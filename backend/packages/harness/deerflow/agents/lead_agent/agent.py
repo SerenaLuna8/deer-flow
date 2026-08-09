@@ -37,7 +37,10 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    assemble_agent_middlewares,
+    build_lead_runtime_middlewares,
+)
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import (
     get_thread_state_schema,
@@ -316,13 +319,17 @@ def build_middlewares(
         List of middleware instances.
     """
     resolved_app_config = app_config or get_app_config()
-    middlewares = build_lead_runtime_middlewares(app_config=resolved_app_config, lazy_init=True)
+    runtime_middlewares = build_lead_runtime_middlewares(
+        app_config=resolved_app_config,
+        lazy_init=True,
+    )
+    before_summarization: list[AgentMiddleware] = []
 
     # Always inject current date as a <system-reminder>. Private long-term
     # Memory is available only through the Worker-issued Run snapshot authority.
     from deerflow.agents.middlewares.dynamic_context_middleware import DynamicContextMiddleware
 
-    middlewares.append(
+    before_summarization.append(
         DynamicContextMiddleware(
             agent_name=agent_name,
             app_config=_dynamic_context_config(
@@ -338,7 +345,7 @@ def build_middlewares(
     from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
 
     slash_source_owner_token = secrets.token_urlsafe(24)
-    middlewares.append(
+    before_summarization.append(
         SkillActivationMiddleware(
             available_skills=available_skills,
             app_config=resolved_app_config,
@@ -359,7 +366,7 @@ def build_middlewares(
         if exact_version_ids is None:
             raise ValueError("runtime_skill_version_ids are required for exact runtime Skills")
         exact_container_path = runtime_skills_container_path or (str(runtime_skills_root) if runtime_skills_root is not None else resolved_app_config.skills.container_path)
-        middlewares.append(
+        before_summarization.append(
             SkillToolPolicyMiddleware(
                 runtime_skills=runtime_skills,
                 runtime_skill_version_ids=exact_version_ids,
@@ -376,41 +383,33 @@ def build_middlewares(
     # (summary + ledger + skills) into model calls.
     from deerflow.agents.middlewares.durable_context_middleware import DurableContextMiddleware
 
-    middlewares.append(
+    before_summarization.append(
         DurableContextMiddleware(
             skills_container_path=(runtime_skills_container_path or (str(runtime_skills_root) if runtime_skills_root is not None else resolved_app_config.skills.container_path)),
             skill_file_read_tool_names=resolved_app_config.summarization.skill_file_read_tool_names,
         )
     )
 
-    # Add summarization middleware if enabled
+    # Resolve feature-owned phases; the shared composer below owns their order.
     summarization_middleware = _create_summarization_middleware(app_config=resolved_app_config)
-    if summarization_middleware is not None:
-        middlewares.append(summarization_middleware)
 
-    # Add TodoList middleware if plan mode is enabled
     cfg = _get_runtime_config(config)
     is_plan_mode = cfg.get("is_plan_mode", False)
     todo_list_middleware = _create_todo_list_middleware(is_plan_mode)
-    if todo_list_middleware is not None:
-        middlewares.append(todo_list_middleware)
 
-    # Add TokenUsageMiddleware when token_usage tracking is enabled
-    if resolved_app_config.token_usage.enabled:
-        middlewares.append(TokenUsageMiddleware())
-
-    # Add TitleMiddleware
-    middlewares.append(TitleMiddleware(app_config=resolved_app_config))
+    token_usage_middleware = TokenUsageMiddleware() if resolved_app_config.token_usage.enabled else None
+    title_middleware = TitleMiddleware(app_config=resolved_app_config)
 
     # Always install checkpoint cleanup. Text-only models disable ephemeral
     # image injection but still purge legacy base64 channels/messages.
     model_config = resolved_app_config.get_model_config(model_name) if model_name else None
-    middlewares.append(ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)))
+    vision_middleware = ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision))
 
     # Auto-promote deferred MCP schemas from PR1 routing metadata before the
     # deferred filter decides which schemas to hide for this model call.
+    routing_middlewares: list[AgentMiddleware] = []
     if mcp_routing_middleware is not None:
-        middlewares.append(mcp_routing_middleware)
+        routing_middlewares.append(mcp_routing_middleware)
 
     # Hide deferred tool schemas from model binding until tool_search promotes them.
     # The deferred set + catalog hash come from the build-time setup (assembled
@@ -418,44 +417,41 @@ def build_middlewares(
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
 
-        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
-
-        assert_mcp_routing_before_deferred_filter(middlewares)
+        routing_middlewares.append(
+            DeferredToolFilterMiddleware(
+                deferred_setup.deferred_names,
+                deferred_setup.catalog_hash,
+            )
+        )
 
     # Coalesce every SystemMessage into a single leading one before the request
     # reaches the provider. Strict backends (vLLM, SGLang, Qwen, Anthropic)
     # reject non-leading SystemMessages. See system_message_coalescing_middleware.py.
     from deerflow.agents.middlewares.system_message_coalescing_middleware import SystemMessageCoalescingMiddleware
 
-    middlewares.append(SystemMessageCoalescingMiddleware())
+    system_message_middleware = SystemMessageCoalescingMiddleware()
 
     # Add SubagentLimitMiddleware to truncate excess parallel task calls
     effective_subagent_enabled = bool(cfg.get("subagent_enabled", False)) if resolved_subagent_enabled is None else resolved_subagent_enabled
+    subagent_middleware = None
     if effective_subagent_enabled:
         effective_max_concurrent = cfg.get("max_concurrent_subagents", 3) if resolved_max_concurrent_subagents is None else resolved_max_concurrent_subagents
-        middlewares.append(
-            SubagentLimitMiddleware(
-                max_concurrent=effective_max_concurrent,
-                max_total=resolved_app_config.subagents.max_total_per_run,
-            )
+        subagent_middleware = SubagentLimitMiddleware(
+            max_concurrent=effective_max_concurrent,
+            max_total=resolved_app_config.subagents.max_total_per_run,
         )
 
     # LoopDetectionMiddleware — detect and break repetitive tool call loops
     loop_detection_config = resolved_app_config.loop_detection
-    if loop_detection_config.enabled:
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
+    loop_detection_middleware = LoopDetectionMiddleware.from_config(loop_detection_config) if loop_detection_config.enabled else None
 
     # TokenBudgetMiddleware - enforce per-run token limits
     token_budget_config = resolved_app_config.token_budget
+    token_budget_middleware = None
     if token_budget_config.enabled:
         from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
 
-        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
-
-    # Inject custom middlewares before ClarificationMiddleware
-    if custom_middlewares:
-        middlewares.extend(custom_middlewares)
+        token_budget_middleware = TokenBudgetMiddleware.from_config(token_budget_config)
 
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after custom middlewares so
@@ -463,11 +459,33 @@ def build_middlewares(
     # cleared tool_calls then flow through Loop/Subagent accounting without
     # firing extra alarms. See safety_finish_reason_middleware.py docstring.
     safety_config = resolved_app_config.safety_finish_reason
-    if safety_config.enabled:
-        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
+    safety_middleware = SafetyFinishReasonMiddleware.from_config(safety_config) if safety_config.enabled else None
 
-    # ClarificationMiddleware should always be last
-    middlewares.append(ClarificationMiddleware())
+    middlewares = assemble_agent_middlewares(
+        runtime=tuple(runtime_middlewares),
+        before_summarization=tuple(before_summarization),
+        summarization=summarization_middleware,
+        planning=todo_list_middleware,
+        token_usage=token_usage_middleware,
+        title=title_middleware,
+        vision=vision_middleware,
+        routing=tuple(routing_middlewares),
+        system_message=system_message_middleware,
+        subagent=subagent_middleware,
+        loop_detection=loop_detection_middleware,
+        token_budget=token_budget_middleware,
+        custom=tuple(custom_middlewares or ()),
+        safety=safety_middleware,
+        clarification=ClarificationMiddleware(),
+    )
+
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.mcp_routing_middleware import (
+            assert_mcp_routing_before_deferred_filter,
+        )
+
+        assert_mcp_routing_before_deferred_filter(middlewares)
+
     return middlewares
 
 

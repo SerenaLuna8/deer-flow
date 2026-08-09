@@ -903,6 +903,91 @@ def _write_skill_tree(
     return tuple(manifests), tuple(skills)
 
 
+class _RunMcpClientSessionOwner:
+    """Own an entered adapter session in one task for its whole lifetime.
+
+    MCP HTTP/SSE transports use anyio task groups whose cancel scope must be
+    exited by the task that entered it.  Run-end and idle eviction can happen
+    in a different asyncio task, so callers only signal this owner; its task
+    performs both ``__aenter__`` and ``__aexit__``.
+    """
+
+    __slots__ = (
+        "_close_event",
+        "_closed",
+        "_load_tools",
+        "_owner_task",
+        "_ready",
+        "_session_context",
+    )
+
+    def __init__(
+        self,
+        session_context: object,
+        load_tools: Callable[[object], Awaitable[tuple[object, ...]]],
+    ) -> None:
+        loop = asyncio.get_running_loop()
+        self._close_event = asyncio.Event()
+        self._closed = False
+        self._load_tools: Callable[[object], Awaitable[tuple[object, ...]]] | None = load_tools
+        self._ready: asyncio.Future[tuple[object, ...]] = loop.create_future()
+        self._session_context: object | None = session_context
+        self._owner_task = loop.create_task(self._run())
+
+    @classmethod
+    async def open(
+        cls,
+        session_context: object,
+        load_tools: Callable[[object], Awaitable[tuple[object, ...]]],
+    ) -> tuple[_RunMcpClientSessionOwner, tuple[object, ...]]:
+        owner = cls(session_context, load_tools)
+        try:
+            tools = await asyncio.shield(owner._ready)
+        except BaseException:
+            await owner._abort_open()
+            raise
+        return owner, tools
+
+    async def _run(self) -> None:
+        session_context = self._session_context
+        load_tools = self._load_tools
+        try:
+            if session_context is None or load_tools is None:
+                raise RuntimeError("MCP session owner is unavailable")
+            async with session_context as session:  # type: ignore[attr-defined]
+                tools = await load_tools(session)
+                if not self._ready.done():
+                    self._ready.set_result(tools)
+                await self._close_event.wait()
+        except BaseException as error:
+            if not self._ready.done():
+                self._ready.set_exception(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                logger.debug("Project MCP session owner stopped unexpectedly", exc_info=True)
+        finally:
+            # Drop the adapter client/context closure after transport teardown;
+            # it contains the materialized URL and request headers.
+            self._load_tools = None
+            self._session_context = None
+
+    async def _abort_open(self) -> None:
+        self._closed = True
+        self._close_event.set()
+        self._owner_task.cancel()
+        try:
+            async with asyncio.timeout(_MCP_CLOSE_TIMEOUT_SECONDS):
+                await asyncio.shield(self._owner_task)
+        except BaseException:
+            pass
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._close_event.set()
+        await asyncio.shield(self._owner_task)
+
+
 class PrivateAgentRuntime:
     """Run-owned exact assets.  Its repr and public manifest are secret-free."""
 
@@ -1224,6 +1309,8 @@ class PrivateAgentRuntime:
 
         schemas: list[_DiscoveredMcpTool] = []
         for snapshot in self._mcp_snapshots:
+            session_key = self._mcp_session_key(snapshot.version_id)
+            session_cache = self._mcp_run_sessions if session_key is not None else None
             try:
                 discovered = await self.invoke_with_mcp_material(
                     snapshot.version_id,
@@ -1234,6 +1321,8 @@ class PrivateAgentRuntime:
                         authorization_boundary=self._authorization_boundary,
                         http_client_factory=self._http_client_factory,
                         discovery_timeout_seconds=self._discovery_timeout_seconds,
+                        session_cache=session_cache,
+                        session_key=session_key,
                     ),
                 )
             except PrivateWorkAssetStale:
@@ -1464,7 +1553,7 @@ class PrivateAgentRuntime:
         if self._mcp_run_sessions is None:
             return None
         snapshot = next((item for item in self._mcp_snapshots if item.version_id == version_id), None)
-        if snapshot is None:
+        if snapshot is None or snapshot.scope is not AssetScope.PROJECT or snapshot.definition.get("transport") not in {"http", "sse"}:
             return None
         return (
             snapshot.version_id,
@@ -1643,13 +1732,16 @@ class PrivateAgentRuntime:
         *,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
+        _bind_live_client_session: bool = False,
     ) -> McpRunSession:
-        """Open one initialized project MCP session (a single handshake).
+        """Load one MCP tool set and return its closable transport owner.
 
         Returns ``(client, tools, derived_secrets)``. The derived-secrets list
         is live: the OAuth interceptor keeps appending refreshed tokens to it,
         so result sanitization always sees the current closure. The caller
-        owns closing the client.
+        owns closing the client. Run reuse opts into tools bound to one entered
+        ClientSession; discovery/system one-shot callers keep the adapter's
+        connection-bound wrappers.
         """
         discovery_timeout_seconds = _validated_mcp_runtime_timeout(discovery_timeout_seconds)
         client = None
@@ -1741,7 +1833,30 @@ class PrivateAgentRuntime:
                         {server_name: merged_config},
                         **client_kwargs,
                     )
-                    remote_tools = tuple(await client.get_tools(server_name=server_name))
+                    if _bind_live_client_session:
+                        from langchain_mcp_adapters.tools import load_mcp_tools
+
+                        if merged_config.get("transport") not in {"http", "sse"}:
+                            raise PrivateWorkUnavailable("unknown")
+                        adapter_client = client
+
+                        async def load_live_tools(session: object) -> tuple[object, ...]:
+                            return tuple(
+                                await load_mcp_tools(
+                                    session,  # type: ignore[arg-type]
+                                    callbacks=adapter_client.callbacks,
+                                    tool_interceptors=tool_interceptors,
+                                    server_name=server_name,
+                                    tool_name_prefix=True,
+                                )
+                            )
+
+                        client, remote_tools = await _RunMcpClientSessionOwner.open(
+                            adapter_client.session(server_name),
+                            load_live_tools,
+                        )
+                    else:
+                        remote_tools = tuple(await client.get_tools(server_name=server_name))
             except TimeoutError:
                 raise PrivateWorkUnavailable("unknown") from None
             return client, remote_tools, derived_secrets
@@ -1749,6 +1864,30 @@ class PrivateAgentRuntime:
             await PrivateAgentRuntime._close_project_mcp_client(client)
             derived_secrets.clear()
             raise
+
+    @staticmethod
+    async def _open_reused_project_mcp_session(
+        version_id: uuid.UUID,
+        definition: Mapping[str, object],
+        material: Mapping[str, Mapping[str, object]],
+        authorization_boundary: object | None = None,
+        *,
+        http_client_factory: SecureMcpHttpClientFactory | None = None,
+        discovery_timeout_seconds: int = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS,
+    ) -> McpRunSession:
+        """Open the project HTTP/SSE session used by the Run-level cache."""
+
+        if definition.get("transport") not in {"http", "sse"}:
+            raise PrivateWorkUnavailable("unknown")
+        return await PrivateAgentRuntime._open_project_mcp_session(
+            version_id,
+            definition,
+            material,
+            authorization_boundary,
+            http_client_factory=http_client_factory,
+            discovery_timeout_seconds=discovery_timeout_seconds,
+            _bind_live_client_session=True,
+        )
 
     @staticmethod
     async def _with_one_shot_mcp_tools(
@@ -1803,6 +1942,8 @@ class PrivateAgentRuntime:
         *,
         http_client_factory: SecureMcpHttpClientFactory | None = None,
         discovery_timeout_seconds: int | None = None,
+        session_cache: McpRunSessionCache | None = None,
+        session_key: McpRunSessionKey | None = None,
     ) -> tuple[_DiscoveredMcpTool, ...]:
         forbidden_values = cls._material_values(material)
 
@@ -1875,6 +2016,25 @@ class PrivateAgentRuntime:
                 )
             return tuple(copied)
 
+        effective_timeout = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS if discovery_timeout_seconds is None else discovery_timeout_seconds
+        if session_cache is not None and session_key is not None:
+
+            async def open_session() -> McpRunSession:
+                return await cls._open_reused_project_mcp_session(
+                    version_id,
+                    definition,
+                    material,
+                    authorization_boundary,
+                    http_client_factory=http_client_factory,
+                    discovery_timeout_seconds=effective_timeout,
+                )
+
+            return await session_cache.call(
+                session_key,
+                open_session,
+                copy_schemas,
+                call_timeout_seconds=_validated_mcp_runtime_timeout(effective_timeout),
+            )
         if authorization_boundary is None and http_client_factory is None and discovery_timeout_seconds is None:
             return await cls._with_one_shot_mcp_tools(
                 version_id,
@@ -1882,7 +2042,6 @@ class PrivateAgentRuntime:
                 material,
                 copy_schemas,
             )
-        effective_timeout = _DEFAULT_MCP_DISCOVERY_TIMEOUT_SECONDS if discovery_timeout_seconds is None else discovery_timeout_seconds
         return await cls._with_one_shot_mcp_tools(
             version_id,
             definition,
@@ -1941,7 +2100,7 @@ class PrivateAgentRuntime:
                 # happened in invoke_with_mcp_material; only the transport
                 # handshake is skipped here.
                 async def open_session() -> McpRunSession:
-                    return await PrivateAgentRuntime._open_project_mcp_session(
+                    return await PrivateAgentRuntime._open_reused_project_mcp_session(
                         version_id,
                         definition,
                         material,
@@ -2394,6 +2553,7 @@ class PrivateAssetRuntime:
         if delegated_agents and delegate_model_names is None:
             raise PrivateWorkAssetStale(context.request_id)
         root = _create_private_skill_root(admitted.run.run_id, context.request_id)
+        runtime: PrivateAgentRuntime | None = None
         try:
             root.chmod(0o700)
             skill_manifests, skills = await asyncio.to_thread(_write_skill_tree, root, skill_snapshots)
@@ -2460,7 +2620,13 @@ class PrivateAssetRuntime:
             return runtime
         except Exception as error:
             try:
-                await asyncio.to_thread(_remove_private_skill_tree, root)
+                if runtime is None:
+                    await asyncio.to_thread(_remove_private_skill_tree, root)
+                else:
+                    # Discovery may already have populated the Run session
+                    # cache. Close it and clear its derived-secret closure
+                    # before propagating a failed materialization.
+                    await runtime.aclose()
             except PrivateRuntimeCleanupError:
                 logger.warning("Private runtime cleanup failed after materialization")
             if isinstance(error, PrivateWorkError):

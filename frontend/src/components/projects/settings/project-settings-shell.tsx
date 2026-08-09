@@ -1,11 +1,10 @@
 "use client";
 
-import { GaugeIcon, ScrollTextIcon, Settings2Icon } from "lucide-react";
+import { Settings2Icon, UsersIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import type { Project } from "@/core/projects/types";
-import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 import { ProjectAccessDenied } from "../project-access-denied";
@@ -21,7 +20,6 @@ type ProjectSettingsNavigationItem = {
 
 export function projectSettingsNavigationItems(
   project: Project,
-  staticWebsiteOnly: boolean,
 ): ProjectSettingsNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}/settings`;
   const items: ProjectSettingsNavigationItem[] = [];
@@ -36,26 +34,12 @@ export function projectSettingsNavigationItems(
       icon: Settings2Icon,
     });
   }
-  if (
-    !staticWebsiteOnly &&
-    project.capabilities.includes("project.usage.read")
-  ) {
+  if (project.capabilities.includes("project.members.manage")) {
     items.push({
-      href: `${base}/usage`,
-      label: "用量与限额",
-      description: "当前使用量与有效上限",
-      icon: GaugeIcon,
-    });
-  }
-  if (
-    !staticWebsiteOnly &&
-    project.capabilities.includes("project.audit.read")
-  ) {
-    items.push({
-      href: `${base}/audit`,
-      label: "审计日志",
-      description: "项目中的关键操作记录",
-      icon: ScrollTextIcon,
+      href: `${base}/members`,
+      label: "项目成员",
+      description: "成员角色与邀请",
+      icon: UsersIcon,
     });
   }
   return items;
@@ -68,7 +52,7 @@ export function ProjectSettingsShell({
 }) {
   const project = useCurrentProject();
   const pathname = usePathname();
-  const items = projectSettingsNavigationItems(project, isStaticWebsiteOnly());
+  const items = projectSettingsNavigationItems(project);
 
   if (items.length === 0) {
     return <ProjectAccessDenied projectSlug={project.slug} area="项目设置" />;
@@ -80,7 +64,7 @@ export function ProjectSettingsShell({
         className="mb-6"
         eyebrow={`${project.display_name} · 治理`}
         title="项目设置"
-        description="管理项目资料、资源用量和关键操作记录。"
+        description="管理项目资料、成员和生命周期。"
       />
 
       <div className="grid items-start gap-6 lg:grid-cols-[14rem_minmax(0,1fr)]">

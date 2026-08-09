@@ -23,12 +23,12 @@ jobs:
         image: postgres:17-alpine
         env:
           POSTGRES_USER: postgres
-          POSTGRES_DB: postgres
+          POSTGRES_DB: deerflow
           POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-cmd "pg_isready -U postgres -d deerflow"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 12
@@ -92,7 +92,7 @@ jobs:
 
       - name: Run backend core tests
         env:
-          POSTGRES_TEST_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/postgres
+          DATABASE_URL: postgresql+asyncpg://postgres@127.0.0.1:5432/deerflow
         run: make test
 
       - name: Run backend format and lint checks

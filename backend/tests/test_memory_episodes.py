@@ -13,7 +13,11 @@ from sqlalchemy.dialects import postgresql
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from app.private_work.privacy_center import PrivacyCenterService
 from app.private_work.retention_purge import purge_private_scope
-from deerflow.agents.memory.dream import DREAM_PROMPT_VERSION, EMPTY_MEMORY_DOCUMENT
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    DREAM_PROMPT_VERSION,
+    EMPTY_MEMORY_DOCUMENT,
+)
 from deerflow.persistence.base import Base
 from deerflow.persistence.private_work.memory_document_model import MemoryEpisodeRow
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -135,6 +139,9 @@ def _finalize_fixture(history_rows):
         namespace=_scope().namespace,
         content=EMPTY_MEMORY_DOCUMENT,
         content_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+        sections_policy_section="memory_document",
+        sections_policy_version_id=uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
         version=4,
         dream_cursor=0,
         active_dream_job_id=JOB_ID,
@@ -223,6 +230,7 @@ async def test_finalize_dream_copies_history_into_episodes_before_erasing_text()
         expected_history_digest=history_digest,
         expected_base_version=4,
         expected_base_digest=document.content_digest,
+        expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
         content=EMPTY_MEMORY_DOCUMENT + "\n\n- 更新",
         now=NOW,
     )
@@ -269,6 +277,7 @@ async def test_finalize_dream_with_zero_retention_keeps_episodes_forever() -> No
         expected_history_digest=history_digest,
         expected_base_version=4,
         expected_base_digest=document.content_digest,
+        expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
         content=EMPTY_MEMORY_DOCUMENT + "\n\n- 更新",
         now=NOW,
         episode_retention_days=0,
@@ -297,6 +306,7 @@ async def test_finalize_dream_rejects_out_of_contract_retention(retention) -> No
             expected_history_digest=history_digest,
             expected_base_version=4,
             expected_base_digest=document.content_digest,
+            expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
             content=EMPTY_MEMORY_DOCUMENT,
             now=NOW,
             episode_retention_days=retention,
@@ -382,6 +392,33 @@ async def test_retention_purge_deletes_episodes_for_project_and_owner_scopes() -
     )
     owner_scoped = next(sql for sql in (_compiled(statement) for statement in owner_session.executed) if "DELETE FROM memory_episodes" in sql)
     assert "project_id" in owner_scoped and "owner_user_id" in owner_scoped
+
+
+@pytest.mark.asyncio
+async def test_retention_purge_requests_cancellation_for_active_memory_jobs() -> None:
+    project_session = _PurgeSession()
+    await purge_private_scope(
+        project_session,
+        project_id=_scope().project_id,
+        owner_user_id=None,
+    )
+    project_job_update = next(_compiled(statement, literal=True) for statement in project_session.executed if "UPDATE jobs" in _compiled(statement))
+    assert "memory_dream" in project_job_update
+    assert "memory_seal" in project_job_update
+    assert "owner_user_id" not in project_job_update
+    assert "cancel_requested_at" in project_job_update
+    assert "retention_scope_purged" in project_job_update
+
+    owner_session = _PurgeSession()
+    await purge_private_scope(
+        owner_session,
+        project_id=_scope().project_id,
+        owner_user_id=_scope().owner_user_id,
+    )
+    owner_job_update = next(_compiled(statement, literal=True) for statement in owner_session.executed if "UPDATE jobs" in _compiled(statement))
+    assert "memory_dream" in owner_job_update
+    assert "memory_seal" in owner_job_update
+    assert "owner_user_id" in owner_job_update
 
 
 @pytest.mark.asyncio

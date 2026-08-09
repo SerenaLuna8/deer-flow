@@ -768,11 +768,13 @@ class MemoryRememberAuditMetadata(_AuditMetadata):
 
 class MemoryRecallExecutedAuditMetadata(_AuditMetadata):
     # Content-free recall quality signal: bucketed result count, which ranking
-    # stage produced the top hit, and whether a tag filter narrowed the search.
-    # Query and episode text never reach the audit trail.
+    # stage produced the top hit, whether a tag filter narrowed the search, and
+    # the normalized query's Unicode code-point length bucket. Query and episode
+    # text never reach the audit trail.
     result_bucket: Literal["0", "1-2", "3+"]
     matched_stage: Literal["exact", "similarity", "none"]
     tags_filtered: StrictBool
+    query_len_bucket: Literal["1-4", "5-16", "17-64", "65-200"]
 
 
 class MemorySealSettledAuditMetadata(_AuditMetadata):
@@ -825,13 +827,14 @@ class CorrectionAuditMetadata(_AuditMetadata):
 
 
 class SystemSettingAuditMetadata(_AuditMetadata):
-    section: Literal["agent_runtime", "auth", "quotas"]
+    section: Literal["agent_runtime", "auth", "memory_document", "quotas"]
     revision: StrictInt = Field(ge=2)
     schema_version: StrictInt = Field(ge=1)
     payload_checksum: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     effect_scope: Literal[
         "new_requests_and_runs",
         "new_requests",
+        "new_memory_documents",
         "next_authoritative_check",
     ]
 

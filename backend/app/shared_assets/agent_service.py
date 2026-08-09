@@ -82,6 +82,12 @@ class AgentInstructions:
 
 
 @dataclass(frozen=True)
+class AgentCapabilityBindings:
+    skill_version_ids: tuple[uuid.UUID, ...]
+    mcp_version_ids: tuple[uuid.UUID, ...]
+
+
+@dataclass(frozen=True)
 class AgentAssetView:
     id: uuid.UUID
     scope: AssetScope
@@ -470,6 +476,229 @@ class AgentService:
                 asset_id,
                 result.id,
                 "agent.instructions.update",
+            ),
+        )
+
+    async def update_capability_bindings(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        bindings: AgentCapabilityBindings,
+        *,
+        expected_asset_version: int,
+    ) -> AgentVersionView:
+        bindings = self._validate_capability_bindings(actor, bindings)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+
+        async def operation(repository: AgentRepository) -> AgentVersionView:
+            asset = await self._get_asset(
+                repository,
+                actor,
+                asset_id,
+                for_update=True,
+            )
+            self._require_expected_version(actor, asset, expected_asset_version)
+            if asset.status not in {"active", "suspended"}:
+                raise AssetConflict(actor.request_id)
+            if asset.current_published_version_id is None:
+                raise AssetConflict(actor.request_id)
+            base = await self._get_version(
+                repository,
+                actor,
+                asset.id,
+                asset.current_published_version_id,
+                for_update=True,
+            )
+            if base.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+                raise AssetConflict(actor.request_id)
+            await self._validate_dependency_closure(
+                repository,
+                actor,
+                bindings.skill_version_ids,
+                bindings.mcp_version_ids,
+            )
+            payload = AgentPayload(
+                description=base.row.description,
+                soul=base.row.soul,
+                model_ref=base.row.model_ref,
+                tool_groups=tuple(base.row.tool_groups),
+                skill_version_ids=bindings.skill_version_ids,
+                mcp_version_ids=bindings.mcp_version_ids,
+                agents_instructions=base.row.agents_instructions,
+                identity=base.row.identity,
+                user_context=base.row.user_context,
+                payload_schema_version=base.row.payload_schema_version,
+                model_settings=self._model_settings_from_row(
+                    base.row.model_settings,
+                    actor.request_id,
+                ),
+            )
+            payload = self._validate_payload(
+                actor,
+                payload,
+                payload_schema_version=base.row.payload_schema_version,
+            )
+            payload_schema_version = base.row.payload_schema_version
+            row = AgentVersionRow(
+                agent_id=asset.id,
+                version_number=await self._next_version_number(
+                    repository,
+                    actor,
+                    asset,
+                ),
+                workflow_status=WorkflowStatus.DRAFT.value,
+                description=payload.description,
+                agents_instructions=payload.agents_instructions,
+                soul=payload.soul,
+                identity=payload.identity,
+                user_context=payload.user_context,
+                model_ref=payload.model_ref,
+                model_settings=self._model_settings_json(payload.model_settings),
+                tool_groups=list(payload.tool_groups),
+                supersedes_version_id=base.row.id,
+                payload_schema_version=payload_schema_version,
+                payload_checksum=self._payload_checksum(
+                    payload,
+                    payload_schema_version=payload_schema_version,
+                ),
+                created_by_user_id=str(actor.user_id),
+            )
+            record = await self._create_version_record(
+                repository,
+                actor,
+                asset.id,
+                row,
+                payload.skill_version_ids,
+                payload.mcp_version_ids,
+            )
+            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
+            await repository.session.flush()
+            asset.current_published_version_id = record.row.id
+            asset.version += 1
+            await repository.session.flush()
+            return self._version_view(record)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "agent.capability_bindings.update",
+            ),
+        )
+
+    async def restore_version(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        *,
+        expected_asset_version: int,
+    ) -> AgentVersionView:
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+
+        async def operation(repository: AgentRepository) -> AgentVersionView:
+            asset = await self._get_asset(
+                repository,
+                actor,
+                asset_id,
+                for_update=True,
+            )
+            self._require_expected_version(actor, asset, expected_asset_version)
+            if asset.status not in {"active", "suspended"}:
+                raise AssetConflict(actor.request_id)
+            target = await self._get_version(
+                repository,
+                actor,
+                asset.id,
+                version_id,
+                for_update=True,
+            )
+            if target.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+                raise AssetConflict(actor.request_id)
+            await self._validate_dependency_closure(
+                repository,
+                actor,
+                target.skill_version_ids,
+                target.mcp_version_ids,
+            )
+            payload = AgentPayload(
+                description=target.row.description,
+                soul=target.row.soul,
+                model_ref=target.row.model_ref,
+                tool_groups=tuple(target.row.tool_groups),
+                skill_version_ids=target.skill_version_ids,
+                mcp_version_ids=target.mcp_version_ids,
+                agents_instructions=target.row.agents_instructions,
+                identity=target.row.identity,
+                user_context=target.row.user_context,
+                payload_schema_version=target.row.payload_schema_version,
+                model_settings=self._model_settings_from_row(
+                    target.row.model_settings,
+                    actor.request_id,
+                ),
+            )
+            payload = self._validate_payload(
+                actor,
+                payload,
+                payload_schema_version=target.row.payload_schema_version,
+            )
+            if (
+                self._payload_checksum(
+                    payload,
+                    payload_schema_version=target.row.payload_schema_version,
+                )
+                != target.row.payload_checksum
+            ):
+                raise AssetValidationFailed(actor.request_id)
+            row = AgentVersionRow(
+                agent_id=asset.id,
+                version_number=await self._next_version_number(
+                    repository,
+                    actor,
+                    asset,
+                ),
+                workflow_status=WorkflowStatus.DRAFT.value,
+                description=payload.description,
+                agents_instructions=payload.agents_instructions,
+                soul=payload.soul,
+                identity=payload.identity,
+                user_context=payload.user_context,
+                model_ref=payload.model_ref,
+                model_settings=self._model_settings_json(payload.model_settings),
+                tool_groups=list(payload.tool_groups),
+                supersedes_version_id=asset.current_published_version_id,
+                payload_schema_version=target.row.payload_schema_version,
+                payload_checksum=target.row.payload_checksum,
+                created_by_user_id=str(actor.user_id),
+            )
+            record = await self._create_version_record(
+                repository,
+                actor,
+                asset.id,
+                row,
+                payload.skill_version_ids,
+                payload.mcp_version_ids,
+            )
+            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
+            await repository.session.flush()
+            asset.current_published_version_id = record.row.id
+            asset.version += 1
+            await repository.session.flush()
+            return self._version_view(record)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "agent.version.restore",
             ),
         )
 
@@ -964,6 +1193,24 @@ class AgentService:
             raise AssetValidationFailed(request_id)
         AgentService._validate_instruction_sizes(actor, instructions)
         return instructions
+
+    @staticmethod
+    def _validate_capability_bindings(
+        actor: _Actor,
+        bindings: AgentCapabilityBindings,
+    ) -> AgentCapabilityBindings:
+        request_id = getattr(actor, "request_id", "unknown")
+        if not isinstance(bindings, AgentCapabilityBindings):
+            raise AssetValidationFailed(request_id)
+        try:
+            skill_version_ids = tuple(bindings.skill_version_ids)
+            mcp_version_ids = tuple(bindings.mcp_version_ids)
+        except TypeError:
+            raise AssetValidationFailed(request_id) from None
+        for values in (skill_version_ids, mcp_version_ids):
+            if any(not isinstance(value, uuid.UUID) for value in values) or len(set(values)) != len(values):
+                raise AssetValidationFailed(request_id)
+        return AgentCapabilityBindings(skill_version_ids, mcp_version_ids)
 
     @staticmethod
     def _validate_instruction_sizes(

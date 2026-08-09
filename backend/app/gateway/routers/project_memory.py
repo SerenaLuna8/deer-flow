@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Literal
+from typing import Literal, Self
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from pydantic import AwareDatetime, Field
+from pydantic import AwareDatetime, Field, model_validator
 
 from app.gateway.deps import (
     get_current_agent_runtime_config,
@@ -49,10 +49,22 @@ class ProjectMemoryDocumentResponse(StrictPrivateWorkResponse):
 class ProjectMemoryVersionSummary(StrictPrivateWorkResponse):
     version: int = Field(ge=1)
     trigger: Literal["auto_dream", "manual_dream", "restore", "budget_rewrite"]
-    history_count: int | None = Field(default=None, alias="historyCount", ge=1, le=20)
+    history_count: int | None = Field(default=None, alias="historyCount", ge=0, le=20)
     changed: bool
     needs_review: bool = Field(alias="needsReview")
     created_at: datetime = Field(alias="createdAt")
+
+    @model_validator(mode="after")
+    def validate_history_contract(self) -> Self:
+        if self.trigger == "restore":
+            valid = self.history_count is None
+        elif self.trigger == "budget_rewrite":
+            valid = self.history_count == 0
+        else:
+            valid = self.history_count is not None and self.history_count >= 1
+        if not valid:
+            raise ValueError("Memory version history count does not match its trigger")
+        return self
 
 
 class ProjectMemoryVersionsResponse(StrictPrivateWorkResponse):
@@ -101,6 +113,23 @@ class ProjectMemoryDreamResponse(StrictPrivateWorkResponse):
     disposition: Literal["queued", "already_running", "nothing_pending"]
     job_id: uuid.UUID | None = Field(alias="jobId")
     history_count: int = Field(alias="historyCount", ge=0, le=20)
+    admission_kind: Literal["budget_rewrite"] | None = Field(
+        default=None,
+        alias="admissionKind",
+        exclude_if=lambda value: value is None,
+    )
+
+    @model_validator(mode="after")
+    def validate_admission_contract(self) -> Self:
+        if self.disposition == "nothing_pending":
+            valid = self.job_id is None and self.history_count == 0 and self.admission_kind is None
+        elif self.admission_kind == "budget_rewrite":
+            valid = self.job_id is not None and self.history_count == 0
+        else:
+            valid = self.job_id is not None and self.history_count >= 1
+        if not valid:
+            raise ValueError("Dream admission fields do not match their disposition")
+        return self
 
 
 class ProjectMemoryRestoreRequest(StrictPrivateWorkRequest):
@@ -286,6 +315,7 @@ async def dream_project_memory(
         disposition=result.disposition,
         jobId=result.job_id,
         historyCount=result.history_count,
+        admissionKind=("budget_rewrite" if result.admission_kind == "budget_rewrite" else None),
     )
 
 

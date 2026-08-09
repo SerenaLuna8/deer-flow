@@ -46,6 +46,25 @@ from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
 logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 _ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
+MIN_SNIP_SUMMARY_OUTPUT_TOKENS = 4096
+
+
+def _ensure_snip_summary_output_budget(model: Any) -> Any:
+    """Raise a provider-declared output cap enough for the dual SNIP contract."""
+
+    model_fields = getattr(type(model), "model_fields", {})
+    for field_name in ("max_tokens", "max_output_tokens"):
+        if field_name not in model_fields:
+            continue
+        current = getattr(model, field_name, None)
+        if isinstance(current, int) and not isinstance(current, bool) and current >= MIN_SNIP_SUMMARY_OUTPUT_TOKENS:
+            return model
+        return model.model_copy(
+            update={field_name: MIN_SNIP_SUMMARY_OUTPUT_TOKENS},
+        )
+    # Some providers (for example the Codex Responses endpoint) deliberately
+    # expose no supported output-cap field. Keep their provider-owned behavior.
+    return model
 
 
 @dataclass(frozen=True)
@@ -126,6 +145,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         self,
         *args,
         compact_all_complete_turns: bool = False,
+        dual_output_contract: bool | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -146,7 +166,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # applies to the packaged SNIP prompt. Deployments that construct this
         # middleware with a custom summary prompt keep the original
         # single-segment semantics.
-        self._dual_output_contract = self.summary_prompt == SNIP_ARCHIVE_PROMPT
+        self._dual_output_contract = self.summary_prompt == SNIP_ARCHIVE_PROMPT if dual_output_contract is None else dual_output_contract
 
     def _parse_snip_response(self, raw: str) -> _SnipSummary:
         if self._dual_output_contract:
@@ -811,7 +831,7 @@ def create_summarization_middleware(
     """Create the configured summarization middleware.
 
     Both the lead-agent automatic path and the manual context-compaction path
-    use this factory so model resolution, the fixed SNIP prompt, and retention
+    use this factory so model resolution, prompt compatibility, and retention
     defaults cannot drift.
     """
     resolved_app_config = app_config or get_app_config()
@@ -840,6 +860,10 @@ def create_summarization_middleware(
             app_config=resolved_app_config,
             attach_tracing=False,
         )
+    dual_output_contract = config.summary_prompt is None
+    summary_prompt = SNIP_ARCHIVE_PROMPT if dual_output_contract else config.summary_prompt
+    if dual_output_contract:
+        model = _ensure_snip_summary_output_budget(model)
     model = model.with_config(tags=["middleware:summarize"])
 
     requested_keep = keep or config.keep.to_tuple()
@@ -850,7 +874,8 @@ def create_summarization_middleware(
         "trigger": trigger,
         "keep": effective_keep,
         "compact_all_complete_turns": compact_all_complete_turns,
-        "summary_prompt": SNIP_ARCHIVE_PROMPT,
+        "summary_prompt": summary_prompt,
+        "dual_output_contract": dual_output_contract,
     }
     if config.trim_tokens_to_summarize is not None:
         kwargs["trim_tokens_to_summarize"] = config.trim_tokens_to_summarize

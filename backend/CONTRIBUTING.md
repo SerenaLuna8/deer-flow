@@ -8,10 +8,10 @@ Read [AGENTS.md](AGENTS.md) before changing backend code.
 uv sync
 make format
 make lint
-POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
+make test
 ```
 
-Features and bug fixes use TDD. PostgreSQL integration tests create random disposable databases and must never point at a business database.
+Features and bug fixes use TDD. `make test` loads the development `DATABASE_URL`; PostgreSQL integration tests derive random disposable databases and never mutate the named development database.
 
 ## Authority rules
 

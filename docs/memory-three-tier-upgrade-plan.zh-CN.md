@@ -1,7 +1,8 @@
 # DeerFlow 记忆系统三层化与可用性改造方案
 
 - 立项日期：2026-08-06
-- 状态：设计稿，待评审
+- 状态：PR1～PR6 已完成；数据库章节策略、文档/Run 冻结与管理后台闭环已验收
+- 实施验收日期：2026-08-09
 - 前置依赖：[记忆系统最终改造方案](memory-system-refactor-plan.zh-CN.md)（SNIP + Dream，已完成并通过后端核心门禁）
 - 适用范围：`project_id + owner_user_id + namespace` 下的用户私有项目记忆
 - 本文性质：在 SNIP + Dream 之上的**能力补全**，不是替换。SNIP 采集、Dream 整理、
@@ -143,11 +144,21 @@ episodes 检索使用 `pg_trgm`（GIN 索引 + 子串/相似度匹配，对 CJK 
 前一方案 2.6 节的全部结论原样有效。episodes、recall、remember 全部绑定
 `project_id + owner_user_id + namespace`，没有任何跨作用域读取路径。
 
-## 4. Schema 变更（`full_schema_v4` → `full_schema_v5`）
+## 4. Schema 变更（功能基线 `full_schema_v5`；当前 head `full_schema_v9`）
 
-没有增量迁移路径：一次性完成本节全部 DDL，标记升为 `full_schema_v5`，本地与共享
-数据库按既有流程用空目标重建。**所有后续 PR 共用这一次 bump**，避免每个 PR 重装
-数据库。
+本节全部功能 DDL 一次性落在冻结的 `full_schema_v5` 基线；不提供 v4 → v5 的原地
+迁移路径。实施验收又发现两项不新增业务表、但必须由数据库强制的语义缺口，因此按
+既有迁移纪律追加：`full_schema_v6` 把 tool-origin history 的
+`snip_prompt_version` 钉为 `remember-tool-v1`；`full_schema_v7` 为
+`threads_meta` 增加专用更新时间触发器，使单独写 `memory_sealed_at` 不冒充用户活跃；
+`full_schema_v8` 将 `run_events` 改为按月 RANGE 分区，以全局窄表维持跨月唯一性，并
+以 singleton 分区状态表保存单调 retention 水位，防止已回收旧月被写路径重新创建；
+`full_schema_v9` 新增 PostgreSQL `memory_document` 系统策略，并把章节标题与其策略版本
+来源冻结到 `memory_documents`，同时把章节复制进 Run Memory 快照。
+
+当前 fresh install 直接安装并标记 `full_schema_v9`；冻结 v5 基线经 v6 → v7 → v8 → v9
+的显式迁移必须与 fresh v9 catalog 完全等价。已有 v5/v6/v7/v8 数据库需先备份，再由
+运维显式执行 `make upgrade-db`；应用运行时与 `make setup-db` 都不会隐式迁移。
 
 ### 4.1 新表 `memory_episodes`
 
@@ -262,8 +273,9 @@ CREATE TABLE memory_episodes (
   以"低权威数据、非指令"框架文案包裹；
 - **只注册给 lead Agent**：detached 子代理执行会清除父 RunnableConfig/context，
   authority 天然不可达，同时不在子代理工具集注册，双重保证；
-- `config.example.yaml` 的 `loop_detection.tool_freq_overrides` 增加 `recall_memory`
-  条目（远程/检索类工具的既有惯例）；
+- PostgreSQL `agent_runtime.loop_detection.tool_freq_overrides` 默认策略增加
+  `recall_memory` 条目（`warn=6`、`hard_limit=10`）。该策略不写入
+  `config.example.yaml`，避免与系统设置形成双重权威；
 - 注册方式对齐 `view_image` 的条件注入先例：Worker 组装时存在 memory authority 才
   加入，不占用 Agent 版本的 `tool_groups`——记忆是平台能力而非资产能力，已发布的
   不可变 Agent 版本无需重发即可获得。
@@ -361,6 +373,10 @@ instruction.` 一字不改（受 AGENTS.md 门禁保护）。
 durable journal，用户回到旧 Thread 看到的聊天记录不变——与手动 `/compact` 的既有
 体验完全一致。
 
+封存戳是唯一语义变化时，`threads_meta` 专用触发器保留原 `updated_at`，避免后台封存
+把 Thread 冒充为刚刚活跃；普通字段更新、封存戳与其他字段的组合更新、无变化 UPDATE
+或显式改写 `updated_at` 仍统一推进到 PostgreSQL 事务时间。
+
 ## 8. 阶段四：质量护栏与降级（解决 R4、R5、R6）
 
 ### 8.1 Dream 大删除复核标记（R4）
@@ -391,8 +407,8 @@ Memory 页对该版本显示复核徽标与横幅："最近一次整理删除了
 - 其余 `MemoryDocumentInvalid` / digest 漂移：维持 fail-closed（存储损坏必须暴露）。
 
 `GET /api/projects/{project_id}/memory` 响应新增计算字段
-`injection_status: "ok" | "over_budget"`（按当前策略预算实时计算），前端在
-`over_budget` 时显示横幅与"立即压缩文档"按钮。
+`injection_status: "ok" | "skipped_over_budget"`（按当前策略预算实时计算），前端在
+`skipped_over_budget` 时显示横幅与"立即压缩文档"按钮。
 
 ### 8.3 `budget_rewrite` Dream（R5 自救闭环）
 
@@ -456,10 +472,12 @@ AGENTS.md 中"恰好四个字段"的受门禁语句同步改写。
 
 ### 10.2 `config.yaml`
 
-- `loop_detection.tool_freq_overrides` 示例增加 `recall_memory`（示例文件编辑，
-  不动 schema）；
-- （PR6，可选）新顶层 `memory_document:` 部署键承载章节标题配置（见 §15），
-  `config_version` 35 → 36，`make config-upgrade` 为旧文件补默认值。
+- `recall_memory` 的频率覆盖属于 PostgreSQL `agent_runtime.loop_detection` 系统策略，
+  默认 bootstrap、运行时 materializer 与管理后台严格合同同步；`config.yaml` 不接受
+  该数据库策略字段；
+- PR6 的章节标题属于独立 PostgreSQL `memory_document` 系统策略（见 §15）；
+  `config.yaml` 不提供回退或覆盖，显式顶层 `memory_document:` 按数据库双权威
+  fail-closed 拒绝。PR6 不提高 `config_version`，也没有 `config-upgrade` 补值步骤。
 
 ## 11. API 变更汇总
 
@@ -469,7 +487,7 @@ AGENTS.md 中"恰好四个字段"的受门禁语句同步改写。
 | `GET /api/projects/{id}/memory/pending` | 新增：分页 backlog 只读列表 |
 | `GET /api/projects/{id}/memory/episodes` | 新增：`q/tags/before/limit` 检索与浏览，分页有界 |
 | `GET .../memory/versions`、`.../versions/{v}` | 响应新增 `needs_review`、`trigger` 透出 `budget_rewrite` |
-| `POST /api/projects/{id}/memory/dream` | 合同不变；服务端可返回 `admission_kind: budget_rewrite` |
+| `POST /api/projects/{id}/memory/dream` | 救援改写返回可选 `admissionKind: budget_rewrite`，且 `historyCount=0`；普通准入仍为 `1..20` |
 
 全部走 `PrivateWorkRoute` + `private_work_context`，strict 模型 `extra="forbid"`，
 错误折叠遵循既有 404/403 约定。账户 personalization API 无变化。
@@ -480,7 +498,8 @@ AGENTS.md 中"恰好四个字段"的受门禁语句同步改写。
   `threads.memory_sealed_at` 是调度元数据不清除。recall 结果作为 ToolMessage 已进入
   Thread 消息/checkpoint，reset 不回溯清除——与"reset 不删除 `summary_text`"的既有
   边界一致，文档同句声明；
-- **项目 retention purge**：依赖序删除中加入 episodes 与 seal Job；
+- **项目 retention purge**：依赖序删除中加入 episodes；对精确 project/owner scope 内
+  活动的 `memory_dream`、`memory_seal` Job 先请求取消，保留不可变 Job 治理壳；
 - **隐私中心导出**：NDJSON 附件新增 episodes 段（同 scope、同格式约定）；
 - **审计**：新增闭合动作 `memory.remember`（目标为域分隔 HMAC）、
   `memory.injection.skipped`、`memory.dream.review_flagged`、`memory.seal.admitted` /
@@ -503,30 +522,42 @@ AGENTS.md 中"恰好四个字段"的受门禁语句同步改写。
 
 - **Memory 页**：新增"待整理"区块（pending 列表 + origin 徽标）；新增"历史归档"
   检索标签页（episodes 搜索/浏览）；版本列表 `needs_review` 徽标与复核横幅；
-  `injection_status=over_budget` 横幅 + "立即压缩文档"按钮；
+  `injection_status=skipped_over_budget` 横幅 + "立即压缩文档"按钮；
 - **聊天**：`remember` ToolMessage 渲染为"已记住：{content}"芯片，点击跳转 Memory 页
   待整理区块；`recall_memory` ToolMessage 按普通工具卡片渲染；
 - **管理后台**：系统设置 Memory 区块增加两个新字段，Zod 严格合同同步；
 - 全部走既有 API client / query key 约定，`pnpm check` + 单测覆盖。
 
-## 15. （可选 P4）文档章节配置化
+## 15. 文档章节数据库配置化
 
 解决中文四章节硬编码：
 
-- `memory_documents` 新列 `sections JSONB NOT NULL`（已含在 4 节的一次性 bump 中，
-  代码可后置）；作用域首次创建文档行时从部署配置 `memory_document.sections`
-  （2..8 项、每项 `# ` 前缀、去重）冻结；
-- 校验器改读**行上冻结**的 sections；`render_dream_input()` 渲染行上 sections；
-  `EMPTY_MEMORY_DOCUMENT` 变为 sections 的函数；
-- 后改配置只影响新作用域，旧文档不迁移、不混排——没有 flag day；
-- Dream 提示词以占位符引用 sections（v3 已预留措辞），提示词版本机制照常。
-
-不进入前五个 PR 的验收范围；若资源紧张可以整体延期，不影响 R1～R6。
+- 新增独立、版本化的 PostgreSQL `memory_document` 系统策略，值严格为
+  `{sections: string[]}`。平台管理员在 `/admin/settings/system` 的 Memory 页面维护；
+  它复用既有 expected-revision CAS、不可变版本、checksum 与内容无关审计，生效范围为
+  `new_memory_documents`；
+- `sections` 保存 2..8 个有序**纯标题**，服务端负责添加 Markdown `# `。每项 trim 后
+  非空、最多 80 个 Unicode 字符，禁止控制字符、Markdown 标题前缀、Dream history
+  标记与重复标题；默认值等价于原四章节；
+- `memory_documents` 冻结 `sections JSONB NOT NULL`、固定策略分区和精确
+  `sections_policy_version_id`；复合外键证明来源确为 `memory_document` 策略版本，数据库
+  trigger 禁止创建后改写章节或来源。`run_memory_context_snapshots` 同步冻结 sections，
+  因而 Run 重试、恢复与 continuation 都不读取最新平台配置；
+- 作用域首次创建文档行时锁定当前 `memory_document` 策略并冻结。管理员后改配置只影响
+  之后首次创建的文档；旧文档、既有版本与在途 Dream 不迁移、不取消、不混排；
+- 校验器、空文档生成、Dream 输入、内存替换工具、Worker 输出校验、restore 和 Run 注入
+  全部读取文档/快照上的冻结 sections。`dream.md` 使用唯一占位符，提示词版本升为 v4；
+- v9 对既有文档与 Run 快照回填原四章节，并为升级库创建默认 `memory_document` v1 策略；
+  fresh install 仍由标准 system-policy bootstrap 初始化四个策略分区；
+- `config.yaml` 没有章节配置路径，也不会在数据库策略损坏时回退到部署文件。
 
 ## 16. 分 PR 执行计划
 
 同一特性分支顺序执行，每个 PR 遵循后端 TDD 五步与"文档随代码同步"规则，完成时
 `ruff format` 干净。schema 一次性在 PR1 落地（D 节），后续 PR 纯代码。
+
+实施状态：PR1～PR5 已完成；验收中追加的 v6/v7 强化 PR3/PR4 的数据库合同，v8 完成
+Run 事件分区。PR6 以独立 v9 实施，不改写或合并既有迁移头。
 
 ### PR1：schema v5 + episodic 基础层（无用户可见行为变化）
 
@@ -535,7 +566,7 @@ AGENTS.md 中"恰好四个字段"的受门禁语句同步改写。
 - reset / retention purge / 隐私导出覆盖 episodes；
 - `memory_seal` 类型加入四处 Job 合同（handler 留待 PR4）。
 
-验收：`POSTGRES_TEST_URL=... make test` 零 skip；新契约测试证明六张表、ORM/SQL
+验收：基于开发环境 `DATABASE_URL` 的 `make test` 零 skip；新契约测试证明六张表、ORM/SQL
 无漂移；Dream 结算后 episodes 行存在且 history tombstone 语义不变；reset 后
 episodes 清空。
 
@@ -577,30 +608,48 @@ episodes 清空。
 后新 Run 准入成功且无注入 + 审计行存在；`budget_rewrite` 后文档进预算、注入恢复；
 SNIP 首次非法 + 二次合法的压缩成功且只调用两次模型。
 
-### PR6（可选）：章节配置化 + 收尾
+### PR6：章节数据库配置化 + 收尾
 
-- §15 全部；README / 教程 / `backend/AGENTS.md` / `frontend/AGENTS.md` 终稿核对。
+- §15 全部；系统管理员 API/UI 严格合同；v8 → v9 数据回填与 fresh/upgrade catalog
+  parity；自定义章节 Dream、restore、Run snapshot/continuation 与旧文档冻结测试；
+  README / 教程 / `backend/AGENTS.md` / `frontend/AGENTS.md` 终稿核对。
+
+验收：策略 A 下已排队/运行的 Dream 在平台切换到策略 B 后仍使用 A；已有文档的
+restore、新 Run 与 continuation 继续冻结 A，仅新作用域首次创建采用 B。真实 PostgreSQL
+同时证明 v8 → v9 默认章节/策略来源回填、两类 sections 不可变 trigger 和 fresh/upgrade
+catalog parity；管理后台使用独立 `memory_document` revision CAS。
 
 ## 17. 测试矩阵
 
-新增（命名对齐现有 `test_memory_*` 约定）：
+当前落地的主要测试（命名对齐现有 `test_memory_*` 约定）：
 
 ```text
-tests/test_memory_episodes.py                 # 转入、幂等、保留期、reset/retention
-tests/test_memory_episodes_postgres.py        # 真实 PG：trgm 检索、约束、并发结算
-tests/test_memory_recall_tool.py              # authority 重验证、排序、转义、不可用分支
-tests/test_memory_remember_tool.py            # 合同、幂等、上限、审计
-tests/test_memory_seal_worker.py              # 发现、抢占、no-op、结算
-tests/test_memory_dream_guardrail.py          # 复核标记边界样例
-tests/test_memory_injection_degradation.py    # over_budget 跳过 + budget_rewrite 闭环
+tests/test_memory_episodes.py                   # 转入、幂等、保留期、reset/retention
+tests/test_memory_episodes_postgres.py          # 真实 PG：trgm 检索、约束、并发结算
+tests/test_memory_recall.py                     # authority、排序、转义、API/工具合同
+tests/test_memory_remember.py                   # 合同、幂等、上限、审计
+tests/test_memory_tool_registration.py          # Lead 条件注册、Subagent 不可见
+tests/test_memory_seal_worker.py                # 发现、锁序、claim、抢占与结算单测
+tests/test_memory_seal_postgres.py              # 真实 PG：Scheduler→Worker→checkpoint 闭环
+tests/test_memory_guardrails.py                 # 复核标记边界样例
+tests/test_memory_admission_snapshot.py         # 注入降级、digest fail-closed
+tests/test_memory_budget_rewrite_postgres.py    # 真实 PG：超预算自救闭环
+tests/test_memory_history_contract_postgres.py  # tool-origin prompt 版本 DB CHECK
 ```
 
 必须更新的既有测试：`test_memory_document_contract.py`（表清单、Job 四合同）、
 `test_memory_policy_contract.py`（六字段）、`test_memory_snip_compaction.py`（至多
 两次调用）、`test_memory_dream.py` / `test_memory_dream_worker.py`（空批次、v3 版本
 门禁）、`test_memory_dream_api.py`（响应新字段）、`test_account_personalization.py`
-（reset 范围）、`test_agents_md_constants.py`（见 §18）、Replay E2E fixture 增加
-remember/recall 帧。
+（reset 范围）、`test_agents_md_constants.py`（见 §18）。
+
+现有 real-backend file Replay 保持 `memory.enabled=false`：它验证凭据无关的真实
+Gateway/Worker/file-tool 闭环，不混入需要 Memory authority、冻结快照、episodes 预置和
+数据库写副作用的第二种场景。remember/recall 的前端渲染验收使用独立的
+`frontend/tests/fixtures/replay/memory-tools.durable-stream-frames.json`：测试依次穿过
+durable frame 游标接收、LangGraph SDK `messages` tuple 投影和 `MessageGroup` 渲染，且
+完全不连接数据库。该 fixture 只证明确定性帧的前端投影/渲染；authority 重验证、检索
+排序与 remember 落库仍由后端聚焦测试及 PostgreSQL 门禁证明。
 
 ## 18. 受门禁文档语句与最终清理
 
@@ -619,14 +668,22 @@ remember/recall 帧。
 最终一致性扫描（预期为空，契约测试中的故意删除断言除外）：
 
 ```bash
-rg -n "memory_search|vector|embedding" backend/app backend/packages/harness/deerflow --glob '!*test*'
+rg -n "memory_search|vector_store|vector_search|embedding_service|embeddings?" backend/app/private_work backend/packages/harness/deerflow/{agents,tools,persistence/private_work} --glob '!*test*'
 rg -n "remember|recall_memory|memory_episodes|memory_seal|budget_rewrite|needs_review|idle_seal|episode_retention" backend frontend --files-with-matches
 ```
 
 第一条确认没有顺手引入向量/嵌入依赖；第二条用于核对新符号的落点清单与本文 §16 的
 PR 归属一致。发布前跑当前检出的全部焦点门禁：
-`POSTGRES_TEST_URL=... make test`（零 skip）、`pnpm check && pnpm test`、Replay E2E、
+基于开发环境 `DATABASE_URL` 的 `make test`（零 skip）、`pnpm check && pnpm test`、Replay E2E、
 `uvx ruff format --check .`。
+
+2026-08-09 当前工作树验收记录：后端核心 `1418 passed, 0 skipped`；前端单测
+`255 passed, 0 skipped`；`pnpm check` 为 0 error（另有 5 条与本改造无关的既有 unused
+warning）；后端 Ruff check 通过且 `786 files already formatted`。PR6 的策略 A → B 冻结
+真实 PostgreSQL 综合门禁 `1 passed, 0 skipped`，v8 → v9 数据回填 `1 passed, 0 skipped`，
+冻结基线升级与 fresh v9 catalog parity `10 passed, 0 skipped`。本地开发库只读检查仍为
+`full_schema_v5 / upgrade_required`，未自动执行升级；固定假模型与临时 PostgreSQL 只消除
+测试不确定性，不替代真实模型供应商、部署环境或浏览器矩阵的独立验收。
 
 ## 19. 非目标
 

@@ -60,4 +60,10 @@ of those processes must restart after a change.
 
 Gateway, Worker and Scheduler validate the configured database and schema at startup. Use the explicit database setup/migration commands before starting application processes.
 
-Memory policy has four controls: enablement, Dream model, automatic Dream interval, and the document injection budget. Persistence remains PostgreSQL project/owner scoped and has no local-file provider option.
+`agent_runtime.memory` has six controls: enablement, Dream model, automatic Dream interval,
+the document injection budget, idle sealing, and episode retention. A separate
+`memory_document` system policy stores two to eight ordered section titles; a platform
+administrator saves both policies under **Admin → System settings → Memory**. The template
+affects only Memory documents created for the first time after that change. Existing documents
+keep their frozen sections. Both policy groups and all Memory data are PostgreSQL-only;
+`config.yaml` has no document-template or local-file-provider fallback.

@@ -27,10 +27,11 @@ router = APIRouter(
     route_class=AdminOperationsRoute,
 )
 
-_SectionName = Literal["agent_runtime", "auth", "quotas"]
+_SectionName = Literal["agent_runtime", "auth", "memory_document", "quotas"]
 _EffectScope = Literal[
     "new_requests_and_runs",
     "new_requests",
+    "new_memory_documents",
     "next_authoritative_check",
 ]
 

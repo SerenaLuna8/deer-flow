@@ -6,7 +6,7 @@ DEFAULT_TEXT_DELTA_FLUSH_MS = 75
 
 
 class WorkerStreamConfig(BaseModel):
-    """Bounded coalescing policy for root text deltas on the durable stream."""
+    """Durable stream publication and wakeup policy."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -15,6 +15,10 @@ class WorkerStreamConfig(BaseModel):
         ge=0,
         le=5000,
         description=("Root assistant text deltas are merged for at most this many milliseconds (or 4 KiB) before one durable frame is published. 0 disables coalescing and restores per-token frames."),
+    )
+    run_event_notify_enabled: bool = Field(
+        default=True,
+        description=("Queue PostgreSQL run_events NOTIFY wakeups after durable stream writes and start the Gateway LISTEN connection. False restores polling-only SSE wakeups."),
     )
 
 

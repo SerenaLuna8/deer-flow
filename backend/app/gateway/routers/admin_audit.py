@@ -112,24 +112,12 @@ async def list_admin_audit(
         project_ids = {item.project_id for item in page.items if item.project_id is not None}
         projects: dict[uuid.UUID, tuple[str, str]] = {}
         if project_ids:
-            rows = (
-                await session.execute(
-                    select(ProjectRow.id, ProjectRow.slug, ProjectRow.display_name).where(
-                        ProjectRow.id.in_(project_ids)
-                    )
-                )
-            ).all()
+            rows = (await session.execute(select(ProjectRow.id, ProjectRow.slug, ProjectRow.display_name).where(ProjectRow.id.in_(project_ids)))).all()
             projects = {row.id: (row.slug, row.display_name) for row in rows}
-        actor_ids = {
-            str(item.actor_user_id) for item in page.items if item.actor_user_id is not None
-        }
+        actor_ids = {str(item.actor_user_id) for item in page.items if item.actor_user_id is not None}
         actors: dict[str, str | None] = {}
         if actor_ids:
-            rows = (
-                await session.execute(
-                    select(UserRow.id, UserRow.email).where(UserRow.id.in_(actor_ids))
-                )
-            ).all()
+            rows = (await session.execute(select(UserRow.id, UserRow.email).where(UserRow.id.in_(actor_ids)))).all()
             actors = {row.id: row.email for row in rows}
         return _response(page, projects, actors)
 

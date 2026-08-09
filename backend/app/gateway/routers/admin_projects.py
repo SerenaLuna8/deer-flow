@@ -9,14 +9,36 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.sinks import SystemProjectLifecycleAuditSink
-from app.gateway.deps import get_project_audit_service, project_session
+from app.gateway.deps import (
+    get_project_audit_service,
+    get_project_quota_service,
+    project_session,
+)
 from app.gateway.routers.admin_operations import (
     AdminOperationsRoute,
     authenticated_system_identity,
     current_system_context,
     map_admin_operations_errors,
 )
+from app.gateway.routers.project_usage import (
+    ProjectUsageResponse,
+    QuotaPolicyResponse,
+    QuotaPolicyUpdateRequest,
+    _policy_response,
+    _usage_response,
+)
 from app.projects.system_lifecycle import SystemProjectLifecycleService
+from app.quotas.models import (
+    ProjectQuotaLimits,
+    QuotaConflict,
+    QuotaForbidden,
+    QuotaPolicyInvalid,
+)
+from app.reliability.errors import (
+    ReliabilityConflict,
+    ReliabilityInvalid,
+    ReliabilityNotFound,
+)
 from app.reliability.operations import SystemOperationsRepository
 
 router = APIRouter(
@@ -134,6 +156,61 @@ async def resume_admin_project(
             audit=SystemProjectLifecycleAuditSink(audit, context),
         ).resume(context, project_id, now=datetime.now(UTC))
         return _project_response(item)
+
+
+@router.get("/{project_id}/usage", response_model=ProjectUsageResponse)
+@map_admin_operations_errors
+async def get_admin_project_usage(
+    project_id: uuid.UUID,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_system_identity),
+    session: AsyncSession = Depends(project_session),
+    quotas=Depends(get_project_quota_service),
+) -> ProjectUsageResponse:
+    async with session.begin():
+        context = await current_system_context(session, identity)
+        try:
+            usage = await quotas.read_usage_as_system_admin(
+                session,
+                context,
+                project_id,
+            )
+        except QuotaForbidden:
+            raise ReliabilityNotFound(identity[1]) from None
+        return _usage_response(usage)
+
+
+@router.patch("/{project_id}/usage/limits", response_model=QuotaPolicyResponse)
+@map_admin_operations_errors
+async def update_admin_project_quota_limits(
+    project_id: uuid.UUID,
+    body: QuotaPolicyUpdateRequest,
+    identity: tuple[uuid.UUID, str] = Depends(authenticated_system_identity),
+    session: AsyncSession = Depends(project_session),
+    quotas=Depends(get_project_quota_service),
+    audit=Depends(get_project_audit_service),
+) -> QuotaPolicyResponse:
+    async with session.begin():
+        context = await current_system_context(session, identity)
+        try:
+            policy = await quotas.set_limits_as_system_admin(
+                session,
+                context,
+                project_id,
+                ProjectQuotaLimits(**body.limits.model_dump()),
+                expected_version=body.expected_version,
+            )
+        except QuotaForbidden:
+            raise ReliabilityNotFound(identity[1]) from None
+        except QuotaConflict:
+            raise ReliabilityConflict(identity[1]) from None
+        except QuotaPolicyInvalid:
+            raise ReliabilityInvalid(identity[1]) from None
+        await SystemProjectLifecycleAuditSink(audit, context).quota_policy_updated(
+            session,
+            project_id=project_id,
+            policy=policy,
+        )
+        return _policy_response(policy)
 
 
 __all__ = ["router"]

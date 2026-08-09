@@ -36,6 +36,9 @@ upgrade-db:
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 
+prune-run-events:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/prune_run_event_partitions.py $(ARGS)
+
 reconcile-usage:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/reconcile_usage.py $(ARGS)
 

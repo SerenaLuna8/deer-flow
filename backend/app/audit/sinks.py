@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.audit.models import (
@@ -25,11 +26,17 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.quotas.models import ProjectQuotaPolicy
 from app.reliability.jobs import AdmittedJobRecord
+from deerflow.persistence.audit.sql import AuditRepository
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
     JobTerminalEvent,
     consume_issued_dead_job_requeued_event,
 )
+from deerflow.persistence.private_work.memory_document_repository import (
+    REMEMBER_RUN_LIMIT,
+)
+from deerflow.persistence.run.model import RunRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 
@@ -641,26 +648,71 @@ class OperationalAuditSink:
         result_bucket: str,
         matched_stage: str,
         tags_filtered: bool,
-    ) -> None:
+        query_len_bucket: str,
+    ) -> bool:
         self._require_process(AuditProcess.WORKER)
+        project_id = _uuid(scope.project_id)
+        owner_user_id = str(_uuid(scope.owner_user_id))
+        run_uuid = _uuid(run_id)
+        normalized_run_id = str(run_uuid)
+        normalized_job_id = _uuid(job_id)
+
+        # ``PrivateRunMemoryAuthority`` has already taken the global
+        # Project/Membership/Thread -> Job -> Run lock order.  Requiring and
+        # re-locking the exact attached Job/Run here makes the count+append
+        # boundary explicit at the sink: concurrent searches for one Run
+        # serialize, and later Worker attempts observe the committed count.
+        locked_job_id = await session.scalar(
+            select(JobRow.id)
+            .where(
+                JobRow.id == normalized_job_id,
+                JobRow.project_id == project_id,
+                JobRow.owner_user_id == owner_user_id,
+                JobRow.run_id == normalized_run_id,
+            )
+            .with_for_update(of=JobRow)
+        )
+        if locked_job_id != normalized_job_id:
+            raise AuditAuthorityRejected()
+        locked_run_id = await session.scalar(
+            select(RunRow.run_id)
+            .where(
+                RunRow.run_id == normalized_run_id,
+                RunRow.project_id == project_id,
+                RunRow.owner_user_id == owner_user_id,
+                RunRow.job_id == normalized_job_id,
+            )
+            .with_for_update(of=RunRow)
+        )
+        if locked_run_id != normalized_run_id:
+            raise AuditAuthorityRejected()
+        if await AuditRepository(session).job_action_limit_reached(
+            project_id=project_id,
+            job_id=normalized_job_id,
+            action=AuditAction.MEMORY_RECALL_EXECUTED.value,
+            limit=REMEMBER_RUN_LIMIT,
+        ):
+            return False
         await self._service.append(
             session,
             AuditActor.trusted_process(self._process_context),
             AuditAction.MEMORY_RECALL_EXECUTED,
             AuditTarget(
                 AuditTargetKind.RUN,
-                _uuid(run_id),
-                _uuid(scope.project_id),
+                run_uuid,
+                project_id,
             ),
             AuditOutcome.SUCCESS,
             {
                 "result_bucket": result_bucket,
                 "matched_stage": matched_stage,
                 "tags_filtered": tags_filtered,
+                "query_len_bucket": query_len_bucket,
             },
             request_id=request_id,
-            job_id=_uuid(job_id),
+            job_id=normalized_job_id,
         )
+        return True
 
     async def memory_injection_skipped(
         self,
@@ -867,6 +919,36 @@ class SystemProjectLifecycleAuditSink:
             session,
             project_id=project_id,
             action=AuditAction.PROJECT_RESUMED,
+        )
+
+    async def quota_policy_updated(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        policy: ProjectQuotaPolicy,
+    ) -> None:
+        if type(policy) is not ProjectQuotaPolicy:
+            raise AuditAuthorityRejected()
+        configured = policy.configured
+        await self._service.append(
+            session,
+            self._actor,
+            AuditAction.QUOTA_POLICY_UPDATED,
+            AuditTarget(
+                AuditTargetKind.QUOTA,
+                _uuid(project_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "member_limit": configured.member_limit,
+                "storage_bytes_limit": configured.storage_bytes_limit,
+                "concurrent_run_limit": configured.concurrent_run_limit,
+                "mcp_calls_daily_limit": configured.mcp_calls_daily_limit,
+                "version": policy.version,
+            },
+            request_id=self._request_id,
         )
 
     async def _project_event(

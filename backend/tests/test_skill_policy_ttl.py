@@ -92,6 +92,22 @@ class _FakeModelRequest:
         return _FakeModelRequest(self.runtime.context, tools)
 
 
+class _FakeRunJournal:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    def record_middleware(self, tag: str, *, name: str, hook: str, action: str, changes: dict) -> None:
+        self.events.append(
+            {
+                "tag": tag,
+                "name": name,
+                "hook": hook,
+                "action": action,
+                "changes": changes,
+            }
+        )
+
+
 def _tools() -> list[SimpleNamespace]:
     return [SimpleNamespace(name=name) for name in _DEFAULT_TOOL_NAMES]
 
@@ -235,7 +251,71 @@ def test_restriction_applies_within_ttl_and_the_block_message_explains_itself() 
     assert "allowed-tools" in blocked.content
     assert "SKILL.md" in blocked.content
     assert "/slash" in blocked.content
-    assert "expires automatically after 3 model calls" in blocked.content
+    assert "2 lead model call(s) remain" in blocked.content
+    assert "3 lead model call(s) remain" not in blocked.content
+
+    advance_lead_model_call_seq(context)
+    _filtered_names(middleware, context)
+    blocked = middleware.wrap_tool_call(
+        _tool_request(context, "bash", tool_call_id="call-3"),
+        _must_not_execute,
+    )
+    assert isinstance(blocked, ToolMessage)
+    assert "1 lead model call(s) remain" in blocked.content
+
+
+def test_restriction_entry_and_exit_emit_content_free_run_journal_traces_once() -> None:
+    skill = _skill()
+    middleware = _middleware(skill, ttl=3)
+    context = _context()
+    journal = _FakeRunJournal()
+    context["__run_journal"] = journal
+    entry_path = skill.get_container_file_path(_CONTAINER)
+
+    advance_lead_model_call_seq(context)
+    _read_skill_entry(middleware, context, entry_path)
+    advance_lead_model_call_seq(context)
+    assert "bash" not in _filtered_names(middleware, context)
+    assert len(journal.events) == 1
+
+    entered = journal.events[0]
+    assert entered == {
+        "tag": "skill_tool_policy",
+        "name": "SkillToolPolicyMiddleware",
+        "hook": "model_call",
+        "action": "restriction_entered",
+        "changes": {
+            "transition": "entered",
+            "source": "verified_read",
+            "skills": [
+                {
+                    "name": "restricted",
+                    "version_id": "skill-version-1",
+                }
+            ],
+            "allowed_tool_count": 4,
+        },
+    }
+    assert "SKILL.md" not in str(entered)
+    assert "allowed_names" not in str(entered)
+
+    # Re-observing the same restriction is not another state transition.
+    _filtered_names(middleware, context)
+    advance_lead_model_call_seq(context)
+    _filtered_names(middleware, context)
+    assert len(journal.events) == 1
+
+    # The next call expires the evidence and records which restriction ended.
+    advance_lead_model_call_seq(context)
+    assert _filtered_names(middleware, context) == set(_DEFAULT_TOOL_NAMES)
+    assert journal.events[1] == {
+        **entered,
+        "action": "restriction_exited",
+        "changes": {
+            **entered["changes"],
+            "transition": "exited",
+        },
+    }
 
 
 def test_expired_evidence_restores_the_default_tool_set() -> None:

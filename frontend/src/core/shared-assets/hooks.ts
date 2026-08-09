@@ -47,6 +47,7 @@ import {
   publishProjectAssetVersion,
   publishAdminProjectAssetVersion,
   requestProjectMcpToolDiscovery,
+  restoreProjectAgentVersion,
   revokeAdminCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
@@ -56,6 +57,7 @@ import {
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
   updateConfiguredProjectMcp,
+  updateProjectAgentCapabilityBindings,
   updateProjectAgentInstructions,
   updateProjectSkillCredentialBindings,
   upgradeAdminProjectSystemBinding,
@@ -79,6 +81,7 @@ import {
 } from "./query-keys";
 import type {
   AdminAssetList,
+  AgentCapabilityBindingsInput,
   AdminProjectAssetStatusAction,
   AdminCredentialList,
   AgentInstructionsInput,
@@ -741,6 +744,74 @@ export function useUpdateProjectAgentInstructions(
     }) =>
       runMutation((signal) =>
         updateProjectAgentInstructions(projectId, assetId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useUpdateProjectAgentCapabilityBindings(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "agents",
+      "update-capability-bindings",
+    ),
+    mutationFn: ({
+      assetId,
+      input,
+    }: {
+      assetId: string;
+      input: AgentCapabilityBindingsInput;
+    }) =>
+      runMutation((signal) =>
+        updateProjectAgentCapabilityBindings(projectId, assetId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function useRestoreProjectAgentVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "agents",
+      "restore-version",
+    ),
+    mutationFn: ({
+      assetId,
+      versionId,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      input: ExpectedAssetVersionInput;
+    }) =>
+      runMutation((signal) =>
+        restoreProjectAgentVersion(
+          projectId,
+          assetId,
+          versionId,
+          input,
+          signal,
+        ),
       ),
     onSuccess: whenActive(invalidate),
   });

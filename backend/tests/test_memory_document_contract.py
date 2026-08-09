@@ -46,7 +46,7 @@ REMOVED_MEMORY_TABLES = {
 
 
 def test_final_memory_schema_uses_only_the_document_model() -> None:
-    assert CURRENT_SCHEMA_REVISION == "full_schema_v5"
+    assert CURRENT_SCHEMA_REVISION == "full_schema_v9"
     assert MEMORY_DOCUMENT_TABLES <= set(Base.metadata.tables)
     assert REMOVED_MEMORY_TABLES.isdisjoint(Base.metadata.tables)
     assert MEMORY_DOCUMENT_TABLES <= set(FINAL_REQUIRED_RELATIONS)
@@ -61,7 +61,7 @@ def test_full_schema_contains_only_the_final_memory_tables_and_job() -> None:
     for table in REMOVED_MEMORY_TABLES:
         assert f"CREATE TABLE {table} (" not in schema_sql
 
-    assert "full_schema_v5" in schema_sql
+    assert "full_schema_v9" in schema_sql
     assert "full_schema_v4" not in schema_sql
     assert "memory_dream" in schema_sql
     assert "memory_seal" in schema_sql
@@ -88,6 +88,46 @@ def test_deferred_dream_result_fk_matches_the_orm() -> None:
         str(AddConstraint(constraint).compile(dialect=postgres_dialect())).split(),
     )
     assert expected in " ".join(schema_sql.split())
+
+
+def test_memory_document_sections_have_frozen_policy_provenance() -> None:
+    schema_sql = (Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/full_schema.sql").read_text(encoding="utf-8")
+    document = Base.metadata.tables["memory_documents"]
+    snapshot = Base.metadata.tables["run_memory_context_snapshots"]
+    provenance = next(constraint for constraint in document.foreign_key_constraints if constraint.name == "fk_memory_documents_sections_policy_version")
+
+    assert document.c.sections.nullable is False
+    assert document.c.sections_policy_section.nullable is False
+    assert document.c.sections_policy_version_id.nullable is False
+    assert tuple(element.parent.name for element in provenance.elements) == (
+        "sections_policy_section",
+        "sections_policy_version_id",
+    )
+    assert tuple(element.target_fullname for element in provenance.elements) == (
+        "system_runtime_policy_versions.section",
+        "system_runtime_policy_versions.id",
+    )
+    assert snapshot.c.sections.nullable is False
+    assert "jsonb_path_exists(sections" in schema_sql
+    assert "sections_policy_section = 'memory_document'" in schema_sql
+    assert "CREATE OR REPLACE FUNCTION prevent_memory_document_sections_mutation()" in schema_sql
+    assert "CREATE TRIGGER trg_memory_documents_sections_immutable" in schema_sql
+    assert "CREATE TRIGGER trg_run_memory_context_snapshots_sections_immutable" in schema_sql
+
+
+def test_tool_history_origin_pins_the_remember_prompt_contract() -> None:
+    schema_sql = (Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/full_schema.sql").read_text(encoding="utf-8")
+    constraint = next(value for value in Base.metadata.tables["memory_history_entries"].constraints if value.name == "ck_memory_history_entries_contract")
+    expected = " ".join(
+        str(AddConstraint(constraint).compile(dialect=postgres_dialect())).split(),
+    )
+    create_table_fragment = expected.removeprefix(
+        "ALTER TABLE memory_history_entries ADD ",
+    )
+
+    assert "origin = 'tool'" in expected
+    assert "snip_prompt_version = 'remember-tool-v1'" in expected
+    assert create_table_fragment in " ".join(schema_sql.split())
 
 
 def test_job_type_contract_is_consistent_across_persistence_and_public_models() -> None:

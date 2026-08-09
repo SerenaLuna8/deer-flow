@@ -36,7 +36,13 @@ const fixture = JSON.parse(
   ),
 ) as {
   prompt: string;
-  turns: Array<{ output: { data: { content?: unknown } } }>;
+  turns: Array<{
+    stream?: {
+      provenance?: unknown;
+      text_chunk_chars?: unknown;
+    };
+    output: { data: { content?: unknown; id?: unknown } };
+  }>;
 };
 
 const PROMPT = fixture.prompt;
@@ -68,6 +74,40 @@ const EXPECTED_SUGGESTION = ((): string => {
   }
 })();
 const EXPECTED_TITLE = fallbackTitle(PROMPT);
+
+const derivedBurstTurn = fixture.turns.find(
+  (turn) =>
+    turn.stream?.provenance === "derived_from_recorded_output" &&
+    typeof turn.stream.text_chunk_chars === "number",
+);
+const DERIVED_BURST_CONTENT = derivedBurstTurn?.output.data.content;
+const DERIVED_BURST_MESSAGE_ID = derivedBurstTurn?.output.data.id;
+const DERIVED_BURST_CHUNK_CHARS = derivedBurstTurn?.stream?.text_chunk_chars;
+
+type DurableSseFrame = {
+  id?: string;
+  event?: string;
+  data?: unknown;
+};
+
+function parseDurableSse(body: string): DurableSseFrame[] {
+  return body
+    .split(/\r?\n\r?\n/)
+    .map((block) => {
+      const frame: DurableSseFrame = {};
+      const dataLines: string[] = [];
+      for (const line of block.split(/\r?\n/)) {
+        if (line.startsWith("id:")) frame.id = line.slice(3).trimStart();
+        if (line.startsWith("event:")) frame.event = line.slice(6).trimStart();
+        if (line.startsWith("data:")) dataLines.push(line.slice(5).trimStart());
+      }
+      if (dataLines.length > 0) frame.data = JSON.parse(dataLines.join("\n"));
+      return frame;
+    })
+    .filter((frame) =>
+      [frame.id, frame.event, frame.data].some((value) => value !== undefined),
+    );
+}
 
 test.describe("real backend render (replay, no API key)", () => {
   let project: ReplayProjectScope;
@@ -117,6 +157,80 @@ test.describe("real backend render (replay, no API key)", () => {
       timeout: 30_000,
     });
     await expect(page.getByTestId("run-failure-alert")).toHaveCount(0);
+
+    // Reconnect from cursor zero after settlement. This response is rebuilt
+    // from PostgreSQL run_events by the real Gateway, so the assertion covers
+    // the real Worker coalescer + durable write + replay path rather than only
+    // the browser's live in-memory projection. The fixture's per-character
+    // chunks are explicitly derived from (and must reconstruct) the recorded
+    // AIMessage; they do not claim to be historical provider transport frames.
+    expect(typeof DERIVED_BURST_CONTENT).toBe("string");
+    expect(typeof DERIVED_BURST_MESSAGE_ID).toBe("string");
+    expect(typeof DERIVED_BURST_CHUNK_CHARS).toBe("number");
+    const runsResponse = await context.request.get(
+      `${APP}/api/projects/${project.id}/private-work/threads/${threadId}/runs?limit=10`,
+    );
+    expect(runsResponse.status(), await runsResponse.text()).toBe(200);
+    const runs = (await runsResponse.json()) as Array<{
+      run_id?: unknown;
+      status?: unknown;
+    }>;
+    const completedRun = runs.find(
+      (run) => typeof run.run_id === "string" && run.status === "success",
+    );
+    expect(
+      completedRun,
+      "the replay Run must settle successfully",
+    ).toBeTruthy();
+    const completedRunId = completedRun?.run_id;
+    if (typeof completedRunId !== "string") {
+      throw new Error("the replay Run response is missing its durable run_id");
+    }
+
+    const durableReplay = await context.request.get(
+      `${APP}/api/projects/${project.id}/private-work/threads/${threadId}/runs/${completedRunId}/stream`,
+      { headers: { "Last-Event-ID": "0" } },
+    );
+    expect(durableReplay.status(), await durableReplay.text()).toBe(200);
+    const frames = parseDurableSse(await durableReplay.text());
+    const durableTextFrames = frames.filter((frame) => {
+      if (frame.event !== "messages" || !Array.isArray(frame.data))
+        return false;
+      const message = frame.data[0];
+      return (
+        typeof message === "object" &&
+        message !== null &&
+        Reflect.get(message, "id") === DERIVED_BURST_MESSAGE_ID &&
+        typeof Reflect.get(message, "content") === "string"
+      );
+    });
+    const reconstructed = durableTextFrames
+      .map((frame) => {
+        const message = (frame.data as unknown[])[0];
+        if (typeof message !== "object" || message === null) {
+          throw new Error("durable text frame is missing its message payload");
+        }
+        const content = Reflect.get(message, "content");
+        if (typeof content !== "string") {
+          throw new Error("durable text frame content is not a string");
+        }
+        return content;
+      })
+      .join("");
+    expect(reconstructed).toBe(DERIVED_BURST_CONTENT);
+
+    const logicalChunkCount = Math.ceil(
+      Array.from(DERIVED_BURST_CONTENT as string).length /
+        (DERIVED_BURST_CHUNK_CHARS as number),
+    );
+    expect(logicalChunkCount).toBeGreaterThanOrEqual(10);
+    expect(durableTextFrames.length).toBeGreaterThan(0);
+    // The leading edge is deliberately immediate. Excluding that required
+    // first frame, the burst tail must shrink by at least one order of
+    // magnitude while its bytes remain exact above.
+    expect(durableTextFrames.length - 1).toBeLessThanOrEqual(
+      Math.floor((logicalChunkCount - 1) / 10),
+    );
 
     // Visual regression is OS-sensitive (a macOS baseline won't match CI's
     // Linux render), so it's a local dev gate only; in CI we capture the render

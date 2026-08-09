@@ -33,6 +33,7 @@ from app.projects.context import ProjectContext, resolve_project_context
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
 from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
+    AgentCapabilityBindings,
     AgentInstructions,
     AgentModelSettings,
     AgentService,
@@ -262,6 +263,12 @@ class AgentInstructionsRequest(_StrictModel):
     soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    expected_asset_version: int = Field(ge=1)
+
+
+class AgentCapabilityBindingsRequest(_StrictModel):
+    skill_version_ids: list[uuid.UUID]
+    mcp_version_ids: list[uuid.UUID]
     expected_asset_version: int = Field(ge=1)
 
 
@@ -1217,6 +1224,44 @@ def register_asset_routes(
             AgentVersionResponse,
         )
 
+    async def update_agent_capability_bindings(
+        asset_id: uuid.UUID,
+        body: AgentCapabilityBindingsRequest,
+        actor=Depends(actor_dependency),
+        service=Depends(get_agent_service),
+    ):
+        return await _version_call(
+            actor,
+            lambda: service.update_capability_bindings(
+                actor,
+                asset_id,
+                AgentCapabilityBindings(
+                    tuple(body.skill_version_ids),
+                    tuple(body.mcp_version_ids),
+                ),
+                expected_asset_version=body.expected_asset_version,
+            ),
+            AgentVersionResponse,
+        )
+
+    async def restore_agent_version(
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        body: ExpectedAssetVersionRequest,
+        actor=Depends(actor_dependency),
+        service=Depends(get_agent_service),
+    ):
+        return await _version_call(
+            actor,
+            lambda: service.restore_version(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=body.expected_asset_version,
+            ),
+            AgentVersionResponse,
+        )
+
     async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), AgentVersionHistoryResponse)
 
@@ -1383,6 +1428,8 @@ def register_asset_routes(
     shared_asset_write_routes = (
         ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
         ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentVersionResponse, 200),
+        ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentVersionResponse, 200),
+        ("/agents/{asset_id}/versions/{version_id}/restore", restore_agent_version, ["POST"], AgentVersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),

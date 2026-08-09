@@ -29,7 +29,7 @@ export const memoryDocumentSchema = z
   })
   .strict();
 
-export const memoryVersionSummarySchema = z
+const memoryVersionSummaryBaseSchema = z
   .object({
     version: memoryVersionSchema,
     trigger: z.enum([
@@ -38,12 +38,34 @@ export const memoryVersionSummarySchema = z
       "restore",
       "budget_rewrite",
     ]),
-    historyCount: z.number().int().min(1).max(20).nullable(),
+    historyCount: z.number().int().min(0).max(20).nullable(),
     changed: z.boolean(),
     needsReview: z.boolean(),
     createdAt: memoryDateTimeSchema,
   })
   .strict();
+
+function validateMemoryVersionHistory(
+  value: z.infer<typeof memoryVersionSummaryBaseSchema>,
+  context: z.RefinementCtx,
+) {
+  const valid =
+    value.trigger === "restore"
+      ? value.historyCount === null
+      : value.trigger === "budget_rewrite"
+        ? value.historyCount === 0
+        : value.historyCount !== null && value.historyCount >= 1;
+  if (!valid) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["historyCount"],
+      message: "Memory version history count does not match its trigger",
+    });
+  }
+}
+
+export const memoryVersionSummarySchema =
+  memoryVersionSummaryBaseSchema.superRefine(validateMemoryVersionHistory);
 
 export const memoryVersionsSchema = z
   .object({
@@ -51,37 +73,40 @@ export const memoryVersionsSchema = z
   })
   .strict();
 
-export const memoryVersionDetailSchema = memoryVersionSummarySchema
+export const memoryVersionDetailSchema = memoryVersionSummaryBaseSchema
   .extend({
     content: z.string().max(MEMORY_DOCUMENT_MAX_LENGTH),
     unifiedDiff: z.string().max(MEMORY_DIFF_MAX_LENGTH),
   })
-  .strict();
-
-export const memoryDreamResultSchema = z
-  .object({
-    disposition: z.enum(["queued", "already_running", "nothing_pending"]),
-    jobId: z.string().uuid().nullable(),
-    historyCount: z.number().int().min(0).max(20),
-  })
   .strict()
-  .superRefine((value, context) => {
-    const nothingPending = value.disposition === "nothing_pending";
-    if (nothingPending !== (value.jobId === null)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["jobId"],
-        message: "Dream job identity does not match its disposition",
-      });
-    }
-    if (nothingPending !== (value.historyCount === 0)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["historyCount"],
-        message: "Dream history count does not match its disposition",
-      });
-    }
-  });
+  .superRefine(validateMemoryVersionHistory);
+
+const admittedDreamDispositionSchema = z.enum(["queued", "already_running"]);
+
+export const memoryDreamResultSchema = z.union([
+  z
+    .object({
+      disposition: z.literal("nothing_pending"),
+      jobId: z.null(),
+      historyCount: z.literal(0),
+    })
+    .strict(),
+  z
+    .object({
+      disposition: admittedDreamDispositionSchema,
+      jobId: z.string().uuid(),
+      historyCount: z.literal(0),
+      admissionKind: z.literal("budget_rewrite"),
+    })
+    .strict(),
+  z
+    .object({
+      disposition: admittedDreamDispositionSchema,
+      jobId: z.string().uuid(),
+      historyCount: z.number().int().min(1).max(20),
+    })
+    .strict(),
+]);
 
 export const MEMORY_EPISODE_PAGE_SIZE = 20;
 export const MEMORY_EPISODE_SEARCH_LIMIT = 50;

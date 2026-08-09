@@ -25,11 +25,17 @@ import {
 } from "./query-keys";
 import type {
   AgentBuilderSession,
+  AgentBuilderSessionSummary,
   AgentBuilderTurnInput,
   CancelAgentBuilderSessionInput,
   CommitAgentBuilderSessionInput,
   CreateAgentBuilderSessionInput,
 } from "./types";
+
+export type CancelAgentBuilderSessionFromListInput =
+  CancelAgentBuilderSessionInput & {
+    session_id: string;
+  };
 
 function useAgentBuilderMutationRunner(accountId: string, projectId: string) {
   const access = usePrivateWorkAccess();
@@ -208,6 +214,42 @@ export function useCancelAgentBuilderSession(
       queryClient.setQueryData(
         agentBuilderSessionKey(accountId, projectId, sessionId),
         response.data,
+      );
+      void queryClient.invalidateQueries(
+        agentBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+  });
+}
+
+export function useCancelAgentBuilderSessionFromList(
+  accountId: string,
+  projectId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useAgentBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: agentBuilderMutationKey(
+      accountId,
+      projectId,
+      "cancel-session-from-list",
+    ),
+    mutationFn: ({
+      session_id: sessionId,
+      ...input
+    }: CancelAgentBuilderSessionFromListInput) =>
+      runMutation((signal) =>
+        cancelAgentBuilderSession(projectId, sessionId, input, signal),
+      ),
+    onSuccess: (response, input) => {
+      queryClient.setQueryData(
+        agentBuilderSessionKey(accountId, projectId, input.session_id),
+        response.data,
+      );
+      queryClient.setQueryData<AgentBuilderSessionSummary[]>(
+        agentBuilderSessionsKey(accountId, projectId),
+        (current) =>
+          current?.filter((session) => session.id !== input.session_id),
       );
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),

@@ -186,52 +186,68 @@ function ConversationRailContent({
                 <li
                   key={thread.thread_id}
                   className={cn(
-                    "group flex items-center gap-1 rounded-xl px-1 transition-colors",
+                    "group rounded-xl px-2 py-2 transition-colors",
                     active
                       ? "bg-accent text-accent-foreground"
                       : "hover:bg-accent/60",
                   )}
                 >
-                  <Link
-                    href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
-                    aria-current={active ? "page" : undefined}
-                    className="min-w-0 flex-1 px-2 py-2.5"
-                    onClick={onNavigate}
-                  >
-                    <span className="block truncate text-sm font-medium">
+                  <div className="relative min-w-0">
+                    <Link
+                      href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
+                      aria-current={active ? "page" : undefined}
+                      className={cn(
+                        "block truncate text-sm font-medium",
+                        canRename && canDelete
+                          ? "group-focus-within:pr-14 group-hover:pr-14"
+                          : canRename || canDelete
+                            ? "group-focus-within:pr-7 group-hover:pr-7"
+                            : null,
+                      )}
+                      onClick={onNavigate}
+                    >
                       {title}
-                    </span>
-                    {thread.updated_at && (
-                      <span className="text-muted-foreground mt-1 block text-xs">
-                        {formatTimeAgo(thread.updated_at)}
-                      </span>
+                    </Link>
+                    {(canRename || canDelete) && (
+                      <div className="pointer-events-none absolute top-1/2 right-0 flex -translate-y-1/2 items-center opacity-0 transition-opacity group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100">
+                        {canRename && (
+                          <Button
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            className="text-muted-foreground size-7"
+                            aria-label={`重命名 ${title}`}
+                            title="重命名"
+                            onClick={() => onRename(thread)}
+                          >
+                            <PencilLineIcon aria-hidden className="size-3.5" />
+                          </Button>
+                        )}
+                        {canDelete && (
+                          <Button
+                            type="button"
+                            size="icon-sm"
+                            variant="ghost"
+                            className="text-muted-foreground size-7"
+                            aria-label={`删除 ${title}`}
+                            onClick={() => onDelete(thread)}
+                          >
+                            <Trash2Icon aria-hidden className="size-3.5" />
+                          </Button>
+                        )}
+                      </div>
                     )}
-                  </Link>
-                  {canRename && (
-                    <Button
-                      type="button"
-                      size="icon-sm"
-                      variant="ghost"
-                      className="text-muted-foreground shrink-0 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-                      aria-label={`重命名 ${title}`}
-                      title="重命名"
-                      onClick={() => onRename(thread)}
+                  </div>
+                  {thread.updated_at ? (
+                    <Link
+                      href={`/projects/${encodeURIComponent(project.slug)}/chats/${encodeURIComponent(thread.thread_id)}`}
+                      tabIndex={-1}
+                      className="text-muted-foreground mt-1 block text-xs"
+                      onClick={onNavigate}
                     >
-                      <PencilLineIcon aria-hidden className="size-4" />
-                    </Button>
-                  )}
-                  {canDelete && (
-                    <Button
-                      type="button"
-                      size="icon-sm"
-                      variant="ghost"
-                      className="text-muted-foreground shrink-0 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-                      aria-label={`删除 ${title}`}
-                      onClick={() => onDelete(thread)}
-                    >
-                      <Trash2Icon aria-hidden className="size-4" />
-                    </Button>
-                  )}
+                      {formatTimeAgo(thread.updated_at)}
+                    </Link>
+                  ) : null}
                 </li>
               );
             })}
@@ -390,7 +406,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
 
   return (
     <>
-      <aside className="border-border/70 bg-card/50 hidden h-full w-72 shrink-0 border-r xl:flex">
+      <aside className="border-border/70 bg-card/50 hidden h-full w-64 shrink-0 border-r xl:flex">
         {rail()}
       </aside>
 
@@ -407,7 +423,7 @@ export function ProjectConversationRail({ project }: { project: Project }) {
             <MenuIcon aria-hidden className="size-4" />
           </Button>
         </SheetTrigger>
-        <SheetContent side="left" className="w-[min(20rem,88vw)] gap-0 p-0">
+        <SheetContent side="left" className="w-[min(16rem,88vw)] gap-0 p-0">
           <SheetHeader className="sr-only">
             <SheetTitle>项目会话</SheetTitle>
             <SheetDescription>

@@ -9,6 +9,14 @@ description: 由 SNIP 归档与 Dream 构成的项目长期记忆。
 
 Thread 摘要仍是独立数据。它只压缩一个 Thread 的模型上下文，重置长期 Memory 时会保留。
 
+## 文档章节模板
+
+平台管理员在 **Admin → 系统设置 → Memory** 中维护 2～8 个有序纯标题。模板是独立、
+带版本且可审计的 PostgreSQL `memory_document` 系统策略，不是 `config.yaml` 配置。
+某个 project/owner 作用域首次创建 Memory 文档时，服务端把当时的章节和精确策略版本冻结到
+文档行；Run Memory 快照继续冻结同一章节合同。以后修改模板只影响新建文档，不会重排已有
+文档、改写历史版本或取消在途 Dream。
+
 ## SNIP 与待整理历史
 
 Thread 压缩时，SNIP 对完整的早期轮次执行一次有界模型调用。通过标签校验的同一份输出会同时写入 Thread `summary_text` 和一条私有待整理历史。精确的 `(nothing)` 仍会更新 Thread 摘要，但不会创建长期历史。checkpoint receipt 与数据库事务使用幂等握手，重试不会重复归档同一次压缩。
@@ -25,7 +33,7 @@ Dream 每次最多把最早的 20 条待整理历史归入当前文档。隔离�
 
 ## 召回
 
-Run 准入事务只读取一次当前有界文档，并冻结成一行 Run 快照。Worker 的每个模型边界只复用这份快照；首次召回不会调用模型、向量检索或排序查询。Dream 在 Run 途中完成也不会改变该 Run 的 Memory。
+Run 准入事务只读取一次当前有界文档及其章节合同，并冻结成一行 Run 快照。Worker 的每个模型边界只复用这份快照；首次召回不会调用模型、向量检索或排序查询。Dream 在 Run 途中完成或管理员修改章节模板，都不会改变该 Run 的 Memory。
 
 启用时，完整冻结文档会作为隐藏、低权限的 Human message 注入，并明确标注它是私有数据而不是指令。关闭 Memory 后，下一个模型边界会跳过注入。重置会删除长期文档、历史、版本、Dream 记录和 Run Memory 快照，但保留聊天与 Thread 摘要。
 

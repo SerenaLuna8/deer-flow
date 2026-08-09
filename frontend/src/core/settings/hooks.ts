@@ -62,27 +62,24 @@ export function useThreadSettings(
     () => false,
   );
 
-  const settings = useMemo(
-    () => {
-      const modelSettings = applyThreadModelOverride(
-        baseSettings,
-        threadModelName,
-        threadModelSelectionExplicit,
-      );
-      return applyThreadModeOverride(
-        modelSettings,
-        threadMode,
-        threadModeSelectionExplicit,
-      );
-    },
-    [
+  const settings = useMemo(() => {
+    const modelSettings = applyThreadModelOverride(
       baseSettings,
-      threadMode,
-      threadModeSelectionExplicit,
       threadModelName,
       threadModelSelectionExplicit,
-    ],
-  );
+    );
+    return applyThreadModeOverride(
+      modelSettings,
+      threadMode,
+      threadModeSelectionExplicit,
+    );
+  }, [
+    baseSettings,
+    threadMode,
+    threadModeSelectionExplicit,
+    threadModelName,
+    threadModelSelectionExplicit,
+  ]);
 
   const setSettings = useCallback<LocalSettingsSetter>(
     (key, value) => {

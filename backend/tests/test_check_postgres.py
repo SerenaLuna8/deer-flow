@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_SCHEMA_MARKER = "full_schema_v5"
+CURRENT_SCHEMA_MARKER = "full_schema_v9"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
@@ -149,6 +149,38 @@ async def test_check_reports_legacy_schema_as_recreate_required(
     assert result.head_revision == CURRENT_SCHEMA_MARKER
     assert result.schema_state == "recreate_required"
     assert result.missing_tables == ()
+    assert result.healthy is False
+
+
+@pytest.mark.asyncio
+async def test_check_reports_a_known_ancestor_as_upgrade_required(monkeypatch) -> None:
+    connection = _connection(
+        revision="full_schema_v5",
+        present_tables=set(check_postgres.REQUIRED_TABLES),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "create_async_engine",
+        lambda *_args, **_kwargs: _Engine(connection),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "classify_database",
+        AsyncMock(return_value="behind"),
+    )
+    monkeypatch.setattr(
+        check_postgres,
+        "get_schema_marker",
+        lambda: CURRENT_SCHEMA_MARKER,
+    )
+
+    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
+
+    assert result.current_revision == "full_schema_v5"
+    assert result.head_revision == CURRENT_SCHEMA_MARKER
+    assert result.schema_state == "upgrade_required"
+    assert result.revision_matches is False
+    assert "make upgrade-db" in result.error
     assert result.healthy is False
 
 

@@ -101,10 +101,20 @@ describe("project shell navigation", () => {
       <ProjectHome
         project={adminProject}
         tokenUsageSection={<div data-testid="token-usage">Usage</div>}
+        usageDimensionsSection={
+          <div data-testid="usage-dimensions">Dimensions</div>
+        }
       />,
     );
 
     expect(html).toContain('data-testid="token-usage"');
+    expect(html).toContain('data-testid="usage-dimensions"');
+    expect(html.indexOf('data-testid="token-usage"')).toBeLessThan(
+      html.indexOf('data-testid="usage-dimensions"'),
+    );
+    expect(html.indexOf('data-testid="usage-dimensions"')).toBeLessThan(
+      html.indexOf("共享资产"),
+    );
     expect(html).not.toContain('href="/workspace"');
   });
 
@@ -134,12 +144,18 @@ describe("project shell navigation", () => {
           section: "management",
         }),
         expect.objectContaining({
-          href: "/projects/alpha/members",
-          label: "项目成员",
+          href: "/projects/alpha/audit",
+          label: "审计日志",
+          section: "management",
+        }),
+        expect.objectContaining({
+          href: "/projects/alpha/settings",
+          label: "项目设置",
           section: "management",
         }),
       ]),
     );
+    expect(items.map((item) => item.label)).not.toContain("项目成员");
   });
 
   test("gates all project private-work destinations with readiness", () => {
@@ -188,7 +204,7 @@ describe("project shell navigation", () => {
 
     for (const label of [
       "项目概览",
-      "项目成员",
+      "审计日志",
       "项目设置",
       "Agent",
       "Skill",
@@ -199,6 +215,7 @@ describe("project shell navigation", () => {
     ]) {
       expect(html).toContain(label);
     }
+    expect(html).not.toContain("项目成员");
     for (const unavailable of ["私有工作", "自动化"]) {
       expect(html).not.toContain(unavailable);
     }
@@ -238,19 +255,20 @@ describe("project shell navigation", () => {
     expect(html).toContain('aria-label="展开菜单栏"');
     for (const label of [
       "项目概览",
-      "Agent",
-      "Skill",
-      "MCP",
+      "智能体",
+      "技能",
+      "工具",
       "项目凭证",
-      "项目成员",
+      "审计日志",
       "项目设置",
       "返回工作空间",
     ]) {
       expect(html).toContain(`aria-label="${label}"`);
       expect(html).toContain(`title="${label}"`);
     }
+    expect(html).not.toContain('aria-label="项目成员"');
     expect(html).toMatch(
-      /<a[^>]*aria-label="Agent"[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/agents"/u,
+      /<a[^>]*aria-label="智能体"[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/agents"/u,
     );
   });
 
@@ -258,13 +276,19 @@ describe("project shell navigation", () => {
     expect(
       isProjectNavigationItemActive(
         "/projects/alpha",
-        "/projects/alpha/settings/usage",
+        "/projects/alpha/settings/members",
       ),
     ).toBe(false);
     expect(
       isProjectNavigationItemActive(
         "/projects/alpha/settings",
-        "/projects/alpha/settings/usage",
+        "/projects/alpha/settings/members",
+      ),
+    ).toBe(true);
+    expect(
+      isProjectNavigationItemActive(
+        "/projects/alpha/audit",
+        "/projects/alpha/audit",
       ),
     ).toBe(true);
   });
@@ -309,14 +333,19 @@ describe("project shell navigation", () => {
       ] as Project["capabilities"],
     };
 
-    expect(renderShell(roleOnlyAdmin)).not.toContain("项目成员");
     expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
     expect(renderShell(capabilityViewer)).toContain("项目设置");
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
     expect(renderShell(sharedAssetReader)).toContain("Agent");
     expect(renderShell(sharedAssetReader)).not.toContain("项目凭证");
-    expect(renderShell(memberManager)).toContain("项目成员");
+    expect(renderShell(memberManager)).toContain("项目设置");
+    expect(renderShell(memberManager)).not.toContain("项目成员");
+    expect(
+      projectNavigationItems(memberManager, false, true, false, false).find(
+        (item) => item.label === "项目设置",
+      )?.href,
+    ).toBe("/projects/alpha/settings/members");
     expect(renderShell(credentialApprover)).toContain("项目凭证");
   });
 });

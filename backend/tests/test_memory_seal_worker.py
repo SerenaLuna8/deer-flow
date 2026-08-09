@@ -8,6 +8,7 @@ import uuid
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 import app.private_work.memory_seal_service as seal_service_module
 import app.worker.memory_seal as seal_worker_module
@@ -31,7 +32,7 @@ from app.projects.errors import ProjectNotFound
 from app.projects.models import ProjectRole
 from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.service import JobSettlement, LeaseLost
-from deerflow.persistence.jobs.sql import JobClaim, JobScope
+from deerflow.persistence.jobs.sql import JobClaim, JobRepository, JobScope
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
 NOW = datetime(2026, 8, 6, 10, 20, 30, tzinfo=UTC)
@@ -90,6 +91,9 @@ class _Rows:
         return iter(self._rows)
 
     def scalar_one_or_none(self):
+        return self._rows[0] if self._rows else None
+
+    def one_or_none(self):
         return self._rows[0] if self._rows else None
 
 
@@ -295,6 +299,28 @@ def _patch_platform_policy(monkeypatch: pytest.MonkeyPatch, policy) -> list[obje
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_job_repository_claim_allowlist_includes_memory_seal() -> None:
+    session = _Session(execute_results=[_Rows(())])
+
+    claim = await JobRepository(session).claim_next(
+        worker_id=uuid.uuid4(),
+        capabilities=frozenset({"memory_seal"}),
+        lease_seconds=60,
+        now=NOW,
+    )
+
+    assert claim is None
+    assert len(session.executed) == 1
+    compiled = str(
+        session.executed[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "jobs.job_type IN ('memory_seal')" in compiled
+
+
 def test_seal_idempotency_key_is_canonical_and_ordinal_separated() -> None:
     key = compute_seal_idempotency_key(
         project_id=str(PROJECT_ID),
@@ -429,6 +455,76 @@ async def test_admission_enqueues_one_job_with_thread_coordinate_and_audit(
     assert audited["project_id"] == PROJECT_ID
     assert audited["job_id"] == job_id
     assert audited["request_id"] == "memory-seal-scheduler"
+
+
+@pytest.mark.asyncio
+async def test_admission_locks_thread_before_reading_live_policy_and_preference(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    async def resolve(*_args, **_kwargs):
+        events.append("project_membership")
+        return _project_context()
+
+    async def materialize(*_args, **_kwargs):
+        events.append("policy")
+        return _policy(), 23
+
+    class _OrderedSession(_Session):
+        async def execute(self, statement):
+            events.append("thread")
+            return await super().execute(statement)
+
+    class _OrderedPersonalization(_Personalization):
+        async def read_memory(self, owner_user_id, *, for_update: bool = False):
+            events.append("preference")
+            return await super().read_memory(
+                owner_user_id,
+                for_update=for_update,
+            )
+
+    class _OrderedJobs(_Jobs):
+        async def enqueue(self, job):
+            events.append("job")
+            return await super().enqueue(job)
+
+    monkeypatch.setattr(
+        seal_service_module,
+        "resolve_project_context_in_transaction",
+        resolve,
+    )
+    monkeypatch.setattr(
+        seal_service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    session = _OrderedSession(
+        execute_results=[_Rows((object(),))],
+        scalar_results=[True, 0],
+    )
+    service = MemorySealAdmissionService(
+        job_repository_builder=lambda _session: _OrderedJobs(),
+        personalization_repository_builder=lambda _session: _OrderedPersonalization(),
+    )
+
+    assert (
+        await service.admit_thread(
+            session,
+            project_id=PROJECT_ID,
+            owner_user_id=OWNER_USER_ID,
+            thread_id=THREAD_ID,
+            now=NOW,
+        )
+        is not None
+    )
+    assert events == [
+        "project_membership",
+        "thread",
+        "policy",
+        "preference",
+        "job",
+    ]
 
 
 @pytest.mark.asyncio

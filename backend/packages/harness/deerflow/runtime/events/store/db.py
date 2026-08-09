@@ -52,9 +52,16 @@ notification merely degrades a consumer to its poll-timeout fallback.
 
 
 class DbRunEventStore(RunEventStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        max_trace_content: int = 10240,
+        run_event_notify_enabled: bool = True,
+    ):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
+        self._run_event_notify_enabled = run_event_notify_enabled
 
     @staticmethod
     def _coordinates(scope: PrivateResourceScope) -> tuple[uuid.UUID, str]:
@@ -445,9 +452,10 @@ class DbRunEventStore(RunEventStore):
             created=created,
         )
 
-    @staticmethod
-    async def _notify_stream_append(session: AsyncSession, run_id: str) -> None:
+    async def _notify_stream_append(self, session: AsyncSession, run_id: str) -> None:
         """Queue a consumer wakeup that is delivered with the caller's commit."""
+        if not self._run_event_notify_enabled:
+            return
         bind = session.get_bind()
         if bind is None or bind.dialect.name != "postgresql":
             return

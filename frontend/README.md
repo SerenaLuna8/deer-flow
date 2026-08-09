@@ -21,22 +21,23 @@ make dev
 
 ## 主要路由
 
-| 路由                                   | 用途                         |
-| -------------------------------------- | ---------------------------- |
-| `/`                                    | 按登录状态进入登录页或工作区 |
-| `/login`、`/setup`                     | 登录和首次账户初始化         |
-| `/workspace`                           | 多项目工作区                 |
-| `/projects/[project_slug]`             | 项目主页                     |
-| `/projects/[project_slug]/chats/*`     | 项目 Thread 与 Run           |
-| `/projects/[project_slug]/agents`      | 项目 Agent                   |
-| `/projects/[project_slug]/skills`      | 项目 Skill                   |
-| `/projects/[project_slug]/mcp`         | 项目 MCP                     |
-| `/projects/[project_slug]/credentials` | 项目 Credential              |
-| `/projects/[project_slug]/automations` | 项目 Automation              |
-| `/projects/[project_slug]/memory`      | 项目 Memory                  |
-| `/projects/[project_slug]/members`     | 项目成员                     |
-| `/admin/*`                             | system admin 平台治理        |
-| `/[lang]/docs/*`、`/blog/*`            | 静态文档与博客内容           |
+| 路由                                        | 用途                         |
+| ------------------------------------------- | ---------------------------- |
+| `/`                                         | 按登录状态进入登录页或工作区 |
+| `/login`、`/setup`                          | 登录和首次账户初始化         |
+| `/workspace`                                | 多项目工作区                 |
+| `/projects/[project_slug]`                  | 项目主页                     |
+| `/projects/[project_slug]/chats/*`          | 项目 Thread 与 Run           |
+| `/projects/[project_slug]/agents`           | 项目 Agent                   |
+| `/projects/[project_slug]/skills`           | 项目 Skill                   |
+| `/projects/[project_slug]/mcp`              | 项目 MCP                     |
+| `/projects/[project_slug]/credentials`      | 项目 Credential              |
+| `/projects/[project_slug]/automations`      | 项目 Automation              |
+| `/projects/[project_slug]/memory`           | 项目 Memory                  |
+| `/projects/[project_slug]/settings/members` | 项目成员（设置内）           |
+| `/projects/[project_slug]/audit`            | 项目审计日志                 |
+| `/admin/*`                                  | system admin 平台治理        |
+| `/[lang]/docs/*`、`/blog/*`                 | 静态文档与博客内容           |
 
 ## 目录
 

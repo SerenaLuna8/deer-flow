@@ -15,6 +15,10 @@ ActWeave 后端由 FastAPI Gateway、独立 Worker 和可选独立 Scheduler 组
 
 所有私有业务操作都要求认证账户和不可变项目上下文。Thread、Run、File、Artifact、Memory、Connection、Automation、Skill 和 MCP 都没有全局或 owner-only 生产入口。Worker 只消费 Gateway 已固定的 project/owner/Agent/asset snapshot。
 
+Memory 运行策略和文档章节模板均为 PostgreSQL system policy。平台管理员在
+`/admin/settings/system` 的 Memory 页面维护；`config.yaml` 不提供同名权威或回退。
+章节模板只在作用域首次创建文档时冻结，后续更新不改写已有文档和 Run 快照。
+
 ## 常用命令
 
 ```bash
@@ -22,7 +26,7 @@ uv sync
 make gateway
 make worker
 make scheduler
-POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
+make test
 make lint
 make format
 ```

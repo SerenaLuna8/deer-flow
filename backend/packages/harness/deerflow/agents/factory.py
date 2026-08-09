@@ -13,10 +13,10 @@ Relationship to the production lead chain
 -----------------------------------------
 
 The SDK chain is a deliberately smaller composition than ``build_middlewares``
-(``lead_agent/agent.py``), not a drifted copy of it. Shared subsequences
-delegate to the same builders (the ThreadData → Uploads → Sandbox trio comes
-from ``build_sandbox_infrastructure``), and for every middleware class both
-paths include, the relative order is pinned by
+(``lead_agent/agent.py``), not a drifted copy of it. Both paths delegate the
+runtime spine and phase ordering to ``build_runtime_middlewares`` and
+``assemble_agent_middlewares``; this module only maps SDK feature switches to
+those shared builders. Every exact chain and shared relative order is pinned by
 ``tests/test_agent_assembly_golden.py``.
 
 Deliberately lead-only (absent here by design):
@@ -26,6 +26,9 @@ Deliberately lead-only (absent here by design):
   ToolProgress (they assume the private Run authorization runtime);
 - private-context composition — DynamicContext, SkillActivation,
   SkillToolPolicy, DurableContext;
+- config-bound capabilities — config-built summarization and MCP
+  routing/deferred filtering (the SDK accepts only an explicit custom
+  summarization middleware and has no MCP catalog input);
 - provider/runtime hardening — SystemMessageCoalescing, SafetyFinishReason,
   TokenUsage.
 
@@ -43,8 +46,10 @@ from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    assemble_agent_middlewares,
+    build_runtime_middlewares,
+)
 from deerflow.agents.thread_state import (
     adapt_state_schema_for_mode,
     get_thread_state_schema,
@@ -220,9 +225,8 @@ def _assemble_from_features(
     which lead-chain middlewares are deliberately absent here.
 
     Two-phase ordering:
-      1. Built-in chain — fixed sequential append; shared subsequences come
-         from the same builders the lead chain uses.
-      2. Extra middleware — inserted via @Next/@Prev.
+      1. Map SDK features into the shared runtime/phase builders.
+      2. Insert extra middleware via @Next/@Prev.
 
     Each feature value is handled as:
       - ``False``: skip
@@ -230,70 +234,64 @@ def _assemble_from_features(
         ``memory``, ``summarization``, and ``guardrail`` — these require a custom instance)
       - ``AgentMiddleware`` instance: use directly (custom replacement)
     """
-    chain: list[AgentMiddleware] = []
     extra_tools: list[BaseTool] = []
 
-    # --- Sandbox infrastructure (shared trio: ThreadData → Uploads → Sandbox) ---
-    if feat.sandbox is not False:
-        if isinstance(feat.sandbox, AgentMiddleware):
-            chain.append(feat.sandbox)
-        else:
-            from deerflow.agents.middlewares.tool_error_handling_middleware import (
-                build_sandbox_infrastructure,
-            )
-
-            chain.extend(build_sandbox_infrastructure(lazy_init=True))
-
-    # --- DanglingToolCall (always) ---
-    chain.append(DanglingToolCallMiddleware())
-
-    # --- Guardrail ---
+    guardrail_middleware = None
     if feat.guardrail is not False:
         if isinstance(feat.guardrail, AgentMiddleware):
-            chain.append(feat.guardrail)
+            guardrail_middleware = feat.guardrail
         else:
             raise ValueError("guardrail=True requires a custom AgentMiddleware instance (no built-in GuardrailMiddleware yet)")
 
-    # --- ToolErrorHandling (always) ---
-    chain.append(ToolErrorHandlingMiddleware())
+    runtime_middlewares = build_runtime_middlewares(
+        app_config=None,
+        include_uploads=True,
+        include_dangling_tool_call_patch=True,
+        include_security_wrappers=False,
+        sandbox=feat.sandbox,
+        guardrail_middleware=guardrail_middleware,
+    )
 
-    # --- Summarization ---
+    summarization_middleware = None
     if feat.summarization is not False:
         if isinstance(feat.summarization, AgentMiddleware):
-            chain.append(feat.summarization)
+            summarization_middleware = feat.summarization
         else:
             raise ValueError("summarization=True requires a custom AgentMiddleware instance (SummarizationMiddleware needs a model argument)")
 
-    # --- TodoMiddleware (plan_mode) ---
+    planning_middleware = None
     if plan_mode:
         from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 
-        chain.append(TodoMiddleware(system_prompt=_TODO_SYSTEM_PROMPT, tool_description=_TODO_TOOL_DESCRIPTION))
+        planning_middleware = TodoMiddleware(
+            system_prompt=_TODO_SYSTEM_PROMPT,
+            tool_description=_TODO_TOOL_DESCRIPTION,
+        )
 
-    # --- Auto Title ---
+    title_middleware = None
     if feat.auto_title is not False:
         if isinstance(feat.auto_title, AgentMiddleware):
-            chain.append(feat.auto_title)
+            title_middleware = feat.auto_title
         else:
             from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 
-            chain.append(TitleMiddleware())
+            title_middleware = TitleMiddleware()
 
-    # --- Memory ---
+    memory_middleware = None
     if feat.memory is not False:
         if isinstance(feat.memory, AgentMiddleware):
-            chain.append(feat.memory)
+            memory_middleware = feat.memory
         else:
             raise ValueError("memory=True requires a custom AgentMiddleware instance (no built-in memory middleware)")
 
     # --- Image checkpoint cleanup / optional vision injection ---
     if feat.vision is not False:
         if isinstance(feat.vision, AgentMiddleware):
-            chain.append(feat.vision)
+            vision_middleware = feat.vision
         else:
             from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
-            chain.append(ViewImageMiddleware())
+            vision_middleware = ViewImageMiddleware()
 
         if feat.sandbox is not False:
             from deerflow.tools.builtins import view_image_tool
@@ -304,42 +302,52 @@ def _assemble_from_features(
         # text-only model. Injection and the view tool remain disabled.
         from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
-        chain.append(ViewImageMiddleware(enable_injection=False))
+        vision_middleware = ViewImageMiddleware(enable_injection=False)
 
-    # --- Subagent ---
+    subagent_middleware = None
     if feat.subagent is not False:
         if isinstance(feat.subagent, AgentMiddleware):
-            chain.append(feat.subagent)
+            subagent_middleware = feat.subagent
         else:
             from deerflow.agents.middlewares.subagent_limit_middleware import SubagentLimitMiddleware
 
-            chain.append(SubagentLimitMiddleware())
+            subagent_middleware = SubagentLimitMiddleware()
         from deerflow.tools.builtins import task_tool
 
         extra_tools.append(task_tool)
 
-    # --- LoopDetection ---
+    loop_detection_middleware = None
     if feat.loop_detection is not False:
         if isinstance(feat.loop_detection, AgentMiddleware):
-            chain.append(feat.loop_detection)
+            loop_detection_middleware = feat.loop_detection
         else:
             from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
             from deerflow.config.loop_detection_config import LoopDetectionConfig
 
-            chain.append(LoopDetectionMiddleware.from_config(LoopDetectionConfig()))
+            loop_detection_middleware = LoopDetectionMiddleware.from_config(LoopDetectionConfig())
 
-    # --- TokenBudget ---
+    token_budget_middleware = None
     if feat.token_budget is not False:
         if isinstance(feat.token_budget, AgentMiddleware):
-            chain.append(feat.token_budget)
+            token_budget_middleware = feat.token_budget
         else:
             from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
             from deerflow.config.token_budget_config import TokenBudgetConfig
 
-            chain.append(TokenBudgetMiddleware.from_config(TokenBudgetConfig()))
+            token_budget_middleware = TokenBudgetMiddleware.from_config(TokenBudgetConfig())
 
-    # --- Clarification (always last among built-ins) ---
-    chain.append(ClarificationMiddleware())
+    chain = assemble_agent_middlewares(
+        runtime=tuple(runtime_middlewares),
+        summarization=summarization_middleware,
+        planning=planning_middleware,
+        title=title_middleware,
+        after_title=(() if memory_middleware is None else (memory_middleware,)),
+        vision=vision_middleware,
+        subagent=subagent_middleware,
+        loop_detection=loop_detection_middleware,
+        token_budget=token_budget_middleware,
+        clarification=ClarificationMiddleware(),
+    )
     extra_tools.append(ask_clarification_tool)
 
     # --- Insert extra_middleware via @Next/@Prev ---

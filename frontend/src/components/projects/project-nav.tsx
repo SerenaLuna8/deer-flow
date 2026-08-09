@@ -12,9 +12,9 @@ import {
   MenuIcon,
   NetworkIcon,
   PanelLeftCloseIcon,
+  ScrollTextIcon,
   SettingsIcon,
   SparklesIcon,
-  UsersIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -52,7 +52,14 @@ import { cn } from "@/lib/utils";
 type ProjectNavigationItem = {
   href: string;
   icon: typeof FolderKanbanIcon;
-  i18nKey?: "audit" | "automations" | "usage";
+  i18nKey?:
+    | "audit"
+    | "automations"
+    | "agents"
+    | "skills"
+    | "mcp"
+    | "memory"
+    | "usage";
   label: string;
   section: ProjectNavigationSection | null;
 };
@@ -73,8 +80,7 @@ function canViewSettings(project: Project): boolean {
     (capability) =>
       capability === "project.lifecycle.manage" ||
       capability === "project.update" ||
-      capability === "project.usage.read" ||
-      capability === "project.audit.read",
+      capability === "project.members.manage",
   );
 }
 
@@ -141,18 +147,21 @@ export function projectNavigationItems(
       {
         href: `${base}/agents`,
         icon: BotIcon,
+        i18nKey: "agents",
         label: "Agent",
         section: "capabilities",
       },
       {
         href: `${base}/skills`,
         icon: SparklesIcon,
+        i18nKey: "skills",
         label: "Skill",
         section: "capabilities",
       },
       {
         href: `${base}/mcp`,
         icon: NetworkIcon,
+        i18nKey: "mcp",
         label: "MCP",
         section: "capabilities",
       },
@@ -162,6 +171,7 @@ export function projectNavigationItems(
     items.push({
       href: `${base}/memory`,
       icon: BrainCircuitIcon,
+      i18nKey: "memory",
       label: "Memory",
       section: "capabilities",
     });
@@ -174,17 +184,28 @@ export function projectNavigationItems(
       section: "management",
     });
   }
-  if (project.capabilities.includes("project.members.manage")) {
+  if (
+    !staticWebsiteOnly &&
+    project.capabilities.includes("project.audit.read")
+  ) {
     items.push({
-      href: `${base}/members`,
-      icon: UsersIcon,
-      label: "项目成员",
+      href: `${base}/audit`,
+      icon: ScrollTextIcon,
+      label: "审计日志",
       section: "management",
     });
   }
   if (canViewSettings(project)) {
+    const settingsBase = `${base}/settings`;
+    const canOpenGeneral =
+      project.capabilities.includes("project.update") ||
+      project.capabilities.includes("project.lifecycle.manage");
     items.push({
-      href: `${base}/settings`,
+      href:
+        canOpenGeneral ||
+        !project.capabilities.includes("project.members.manage")
+          ? settingsBase
+          : `${settingsBase}/members`,
       icon: SettingsIcon,
       label: "项目设置",
       section: "management",

@@ -328,10 +328,10 @@ export function ProjectTokenUsageStateView({
                     key={point.bucketStart}
                     cx={point.x}
                     cy={point.y}
-                    r={isEmpty ? 2 : 3}
+                    r={isEmpty ? 1.25 : 1.75}
                     fill={SERIES_COLORS.total_tokens}
                     stroke="var(--card)"
-                    strokeWidth="1.5"
+                    strokeWidth="1"
                     vectorEffect="non-scaling-stroke"
                     pointerEvents="none"
                   />
@@ -346,10 +346,10 @@ export function ProjectTokenUsageStateView({
                           key={`active-${series.key}`}
                           cx={point.x}
                           cy={point.y}
-                          r={series.key === "total_tokens" ? 5 : 4}
+                          r={series.key === "total_tokens" ? 3 : 2.5}
                           fill={SERIES_COLORS[series.key]}
                           stroke="var(--card)"
-                          strokeWidth="2"
+                          strokeWidth="1.25"
                           vectorEffect="non-scaling-stroke"
                           pointerEvents="none"
                         />

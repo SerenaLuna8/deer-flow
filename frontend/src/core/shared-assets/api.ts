@@ -6,6 +6,7 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   adminAssetListSchema,
   adminCredentialListSchema,
+  agentCapabilityBindingsInputSchema,
   agentInstructionsInputSchema,
   agentVersionHistoryResponseSchema,
   agentVersionResponseSchema,
@@ -56,6 +57,7 @@ import {
   type AdminAssetList,
   type AdminProjectAssetStatusAction,
   type AdminCredentialList,
+  type AgentCapabilityBindingsInput,
   type AgentInstructionsInput,
   type AgentVersionResponse,
   type ApproveMcpInput,
@@ -600,6 +602,48 @@ export async function updateProjectAgentInstructions(
     `${projectAssetUrl(projectId, "agents")}/${id}/instructions`,
     {
       method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(response, agentVersionResponseSchema);
+}
+
+export async function updateProjectAgentCapabilityBindings(
+  projectId: string,
+  assetId: string,
+  input: AgentCapabilityBindingsInput,
+  signal?: AbortSignal,
+): Promise<AgentVersionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const body = parseInput(agentCapabilityBindingsInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "agents")}/${id}/capability-bindings`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(response, agentVersionResponseSchema);
+}
+
+export async function restoreProjectAgentVersion(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  input: ExpectedAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<AgentVersionResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  const body = parseInput(expectedAssetVersionInputSchema, input);
+  const response = await request(
+    `${projectAssetUrl(projectId, "agents")}/${id}/versions/${version}/restore`,
+    {
+      method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal,

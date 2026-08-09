@@ -62,7 +62,7 @@ export function agentBuilderDisplayState(
   session: AgentBuilderSession,
 ): AgentBuilderDisplayState {
   if (
-    session.active_clarification &&
+    session.active_clarifications.length > 0 &&
     session.status !== "committing" &&
     session.status !== "completed"
   ) {

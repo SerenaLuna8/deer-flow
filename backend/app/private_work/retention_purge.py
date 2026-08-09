@@ -6,12 +6,13 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import delete, exists, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
 from app.quotas.integration import ProjectQuotaEnforcer
+from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryEpisodeRow,
@@ -415,6 +416,31 @@ async def purge_private_scope(
 
     def owner_for(alias: str) -> str:
         return "" if owner_user_id is None else f" AND {alias}.owner_user_id = :owner_user_id"
+
+    # Jobs are immutable governance shells, so retention does not delete them.
+    # Request cancellation for every active Memory producer in the exact purge
+    # scope before deleting its private payload.  An owned Worker observes the
+    # request at heartbeat; an unowned Job is terminalized by normal claiming.
+    await session.execute(
+        update(JobRow)
+        .where(
+            JobRow.job_type.in_(("memory_dream", "memory_seal")),
+            JobRow.project_id == project_id,
+            JobRow.status.in_(("queued", "leased", "running", "retry_wait")),
+            *(() if owner_user_id is None else (JobRow.owner_user_id == owner_user_id,)),
+        )
+        .values(
+            cancel_requested_at=func.coalesce(
+                JobRow.cancel_requested_at,
+                parameters["purged_at"],
+            ),
+            cancel_reason=func.coalesce(
+                JobRow.cancel_reason,
+                "retention_scope_purged",
+            ),
+            updated_at=parameters["purged_at"],
+        )
+    )
 
     # Agent Builder sessions contain private conversation and generated
     # blueprint bodies.  Delete the exact project/owner scope before shared

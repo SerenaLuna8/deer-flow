@@ -56,7 +56,7 @@ async def analyze(database_url: str, *, days: int | None) -> str:
     try:
         totals = await _fetch_all(
             engine,
-            "SELECT COUNT(*) AS rows, COALESCE(SUM(LENGTH(content)), 0) AS bytes, COUNT(DISTINCT run_id) AS runs FROM run_events" + window.clause,
+            "SELECT COUNT(*) AS rows, COALESCE(SUM(OCTET_LENGTH(content)), 0) AS bytes, COUNT(DISTINCT run_id) AS runs FROM run_events" + window.clause,
         )
         total_rows, total_bytes, total_runs = totals[0]
         lines.append(f"总行数: {total_rows}    总内容字节: {total_bytes}    Run 数: {total_runs}")
@@ -71,7 +71,7 @@ async def analyze(database_url: str, *, days: int | None) -> str:
                 " percentile_cont(0.95) WITHIN GROUP (ORDER BY frames) AS p95, MAX(frames) AS max,"
                 " percentile_cont(0.5) WITHIN GROUP (ORDER BY bytes) AS bytes_p50,"
                 " percentile_cont(0.95) WITHIN GROUP (ORDER BY bytes) AS bytes_p95, MAX(bytes) AS bytes_max"
-                " FROM (SELECT run_id, COUNT(*) AS frames, SUM(LENGTH(content)) AS bytes"
+                " FROM (SELECT run_id, COUNT(*) AS frames, SUM(OCTET_LENGTH(content)) AS bytes"
                 " FROM run_events" + window.clause + " GROUP BY run_id) AS per_run"
             ),
         )
@@ -82,7 +82,7 @@ async def analyze(database_url: str, *, days: int | None) -> str:
 
         buckets = await _fetch_all(
             engine,
-            "SELECT category, event_type, COUNT(*) AS rows, SUM(LENGTH(content)) AS bytes FROM run_events" + window.clause + " GROUP BY category, event_type ORDER BY rows DESC",
+            "SELECT category, event_type, COUNT(*) AS rows, SUM(OCTET_LENGTH(content)) AS bytes FROM run_events" + window.clause + " GROUP BY category, event_type ORDER BY rows DESC",
         )
         lines.append("")
         lines.append(f"{'category':<12} {'event_type':<28} {'rows':>10} {'bytes':>14} {'rows%':>7}")

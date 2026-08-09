@@ -1,0 +1,388 @@
+from __future__ import annotations
+
+import hashlib
+import uuid
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy import text
+from support.private_thread_seed import seed_private_thread_database
+
+from app.private_work.memory_dream_service import MemoryDreamAdmissionService
+from app.private_work.memory_service import PrivateMemoryDocumentService
+from app.private_work.snapshot_repository import RunSnapshotRepository
+from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
+from app.system_runtime_settings.models import (
+    AgentRuntimePolicyValue,
+    LockedAgentRuntimePolicy,
+    RuntimePolicySection,
+)
+from app.worker.memory_dream import MemoryDreamJobHandler
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    EMPTY_MEMORY_DOCUMENT,
+    estimate_memory_tokens,
+    validate_memory_document,
+)
+from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
+from deerflow.persistence.jobs.sql import JobRepository
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDocumentRow,
+    MemoryDocumentVersionRow,
+    MemoryDreamRunRow,
+    MemoryEpisodeRow,
+    RunMemoryContextSnapshotRow,
+)
+from deerflow.persistence.private_work.memory_document_repository import (
+    BUDGET_REWRITE_HISTORY_DIGEST,
+    MemoryDocumentRepository,
+    MemoryDocumentScope,
+    memory_document_digest,
+)
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+
+class _InjectionAudit:
+    def __init__(self) -> None:
+        self.skipped_run_ids: list[str] = []
+
+    async def memory_injection_skipped(
+        self,
+        _session,
+        *,
+        project_id,
+        run_id,
+        request_id,
+    ) -> None:
+        assert isinstance(project_id, uuid.UUID)
+        assert isinstance(request_id, str) and request_id
+        self.skipped_run_ids.append(run_id)
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
+    migrated_postgres_database_url: str,
+) -> None:
+    """Prove the PR5 rescue path without crossing the external model boundary."""
+
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    scope = MemoryDocumentScope(
+        project_id=seed.owner_a.project_id,
+        owner_user_id=str(seed.owner_a.user_id),
+    )
+    thread_id = str(uuid.uuid4())
+    before_run_id = str(uuid.uuid4())
+    after_run_id = str(uuid.uuid4())
+    model_id = uuid.uuid4()
+    model_version_id = uuid.uuid4()
+    model_checksum = "c" * 64
+    model_name = f"budget-rewrite-{model_id.hex}"
+    worker_id = uuid.uuid4()
+    now = datetime.now(UTC)
+
+    try:
+        async with seed.factory() as session:
+            policy, policy_revision = await SystemRuntimePolicyMaterializer.materialize_current_with_revision_in_session(
+                session,
+                RuntimePolicySection.AGENT_RUNTIME,
+            )
+        assert isinstance(policy, AgentRuntimePolicyValue)
+        budget = policy.memory.max_injection_tokens
+        over_budget_content = EMPTY_MEMORY_DOCUMENT.replace(
+            "# 项目背景",
+            "# 项目背景\n\n" + ("超" * (budget + 200)),
+        )
+        rewritten_content = EMPTY_MEMORY_DOCUMENT.replace(
+            "# 项目背景",
+            "# 项目背景\n\n- 保留当前有效约束。",
+        )
+        assert estimate_memory_tokens(over_budget_content) > budget
+        assert validate_memory_document(rewritten_content, budget) == rewritten_content
+
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO system_model_configs
+                    (id,logical_name,display_name,description,status,
+                     current_version_id,revision,sort_order,created_by_user_id,
+                     updated_by_user_id)
+                    VALUES (:id,:name,'Budget rewrite test',
+                            'PostgreSQL budget rewrite closure','active',
+                            NULL,1,0,:owner,:owner)"""
+                ),
+                {
+                    "id": model_id,
+                    "name": model_name,
+                    "owner": scope.owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO system_model_config_versions
+                    (id,model_config_id,version_number,provider_adapter,
+                     provider_model,settings,supports_thinking,
+                     supports_reasoning_effort,supports_vision,credential_id,
+                     credential_version_id,credential_env_key,payload_checksum,
+                     supersedes_version_id,created_by_user_id)
+                    VALUES (:id,:model,1,'codex_cli','budget-rewrite-test',
+                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
+                            :checksum,NULL,:owner)"""
+                ),
+                {
+                    "id": model_version_id,
+                    "model": model_id,
+                    "checksum": model_checksum,
+                    "owner": scope.owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """UPDATE system_model_configs
+                    SET current_version_id=:version WHERE id=:model"""
+                ),
+                {"version": model_version_id, "model": model_id},
+            )
+
+        async with seed.factory() as session, session.begin():
+            session.add(
+                ThreadMetaRow(
+                    thread_id=thread_id,
+                    assistant_id=str(seed.project_agent_id),
+                    owner_user_id=scope.owner_user_id,
+                    display_name="Budget rewrite closure",
+                    status="idle",
+                    metadata_json={},
+                    project_id=scope.project_id,
+                    agent_asset_id=seed.project_agent_id,
+                    agent_scope="project",
+                )
+            )
+            await session.flush()
+            for run_id, trace in (
+                (before_run_id, "a" * 32),
+                (after_run_id, "b" * 32),
+            ):
+                session.add(
+                    RunRow(
+                        run_id=run_id,
+                        thread_id=thread_id,
+                        assistant_id=str(seed.project_agent_id),
+                        owner_user_id=scope.owner_user_id,
+                        status="pending",
+                        model_name=model_name,
+                        multitask_strategy="reject",
+                        metadata_json={},
+                        kwargs_json={},
+                        origin_trace_id=trace,
+                        project_id=scope.project_id,
+                    )
+                )
+            sections_policy_version_id = await session.scalar(
+                sa.select(SystemRuntimePolicyRow.current_version_id).where(
+                    SystemRuntimePolicyRow.section == "memory_document",
+                )
+            )
+            assert isinstance(sections_policy_version_id, uuid.UUID)
+            session.add(
+                MemoryDocumentRow(
+                    project_id=scope.project_id,
+                    owner_user_id=scope.owner_user_id,
+                    namespace=scope.namespace,
+                    content=over_budget_content,
+                    content_digest=memory_document_digest(over_budget_content),
+                    sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                    sections_policy_version_id=sections_policy_version_id,
+                    version=1,
+                    dream_cursor=0,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="budget-rewrite-test",
+                    capabilities_json=["memory_dream"],
+                    max_concurrent_jobs=1,
+                    draining=False,
+                    started_at=now,
+                    heartbeat_at=now,
+                )
+            )
+
+        memory_service = PrivateMemoryDocumentService(seed.factory)
+        before_state, before_status = await memory_service.get(seed.owner_a)
+        assert before_state.pending_count == 0
+        assert before_state.document.version == 1
+        assert before_status == "skipped_over_budget"
+
+        locked_policy = LockedAgentRuntimePolicy(
+            policy_version_id=uuid.uuid4(),
+            revision=policy_revision,
+            schema_version=1,
+            payload_checksum="d" * 64,
+            value=policy,
+        )
+        injection_audit = _InjectionAudit()
+        snapshot_repository = RunSnapshotRepository(
+            seed.factory,
+            audit=injection_audit,
+        )
+        async with seed.factory() as session, session.begin():
+            await snapshot_repository._admit_memory_context_snapshot(
+                session,
+                seed.owner_a,
+                run_id=before_run_id,
+                locked_policy=locked_policy,
+            )
+        assert injection_audit.skipped_run_ids == [before_run_id]
+        async with seed.factory() as session:
+            assert (
+                await session.scalar(
+                    sa.select(RunMemoryContextSnapshotRow).where(
+                        RunMemoryContextSnapshotRow.run_id == before_run_id,
+                    )
+                )
+                is None
+            )
+
+        runtime_model = SimpleNamespace(
+            model=SimpleNamespace(id=model_id),
+            version=SimpleNamespace(
+                id=model_version_id,
+                payload_checksum=model_checksum,
+            ),
+        )
+
+        class Admission(MemoryDreamAdmissionService):
+            @staticmethod
+            async def _platform_runtime(_session, *, create_document):
+                assert create_document is False
+                return policy, policy_revision, runtime_model, None
+
+        async with seed.factory() as session, session.begin():
+            admission = await Admission().admit(
+                session,
+                scope,
+                trigger="manual_dream",
+                now=now,
+            )
+        assert admission.disposition == "queued"
+        assert admission.admission_kind == "budget_rewrite"
+        assert admission.history_count == 0
+        assert admission.job_id is not None
+
+        async with seed.factory() as session:
+            dream_run = await session.get(MemoryDreamRunRow, admission.job_id)
+            assert dream_run is not None
+            assert dream_run.trigger == "budget_rewrite"
+            assert dream_run.history_count == 0
+            assert dream_run.history_from is dream_run.history_to is None
+            assert dream_run.history_digest == BUDGET_REWRITE_HISTORY_DIGEST
+
+        async with seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=worker_id,
+                capabilities=frozenset({"memory_dream"}),
+                lease_seconds=60,
+                now=datetime.now(UTC) + timedelta(seconds=1),
+            )
+            assert claim is not None and claim.job_id == admission.job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+                now=datetime.now(UTC) + timedelta(seconds=1),
+            )
+
+        async with seed.factory() as session:
+            work = await MemoryDocumentRepository(session).load_dream_work(
+                scope,
+                claim.job_id,
+            )
+        assert work is not None
+        assert work.trigger == "budget_rewrite"
+        assert work.history == ()
+        assert work.history_count == 0
+        assert work.history_digest == BUDGET_REWRITE_HISTORY_DIGEST
+
+        class RuntimePolicy:
+            async def materialize_current_with_revision_in_session(
+                self,
+                _session,
+                section,
+                *,
+                for_update,
+            ):
+                assert section is RuntimePolicySection.AGENT_RUNTIME
+                assert for_update is True
+                return policy, policy_revision
+
+        class Models:
+            def __init__(self, _session) -> None:
+                pass
+
+            async def resolve_active_model(self, model_ref, *, load_envelope):
+                assert model_ref == policy.memory.model_name
+                assert load_envelope is False
+                return runtime_model
+
+        handler = MemoryDreamJobHandler(
+            seed.factory,
+            app_config=None,
+            runtime_policy_materializer=RuntimePolicy(),
+            runner_factory=lambda _model: None,
+            model_repository_builder=Models,
+        )
+        settlement = handler._success_settlement(
+            claim,
+            work=work,
+            content=rewritten_content,
+            max_tokens=budget,
+            episode_retention_days=0,
+        )
+        await settlement.commit()
+
+        after_state, after_status = await memory_service.get(seed.owner_a)
+        assert after_status == "ok"
+        assert after_state.pending_count == 0
+        assert after_state.document.version == 2
+        assert after_state.document.content == rewritten_content
+
+        async with seed.factory() as session, session.begin():
+            await snapshot_repository._admit_memory_context_snapshot(
+                session,
+                seed.owner_a,
+                run_id=after_run_id,
+                locked_policy=locked_policy,
+            )
+
+        async with seed.factory() as session:
+            snapshot = await session.scalar(
+                sa.select(RunMemoryContextSnapshotRow).where(
+                    RunMemoryContextSnapshotRow.run_id == after_run_id,
+                )
+            )
+            version = await session.get(
+                MemoryDocumentVersionRow,
+                (scope.project_id, scope.owner_user_id, scope.namespace, 2),
+            )
+            job = await session.get(JobRow, claim.job_id)
+            episode_count = await session.scalar(sa.select(sa.func.count()).select_from(MemoryEpisodeRow))
+        assert snapshot is not None
+        assert snapshot.document_version == 2
+        assert snapshot.content == rewritten_content
+        assert snapshot.content_digest == hashlib.sha256(rewritten_content.encode("utf-8")).hexdigest()
+        assert injection_audit.skipped_run_ids == [before_run_id]
+        assert version is not None
+        assert version.trigger == "budget_rewrite"
+        assert version.history_count == 0
+        assert version.history_from is version.history_to is None
+        assert job is not None and job.status == "succeeded"
+        assert episode_count == 0
+    finally:
+        await seed.engine.dispose()

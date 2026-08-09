@@ -264,6 +264,7 @@ class _LargeFileToolChunkBatcher:
 _TEXT_DELTA_FLUSH_BYTES = 4096
 # response_metadata keys that mark the end of a provider message stream.
 _TEXT_DELTA_FINISH_KEYS = ("finish_reason", "stop_reason", "done_reason")
+_TEXT_DELTA_FLUSH_DUE = object()
 
 
 @dataclass
@@ -298,7 +299,19 @@ class _TextDeltaCoalescer:
     def _content_size(content: Any) -> int:
         if isinstance(content, str):
             return len(content.encode("utf-8", errors="ignore"))
-        return sum(len(str(block)) for block in content)
+        return sum(len(str(block).encode("utf-8", errors="ignore")) for block in content)
+
+    @classmethod
+    def _message_size(cls, message: Any) -> int:
+        """Count UTF-8 payload bytes that grow while message chunks merge."""
+
+        size = cls._content_size(getattr(message, "content", ""))
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict):
+            reasoning = additional_kwargs.get("reasoning_content")
+            if isinstance(reasoning, (str, list)):
+                size += cls._content_size(reasoning)
+        return size
 
     @classmethod
     def _text_delta_parts(cls, chunk: Any) -> tuple[Any, dict[str, Any], str, bool] | None:
@@ -354,12 +367,12 @@ class _TextDeltaCoalescer:
             self.pending_message = message
             self.pending_metadata = dict(metadata)
             self.pending_message_id = message_id
-            self.pending_bytes = self._content_size(getattr(message, "content", ""))
+            self.pending_bytes = self._message_size(message)
             self.window_started_at = now
         else:
             self.pending_message = self.pending_message + message
             self.pending_metadata.update(metadata)
-            self.pending_bytes += self._content_size(getattr(message, "content", ""))
+            self.pending_bytes += self._message_size(message)
 
         if is_final or now - self.window_started_at >= self.window_seconds or self.pending_bytes >= self.max_pending_bytes:
             outputs.extend(self.flush())
@@ -375,6 +388,73 @@ class _TextDeltaCoalescer:
         self.pending_bytes = 0
         self.last_flush_at = time.monotonic()
         return [chunk]
+
+    def pending_flush_delay(self) -> float | None:
+        """Seconds until the buffered frame's hard deadline, if any."""
+        if self.pending_message is None:
+            return None
+        deadline = self.window_started_at + self.window_seconds
+        return max(0.0, deadline - time.monotonic())
+
+
+async def _iter_with_text_delta_deadline(source: Any, coalescer: _TextDeltaCoalescer | None):
+    """Yield stream items plus a timer marker when pending text must flush.
+
+    Merely checking elapsed time from ``push()`` leaves a buffered final token
+    parked until the provider emits another frame.  Keep one ``__anext__``
+    task alive while a timeout races it; a timeout never cancels the provider
+    iterator and therefore cannot truncate the graph stream.
+    """
+
+    iterator = source.__aiter__()
+    if coalescer is None:
+        # The explicit opt-out restores the old direct-iteration path. Besides
+        # avoiding one Task allocation per frame, this keeps cancellation and
+        # ContextVar execution in the caller task exactly as before U2.
+        try:
+            async for item in iterator:
+                yield item
+        finally:
+            close = getattr(iterator, "aclose", None)
+            if callable(close):
+                await close()
+        return
+
+    pending_next: asyncio.Future[Any] | None = None
+    try:
+        while True:
+            if pending_next is None:
+                pending_next = asyncio.ensure_future(iterator.__anext__())
+
+            flush_delay = coalescer.pending_flush_delay() if coalescer is not None else None
+            if flush_delay is None:
+                done, _pending = await asyncio.wait({pending_next})
+            else:
+                done, _pending = await asyncio.wait(
+                    {pending_next},
+                    timeout=flush_delay,
+                )
+                if not done:
+                    yield _TEXT_DELTA_FLUSH_DUE
+                    continue
+
+            completed = pending_next
+            pending_next = None
+            try:
+                yield completed.result()
+            except StopAsyncIteration:
+                return
+    finally:
+        if pending_next is not None:
+            if not pending_next.done():
+                pending_next.cancel()
+            # A provider can finish (or fail) while this generator is suspended
+            # after yielding the timer marker. Always retrieve that outcome so
+            # abort/close paths cannot leak an unobserved Task exception.
+            await asyncio.gather(pending_next, return_exceptions=True)
+        close = getattr(iterator, "aclose", None)
+        if callable(close):
+            await close()
 
 
 def _private_output_delivery_satisfied(finalization_result: object | None) -> bool:
@@ -1319,11 +1399,24 @@ async def run_agent(
                     # File batching intentionally requires values mode, so this
                     # path remains ordinary per-frame publication.
                     single_mode = lg_modes[0]
-                    async for chunk in agent.astream(
+                    raw_stream = agent.astream(
                         input_payload,
                         config=stream_config,
                         stream_mode=single_mode,
+                    )
+                    async for chunk in _iter_with_text_delta_deadline(
+                        raw_stream,
+                        text_delta_coalescer,
                     ):
+                        if chunk is _TEXT_DELTA_FLUSH_DUE:
+                            assert text_delta_coalescer is not None
+                            for frame in text_delta_coalescer.flush():
+                                await bridge.publish(
+                                    run_id,
+                                    _lg_mode_to_sse_event(single_mode),
+                                    serialize(frame, mode=single_mode),
+                                )
+                            continue
                         if record.abort_event.is_set():
                             logger.info(
                                 "Run %s abort requested — stopping",
@@ -1347,12 +1440,28 @@ async def run_agent(
                     return
 
                 # Multiple modes or subgraphs: astream yields tuples.
-                async for item in agent.astream(
+                raw_stream = agent.astream(
                     input_payload,
                     config=stream_config,
                     stream_mode=lg_modes,
                     subgraphs=stream_subgraphs,
+                )
+                async for item in _iter_with_text_delta_deadline(
+                    raw_stream,
+                    text_delta_coalescer,
                 ):
+                    if item is _TEXT_DELTA_FLUSH_DUE:
+                        assert text_delta_coalescer is not None
+                        pending_frames: list[Any] = []
+                        for frame in text_delta_coalescer.flush():
+                            pending_frames.extend(file_tool_chunk_batcher.push(frame) if file_tool_chunk_batcher is not None else [frame])
+                        for publish_chunk in pending_frames:
+                            await bridge.publish(
+                                run_id,
+                                "messages",
+                                serialize(publish_chunk, mode="messages"),
+                            )
+                        continue
                     if record.abort_event.is_set():
                         logger.info(
                             "Run %s abort requested — stopping",

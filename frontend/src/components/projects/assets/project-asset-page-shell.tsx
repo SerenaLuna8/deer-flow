@@ -80,6 +80,7 @@ export type ProjectAssetSourceFilter = "system" | "project";
 export type ProjectAssetPageLayout = "default" | "agent-cards";
 export type ProjectAssetListRenderContext = {
   project: Project;
+  data: ProjectAssetList;
   items: ProjectAssetItem[];
   source: ProjectAssetSourceFilter;
   selectedAssetId: string | null;
@@ -1110,6 +1111,7 @@ function ProjectAssetCatalog({
       {layout === "agent-cards" && renderList ? (
         renderList({
           project,
+          data: filteredData,
           items: filteredData.project_items,
           source: "project",
           selectedAssetId,
@@ -1236,6 +1238,7 @@ function ProjectAssetCatalog({
                 ) : renderList ? (
                   renderList({
                     project,
+                    data: filteredData,
                     items,
                     source: value,
                     selectedAssetId,
@@ -1386,6 +1389,7 @@ export function ProjectAssetPageShell({
   kind,
   title,
   layout = "default",
+  headerActions,
   initialSelectedAssetId = null,
   renderList,
   renderAssetEditor,
@@ -1395,6 +1399,7 @@ export function ProjectAssetPageShell({
   kind: MutableAssetKind;
   title: string;
   layout?: ProjectAssetPageLayout;
+  headerActions?: ReactNode;
   initialSelectedAssetId?: string | null;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderAssetEditor?: (
@@ -1422,16 +1427,23 @@ export function ProjectAssetPageShell({
         className="mb-5"
         title={title}
         actions={
-          layout === "agent-cards" &&
-          agentBuilderCanAuthor(project.capabilities) ? (
-            <Button asChild>
-              <Link
-                href={`/projects/${encodeURIComponent(project.slug)}/agents/new`}
-              >
-                <PlusIcon aria-hidden className="size-4" />
-                新建 Agent
-              </Link>
-            </Button>
+          headerActions ||
+          (layout === "agent-cards" &&
+            agentBuilderCanAuthor(project.capabilities)) ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {headerActions}
+              {layout === "agent-cards" &&
+              agentBuilderCanAuthor(project.capabilities) ? (
+                <Button asChild>
+                  <Link
+                    href={`/projects/${encodeURIComponent(project.slug)}/agents/new`}
+                  >
+                    <PlusIcon aria-hidden className="size-4" />
+                    新建 Agent
+                  </Link>
+                </Button>
+              ) : null}
+            </div>
           ) : null
         }
       />

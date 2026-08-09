@@ -22,6 +22,7 @@ from sqlalchemy import (
     Uuid,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -151,7 +152,7 @@ class MemoryHistoryEntryRow(Base):
             name="ck_memory_history_entries_preference_version",
         ),
         CheckConstraint(
-            "snip_prompt_version <> ''",
+            "(origin = 'snip' AND snip_prompt_version <> '') OR (origin = 'tool' AND snip_prompt_version = 'remember-tool-v1')",
             name="ck_memory_history_entries_contract",
         ),
         CheckConstraint(
@@ -208,6 +209,14 @@ class MemoryDocumentRow(Base):
         default=_now,
         server_default=text("now()"),
     )
+    sections: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    sections_policy_section: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="memory_document",
+        server_default=text("'memory_document'"),
+    )
+    sections_policy_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -217,6 +226,15 @@ class MemoryDocumentRow(Base):
             name="pk_memory_documents",
         ),
         *_scope_constraints("memory_documents"),
+        ForeignKeyConstraint(
+            ["sections_policy_section", "sections_policy_version_id"],
+            [
+                "system_runtime_policy_versions.section",
+                "system_runtime_policy_versions.id",
+            ],
+            name="fk_memory_documents_sections_policy_version",
+            ondelete="RESTRICT",
+        ),
         ForeignKeyConstraint(
             ["active_dream_job_id", "project_id", "owner_user_id", "namespace"],
             ["jobs.id", "jobs.project_id", "jobs.owner_user_id", "jobs.namespace"],
@@ -235,6 +253,14 @@ class MemoryDocumentRow(Base):
         CheckConstraint(
             "char_length(content) <= 16000",
             name="ck_memory_documents_content_size",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(sections) = 'array' AND jsonb_array_length(sections) BETWEEN 2 AND 8 AND NOT jsonb_path_exists(sections, '$[*] ? (@.type() != \"string\")')",
+            name="ck_memory_documents_sections",
+        ),
+        CheckConstraint(
+            "sections_policy_section = 'memory_document'",
+            name="ck_memory_documents_sections_policy_section",
         ),
         CheckConstraint(
             "version >= 0 AND dream_cursor >= 0",
@@ -523,6 +549,7 @@ class RunMemoryContextSnapshotRow(Base):
         default=_now,
         server_default=text("now()"),
     )
+    sections: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -560,6 +587,10 @@ class RunMemoryContextSnapshotRow(Base):
         CheckConstraint(
             "content <> '' AND char_length(content) <= 16000",
             name="ck_run_memory_context_snapshots_content",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(sections) = 'array' AND jsonb_array_length(sections) BETWEEN 2 AND 8 AND NOT jsonb_path_exists(sections, '$[*] ? (@.type() != \"string\")')",
+            name="ck_run_memory_context_snapshots_sections",
         ),
     )
 

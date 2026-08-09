@@ -22,6 +22,37 @@ class AuditRepository:
         await self.session.flush()
         return row
 
+    async def job_action_limit_reached(
+        self,
+        *,
+        project_id: uuid.UUID,
+        job_id: uuid.UUID,
+        action: str,
+        limit: int,
+    ) -> bool:
+        """Return whether a durable Job already owns ``limit`` action rows.
+
+        Callers that use this as an append guard must hold the authoritative
+        Job row lock until commit.  The bounded ID read avoids counting beyond
+        the closed cap and makes retries observe rows committed by prior
+        attempts instead of relying on process-local state.
+        """
+
+        if type(project_id) is not uuid.UUID or type(job_id) is not uuid.UUID or type(action) is not str or not action or type(limit) is not int or limit < 1:
+            raise ValueError("audit job action limit is invalid")
+        rows = (
+            await self.session.execute(
+                select(AuditLogRow.id)
+                .where(
+                    AuditLogRow.project_id == project_id,
+                    AuditLogRow.job_id == job_id,
+                    AuditLogRow.action == action,
+                )
+                .limit(limit)
+            )
+        ).scalars()
+        return len(tuple(rows)) >= limit
+
     async def list_project(
         self,
         project_id: uuid.UUID,

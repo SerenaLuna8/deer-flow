@@ -13,7 +13,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Protocol
@@ -27,12 +27,14 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.agent_design_generation import (
     DEFAULT_GENERATION_TIMEOUT_SECONDS,
+    REQUIRED_INTERVIEW_QUESTIONS,
     AgentDesignDraft,
     AgentDesignGenerationContext,
     AgentDesignGenerationError,
     AgentDesignGenerationRequest,
     AgentDesignGenerationResult,
     AgentDesignGenerationService,
+    AgentDesignInterviewAnswer,
     CandidateResult,
     ClarificationQuestion,
     NeedsClarificationResult,
@@ -60,12 +62,16 @@ from deerflow.persistence.shared_assets import (
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _CAPABILITY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+_GENERATION_MODEL_REF_PATTERN = re.compile(
+    r"(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)\Z",
+)
 _PUBLIC_ERROR_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _MAX_IDEMPOTENCY_KEY_CHARS = 255
 _MAX_MESSAGE_CHARS = 4_000
 _MAX_DESCRIPTION_CHARS = 4_000
 _MAX_MODEL_REF_CHARS = 255
 _MAX_TOOL_GROUPS = 50
+_CLARIFICATION_SET_KIND = "agent_design_clarification_set"
 _DEFAULT_STALE_GENERATING_SECONDS = DEFAULT_GENERATION_TIMEOUT_SECONDS + 60.0
 _CONFLICT_CONSTRAINTS = frozenset(
     {
@@ -218,6 +224,7 @@ class SubmitAgentDesignTurn:
     input: AgentDesignTurn
     expected_revision: int
     idempotency_key: str
+    generation_model_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +254,7 @@ class AgentDesignSessionView:
     blueprint_checksum: str | None
     messages: tuple[AgentDesignMessage, ...]
     active_clarification: AgentDesignClarificationRequest | None
+    active_clarifications: tuple[AgentDesignClarificationRequest, ...]
     progress: tuple[AgentDesignProgressItem, ...]
     error_code: str | None
     error_message: str | None
@@ -261,6 +269,7 @@ class AgentDesignSessionSummary:
     slug: str
     display_name: str
     status: AgentDesignStatus
+    revision: int
     updated_at: datetime
 
 
@@ -285,6 +294,7 @@ class AgentDesignService:
         generator: AgentDesignGenerationService | None = None,
         agent_service: AgentService | None = None,
         repository_factory: _RepositoryFactory = AgentDesignRepository,
+        default_tool_groups_provider: Callable[[], tuple[str, ...]] | None = None,
         stale_generating_seconds: float = _DEFAULT_STALE_GENERATING_SECONDS,
     ) -> None:
         if not isinstance(stale_generating_seconds, int | float) or isinstance(stale_generating_seconds, bool) or stale_generating_seconds <= 0:
@@ -293,6 +303,7 @@ class AgentDesignService:
         self._generator = generator or AgentDesignGenerationService()
         self._agent_service = agent_service or AgentService(session_factory)
         self._repository_factory = repository_factory
+        self._default_tool_groups_provider = default_tool_groups_provider or (lambda: DEFAULT_AGENT_TOOL_GROUPS)
         self._stale_after = timedelta(seconds=float(stale_generating_seconds))
 
     async def create(
@@ -451,6 +462,7 @@ class AgentDesignService:
                 "session_id": session_id,
                 "expected_revision": command.expected_revision,
                 "input": command.input,
+                "generation_model_ref": command.generation_model_ref,
             }
         )
 
@@ -468,6 +480,7 @@ class AgentDesignService:
             result = await self._generator.generate(
                 request,
                 context=generation_context,
+                model_ref=command.generation_model_ref,
             )
         except AgentDesignGenerationError as exc:
             code = exc.code if isinstance(exc.code, str) and _PUBLIC_ERROR_PATTERN.fullmatch(exc.code) else AgentDesignServiceErrorCode.GENERATION_UNAVAILABLE.value
@@ -817,7 +830,24 @@ class AgentDesignService:
                         return self._session_view(row)
 
                     if not retry_existing:
-                        self._append_turn_input(context, row, command.input)
+                        ready_to_generate = self._append_turn_input(
+                            context,
+                            row,
+                            command.input,
+                        )
+                        if not ready_to_generate:
+                            row.status = AgentDesignStatus.AWAITING_CLARIFICATION.value
+                            row.error_code = None
+                            row.error_message = None
+                            row.progress_json = self._progress_json(
+                                AgentDesignProgressStatus.PENDING,
+                            )
+                            row.revision += 1
+                            operation.status = "completed"
+                            operation.result_revision = row.revision
+                            operation.public_error_code = None
+                            await session.flush()
+                            return self._session_view(row)
                     blueprint = self._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else self._default_blueprint(self._first_user_message(row))
                     generation_request = self._generation_request(
                         row,
@@ -877,35 +907,33 @@ class AgentDesignService:
                     if operation is None or operation.status != "in_progress" or row.status != AgentDesignStatus.GENERATING.value or row.revision != generation_revision:
                         raise AssetConflict(context.request_id)
                     if isinstance(result, NeedsClarificationResult):
-                        clarification = self._clarification_request(result.questions[0])
+                        if len(result.questions) != 1:
+                            raise AssetValidationFailed(context.request_id)
+                        question_number = len(self._clarification_history(row)) + 1
+                        if question_number > REQUIRED_INTERVIEW_QUESTIONS:
+                            raise AssetValidationFailed(context.request_id)
+                        clarification = self._clarification_request(
+                            result.questions[0],
+                            index=question_number,
+                            total=REQUIRED_INTERVIEW_QUESTIONS,
+                        )
                         row.status = AgentDesignStatus.AWAITING_CLARIFICATION.value
                         row.active_clarification_json = self._clarification_json(clarification)
                         row.progress_json = self._progress_json(AgentDesignProgressStatus.PENDING)
-                        row.messages_json = [
-                            *row.messages_json,
-                            self._message_json(
-                                "assistant",
-                                clarification.question,
-                                now=self._now(),
-                            ),
-                        ]
                     elif isinstance(result, CandidateResult):
-                        current = self._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else self._default_blueprint(self._first_user_message(row))
-                        blueprint = AgentDesignBlueprint(
-                            description=current.description,
-                            model_ref=current.model_ref,
-                            tool_groups=current.tool_groups,
-                            skill_version_ids=current.skill_version_ids,
-                            mcp_version_ids=current.mcp_version_ids,
-                            agents_instructions=(result.documents.agents_instructions),
-                            soul=result.documents.soul,
-                            identity=result.documents.identity,
-                            user_context=result.documents.user_context,
-                            model_settings=current.model_settings,
+                        current = (
+                            self._blueprint_from_json(row.blueprint_json)
+                            if row.blueprint_json is not None
+                            else await self._default_blueprint_with_system_dependencies(
+                                session,
+                                context,
+                                self._first_user_message(row),
+                            )
                         )
-                        blueprint = self._validate_blueprint(
+                        blueprint = self._candidate_blueprint(
                             context,
-                            blueprint,
+                            current,
+                            result,
                         )
                         row.blueprint_json = self._blueprint_json(blueprint)
                         row.blueprint_checksum = self.blueprint_checksum(blueprint)
@@ -1064,28 +1092,56 @@ class AgentDesignService:
         context: ProjectContext,
         row: AgentDesignSessionRow,
         turn: AgentDesignMessageTurn | AgentDesignClarificationTurn,
-    ) -> None:
+    ) -> bool:
         if isinstance(turn, AgentDesignMessageTurn):
             if row.active_clarification_json is not None:
                 raise AssetConflict(context.request_id)
             content = turn.message
+            messages = [self._message_json("user", content, now=self._now())]
+            ready_to_generate = True
         elif isinstance(turn, AgentDesignClarificationTurn):
             active = row.active_clarification_json
-            if row.status != AgentDesignStatus.AWAITING_CLARIFICATION.value or not isinstance(active, Mapping) or active.get("source") != turn.response.source or active.get("request_id") != turn.response.request_id:
+            if row.status != AgentDesignStatus.AWAITING_CLARIFICATION.value or not isinstance(active, Mapping):
                 raise AssetConflict(context.request_id)
+            clarifications = self._clarifications_from_json(active)
+            answered = self._clarification_answers(row)
+            pending = tuple(request for request in clarifications if request.request_id not in answered)
+            matching = pending[0] if pending else None
+            if matching is None or matching.source != turn.response.source or matching.request_id != turn.response.request_id:
+                raise AssetConflict(context.request_id)
+            matching_json = self._clarification_json(matching)
             self._require_matching_clarification_response(
                 context,
-                active,
+                matching_json,
                 turn.response,
             )
             content = turn.response.value
+            messages = [
+                self._message_json(
+                    "assistant",
+                    matching.question,
+                    now=self._now(),
+                ),
+                self._message_json(
+                    "user",
+                    content,
+                    now=self._now(),
+                    clarification_request_id=turn.response.request_id,
+                    clarification_question=matching.question,
+                ),
+            ]
+            answered[turn.response.request_id] = content
+            ready_to_generate = True
+            row.active_clarification_json = None
         else:
             raise AssetValidationFailed(context.request_id)
         row.messages_json = [
             *row.messages_json,
-            self._message_json("user", content, now=self._now()),
+            *messages,
         ]
-        row.active_clarification_json = None
+        if isinstance(turn, AgentDesignMessageTurn):
+            row.active_clarification_json = None
+        return ready_to_generate
 
     @staticmethod
     def _require_matching_clarification_response(
@@ -1113,8 +1169,9 @@ class AgentDesignService:
         if selected is None or selected.get("value") != response.value:
             raise AssetConflict(context.request_id)
 
-    @staticmethod
+    @classmethod
     def _generation_request(
+        cls,
         row: AgentDesignSessionRow,
         blueprint: AgentDesignBlueprint,
         turn: AgentDesignMessageTurn | AgentDesignClarificationTurn,
@@ -1125,9 +1182,12 @@ class AgentDesignService:
             identity=blueprint.identity,
             user_context=blueprint.user_context,
         )
-        answers: dict[str, str] = {}
+        answers = cls._clarification_answers(row)
+        interview_history = cls._clarification_history(row)
+        phase = "composition" if len(interview_history) >= REQUIRED_INTERVIEW_QUESTIONS else "discovery"
         if isinstance(turn, AgentDesignClarificationTurn):
-            answers[turn.response.request_id] = turn.response.value
+            if not answers:
+                raise AssetValidationFailed("unknown")
         elif any(
             (
                 current.agents_instructions,
@@ -1137,20 +1197,25 @@ class AgentDesignService:
             )
         ):
             answers["revision_request"] = turn.message
+        elif answers:
+            answers["retry_request"] = turn.message
+        else:
+            answers = {}
         return AgentDesignGenerationRequest(
             agent_name=row.display_name,
             brief=blueprint.description,
             answers=answers,
+            interview_history=interview_history,
             current_draft=current,
             mode=("revise" if any(current.model_dump().values()) else "initial"),
+            phase=phase,
         )
 
-    @staticmethod
-    def _default_blueprint(description: str) -> AgentDesignBlueprint:
+    def _default_blueprint(self, description: str) -> AgentDesignBlueprint:
         return AgentDesignBlueprint(
             description=description,
             model_ref=DEFAULT_AGENT_MODEL_REF,
-            tool_groups=DEFAULT_AGENT_TOOL_GROUPS,
+            tool_groups=tuple(dict.fromkeys(self._default_tool_groups_provider())),
             skill_version_ids=(),
             mcp_version_ids=(),
             agents_instructions="",
@@ -1158,6 +1223,19 @@ class AgentDesignService:
             identity="",
             user_context="",
             model_settings=AgentModelSettings(),
+        )
+
+    async def _default_blueprint_with_system_dependencies(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        description: str,
+    ) -> AgentDesignBlueprint:
+        skill_version_ids, mcp_version_ids = await AgentRepository(session).list_enabled_system_dependency_versions(context)
+        return replace(
+            self._default_blueprint(description),
+            skill_version_ids=skill_version_ids,
+            mcp_version_ids=mcp_version_ids,
         )
 
     @staticmethod
@@ -1214,6 +1292,9 @@ class AgentDesignService:
             context,
             command.idempotency_key,
         )
+        generation_model_ref = command.generation_model_ref
+        if generation_model_ref is not None and (not isinstance(generation_model_ref, str) or _GENERATION_MODEL_REF_PATTERN.fullmatch(generation_model_ref) is None):
+            raise AssetValidationFailed(context.request_id)
         turn = command.input
         if isinstance(turn, AgentDesignMessageTurn):
             if turn.kind != "message":
@@ -1279,6 +1360,7 @@ class AgentDesignService:
             input=normalized,
             expected_revision=command.expected_revision,
             idempotency_key=idempotency_key,
+            generation_model_ref=generation_model_ref,
         )
 
     @classmethod
@@ -1404,6 +1486,29 @@ class AgentDesignService:
             identity=documents.identity,
             user_context=documents.user_context,
             model_settings=model_settings,
+        )
+
+    @classmethod
+    def _candidate_blueprint(
+        cls,
+        context: ProjectContext,
+        current: AgentDesignBlueprint,
+        result: CandidateResult,
+    ) -> AgentDesignBlueprint:
+        return cls._validate_blueprint(
+            context,
+            AgentDesignBlueprint(
+                description=result.description,
+                model_ref=current.model_ref,
+                tool_groups=current.tool_groups,
+                skill_version_ids=current.skill_version_ids,
+                mcp_version_ids=current.mcp_version_ids,
+                agents_instructions=result.documents.agents_instructions,
+                soul=result.documents.soul,
+                identity=result.documents.identity,
+                user_context=result.documents.user_context,
+                model_settings=current.model_settings,
+            ),
         )
 
     @staticmethod
@@ -1582,13 +1687,20 @@ class AgentDesignService:
         content: str,
         *,
         now: datetime,
+        clarification_request_id: str | None = None,
+        clarification_question: str | None = None,
     ) -> dict[str, object]:
-        return {
+        message: dict[str, object] = {
             "id": str(uuid.uuid4()),
             "role": role,
             "content": content,
             "created_at": now.isoformat(),
         }
+        if clarification_request_id is not None:
+            message["clarification_request_id"] = clarification_request_id
+        if clarification_question is not None:
+            message["clarification_question"] = clarification_question
+        return message
 
     @staticmethod
     def _progress_json(
@@ -1652,11 +1764,14 @@ class AgentDesignService:
     @staticmethod
     def _clarification_request(
         question: ClarificationQuestion,
+        *,
+        index: int = 1,
+        total: int = 1,
     ) -> AgentDesignClarificationRequest:
         if question.kind == "free_text":
             input_mode = "free_text"
         elif question.kind == "single_select":
-            input_mode = "single_choice"
+            input_mode = "choice_with_other"
         else:
             input_mode = "choice_with_other"
         options = tuple(
@@ -1673,7 +1788,7 @@ class AgentDesignService:
             source="agent_builder",
             request_id=question.id,
             clarification_type="agent_design",
-            title="需要你的帮助",
+            title=f"问题 {index}/{total}",
             question=question.prompt,
             context=question.reason,
             input_mode=input_mode,
@@ -1704,6 +1819,93 @@ class AgentDesignService:
             ],
         }
 
+    @classmethod
+    def _clarification_set_json(
+        cls,
+        requests: tuple[AgentDesignClarificationRequest, ...],
+    ) -> dict[str, object]:
+        if len(requests) != 3:
+            raise AssetValidationFailed("unknown")
+        return {
+            "version": 1,
+            "kind": _CLARIFICATION_SET_KIND,
+            "questions": [cls._clarification_json(request) for request in requests],
+        }
+
+    @classmethod
+    def _clarifications_from_json(
+        cls,
+        raw: Mapping[str, object],
+    ) -> tuple[AgentDesignClarificationRequest, ...]:
+        if raw.get("kind") == _CLARIFICATION_SET_KIND:
+            questions = raw.get("questions")
+            if not isinstance(questions, list) or len(questions) != 3:
+                raise AssetValidationFailed("unknown")
+            values = tuple(cls._clarification_from_json(question) for question in questions if isinstance(question, Mapping))
+            if len(values) != 3:
+                raise AssetValidationFailed("unknown")
+            return values
+        return (cls._clarification_from_json(raw),)
+
+    @staticmethod
+    def _clarification_from_json(
+        raw: Mapping[str, object],
+    ) -> AgentDesignClarificationRequest:
+        try:
+            return AgentDesignClarificationRequest(
+                version=int(raw["version"]),
+                kind=str(raw["kind"]),
+                source=str(raw["source"]),
+                request_id=str(raw["request_id"]),
+                clarification_type=str(raw["clarification_type"]),
+                title=str(raw["title"]),
+                question=str(raw["question"]),
+                context=str(raw["context"]),
+                input_mode=str(raw["input_mode"]),
+                options=tuple(
+                    AgentDesignClarificationOption(
+                        id=str(option["id"]),
+                        label=str(option["label"]),
+                        value=str(option["value"]),
+                    )
+                    for option in raw.get("options", ())
+                    if isinstance(option, Mapping)
+                ),
+            )
+        except (KeyError, TypeError, ValueError):
+            raise AssetValidationFailed("unknown") from None
+
+    @staticmethod
+    def _clarification_answers(
+        row: AgentDesignSessionRow,
+    ) -> dict[str, str]:
+        answers: dict[str, str] = {}
+        for message in row.messages_json:
+            request_id = message.get("clarification_request_id")
+            content = message.get("content")
+            if isinstance(request_id, str) and isinstance(content, str):
+                answers[request_id] = content
+        return answers
+
+    @staticmethod
+    def _clarification_history(
+        row: AgentDesignSessionRow,
+    ) -> tuple[AgentDesignInterviewAnswer, ...]:
+        history: list[AgentDesignInterviewAnswer] = []
+        for message in row.messages_json:
+            request_id = message.get("clarification_request_id")
+            content = message.get("content")
+            question = message.get("clarification_question")
+            if isinstance(request_id, str) and isinstance(content, str):
+                history.append(
+                    AgentDesignInterviewAnswer(
+                        id=request_id,
+                        question=(question if isinstance(question, str) else request_id),
+                        answer=content,
+                    )
+                )
+        return tuple(history)
+
     @staticmethod
     def _session_view(
         row: AgentDesignSessionRow,
@@ -1727,27 +1929,11 @@ class AgentDesignService:
             for item in row.progress_json
         )
         active_raw = row.active_clarification_json
-        active = None
+        active_clarifications: tuple[AgentDesignClarificationRequest, ...] = ()
         if active_raw is not None:
-            active = AgentDesignClarificationRequest(
-                version=int(active_raw["version"]),
-                kind=str(active_raw["kind"]),
-                source=str(active_raw["source"]),
-                request_id=str(active_raw["request_id"]),
-                clarification_type=str(active_raw["clarification_type"]),
-                title=str(active_raw["title"]),
-                question=str(active_raw["question"]),
-                context=str(active_raw["context"]),
-                input_mode=str(active_raw["input_mode"]),
-                options=tuple(
-                    AgentDesignClarificationOption(
-                        id=str(option["id"]),
-                        label=str(option["label"]),
-                        value=str(option["value"]),
-                    )
-                    for option in active_raw.get("options", ())
-                ),
-            )
+            answered = AgentDesignService._clarification_answers(row)
+            active_clarifications = tuple(request for request in AgentDesignService._clarifications_from_json(active_raw) if request.request_id not in answered)
+        active = active_clarifications[0] if active_clarifications else None
         return AgentDesignSessionView(
             id=row.id,
             project_id=row.project_id,
@@ -1761,6 +1947,7 @@ class AgentDesignService:
             blueprint_checksum=row.blueprint_checksum,
             messages=messages,
             active_clarification=active,
+            active_clarifications=active_clarifications,
             progress=progress,
             error_code=row.error_code,
             error_message=row.error_message,
@@ -1778,6 +1965,7 @@ class AgentDesignService:
             slug=row.slug,
             display_name=row.display_name,
             status=AgentDesignStatus(row.status),
+            revision=row.revision,
             updated_at=row.updated_at,
         )
 

@@ -31,8 +31,8 @@ pnpm build:static
 - `/workspace` is the authenticated account-wide multi-project landing page. It shows
   project cards, invitations, and recoverable projects without a project sidebar.
 - `/projects/[project_slug]` is the only live project shell. Nested pages include project
-  overview, members/settings, Chats, Memory, Connections, Automation, shared assets,
-  Usage, and Audit according to server-issued capabilities.
+  overview, settings (including members), Audit, Chats, Memory, Connections,
+  Automation, shared assets, and Usage according to server-issued capabilities.
 - `/admin/assets/*`, `/admin/operations/*`, and `/admin/settings/*` are the platform
   administration shells.
   Their server layouts return not-found for an authenticated non-system-admin and retain
@@ -244,7 +244,10 @@ may read bounded provider status; only the server-issued `project.channels.manag
 shows configuration, enable/disable, or delete controls. Personal external-account and Agent
 selection remains a separate `private_work.create` flow.
 
-The current group-binding surface is Feishu-only although the backend DTO is provider-neutral.
+The project Connections page currently surfaces Feishu only for both channel
+configuration cards and personal connections; other providers remain API-capable
+but are filtered out of the member UI. The current group-binding surface is also
+Feishu-only although the backend DTO is provider-neutral.
 Only `project.channels.manage` may see or mutate it. The Admin chooses an available Agent, receives
 one `/bind-project` command, copies it to the target Feishu group, and explicitly checks completion.
 The resulting rows show only group name, Agent, running/disabled state, and recent activity, with
@@ -261,9 +264,13 @@ require their exact server capability. Viewer can read/list/export and delete th
 ready upload/workspace/output files, but never sees mutation controls that require
 create/manage authority.
 
-The project Memory page presents one owner-private long-term document, its current version and
-pending count, immediate Dream admission, and bounded version history with the real unified diff
-and explicit restore confirmation. The client uses only `/memory`, `/memory/dream`, and the
+The project Memory page uses two top-level tabs: Current memory and Archive. Current
+memory shows one owner-private long-term document with a compact `MEMORY.md` header,
+markdown source/preview toggle (preview default), pending count, immediate Dream
+admission, and a direct “view changes” entry into the latest version’s unified diff with
+explicit restore confirmation. Archive restores the searchable episode list with tag
+filters. `?tab=archive` selects Archive; organization-history list UI stays out of the
+member page. The client uses only `/memory`, `/memory/dream`, and the
 `/memory/versions` family; it never sends owner or namespace. Every response is strict Zod,
 requests forward the active AbortSignal, and loading, error, empty, running, and pagination states
 remain distinct. Read, Dream, and restore controls derive only from server-issued capabilities.
@@ -438,20 +445,32 @@ Project Agent details expose four fixed logical Markdown entries: `AGENTS.md`, `
 `IDENTITY.md`, and `USER.md`. They are an asset-level editor over Agent-version fields, not a
 filesystem browser: do not add directory, create, rename, delete, breadcrumb, or independent
 file-version controls. New Agents open this editor even before any runtime version exists.
-The editor always uses the current published revision, otherwise the latest Draft. Agent
-revisions remain an internal Run-snapshot boundary: the detail sheet exposes no publish/version
-summary card, selector, status, history, technical metadata, or manual version action. Its header
-shows the formatted update time rather than repeating the slug. One explicit save submits all
-four values with the asset revision; dirty state blocks close, while a `409` keeps the local
-draft for retry.
+The editor always uses the current published revision, otherwise the latest Draft. Project-owned
+Agent details add a sibling tool-binding tab that lists only the entered project's eligible
+published Skill/MCP versions: enabled System bindings use their pinned version and active Project
+assets use their current published version. Saving bindings preserves the model, built-in tool
+groups, description, and four logical documents while atomically publishing a replacement Agent
+revision. The detail sheet exposes Agent revision history and capability counts; restoring one
+published historical revision copies it into another new published revision instead of moving the
+pointer backward or mutating history. No raw create-version or publish-version control is exposed.
+Its header shows the formatted update time rather than repeating the slug. Dirty instruction or
+binding state blocks close; a `409` keeps the local draft for retry.
 
 New project Agents are designed through `/projects/{project_slug}/agents/new` and the resumable
 `/agents/new/{session_id}` workspace. The name step creates only a private Builder session.
 The workspace keeps the page shell fixed, scrolls only its conversation region, renders bounded
-clarification cards and four fixed logical-document progress items, and allows preview/edit before
-one final confirmation. Completion creates a published version 1 but leaves the Agent suspended;
+clarification cards and four fixed logical-document progress items. After the initial description it
+renders exactly one question at a time through the same `HumanInputCard` used by ordinary chat.
+Each card shows model-generated choices plus the shared free-text alternative. Submitting an answer
+replaces the card only after the backend has used the complete prior interview to generate the next
+question; after the third answer it generates the candidate instead of another card. The
+workspace then allows preview/edit before one final confirmation. Completion creates a published
+version 1 but leaves the Agent suspended;
 cards and details expose the capability-checked activate action. Never fall back to the former
 generic Agent create dialog or sequence a bare Agent create before the Builder commit.
+Each unfinished-session card exposes a separate delete action with explicit confirmation. The
+cancel mutation uses the exact revision returned by the unfinished-session list, removes the
+session from that scoped cache after success, and never creates, changes, or deletes an Agent.
 
 ### Skill authoring and package import
 
@@ -514,10 +533,13 @@ DELETE succeeds. System Skills never expose deletion. Agent lifecycle exposes ac
 transitions but no archive mutation; project Agent screens label them as enable/disable. Project Agent
 cards never expose deletion. A project-owned Agent with `shared_assets.edit` exposes permanent
 deletion only from its detail sheet, using the same five-second delayed confirmation pattern and
-removing the Agent plus all of its settings only after the scoped DELETE succeeds. Referenced Agents
-remain visible and the API returns conflict rather than deleting Threads, Automations, or Run
-snapshots. Reversible Agent enable/disable actions use neutral styling; the detail action is labeled
-“删除”, and only that permanent action uses destructive styling. Project MCP details follow the
+removing the Agent plus all of its settings only after the scoped DELETE succeeds. The detail
+sheet confirms the current project default before enabling deletion; a current default stays
+undeletable until Main or another Agent is selected, and unavailable default state fails closed
+with retry guidance. Referenced Agents remain visible and a deletion conflict explains default,
+Thread, Automation, Run-snapshot, and concurrent-state causes rather than presenting every `409`
+as a stale revision. Reversible Agent enable/disable actions use neutral styling; the detail action
+is labeled “删除”, and only that permanent action uses destructive styling. Project MCP details follow the
 same reversible enable/disable wording for assets with a current Published version and do not
 show archive as a primary action. A project-owned MCP with `shared_assets.edit` exposes permanent
 deletion only from the detail danger zone, using the five-second confirmation pattern; System MCP
@@ -667,9 +689,12 @@ remains display-only and cannot be used to infer runtime health or skip Worker d
 
 ### Agent defaults and Skill suggestions
 
-Agent cards expose the project default as read-only state to project members; only a member with
-`shared_assets.manage_bindings` may set an active, published, executable project Agent as the
-default or restore Main. Ordinary new-conversation entry points and Builder continuation share
+The Agent catalog separates usable System Agents from project-owned Agents and applies one shared
+card/list view mode to both sections. The current project default sorts first within its section
+and is read-only state to project members. Only a member with `shared_assets.manage_bindings` may
+set an active, published, executable project Agent as the default or choose Main through the same
+set-default action; the current default never exposes a restore action. Ordinary new-conversation
+entry points and Builder continuation share
 one project-new-chat path: they omit explicit Agent fields so Gateway resolves the current
 default atomically. Agent-card chat remains an explicit override, and a configured but invalid
 default fails closed rather than silently switching to Main. Agent cards, the Agent selector,
@@ -706,12 +731,16 @@ fallback instead of retrying an unavailable provider until the Run recursion cei
 
 ## Project governance and system administration
 
-Usage and Audit pages mount hooks only after their exact readiness and capability gates pass.
-Usage distinguishes configured/effective limit, used/reserved amount, and one 80% warning per
-dimension. Audit accepts a closed action enum and action-specific strict metadata, and never
-renders private target digests, owner/project internals, or secret content.
+Audit pages mount hooks only after their exact readiness and capability gates pass.
+Live occupancy cards (members, storage, concurrent runs, daily MCP calls) render on the project
+overview under Token usage. Project quota ceilings are tightened only by system admins under
+Admin > Projects > asset escrow > Quota. Usage distinguishes configured/effective limit,
+used/reserved amount, and one 80% warning per dimension. Audit accepts a closed action enum and
+action-specific strict metadata, and never renders private target digests, owner/project
+internals, or secret content.
 
-The project overview mounts its Token trend query only after `project.usage.read` is present.
+The project overview mounts its Token trend and usage-dimension queries only after
+`project.usage.read` is present.
 Its query key stays under the exact account/project governance usage root, forwards the TanStack
 abort signal, and strictly validates 24 consecutive hourly buckets plus independently summed
 input/output/total counters. Loading, unavailable, and valid all-zero states remain distinct;
@@ -742,6 +771,11 @@ System settings use strict, secret-free section contracts under the authenticate
 root. Each section is replaced atomically with its expected revision; conflict responses preserve
 the local draft, and the UI renders the server-confirmed effective revision, effect scope, and any
 pending runtime roles. Agent model references are limited to active system logical model names.
+The single Memory destination renders two independently versioned cards: the Memory fields inside
+`agent_runtime`, and the ordered 2..8-title `memory_document` template. The latter saves only
+through its own `expected_revision`, reports the `new_memory_documents` effect scope, and must state
+that existing documents, versions, in-flight Dreams, and Run snapshots keep their frozen sections.
+It has no `config.yaml` or browser-local fallback.
 
 The ordinary Settings dialog has a separate account-owned Personalization section. Its Memory
 switch and reset action use the strict account API and `preferences_version` CAS; they are not

@@ -19,13 +19,15 @@ from app.projects.errors import ProjectForbidden, ProjectNotFound
 from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
+    LockedMemoryDocumentPolicy,
     RuntimePolicySection,
 )
+from app.system_runtime_settings.service import SystemRuntimePolicyService
 from app.system_settings.repository import SystemModelRepository
 from deerflow.agents.memory.dream import (
     DREAM_PROMPT_VERSION,
-    EMPTY_MEMORY_DOCUMENT,
     estimate_memory_tokens,
+    render_empty_memory_document,
 )
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -95,7 +97,17 @@ class MemoryDreamAdmissionService:
     @staticmethod
     async def _platform_runtime(
         session: AsyncSession,
-    ) -> tuple[AgentRuntimePolicyValue, int, object] | None:
+        *,
+        create_document: bool,
+    ) -> (
+        tuple[
+            AgentRuntimePolicyValue,
+            int,
+            object,
+            LockedMemoryDocumentPolicy | None,
+        ]
+        | None
+    ):
         policy_state = await MemoryDreamAdmissionService._platform_policy(
             session,
             for_update=True,
@@ -103,13 +115,20 @@ class MemoryDreamAdmissionService:
         if policy_state is None:
             return None
         policy, policy_revision = policy_state
+        creation_policy = (
+            await SystemRuntimePolicyService.lock_memory_document_for_creation(
+                session,
+            )
+            if create_document
+            else None
+        )
         model = await SystemModelRepository(session).resolve_active_model(
             policy.memory.model_name,
             load_envelope=False,
         )
         if model is None:
             return None
-        return policy, policy_revision, model
+        return policy, policy_revision, model, creation_policy
 
     async def admit(
         self,
@@ -119,7 +138,12 @@ class MemoryDreamAdmissionService:
         trigger: MemoryDreamTrigger,
         now: datetime,
     ) -> MemoryDreamAdmissionRecord:
-        runtime = await self._platform_runtime(session)
+        repository = self._repository(session)
+        state = await repository.read_state(scope)
+        runtime = await self._platform_runtime(
+            session,
+            create_document=state.document.sections_policy_version_id is None,
+        )
         if runtime is None:
             return self._nothing_pending()
         return await self._admit_with_runtime(
@@ -137,10 +161,15 @@ class MemoryDreamAdmissionService:
         *,
         trigger: MemoryDreamTrigger,
         now: datetime,
-        runtime: tuple[AgentRuntimePolicyValue, int, object],
+        runtime: tuple[
+            AgentRuntimePolicyValue,
+            int,
+            object,
+            LockedMemoryDocumentPolicy | None,
+        ],
         budget_only: bool = False,
     ) -> MemoryDreamAdmissionRecord:
-        _policy, policy_revision, model = runtime
+        _policy, policy_revision, model, creation_policy = runtime
         try:
             preference = await self._personalization_repository_builder(session).read_memory(
                 scope.owner_user_id,
@@ -178,7 +207,9 @@ class MemoryDreamAdmissionService:
             scope,
             trigger=effective_trigger,
             frozen=frozen,
-            initial_content=EMPTY_MEMORY_DOCUMENT,
+            initial_content=(render_empty_memory_document(creation_policy.value.sections) if creation_policy is not None else None),
+            initial_sections=(tuple(creation_policy.value.sections) if creation_policy is not None else None),
+            sections_policy_version_id=(creation_policy.policy_version_id if creation_policy is not None else None),
             now=now,
         )
 
@@ -240,10 +271,15 @@ class MemoryDreamAdmissionService:
             lock=True,
         )
         context.require(Capability.PRIVATE_WORK_CREATE)
-        runtime = await self._platform_runtime(session)
+        repository = self._repository(session)
+        state = await repository.read_state(scope)
+        runtime = await self._platform_runtime(
+            session,
+            create_document=state.document.sections_policy_version_id is None,
+        )
         if runtime is None:
             return self._nothing_pending()
-        policy, _policy_revision, _model = runtime
+        policy, _policy_revision, _model, _creation_policy = runtime
         if require_due and not await self._repository(session).is_scope_due(
             scope,
             now=now,

@@ -23,6 +23,8 @@ _ACTIONS: dict[str, AuditAction] = {
     "agent.create": AuditAction.ASSET_CREATED,
     "agent.version.create": AuditAction.ASSET_UPDATED,
     "agent.instructions.update": AuditAction.ASSET_UPDATED,
+    "agent.capability_bindings.update": AuditAction.ASSET_UPDATED,
+    "agent.version.restore": AuditAction.ASSET_UPDATED,
     "agent.publish": AuditAction.ASSET_PUBLISHED,
     "agent.delete": AuditAction.ASSET_DELETED,
     "agent.activate": AuditAction.ASSET_UPDATED,

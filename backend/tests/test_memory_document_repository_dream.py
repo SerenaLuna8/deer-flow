@@ -7,7 +7,11 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy.dialects import postgresql
 
-from deerflow.agents.memory.dream import DREAM_PROMPT_VERSION, EMPTY_MEMORY_DOCUMENT
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    DREAM_PROMPT_VERSION,
+    EMPTY_MEMORY_DOCUMENT,
+)
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentVersionRow,
 )
@@ -107,6 +111,9 @@ def _document(*, active_job_id=None, version: int = 4, cursor: int = 8):
         namespace="default",
         content=EMPTY_MEMORY_DOCUMENT,
         content_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+        sections_policy_section="memory_document",
+        sections_policy_version_id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
         version=version,
         dream_cursor=cursor,
         active_dream_job_id=active_job_id,
@@ -188,6 +195,7 @@ async def test_finalize_retry_returns_the_existing_version_without_resettling() 
         expected_history_digest="b" * 64,
         expected_base_version=4,
         expected_base_digest="c" * 64,
+        expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
         content=EMPTY_MEMORY_DOCUMENT,
         now=NOW,
     )
@@ -211,6 +219,8 @@ async def test_restore_is_new_version_and_never_rolls_back_dream_cursor() -> Non
         _scope(),
         target_version=4,
         expected_current_version=12,
+        expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+        max_tokens=8_000,
         now=NOW,
     )
 
@@ -237,5 +247,7 @@ async def test_restore_rejects_active_dream_or_stale_cas() -> None:
                 _scope(),
                 target_version=4,
                 expected_current_version=12,
+                expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                max_tokens=8_000,
                 now=NOW,
             )

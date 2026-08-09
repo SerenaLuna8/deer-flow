@@ -24,6 +24,7 @@ from app.worker import memory_dream as memory_dream_worker_module
 from app.worker.memory_dream import MemoryDreamJobHandler
 from app.worker.service import JobLeaseAuthority, JobSettlement
 from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
     DREAM_PROMPT_VERSION,
     EMPTY_MEMORY_DOCUMENT,
     MemoryDreamInput,
@@ -46,6 +47,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     memory_document_digest,
 )
 from deerflow.persistence.system_runtime_settings import (
+    SystemRuntimePolicyRow,
     SystemRuntimePolicyVersionRow,
 )
 
@@ -56,6 +58,16 @@ def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
 
 def _jobs(session) -> JobRepository:
     return JobRepository(session, owner_ref_hasher=_owner_ref)
+
+
+async def _memory_document_policy_version_id(session) -> uuid.UUID:
+    version_id = await session.scalar(
+        sa.select(SystemRuntimePolicyRow.current_version_id).where(
+            SystemRuntimePolicyRow.section == "memory_document",
+        )
+    )
+    assert isinstance(version_id, uuid.UUID)
+    return version_id
 
 
 class _RecordingDreamRunner:
@@ -198,6 +210,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
             now: datetime = base_time,
         ):
             async with seed.factory() as session, session.begin():
+                sections_policy_version_id = await _memory_document_policy_version_id(session)
                 return await MemoryDocumentRepository(
                     session,
                     jobs=_jobs(session),
@@ -206,6 +219,8 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                     trigger=trigger,
                     frozen=frozen,
                     initial_content=EMPTY_MEMORY_DOCUMENT,
+                    initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                    sections_policy_version_id=sections_policy_version_id,
                     now=now,
                 )
 
@@ -255,6 +270,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                     expected_history_digest=history_digest,
                     expected_base_version=0,
                     expected_base_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+                    expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
                     content=changed_content,
                     now=base_time + timedelta(seconds=2),
                 )
@@ -282,6 +298,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                 expected_history_digest=history_digest,
                 expected_base_version=0,
                 expected_base_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+                expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
                 content=changed_content,
                 now=base_time + timedelta(seconds=2),
             )
@@ -673,6 +690,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
                 )
 
         async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await _memory_document_policy_version_id(session)
             admission = await MemoryDocumentRepository(
                 session,
                 jobs=_jobs(session),
@@ -681,6 +699,8 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
+                initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                sections_policy_version_id=sections_policy_version_id,
                 now=now - timedelta(minutes=30),
             )
         assert admission.disposition == "queued"
@@ -919,6 +939,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
             )
 
         async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await _memory_document_policy_version_id(session)
             admission = await MemoryDocumentRepository(
                 session,
                 jobs=_jobs(session),
@@ -927,6 +948,8 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
+                initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                sections_policy_version_id=sections_policy_version_id,
                 now=base_time,
             )
         assert admission.disposition == "queued"

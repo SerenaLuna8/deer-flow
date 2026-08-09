@@ -11,17 +11,22 @@ new contract:
 - result objects without a change signal degrade to heartbeat polling.
 
 ``conftest.py`` replaces ``deerflow.subagents.executor`` with a mock to break
-a production import cycle, so these tests drive the real primitives —
-``SubagentChangeSignal`` and the ``task_tool`` waiting helpers — against fake
-result objects instead of the real ``SubagentResult``.
+a production import cycle. Most timing cases therefore isolate the signal and
+wait helpers with small result doubles; one clean-process acceptance probe also
+drives the production ``SubagentResult`` through the complete ``task`` tool and
+asserts its final ``ToolMessage`` plus exact progress-event volume.
 """
 
 import asyncio
 import importlib
+import json
+import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +39,7 @@ task_tool = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 # Wall-clock ceiling used to prove "no 5-second sleep happened".
 _SUBSECOND = 1.0
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 @dataclass
@@ -69,6 +75,29 @@ class _FakeStatus:
 def _install_task(monkeypatch: pytest.MonkeyPatch, result: object | None) -> None:
     monkeypatch.setattr(task_tool, "SubagentStatus", _FakeStatus)
     monkeypatch.setattr(task_tool, "get_background_task_result", lambda task_id: result)
+
+
+def test_real_subagent_result_returns_a_full_tool_message_in_under_a_second() -> None:
+    """Run the production result holder and full tool path outside conftest's mock."""
+    completed = subprocess.run(
+        [sys.executable, "tests/support/task_tool_event_probe.py"],
+        cwd=_BACKEND_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["elapsed"] < _SUBSECOND
+    assert result["event_types"] == [
+        "task_started",
+        "task_running",
+        "task_running",
+        "task_completed",
+    ]
+    assert result["tool_status"] == "completed"
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +147,20 @@ async def test_non_terminal_notifications_are_debounced() -> None:
 
     signal.notify(terminal=True)  # terminal bypasses the debounce window
     await asyncio.sleep(0)
+    assert event.is_set()
+
+
+@pytest.mark.asyncio
+async def test_notification_before_subscribe_does_not_debounce_the_first_real_wakeup() -> None:
+    """mark_running commonly fires before task_tool installs its waiter."""
+
+    signal = SubagentChangeSignal(debounce_seconds=60.0)
+    signal.notify()  # no waiter yet: there was no event storm to suppress
+    event = signal.subscribe()
+
+    signal.notify()
+    await asyncio.sleep(0)
+
     assert event.is_set()
 
 

@@ -30,6 +30,8 @@ _PATCH_FLAG = "_deerflow_delta_history_patched"
 # On any newer LangGraph the override must be re-inspected before keeping the
 # patch: if upstream fixed or removed it, this module must stand down.
 _PATCH_VALIDATED_LANGGRAPH_VERSION = Version("1.2.9")
+_unpatched_inmemory_get_delta_channel_history = InMemorySaver.get_delta_channel_history
+_unpatched_inmemory_aget_delta_channel_history = InMemorySaver.aget_delta_channel_history
 
 
 def _get_delta_channel_history_via_base(self: Any, *, config: Any, channels: Any) -> Any:

@@ -39,8 +39,10 @@ import {
   useDeleteProjectMcp,
   useDeleteProjectSkill,
   useProjectAssetVersions,
+  useProjectDefaultAgent,
   useProjectMcpEditableConfiguration,
   usePublishProjectAssetVersion,
+  useRestoreProjectAgentVersion,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetItem,
@@ -54,6 +56,7 @@ import {
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
+  projectAgentDeleteErrorMessage,
   projectMcpDeleteErrorMessage,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
@@ -67,7 +70,26 @@ type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
 ): boolean {
-  return kind === "skills";
+  return kind === "skills" || kind === "agents";
+}
+
+export function projectAgentVersionCanRestore(
+  kind: MutableAssetKind,
+  scope: ProjectAssetItem["scope"],
+  canAuthor: boolean,
+  version: Pick<
+    Extract<AssetVersion, { agent_id: string }>,
+    "id" | "workflow_status"
+  > | null,
+  currentPublishedVersionId: string | null,
+): boolean {
+  return (
+    kind === "agents" &&
+    scope === "project" &&
+    canAuthor &&
+    version?.workflow_status === "published" &&
+    version.id !== currentPublishedVersionId
+  );
 }
 
 export function projectAssetDetailPreferredVersionId(
@@ -286,6 +308,21 @@ export function createProjectAgentDeleteSnapshot(
   });
 }
 
+export function projectAgentDeleteBlockedReason(
+  agentId: string,
+  defaultAgentId: string | null | undefined,
+  loading: boolean,
+  failed: boolean,
+): string | null {
+  if (loading) return "正在确认项目默认 Agent，请稍候。";
+  if (failed || defaultAgentId === undefined) {
+    return "无法确认项目默认 Agent，请刷新后重试。";
+  }
+  return defaultAgentId === agentId
+    ? "当前默认 Agent 无法删除，请先将 Main 或其他 Agent 设为默认。"
+    : null;
+}
+
 export type ProjectMcpDeleteSnapshot = Readonly<{
   assetId: string;
   mcpName: string;
@@ -351,6 +388,35 @@ function workflowStatus(
   return "workflow_status" in version
     ? version.workflow_status
     : version.status;
+}
+
+function AgentVersionCapabilitySummary({
+  version,
+}: {
+  version: Extract<AssetVersion, { agent_id: string }>;
+}) {
+  return (
+    <dl className="grid gap-3 sm:grid-cols-3">
+      <div className="bg-muted/35 rounded-xl p-4">
+        <dt className="text-muted-foreground text-xs">内置工具组</dt>
+        <dd className="mt-2 text-sm font-medium">
+          {version.tool_groups.length} 个
+        </dd>
+      </div>
+      <div className="bg-muted/35 rounded-xl p-4">
+        <dt className="text-muted-foreground text-xs">Skill</dt>
+        <dd className="mt-2 text-sm font-medium">
+          {version.skill_version_ids.length} 个
+        </dd>
+      </div>
+      <div className="bg-muted/35 rounded-xl p-4">
+        <dt className="text-muted-foreground text-xs">MCP</dt>
+        <dd className="mt-2 text-sm font-medium">
+          {version.mcp_version_ids.length} 个
+        </dd>
+      </div>
+    </dl>
+  );
 }
 
 export function versionPublishDisabled(
@@ -606,7 +672,7 @@ export function ProjectAssetDetailSheet({
     editableMcpConfigurationEnabled,
   );
   const showsVersionHistory = projectAssetDetailShowsVersionHistory(kind);
-  const showsVersionContent = kind !== "agents";
+  const showsVersionContent = true;
   const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
   const revisionCopy = projectAssetDetailRevisionCopy(kind);
   const discardCopy = projectAssetDiscardCopy(kind);
@@ -619,6 +685,15 @@ export function ProjectAssetDetailSheet({
   const deleteSkill = useDeleteProjectSkill(accountId, projectId);
   const deleteAgent = useDeleteProjectAgent(accountId, projectId);
   const deleteMcp = useDeleteProjectMcp(accountId, projectId);
+  const restoreAgentVersion = useRestoreProjectAgentVersion(
+    accountId,
+    projectId,
+  );
+  const projectDefaultAgent = useProjectDefaultAgent(
+    accountId,
+    projectId,
+    open && kind === "agents",
+  );
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [versionDirty, setVersionDirty] = useState(false);
   const [versionEditing, setVersionEditing] = useState(false);
@@ -628,6 +703,10 @@ export function ProjectAssetDetailSheet({
     useState<ProjectAgentDeleteSnapshot | null>(null);
   const [mcpDeleteSnapshot, setMcpDeleteSnapshot] =
     useState<ProjectMcpDeleteSnapshot | null>(null);
+  const [agentRestoreTarget, setAgentRestoreTarget] = useState<Extract<
+    AssetVersion,
+    { agent_id: string }
+  > | null>(null);
   const [discardAction, setDiscardAction] = useState<
     { type: "close" } | { type: "version"; versionId: string } | null
   >(null);
@@ -645,6 +724,8 @@ export function ProjectAssetDetailSheet({
     kind === "mcp-servers"
       ? (mcpConfiguration?.version ?? null)
       : (versions.find((version) => version.id === selectedVersionId) ?? null);
+  const selectedAgentVersion =
+    selectedVersion && "agent_id" in selectedVersion ? selectedVersion : null;
   const editBaseVersion = projectAssetEditBaseVersion(
     kind,
     selectedVersion,
@@ -731,6 +812,7 @@ export function ProjectAssetDetailSheet({
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
     setMcpDeleteSnapshot(null);
+    setAgentRestoreTarget(null);
     setDiscardAction(null);
   }, [open]);
 
@@ -745,6 +827,15 @@ export function ProjectAssetDetailSheet({
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
       : [];
   const canDeleteAsset = projectAssetCanDelete(kind, item);
+  const agentDeleteBlockedReason =
+    kind === "agents" && canDeleteAsset
+      ? projectAgentDeleteBlockedReason(
+          item.id,
+          projectDefaultAgent.data?.agent_asset_id,
+          projectDefaultAgent.isLoading,
+          Boolean(projectDefaultAgent.error),
+        )
+      : null;
   const versionActions = useMemo(() => {
     if (
       kind === "agents" ||
@@ -767,9 +858,11 @@ export function ProjectAssetDetailSheet({
     changeStatus.isPending ||
     deleteSkill.isPending ||
     deleteAgent.isPending ||
-    deleteMcp.isPending;
+    deleteMcp.isPending ||
+    restoreAgentVersion.isPending;
   const versionSelectionPending = requestedVersionId !== null;
-  const actionError = publish.error ?? changeStatus.error;
+  const actionError =
+    publish.error ?? changeStatus.error ?? restoreAgentVersion.error;
   const optimisticSkillStatus =
     kind === "skills" && changeStatus.isPending
       ? changeStatus.variables?.action === "activate"
@@ -886,6 +979,23 @@ export function ProjectAssetDetailSheet({
       onDeleted(snapshot.assetId);
     } catch {
       // The mutation exposes only its mapped public error inside the dialog.
+    }
+  }
+
+  async function confirmAgentVersionRestore() {
+    const target = agentRestoreTarget;
+    if (!target) return;
+    try {
+      const result = await restoreAgentVersion.mutateAsync({
+        assetId: item.id,
+        versionId: target.id,
+        input: { expected_asset_version: item.version },
+      });
+      setAgentRestoreTarget(null);
+      setSelectedVersionId(result.data.id);
+      handleWorkbenchVersionCreated(result.data.id);
+    } catch {
+      // The mapped public error remains visible in the confirmation dialog.
     }
   }
 
@@ -1053,8 +1163,16 @@ export function ProjectAssetDetailSheet({
                   <Button
                     type="button"
                     variant="destructive"
-                    disabled={actionPending}
+                    disabled={
+                      actionPending || agentDeleteBlockedReason !== null
+                    }
+                    aria-describedby={
+                      agentDeleteBlockedReason
+                        ? "project-agent-delete-blocked-reason"
+                        : undefined
+                    }
                     onClick={() => {
+                      if (agentDeleteBlockedReason) return;
                       deleteAgent.reset();
                       setAgentDeleteSnapshot(
                         createProjectAgentDeleteSnapshot(item, Date.now()),
@@ -1065,6 +1183,18 @@ export function ProjectAssetDetailSheet({
                   </Button>
                 ) : null}
               </div>
+
+              {kind === "agents" &&
+              canDeleteAsset &&
+              agentDeleteBlockedReason ? (
+                <p
+                  id="project-agent-delete-blocked-reason"
+                  role="status"
+                  className="text-muted-foreground text-sm"
+                >
+                  {agentDeleteBlockedReason}
+                </p>
+              ) : null}
 
               {renderAssetEditor ? (
                 history.isLoading ? (
@@ -1183,6 +1313,40 @@ export function ProjectAssetDetailSheet({
                         </div>
                       ) : null}
 
+                      {projectAgentVersionCanRestore(
+                        kind,
+                        item.scope,
+                        canAuthor,
+                        selectedAgentVersion,
+                        item.current_published_version_id,
+                      ) ? (
+                        <div className="flex flex-wrap gap-2">
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={
+                              actionPending ||
+                              versionDirty ||
+                              versionSelectionPending
+                            }
+                            title={
+                              versionDirty
+                                ? "请先保存或放弃当前未保存修改"
+                                : versionSelectionPending
+                                  ? revisionCopy.loading
+                                  : undefined
+                            }
+                            onClick={() => {
+                              restoreAgentVersion.reset();
+                              setAgentRestoreTarget(selectedAgentVersion);
+                            }}
+                          >
+                            恢复为新版本
+                          </Button>
+                        </div>
+                      ) : null}
+
                       {item.scope === "project" &&
                         versionActions.length > 0 && (
                           <div className="flex flex-wrap gap-2">
@@ -1225,6 +1389,11 @@ export function ProjectAssetDetailSheet({
                         key={selectedVersion.id}
                         className="border-border/70 border-t pt-5"
                       >
+                        {"agent_id" in selectedVersion ? (
+                          <AgentVersionCapabilitySummary
+                            version={selectedVersion}
+                          />
+                        ) : null}
                         {renderVersion?.(
                           detailContentVersion ?? selectedVersion,
                           {
@@ -1312,7 +1481,9 @@ export function ProjectAssetDetailSheet({
           startedAt={agentDeleteSnapshot.startedAt}
           pending={deleteAgent.isPending}
           errorMessage={
-            deleteAgent.error ? adminAssetErrorMessage(deleteAgent.error) : null
+            deleteAgent.error
+              ? projectAgentDeleteErrorMessage(deleteAgent.error)
+              : null
           }
           onOpenChange={(next) => {
             if (next) return;
@@ -1342,6 +1513,48 @@ export function ProjectAssetDetailSheet({
           onConfirm={() => void confirmMcpDelete()}
         />
       )}
+
+      <Dialog
+        open={agentRestoreTarget !== null}
+        onOpenChange={(next) => {
+          if (next || restoreAgentVersion.isPending) return;
+          setAgentRestoreTarget(null);
+          restoreAgentVersion.reset();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>恢复这个 Agent 版本？</DialogTitle>
+            <DialogDescription>
+              将复制版本 {agentRestoreTarget?.version_number ?? "-"}
+              的全部设定与工具绑定，并发布为新的最新版本。现有版本记录不会被覆盖或删除。
+            </DialogDescription>
+          </DialogHeader>
+          {restoreAgentVersion.error ? (
+            <ErrorNotice error={restoreAgentVersion.error} />
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={restoreAgentVersion.isPending}
+              onClick={() => {
+                setAgentRestoreTarget(null);
+                restoreAgentVersion.reset();
+              }}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              disabled={restoreAgentVersion.isPending}
+              onClick={() => void confirmAgentVersionRestore()}
+            >
+              {restoreAgentVersion.isPending ? "恢复中…" : "确认并发布新版本"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={discardAction !== null}

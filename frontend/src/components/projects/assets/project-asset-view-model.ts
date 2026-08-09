@@ -49,6 +49,13 @@ export function projectMcpDeleteErrorMessage(error: unknown): string {
   return adminAssetErrorMessage(error);
 }
 
+export function projectAgentDeleteErrorMessage(error: unknown): string {
+  if (error instanceof SharedAssetApiError && error.code === "ASSET_CONFLICT") {
+    return "无法删除此 Agent：它可能是项目当前默认 Agent、已被对话、自动化或运行记录引用，或状态已经变化。请刷新页面并处理相关引用后重试。";
+  }
+  return adminAssetErrorMessage(error);
+}
+
 export type ProjectAssetDetailLifecycleAction<Kind extends MutableAssetKind> =
   Kind extends "skills" ? never : "activate" | "suspend";
 

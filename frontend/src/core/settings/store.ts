@@ -110,7 +110,10 @@ function handleStorage(event: StorageEvent) {
 
   if (event.key.startsWith(THREAD_MODE_EXPLICIT_KEY_PREFIX)) {
     const threadId = event.key.slice(THREAD_MODE_EXPLICIT_KEY_PREFIX.length);
-    threadModeSelections.set(threadId, getThreadModeSelectionExplicit(threadId));
+    threadModeSelections.set(
+      threadId,
+      getThreadModeSelectionExplicit(threadId),
+    );
     emitChange();
     return;
   }

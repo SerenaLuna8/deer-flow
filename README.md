@@ -18,7 +18,7 @@ PostgreSQL `lower(email)` 唯一索引保护。`auth.local.allow_registration` �
 
 项目 Memory 保存在 PostgreSQL，并始终受 account、project、owner 与 namespace 作用域约束。
 Thread 自动压缩和 `/compact` 共用同一 SNIP 提示词，每次压缩至多两次模型调用（输出格式无效时
-追加一次修复重试）：同一段带标签文本既成为 Thread 的 `summary_text`，也通过 checkpoint 回执
+追加一次修复重试）：续航散文写入 Thread 的 `summary_text`，独立的带标签段通过 checkpoint 回执
 幂等激活为待整理 history，不再运行独立 Extractor。Agent 还可在对话中通过 `remember` 工具直接
 提出一条待整理记忆（有单 Run 与积压上限），通过只读 `recall_memory` 工具检索已归档的历史片段。
 Scheduler 或手动 `/Dream` 每次严格选择最老 20 条 history，由 Worker 的无外部工具 Dream
@@ -41,6 +41,11 @@ version/snapshot，仍保留 Thread、聊天消息、文件和 Thread `summary_t
 历史归档（episode），并提供“立即整理”与基于当前版本 CAS 的恢复；大幅删除的版本会带
 待复核标记，超预算文档会显示降级横幅。旧 Source/Extractor/Candidate/Fact、v1/v2 Pipeline
 和 hard-forget/export/status 管理面均不再存在。
+
+平台管理员可在“平台设置 → Memory”维护 2～8 个有序的 Memory 文档章节标题。该模板作为
+独立、版本化的 PostgreSQL `memory_document` 系统策略保存，不属于 `config.yaml`；某个
+project/owner 作用域首次创建文档时会把当时的章节与策略版本冻结到文档，Run 快照继续冻结
+同一章节合同。后续修改只影响新建文档，不会重排已有文档或取消其在途 Dream。
 
 Checkpoint 默认使用兼容的 `full` 表示，也可将全部 Gateway/Worker 同步配置为 `delta`
 以减少长会话的重复消息写入。Delta 状态始终通过项目作用域内的物化读取恢复；配置切换需要
@@ -69,7 +74,7 @@ UUID 支持的持久文件；关闭预览后可从顶部“文件”目录再次
 ## 核心能力
 
 - 项目工作区：账户、成员、角色、邀请、配额、审计和项目生命周期。
-- 项目用量：具备用量权限的项目管理员可在概览查看全项目最近 24 个小时的 Token 消耗趋势。
+- 项目用量：具备用量权限的成员可在概览查看最近 24 个小时的 Token 消耗趋势，以及成员、存储、并发运行与每日 MCP 调用的实时占用；平台管理员可在项目共享资产代管的「配额」页收紧上限。
 - 系统通知：工作区顶部铃铛集中展示账号级通知和未读数量；已注册用户收到项目邀请后可直接在通知中接受，未注册邮箱仍使用一次性邀请链接。
 - Agent 运行：持久化 Thread/Run、durable SSE、断线重连、取消、重试和 Worker lease。
 - 会话管理：项目管理员可把已启用的项目 Agent 设为项目默认；普通新会话直接使用该默认 Agent，未配置时回退系统 Main，显式 Agent 对话和既有会话不受影响。Main 无需项目 Agent 绑定，会在每次 Run 准入时冻结当前项目可用的系统/自建 Agent、Skill 和 MCP；普通 Agent 仍只加载其版本明确引用的 Skill 与 MCP。会话列表按最近活跃时间倒序排列，进入“会话”会自动打开第一条；列表支持手动重命名，并仅在首轮成功完成后由 Worker 自动生成一次标题。
@@ -155,7 +160,7 @@ Scheduler 和 Worker。
 
 ### 3. 初始化 PostgreSQL
 
-`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v5`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY` 与 Credential keyring：DeepSeek V4 Flash 与 DeepSeek V4 Pro 共同引用一份加密 `model_api_key` Credential，GPT 5.6 Luna 使用单独加密的 OpenCode Credential，Flash 仍为默认模型；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
+`make setup-db` 是唯一数据库初始化入口，只接受空 PostgreSQL 目标库。它直接执行完整的 `full_schema.sql`、写入精确 marker `full_schema_v9`，随后初始化系统资产 catalog、LangGraph schema 和默认项目。初始化命令会在根目录 `.env` 存在时加载它（显式 shell 环境优先，也可完全不依赖 `.env`），一次性读取 `DEEPSEEK_API_KEY`、`OPENCODE_API_KEY` 与 Credential keyring：DeepSeek V4 Flash 与 DeepSeek V4 Pro 共同引用一份加密 `model_api_key` Credential，GPT 5.6 Luna 使用单独加密的 OpenCode Credential，Flash 仍为默认模型；运行时仍只读取数据库，不隐式加载 dotenv，也不把 provider key 作为进程级模型配置。直接从 `backend/` 启动的模块命令会通过显式安全入口读取根 `.env` 中的数据库、鉴权等非模型配置（显式进程环境优先），并在启动角色前移除模型 provider API key。缺少 key 或 keyring 时，初始化命令会在创建目标库前失败，不留下半初始化库。项目 Skill、Agent Builder、Skill Builder、Skill Credential 绑定、无明文 Run snapshot 与 Credential 逻辑删除都已包含在这份完整 schema 中。运行时不会建库、升级、stamp 或修复 schema；应用 role 需要预先存在，并建议使用非 superuser role。
 
 ```bash
 # 在根目录 .env 中配置 DATABASE_URL、POSTGRES_ADMIN_URL、
@@ -165,7 +170,7 @@ make setup-db
 make check-db
 ```
 
-`make check-db` 只读校验 schema marker 与必需对象，输出三态：`ready`（已在迁移链头）、`upgrade_required`（处于已知历史 revision，先备份数据库再运行 `make upgrade-db` 显式升级到链头）、其余未知 marker、未纳管非空 schema 或 catalog drift 保持 fail-closed，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。`make upgrade-db` 是唯一升级入口（不支持 downgrade），升级后会重算 catalog 校验，结果必须与全新安装完全一致；运行时进程永不自动迁移。
+`make check-db` 只读校验 schema marker 与必需对象，输出三态：`ready`（已在迁移链头）、`upgrade_required`（处于已知历史 revision，先备份数据库再运行 `make upgrade-db` 显式升级到链头）、其余未知 marker、未纳管非空 schema 或 catalog drift 保持 fail-closed，必须新建空库后重新运行 `make setup-db`；命令不会输出完整连接 URL 或密码。`make upgrade-db` 是唯一升级入口（不支持 downgrade），升级后会重算 catalog 校验，结果必须与全新安装完全一致；运行时进程永不自动迁移。全局按月清理 `run_events` 使用 `make prune-run-events ARGS="--before YYYY-MM-01T00:00:00Z"` 只读预览，确认备份与全租户保留边界后追加 `--yes` 才会 DROP 完整旧分区；project/account/owner 删除仍走精确作用域逐行 DELETE。
 
 ### 4. 启动
 
@@ -235,9 +240,11 @@ System Agent、Skill 和 MCP 在显式数据库 setup 过程中由受校验的 p
 
 使用 HTTP 时，请求头和查询参数中的 Credential 会以明文经过网络，只适用于可信内网；跨越不可信网络时应使用 HTTPS。query 密钥按协议会出现在发送给出口代理和远端服务的 request-target 中，因此代理及上游访问日志必须禁用查询串记录或对其完整脱敏；服务支持 header 鉴权时应优先使用 header。Worker 对工具发现和每次调用重新校验快照与目标网段、禁用重定向和环境代理，并执行平台级硬超时。部署可选启用 `mcp_security.require_egress_proxy` 和 `egress_proxy_url`，由受控出口进一步实施独立网络策略。项目 MCP 在新建或编辑后，只要配置已经发布，发布事务就会同时加入一次持久化工具发现任务；带 Credential 的配置会在凭据绑定并固定完整授权闭包后再加入任务。Worker 只执行 MCP 初始化和工具列表读取，不调用任何工具，详情会显示测试中、工具名称与说明，失败时保留已保存配置并提供“重新测试”。Gateway 和浏览器不会连接外部 MCP，也不会解密 Credential；工具目录只是显示用观测，每次真实 Run 仍会重新发现并校验工具。发现失败、Credential 授权变化或配置变化会分别显示降级、失败或过期说明。历史不兼容配置仍可审计读取，Project MCP 历史 API 继续只返回远程 HTTP(S) origin，不回放可能携带凭据的路径或查询参数，也不能用于新的 Agent Run。只有具备编辑权限的专用 `GET /api/projects/{project_id}/mcp-servers/{asset_id}/configured` 会返回当前可编辑配置中经过校验的完整 IP 路径，且仍不返回内嵌凭据、查询参数、片段或 Credential 值。项目详情不再把“归档”作为主操作：具备当前已发布配置的项目自建 MCP 可停用并重新启用，重新启用时会再次校验定义和 Credential 闭包；详情危险操作区经过二次确认和 5 秒等待后可永久删除未被引用的项目 MCP 及其内部修订、槽位和授权配置。仍被 Agent revision 或历史 Run/授权快照引用时返回 `409`，不会级联删除引用方；系统 MCP 永远不可删除。
 
-项目 Agent 页面使用项目自建 Agent 卡片：卡片主体进入详情，已配置、启用且具备执行权限的 Agent 可从卡片直接创建绑定到该 Agent 的私有对话。新建入口会先创建一个仅绑定当前项目与当前账号的可恢复设计会话，再通过对话和澄清让模型生成 `AGENTS.md`、`SOUL.md`、`IDENTITY.md` 与 `USER.md` 四项候选设定；模型不能直接写库、发布或启用资产。用户预览、修改并最终确认后，后端才在一个事务里创建默认停用的 Agent、写入首份完整内部配置并结束设计会话；确认响应只返回设计会话和 Agent，不暴露内部 revision。同一项目的 Agent slug 不可重复，中断的生成可重试，设计消息和候选稿随精确项目/账号隐私范围清理。详情顶部只显示名称与最近更新时间，不提供 Agent 归档；卡片与详情为具备权限的停用态 Agent 提供启用动作，启用态详情提供停用动作。列表不提供删除入口；项目自建 Agent 仅在详情页经过二次确认和 5 秒等待后才可永久删除整个 Agent 及全部设置。已有对话、自动化或 Run snapshot 引用时返回 `409`，不会级联删除私有历史；系统 Agent 永远不可删除。四个名称只是映射到 Agent 内部配置字段的固定逻辑文档，不创建物理文件或独立文件版本。保存会在同一事务中复制当前运行配置、写入新的内部 revision 并移动当前指针；停用状态不会阻止继续编辑。后续新准入 Run 会立即使用新设置，无需重启服务；已经准入的 Run 继续使用当次固定的精确版本，后续发布不会替换它们。Worker 在物化和每个副作用边界仍会重验项目归属、资产状态、System binding、Credential 闭包与执行权限，停用、解绑或撤销会按安全边界 fail closed。四项内容位于其他项目可配置提示之后，是最高的项目可配置提示层，并紧邻最终平台关键提醒之前；平台安全、授权与隔离规则无论位于模板何处都始终优先；Main 委派时为每个子 Agent 注入其自身的精确准入快照，而不是继承 Main 的全量资产。
+项目 Agent 页面上下分为系统 Agent 与项目 Agent 两个区域，并由页面顶部的同一个切换器统一显示为卡片或列表；当前默认 Agent 在所属区域排在第一位。Main 与其他非默认项目 Agent 使用相同的“设为默认”动作，当前默认项只显示状态而不提供“恢复 Main”。条目主体进入详情，已配置、启用且具备执行权限的 Agent 可直接创建绑定到该 Agent 的私有对话。新建入口会先创建一个仅绑定当前项目与当前账号的可恢复设计会话；用户提交初始描述后，模型先生成第一张职责澄清卡片，卡片提供与会话相同的若干动态选项及“其他”自由输入。每次只展示一题；保存当前答案后，模型必须结合初始描述和前面全部问答生成下一题，不预设或一次性生成后续问题。完成三轮后模型才生成 `AGENTS.md`、`SOUL.md`、`IDENTITY.md` 与 `USER.md` 四项候选设定；设计输入栏可为每个对话轮次选择当前可用的系统逻辑模型，该选择只驱动提问与候选稿生成，不会改写候选 Agent 的运行模型配置；候选稿首次生成时会默认固定当前运行配置中的全部内部工具组（含 `task`），并引用当前项目已启用绑定、资产有效且版本已发布的全部 System Skill 与 System MCP，未绑定或已停用的系统资产不会自动开放；模型不能直接写库、发布或启用资产。用户预览、修改并最终确认后，后端才在一个事务里创建默认停用的 Agent、写入首份完整内部配置并结束设计会话；确认响应只返回设计会话和 Agent，不暴露内部 revision。同一项目的 Agent slug 不可重复，中断的生成可重试；未完成列表为每个设计草稿提供独立删除入口，经过确认并校验列表返回的当前 revision 后结束该会话并立即移出列表，不会创建、修改或删除正式 Agent。设计消息和候选稿随精确项目/账号隐私范围清理。详情顶部只显示名称与最近更新时间，不提供 Agent 归档；项目自建 Agent 详情提供“Agent 设定”和“工具绑定”两个页签，工具绑定可随时增删当前项目有权使用的已发布 Skill/MCP，并区分系统与项目来源；内置工具组保持创建时配置。保存绑定会保留模型、简介和四项设定，在同一事务中发布下一不可变版本，版本记录展示每版的工具组、Skill 与 MCP 数量；恢复历史版本会复制其完整配置并发布为新的最新版本，不覆盖原记录。卡片与详情为具备权限的停用态 Agent 提供启用动作，启用态详情提供停用动作。正式 Agent 列表不提供删除入口；项目自建 Agent 仅在详情页经过二次确认和 5 秒等待后才可永久删除整个 Agent 及全部设置。已有对话、自动化或 Run snapshot 引用时返回 `409`，不会级联删除私有历史；系统 Agent 永远不可删除。四个名称只是映射到 Agent 内部配置字段的固定逻辑文档，不创建物理文件或独立文件版本。保存会在同一事务中复制当前运行配置、写入新的内部 revision 并移动当前指针；停用状态不会阻止继续编辑。后续新准入 Run 会立即使用新设置，无需重启服务；已经准入的 Run 继续使用当次固定的精确版本，后续发布不会替换它们。Worker 在物化和每个副作用边界仍会重验项目归属、资产状态、System binding、Credential 闭包与执行权限，停用、解绑或撤销会按安全边界 fail closed。四项内容位于其他项目可配置提示之后，是最高的项目可配置提示层，并紧邻最终平台关键提醒之前；平台安全、授权与隔离规则无论位于模板何处都始终优先；Main 委派时为每个子 Agent 注入其自身的精确准入快照，而不是继承 Main 的全量资产。
 
-Agent 不向用户提供创建版本、选择版本或发布版本的操作。项目与管理员代管项目 API 只保留内部 revision 历史的只读查询；Builder 确认和四项指令保存由后端内部原子维护不可变 revision，Run snapshot 仍固定实际使用的精确配置。
+Agent Builder 完成三轮职责澄清后，会由同一次模型生成基于完整 Agent 设定的一句简短简介；最初的用户描述只作为设计输入，不会直接写入正式 Agent 简介，模型若原样复制会进入一次受限修复重试。
+
+Agent 不向用户提供底层的空白版本创建或手动发布操作。详情可选择并查看版本记录，也可把历史发布版本复制成新的最新版本；Builder 确认、四项指令保存、工具绑定保存和版本恢复都由后端原子维护不可变 revision。Run snapshot 仍固定实际使用的精确配置。
 
 项目 Skill 的显示名称在同一项目内大小写不敏感且不可重复，不同项目可使用相同名称；`SKILL.md` frontmatter `name` 必须与资产 slug 完全一致。列表的新建菜单提供“AI 对话创建”“从空白创建”和“上传压缩包”三种入口。AI 对话创建会先建立仅绑定当前项目与账号的可恢复设计会话，固定当时已发布的系统 `skill-creator` 版本，并由无工具的一次性模型生成临时候选文件包；用户可以按目录预览和修改文件，每次变化后都要重新检查，最终确认才会原子创建默认停用、已发布版本 1 且尚未绑定任何 Agent 的项目 Skill。Builder 通过文件的安全相对路径还原 `scripts/`、`references/`、`templates/` 等目录，只接受 UTF-8 文本文件，不能表示空目录、二进制文件或可执行权限位；当前人工编辑区可修改 AI 已生成的文件，新增、删除或重命名文件需要继续通过对话让 AI 更新候选包。放弃会话会清除候选文件，未完成会话数量和文件大小均受限，敏感凭据样式的名称、消息或文件不会进入设计存储或模型输入。
 
@@ -281,9 +288,10 @@ deer-flow/
 | `make setup-db`                                               | 在空库执行完整 schema 并初始化 PostgreSQL               |
 | `make upgrade-db`                                             | 显式升级存量库到迁移链头（先备份，不支持 downgrade）    |
 | `make check-db`                                               | 只读检查 PostgreSQL marker 与必需对象                   |
+| `make prune-run-events ARGS="--before ..."`                  | 预览全局 UTC 月分区保留；追加 `--yes` 执行 DROP          |
 | `cd backend && make lint`                                     | 后端格式与静态检查                                      |
 | `cd frontend && pnpm check && pnpm test`                      | 前端 lint、类型检查与单元测试                           |
-| `POSTGRES_TEST_URL=... make test`                             | 运行后端核心测试（含真实 PostgreSQL）；仅限可丢弃实例   |
+| `make test`                                                   | 从开发环境 `DATABASE_URL` 派生随机测试库并运行后端核心测试 |
 
 完整命令列表运行 `make help`。
 

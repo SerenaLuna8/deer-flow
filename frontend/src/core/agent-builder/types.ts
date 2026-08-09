@@ -108,6 +108,7 @@ export const agentBuilderSessionSchema = z
     blueprint_checksum: z.string().trim().min(1).nullable(),
     messages: z.array(agentBuilderMessageSchema),
     active_clarification: humanInputRequestSchema.nullable(),
+    active_clarifications: z.array(humanInputRequestSchema),
     progress: z.array(agentBuilderProgressItemSchema),
     error_code: z.string().trim().min(1).nullable(),
     error_message: z.string().trim().min(1).nullable(),
@@ -123,6 +124,7 @@ export const agentBuilderSessionSummarySchema = z
     slug: z.string().trim().min(1),
     display_name: z.string().trim().min(1),
     status: agentBuilderStatusSchema,
+    revision: z.number().int().positive(),
     updated_at: timestampSchema,
   })
   .strict();
@@ -187,6 +189,13 @@ export const agentBuilderTurnInputSchema = z
       agentBuilderClarificationTurnInputSchema,
       agentBuilderBlueprintTurnInputSchema,
     ]),
+    generation_model_ref: z
+      .string()
+      .trim()
+      .min(1)
+      .max(128)
+      .regex(/^(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)$/u)
+      .optional(),
     expected_revision: z.number().int().positive(),
     idempotency_key: z.string().trim().min(1),
   })

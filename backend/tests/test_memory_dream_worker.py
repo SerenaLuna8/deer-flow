@@ -12,10 +12,12 @@ from app.system_runtime_settings.models import AgentRuntimePolicyValue, MemoryPo
 from app.worker.memory_dream import MemoryDreamJobHandler
 from app.worker.service import JobSettlement
 from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
     DREAM_PROMPT_VERSION,
     EMPTY_MEMORY_DOCUMENT,
     MemoryDreamError,
     MemoryDreamResult,
+    render_empty_memory_document,
 )
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -225,6 +227,8 @@ def _work() -> MemoryDreamWork:
         base_document_version=0,
         base_content=EMPTY_MEMORY_DOCUMENT,
         base_content_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+        sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+        sections_policy_version_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
         preference_version=6,
         policy_revision=17,
         model_config_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
@@ -316,6 +320,8 @@ async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() ->
     await settlement.commit()
     assert len(state.finalized) == 1
     assert state.finalized[0]["content"] == EMPTY_MEMORY_DOCUMENT
+    assert state.finalized[0]["expected_sections"] == DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
+    assert runner.inputs[0].sections == DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
     assert not state.released
 
 
@@ -377,6 +383,67 @@ async def test_dream_worker_can_shrink_a_document_after_the_budget_is_lowered() 
     assert runner.inputs[0].max_tokens == 2_000
     await settlement.commit()
     assert state.finalized[0]["content"] == EMPTY_MEMORY_DOCUMENT
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_uses_frozen_custom_sections_for_input_and_settlement() -> None:
+    sections = ("协作方式", "架构边界", "当前目标")
+    content = render_empty_memory_document(sections)
+    work = replace(
+        _work(),
+        base_content=content,
+        base_content_digest=memory_document_digest(content),
+        sections=sections,
+    )
+    factory = _SessionFactory()
+    state = _RepositoryState(work)
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(content=content, replaced=False),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "succeeded"
+    assert runner.inputs[0].sections == sections
+    await settlement.commit()
+    assert state.finalized[0]["expected_sections"] == sections
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_rejects_output_with_non_frozen_sections() -> None:
+    sections = ("协作方式", "架构边界", "当前目标")
+    content = render_empty_memory_document(sections)
+    work = replace(
+        _work(),
+        base_content=content,
+        base_content_digest=memory_document_digest(content),
+        sections=sections,
+    )
+    factory = _SessionFactory()
+    state = _RepositoryState(work)
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(content=EMPTY_MEMORY_DOCUMENT, replaced=True),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.public_error_code == "MEMORY_DREAM_OUTPUT_INVALID"
+    await settlement.commit()
+    assert state.finalized == []
 
 
 @pytest.mark.asyncio
@@ -543,6 +610,50 @@ async def test_dream_worker_cancel_releases_processing_history_without_model() -
     await settlement.commit()
     assert not runner.inputs
     assert state.released[0]["cancelled"] is True
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_prompt_version_drift_cancels_without_retry_or_model() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(
+        replace(
+            _work(),
+            prompt_version="dream-prompt-retired",
+        )
+    )
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, model_materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.status == "cancelled"
+    assert not model_materializer.exact
+    assert not runner.inputs
+    await settlement.commit()
+    assert not state.finalized
+    assert state.released == [
+        {
+            "job_id": _claim().job_id,
+            "lease_token": _claim().lease_token,
+            "now": state.released[0]["now"],
+            "cancelled": True,
+            "public_error_code": "MEMORY_DREAM_CANCELLED",
+            "retryable": False,
+            "retry_initial_seconds": 5,
+            "retry_max_seconds": 300,
+        }
+    ]
 
 
 def test_server_diff_is_empty_for_no_change_and_real_for_replacement() -> None:

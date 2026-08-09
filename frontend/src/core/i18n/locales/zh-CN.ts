@@ -287,6 +287,10 @@ export const zhCN: Translations = {
   project: {
     audit: "审计",
     automations: "自动化",
+    agents: "智能体",
+    skills: "技能",
+    mcp: "工具",
+    memory: "记忆",
     usage: "用量",
     governance: {
       retry: "重试",
@@ -308,6 +312,8 @@ export const zhCN: Translations = {
       usage: {
         title: "项目用量",
         description: "查看有效配额和当前项目用量。",
+        settingsDescription:
+          "由平台管理员收紧该项目的配额上限；实时占用与有效限额可在项目概览查看。",
         loading: "正在加载用量",
         unavailableTitle: "暂时无法读取用量",
         unavailableDescription: "无法安全读取项目用量服务。",
@@ -335,6 +341,21 @@ export const zhCN: Translations = {
         emptyTitle: "暂无审计事件",
         emptyDescription: "该项目尚无已记录的治理事件。",
         olderEvents: "更早的事件",
+        previousPage: "上一页",
+        nextPage: "下一页",
+        page: (page) => `第 ${page} 页`,
+        pageSize: "每页",
+        pageSizeOption: (pageSize) => `${pageSize}`,
+        itemsOnPage: (count) => `本页 ${count} 条`,
+        columns: {
+          time: "时间",
+          action: "操作",
+          outcome: "结果",
+          actor: "执行者",
+          target: "对象",
+          details: "详情",
+          error: "错误",
+        },
       },
     },
   },
@@ -739,6 +760,11 @@ export const zhCN: Translations = {
         description:
           "控制新任务的预算、上下文、记忆、工具结果和安全边界。已在运行的任务不受本次修改影响。",
       },
+      memoryDocument: {
+        title: "Memory 文档章节",
+        description:
+          "定义新建 Memory 文档的章节模板。仅影响新建文档；已有文档继续使用创建时冻结的章节结构。",
+      },
     },
     groups: {
       runLimits: "运行预算与限制",
@@ -760,6 +786,14 @@ export const zhCN: Translations = {
       addRow: "添加一项",
       removeRow: "移除",
       listHint: "使用英文逗号分隔，保存时会去除空项和重复项。",
+      memoryDocumentSections: "章节标题",
+      memoryDocumentSectionsHint:
+        "按文档中的出现顺序填写 2–8 个纯标题。不要输入 # 或 Dream 历史标记，系统会生成 Markdown 一级标题；每项最多 80 个字符且不可重复。",
+      memoryDocumentSectionInput: (position) => `Memory 文档章节 ${position}`,
+      addMemoryDocumentSection: "添加章节",
+      removeMemoryDocumentSection: (position) => `删除章节 ${position}`,
+      moveMemoryDocumentSectionUp: (position) => `上移章节 ${position}`,
+      moveMemoryDocumentSectionDown: (position) => `下移章节 ${position}`,
     },
     common: {
       save: "保存修改",
@@ -776,6 +810,7 @@ export const zhCN: Translations = {
       newRequests: "后续请求生效",
       newRuns: "新任务生效",
       newRequestsAndRuns: "新请求和新任务生效",
+      newMemoryDocuments: "仅新建 Memory 文档",
       nextAuthoritativeCheck: "下次配额校验生效",
       restartRequired: "重启服务后生效",
     },
@@ -799,6 +834,7 @@ export const zhCN: Translations = {
       skill: "Skill",
       mcp: "MCP",
       credential: "凭据",
+      quota: "配额",
     },
     shell: {
       platformAria: "平台资产管理",
@@ -1299,7 +1335,14 @@ export const zhCN: Translations = {
   },
 
   automation: {
+    title: "自动化",
     create: "创建自动化",
+    editTitle: "编辑自动化",
+    deleteTitle: "删除自动化",
+    emptyTitle: "还没有自动化",
+    emptyDescription: "创建后可按 Cron 或单次时间运行项目 Agent。",
+    filterEmptyTitle: "没有符合筛选条件的自动化",
+    selectPrompt: "请选择一个自动化。",
     runNow: "立即运行",
     schedulerDisabled: "自动调度当前已关闭",
     migrationRequired: "需要完成自动化迁移",
@@ -1640,7 +1683,7 @@ export const zhCN: Translations = {
     clickToViewContent: "点击查看文件内容",
     writeTodos: "更新 To-do 列表",
     rememberMemory: "写入记忆",
-    remembered: "已记住，等待下次整理",
+    remembered: "已记住：",
     skillInstallTooltip: "安装技能并使其可在 ActWeave 中使用",
   },
 
@@ -1777,7 +1820,6 @@ export const zhCN: Translations = {
       memory: "记忆",
       tools: "工具",
       skills: "技能",
-      notification: "通知",
     },
     memory: {
       title: "记忆",
@@ -1867,23 +1909,14 @@ export const zhCN: Translations = {
       loading: "正在加载技能内容",
       retry: "重试",
     },
-    notification: {
-      title: "通知",
-      description:
-        "ActWeave 只会在窗口不活跃时发送完成通知，特别适合长时间任务：你可以先去做别的事，完成后会收到提醒。",
-      requestPermission: "请求通知权限",
-      deniedHint:
-        "通知权限已被拒绝。可在浏览器的网站设置中重新开启，以接收完成提醒。",
-      testButton: "发送测试通知",
-      testTitle: "ActWeave",
-      testBody: "这是一条测试通知。",
-      notSupported: "当前浏览器不支持通知功能。",
-      disableNotification: "关闭通知",
-    },
     account: {
       profileTitle: "个人信息",
       email: "邮箱",
       role: "角色",
+      roles: {
+        system_admin: "系统管理员",
+        user: "普通用户",
+      },
       ssoProvider: "SSO",
       changePasswordTitle: "修改密码",
       changePasswordDescription: "更新你的账号密码。",

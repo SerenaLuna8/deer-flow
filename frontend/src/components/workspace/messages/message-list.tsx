@@ -58,7 +58,6 @@ import {
   isHiddenFromUIMessage,
   type MessageGroup as MessageGroupModel,
 } from "@/core/messages/utils";
-import type { RunExecutionProfile } from "@/core/private-work/execution-profile";
 import { useRehypeSplitWordsIntoSpans } from "@/core/rehype";
 import {
   buildMessageSidecarContext,
@@ -72,7 +71,6 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
-import { agentModeForRunExecutionProfile } from "@/core/threads/agent-mode";
 import { cn } from "@/lib/utils";
 
 import { useArtifacts } from "../artifacts";
@@ -310,7 +308,6 @@ export function MessageList({
   sidecarSurface = false,
   initialScroll = "smooth",
   resizeScroll = "smooth",
-  runExecutionProfiles,
 }: {
   className?: string;
   testId?: string;
@@ -348,7 +345,6 @@ export function MessageList({
   sidecarSurface?: boolean;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
-  runExecutionProfiles?: ReadonlyMap<string, RunExecutionProfile>;
 }) {
   const { t } = useI18n();
   const {
@@ -1218,56 +1214,16 @@ export function MessageList({
     content: ReactNode,
     displays: ReturnType<typeof resolveRunDurationDisplays>,
   ) => {
-    const messageRunIds = group.messages.flatMap((message) => {
-      const directRunId = Reflect.get(message, "run_id");
-      const additionalRunId = message.additional_kwargs?.run_id;
-      const runId =
-        typeof directRunId === "string" ? directRunId : additionalRunId;
-      return typeof runId === "string" ? [runId] : [];
-    });
-    const profileRunId = group.type.startsWith("assistant")
-      ? [...displays.map((display) => display.runId), ...messageRunIds].find(
-          (runId) => runExecutionProfiles?.has(runId),
-        )
-      : undefined;
-    const runExecutionProfile = profileRunId
-      ? runExecutionProfiles?.get(profileRunId)
-      : undefined;
-
-    if (!content && displays.length === 0 && !runExecutionProfile) {
+    if (!content && displays.length === 0) {
       return null;
     }
 
-    const mode = runExecutionProfile
-      ? agentModeForRunExecutionProfile(runExecutionProfile)
-      : null;
-    const modeName =
-      mode === "flash"
-        ? t.inputBox.flashMode
-        : mode === "thinking"
-          ? t.inputBox.reasoningMode
-          : mode === "pro"
-            ? t.inputBox.proMode
-            : t.inputBox.ultraMode;
-
     return (
       <div
-        key={`duration-group:${group.id ?? groupIndex}`}
+        key={`duration-group:${group.id ?? group.messages[0]?.id ?? groupIndex}`}
         className="flex w-full flex-col gap-2"
       >
         {content}
-        {runExecutionProfile && mode && (
-          <div
-            className="text-muted-foreground text-xs"
-            data-testid="run-execution-profile"
-          >
-            {t.conversation.runExecutionProfile(
-              runExecutionProfile.model_name,
-              modeName,
-              runExecutionProfile.supports_vision,
-            )}
-          </div>
-        )}
         {displays.map((display) => (
           <RunDuration
             key={display.runId}

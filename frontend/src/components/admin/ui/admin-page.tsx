@@ -258,9 +258,7 @@ export function AdminCursorPagination({
               aria-label={pageSizeLabel}
               value={pageSize}
               disabled={busy}
-              onChange={(event) =>
-                onPageSizeChange(Number(event.target.value))
-              }
+              onChange={(event) => onPageSizeChange(Number(event.target.value))}
               className="border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 h-8 rounded-md border px-2 text-xs outline-none focus-visible:ring-[3px]"
             >
               {pageSizeOptions.map((option) => (

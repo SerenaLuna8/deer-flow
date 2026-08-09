@@ -10,17 +10,24 @@ Acceptance pins from the upgrade plan:
 - calls on one session are serialized (MCP sessions are not
   concurrency-safe) and an idle session closes proactively.
 
-The fake opener stands in for the initialize handshake, so "initialize
-count" == "open count" without a network server.
+Most cache races use a small fake opener. A separate in-process Streamable
+HTTP MCP server drives the real MCP SDK and LangChain adapter, proving five
+tool calls use one initialized ``ClientSession`` instead of caching wrappers
+that reconnect for every invocation.
 """
 
 import asyncio
+import json
+import time
 import uuid
+from collections import Counter
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from langchain_core.tools import ToolException
+from mcp.server.fastmcp import FastMCP
 
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
 from app.private_work.mcp_run_sessions import McpRunSessionCache
@@ -224,6 +231,545 @@ class _RemoteTool:
         return {"ok": True}
 
 
+@pytest.mark.asyncio
+async def test_http_reuse_binds_tools_to_one_initialized_client_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catch the adapter's connection-bound wrapper false positive.
+
+    ``MultiServerMCPClient.get_tools`` only caches LangChain wrappers: its
+    wrappers open and initialize a new ClientSession for every invocation.
+    A Run cache must instead enter ``client.session`` once and load tools
+    against that live session.
+    """
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    counts = {
+        "initialize": 0,
+        "session_exit": 0,
+        "get_tools": 0,
+        "connection_calls": 0,
+        "session_calls": 0,
+    }
+    owner_tasks: dict[str, asyncio.Task[Any] | None] = {}
+    fake_session = object()
+    server_name = ""
+
+    class ConnectionBoundTool:
+        name = ""
+
+        async def ainvoke(self, _args: dict) -> dict:
+            # This models the adapter wrapper returned by get_tools(): every
+            # call opens and initializes another transport session.
+            counts["initialize"] += 1
+            counts["connection_calls"] += 1
+            return {"ok": True}
+
+    class SessionBoundTool:
+        name = ""
+
+        async def ainvoke(self, _args: dict) -> dict:
+            counts["session_calls"] += 1
+            return {"ok": True}
+
+    class FakeSessionContext:
+        async def __aenter__(self) -> object:
+            owner_tasks["enter"] = asyncio.current_task()
+            counts["initialize"] += 1
+            return fake_session
+
+        async def __aexit__(self, *_exc_info: object) -> None:
+            owner_tasks["exit"] = asyncio.current_task()
+            counts["session_exit"] += 1
+
+    class FakeAdapterClient:
+        def __init__(self, connections: dict[str, object], **_kwargs: object) -> None:
+            nonlocal server_name
+            server_name = next(iter(connections))
+            ConnectionBoundTool.name = f"{server_name}_echo"
+            SessionBoundTool.name = f"{server_name}_echo"
+            self.callbacks = object()
+            self.tool_interceptors: list[object] = []
+
+        async def get_tools(self, *, server_name: str) -> list[ConnectionBoundTool]:
+            counts["get_tools"] += 1
+            counts["initialize"] += 1
+            return [ConnectionBoundTool()]
+
+        def session(self, server_name: str) -> FakeSessionContext:
+            return FakeSessionContext()
+
+    async def fake_load_mcp_tools(
+        session: object,
+        **_kwargs: object,
+    ) -> list[SessionBoundTool]:
+        assert session is fake_session
+        return [SessionBoundTool()]
+
+    monkeypatch.setattr(
+        "langchain_mcp_adapters.client.MultiServerMCPClient",
+        FakeAdapterClient,
+    )
+    monkeypatch.setattr(
+        "langchain_mcp_adapters.tools.load_mcp_tools",
+        fake_load_mcp_tools,
+    )
+
+    version_id = uuid.uuid4()
+    key = _key(version_id)
+    cache = McpRunSessionCache()
+    definition = {
+        "transport": "http",
+        "url": "https://mcp.example.test/tools",
+    }
+    expected_name = f"project_{version_id.hex[:16]}_echo"
+
+    for _ in range(2):
+        assert await PrivateAgentRuntime._invoke_exact_mcp(
+            version_id,
+            definition,
+            {},
+            expected_name,
+            {},
+            session_cache=cache,
+            session_key=key,
+        ) == {"ok": True}
+
+    # Run-end cleanup need not originate from the task that first called the
+    # tool. The session owner must still exit the anyio context in its own task.
+    await asyncio.create_task(cache.aclose())
+
+    assert server_name == f"project_{version_id.hex[:16]}"
+    assert owner_tasks["enter"] is owner_tasks["exit"]
+    assert counts == {
+        "initialize": 1,
+        "session_exit": 1,
+        "get_tools": 0,
+        "connection_calls": 0,
+        "session_calls": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -> None:
+    """Exercise the actual MCP SDK, adapter loader, and production invoke path."""
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+
+    server = FastMCP(
+        "run-session-probe",
+        stateless_http=True,
+        log_level="ERROR",
+    )
+
+    @server.tool()
+    def echo(value: str) -> str:
+        return value
+
+    app = server.streamable_http_app()
+    methods: Counter[str] = Counter()
+
+    async def counting_app(scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        received: list[dict[str, Any]] = []
+        body = b""
+        while True:
+            message = await receive()
+            received.append(message)
+            if message["type"] != "http.request":
+                break
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        try:
+            payload = json.loads(body)
+            requests = payload if isinstance(payload, list) else [payload]
+            for request in requests:
+                method = request.get("method")
+                if isinstance(method, str):
+                    methods[method] += 1
+                    if method == "initialize":
+                        # Make handshake cost deterministic enough to preserve
+                        # a comparison record without relying on real network.
+                        await asyncio.sleep(0.02)
+        except (TypeError, ValueError):
+            pass
+
+        index = 0
+
+        async def replay_receive():
+            nonlocal index
+            if index < len(received):
+                message = received[index]
+                index += 1
+                return message
+            return await receive()
+
+        await app(scope, replay_receive, send)
+
+    def http_client_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=counting_app),
+            base_url="http://localhost:8000",
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+
+    version_id = uuid.uuid4()
+    definition = {
+        "transport": "http",
+        "url": "http://localhost:8000/mcp",
+    }
+    tool_name = f"project_{version_id.hex[:16]}_echo"
+    key = _key(version_id, checksum="a" * 64, digest="b" * 64)
+
+    async with app.router.lifespan_context(app):
+        cache = McpRunSessionCache()
+        reused_started = time.monotonic()
+        reused_results = [
+            await PrivateAgentRuntime._invoke_exact_mcp(
+                version_id,
+                definition,
+                {},
+                tool_name,
+                {"value": str(index)},
+                http_client_factory=http_client_factory,
+                session_cache=cache,
+                session_key=key,
+            )
+            for index in range(5)
+        ]
+        reused_elapsed = time.monotonic() - reused_started
+        await cache.aclose()
+        reused_methods = methods.copy()
+
+        methods.clear()
+        one_shot_started = time.monotonic()
+        one_shot_results = [
+            await PrivateAgentRuntime._invoke_exact_mcp(
+                version_id,
+                definition,
+                {},
+                tool_name,
+                {"value": str(index)},
+                http_client_factory=http_client_factory,
+            )
+            for index in range(5)
+        ]
+        one_shot_elapsed = time.monotonic() - one_shot_started
+
+    assert [result[0]["text"] for result in reused_results] == [str(index) for index in range(5)]
+    assert [result[0]["text"] for result in one_shot_results] == [str(index) for index in range(5)]
+    assert reused_methods == Counter(
+        {
+            "initialize": 1,
+            "notifications/initialized": 1,
+            "tools/list": 1,
+            "tools/call": 5,
+        }
+    )
+    # The previous adapter-wrapper path initializes once to list tools and once
+    # again to call the selected tool, for every call in the five-call sample.
+    assert methods == Counter(
+        {
+            "initialize": 10,
+            "notifications/initialized": 10,
+            "tools/list": 10,
+            "tools/call": 5,
+        }
+    )
+    assert one_shot_elapsed > reused_elapsed + 0.10
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_end(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin admission, PostgreSQL revalidation, proxy dispatch, and Run cleanup."""
+    from sqlalchemy import text
+    from support.private_thread_seed import seed_private_thread_database
+
+    from app.private_work.asset_runtime import PrivateAgentRuntime, PrivateAssetRuntime
+    from app.private_work.authorization import PrivateRunAuthorizationService
+    from app.private_work.run_admission import PrivateRunAdmissionService
+    from app.private_work.run_repository import PrivateRunCreate
+    from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+    from app.shared_assets.keyring import CredentialKeyring
+    from app.shared_assets.resolver import ProjectAssetResolver
+    from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
+
+    server = FastMCP(
+        "admitted-run-session-probe",
+        stateless_http=True,
+        log_level="ERROR",
+    )
+
+    @server.tool()
+    def echo(value: str) -> str:
+        return value
+
+    app = server.streamable_http_app()
+    methods: Counter[str] = Counter()
+
+    async def counting_app(scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        received: list[dict[str, Any]] = []
+        body = b""
+        while True:
+            message = await receive()
+            received.append(message)
+            if message["type"] != "http.request":
+                break
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        try:
+            payload = json.loads(body)
+            requests = payload if isinstance(payload, list) else [payload]
+            for request in requests:
+                method = request.get("method")
+                if isinstance(method, str):
+                    methods[method] += 1
+                    if method == "initialize":
+                        await asyncio.sleep(0.02)
+        except (TypeError, ValueError):
+            pass
+
+        index = 0
+
+        async def replay_receive():
+            nonlocal index
+            if index < len(received):
+                message = received[index]
+                index += 1
+                return message
+            return await receive()
+
+        await app(scope, replay_receive, send)
+
+    def http_client_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx.Timeout | None = None,
+        auth: httpx.Auth | None = None,
+    ) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=counting_app),
+            base_url="http://127.0.0.1:8000",
+            headers=headers,
+            timeout=timeout,
+            auth=auth,
+        )
+
+    endpoint = "http://127.0.0.1:8000/mcp"
+    endpoint_policy = NetworkMcpEndpointPolicy(("127.0.0.0/8",))
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    mcp_id = uuid.uuid4()
+    mcp_version_id = uuid.uuid4()
+    agent_id = uuid.uuid4()
+    agent_version_id = uuid.uuid4()
+    try:
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO mcp_servers
+                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    VALUES (:id,'project',:project_id,:slug,'Admitted Run MCP','active',1,:owner)"""
+                ),
+                {
+                    "id": mcp_id,
+                    "project_id": seed.owner_a.project_id,
+                    "slug": f"admitted-run-mcp-{mcp_id.hex[:12]}",
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO mcp_server_versions
+                    (id,mcp_server_id,version_number,workflow_status,description,
+                     transport,url,payload_checksum,created_by_user_id)
+                    VALUES (:id,:mcp_id,1,'published','admitted run probe',
+                            'http',:url,:checksum,:owner)"""
+                ),
+                {
+                    "id": mcp_version_id,
+                    "mcp_id": mcp_id,
+                    "url": endpoint,
+                    "checksum": "d" * 64,
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+            await session.execute(
+                text("UPDATE mcp_servers SET current_published_version_id=:version_id WHERE id=:mcp_id"),
+                {"version_id": mcp_version_id, "mcp_id": mcp_id},
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO agents
+                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    VALUES (:id,'project',:project_id,:slug,'MCP Run Agent','active',1,:owner)"""
+                ),
+                {
+                    "id": agent_id,
+                    "project_id": seed.owner_a.project_id,
+                    "slug": f"mcp-run-agent-{agent_id.hex[:12]}",
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO agent_versions
+                    (id,agent_id,version_number,workflow_status,description,soul,
+                     model_ref,tool_groups,payload_checksum,created_by_user_id)
+                    VALUES (:id,:agent_id,1,'draft','','mcp run agent','test-model',
+                            '[]'::jsonb,:checksum,:owner)"""
+                ),
+                {
+                    "id": agent_version_id,
+                    "agent_id": agent_id,
+                    "checksum": "e" * 64,
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO agent_version_mcp_refs
+                    (agent_version_id,mcp_server_version_id,sort_order)
+                    VALUES (:agent_version_id,:mcp_version_id,0)"""
+                ),
+                {
+                    "agent_version_id": agent_version_id,
+                    "mcp_version_id": mcp_version_id,
+                },
+            )
+            await session.execute(
+                text("UPDATE agent_versions SET workflow_status='published' WHERE id=:version_id"),
+                {"version_id": agent_version_id},
+            )
+            await session.execute(
+                text("UPDATE agents SET current_published_version_id=:version_id WHERE id=:agent_id"),
+                {"version_id": agent_version_id, "agent_id": agent_id},
+            )
+
+        original_is_active = PrivateRunAuthorizationService.is_active
+        original_materialize_call = PrivateAgentRuntime._materialize_mcp_call
+        revalidation_calls = 0
+        materialize_calls = 0
+
+        async def counted_is_active(session, **kwargs):
+            nonlocal revalidation_calls
+            revalidation_calls += 1
+            return await original_is_active(session, **kwargs)
+
+        async def counted_materialize_call(self, snapshot):
+            nonlocal materialize_calls
+            materialize_calls += 1
+            return await original_materialize_call(self, snapshot)
+
+        monkeypatch.setattr(
+            PrivateRunAuthorizationService,
+            "is_active",
+            staticmethod(counted_is_active),
+        )
+        monkeypatch.setattr(
+            PrivateAgentRuntime,
+            "_materialize_mcp_call",
+            counted_materialize_call,
+        )
+
+        elapsed_by_reuse: dict[bool, float] = {}
+        methods_by_reuse: dict[bool, Counter[str]] = {}
+        async with app.router.lifespan_context(app):
+            for reuse in (True, False):
+                thread_id = f"mcp-run-session-{reuse}-{uuid.uuid4()}"
+                async with seed.factory() as session, session.begin():
+                    await PrivateThreadRepository(session).create(
+                        scope=seed.owner_a_scope,
+                        thread_id=thread_id,
+                        agent=ThreadAgentRef(agent_id, "project"),
+                    )
+                admitted = await PrivateRunAdmissionService(
+                    seed.factory,
+                    endpoint_policy=endpoint_policy,
+                ).admit(
+                    seed.owner_a,
+                    thread_id,
+                    PrivateRunCreate(run_id=f"mcp-run-{reuse}-{uuid.uuid4()}"),
+                )
+
+                methods.clear()
+                resolver = ProjectAssetResolver(
+                    seed.factory,
+                    keyring=CredentialKeyring(
+                        active_key_id="mcp-run-test",
+                        _keys={"mcp-run-test": b"m" * 32},
+                    ),
+                )
+                runtime = await PrivateAssetRuntime(
+                    seed.factory,
+                    resolver=resolver,
+                    endpoint_policy=endpoint_policy,
+                    http_client_factory=http_client_factory,
+                    run_session_reuse=reuse,
+                ).materialize(seed.owner_a, admitted)
+                assert len(runtime.mcp_tools) == 1
+                materialize_baseline = materialize_calls
+                revalidation_baseline = revalidation_calls
+                started = time.monotonic()
+                results = [await runtime.mcp_tools[0].ainvoke({"value": str(index)}) for index in range(5)]
+                elapsed_by_reuse[reuse] = time.monotonic() - started
+                methods_by_reuse[reuse] = methods.copy()
+
+                assert [result[0]["text"] for result in results] == [str(index) for index in range(5)]
+                assert materialize_calls - materialize_baseline == 5
+                # Every proxy call revalidates before materialization, inside
+                # the locked materialization transaction, and before dispatch.
+                # One-shot mode performs one additional check while opening its
+                # per-call transport; reuse performs that check during discovery.
+                assert revalidation_calls - revalidation_baseline == (15 if reuse else 20)
+                cache = runtime._mcp_run_sessions
+                if reuse:
+                    assert cache is not None
+                    assert cache.active_session_count == 1
+                else:
+                    assert cache is None
+                await runtime.aclose()
+                assert runtime._closed is True
+                if cache is not None:
+                    assert cache.active_session_count == 0
+
+        assert methods_by_reuse[True] == Counter(
+            {
+                "initialize": 1,
+                "notifications/initialized": 1,
+                "tools/list": 1,
+                "tools/call": 5,
+            }
+        )
+        assert methods_by_reuse[False] == Counter(
+            {
+                "initialize": 11,
+                "notifications/initialized": 11,
+                "tools/list": 11,
+                "tools/call": 5,
+            }
+        )
+        assert elapsed_by_reuse[False] > elapsed_by_reuse[True] + 0.15
+    finally:
+        await seed.engine.dispose()
+
+
 def _patched_open(monkeypatch: pytest.MonkeyPatch, tool: _RemoteTool) -> _Opener:
     from app.private_work.asset_runtime import PrivateAgentRuntime
 
@@ -247,6 +793,11 @@ def _patched_open(monkeypatch: pytest.MonkeyPatch, tool: _RemoteTool) -> _Opener
     monkeypatch.setattr(
         PrivateAgentRuntime,
         "_open_project_mcp_session",
+        staticmethod(fake_open),
+    )
+    monkeypatch.setattr(
+        PrivateAgentRuntime,
+        "_open_reused_project_mcp_session",
         staticmethod(fake_open),
     )
     return opener
@@ -296,6 +847,42 @@ async def test_invoke_exact_mcp_without_a_cache_stays_one_shot(monkeypatch: pyte
 
     assert opener.count == 2
     assert all(client.close_count == 1 for client in opener.clients)
+
+
+def test_session_cache_key_is_limited_to_project_http_and_sse() -> None:
+    from app.private_work.asset_runtime import PrivateAgentRuntime
+    from app.shared_assets.models import AssetKind, AssetScope, ResolvedMcpSnapshot
+
+    def snapshot(scope: AssetScope, transport: str) -> ResolvedMcpSnapshot:
+        return ResolvedMcpSnapshot(
+            kind=AssetKind.MCP,
+            scope=scope,
+            asset_id=uuid.uuid4(),
+            version_id=uuid.uuid4(),
+            checksum=f"{scope.value}-{transport}",
+            catalog_generation=1,
+            dependency_version_ids=(),
+            definition={"transport": transport},
+            credential_grant_ids=(),
+        )
+
+    project_http = snapshot(AssetScope.PROJECT, "http")
+    project_sse = snapshot(AssetScope.PROJECT, "sse")
+    project_stdio = snapshot(AssetScope.PROJECT, "stdio")
+    system_http = snapshot(AssetScope.SYSTEM, "http")
+    runtime = object.__new__(PrivateAgentRuntime)
+    runtime._mcp_run_sessions = McpRunSessionCache()
+    runtime._mcp_snapshots = (
+        project_http,
+        project_sse,
+        project_stdio,
+        system_http,
+    )
+
+    assert runtime._mcp_session_key(project_http.version_id) is not None
+    assert runtime._mcp_session_key(project_sse.version_id) is not None
+    assert runtime._mcp_session_key(project_stdio.version_id) is None
+    assert runtime._mcp_session_key(system_http.version_id) is None
 
 
 def test_the_reuse_toggle_defaults_on_and_propagates() -> None:

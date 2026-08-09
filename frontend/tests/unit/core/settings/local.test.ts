@@ -28,11 +28,7 @@ test("migrates legacy automatic selections as non-authoritative", () => {
 
 test("applies a per-thread explicit model selection independently", () => {
   const settings = normalizeLocalSettings();
-  const selected = applyThreadModelOverride(
-    settings,
-    "gpt-5.6-luna",
-    true,
-  );
+  const selected = applyThreadModelOverride(settings, "gpt-5.6-luna", true);
 
   expect(selected.context.model_name).toBe("gpt-5.6-luna");
   expect(selected.context.model_selection_explicit).toBe(true);
@@ -46,11 +42,7 @@ test("applies an explicit mode per thread and otherwise keeps the global fallbac
     },
   });
 
-  const inherited = applyThreadModeOverride(
-    globalSettings,
-    undefined,
-    false,
-  );
+  const inherited = applyThreadModeOverride(globalSettings, undefined, false);
   const selected = applyThreadModeOverride(globalSettings, "ultra", true);
 
   expect(inherited.context.mode).toBe("pro");

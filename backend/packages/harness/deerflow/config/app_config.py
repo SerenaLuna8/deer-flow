@@ -81,7 +81,7 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
     }
 )
 
-YAML_CONFIG_TOMBSTONES = frozenset({"models"})
+YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models"})
 
 DATABASE_RUNTIME_POLICY_PATHS = frozenset(
     {

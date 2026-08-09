@@ -541,7 +541,7 @@ export function HumanInputCard({
             <MarkdownContent content={request.question} isLoading={false} />
           </div>
 
-          <form className="space-y-4" onSubmit={handleSubmit}>
+          <form className="relative space-y-4" onSubmit={handleSubmit}>
             {isForm
               ? fields.map((field, index) => {
                   const controlId = `${formFieldIdBase}-${index}`;

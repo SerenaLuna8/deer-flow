@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 from sqlalchemy.dialects import postgresql
 
 import app.private_work.memory_authority as authority_module
@@ -253,6 +256,33 @@ class _Runs:
         return SimpleNamespace(thread_id=self.thread_id, job_id=self.job_id)
 
 
+class _Threads:
+    def __init__(
+        self,
+        _session,
+        *,
+        thread_id: str,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+    ) -> None:
+        self.thread_id = thread_id
+        self.project_id = project_id
+        self.owner_user_id = owner_user_id
+
+    async def get(self, *, scope, thread_id: str, lock: bool):
+        assert scope.project_id == str(self.project_id)
+        assert scope.owner_user_id == self.owner_user_id
+        assert thread_id == self.thread_id
+        assert lock is True
+        return SimpleNamespace(
+            thread_id=self.thread_id,
+            project_id=self.project_id,
+            owner_user_id=self.owner_user_id,
+            frozen_at=None,
+            deleted_at=None,
+        )
+
+
 class _RecallAudit:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -307,6 +337,12 @@ def _authority_parts(*, rows=(), memory_enabled: bool = True, audit=None):
         memory_config=MemoryConfig(enabled=True, max_injection_tokens=2_000),
         personalization_repository_builder=lambda current: _Personalization(current, enabled=memory_enabled),
         run_repository_builder=lambda current: _Runs(current, thread_id=thread_id, job_id=job_id),
+        thread_repository_builder=lambda current: _Threads(
+            current,
+            thread_id=thread_id,
+            project_id=project_id,
+            owner_user_id=str(user_id),
+        ),
         audit=audit,
     )
     return authority, project, session, sessions_opened
@@ -401,6 +437,30 @@ async def test_authority_search_fails_closed_when_revalidation_breaks(
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    (
+        ("数", "1-4"),
+        ("数据流转", "1-4"),
+        ("x" * 5, "5-16"),
+        ("x" * 16, "5-16"),
+        ("x" * 17, "17-64"),
+        ("x" * 64, "17-64"),
+        ("x" * 65, "65-200"),
+        ("x" * 200, "65-200"),
+    ),
+)
+def test_recall_query_len_bucket_has_closed_unicode_codepoint_boundaries(query: str, expected: str) -> None:
+    assert authority_module._recall_query_len_bucket(query) == expected
+
+
+def test_recall_query_len_bucket_rejects_out_of_contract_lengths() -> None:
+    with pytest.raises(ValueError):
+        authority_module._recall_query_len_bucket("")
+    with pytest.raises(ValueError):
+        authority_module._recall_query_len_bucket("x" * 201)
+
+
 @pytest.mark.asyncio
 async def test_authority_search_emits_content_free_recall_audit(
     monkeypatch: pytest.MonkeyPatch,
@@ -410,7 +470,7 @@ async def test_authority_search_emits_content_free_recall_audit(
     authority, project, session, _opened = _authority_parts(rows=(row,), audit=audit)
     _pass_revalidation(monkeypatch, project)
 
-    await authority.search_episodes(query="archived-fact", tags=("durable",), limit=3)
+    await authority.search_episodes(query="  archived-fact  ", tags=("durable",), limit=3)
 
     assert len(audit.calls) == 1
     call = audit.calls[0]
@@ -419,6 +479,7 @@ async def test_authority_search_emits_content_free_recall_audit(
     assert call["result_bucket"] == "1-2"
     assert call["matched_stage"] == "exact"
     assert call["tags_filtered"] is True
+    assert call["query_len_bucket"] == "5-16"
     # Content never leaks: only the closed vocabulary plus routing ids.
     assert set(call) == {
         "session",
@@ -429,6 +490,7 @@ async def test_authority_search_emits_content_free_recall_audit(
         "result_bucket",
         "matched_stage",
         "tags_filtered",
+        "query_len_bucket",
     }
 
 
@@ -484,21 +546,21 @@ def test_memory_recall_audit_action_binds_worker_and_metadata() -> None:
     assert contract.variants[0].processes == frozenset({AuditProcess.WORKER})
 
     model = AUDIT_METADATA_MODELS[AuditAction.MEMORY_RECALL_EXECUTED]
-    accepted = model.model_validate(
-        {
-            "result_bucket": "1-2",
-            "matched_stage": "exact",
-            "tags_filtered": True,
-        }
-    )
+    valid = {
+        "result_bucket": "1-2",
+        "matched_stage": "exact",
+        "tags_filtered": True,
+        "query_len_bucket": "5-16",
+    }
+    accepted = model.model_validate(valid)
     assert accepted.result_bucket == "1-2"
+    assert {model.model_validate({**valid, "query_len_bucket": bucket}).query_len_bucket for bucket in ("1-4", "5-16", "17-64", "65-200")} == {"1-4", "5-16", "17-64", "65-200"}
     for invalid in (
-        {"result_bucket": "4", "matched_stage": "exact", "tags_filtered": True},
-        {"result_bucket": "1-2", "matched_stage": "fuzzy", "tags_filtered": True},
+        {**valid, "result_bucket": "4"},
+        {**valid, "matched_stage": "fuzzy"},
+        {**valid, "query_len_bucket": "201+"},
         {
-            "result_bucket": "1-2",
-            "matched_stage": "exact",
-            "tags_filtered": True,
+            **valid,
             "query": "leak",
         },
     ):
@@ -631,10 +693,34 @@ def test_recall_tool_is_async_only_and_named_for_loop_detection() -> None:
 
     config_overrides = LoopDetectionConfig().tool_freq_overrides
     policy_overrides = LoopDetectionPolicy().tool_freq_overrides
-    assert config_overrides["recall_memory"].warn == 6
-    assert config_overrides["recall_memory"].hard_limit == 10
-    assert policy_overrides["recall_memory"].warn == 6
-    assert policy_overrides["recall_memory"].hard_limit == 10
+    expected = {
+        "web_fetch": (6, 10),
+        "web_search": (6, 10),
+        "recall_memory": (6, 10),
+    }
+    assert {name: (override.warn, override.hard_limit) for name, override in config_overrides.items()} == expected
+    assert {name: (override.warn, override.hard_limit) for name, override in policy_overrides.items()} == expected
+
+
+def test_example_config_omits_database_runtime_policy_tombstones() -> None:
+    from deerflow.config.app_config import DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
+
+    repo_root = Path(__file__).resolve().parents[2]
+    example = yaml.safe_load((repo_root / "config.example.yaml").read_text(encoding="utf-8"))
+    assert isinstance(example, Mapping)
+
+    present: set[str] = set()
+    for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
+        current: object = example
+        for part in field_path.split("."):
+            if not isinstance(current, Mapping) or part not in current:
+                break
+            current = current[part]
+        else:
+            present.add(field_path)
+
+    assert present == set()
+    assert "loop_detection" not in example
 
 
 @pytest.mark.asyncio

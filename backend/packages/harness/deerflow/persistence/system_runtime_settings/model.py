@@ -105,7 +105,7 @@ class SystemRuntimePolicyRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "section IN ('agent_runtime', 'auth', 'quotas')",
+            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')",
             name="ck_system_runtime_policies_section",
         ),
         CheckConstraint("revision >= 1", name="ck_system_runtime_policies_revision"),
@@ -160,7 +160,7 @@ class SystemRuntimePolicyVersionRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "section IN ('agent_runtime', 'auth', 'quotas')",
+            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')",
             name="ck_system_runtime_policy_versions_section",
         ),
         CheckConstraint("version_number >= 1", name="ck_system_runtime_policy_versions_number"),

@@ -51,4 +51,8 @@ HTTP 可用于可信隔离内网，但 header/query Credential 会以明文经�
 
 Gateway、Worker 和 Scheduler 启动时只验证目标数据库和 schema。启动应用进程前，请先运行显式数据库 setup/migration 命令。
 
-Memory 策略只有启用状态、Dream 模型、自动 Dream 周期和文档注入预算四项；持久化固定为 PostgreSQL project/owner scope，没有本地文件 provider 选项。
+`agent_runtime.memory` 包含启用状态、Dream 模型、自动 Dream 周期、文档注入预算、
+空闲封存阈值和 episode 保留期六项。另一个独立的 `memory_document` 系统策略保存
+2～8 个有序章节标题；平台管理员在 **Admin → 系统设置 → Memory** 中分别保存两组策略。
+章节模板只影响之后首次创建的 Memory 文档，已有文档继续使用行上冻结的章节。两组策略与
+Memory 数据都只存 PostgreSQL，`config.yaml` 没有章节模板或本地文件 provider 回退。

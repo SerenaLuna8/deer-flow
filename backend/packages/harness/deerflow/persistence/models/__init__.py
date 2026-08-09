@@ -35,7 +35,12 @@ from deerflow.persistence.channel_connections.model import (
 )
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
-from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
+from deerflow.persistence.models.run_event import (
+    RunEventInvariantRow,
+    RunEventPartitionStateRow,
+    RunEventRow,
+    ThreadEventSequenceRow,
+)
 from deerflow.persistence.notifications import UserNotificationRow
 from deerflow.persistence.private_work import (
     MemoryDocumentRow,
@@ -164,6 +169,8 @@ __all__ = [
     "ProjectSkillCredentialBindingRow",
     "ProjectSkillCredentialConfigRow",
     "RunEventRow",
+    "RunEventInvariantRow",
+    "RunEventPartitionStateRow",
     "ThreadEventSequenceRow",
     "RunAssetVersionRow",
     "RunMcpGrantSnapshotRow",

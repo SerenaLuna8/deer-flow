@@ -228,7 +228,7 @@ Recommend the checks matching the touched surface:
 
 | Surface | Suggested validation |
 | --- | --- |
-| Backend API / harness / agents / MCP / skills runtime | `cd backend && make lint && POSTGRES_TEST_URL=... make test` |
+| Backend API / harness / agents / MCP / skills runtime | `cd backend && make lint`, then `make test` from the repository root using the development `DATABASE_URL` |
 | Blocking IO or async file/network work | `make detect-blocking-io` plus a focused regression for the changed production path |
 | Harness/app boundary | focused tests for the changed public import or execution boundary |
 | Frontend UI/core | `cd frontend && pnpm format && pnpm check && pnpm test` |

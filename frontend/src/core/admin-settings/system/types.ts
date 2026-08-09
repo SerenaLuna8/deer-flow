@@ -8,12 +8,14 @@ export const adminSystemSettingsAccountIdSchema = z.union([
 export const systemSettingsSectionNameSchema = z.enum([
   "agent_runtime",
   "auth",
+  "memory_document",
   "quotas",
 ]);
 export const systemSettingsEffectScopeSchema = z.enum([
   "new_requests",
   "new_runs",
   "new_requests_and_runs",
+  "new_memory_documents",
   "next_authoritative_check",
   "restart_required",
 ]);
@@ -65,7 +67,18 @@ function containsSecretLikeMaterial(value: unknown): boolean {
     );
   }
   if (typeof value !== "string") return false;
-  if (/[^\t\n\x20-\x7E]/u.test(value)) return true;
+  if (
+    Array.from(value).some((character) => {
+      const codePoint = character.codePointAt(0);
+      return (
+        codePoint !== undefined &&
+        codePoint < 32 &&
+        character !== "\n" &&
+        character !== "\t"
+      );
+    })
+  )
+    return true;
   if (secretValuePatterns.some((pattern) => pattern.test(value))) return true;
   for (const match of value.matchAll(httpUrlPattern)) {
     try {
@@ -314,6 +327,50 @@ export const quotaSettingsValueSchema = boundedJson(
     .strict(),
 );
 
+const memoryDocumentTitleSchema = z
+  .string()
+  .refine((value) => !/[\p{C}\p{Zl}\p{Zp}]/u.test(value), {
+    message:
+      "Memory document titles must not contain control or line-separator characters",
+  })
+  .transform((value) => value.trim())
+  .pipe(
+    z
+      .string()
+      .min(1)
+      .refine((value) => Array.from(value).length <= 80, {
+        message: "Memory document titles must not exceed 80 Unicode characters",
+      })
+      .refine((value) => !value.startsWith("#"), {
+        message:
+          "Memory document titles must not include a Markdown heading prefix",
+      })
+      .refine(
+        (value) =>
+          !/\[H:\d+\]/iu.test(value) &&
+          !/\[(?:skip|correction|permanent|durable|ephemeral)\]/iu.test(value),
+        {
+          message:
+            "Memory document titles must not contain Dream history markers",
+        },
+      ),
+  );
+
+export const memoryDocumentSettingsValueSchema = boundedJson(
+  z
+    .object({
+      sections: z
+        .array(memoryDocumentTitleSchema)
+        .min(2)
+        .max(8)
+        .refine(
+          (sections) => new Set(sections).size === sections.length,
+          "Memory document titles must be unique",
+        ),
+    })
+    .strict(),
+);
+
 const sectionMetadataFields = {
   revision: z.number().int().positive(),
   schema_version: z.number().int().positive(),
@@ -337,6 +394,14 @@ const authSectionSchema = z
     effect_scope: z.literal("new_requests"),
   })
   .strict();
+const memoryDocumentSectionSchema = z
+  .object({
+    section: z.literal("memory_document"),
+    ...sectionMetadataFields,
+    value: memoryDocumentSettingsValueSchema,
+    effect_scope: z.literal("new_memory_documents"),
+  })
+  .strict();
 const quotasSectionSchema = z
   .object({
     section: z.literal("quotas"),
@@ -353,6 +418,7 @@ export const systemSettingsCatalogSchema = z
       .object({
         agent_runtime: agentRuntimeSectionSchema,
         auth: authSectionSchema,
+        memory_document: memoryDocumentSectionSchema,
         quotas: quotasSectionSchema,
       })
       .strict(),
@@ -372,10 +438,11 @@ const mutationBaseFields = {
 } as const;
 
 function mutationResponseSchema<
-  Section extends "agent_runtime" | "auth" | "quotas",
+  Section extends "agent_runtime" | "auth" | "memory_document" | "quotas",
   Value extends z.ZodTypeAny,
   Effect extends
     | "new_requests_and_runs"
+    | "new_memory_documents"
     | "new_requests"
     | "next_authoritative_check",
 >(section: Section, value: Value, effectScope: Effect) {
@@ -405,6 +472,11 @@ export const systemSettingsMutationResponseSchema = z.discriminatedUnion(
     ),
     mutationResponseSchema("auth", authSettingsValueSchema, "new_requests"),
     mutationResponseSchema(
+      "memory_document",
+      memoryDocumentSettingsValueSchema,
+      "new_memory_documents",
+    ),
+    mutationResponseSchema(
       "quotas",
       quotaSettingsValueSchema,
       "next_authoritative_check",
@@ -424,6 +496,12 @@ export const replaceAuthSettingsInputSchema = z
     value: authSettingsValueSchema,
   })
   .strict();
+export const replaceMemoryDocumentSettingsInputSchema = z
+  .object({
+    expected_revision: z.number().int().positive(),
+    value: memoryDocumentSettingsValueSchema,
+  })
+  .strict();
 export const replaceQuotaSettingsInputSchema = z
   .object({
     expected_revision: z.number().int().positive(),
@@ -435,6 +513,9 @@ export type AgentRuntimeSettingsValue = z.infer<
   typeof agentRuntimeSettingsValueSchema
 >;
 export type AuthSettingsValue = z.infer<typeof authSettingsValueSchema>;
+export type MemoryDocumentSettingsValue = z.infer<
+  typeof memoryDocumentSettingsValueSchema
+>;
 export type QuotaSettingsValue = z.infer<typeof quotaSettingsValueSchema>;
 export type SystemSettingsCatalog = z.infer<typeof systemSettingsCatalogSchema>;
 export type SystemSettingsMutationResponse = z.infer<
@@ -452,6 +533,9 @@ export type ReplaceAgentRuntimeSettingsInput = z.infer<
 export type ReplaceAuthSettingsInput = z.infer<
   typeof replaceAuthSettingsInputSchema
 >;
+export type ReplaceMemoryDocumentSettingsInput = z.infer<
+  typeof replaceMemoryDocumentSettingsInputSchema
+>;
 export type ReplaceQuotaSettingsInput = z.infer<
   typeof replaceQuotaSettingsInputSchema
 >;
@@ -459,6 +543,7 @@ export type ReplaceQuotaSettingsInput = z.infer<
 export type SystemSettingsSectionValueMap = {
   agent_runtime: AgentRuntimeSettingsValue;
   auth: AuthSettingsValue;
+  memory_document: MemoryDocumentSettingsValue;
   quotas: QuotaSettingsValue;
 };
 

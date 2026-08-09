@@ -14,14 +14,18 @@ from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 
-# Pytest imports conftest before collecting test modules. Install a deliberately
-# non-sensitive unit-test default here so modules that construct
-# Gateway state at import time never rely on an implicit repository dotenv
-# load. Explicit caller-provided values (including core-suite databases) win.
-os.environ.setdefault(
-    "DATABASE_URL",
-    "postgresql://test-role@localhost/deerflow_test_unit",
-)
+# Keep the caller's development connection separate from the non-sensitive
+# import-time fallback below. ``make test`` loads the root development
+# environment before pytest starts; focused unit tests without that environment
+# continue to skip real PostgreSQL cases.
+_DEVELOPMENT_DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+# Pytest imports conftest before collecting test modules. Always replace the
+# application-facing value with a deliberately non-sensitive, nonexistent test
+# target so import-time Gateway state can never connect to the development
+# database. Real PostgreSQL fixtures retain the captured URL above and derive
+# their own random ``deerflow_test_*`` databases from it.
+os.environ["DATABASE_URL"] = "postgresql://test-role@localhost/deerflow_test_unit"
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -54,10 +58,10 @@ sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 @pytest.fixture(scope="session")
 def postgres_admin_url() -> str:
-    """Return a maintenance URL without ever logging credentials."""
-    url = os.getenv("POSTGRES_TEST_URL")
+    """Derive a maintenance URL from the development URL without logging it."""
+    url = _DEVELOPMENT_DATABASE_URL
     if not url:
-        pytest.skip("POSTGRES_TEST_URL is required for PostgreSQL tests")
+        pytest.skip("DATABASE_URL from the development environment is required for PostgreSQL tests")
     return RedactedURL(replace_database(url, "postgres"))
 
 

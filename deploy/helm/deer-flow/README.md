@@ -22,12 +22,13 @@ The default chart deliberately has no usable database target. Choose one:
 3. explicitly set `postgresql.enabled=true` to create a bundled, **empty**
    PostgreSQL instance.
 
-The database must have been initialized from an empty target by the checkout's
-sole supported `make setup-db` workflow before Gateway, Worker or Scheduler
-starts. Runtime Pods only validate `full_schema_v4`; they never create, migrate,
-stamp, repair or delete schema. An older, unknown or non-empty unmanaged
-database must be replaced with a new empty database rather than upgraded in
-place.
+The database must be at the checkout's `full_schema_v9` chain head before
+Gateway, Worker or Scheduler starts. Fresh installs use the sole supported
+`make setup-db` workflow against an empty target. A database stamped at a known
+ancestor revision may be upgraded only through the operator-driven
+`make upgrade-db` workflow after a backup. Runtime Pods never create, migrate,
+stamp, repair or delete schema; unknown markers, unmanaged non-empty schemas and
+catalog drift remain fail-closed and require a new empty target.
 
 You must also provide:
 

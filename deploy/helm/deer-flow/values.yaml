@@ -201,7 +201,7 @@ ingress:
 # -- ActWeave config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 36
+  config_version: 37
   log_level: info
   logging:
     enhance:
@@ -331,3 +331,4 @@ config: |
     retry_max_seconds: 300
     stream:
       text_delta_flush_ms: 75
+      run_event_notify_enabled: true

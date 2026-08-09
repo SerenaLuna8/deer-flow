@@ -9,6 +9,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, Depends, Request, status
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.gateway.deps import get_config
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
     AssetItemResponse,
@@ -35,6 +36,7 @@ from app.shared_assets.agent_design_service import (
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.errors import AssetStorageUnavailable
 from app.shared_assets.models import AgentModelSettings
+from deerflow.config.app_config import AppConfig
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -100,6 +102,12 @@ class AgentDesignTurnRequest(_StrictModel):
     ]
     expected_revision: int = Field(ge=1)
     idempotency_key: str
+    generation_model_ref: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)$",
+    )
 
 
 class AgentDesignCommitRequest(_StrictModel):
@@ -180,6 +188,7 @@ class AgentDesignSessionItemResponse(_StrictModel):
     blueprint_checksum: str | None
     messages: tuple[AgentDesignMessageResponse, ...]
     active_clarification: AgentDesignClarificationRequestResponse | None
+    active_clarifications: tuple[AgentDesignClarificationRequestResponse, ...]
     progress: tuple[AgentDesignProgressItemResponse, ...]
     error_code: str | None
     error_message: str | None
@@ -202,6 +211,7 @@ class AgentDesignSessionSummaryResponse(_StrictModel):
         "failed",
         "cancelled",
     ]
+    revision: int = Field(ge=1)
     updated_at: datetime
 
 
@@ -229,6 +239,20 @@ def _request_id() -> str:
     return get_current_trace_id() or generate_trace_id()
 
 
+def _all_internal_tool_groups(config: AppConfig) -> tuple[str, ...]:
+    """Return every configured internal tool group plus subagent delegation."""
+
+    return tuple(
+        dict.fromkeys(
+            (
+                *(group.name for group in config.tool_groups),
+                *(tool.group for tool in config.tools),
+                "task",
+            )
+        )
+    )
+
+
 def get_agent_design_service(request: Request) -> AgentDesignService:
     """Resolve the app-owned persistence, audit, and generation dependencies."""
 
@@ -250,6 +274,7 @@ def get_agent_design_service(request: Request) -> AgentDesignService:
             session_factory,
             governance_sink=governance_sink,
         ),
+        default_tool_groups_provider=lambda: _all_internal_tool_groups(get_config()),
     )
     request.app.state.agent_design_service = service
     return service
@@ -300,6 +325,7 @@ def _turn(body: AgentDesignTurnRequest):
         input=value,
         expected_revision=body.expected_revision,
         idempotency_key=body.idempotency_key,
+        generation_model_ref=body.generation_model_ref,
     )
 
 

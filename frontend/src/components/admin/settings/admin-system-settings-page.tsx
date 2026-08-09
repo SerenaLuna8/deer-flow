@@ -1,6 +1,8 @@
 "use client";
 
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   BotIcon,
   BrainIcon,
   CheckCircle2Icon,
@@ -42,12 +44,14 @@ import {
   AdminSystemSettingsApiError,
   agentRuntimeSettingsValueSchema,
   authSettingsValueSchema,
+  memoryDocumentSettingsValueSchema,
   quotaSettingsValueSchema,
   useAdminSystemSettings,
   useReplaceAdminSystemSettingsSection,
   validateAgentRuntimeModelReferences,
   type AgentRuntimeSettingsValue,
   type AuthSettingsValue,
+  type MemoryDocumentSettingsValue,
   type QuotaSettingsValue,
   type SystemSettingsCatalog,
   type SystemSettingsEffectScope,
@@ -450,6 +454,8 @@ function effectLabel(
       return labels.newRuns;
     case "new_requests_and_runs":
       return labels.newRequestsAndRuns;
+    case "new_memory_documents":
+      return labels.newMemoryDocuments;
     case "next_authoritative_check":
       return labels.nextAuthoritativeCheck;
     case "restart_required":
@@ -739,6 +745,130 @@ function ModelField({
         ))}
       </select>
     </FieldShell>
+  );
+}
+
+export function moveMemoryDocumentSection(
+  value: MemoryDocumentSettingsValue,
+  index: number,
+  offset: -1 | 1,
+): MemoryDocumentSettingsValue {
+  const target = index + offset;
+  if (
+    index < 0 ||
+    index >= value.sections.length ||
+    target < 0 ||
+    target >= value.sections.length
+  ) {
+    return value;
+  }
+  const sections = [...value.sections];
+  [sections[index], sections[target]] = [sections[target]!, sections[index]!];
+  return { sections };
+}
+
+export function MemoryDocumentSectionsEditor({
+  onChange,
+  value,
+}: {
+  onChange: (value: MemoryDocumentSettingsValue) => void;
+  value: MemoryDocumentSettingsValue;
+}) {
+  const labels = useI18n().t.adminSystemSettings.fields;
+  const minimumReached = value.sections.length <= 2;
+  const maximumReached = value.sections.length >= 8;
+
+  return (
+    <div
+      data-setting-key="memory_document.sections"
+      data-settings-field-row="memory_document.sections"
+      className="border-border/70 bg-background space-y-4 rounded-lg border p-4"
+    >
+      <div>
+        <p className="text-sm font-medium">{labels.memoryDocumentSections}</p>
+        <p className="text-muted-foreground mt-1 text-xs leading-5">
+          {labels.memoryDocumentSectionsHint}
+        </p>
+      </div>
+
+      <div className="space-y-2">
+        {value.sections.map((section, index) => (
+          <div
+            key={index}
+            className="grid gap-2 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto] sm:items-center"
+          >
+            <span className="text-muted-foreground w-6 text-right text-xs tabular-nums">
+              {index + 1}
+            </span>
+            <Input
+              name={`memory_document.sections.${index}`}
+              aria-label={labels.memoryDocumentSectionInput(index + 1)}
+              value={section}
+              onChange={(event) => {
+                const sections = [...value.sections];
+                sections[index] = event.currentTarget.value;
+                onChange({ sections });
+              }}
+            />
+            <span className="text-muted-foreground text-right text-xs tabular-nums">
+              {Array.from(section.trim()).length}/80
+            </span>
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={index === 0}
+                aria-label={labels.moveMemoryDocumentSectionUp(index + 1)}
+                onClick={() =>
+                  onChange(moveMemoryDocumentSection(value, index, -1))
+                }
+              >
+                <ArrowUpIcon aria-hidden />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={index === value.sections.length - 1}
+                aria-label={labels.moveMemoryDocumentSectionDown(index + 1)}
+                onClick={() =>
+                  onChange(moveMemoryDocumentSection(value, index, 1))
+                }
+              >
+                <ArrowDownIcon aria-hidden />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={minimumReached}
+                aria-label={labels.removeMemoryDocumentSection(index + 1)}
+                onClick={() =>
+                  onChange({
+                    sections: value.sections.filter(
+                      (_item, current) => current !== index,
+                    ),
+                  })
+                }
+              >
+                <XIcon aria-hidden />
+              </Button>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        disabled={maximumReached}
+        onClick={() => onChange({ sections: [...value.sections, ""] })}
+      >
+        {labels.addMemoryDocumentSection}
+      </Button>
+    </div>
   );
 }
 
@@ -1745,6 +1875,27 @@ function SectionFeedback({
   );
 }
 
+export function isSystemSettingsSaveDisabled({
+  dirty,
+  modelsStatus,
+  pending,
+  schemaValid,
+  section,
+}: {
+  dirty: boolean;
+  modelsStatus: ModelsStatus;
+  pending: boolean;
+  schemaValid: boolean;
+  section: SystemSettingsSectionName;
+}): boolean {
+  return (
+    !dirty ||
+    pending ||
+    (section === "memory_document" && !schemaValid) ||
+    (section === "agent_runtime" && modelsStatus !== "ready")
+  );
+}
+
 function EditableSection<Value>({
   activeModels,
   description,
@@ -1794,6 +1945,8 @@ function EditableSection<Value>({
   const [baseRevision, setBaseRevision] = useState(revision);
   const [localError, setLocalError] = useState<string | null>(null);
   const dirty = JSON.stringify(base) !== JSON.stringify(draft);
+  const schemaValid =
+    section !== "memory_document" || schema.safeParse(draft).success;
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -1889,7 +2042,11 @@ function EditableSection<Value>({
                   : "No changes"}
             </p>
             <SectionFeedback
-              error={localError ?? error}
+              error={
+                localError ??
+                error ??
+                (dirty && !schemaValid ? labels.feedback.invalid : undefined)
+              }
               result={dirty ? undefined : lastResult}
             />
           </div>
@@ -1910,11 +2067,13 @@ function EditableSection<Value>({
             <Button
               type="submit"
               className="min-h-11 sm:min-h-9"
-              disabled={
-                !dirty ||
-                pending ||
-                (section === "agent_runtime" && modelsStatus !== "ready")
-              }
+              disabled={isSystemSettingsSaveDisabled({
+                dirty,
+                modelsStatus,
+                pending,
+                schemaValid,
+                section,
+              })}
             >
               {pending ? (
                 <RefreshCwIcon aria-hidden className="animate-spin" />
@@ -2246,6 +2405,34 @@ export function AdminSystemSettingsStateView({
                 )}
               />
             </div>
+            <div hidden={activeDestination !== "memory"}>
+              <EditableSection
+                key={`memory-document-${state.data.sections.memory_document.revision}`}
+                section="memory_document"
+                title={labels.sections.memoryDocument.title}
+                description={labels.sections.memoryDocument.description}
+                value={state.data.sections.memory_document.value}
+                revision={state.data.sections.memory_document.revision}
+                effectiveRevision={
+                  state.data.sections.memory_document.effective_revision
+                }
+                effectScope={state.data.sections.memory_document.effect_scope}
+                updatedAt={state.data.sections.memory_document.updated_at}
+                schema={memoryDocumentSettingsValueSchema}
+                pending={pendingSection === "memory_document"}
+                error={sectionErrors.memory_document}
+                lastResult={lastResults.memory_document}
+                activeModels={activeModels}
+                modelsStatus={modelsStatus}
+                onSave={onSave}
+                renderEditor={(value, setValue) => (
+                  <MemoryDocumentSectionsEditor
+                    value={value}
+                    onChange={setValue}
+                  />
+                )}
+              />
+            </div>
           </div>
         </div>
       )}
@@ -2306,6 +2493,15 @@ function AuthorizedAdminSystemSettingsPage({
             input: {
               expected_revision: expectedRevision,
               value: authSettingsValueSchema.parse(value),
+            },
+          });
+          break;
+        case "memory_document":
+          result = await replaceSection.mutateAsync({
+            section,
+            input: {
+              expected_revision: expectedRevision,
+              value: memoryDocumentSettingsValueSchema.parse(value),
             },
           });
           break;

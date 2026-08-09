@@ -132,6 +132,8 @@ def test_proposal_rejects_out_of_contract_input() -> None:
         {"content": "   "},
         {"content": "x" * 501},
         {"content": "line one\nline two"},
+        {"content": "line one\n"},
+        {"content": "\tline one"},
         {"content": "bell\x07"},
         {"content": 7},
         {"thread_id": ""},
@@ -433,6 +435,33 @@ class _Runs:
         return SimpleNamespace(thread_id=self.thread_id, job_id=self.job_id)
 
 
+class _Threads:
+    def __init__(
+        self,
+        _session,
+        *,
+        thread_id: str,
+        project_id: uuid.UUID,
+        owner_user_id: str,
+    ) -> None:
+        self.thread_id = thread_id
+        self.project_id = project_id
+        self.owner_user_id = owner_user_id
+
+    async def get(self, *, scope, thread_id: str, lock: bool):
+        assert scope.project_id == str(self.project_id)
+        assert scope.owner_user_id == self.owner_user_id
+        assert thread_id == self.thread_id
+        assert lock is True
+        return SimpleNamespace(
+            thread_id=self.thread_id,
+            project_id=self.project_id,
+            owner_user_id=self.owner_user_id,
+            frozen_at=None,
+            deleted_at=None,
+        )
+
+
 class _AuditPort:
     def __init__(self) -> None:
         self.calls: list[dict] = []
@@ -511,6 +540,12 @@ def _authority_parts(*, memory_platform_enabled: bool = True, audit=None):
             thread_id=thread_id,
             job_id=job_id,
         ),
+        thread_repository_builder=lambda current: _Threads(
+            current,
+            thread_id=thread_id,
+            project_id=project_id,
+            owner_user_id=str(user_id),
+        ),
         audit=audit,
     )
     return authority, project, claim, session, sessions_opened
@@ -544,6 +579,8 @@ async def test_authority_propose_validates_arguments_before_any_database_work() 
         {"kind": "durable", "content": "  ", "tool_call_id": "call-1"},
         {"kind": "durable", "content": "x" * 501, "tool_call_id": "call-1"},
         {"kind": "durable", "content": "a\nb", "tool_call_id": "call-1"},
+        {"kind": "durable", "content": "fact\n", "tool_call_id": "call-1"},
+        {"kind": "durable", "content": "\tfact", "tool_call_id": "call-1"},
         {"kind": "durable", "content": "ok", "tool_call_id": ""},
     ):
         with pytest.raises(ValueError):
@@ -721,6 +758,8 @@ async def test_remember_tool_rejects_out_of_contract_arguments_before_proposing(
     assert (await _invoke(context, content="  ", kind="durable")).startswith("Error:")
     assert (await _invoke(context, content="x" * 501, kind="durable")).startswith("Error:")
     assert (await _invoke(context, content="a\nb", kind="durable")).startswith("Error:")
+    assert (await _invoke(context, content="fact\n", kind="durable")).startswith("Error:")
+    assert (await _invoke(context, content="\tfact", kind="durable")).startswith("Error:")
     assert authority.calls == []
 
 

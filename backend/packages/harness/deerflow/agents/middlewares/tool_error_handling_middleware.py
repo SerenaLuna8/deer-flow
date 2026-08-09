@@ -1,7 +1,7 @@
 """Tool error handling middleware and shared runtime middleware builders."""
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, override
 
 from langchain.agents import AgentState
@@ -242,18 +242,81 @@ def build_sandbox_infrastructure(
     return middlewares
 
 
-def _build_runtime_middlewares(
+def assemble_agent_middlewares(
     *,
-    app_config: AppConfig,
+    runtime: Sequence[AgentMiddleware],
+    before_summarization: Sequence[AgentMiddleware] = (),
+    summarization: AgentMiddleware | None = None,
+    planning: AgentMiddleware | None = None,
+    token_usage: AgentMiddleware | None = None,
+    title: AgentMiddleware | None = None,
+    after_title: Sequence[AgentMiddleware] = (),
+    vision: AgentMiddleware | None = None,
+    routing: Sequence[AgentMiddleware] = (),
+    system_message: AgentMiddleware | None = None,
+    subagent: AgentMiddleware | None = None,
+    loop_detection: AgentMiddleware | None = None,
+    token_budget: AgentMiddleware | None = None,
+    custom: Sequence[AgentMiddleware] = (),
+    safety: AgentMiddleware | None = None,
+    clarification: AgentMiddleware,
+) -> list[AgentMiddleware]:
+    """Compose the lead/SDK middleware phases in one canonical order.
+
+    Callers own feature resolution; this builder owns sequence. The SDK keeps
+    its documented omissions by passing empty phases, while production lead
+    assembly supplies its private-context and hardening phases. Keeping the
+    final append here makes ``ClarificationMiddleware`` a structural tail
+    invariant rather than a convention duplicated by each caller.
+    """
+
+    middlewares = [*runtime, *before_summarization]
+    for middleware in (
+        summarization,
+        planning,
+        token_usage,
+        title,
+    ):
+        if middleware is not None:
+            middlewares.append(middleware)
+    middlewares.extend(after_title)
+    if vision is not None:
+        middlewares.append(vision)
+    middlewares.extend(routing)
+    for middleware in (
+        system_message,
+        subagent,
+        loop_detection,
+        token_budget,
+    ):
+        if middleware is not None:
+            middlewares.append(middleware)
+    middlewares.extend(custom)
+    if safety is not None:
+        middlewares.append(safety)
+    middlewares.append(clarification)
+    return middlewares
+
+
+def build_runtime_middlewares(
+    *,
+    app_config: AppConfig | None,
     include_uploads: bool,
     include_dangling_tool_call_patch: bool,
+    include_security_wrappers: bool = True,
+    sandbox: bool | AgentMiddleware = True,
+    guardrail_middleware: AgentMiddleware | None = None,
     lazy_init: bool = True,
 ) -> list[AgentMiddleware]:
-    """Build shared base middlewares for agent execution."""
-    from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
-    from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
-    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
-    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+    """Build the shared runtime spine for lead, subagent, and SDK paths.
+
+    ``include_security_wrappers=False`` is the SDK profile: it retains the
+    sandbox/dangling/error spine and an explicitly supplied custom guardrail,
+    but omits private-Run wrappers that require a materialized ``AppConfig``.
+    """
+
+    if include_security_wrappers and app_config is None:
+        raise ValueError("Security runtime middlewares require AppConfig")
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
     # InputSanitizationMiddleware is first so it becomes the outermost
@@ -264,17 +327,33 @@ def _build_runtime_middlewares(
     # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
     # the raw tool output first; the budget wrapper then truncates the already
     # neutralized text.
-    outer_wrappers: list[AgentMiddleware] = [
-        InputSanitizationMiddleware(),
-        ToolOutputBudgetMiddleware.from_app_config(app_config),
-        ToolResultSanitizationMiddleware(),
-    ]
+    outer_wrappers: list[AgentMiddleware] = []
+    if include_security_wrappers:
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
+        from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+
+        assert app_config is not None
+        outer_wrappers.extend(
+            [
+                InputSanitizationMiddleware(),
+                ToolOutputBudgetMiddleware.from_app_config(app_config),
+                ToolResultSanitizationMiddleware(),
+            ]
+        )
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
-    thread_hooks = build_sandbox_infrastructure(
-        lazy_init=lazy_init,
-        include_uploads=include_uploads,
-    )
+    if sandbox is False:
+        thread_hooks: list[AgentMiddleware] = []
+    elif isinstance(sandbox, AgentMiddleware):
+        thread_hooks = [sandbox]
+    elif sandbox is True:
+        thread_hooks = build_sandbox_infrastructure(
+            lazy_init=lazy_init,
+            include_uploads=include_uploads,
+        )
+    else:
+        raise TypeError("sandbox must be a boolean or AgentMiddleware instance")
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -282,50 +361,56 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 
         tail.append(DanglingToolCallMiddleware())
-    tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
+    if include_security_wrappers:
+        from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
+
+        assert app_config is not None
+        tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
 
     # Build the optional operator Guardrail now, but register it only after the
     # private authorization middleware below. The first registered middleware
     # is outermost, so ToolErrorHandlingMiddleware must execute its
     # database-backed boundary before an external provider can inspect tool
     # names or arguments.
-    guardrail_middleware: AgentMiddleware | None = None
-    guardrails_config = app_config.guardrails
-    if guardrails_config.enabled and guardrails_config.provider:
+    if include_security_wrappers and guardrail_middleware is None:
         import inspect
 
         from deerflow.guardrails.middleware import GuardrailMiddleware
         from deerflow.reflection import resolve_variable
 
-        provider_cls = resolve_variable(guardrails_config.provider.use)
-        provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
-        # Pass framework hint if the provider accepts it (e.g. for config discovery).
-        # Built-in providers like AllowlistProvider don't need it, so only inject
-        # when the constructor accepts 'framework' or '**kwargs'.
-        if "framework" not in provider_kwargs:
-            try:
-                sig = inspect.signature(provider_cls.__init__)
-                if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                    provider_kwargs["framework"] = "deerflow"
-            except (ValueError, TypeError):
-                pass
-        provider = provider_cls(**provider_kwargs)
-        guardrail_middleware = GuardrailMiddleware(
-            provider,
-            fail_closed=guardrails_config.fail_closed,
-            passport=guardrails_config.passport,
-        )
+        assert app_config is not None
+        guardrails_config = app_config.guardrails
+        if guardrails_config.enabled and guardrails_config.provider:
+            provider_cls = resolve_variable(guardrails_config.provider.use)
+            provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
+            # Pass framework hint if the provider accepts it (e.g. for config discovery).
+            # Built-in providers like AllowlistProvider don't need it, so only inject
+            # when the constructor accepts 'framework' or '**kwargs'.
+            if "framework" not in provider_kwargs:
+                try:
+                    sig = inspect.signature(provider_cls.__init__)
+                    if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                        provider_kwargs["framework"] = "deerflow"
+                except (ValueError, TypeError):
+                    pass
+            provider = provider_cls(**provider_kwargs)
+            guardrail_middleware = GuardrailMiddleware(
+                provider,
+                fail_closed=guardrails_config.fail_closed,
+                passport=guardrails_config.passport,
+            )
 
-    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    if include_security_wrappers:
+        from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
 
-    tail.append(SandboxAuditMiddleware())
+        tail.append(SandboxAuditMiddleware())
 
     # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
     # the model hasn't read in their current version.  It must sit outside ToolProgress
     # and ToolErrorHandling so that a blocked write returns immediately without consuming
     # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
     # ToolMessage itself so downstream callers receive a well-formed result.
-    if app_config.read_before_write.enabled:
+    if include_security_wrappers and app_config is not None and app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
         tail.append(ReadBeforeWriteMiddleware())
@@ -334,12 +419,11 @@ def _build_runtime_middlewares(
     # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
     # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
     # Framework rule: first in list = outermost (types.py: "compose with first in list as outermost layer").
-    tool_progress_config = app_config.tool_progress
     _ToolProgressMiddleware = None
-    if tool_progress_config.enabled:
+    if include_security_wrappers and app_config is not None and app_config.tool_progress.enabled:
         from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
 
-        tail.append(_ToolProgressMiddleware.from_config(tool_progress_config))
+        tail.append(_ToolProgressMiddleware.from_config(app_config.tool_progress))
 
     if guardrail_middleware is not None:
         tail.append(guardrail_middleware)
@@ -371,7 +455,7 @@ def _build_runtime_middlewares(
 
 def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
-    return _build_runtime_middlewares(
+    return build_runtime_middlewares(
         app_config=app_config,
         include_uploads=True,
         include_dangling_tool_call_patch=True,
@@ -394,7 +478,7 @@ def build_subagent_runtime_middlewares(
 
         app_config = get_app_config()
 
-    middlewares = _build_runtime_middlewares(
+    middlewares = build_runtime_middlewares(
         app_config=app_config,
         include_uploads=False,
         include_dangling_tool_call_patch=True,

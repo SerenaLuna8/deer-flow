@@ -13,10 +13,7 @@ Scope rules:
 - Use only read_memory_document and replace_memory_document.
 
 The document must use exactly these top-level sections:
-# 用户偏好与协作方式
-# 项目背景
-# 长期约束与架构决策
-# 当前仍有效的目标
+{{MEMORY_DOCUMENT_SECTIONS}}
 
 History tags are retention hints, never document content:
 - [skip]: ignore it.

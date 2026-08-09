@@ -10,6 +10,14 @@ import { I18nProvider } from "@/core/i18n/context";
 const TIMESTAMP = "2026-08-05T00:00:00Z";
 
 function props(): MemoryDocumentWorkbenchProps {
+  const latestVersion = {
+    version: 4,
+    trigger: "manual_dream" as const,
+    historyCount: 3,
+    changed: true,
+    needsReview: false,
+    createdAt: TIMESTAMP,
+  };
   return {
     document: {
       data: {
@@ -25,24 +33,8 @@ function props(): MemoryDocumentWorkbenchProps {
       retry: () => undefined,
     },
     versions: {
-      data: [
-        {
-          version: 4,
-          trigger: "manual_dream",
-          historyCount: 3,
-          changed: true,
-          needsReview: false,
-          createdAt: TIMESTAMP,
-        },
-        {
-          version: 3,
-          trigger: "restore",
-          historyCount: null,
-          changed: false,
-          needsReview: false,
-          createdAt: TIMESTAMP,
-        },
-      ],
+      data: [latestVersion],
+      latest: latestVersion,
       isLoading: false,
       error: null,
       retry: () => undefined,
@@ -132,18 +124,35 @@ function render(transform?: (value: MemoryDocumentWorkbenchProps) => void) {
 }
 
 describe("Memory document workbench", () => {
-  test("shows only the current document, pending work and real version history", () => {
+  test("offers current memory and archive tabs with the document frame", () => {
     const html = render();
 
+    expect(html).toContain("当前记忆");
+    expect(html).toContain("历史归档");
+    expect(html).toContain("MEMORY.md");
+    expect(html).toContain("源码");
+    expect(html).toContain("预览");
+    expect(html).toContain("查看变化");
+    expect(html).toContain("版本历史");
+    expect(html).toContain("版本 4");
     expect(html).toContain("用户希望执行计划可直接落地");
+    expect(html).toContain('data-slot="memory-document-frame"');
     expect(html).toContain("待整理");
-    expect(html).toContain("3 条");
     expect(html).toContain("立即整理");
-    expect(html).toContain("整理记录");
-    expect(html).toContain("手动整理");
-    expect(html).toContain("版本恢复");
-    expect(html).toContain("有内容变化");
-    expect(html).toContain("内容未变化");
+    expect(html).not.toContain("整理记录");
+  });
+
+  test("renders archived episodes on the archive tab", () => {
+    const html = render((value) => {
+      value.activeTab = "archive";
+    });
+
+    expect(html).toContain("搜索归档记忆");
+    expect(html).toContain("部署目标是 region-eu");
+    expect(html).toContain("自动摘要");
+    expect(html).toContain("主动记忆");
+    expect(html).toContain("永久");
+    expect(html).toContain("持久");
   });
 
   test("renders a clear first-use document state", () => {
@@ -157,10 +166,11 @@ describe("Memory document workbench", () => {
         injectionStatus: "ok",
       };
       value.versions.data = [];
+      value.versions.latest = null;
     });
 
     expect(html).toContain("还没有长期记忆");
-    expect(html).toContain("还没有整理记录");
+    expect(html).not.toContain("查看变化");
     expect(html).toMatch(/<button[^>]*disabled[^>]*>[^<]*<svg[\s\S]*立即整理/u);
   });
 
@@ -182,46 +192,11 @@ describe("Memory document workbench", () => {
     expect(html).toMatch(/<button[^>]*disabled/u);
   });
 
-  test("keeps pagination recoverable on a later empty page", () => {
-    const html = render((value) => {
-      value.versions.data = [];
-      value.versions.page = 1;
-    });
-
-    expect(html).toContain("上一页");
-  });
-
-  test("offers the archive tab beside organization history", () => {
-    const html = render();
-
-    expect(html).toContain("历史归档");
-    expect(html).toContain("整理记录");
-  });
-
-  test("renders searchable archived episodes with origin and tags", () => {
-    const html = render((value) => {
-      value.initialTab = "archive";
-    });
-
-    expect(html).toContain("搜索归档记忆");
-    expect(html).toContain("部署目标是 region-eu");
-    expect(html).toContain("自动摘要");
-    expect(html).toContain("主动记忆");
-    expect(html).toContain("永久");
-    expect(html).toContain("持久");
-    expect(html).toContain("短期");
-    expect(html).toContain("更正");
-    // Browse mode with a full page keeps loading bounded via an explicit action.
-    expect(html).not.toContain("加载更多");
-  });
-
-  test("surfaces the pending backlog with origins before the tabs", () => {
+  test("surfaces the pending backlog with origins", () => {
     const html = render();
 
     expect(html).toContain("待整理内容");
     expect(html).toContain("正在排查导入抖动");
-    expect(html).toContain("主动记忆");
-    expect(html).toContain("自动摘要");
     expect(html).toContain('id="memory-pending"');
   });
 
@@ -251,27 +226,44 @@ describe("Memory document workbench", () => {
 
     expect(html).toContain("记忆文档超出注入预算");
     expect(html).toContain("立即压缩文档");
-    // Both Dream entry points must stay enabled for the budget rescue even
-    // with zero pending items. Static markup renders a disabled button as an
-    // actual `disabled=""` attribute (class names also contain "disabled:").
     expect(html).not.toMatch(
       /<button[^>]*\sdisabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?(?:立即压缩文档|立即整理)/u,
     );
   });
 
-  test("hides the over-budget banner when injection is healthy", () => {
-    const html = render();
+  test("surfaces versions that need review in both the banner and history", () => {
+    const html = render((value) => {
+      value.versions.data![0]!.needsReview = true;
+    });
 
-    expect(html).not.toContain("记忆文档超出注入预算");
+    expect(html).toContain("最新版本建议复核");
+    expect(html).toContain("查看需复核版本");
+    expect(html).toContain("建议复核");
   });
 
-  test("marks large-deletion versions with a review badge", () => {
+  test("keeps version history pagination and load failures recoverable", () => {
+    const paged = render((value) => {
+      value.versions.page = 1;
+      value.versions.hasNext = true;
+    });
+    const failed = render((value) => {
+      value.versions.data = [];
+      value.versions.error = new Error("boom");
+    });
+
+    expect(paged).toContain("上一页");
+    expect(paged).toContain("下一页");
+    expect(failed).toContain("无法加载版本历史");
+  });
+
+  test("does not promote an older page item to the latest review banner", () => {
     const html = render((value) => {
+      value.versions.page = 1;
       value.versions.data = [
         {
-          version: 5,
-          trigger: "budget_rewrite",
-          historyCount: null,
+          version: 3,
+          trigger: "auto_dream",
+          historyCount: 2,
           changed: true,
           needsReview: true,
           createdAt: TIMESTAMP,
@@ -279,22 +271,22 @@ describe("Memory document workbench", () => {
       ];
     });
 
-    expect(html).toContain("预算压缩");
     expect(html).toContain("建议复核");
+    expect(html).not.toContain("最新版本建议复核");
   });
 
   test("distinguishes archive empty state from a search without matches", () => {
     const empty = render((value) => {
-      value.initialTab = "archive";
+      value.activeTab = "archive";
       value.episodes.items = [];
     });
     const noMatch = render((value) => {
-      value.initialTab = "archive";
+      value.activeTab = "archive";
       value.episodes.items = [];
       value.episodes.activeQuery = "deployment";
     });
     const more = render((value) => {
-      value.initialTab = "archive";
+      value.activeTab = "archive";
       value.episodes.hasMore = true;
     });
 

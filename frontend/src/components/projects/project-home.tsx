@@ -41,9 +41,11 @@ const assets = [
 export function ProjectHome({
   project,
   tokenUsageSection,
+  usageDimensionsSection,
 }: {
   project: Project;
   tokenUsageSection?: ReactNode;
+  usageDimensionsSection?: ReactNode;
 }) {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   return (
@@ -51,6 +53,7 @@ export function ProjectHome({
       <ProjectHeader project={project} />
       <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
         {tokenUsageSection}
+        {usageDimensionsSection}
         {project.capabilities.includes("shared_assets.read") && (
           <section>
             <div className="mb-4">

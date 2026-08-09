@@ -154,7 +154,9 @@ export function getThreadModelSelectionExplicit(threadId: string): boolean {
   if (!isBrowser()) {
     return false;
   }
-  return localStorage.getItem(getThreadModelExplicitStorageKey(threadId)) === "1";
+  return (
+    localStorage.getItem(getThreadModelExplicitStorageKey(threadId)) === "1"
+  );
 }
 
 export function saveThreadModelSelectionExplicit(
@@ -202,10 +204,7 @@ export function getThreadMode(threadId: string): AgentMode | undefined {
   return isAgentMode(mode) ? mode : undefined;
 }
 
-export function saveThreadMode(
-  threadId: string,
-  mode: AgentMode | undefined,
-) {
+export function saveThreadMode(threadId: string, mode: AgentMode | undefined) {
   if (!isBrowser()) {
     return;
   }
@@ -225,7 +224,9 @@ export function getThreadModeSelectionExplicit(threadId: string): boolean {
   if (!isBrowser()) {
     return false;
   }
-  return localStorage.getItem(getThreadModeExplicitStorageKey(threadId)) === "1";
+  return (
+    localStorage.getItem(getThreadModeExplicitStorageKey(threadId)) === "1"
+  );
 }
 
 export function saveThreadModeSelectionExplicit(

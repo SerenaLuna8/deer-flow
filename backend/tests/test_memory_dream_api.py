@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from fastapi import FastAPI
+from pydantic import ValidationError
 
 from app.gateway.deps import (
     get_current_agent_runtime_config,
@@ -51,9 +52,15 @@ def _context() -> PrivateWorkContext:
 class _Service:
     def __init__(self) -> None:
         self.job_id = uuid.uuid4()
+        self.dream_result = MemoryDreamAdmissionRecord(
+            disposition="queued",
+            job_id=self.job_id,
+            history_count=7,
+        )
         self.dream_calls: list[str | None] = []
         self.dream_configs: list[object] = []
         self.restore_calls: list[tuple[int, int]] = []
+        self.versions: tuple[MemoryDocumentVersionRecord, ...] = ()
         self.episode_calls: list[dict[str, object]] = []
         self.episodes: tuple = ()
         self.pending_calls: list[dict[str, object]] = []
@@ -77,11 +84,17 @@ class _Service:
             raise self.error
         self.dream_calls.append(thread_id)
         self.dream_configs.append(app_config)
-        return MemoryDreamAdmissionRecord(
-            disposition="queued",
-            job_id=self.job_id,
-            history_count=7,
-        )
+        return self.dream_result
+
+    async def list_versions(self, context, *, limit, offset):
+        if self.error is not None:
+            raise self.error
+        return self.versions[offset : offset + limit]
+
+    async def get_version(self, context, version):
+        if self.error is not None:
+            raise self.error
+        return next(row for row in self.versions if row.version == version)
 
     async def restore(
         self,
@@ -166,6 +179,56 @@ async def test_manual_dream_accepts_no_body_and_exact_optional_thread_id(
 
 
 @pytest.mark.asyncio
+async def test_manual_dream_exposes_zero_history_budget_rewrite_admission(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    service.dream_result = MemoryDreamAdmissionRecord(
+        disposition="queued",
+        job_id=service.job_id,
+        history_count=0,
+        admission_kind="budget_rewrite",
+    )
+
+    response = await _post(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/dream",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "disposition": "queued",
+        "jobId": str(service.job_id),
+        "historyCount": 0,
+        "admissionKind": "budget_rewrite",
+    }
+
+
+@pytest.mark.asyncio
+async def test_manual_dream_preserves_nothing_pending_response_shape(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    service.dream_result = MemoryDreamAdmissionRecord(
+        disposition="nothing_pending",
+        job_id=None,
+        history_count=0,
+    )
+
+    response = await _post(
+        value,
+        f"/api/projects/{uuid.uuid4()}/memory/dream",
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "disposition": "nothing_pending",
+        "jobId": None,
+        "historyCount": 0,
+    }
+
+
+@pytest.mark.asyncio
 async def test_manual_dream_rejects_unknown_or_invalid_body_fields(
     app: tuple[FastAPI, _Service],
 ) -> None:
@@ -210,6 +273,81 @@ async def test_restore_uses_cas_and_returns_complete_version_detail(
         "unifiedDiff": "--- memory-before.md\n+++ memory-after.md\n",
     }
     assert service.restore_calls == [(4, 12)]
+
+
+@pytest.mark.asyncio
+async def test_budget_rewrite_version_endpoints_accept_zero_history(
+    app: tuple[FastAPI, _Service],
+) -> None:
+    value, service = app
+    created_at = datetime(2026, 8, 5, 2, 3, 4, tzinfo=UTC)
+    service.versions = (
+        MemoryDocumentVersionRecord(
+            version=14,
+            content="# 用户偏好与协作方式\n\n# 项目背景\n\n# 长期约束与架构决策\n\n# 当前仍有效的目标",
+            content_digest="b" * 64,
+            unified_diff="--- memory-before.md\n+++ memory-after.md\n",
+            trigger="budget_rewrite",
+            dream_job_id=uuid.uuid4(),
+            history_from=None,
+            history_to=None,
+            history_count=0,
+            prompt_version="dream-v3",
+            model_ref=uuid.uuid4(),
+            needs_review=False,
+            created_at=created_at,
+        ),
+    )
+    project_id = uuid.uuid4()
+
+    listed = await _get(
+        value,
+        f"/api/projects/{project_id}/memory/versions",
+    )
+    detail = await _get(
+        value,
+        f"/api/projects/{project_id}/memory/versions/14",
+    )
+
+    expected_summary = {
+        "version": 14,
+        "trigger": "budget_rewrite",
+        "historyCount": 0,
+        "changed": True,
+        "needsReview": False,
+        "createdAt": "2026-08-05T02:03:04Z",
+    }
+    assert listed.status_code == detail.status_code == 200
+    assert listed.json() == {"items": [expected_summary]}
+    assert detail.json() == {
+        **expected_summary,
+        "content": service.versions[0].content,
+        "unifiedDiff": service.versions[0].unified_diff,
+    }
+
+
+@pytest.mark.parametrize(
+    ("trigger", "history_count"),
+    (
+        ("auto_dream", 0),
+        ("manual_dream", None),
+        ("budget_rewrite", 1),
+        ("restore", 0),
+    ),
+)
+def test_version_response_rejects_history_count_outside_trigger_contract(
+    trigger: str,
+    history_count: int | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        memory_router.ProjectMemoryVersionSummary(
+            version=1,
+            trigger=trigger,
+            historyCount=history_count,
+            changed=True,
+            needsReview=False,
+            createdAt=datetime(2026, 8, 5, tzinfo=UTC),
+        )
 
 
 @pytest.mark.asyncio

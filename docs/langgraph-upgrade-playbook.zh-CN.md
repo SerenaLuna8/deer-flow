@@ -35,8 +35,8 @@
    失败即上游行为变化，逐条对照第 5 节决定"改代码适配"还是"补丁站岗/退役"。
 4. **复核 `checkpoint_patches.py`**（第 4 节）：两枚补丁各自核对上游源码与
    探针结果，更新 `_PATCH_VALIDATED_LANGGRAPH_VERSION` 或删除补丁。
-5. **跑完整金丝雀清单**（第 3 节顺序），随后跑 backend 全量
-   `POSTGRES_TEST_URL=... make test`。
+5. **跑完整金丝雀清单**（第 3 节顺序），随后基于开发环境 `DATABASE_URL` 跑
+   backend 全量 `make test`。
 6. **full/delta 双模式矩阵**（第 6 节）逐格核对，真 PostgreSQL 用例必跑。
 7. 升级 PR 里写清楚：上游 changelog 相关条目、契约测试的差异与处置、
    补丁复核结论。
@@ -45,8 +45,8 @@
 
 | 顺序 | 测试 | 看住什么 |
 |---|---|---|
-| 1 | `tests/test_langchain_contract.py` | `after_model` 逆序派发、`wrap_model_call`/`wrap_tool_call` 组合方向与短路、`create_agent` 参数形态、checkpoint 补丁依赖的上游内部结构、版本上界自检 |
-| 2 | `tests/test_agent_assembly_golden.py` | 三条装配链的精确中间件序列与共享脊椎投影 |
+| 1 | `tests/test_langchain_contract.py` | `after_model` 逆序派发、`wrap_model_call`/`wrap_tool_call` 组合方向与外层短路、`create_agent` 参数形态、两枚 checkpoint 补丁生效前/后的上游合同、版本上界自检 |
+| 2 | `tests/test_agent_assembly_golden.py` | private lead、non-private lead、SDK、embedded 四条装配链的精确序列、逐链顺序不变量与共享脊椎投影 |
 | 3 | `tests/test_create_deerflow_agent.py` | SDK factory 全部参数形态与特性开关 |
 | 4 | `tests/test_clarification_middleware.py` | clarification 中断/恢复（依赖上游 interrupt 语义） |
 | 5 | `tests/test_client.py` | 嵌入客户端复用 lead 链 + DeltaChannel 行为 |
@@ -74,7 +74,8 @@
   验证版本 `_PATCH_VALIDATED_LANGGRAPH_VERSION = 1.2.9`，更新版本超过它时
   启动日志出 warning，提示重新核对。
 - **何时可删**：上游修正或移除该 override（补丁自动 stand down 后观察一个
-  版本周期）；删除时同步删 `test_langchain_contract.py` 里对应的结构断言。
+  版本周期）；删除时同步更新 `test_langchain_contract.py` 里对应的补丁生效前/后
+  合同，保留上游行为回归覆盖。
 
 ### 4.2 `ensure_binop_overwrite_first_write_patch`
 
@@ -90,7 +91,7 @@
   （用 Union 通道实测上游是否仍存包装对象）。探针为假时补丁自动不装。
 - **何时可删**：新版本上探针返回 False（上游自己解包了）；确认
   `DeltaChannel.update` 与 `BinaryOperatorAggregate.update` 行为已一致后删除，
-  并同步删除契约测试中的探针断言。
+  并同步更新契约测试中的补丁生效前/后合同，保留上游行为探针。
 
 ## 5. 契约测试失败的处置矩阵
 
@@ -110,7 +111,7 @@
 |---|---|---|---|
 | 新线程首轮写入 | ✅ | ✅ | `test_client.py`、`test_create_deerflow_agent.py` |
 | 断点续跑 / 重放 | ✅ | ✅ | `test_memory_archive_receipt_postgres.py`（真 PG） |
-| full → delta 迁移后首条消息 | — | ✅ | `test_langchain_contract.py` 补丁结构断言 + 4.1 补丁自身逻辑 |
+| full → delta 迁移后首条消息 | — | ✅ | `test_langchain_contract.py` 补丁生效前/后合同 + 4.1 补丁自身逻辑 |
 | 线程分支 / 替换式状态写入 | ✅ | ✅ | 4.2 补丁探针 + `test_human_input_response_promotion.py` |
 | SNIP 压缩回执激活 | ✅ | ✅ | `test_memory_archive_receipt_postgres.py` |
 | 嵌入客户端（InMemorySaver） | ✅ | ✅ | `test_client.py` |

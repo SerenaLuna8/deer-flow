@@ -15,6 +15,12 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deerflow.agents.memory.dream import (
+    MAX_MEMORY_DOCUMENT_CHARS,
+    render_empty_memory_document,
+    validate_memory_document,
+    validate_memory_document_sections,
+)
 from deerflow.agents.memory.snip import (
     SNIP_NOTHING,
     compute_snip_content_digest,
@@ -318,8 +324,10 @@ class MemoryRememberProposal:
             raise ValueError("Memory proposal kind is out of contract")
         if not isinstance(self.content, str):
             raise ValueError("Memory proposal content must be text")
+        if _CONTROL_CHARS.search(self.content):
+            raise ValueError("Memory proposal content must be one bounded line")
         content = self.content.strip()
-        if not content or len(content) > MAX_REMEMBER_CONTENT_CHARS or _CONTROL_CHARS.search(content):
+        if not content or len(content) > MAX_REMEMBER_CONTENT_CHARS:
             raise ValueError("Memory proposal content must be one bounded line")
         try:
             validate_snip_line(f"- [{self.kind}] {content}")
@@ -351,6 +359,8 @@ class MemoryProposalOutcome:
 class MemoryDocumentRecord:
     content: str
     content_digest: str
+    sections: tuple[str, ...]
+    sections_policy_version_id: uuid.UUID | None
     version: int
     dream_cursor: int
     active_dream_job_id: uuid.UUID | None
@@ -461,6 +471,8 @@ class MemoryDreamWork:
     base_document_version: int
     base_content: str
     base_content_digest: str
+    sections: tuple[str, ...]
+    sections_policy_version_id: uuid.UUID
     preference_version: int
     policy_revision: int
     model_config_id: uuid.UUID
@@ -575,19 +587,38 @@ class MemoryDocumentRepository:
         )
 
     @staticmethod
+    def _frozen_document_sections(
+        row: MemoryDocumentRow,
+    ) -> tuple[tuple[str, ...], uuid.UUID]:
+        if row.sections_policy_section != "memory_document" or not isinstance(
+            row.sections_policy_version_id,
+            uuid.UUID,
+        ):
+            raise MemoryDocumentConflict("Memory document sections provenance is invalid")
+        return (
+            validate_memory_document_sections(row.sections),
+            row.sections_policy_version_id,
+        )
+
+    @staticmethod
     def _document_record(row: MemoryDocumentRow | None) -> MemoryDocumentRecord:
         if row is None:
             return MemoryDocumentRecord(
                 content="",
                 content_digest="",
+                sections=(),
+                sections_policy_version_id=None,
                 version=0,
                 dream_cursor=0,
                 active_dream_job_id=None,
                 updated_at=None,
             )
+        sections, sections_policy_version_id = MemoryDocumentRepository._frozen_document_sections(row)
         return MemoryDocumentRecord(
             content=row.content,
             content_digest=row.content_digest,
+            sections=sections,
+            sections_policy_version_id=sections_policy_version_id,
             version=int(row.version),
             dream_cursor=int(row.dream_cursor),
             active_dream_job_id=row.active_dream_job_id,
@@ -1260,7 +1291,9 @@ class MemoryDocumentRepository:
         *,
         trigger: MemoryDreamTrigger,
         frozen: MemoryDreamFrozenRuntime,
-        initial_content: str,
+        initial_content: str | None,
+        initial_sections: tuple[str, ...] | None,
+        sections_policy_version_id: uuid.UUID | None,
         now: datetime,
         max_attempts: int = 3,
     ) -> MemoryDreamAdmissionRecord:
@@ -1268,37 +1301,65 @@ class MemoryDocumentRepository:
             type(scope) is not MemoryDocumentScope
             or trigger not in {"auto_dream", "manual_dream", "budget_rewrite"}
             or type(frozen) is not MemoryDreamFrozenRuntime
-            or not isinstance(initial_content, str)
-            or not initial_content
-            or len(initial_content) > 16_000
             or not isinstance(now, datetime)
             or now.tzinfo is None
             or type(max_attempts) is not int
             or not 1 <= max_attempts <= 20
         ):
             raise ValueError("Dream admission input is invalid")
-        await self.session.execute(
-            pg_insert(MemoryDocumentRow)
-            .values(
-                project_id=scope.project_id,
-                owner_user_id=scope.owner_user_id,
-                namespace=scope.namespace,
-                content=initial_content,
-                content_digest=memory_document_digest(initial_content),
-                version=0,
-                dream_cursor=0,
-                active_dream_job_id=None,
-                updated_at=now,
-            )
-            .on_conflict_do_nothing(
-                index_elements=[
-                    MemoryDocumentRow.project_id,
-                    MemoryDocumentRow.owner_user_id,
-                    MemoryDocumentRow.namespace,
-                ]
-            )
+        supplied_creation_material = (
+            initial_content is not None,
+            initial_sections is not None,
+            sections_policy_version_id is not None,
         )
-        document = (await self.session.execute(sa.select(MemoryDocumentRow).where(*self._scope_predicates(MemoryDocumentRow, scope)).with_for_update(of=MemoryDocumentRow))).scalar_one()
+        if any(supplied_creation_material) and not all(supplied_creation_material):
+            raise ValueError("Dream document creation material is incomplete")
+        creation_sections: tuple[str, ...] | None = None
+        if all(supplied_creation_material):
+            if not isinstance(initial_content, str) or not isinstance(sections_policy_version_id, uuid.UUID):
+                raise ValueError("Dream document creation material is invalid")
+            creation_sections = validate_memory_document_sections(initial_sections)
+            if initial_content != render_empty_memory_document(creation_sections):
+                raise ValueError("Dream initial document does not match its sections")
+
+        document = (await self.session.execute(sa.select(MemoryDocumentRow).where(*self._scope_predicates(MemoryDocumentRow, scope)).with_for_update(of=MemoryDocumentRow))).scalar_one_or_none()
+        if document is None:
+            if creation_sections is None or initial_content is None or sections_policy_version_id is None:
+                raise MemoryDocumentConflict("Dream document creation policy is unavailable")
+            await self.session.execute(
+                pg_insert(MemoryDocumentRow)
+                .values(
+                    project_id=scope.project_id,
+                    owner_user_id=scope.owner_user_id,
+                    namespace=scope.namespace,
+                    content=initial_content,
+                    content_digest=memory_document_digest(initial_content),
+                    sections=list(creation_sections),
+                    sections_policy_version_id=sections_policy_version_id,
+                    version=0,
+                    dream_cursor=0,
+                    active_dream_job_id=None,
+                    updated_at=now,
+                )
+                .on_conflict_do_nothing(
+                    index_elements=(
+                        MemoryDocumentRow.project_id,
+                        MemoryDocumentRow.owner_user_id,
+                        MemoryDocumentRow.namespace,
+                    )
+                )
+            )
+            document = (await self.session.execute(sa.select(MemoryDocumentRow).where(*self._scope_predicates(MemoryDocumentRow, scope)).with_for_update(of=MemoryDocumentRow))).scalar_one_or_none()
+            if document is None:
+                raise MemoryDocumentConflict("Dream document creation disappeared")
+        document_sections, _sections_policy_version_id = self._frozen_document_sections(document)
+        if memory_document_digest(document.content) != document.content_digest:
+            raise MemoryDocumentConflict("Memory document digest changed")
+        validate_memory_document(
+            document.content,
+            MAX_MEMORY_DOCUMENT_CHARS,
+            sections=document_sections,
+        )
         active = await self._active_dream(document, scope)
         if active is not None:
             return active
@@ -1567,6 +1628,7 @@ class MemoryDocumentRepository:
             )
             for row in history_rows
         )
+        document_sections, sections_policy_version_id = self._frozen_document_sections(document)
         return MemoryDreamWork(
             job_id=run.job_id,
             project_id=run.project_id,
@@ -1580,6 +1642,8 @@ class MemoryDocumentRepository:
             base_document_version=int(run.base_document_version),
             base_content=document.content if run.result_version is None else (await self.read_version(scope, int(run.result_version))).content,
             base_content_digest=run.base_content_digest,
+            sections=document_sections,
+            sections_policy_version_id=sections_policy_version_id,
             preference_version=int(run.preference_version),
             policy_revision=int(run.policy_revision),
             model_config_id=model_version.model_config_id,
@@ -1601,11 +1665,13 @@ class MemoryDocumentRepository:
         expected_history_digest: str,
         expected_base_version: int,
         expected_base_digest: str,
+        expected_sections: tuple[str, ...],
         content: str,
         now: datetime,
         episode_retention_days: int = DEFAULT_EPISODE_RETENTION_DAYS,
     ) -> MemoryDocumentVersionRecord:
         validate_episode_retention_days(episode_retention_days)
+        expected_sections = validate_memory_document_sections(expected_sections)
         existing = (
             await self.session.execute(
                 sa.select(MemoryDocumentVersionRow).where(
@@ -1658,11 +1724,17 @@ class MemoryDocumentRepository:
             or document.content_digest != expected_base_digest
             or int(run.base_document_version) != expected_base_version
             or run.base_content_digest != expected_base_digest
+            or self._frozen_document_sections(document)[0] != expected_sections
             or run.history_digest != expected_history_digest
             or int(run.history_count) != len(history)
             or any(row.status != "processing" for row in history_rows)
         ):
             raise MemoryDocumentConflict("Dream settlement contract changed")
+        validate_memory_document(
+            content,
+            MAX_MEMORY_DOCUMENT_CHARS,
+            sections=expected_sections,
+        )
         if run.trigger == "budget_rewrite":
             if history or expected_history_digest != BUDGET_REWRITE_HISTORY_DIGEST:
                 raise MemoryDocumentConflict("Dream settlement contract changed")
@@ -1849,14 +1921,26 @@ class MemoryDocumentRepository:
         *,
         target_version: int,
         expected_current_version: int,
+        expected_sections: tuple[str, ...],
+        max_tokens: int,
         now: datetime,
     ) -> MemoryDocumentVersionRecord:
-        if type(target_version) is not int or target_version < 1 or type(expected_current_version) is not int or expected_current_version < 0 or not isinstance(now, datetime) or now.tzinfo is None:
+        expected_sections = validate_memory_document_sections(expected_sections)
+        if (
+            type(target_version) is not int
+            or target_version < 1
+            or type(expected_current_version) is not int
+            or expected_current_version < 0
+            or type(max_tokens) is not int
+            or max_tokens < 1
+            or not isinstance(now, datetime)
+            or now.tzinfo is None
+        ):
             raise ValueError("Memory restore input is invalid")
         document = (await self.session.execute(sa.select(MemoryDocumentRow).where(*self._scope_predicates(MemoryDocumentRow, scope)).with_for_update(of=MemoryDocumentRow))).scalar_one_or_none()
         if document is None:
             raise MemoryDocumentNotFound
-        if document.active_dream_job_id is not None or int(document.version) != expected_current_version:
+        if document.active_dream_job_id is not None or int(document.version) != expected_current_version or self._frozen_document_sections(document)[0] != expected_sections:
             raise MemoryDocumentConflict("Memory restore CAS conflict")
         target = (
             await self.session.execute(
@@ -1868,6 +1952,11 @@ class MemoryDocumentRepository:
         ).scalar_one_or_none()
         if target is None:
             raise MemoryDocumentNotFound
+        validate_memory_document(
+            target.content,
+            max_tokens,
+            sections=expected_sections,
+        )
         next_version = int(document.version) + 1
         restored = MemoryDocumentVersionRow(
             project_id=scope.project_id,

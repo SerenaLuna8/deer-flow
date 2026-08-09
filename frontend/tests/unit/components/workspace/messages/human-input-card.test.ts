@@ -49,6 +49,7 @@ describe("HumanInputCard", () => {
     expect(html).toContain("Submit answer");
     expect(html).toContain("You can change your selection before submitting.");
     expect(html).toContain('type="text"');
+    expect(html).toContain('<form class="relative space-y-4"');
   });
 
   it("renders answered state as a collapsed read-only disclosure", () => {

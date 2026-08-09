@@ -302,6 +302,10 @@ export const enUS: Translations = {
   project: {
     audit: "Audit",
     automations: "Automations",
+    agents: "Agent",
+    skills: "Skill",
+    mcp: "MCP",
+    memory: "Memory",
     usage: "Usage",
     governance: {
       retry: "Retry",
@@ -326,6 +330,8 @@ export const enUS: Translations = {
       usage: {
         title: "Project usage",
         description: "Review effective limits and current project consumption.",
+        settingsDescription:
+          "System admins can tighten this project's quota ceilings here. Live occupancy and effective limits remain on the project overview.",
         loading: "Loading usage",
         unavailableTitle: "Usage is unavailable",
         unavailableDescription:
@@ -354,6 +360,21 @@ export const enUS: Translations = {
         emptyTitle: "No audit events",
         emptyDescription: "This project has no recorded governance events yet.",
         olderEvents: "Older events",
+        previousPage: "Previous",
+        nextPage: "Next",
+        page: (page) => `Page ${page}`,
+        pageSize: "Per page",
+        pageSizeOption: (pageSize) => `${pageSize}`,
+        itemsOnPage: (count) => `${count} on this page`,
+        columns: {
+          time: "Time",
+          action: "Action",
+          outcome: "Outcome",
+          actor: "Actor",
+          target: "Target",
+          details: "Details",
+          error: "Error",
+        },
       },
     },
   },
@@ -773,6 +794,11 @@ export const enUS: Translations = {
         description:
           "Control budgets, context, Memory, tool results, and safeguards for new Runs. Active Runs are not changed.",
       },
+      memoryDocument: {
+        title: "Memory document sections",
+        description:
+          "Define the section template for newly created Memory documents. Existing documents keep the structure frozen when they were created.",
+      },
     },
     groups: {
       runLimits: "Run budgets and limits",
@@ -795,6 +821,16 @@ export const enUS: Translations = {
       removeRow: "Remove",
       listHint:
         "Separate values with commas. Empty and duplicate values are removed before save.",
+      memoryDocumentSections: "Section titles",
+      memoryDocumentSectionsHint:
+        "Enter 2–8 plain titles in document order. Do not include # or Dream history markers; the system creates the Markdown headings. Each title is limited to 80 characters and must be unique.",
+      memoryDocumentSectionInput: (position) =>
+        `Memory document section ${position}`,
+      addMemoryDocumentSection: "Add section",
+      removeMemoryDocumentSection: (position) => `Remove section ${position}`,
+      moveMemoryDocumentSectionUp: (position) => `Move section ${position} up`,
+      moveMemoryDocumentSectionDown: (position) =>
+        `Move section ${position} down`,
     },
     common: {
       save: "Save changes",
@@ -811,6 +847,7 @@ export const enUS: Translations = {
       newRequests: "Effective for later requests",
       newRuns: "Applies to new Runs",
       newRequestsAndRuns: "Applies to new requests and Runs",
+      newMemoryDocuments: "New Memory documents only",
       nextAuthoritativeCheck: "Applies at the next quota check",
       restartRequired: "Applies after services restart",
     },
@@ -837,6 +874,7 @@ export const enUS: Translations = {
       skill: "Skill",
       mcp: "MCP",
       credential: "Credential",
+      quota: "Quota",
     },
     shell: {
       platformAria: "Platform asset management",
@@ -1368,7 +1406,15 @@ export const enUS: Translations = {
   },
 
   automation: {
+    title: "Automations",
     create: "Create automation",
+    editTitle: "Edit automation",
+    deleteTitle: "Delete automation",
+    emptyTitle: "No automations yet",
+    emptyDescription:
+      "After creating one, project Agents can run on a cron or one-time schedule.",
+    filterEmptyTitle: "No automations match these filters",
+    selectPrompt: "Select an automation.",
     runNow: "Run now",
     schedulerDisabled: "Scheduling is disabled",
     migrationRequired: "Automation migration is required",
@@ -1721,7 +1767,7 @@ export const enUS: Translations = {
     clickToViewContent: "Click to view file content",
     writeTodos: "Update to-do list",
     rememberMemory: "Save to memory",
-    remembered: "Remembered for the next organization pass",
+    remembered: "Remembered:",
     skillInstallTooltip: "Install skill and make it available to ActWeave",
   },
 
@@ -1866,7 +1912,6 @@ export const enUS: Translations = {
       memory: "Memory",
       tools: "Tools",
       skills: "Skills",
-      notification: "Notification",
     },
     memory: {
       title: "Memory",
@@ -1967,23 +2012,14 @@ export const enUS: Translations = {
       loading: "Loading skill content",
       retry: "Retry",
     },
-    notification: {
-      title: "Notification",
-      description:
-        "ActWeave only sends a completion notification when the window is not active. This is especially useful for long-running tasks so you can switch to other work and get notified when done.",
-      requestPermission: "Request notification permission",
-      deniedHint:
-        "Notification permission was denied. You can enable it in your browser's site settings to receive completion alerts.",
-      testButton: "Send test notification",
-      testTitle: "ActWeave",
-      testBody: "This is a test notification.",
-      notSupported: "Your browser does not support notifications.",
-      disableNotification: "Disable notification",
-    },
     account: {
       profileTitle: "Profile",
       email: "Email",
       role: "Role",
+      roles: {
+        system_admin: "System admin",
+        user: "User",
+      },
       ssoProvider: "SSO",
       changePasswordTitle: "Change Password",
       changePasswordDescription: "Update your account password.",

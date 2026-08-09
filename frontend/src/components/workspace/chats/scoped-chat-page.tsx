@@ -191,7 +191,6 @@ export function ScopedChatPage({
     loadMoreHistory,
     historyError,
     retryHistory,
-    runExecutionProfiles,
     hasTerminalRunFailure,
   } = useThreadStream({
     threadId: isNewThread ? undefined : threadId,
@@ -470,7 +469,6 @@ export function ScopedChatPage({
                   isHistoryLoading={isHistoryLoading}
                   historyError={historyError}
                   retryHistory={retryHistory}
-                  runExecutionProfiles={runExecutionProfiles}
                   tokenUsageInlineMode={tokenUsageInlineMode}
                   canSubmitFeedback={scope.canRun}
                   canDeleteFiles={scope.canDeleteFiles === true}

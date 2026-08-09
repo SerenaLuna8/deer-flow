@@ -893,7 +893,8 @@ function ModelCatalog({
                         model.sort_order,
                       )}
                     >
-                      v{model.version_number} · r{model.revision} · {model.sort_order}
+                      v{model.version_number} · r{model.revision} ·{" "}
+                      {model.sort_order}
                     </p>
                   </td>
                   <td className="px-3 py-3.5 text-xs">
@@ -1834,7 +1835,8 @@ export function ModelEditorDialog({
                       aria-busy={testingConnection}
                       aria-describedby={
                         providerAcceptsCredential &&
-                        (credentialStatus !== "ready" || !credentialBindingReady)
+                        (credentialStatus !== "ready" ||
+                          !credentialBindingReady)
                           ? MODEL_EDITOR_CREDENTIAL_STATUS_ID
                           : undefined
                       }

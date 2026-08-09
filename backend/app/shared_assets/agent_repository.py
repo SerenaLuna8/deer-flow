@@ -947,6 +947,91 @@ class AgentRepository:
         system_ids = (await self.session.execute(system_statement)).scalars().all()
         return tuple((*project_ids, *system_ids))
 
+    async def list_enabled_system_dependency_versions(
+        self,
+        context: ProjectContext,
+    ) -> tuple[tuple[uuid.UUID, ...], tuple[uuid.UUID, ...]]:
+        """Freeze every enabled, active, published System Skill/MCP binding.
+
+        Agent revisions store exact dependency version IDs.  Defaults therefore
+        come from the project's enabled bindings rather than from the global
+        catalog, preserving the project authorization boundary.
+        """
+
+        self._require_project_actor(context)
+        await self._lock_project_context(context)
+        skill_statement = (
+            select(SkillVersionRow.id)
+            .select_from(ProjectSystemSkillBindingRow)
+            .join(
+                SkillRow,
+                and_(
+                    SkillRow.id == ProjectSystemSkillBindingRow.system_skill_id,
+                    SkillRow.scope == "system",
+                    SkillRow.project_id.is_(None),
+                    SkillRow.status == "active",
+                ),
+            )
+            .join(
+                SkillVersionRow,
+                and_(
+                    SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillVersionRow.workflow_status == "published",
+                ),
+            )
+            .where(
+                ProjectSystemSkillBindingRow.project_id == context.project_id,
+                ProjectSystemSkillBindingRow.enabled.is_(True),
+            )
+            .order_by(SkillRow.id, SkillVersionRow.id)
+            .with_for_update(
+                read=True,
+                of=[
+                    ProjectSystemSkillBindingRow,
+                    SkillRow,
+                    SkillVersionRow,
+                ],
+            )
+        )
+        mcp_statement = (
+            select(McpServerVersionRow.id)
+            .select_from(ProjectSystemMcpBindingRow)
+            .join(
+                McpServerRow,
+                and_(
+                    McpServerRow.id == ProjectSystemMcpBindingRow.system_mcp_server_id,
+                    McpServerRow.scope == "system",
+                    McpServerRow.project_id.is_(None),
+                    McpServerRow.status == "active",
+                ),
+            )
+            .join(
+                McpServerVersionRow,
+                and_(
+                    McpServerVersionRow.id == ProjectSystemMcpBindingRow.mcp_server_version_id,
+                    McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                    McpServerVersionRow.workflow_status == "published",
+                ),
+            )
+            .where(
+                ProjectSystemMcpBindingRow.project_id == context.project_id,
+                ProjectSystemMcpBindingRow.enabled.is_(True),
+            )
+            .order_by(McpServerRow.id, McpServerVersionRow.id)
+            .with_for_update(
+                read=True,
+                of=[
+                    ProjectSystemMcpBindingRow,
+                    McpServerRow,
+                    McpServerVersionRow,
+                ],
+            )
+        )
+        skill_ids = (await self.session.execute(skill_statement)).scalars().all()
+        mcp_ids = (await self.session.execute(mcp_statement)).scalars().all()
+        return tuple(skill_ids), tuple(mcp_ids)
+
     async def lock_skill_version_slugs(
         self,
         version_ids: Sequence[uuid.UUID],

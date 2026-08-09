@@ -85,6 +85,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "project_usage_ledger",
     "projects",
     "run_asset_versions",
+    "run_event_invariants",
+    "run_event_partition_state",
     "run_events",
     "run_mcp_grant_snapshots",
     "run_memory_context_snapshots",

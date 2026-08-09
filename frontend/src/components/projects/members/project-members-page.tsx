@@ -26,7 +26,11 @@ import { CreateInvitationDialog } from "./create-invitation-dialog";
 import { MemberRoleDialog } from "./member-role-dialog";
 import { findSelfMembership } from "./self-membership";
 
-export function ProjectMembersPage() {
+export function ProjectMembersPage({
+  embedded = false,
+}: {
+  embedded?: boolean;
+}) {
   const project = useCurrentProject();
   const { user } = useAuth();
   const router = useRouter();
@@ -51,23 +55,39 @@ export function ProjectMembersPage() {
   }, [changeRole.isSuccess]);
 
   const selfMembership = findSelfMembership(members.data ?? [], user);
+  const inviteAction = canManage ? (
+    <Button type="button" onClick={() => setInvitationOpen(true)}>
+      邀请成员
+    </Button>
+  ) : null;
 
-  return (
-    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
-      <ProjectPageHeader
-        eyebrow={`${project.display_name} · 项目管理`}
-        title="成员与邀请"
-        description="管理项目成员、角色和待处理邀请。"
-        actions={
-          canManage ? (
-            <Button type="button" onClick={() => setInvitationOpen(true)}>
-              邀请成员
-            </Button>
-          ) : null
-        }
-      />
+  const body = (
+    <>
+      {embedded ? (
+        <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+          <div className="max-w-2xl">
+            <h2 className="text-2xl font-semibold tracking-tight">
+              成员与邀请
+            </h2>
+            <p className="text-muted-foreground mt-2 leading-6">
+              管理项目成员、角色和待处理邀请。
+            </p>
+          </div>
+          {inviteAction}
+        </header>
+      ) : (
+        <ProjectPageHeader
+          eyebrow={`${project.display_name} · 项目管理`}
+          title="成员与邀请"
+          description="管理项目成员、角色和待处理邀请。"
+          actions={inviteAction}
+        />
+      )}
 
-      <section aria-labelledby="project-members-title" className="mt-6">
+      <section
+        aria-labelledby="project-members-title"
+        className={embedded ? undefined : "mt-6"}
+      >
         <h2 id="project-members-title" className="mb-3 text-lg font-semibold">
           成员
         </h2>
@@ -238,6 +258,16 @@ export function ProjectMembersPage() {
         }}
         onSubmit={(input) => createInvitation.mutate(input)}
       />
+    </>
+  );
+
+  if (embedded) {
+    return <div className="min-w-0">{body}</div>;
+  }
+
+  return (
+    <main className="mx-auto w-full max-w-6xl px-4 py-6 sm:px-6 lg:px-8">
+      {body}
     </main>
   );
 }

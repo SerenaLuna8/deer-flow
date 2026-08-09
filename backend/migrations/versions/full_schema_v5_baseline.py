@@ -1,10 +1,9 @@
-"""Chain root: the full_schema_v5 snapshot installed by full_schema.sql.
+"""Chain root: the frozen full_schema_v5 release snapshot.
 
-No-op by design (D2): ``full_schema.sql`` already stamps exactly this
-revision id into ``alembic_version``, so every database installed through
-``make setup-db`` is natively at the chain root and Alembic adopts it in
-place without any backfill. The frozen snapshot this root corresponds to
-lives at ``backend/migrations/baseline/full_schema_v5.sql``.
+No-op by design (D2): databases installed by the original v5 release already
+carry this revision id, so Alembic adopts them without backfill. Current fresh
+installs stamp the current chain head directly; the immutable SQL represented
+by this root lives at ``backend/migrations/baseline/full_schema_v5.sql``.
 """
 
 from __future__ import annotations

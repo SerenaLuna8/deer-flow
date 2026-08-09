@@ -977,6 +977,20 @@ export const agentInstructionsInputSchema = z
     expected_asset_version: z.number().int().positive(),
   })
   .strict();
+export const agentCapabilityBindingsInputSchema = z
+  .object({
+    skill_version_ids: z.array(assetIdSchema),
+    mcp_version_ids: z.array(assetIdSchema),
+    expected_asset_version: z.number().int().positive(),
+  })
+  .strict()
+  .refine(
+    (value) =>
+      new Set(value.skill_version_ids).size ===
+        value.skill_version_ids.length &&
+      new Set(value.mcp_version_ids).size === value.mcp_version_ids.length,
+    { message: "Agent capability version IDs must be unique" },
+  );
 export const skillVersionInputSchema = z
   .object({
     files: z
@@ -1305,6 +1319,9 @@ export type CredentialReplacementResponse = z.infer<
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
 export type AgentInstructionsInput = z.input<
   typeof agentInstructionsInputSchema
+>;
+export type AgentCapabilityBindingsInput = z.input<
+  typeof agentCapabilityBindingsInputSchema
 >;
 export type SkillVersionInput = z.input<typeof skillVersionInputSchema>;
 export type SkillVersionFileContent = z.infer<

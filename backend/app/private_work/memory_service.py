@@ -393,15 +393,21 @@ class PrivateMemoryDocumentService:
                 if not preference.memory_enabled or not isinstance(policy, AgentRuntimePolicyValue) or not policy.memory.enabled:
                     raise MemoryDocumentConflict("Memory is disabled")
                 repository = self._repository_builder(session)
+                state = await repository.read_state(scope, for_update=True)
+                if state.document.sections_policy_version_id is None:
+                    raise MemoryDocumentNotFound
                 target = await repository.read_version(scope, target_version)
                 validate_memory_document(
                     target.content,
                     policy.memory.max_injection_tokens,
+                    sections=state.document.sections,
                 )
                 return await repository.restore_version(
                     scope,
                     target_version=target_version,
                     expected_current_version=expected_current_version,
+                    expected_sections=state.document.sections,
+                    max_tokens=policy.memory.max_injection_tokens,
                     now=datetime.now(UTC),
                 )
         except MemoryDocumentNotFound:

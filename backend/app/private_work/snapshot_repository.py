@@ -80,6 +80,7 @@ from app.system_settings.validation import (
 from deerflow.agents.memory.dream import (
     MemoryDocumentOverBudget,
     validate_memory_document,
+    validate_memory_document_sections,
 )
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
@@ -330,15 +331,27 @@ class RunSnapshotRepository:
             if source_snapshot is None:
                 return
             try:
-                validate_memory_document(
-                    source_snapshot.content,
-                    memory.max_injection_tokens,
-                )
+                if not isinstance(source_snapshot.content, str) or not isinstance(
+                    source_snapshot.content_digest,
+                    str,
+                ):
+                    raise ValueError("Run Memory snapshot digest is invalid")
                 digest = hashlib.sha256(
                     source_snapshot.content.encode("utf-8"),
                 ).hexdigest()
                 if digest != source_snapshot.content_digest:
                     raise ValueError("Run Memory snapshot digest drift")
+                # Corruption must be detected before the recoverable budget
+                # branch.  A drifted row must never be normalized into an
+                # over-budget skip.
+                validate_memory_document(
+                    source_snapshot.content,
+                    memory.max_injection_tokens,
+                    sections=source_snapshot.sections,
+                )
+                source_sections = validate_memory_document_sections(
+                    source_snapshot.sections,
+                )
             except MemoryDocumentOverBudget:
                 await self._skip_memory_injection(session, context, run_id)
                 return
@@ -353,6 +366,7 @@ class RunSnapshotRepository:
                     document_version=int(source_snapshot.document_version),
                     content=source_snapshot.content,
                     content_digest=source_snapshot.content_digest,
+                    sections=list(source_sections),
                 )
             )
             return
@@ -378,13 +392,24 @@ class RunSnapshotRepository:
         if document is None or int(document.version) < 1:
             return
         try:
-            validate_memory_document(
-                document.content,
-                memory.max_injection_tokens,
-            )
+            if not isinstance(document.content, str) or not isinstance(
+                document.content_digest,
+                str,
+            ):
+                raise ValueError("Memory document digest is invalid")
             digest = hashlib.sha256(document.content.encode("utf-8")).hexdigest()
             if digest != document.content_digest:
                 raise ValueError("Memory document digest drift")
+            # Validate integrity first so an over-budget document with a bad
+            # digest still fails admission closed.
+            validate_memory_document(
+                document.content,
+                memory.max_injection_tokens,
+                sections=document.sections,
+            )
+            document_sections = validate_memory_document_sections(
+                document.sections,
+            )
         except MemoryDocumentOverBudget:
             await self._skip_memory_injection(session, context, run_id)
             return
@@ -399,6 +424,7 @@ class RunSnapshotRepository:
                 document_version=int(document.version),
                 content=document.content,
                 content_digest=document.content_digest,
+                sections=list(document_sections),
             )
         )
 

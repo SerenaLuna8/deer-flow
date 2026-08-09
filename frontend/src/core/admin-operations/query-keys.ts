@@ -90,3 +90,26 @@ export function adminProjectLifecycleMutationKey(accountId: string) {
     "lifecycle",
   ] as const;
 }
+
+export function adminProjectUsageQueryKey(
+  accountId: string,
+  projectId: string,
+) {
+  return [
+    ...adminOperationsRoot(accountId),
+    "projects",
+    projectId,
+    "usage",
+  ] as const;
+}
+
+export function adminProjectQuotaLimitsMutationKey(
+  accountId: string,
+  projectId: string,
+) {
+  return [
+    ...adminProjectUsageQueryKey(accountId, projectId),
+    "mutation",
+    "limits",
+  ] as const;
+}

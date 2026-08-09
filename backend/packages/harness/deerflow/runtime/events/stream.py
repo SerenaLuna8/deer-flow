@@ -79,9 +79,13 @@ class PostgresStreamBridge(StreamBridge):
         session_factory: async_sessionmaker[AsyncSession],
         *,
         notifier: StreamNotifier | None = None,
+        run_event_notify_enabled: bool = True,
     ) -> None:
         self._sessions = session_factory
-        self._events = DbRunEventStore(session_factory)
+        self._events = DbRunEventStore(
+            session_factory,
+            run_event_notify_enabled=run_event_notify_enabled,
+        )
         self._notifier = notifier or _NoopNotifier()
 
     async def _notify(self, frame: StoredStreamFrame) -> None:

@@ -213,7 +213,13 @@ class MemoryDreamJobHandler:
         *,
         max_tokens: int,
     ) -> MemoryDreamInput:
-        if work.prompt_version != DREAM_PROMPT_VERSION or work.result_version is not None or work.history_count != len(work.history) or memory_document_digest(work.base_content) != work.base_content_digest:
+        if (
+            work.prompt_version != DREAM_PROMPT_VERSION
+            or work.result_version is not None
+            or work.history_count != len(work.history)
+            or memory_document_digest(work.base_content) != work.base_content_digest
+            or not isinstance(work.sections_policy_version_id, uuid.UUID)
+        ):
             raise ValueError("Dream frozen work is invalid")
         if work.trigger == "budget_rewrite":
             if work.history or work.history_from is not None or work.history_to is not None or work.history_digest != BUDGET_REWRITE_HISTORY_DIGEST:
@@ -238,6 +244,7 @@ class MemoryDreamJobHandler:
                 for item in work.history
             ),
             max_tokens=max_tokens,
+            sections=work.sections,
             budget_rewrite=work.trigger == "budget_rewrite",
         )
 
@@ -267,6 +274,16 @@ class MemoryDreamJobHandler:
             )
         if authority.cancel_requested or work.cancel_requested or not preference.memory_enabled or preference.version != work.preference_version:
             return self._release_settlement(claim, cancelled=True)
+        if work.prompt_version != DREAM_PROMPT_VERSION:
+            # Prompt text is frozen admission authority.  A deployed prompt
+            # version change makes this batch stale rather than transiently
+            # unavailable, so release it as cancelled without materializing a
+            # model or retrying the same permanently incompatible work.
+            return self._release_settlement(
+                claim,
+                cancelled=True,
+                retryable=False,
+            )
         try:
             frozen_policy = await self._runtime_policy_materializer.materialize_revision(
                 RuntimePolicySection.AGENT_RUNTIME,
@@ -315,6 +332,7 @@ class MemoryDreamJobHandler:
             validate_memory_document(
                 result.content,
                 frozen_policy.memory.max_injection_tokens,
+                sections=work.sections,
             )
         except asyncio.CancelledError:
             raise
@@ -411,7 +429,11 @@ class MemoryDreamJobHandler:
                         cancelled=True,
                     )
                     return
-                validate_memory_document(content, max_tokens)
+                validate_memory_document(
+                    content,
+                    max_tokens,
+                    sections=work.sections,
+                )
                 try:
                     async with session.begin_nested():
                         record = await repository.finalize_dream(
@@ -421,6 +443,7 @@ class MemoryDreamJobHandler:
                             expected_history_digest=work.history_digest,
                             expected_base_version=work.base_document_version,
                             expected_base_digest=work.base_content_digest,
+                            expected_sections=work.sections,
                             content=content,
                             now=datetime.now(UTC),
                             episode_retention_days=episode_retention_days,

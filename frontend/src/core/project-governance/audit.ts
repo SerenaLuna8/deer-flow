@@ -126,6 +126,7 @@ const memoryRecallExecutedMetadataSchema = z
     result_bucket: z.enum(["0", "1-2", "3+"]),
     matched_stage: z.enum(["exact", "similarity", "none"]),
     tags_filtered: z.boolean(),
+    query_len_bucket: z.enum(["1-4", "5-16", "17-64", "65-200"]),
   })
   .strict();
 const memorySealSettledMetadataSchema = z

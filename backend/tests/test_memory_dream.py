@@ -6,6 +6,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
     DREAM_PROMPT,
     DREAM_PROMPT_VERSION,
     EMPTY_MEMORY_DOCUMENT,
@@ -21,6 +22,8 @@ from deerflow.agents.memory.dream import (
     build_dream_tools,
     estimate_memory_tokens,
     render_dream_input,
+    render_dream_prompt,
+    render_empty_memory_document,
     validate_memory_document,
 )
 
@@ -41,7 +44,7 @@ def _document(*lines: str) -> str:
 
 
 def test_dream_prompt_and_document_sections_are_fixed() -> None:
-    assert DREAM_PROMPT_VERSION == "dream-prompt-v3"
+    assert DREAM_PROMPT_VERSION == "dream-prompt-v4"
     assert "Use only read_memory_document and replace_memory_document." in DREAM_PROMPT
     assert "You must not create or update an account-global profile" in DREAM_PROMPT
     assert "transfer memory from another project or namespace." in DREAM_PROMPT
@@ -53,6 +56,52 @@ def test_dream_prompt_and_document_sections_are_fixed() -> None:
     assert "this is a budget\nrewrite session" in DREAM_PROMPT
     assert tuple(line for line in DREAM_PROMPT.splitlines() if line.startswith("# ")) == MEMORY_DOCUMENT_SECTIONS
     assert EMPTY_MEMORY_DOCUMENT == "\n\n".join(MEMORY_DOCUMENT_SECTIONS)
+
+
+def test_memory_document_contract_renders_and_validates_frozen_custom_sections() -> None:
+    sections = ("协作偏好", "交付边界", "当前目标")
+    content = render_empty_memory_document(sections)
+
+    assert content == "# 协作偏好\n\n# 交付边界\n\n# 当前目标"
+    assert validate_memory_document(content, 8_000, sections=sections) == content
+    with pytest.raises(MemoryDocumentInvalid, match="sections are invalid"):
+        validate_memory_document(content, 8_000)
+
+    value = MemoryDreamInput(
+        document=content,
+        document_version=0,
+        history=(DreamHistoryInput(sequence=1, tagged_text="- [durable] 保持简洁。"),),
+        max_tokens=8_000,
+        sections=sections,
+    )
+    rendered = render_dream_input(value)
+    assert "<document-sections>\n# 协作偏好\n# 交付边界\n# 当前目标\n</document-sections>" in rendered
+    prompt = render_dream_prompt(sections)
+    assert tuple(line for line in prompt.splitlines() if line.startswith("# ")) == (
+        "# 协作偏好",
+        "# 交付边界",
+        "# 当前目标",
+    )
+    assert "{{MEMORY_DOCUMENT_SECTIONS}}" not in prompt
+    assert render_empty_memory_document(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES) == EMPTY_MEMORY_DOCUMENT
+
+
+@pytest.mark.parametrize(
+    "sections",
+    [
+        ("只有一个",),
+        ("重复", "重复"),
+        ("# 非纯标题", "合法"),
+        ("包含\n换行", "合法"),
+        ("包含\u2028行分隔符", "合法"),
+        ("包含\u2029段落分隔符", "合法"),
+        ("[durable] 非法标记", "合法"),
+        ("含 [H:12] 历史编号", "合法"),
+    ],
+)
+def test_memory_document_sections_fail_closed(sections: tuple[str, ...]) -> None:
+    with pytest.raises((MemoryDocumentInvalid, ValueError)):
+        render_empty_memory_document(sections)
 
 
 def test_memory_token_estimate_is_deterministic_and_cjk_conservative() -> None:

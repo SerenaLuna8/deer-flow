@@ -478,7 +478,7 @@ Worker 只读取准入时冻结的：
 - 最老 20 条 history，每条最多 1000 字符，不再截断；
 - 固定 Dream system prompt。
 
-冻结输入由 `render_dream_input()` 渲染为一个 `<dream-input>` 数据块，其中同时给出硬上限和目标预算四个标签：
+冻结输入由 `render_dream_input()` 渲染为一个 `<dream-input>` 数据块，其中同时给出硬上限、目标预算和文档章节：
 
 | 标签 | 取值 | 含义 |
 |---|---|---|
@@ -486,6 +486,7 @@ Worker 只读取准入时冻结的：
 | `<token-limit>` | `max_injection_tokens` | 文档硬 token 上限 |
 | `<target-token-limit>` | 硬上限的 90% | 要求模型写入时遵守的目标 token 预算 |
 | `<target-character-limit>` | `min(16000, target_token)` | 要求模型写入时遵守的目标字符预算 |
+| `<document-sections>` | 文档行冻结的 2～8 个一级标题 | 本次 Dream 必须保留的有序章节合同 |
 
 目标预算不是硬上限的同义词：提示词要求模型写到目标以内，而服务端 `validate_memory_document()` 按硬上限判定。留出 10% 余量是为了让模型的自估偏差不会立刻撞上硬上限，也让下面 7.7 的重写反馈有可收敛的空间。
 
@@ -501,7 +502,7 @@ Worker 只读取准入时冻结的：
 
 ### 7.4 长期记忆文档结构
 
-长期记忆不是共享 Agent 文件，而是一段数据库中的 Markdown 文本。固定章节为：
+长期记忆不是共享 Agent 文件，而是一段数据库中的 Markdown 文本。以下四项是默认章节：
 
 ```markdown
 # 用户偏好与协作方式
@@ -512,6 +513,11 @@ Worker 只读取准入时冻结的：
 
 # 当前仍有效的目标
 ```
+
+三层升级方案的 PR6 已把章节模板迁入独立 PostgreSQL `memory_document` 系统策略。平台
+管理员在系统设置的 Memory 页面维护 2～8 个纯标题；作用域首次创建文档时把当时的章节与
+精确策略版本冻结到 `memory_documents`，Run 快照继续冻结同一章节合同。后改模板只影响
+新文档，不重排已有文档。`config.yaml` 没有章节模板权威。
 
 规则：
 
@@ -558,7 +564,10 @@ Dream 不再输出 confidence 或结构化 Fact 操作，而是维护整份文�
 
 `backend/packages/harness/deerflow/agents/memory/prompts/dream.md`
 
-当前版本号为 `DREAM_PROMPT_VERSION = "dream-prompt-v2"`。修改这个文件的正文必须同时升版本号：Worker 在 `_input()` 中用 `work.prompt_version != DREAM_PROMPT_VERSION` 拒绝已冻结的 Dream 工作，版本号不升会让两份不同的提示词共用同一个 `prompt_version`，`memory_dream_runs` 的审计含义随之失真。
+当前版本号为 `DREAM_PROMPT_VERSION = "dream-prompt-v4"`。v4 以唯一占位符渲染文档行
+冻结的章节。修改这个文件的正文必须同时升版本号：Worker 在 `_input()` 中用
+`work.prompt_version != DREAM_PROMPT_VERSION` 取消已冻结的旧 Dream 工作，版本号不升会让
+两份不同的提示词共用同一个 `prompt_version`，`memory_dream_runs` 的审计含义随之失真。
 
 ```text
 You are DeerFlow Dream, a long-term memory consolidation engine.
@@ -576,10 +585,7 @@ Scope rules:
 - Use only read_memory_document and replace_memory_document.
 
 The document must use exactly these top-level sections:
-# 用户偏好与协作方式
-# 项目背景
-# 长期约束与架构决策
-# 当前仍有效的目标
+{{MEMORY_DOCUMENT_SECTIONS}}
 
 History tags are retention hints, never document content:
 - [skip]: ignore it.
@@ -1330,7 +1336,7 @@ rg -n "consolidation_interval_minutes|candidate_retention_days|memory\.search_en
 3. 更新 `README.md`、`backend/AGENTS.md`、`frontend/AGENTS.md`、Memory 教程和系统设置说明。
 4. 检查当前工作树，保留用户已有且与本任务无关的改动，不通过 reset/checkout 覆盖。
 5. 完成所有静态、单元、真实 PostgreSQL 和前端构建门禁。
-6. 应用层测试只使用 `.env` 已有连接：真实 PostgreSQL 核心门禁可将既有 `POSTGRES_ADMIN_URL` 映射为 `POSTGRES_TEST_URL`，并仅由仓库测试夹具管理随机 `deerflow_test_*`；Codex 不修改数据库角色或权限。连接权限不足时如实报告，门禁保持未通过。
+6. 应用层测试直接读取 `.env` 已有的开发 `DATABASE_URL`，仅复用其 PostgreSQL 实例与凭据，并由仓库测试夹具派生、管理随机 `deerflow_test_*`；Codex 不修改数据库角色或权限。连接权限不足时如实报告，门禁保持未通过。
 7. 现有 `DATABASE_URL` 对应开发库从 `full_schema_v3` 切换到 `full_schema_v4` 时，只能使用仓库支持的空库初始化流程，不做原地打补丁。默认由用户、DBA 或环境所有者交付空目标；用户对精确 `.env` 开发库明确授权 reset 时，Codex 可停止应用栈并执行该受支持流程，但仍不改角色和权限。初始化后运行只读 `make check-db` 验证 marker 和必需对象。
 8. 启动完整真实环境，进行长时间、同一主题的持续对话测试。
 
@@ -1579,13 +1585,11 @@ cd "$REPO"
 set -a
 . ./.env
 set +a
-# 核心门禁要求 POSTGRES_TEST_URL 指向名为 postgres 的维护库，且该连接
-# 必须有权创建/销毁随机 deerflow_test_* 库。backend/tests/support/core_gate_plugin.py
-# 会在 pytest 收集前校验库名，不满足时以 exit 4 直接拒绝。
-# 本仓库 .env 中的 POSTGRES_ADMIN_URL 已指向 postgres 维护库且角色具备 CREATEDB，
-# 下面这行成立；换环境时若它指向业务库，必须改用可丢弃的维护连接，不得授予权限绕过。
-test -n "$POSTGRES_ADMIN_URL"
-POSTGRES_TEST_URL="$POSTGRES_ADMIN_URL" make test
+# 核心门禁直接读取开发 DATABASE_URL，只复用连接信息并派生 postgres 维护连接；
+# 测试夹具只创建/销毁随机 deerflow_test_* 库，不连接或改动命名开发库。
+# 该角色必须具备随机测试库生命周期所需权限，权限不足时门禁安全失败。
+test -n "$DATABASE_URL"
+make test
 
 cd "$REPO/frontend"
 pnpm format
@@ -1621,7 +1625,7 @@ Replay E2E 的 `DATABASE_URL` 必须指向独立、可写且库名以 `deerflow_
 最终方式：
 
 1. Codex 只负责应用代码、schema 定义、测试代码和应用层验证，使用根目录 `.env` 已有连接；不管理数据库角色、角色属性或授权，不做手工 schema 修补、数据回填或业务数据迁移，也不打印连接串或凭据。
-2. 代码阶段的真实 PostgreSQL 门禁可把 `.env` 中既有 `POSTGRES_ADMIN_URL` 作为 `POSTGRES_TEST_URL` 使用，前提是它指向名为 `postgres` 的维护库——`backend/tests/support/core_gate_plugin.py` 会在 pytest 收集前校验库名并对业务库以 exit 4 拒绝。创建和回收仅限测试夹具自动管理的随机 `deerflow_test_*`，绝不连接或改动业务库。
+2. 代码阶段的真实 PostgreSQL 门禁直接读取 `.env` 中既有的开发 `DATABASE_URL`；`backend/tests/support/core_gate_plugin.py` 只解析并校验这一项，测试夹具再派生维护连接。创建和回收仅限随机 `deerflow_test_*`，绝不连接或改动命名开发库。
 3. 如果既有测试连接缺少随机测试库生命周期所需权限，Codex 只报告具体失败和未通过门禁；由用户、DBA 或环境所有者提供符合仓库测试合同的既有授权连接，Codex 不自行授予 `CREATEDB` 或其他权限。
 4. 现有 `DATABASE_URL` 对应开发库从 `full_schema_v3` 到 `full_schema_v4` 没有原地升级路径。默认由用户、DBA 或环境所有者停栈并交付空目标；如果用户已对精确的 `.env` 开发库明确授权 reset，Codex 可停栈并运行当前 checkout 的完整 `make setup-db` 流程。该授权不延伸到数据库角色、权限或其他数据库。
 5. 初始化后，Codex 使用既有 `DATABASE_URL` 运行只读 `make check-db`，确认 `full_schema_v4` marker、必需表和系统目录，再启动 `make dev` 做应用层真实环境测试。
@@ -1707,7 +1711,7 @@ PR1～PR5 的应用代码、清理和第 14.4 节真实模型/UI 验收均已完
 1. 真实 PostgreSQL 核心门禁上次结果为 `848 passed, 1 failed, 35 errors, 0 skipped`；36 项均停在夹具创建随机 `deerflow_test_*` 的入口，尚未执行对应应用断言。必须由符合仓库测试合同的既有 disposable PostgreSQL 连接重跑到 0 skip。**（已于 18.1 节解决。）**
 2. `backend/tests/_replay_fixture.py` 本次有改动并命中 Replay E2E workflow；该门禁同样要求独立可写的 `deerflow_test_replay_*`，不得改用业务 `deerflow`，也不得通过修改角色属性或授权绕过。**（仍未运行。）**
 
-2026-08-06 继续执行时，用户再次明确授权精确业务库 `deerflow` 可删除重建。只读检查确认该库仍为健康的 `full_schema_v4`，因此没有执行无收益的再次清空；随后使用该库重新启动完整开发栈，Nginx 与 Gateway `/health` 均返回 healthy。两项独立外部门禁分别做了“写入前”真实前置校验：把业务 URL 传给核心门禁时，在 pytest 启动前以 exit 4 拒绝并要求库名 `postgres`；把业务 URL 传给 Replay 校验器时，在数据库连接前以 exit 4 拒绝并要求 `deerflow_test_replay_*`。删除重建业务库不会改变这两个合同，也不会赋予当前连接创建随机测试库的能力，因此未修改保护代码、数据库角色或授权。
+2026-08-06 继续执行时，用户再次明确授权精确业务库 `deerflow` 可删除重建。只读检查确认该库仍为健康的 `full_schema_v4`，因此没有执行无收益的再次清空；随后使用该库重新启动完整开发栈，Nginx 与 Gateway `/health` 均返回 healthy。按当时测试入口合同，两项独立外部门禁分别做了“写入前”真实前置校验：把业务 URL 传给核心门禁时，在 pytest 启动前以 exit 4 拒绝并要求库名 `postgres`；把业务 URL 传给 Replay 校验器时，在数据库连接前以 exit 4 拒绝并要求 `deerflow_test_replay_*`。当前核心门禁入口已由 18.1 节所述的开发 `DATABASE_URL` 派生机制取代；Replay 的独立测试库合同不变。
 
 因此，PR1～PR5 的应用实现和真实应用验收均已完成；外部 disposable PostgreSQL 核心 0-skip 与 Replay E2E 仍未通过，本文状态为"应用层完成、发布门禁未通过"。
 
@@ -1716,7 +1720,6 @@ PR1～PR5 的应用代码、清理和第 14.4 节真实模型/UI 验收均已完
 - 补上 Dream 提示词缺失的 account-global scope 规则（2.6 节授权边界在提示词层的落地），`DREAM_PROMPT_VERSION` 随之从 `dream-prompt-v1` 升到 `dream-prompt-v2`，并在 `backend/tests/test_memory_dream.py` 中加了固定断言。此前该规则只存在于本文，代码和测试中都没有。
 - 按当前代码复核并修正本文与实现脱节的部分：7.6 的提示词全文、7.7 的草稿拒绝重写循环、7.3 的目标预算标签、6.3 的 SNIP 输出合同位置、6.5 的 checkpoint 三条边界、7.1 的 `/Dream` 服务端屏障、12.2 的文件地图（原先列出的 `memory_compaction_archive.py` 从未存在），以及 8.1、10.1、11.2、12.4、14.5 的若干细节。
 
-**真实 PostgreSQL 后端核心门禁已通过。** 使用根 `.env` 既有的 `POSTGRES_ADMIN_URL`（指向本机 `postgres` 维护库，角色具备 CREATEDB）作为 `POSTGRES_TEST_URL` 运行
-`POSTGRES_TEST_URL="$POSTGRES_ADMIN_URL" make test`，结果为 `collected=975 passed=975 failed=0 skipped=0`，用时约 43 秒。此前 18 节记录的 36 项夹具入口失败不再出现——那次是连接不满足测试合同，不是应用缺陷。运行后核对：随机 `deerflow_test_*` 全部由夹具自动回收（残留 0 个），业务库 `deerflow` 未被连接或改动，只读 `make check-db` 仍报告 `full_schema_v4` ready。全程未修改数据库角色、角色属性或授权。
+**真实 PostgreSQL 后端核心门禁已通过。** 当时使用同一开发 PostgreSQL 实例的维护权限连接运行完整门禁，结果为 `collected=975 passed=975 failed=0 skipped=0`，用时约 43 秒；当前统一入口为直接从开发环境 `DATABASE_URL` 派生测试连接后执行 `make test`。此前 18 节记录的 36 项夹具入口失败不再出现——那次是连接不满足测试合同，不是应用缺陷。运行后核对：随机 `deerflow_test_*` 全部由夹具自动回收（残留 0 个），业务库 `deerflow` 未被连接或改动，只读 `make check-db` 仍报告 `full_schema_v4` ready。全程未修改数据库角色、角色属性或授权。
 
 剩余未完成的门禁只有 Replay E2E：它要求独立可写、库名以 `deerflow_test_replay_` 开头的目标，`REPLAY_DATABASE_URL` 当前未在 `.env` 中配置，因此保持未运行。

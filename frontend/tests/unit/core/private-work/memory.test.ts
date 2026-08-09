@@ -12,6 +12,7 @@ import {
   memoryEpisodeSchema,
   memoryPendingEntrySchema,
   memoryVersionDetailSchema,
+  memoryVersionSummarySchema,
   projectMemoryEpisodesQueryKey,
   projectMemoryPendingQueryKey,
   projectMemoryPermissions,
@@ -102,6 +103,32 @@ describe("project Memory document client", () => {
     expect(init?.method).toBe("POST");
     expect(jsonBody(init)).toEqual({ threadId: "thread-1" });
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("memory-token");
+  });
+
+  test("accepts the explicit zero-history budget rewrite admission", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json(
+          {
+            disposition: "queued",
+            historyCount: 0,
+            jobId: JOB_ID,
+            admissionKind: "budget_rewrite",
+          },
+          { status: 202 },
+        ),
+    );
+    rs.stubGlobal("document", { cookie: "csrf_token=memory-token" });
+    rs.stubGlobal("fetch", fetcher);
+
+    const result = await dreamProjectMemory(access);
+
+    expect(result).toEqual({
+      disposition: "queued",
+      historyCount: 0,
+      jobId: JOB_ID,
+      admissionKind: "budget_rewrite",
+    });
   });
 
   test("uses bounded version pagination and scoped query keys", async () => {
@@ -200,6 +227,49 @@ describe("project Memory document client", () => {
         historyCount: 0,
       }).success,
     ).toBe(false);
+    expect(
+      memoryDreamResultSchema.safeParse({
+        disposition: "nothing_pending",
+        jobId: null,
+        historyCount: 0,
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryDreamResultSchema.safeParse({
+        disposition: "nothing_pending",
+        jobId: null,
+        historyCount: 0,
+        admissionKind: "budget_rewrite",
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryDreamResultSchema.safeParse({
+        disposition: "queued",
+        jobId: JOB_ID,
+        historyCount: 0,
+      }).success,
+    ).toBe(false);
+
+    expect(
+      memoryVersionSummarySchema.safeParse({
+        ...version,
+        trigger: "budget_rewrite",
+        historyCount: 0,
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryVersionSummarySchema.safeParse({
+        ...version,
+        historyCount: 0,
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryVersionSummarySchema.safeParse({
+        ...version,
+        trigger: "restore",
+        historyCount: null,
+      }).success,
+    ).toBe(true);
 
     rs.stubGlobal("fetch", async () =>
       Response.json({

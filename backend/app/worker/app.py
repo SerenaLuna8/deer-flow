@@ -162,7 +162,11 @@ async def run_worker(
                 proxy_url=mcp_security.egress_proxy_url,
                 timeout_seconds=mcp_security.discovery_timeout_seconds,
             )
-            bridge = PostgresStreamBridge(session_factory)
+            run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
+            bridge = PostgresStreamBridge(
+                session_factory,
+                run_event_notify_enabled=run_event_notify_enabled,
+            )
             raw_checkpointer = await stack.enter_async_context(
                 make_checkpointer(config),
             )
@@ -176,7 +180,10 @@ async def run_worker(
             runtime_policy_materializer = SystemRuntimePolicyMaterializer(
                 session_factory,
             )
-            run_event_store = DbRunEventStore(session_factory)
+            run_event_store = DbRunEventStore(
+                session_factory,
+                run_event_notify_enabled=run_event_notify_enabled,
+            )
             executor = RunAgentPrivateExecutor(
                 session_factory,
                 app_config=config,

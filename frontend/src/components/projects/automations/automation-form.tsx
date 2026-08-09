@@ -32,6 +32,17 @@ const RECIPE_TITLES: Record<RecipeTitleKey, string> = {
   weekly: "每周项目报告",
 };
 
+function RequiredMark({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center gap-0.5">
+      {label}
+      <span className="text-destructive" aria-hidden>
+        *
+      </span>
+    </span>
+  );
+}
+
 export type AutomationAgentOption = {
   id: string;
   scope: "project" | "system";
@@ -405,11 +416,12 @@ export function AutomationForm({
 
       <section className="space-y-5" data-testid="automation-task-composer">
         <label className="block space-y-2 text-sm font-medium">
-          <span>{t.automation.fields.title}</span>
+          <RequiredMark label={t.automation.fields.title} />
           <Input
             className={createMode ? "h-12" : undefined}
             value={draft.title}
             maxLength={255}
+            aria-required="true"
             placeholder={
               locale.startsWith("zh") ? "输入标题…" : "Enter a title…"
             }
@@ -420,11 +432,12 @@ export function AutomationForm({
         </label>
 
         <label className="block space-y-2 text-sm font-medium">
-          <span>{t.automation.fields.prompt}</span>
+          <RequiredMark label={t.automation.fields.prompt} />
           <Textarea
             className={createMode ? "min-h-40 resize-y" : "resize-y"}
             rows={5}
             value={draft.prompt}
+            aria-required="true"
             placeholder={
               locale.startsWith("zh")
                 ? "输入要让 Agent 执行的任务或指令…"
@@ -489,7 +502,7 @@ export function AutomationForm({
         </fieldset>
 
         <label className="block space-y-2 text-sm font-medium">
-          <span>Agent</span>
+          <RequiredMark label="Agent" />
           <select
             data-testid="automation-agent"
             className={`border-input bg-background focus-visible:border-ring focus-visible:ring-ring/50 w-full rounded-md border px-3 text-sm shadow-xs transition-[color,box-shadow] outline-none focus-visible:ring-[3px] disabled:opacity-50 ${
@@ -500,6 +513,7 @@ export function AutomationForm({
                 ? `${draft.agentScope}:${draft.agentAssetId}`
                 : ""
             }
+            aria-required="true"
             disabled={immutable}
             onChange={(event) => selectAgent(event.target.value)}
           >
@@ -525,7 +539,7 @@ export function AutomationForm({
               className="block text-sm font-medium"
               htmlFor="automation-thread-select"
             >
-              选择已有会话
+              <RequiredMark label="选择已有会话" />
             </label>
             <select
               id="automation-thread-select"
@@ -536,6 +550,7 @@ export function AutomationForm({
                 createMode ? "h-12" : "h-9"
               }`}
               value={draft.threadId}
+              aria-required="true"
               disabled={threadSelectDisabled}
               onChange={(event) =>
                 setDraft((current) => ({
@@ -585,12 +600,12 @@ export function AutomationForm({
         className="space-y-3 border-t pt-5"
         data-testid="automation-schedule-section"
       >
-        <p className="text-sm font-medium">{t.automation.fields.schedule}</p>
         <AutomationScheduleInput
           key={scheduleRevision}
           initial={draft.schedule}
           layout={createMode ? "compact" : "stacked"}
           scheduleTypeLocked={immutable}
+          label={<RequiredMark label={t.automation.fields.schedule} />}
           onChange={(schedule) =>
             setDraft((current) => ({ ...current, schedule }))
           }
@@ -619,7 +634,7 @@ export function AutomationForm({
           size={createMode ? "lg" : "default"}
           disabled={!canSubmit}
         >
-          {createMode ? "创建 Automation" : "保存修改"}
+          {createMode ? t.automation.create : "保存修改"}
         </Button>
       </div>
     </form>

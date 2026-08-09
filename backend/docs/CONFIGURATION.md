@@ -14,8 +14,11 @@ Run `make config-upgrade` to merge new fields into your config.
 - **Missing `config_version`** in your config is treated as version 0.
 - Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
-- The current example schema is **version 35**. Version 35 replaces the retired per-URL Project
-  MCP allowlist with `mcp_security.project_remote_allowed_networks`. During upgrade, an omitted or
+- The current example schema is **version 37**. Version 37 adds the independent
+  `worker.stream.run_event_notify_enabled` rollback switch; version 36 adds bounded root-text
+  micro-batching, Run-scoped Project MCP session reuse, and Skill read-evidence TTL settings.
+  Version 35 replaces the retired per-URL Project MCP allowlist with
+  `mcp_security.project_remote_allowed_networks`. During upgrade, an omitted or
   empty version-34 endpoint list becomes an empty deny-all network list; a nonempty endpoint list
   requires an explicit operator-selected CIDR and makes `make config-upgrade` stop without writing.
   Version 34 moved the allowlisted Agent runtime leaves, local self-registration switch, and
@@ -55,8 +58,12 @@ the intended network boundary.
 
 ### Project Memory
 
-项目 Memory 的数据与运行策略都以 PostgreSQL 为权威。system admin 在
-`/admin/settings/system` 的 Agent runtime 区域只配置四个字段：
+项目 Memory 的数据与策略都以 PostgreSQL 为唯一权威。system admin 在
+`/admin/settings/system` 的 Memory 页面维护两个独立、版本化并使用各自 revision CAS 的
+策略分区：`agent_runtime.memory` 负责运行行为，`memory_document` 负责新文档章节模板。
+`config.yaml` 不接受这两类数据库策略，也不存在文件回退。
+
+`agent_runtime.memory` 恰好包含六个字段：
 
 - `enabled`：平台总开关。关闭后 Thread 压缩仍可维持短期上下文，但不新增 history、不准入
   Dream，也不向模型注入长期文档。
@@ -65,12 +72,24 @@ the intended network boundary.
 - `dream_interval_minutes`：Scheduler 自动准入 Dream 的间隔，范围 `15..1440`，默认 `120`。
 - `max_injection_tokens`：Run 准入时允许冻结的完整 Memory 文档上限；超限会 fail closed，绝不
   在运行时静默截断正文。
+- `idle_seal_minutes`：空闲 Thread 自动封存阈值；`0` 关闭，否则范围 `30..10080`，默认
+  `1440`。
+- `episode_retention_days`：归档 episodes 的保留天数；`0` 永久保留，否则范围
+  `30..3650`，默认 `365`。
 
-账号级 `memory_enabled` 与平台 `enabled` 共同生效。SNIP 把同一带标签输出同时写入 Thread
-`summary_text` 和待整理 history；Scheduler 或手动入口只准入一个 `memory_dream` Job，每批严格
-取最老 20 条。Worker 整理整份 Markdown 文档并在同一事务写版本、server diff、cursor、history
-tombstone 与 Job 终态。新 Run 在准入事务冻结完整文档，之后只通过 Worker 签发的 opaque
-authority 读取该快照；没有 Fact/Candidate Pipeline、`memory_search`、向量召回或旧版回退。
+`memory_document` 的值严格为 `{sections: string[]}`：2～8 个有序纯标题，每项 trim 后
+非空、最多 80 个 Unicode 字符，且不能包含控制字符、Markdown 标题前缀、Dream history
+标记或重复标题。某个 project/owner 作用域首次创建 Memory 文档时，当前章节列表及其精确
+策略版本会冻结到文档；Run 快照继续复制并冻结该列表。因此管理员后续修改只影响新建
+文档，不会迁移已有文档、重排旧版本或取消在途 Dream。
+
+账号级 `memory_enabled` 与平台 `enabled` 共同生效。打包 SNIP 提示词输出两段：续航散文写入
+Thread `summary_text`，独立的 tagged 段进入待整理 history；自定义 summary prompt 继续保持
+单段兼容语义。Scheduler 或手动入口只准入一个 `memory_dream` Job，每批严格取最老 20 条。
+Worker 整理整份 Markdown 文档并在同一事务写版本、server diff、cursor、history tombstone 与
+Job 终态。新 Run 在准入事务冻结完整文档及章节合同，之后只通过 Worker 签发的 opaque
+authority 读取该快照；没有 Fact/Candidate Pipeline、`memory_search`、向量排序或旧版
+回退，`recall_memory` 只检索同作用域的 PostgreSQL episodes。
 
 项目页使用 `/api/projects/{project_id}/memory`、`/dream` 和 `/versions` 系列接口查看当前文档、
 立即整理、查看真实 diff 及 CAS 恢复。账号关闭会从下一模型边界停止使用而不删除数据；reset
@@ -142,8 +161,10 @@ ActWeave 当前没有启用 generic `AuthorizationProvider` 配置。旧顶层 `
 项目权限继续来自 server-issued ProjectContext、当前 membership/capability、owner scope 和
 side-effect revalidation。
 
-`lower(email)` 是完整数据库 schema 的一部分，不提供旧库在线升级。已有数据库需要换成空目标并
-运行 `make setup-db`；不要自行创建增量 migration、运行时 `ALTER` 或手工 stamp。
+`lower(email)` 是完整数据库 schema 的一部分。已处于受支持 Alembic 链上、marker 为已知
+祖先 revision 的数据库，先备份后只能通过 `make upgrade-db` 显式升级；新装仍只接受空目标并
+运行 `make setup-db`。未知/legacy marker 或 catalog drift 保持 fail-closed，必须换空目标；不要
+在运行时 `ALTER`、手工 stamp，新增 schema 变更必须同时维护 ORM、`full_schema.sql` 与正式迁移。
 
 ### 认证反向代理
 

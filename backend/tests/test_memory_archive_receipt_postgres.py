@@ -23,6 +23,7 @@ from app.gateway.deps import (
     private_work_context,
     require_project_private_open,
 )
+from app.gateway.routers import private_work as private_work_router
 from app.gateway.routers import project_memory as memory_router
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.chat_controls import ProjectChatControlService
@@ -663,6 +664,143 @@ async def test_worker_receipt_activation_does_not_deadlock_durable_stream_append
             )
         assert len(stream_rows) == 1
         assert str(stream_rows[0].seq) == stored_frame.id == "1"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_batches(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise the real HTTP/service/checkpoint/history path over several SNIPs."""
+
+    _reset_checkpoint_mode(monkeypatch)
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _CountingInMemorySaver()
+    scoped = ProjectScopedCheckpointer(raw, seed.factory)
+    app_config = _app_config()
+    thread_id = str(uuid.uuid4())
+    continuity = "The long thread remains coherent across every compaction batch."
+    tagged_text = "- [durable] Manual compact archives each bounded batch into tagged history"
+    try:
+        model_version_id = await _seed_model_version(seed)
+        async with seed.factory() as session, session.begin():
+            await PrivateThreadRepository(session).create(
+                scope=seed.owner_a_scope,
+                thread_id=thread_id,
+                agent=ThreadAgentRef(seed.project_agent_id, "project"),
+            )
+        state = bind_scoped_checkpoint_state(
+            scoped,
+            seed.owner_a,
+            app_config,
+            as_node="long_compact_test",
+        )
+        messages = []
+        for turn in range(8):
+            messages.extend(
+                [
+                    HumanMessage(
+                        id=f"human-{turn}",
+                        content=f"User turn {turn}: " + ("u" * 320),
+                    ),
+                    AIMessage(
+                        id=f"ai-{turn}",
+                        content=f"Assistant turn {turn}: " + ("a" * 320),
+                    ),
+                ]
+            )
+        await state.aupdate(
+            checkpoint_config(thread_id),
+            {"messages": messages},
+            as_node="long_compact_test",
+        )
+
+        runtime_model = ModelConfig(
+            name="snip-long-compact-model",
+            display_name=None,
+            description=None,
+            use=("langchain_core.language_models.fake_chat_models:FakeListChatModel"),
+            model="snip-long-compact-model",
+            responses=[
+                f"<continuity>\n{continuity}\n</continuity>\n{tagged_text}",
+            ],
+            # Keep the fake model's deterministic tokenizer; the 1,100-token
+            # rendered-prompt ceiling admits at most two of these large turns
+            # per batch instead of allowing one oversized archive.
+            custom_get_token_ids=lambda text: list(range(len(text))),
+        )
+        runtime_model._system_model_config_version_id = model_version_id
+        app_config.summarization.enabled = True
+        app_config.summarization.model_name = runtime_model.name
+        app_config.summarization.trim_tokens_to_summarize = 1_100
+
+        class ModelMaterializer:
+            async def materialize_active(self, model_ref):
+                assert model_ref == runtime_model.name
+                return runtime_model
+
+        barrier = ProjectChatControlService(
+            seed.factory,
+            scoped,
+            PrivateThreadService(seed.factory, scoped),
+            object(),  # type: ignore[arg-type]
+            model_materializer=ModelMaterializer(),  # type: ignore[arg-type]
+        )
+        app = FastAPI()
+        app.include_router(private_work_router.router)
+        app.dependency_overrides[private_work_context] = lambda: seed.owner_a
+        app.dependency_overrides[require_project_private_open] = lambda: None
+        app.dependency_overrides[get_current_agent_runtime_config] = lambda: app_config
+        monkeypatch.setattr(
+            private_work_router,
+            "_chat_control_service",
+            lambda _request, _request_id: barrier,
+        )
+
+        compacted_batches: list[dict[str, object]] = []
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="http://test",
+        ) as client:
+            for _attempt in range(9):
+                response = await client.post(
+                    f"/api/projects/{seed.owner_a.project_id}/private-work/threads/{thread_id}/compact",
+                    json={
+                        "force": True,
+                        "keep": {"type": "messages", "value": 0},
+                    },
+                )
+                assert response.status_code == 200, response.text
+                payload = response.json()
+                if not payload["compacted"]:
+                    assert payload["reason"] == "not_enough_messages"
+                    break
+                compacted_batches.append(payload)
+            else:
+                pytest.fail("long /compact did not drain within its bounded attempts")
+
+        assert len(compacted_batches) >= 2
+        assert sum(int(batch["removed_message_count"]) for batch in compacted_batches) == len(messages)
+        assert all(int(batch["preserved_message_count"]) < len(messages) for batch in compacted_batches)
+        rows = await _history_rows(seed)
+        assert len(rows) == len(compacted_batches)
+        assert all(row.status == "pending" for row in rows)
+        assert all(row.tagged_text == tagged_text for row in rows)
+        assert len({row.source_digest for row in rows}) == len(rows)
+
+        latest = await bind_scoped_checkpoint_state(
+            scoped,
+            seed.owner_a,
+            app_config,
+            as_node="long_compact_test",
+        ).aget(checkpoint_config(thread_id))
+        assert latest.values["messages"] == []
+        assert latest.values["summary_text"] == continuity
+        assert "[durable]" not in latest.values["summary_text"]
+        assert raw.alist_calls == 0
     finally:
         await seed.engine.dispose()
 

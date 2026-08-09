@@ -50,13 +50,18 @@ async def remember_tool(
         allowed = ", ".join(REMEMBER_KINDS)
         return f"Error: unknown kind {kind!r}; allowed kinds are {allowed}."
 
-    if not isinstance(content, str) or not content.strip():
+    if not isinstance(content, str):
+        return "Error: content must be non-empty text."
+    # Inspect the exact model-supplied value before trimming surrounding spaces.
+    # Otherwise a trailing newline or tab would be stripped away and silently
+    # accepted even though the contract permits one printable line only.
+    if _CONTROL_CHARS.search(content):
+        return "Error: content must be a single line without control characters."
+    if not content.strip():
         return "Error: content must be non-empty text."
     normalized = content.strip()
     if len(normalized) > MAX_REMEMBER_CHARS:
         return f"Error: content must be at most {MAX_REMEMBER_CHARS} characters."
-    if _CONTROL_CHARS.search(normalized):
-        return "Error: content must be a single line without control characters."
 
     authority = resolve_memory_authority(
         runtime.context if isinstance(runtime.context, dict) else {},

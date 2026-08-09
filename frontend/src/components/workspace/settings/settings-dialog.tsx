@@ -1,6 +1,6 @@
 "use client";
 
-import { BellIcon, PaletteIcon, SparklesIcon, UserIcon } from "lucide-react";
+import { PaletteIcon, SparklesIcon, UserIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import {
@@ -12,7 +12,6 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
 import { AppearanceSettingsPage } from "@/components/workspace/settings/appearance-settings-page";
-import { NotificationSettingsPage } from "@/components/workspace/settings/notification-settings-page";
 import { PersonalizationSettingsPage } from "@/components/workspace/settings/personalization-settings-page";
 import {
   SETTINGS_SECTION_IDS,
@@ -25,7 +24,6 @@ const settingsSectionIcons = {
   account: UserIcon,
   personalization: SparklesIcon,
   appearance: PaletteIcon,
-  notification: BellIcon,
 } as const;
 
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
@@ -97,7 +95,6 @@ export function SettingsDialog(props: SettingsDialogProps) {
                 <PersonalizationSettingsPage />
               )}
               {activeSection === "appearance" && <AppearanceSettingsPage />}
-              {activeSection === "notification" && <NotificationSettingsPage />}
             </div>
           </ScrollArea>
         </div>

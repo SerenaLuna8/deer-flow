@@ -18,6 +18,7 @@ from deerflow.agents.memory.snip import (
     SnipArchiveContext,
     compute_snip_source_digest,
 )
+from deerflow.agents.middlewares import summarization_middleware as summarization_module
 from deerflow.agents.middlewares.summarization_middleware import (
     DeerFlowSummarizationMiddleware,
 )
@@ -34,6 +35,10 @@ class _RecordingModel(FakeListChatModel):
         self.prompts.append("\n".join(str(message.content) for message in messages))
         self.call_count += 1
         return super()._call(*args, **kwargs)
+
+
+class _LowBudgetModel(_RecordingModel):
+    max_tokens: int | None = 512
 
 
 def _dual(continuity: str, tagged: str) -> str:
@@ -857,6 +862,121 @@ def test_custom_summary_prompt_keeps_single_segment_semantics() -> None:
     assert result.summary_text == output
     assert result.memory_archive_receipt is not None
     assert result.memory_archive_receipt["tagged_text"] == output
+
+
+def test_configured_custom_prompt_reaches_the_production_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    custom_prompt = "Summarize this deployment conversation.\n\n{messages}"
+    config = SimpleNamespace(
+        enabled=True,
+        model_name=None,
+        trigger=None,
+        keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
+        trim_tokens_to_summarize=20_000,
+        summary_prompt=custom_prompt,
+    )
+    app_config = SimpleNamespace(summarization=config)
+    monkeypatch.setattr(
+        summarization_module,
+        "create_chat_model",
+        lambda **_kwargs: _model("- [durable] Custom prompt output."),
+    )
+
+    middleware = summarization_module.create_summarization_middleware(
+        app_config=app_config,
+    )
+
+    assert middleware is not None
+    assert middleware.summary_prompt == custom_prompt
+    assert middleware._dual_output_contract is False
+
+
+def test_explicit_custom_prompt_equal_to_packaged_text_stays_single_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Prompt provenance, not accidental string equality, selects the contract."""
+    config = SimpleNamespace(
+        enabled=True,
+        model_name=None,
+        trigger=None,
+        keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
+        trim_tokens_to_summarize=20_000,
+        summary_prompt=SNIP_ARCHIVE_PROMPT,
+    )
+    app_config = SimpleNamespace(summarization=config)
+    monkeypatch.setattr(
+        summarization_module,
+        "create_chat_model",
+        lambda **_kwargs: _model("- [durable] Explicit custom output."),
+    )
+    monkeypatch.setattr(
+        summarization_module,
+        "_ensure_snip_summary_output_budget",
+        lambda _model: (_ for _ in ()).throw(
+            AssertionError("custom prompts must not receive the packaged SNIP budget"),
+        ),
+    )
+
+    middleware = summarization_module.create_summarization_middleware(
+        app_config=app_config,
+    )
+
+    assert middleware is not None
+    assert middleware.summary_prompt == SNIP_ARCHIVE_PROMPT
+    assert middleware._dual_output_contract is False
+
+
+def test_packaged_prompt_budget_reaches_the_production_factory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = SimpleNamespace(
+        enabled=True,
+        model_name=None,
+        trigger=None,
+        keep=SimpleNamespace(to_tuple=lambda: ("messages", 1)),
+        trim_tokens_to_summarize=20_000,
+        summary_prompt=None,
+    )
+    app_config = SimpleNamespace(summarization=config)
+    model = _model(_dual("Continue the task.", "(nothing)"))
+    observed: list[_RecordingModel] = []
+    monkeypatch.setattr(
+        summarization_module,
+        "create_chat_model",
+        lambda **_kwargs: model,
+    )
+
+    def record_budget(candidate: _RecordingModel) -> _RecordingModel:
+        observed.append(candidate)
+        return candidate
+
+    monkeypatch.setattr(
+        summarization_module,
+        "_ensure_snip_summary_output_budget",
+        record_budget,
+    )
+
+    middleware = summarization_module.create_summarization_middleware(
+        app_config=app_config,
+    )
+
+    assert middleware is not None
+    assert observed == [model]
+    assert middleware.summary_prompt == SNIP_ARCHIVE_PROMPT
+    assert middleware._dual_output_contract is True
+
+
+def test_snip_summary_model_output_budget_is_raised_for_dual_output() -> None:
+    model = _LowBudgetModel(
+        responses=["unused"],
+        custom_get_token_ids=lambda text: list(range(len(text))),
+    )
+
+    raised = summarization_module._ensure_snip_summary_output_budget(model)
+
+    assert raised.max_tokens == summarization_module.MIN_SNIP_SUMMARY_OUTPUT_TOKENS
+    assert raised.max_tokens > model.max_tokens
 
 
 def test_twice_invalid_snip_output_preserves_state_after_two_calls() -> None:

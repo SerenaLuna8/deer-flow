@@ -21,6 +21,7 @@ from sqlalchemy.pool import NullPool
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
+    SCHEMA_MUTATION_LOCK_KEY,
     M7RecreateRequired,
     classify_database,
 )
@@ -33,9 +34,10 @@ except ModuleNotFoundError:  # Direct ``python scripts/upgrade_postgres.py`` exe
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 MIGRATIONS_PATH = BACKEND_ROOT / "migrations"
 
-# Distinct from the bootstrap and setup lock keys; serializes concurrent
-# upgrade invocations against each other and against `make setup-db`.
-_UPGRADE_LOCK_KEY = 0x0DEE_12F1_5E7D_0006
+# The production bootstrap path used by `make setup-db` takes this same lock.
+# Sharing it prevents setup and an operator-driven upgrade from mutating one
+# target schema concurrently.
+_UPGRADE_LOCK_KEY = SCHEMA_MUTATION_LOCK_KEY
 _LOCK_POLL_SECONDS = 0.1
 
 

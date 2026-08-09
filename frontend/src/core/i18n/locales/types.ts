@@ -223,6 +223,10 @@ export interface Translations {
   project: {
     audit: string;
     automations: string;
+    agents: string;
+    skills: string;
+    mcp: string;
+    memory: string;
     usage: string;
     governance: {
       retry: string;
@@ -244,6 +248,7 @@ export interface Translations {
       usage: {
         title: string;
         description: string;
+        settingsDescription: string;
         loading: string;
         unavailableTitle: string;
         unavailableDescription: string;
@@ -271,6 +276,21 @@ export interface Translations {
         emptyTitle: string;
         emptyDescription: string;
         olderEvents: string;
+        previousPage: string;
+        nextPage: string;
+        page: (page: number) => string;
+        pageSize: string;
+        pageSizeOption: (pageSize: number) => string;
+        itemsOnPage: (count: number) => string;
+        columns: {
+          time: string;
+          action: string;
+          outcome: string;
+          actor: string;
+          target: string;
+          details: string;
+          error: string;
+        };
       };
     };
   };
@@ -506,6 +526,7 @@ export interface Translations {
       skill: string;
       mcp: string;
       credential: string;
+      quota: string;
     };
     shell: {
       platformAria: string;
@@ -1114,6 +1135,7 @@ export interface Translations {
       auth: { title: string; description: string };
       quotas: { title: string; description: string };
       agentRuntime: { title: string; description: string };
+      memoryDocument: { title: string; description: string };
     };
     groups: {
       runLimits: string;
@@ -1135,6 +1157,13 @@ export interface Translations {
       addRow: string;
       removeRow: string;
       listHint: string;
+      memoryDocumentSections: string;
+      memoryDocumentSectionsHint: string;
+      memoryDocumentSectionInput: (position: number) => string;
+      addMemoryDocumentSection: string;
+      removeMemoryDocumentSection: (position: number) => string;
+      moveMemoryDocumentSectionUp: (position: number) => string;
+      moveMemoryDocumentSectionDown: (position: number) => string;
     };
     common: {
       save: string;
@@ -1151,6 +1180,7 @@ export interface Translations {
       newRequests: string;
       newRuns: string;
       newRequestsAndRuns: string;
+      newMemoryDocuments: string;
       nextAuthoritativeCheck: string;
       restartRequired: string;
     };
@@ -1166,7 +1196,14 @@ export interface Translations {
   };
 
   automation: {
+    title: string;
     create: string;
+    editTitle: string;
+    deleteTitle: string;
+    emptyTitle: string;
+    emptyDescription: string;
+    filterEmptyTitle: string;
+    selectPrompt: string;
     runNow: string;
     schedulerDisabled: string;
     migrationRequired: string;
@@ -1611,7 +1648,6 @@ export interface Translations {
       memory: string;
       tools: string;
       skills: string;
-      notification: string;
     };
     memory: {
       title: string;
@@ -1696,21 +1732,14 @@ export interface Translations {
       loading: string;
       retry: string;
     };
-    notification: {
-      title: string;
-      description: string;
-      requestPermission: string;
-      deniedHint: string;
-      testButton: string;
-      testTitle: string;
-      testBody: string;
-      notSupported: string;
-      disableNotification: string;
-    };
     account: {
       profileTitle: string;
       email: string;
       role: string;
+      roles: {
+        system_admin: string;
+        user: string;
+      };
       changePasswordTitle: string;
       changePasswordDescription: string;
       ssoProvider: string;

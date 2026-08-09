@@ -1092,6 +1092,35 @@ CREATE TABLE run_asset_versions (
     CONSTRAINT fk_run_asset_versions_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
 );
 
+CREATE TABLE run_event_partition_state (
+    singleton BOOLEAN DEFAULT true NOT NULL,
+    retained_from TIMESTAMP WITH TIME ZONE,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (singleton),
+    CONSTRAINT ck_run_event_partition_state_singleton CHECK (singleton)
+);
+
+INSERT INTO run_event_partition_state (singleton) VALUES (true);
+
+CREATE TABLE run_event_invariants (
+    id BIGINT NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    run_id VARCHAR(64) NOT NULL,
+    seq BIGINT NOT NULL,
+    is_stream_terminal BOOLEAN DEFAULT false NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT fk_run_event_invariants_private_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT uq_run_events_private_seq UNIQUE (project_id, owner_user_id, thread_id, run_id, seq),
+    CONSTRAINT uq_events_thread_seq UNIQUE (thread_id, seq)
+);
+
+CREATE INDEX ix_run_event_invariants_created_at ON run_event_invariants (created_at);
+
+CREATE UNIQUE INDEX uq_run_events_stream_terminal ON run_event_invariants (project_id, owner_user_id, thread_id, run_id) WHERE is_stream_terminal;
+
 CREATE TABLE run_events (
     id BIGSERIAL NOT NULL,
     thread_id VARCHAR(64) NOT NULL,
@@ -1104,14 +1133,12 @@ CREATE TABLE run_events (
     seq BIGINT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE NOT NULL,
     project_id UUID NOT NULL,
-    PRIMARY KEY (id),
+    PRIMARY KEY (id, created_at),
     CONSTRAINT fk_run_events_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_run_events_private_run FOREIGN KEY(project_id, owner_user_id, thread_id, run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
     CONSTRAINT fk_run_events_project_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
-    CONSTRAINT fk_run_events_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT uq_run_events_private_seq UNIQUE (project_id, owner_user_id, thread_id, run_id, seq),
-    CONSTRAINT uq_events_thread_seq UNIQUE (thread_id, seq)
-);
+    CONSTRAINT fk_run_events_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT
+) PARTITION BY RANGE (created_at);
 
 CREATE INDEX ix_events_run ON run_events (thread_id, run_id, seq);
 
@@ -1121,7 +1148,7 @@ CREATE INDEX ix_run_events_owner_user_id ON run_events (owner_user_id);
 
 CREATE INDEX ix_run_events_project_id ON run_events (project_id);
 
-CREATE UNIQUE INDEX uq_run_events_stream_terminal ON run_events (project_id, owner_user_id, thread_id, run_id) WHERE category = 'stream' AND event_type = 'stream.end';
+CREATE INDEX ix_run_events_stream_terminal ON run_events (project_id, owner_user_id, thread_id, run_id) WHERE category = 'stream' AND event_type = 'stream.end';
 
 CREATE TABLE skill_versions (
     id UUID NOT NULL,
@@ -2093,20 +2120,33 @@ CREATE TRIGGER trg_dead_jobs_append_only BEFORE UPDATE OR DELETE ON dead_jobs FO
 CREATE OR REPLACE FUNCTION enforce_stream_terminal_invariant()
 RETURNS trigger AS $$
 BEGIN
+    -- Serialize every Thread's cross-partition invariant checks. The event
+    -- store already holds this advisory lock, so normal writes are reentrant.
+    PERFORM pg_advisory_xact_lock(hashtext(NEW.thread_id)::bigint);
+    PERFORM 1
+      FROM run_event_partition_state
+     WHERE singleton
+       AND (retained_from IS NULL OR NEW.created_at >= retained_from);
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event timestamp precedes the retention watermark'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    INSERT INTO run_event_invariants (
+        id, created_at, project_id, owner_user_id, thread_id, run_id, seq,
+        is_stream_terminal
+    ) VALUES (
+        NEW.id, NEW.created_at, NEW.project_id, NEW.owner_user_id,
+        NEW.thread_id, NEW.run_id, NEW.seq,
+        NEW.category = 'stream' AND NEW.event_type = 'stream.end'
+    );
     IF NEW.category = 'stream' THEN
-        PERFORM 1 FROM thread_event_sequences
-         WHERE project_id = NEW.project_id
-           AND owner_user_id = NEW.owner_user_id
-           AND thread_id = NEW.thread_id
-         FOR UPDATE;
         IF NEW.event_type <> 'stream.end' AND EXISTS (
-            SELECT 1 FROM run_events
+            SELECT 1 FROM run_event_invariants
              WHERE project_id = NEW.project_id
                AND owner_user_id = NEW.owner_user_id
                AND thread_id = NEW.thread_id
                AND run_id = NEW.run_id
-               AND category = 'stream'
-               AND event_type = 'stream.end'
+               AND is_stream_terminal
         ) THEN
             RAISE EXCEPTION 'stream event cannot follow terminal event'
                 USING ERRCODE = 'integrity_constraint_violation';
@@ -2116,12 +2156,183 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+CREATE OR REPLACE FUNCTION cleanup_run_event_invariant()
+RETURNS trigger AS $$
+BEGIN
+    DELETE FROM run_event_invariants WHERE id = OLD.id;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION enforce_run_event_identity_immutable()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.id IS DISTINCT FROM OLD.id
+       OR NEW.created_at IS DISTINCT FROM OLD.created_at
+       OR NEW.project_id IS DISTINCT FROM OLD.project_id
+       OR NEW.owner_user_id IS DISTINCT FROM OLD.owner_user_id
+       OR NEW.thread_id IS DISTINCT FROM OLD.thread_id
+       OR NEW.run_id IS DISTINCT FROM OLD.run_id
+       OR NEW.seq IS DISTINCT FROM OLD.seq
+       OR NEW.category IS DISTINCT FROM OLD.category
+       OR NEW.event_type IS DISTINCT FROM OLD.event_type THEN
+        RAISE EXCEPTION 'run event identity is immutable'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION ensure_run_events_month_partition(target_at TIMESTAMP WITH TIME ZONE)
+RETURNS text AS $$
+DECLARE
+    month_start TIMESTAMP WITH TIME ZONE;
+    month_end TIMESTAMP WITH TIME ZONE;
+    partition_name text;
+    retention_watermark TIMESTAMP WITH TIME ZONE;
+BEGIN
+    IF target_at IS NULL THEN
+        RAISE EXCEPTION 'run event partition timestamp is required'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+    SELECT retained_from
+      INTO retention_watermark
+      FROM run_event_partition_state
+     WHERE singleton;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event partition state is missing'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF retention_watermark IS NOT NULL AND target_at < retention_watermark THEN
+        RAISE EXCEPTION 'run event timestamp precedes the retention watermark'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    month_start := date_trunc('month', target_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC';
+    month_end := month_start + INTERVAL '1 month';
+    partition_name := 'run_events_p' || to_char(month_start AT TIME ZONE 'UTC', 'YYYYMM');
+    IF to_regclass(partition_name) IS NOT NULL THEN
+        RETURN partition_name;
+    END IF;
+    LOCK TABLE run_events IN ACCESS EXCLUSIVE MODE;
+    SELECT retained_from
+      INTO retention_watermark
+      FROM run_event_partition_state
+     WHERE singleton
+       FOR SHARE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event partition state is missing'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF retention_watermark IS NOT NULL AND target_at < retention_watermark THEN
+        RAISE EXCEPTION 'run event timestamp precedes the retention watermark'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF to_regclass(partition_name) IS NULL THEN
+        EXECUTE format(
+            'CREATE TABLE %I PARTITION OF run_events FOR VALUES FROM (%L) TO (%L)',
+            partition_name,
+            month_start,
+            month_end
+        );
+    END IF;
+    RETURN partition_name;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION drop_run_event_partitions_before(cutoff_at TIMESTAMP WITH TIME ZONE)
+RETURNS integer AS $$
+DECLARE
+    keep_from TIMESTAMP WITH TIME ZONE;
+    retention_watermark TIMESTAMP WITH TIME ZONE;
+    month_key text;
+    month_start TIMESTAMP WITH TIME ZONE;
+    month_end TIMESTAMP WITH TIME ZONE;
+    partition_name text;
+    dropped integer := 0;
+BEGIN
+    IF cutoff_at IS NULL THEN
+        RAISE EXCEPTION 'run event retention cutoff is required'
+            USING ERRCODE = 'not_null_violation';
+    END IF;
+    IF NOT isfinite(cutoff_at) OR cutoff_at > clock_timestamp() THEN
+        RAISE EXCEPTION 'run event retention cutoff cannot be in the future'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+    keep_from := date_trunc('month', cutoff_at AT TIME ZONE 'UTC') AT TIME ZONE 'UTC';
+    LOCK TABLE run_events IN ACCESS EXCLUSIVE MODE;
+    SELECT retained_from
+      INTO retention_watermark
+      FROM run_event_partition_state
+     WHERE singleton
+       FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'run event partition state is missing'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF retention_watermark IS NULL OR keep_from > retention_watermark THEN
+        retention_watermark := keep_from;
+    END IF;
+    UPDATE run_event_partition_state
+       SET retained_from = retention_watermark,
+           updated_at = now()
+     WHERE singleton;
+    FOR partition_name IN
+        SELECT child.relname
+          FROM pg_inherits inheritance
+          JOIN pg_class parent ON parent.oid = inheritance.inhparent
+          JOIN pg_class child ON child.oid = inheritance.inhrelid
+          JOIN pg_namespace namespace ON namespace.oid = child.relnamespace
+         WHERE parent.oid = 'run_events'::regclass
+           AND namespace.nspname = current_schema()
+           AND child.relname ~ '^run_events_p[0-9]{6}$'
+         ORDER BY child.relname
+    LOOP
+        month_key := substring(partition_name FROM '^run_events_p([0-9]{6})$');
+        month_start := to_date(month_key, 'YYYYMM')::timestamp AT TIME ZONE 'UTC';
+        month_end := month_start + INTERVAL '1 month';
+        IF month_end <= retention_watermark THEN
+            EXECUTE format('DROP TABLE %I', partition_name);
+            DELETE FROM run_event_invariants
+             WHERE created_at >= month_start AND created_at < month_end;
+            dropped := dropped + 1;
+        END IF;
+    END LOOP;
+    PERFORM ensure_run_events_month_partition(now());
+    PERFORM ensure_run_events_month_partition(now() + INTERVAL '1 month');
+    RETURN dropped;
+END;
+$$ LANGUAGE plpgsql;
+
+SELECT ensure_run_events_month_partition(now());
+
+SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
+
 CREATE TRIGGER trg_run_events_stream_terminal BEFORE INSERT ON run_events FOR EACH ROW EXECUTE FUNCTION enforce_stream_terminal_invariant();
+
+CREATE TRIGGER trg_run_events_identity_immutable BEFORE UPDATE OF id, created_at, project_id, owner_user_id, thread_id, run_id, seq, category, event_type ON run_events FOR EACH ROW EXECUTE FUNCTION enforce_run_event_identity_immutable();
+
+CREATE TRIGGER trg_run_events_invariant_cleanup AFTER DELETE ON run_events FOR EACH ROW EXECUTE FUNCTION cleanup_run_event_invariant();
 
 CREATE OR REPLACE FUNCTION set_m7_updated_at()
 RETURNS trigger AS $$
 BEGIN
     NEW.updated_at := now();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION set_threads_meta_updated_at()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.memory_sealed_at IS DISTINCT FROM OLD.memory_sealed_at
+       AND NEW.updated_at IS NOT DISTINCT FROM OLD.updated_at
+       AND (to_jsonb(NEW) - 'memory_sealed_at' - 'updated_at')
+           IS NOT DISTINCT FROM
+           (to_jsonb(OLD) - 'memory_sealed_at' - 'updated_at') THEN
+        NEW.updated_at := OLD.updated_at;
+    ELSE
+        NEW.updated_at := now();
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -2182,7 +2393,7 @@ CREATE TRIGGER trg_scheduled_tasks_updated_at BEFORE UPDATE ON scheduled_tasks F
 
 CREATE TRIGGER trg_skills_updated_at BEFORE UPDATE ON skills FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
 
-CREATE TRIGGER trg_threads_meta_updated_at BEFORE UPDATE ON threads_meta FOR EACH ROW EXECUTE FUNCTION set_m7_updated_at();
+CREATE TRIGGER trg_threads_meta_updated_at BEFORE UPDATE ON threads_meta FOR EACH ROW EXECUTE FUNCTION set_threads_meta_updated_at();
 
 ALTER TABLE skills ADD CONSTRAINT uq_skills_project_id_id UNIQUE (project_id, id);
 
@@ -2616,7 +2827,7 @@ CREATE TABLE system_runtime_policies (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (section),
-    CONSTRAINT ck_system_runtime_policies_section CHECK (section IN ('agent_runtime', 'auth', 'quotas')),
+    CONSTRAINT ck_system_runtime_policies_section CHECK (section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')),
     CONSTRAINT ck_system_runtime_policies_revision CHECK (revision >= 1),
     CONSTRAINT uq_system_runtime_policies_current_version UNIQUE (section, current_version_id),
     FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
@@ -2633,7 +2844,7 @@ CREATE TABLE system_runtime_policy_versions (
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     PRIMARY KEY (id),
-    CONSTRAINT ck_system_runtime_policy_versions_section CHECK (section IN ('agent_runtime', 'auth', 'quotas')),
+    CONSTRAINT ck_system_runtime_policy_versions_section CHECK (section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')),
     CONSTRAINT ck_system_runtime_policy_versions_number CHECK (version_number >= 1),
     CONSTRAINT ck_system_runtime_policy_versions_schema CHECK (schema_version >= 1),
     CONSTRAINT ck_system_runtime_policy_versions_value_object CHECK (jsonb_typeof(value) = 'object'),
@@ -2716,17 +2927,40 @@ CREATE TABLE memory_documents (
     dream_cursor BIGINT DEFAULT 0 NOT NULL,
     active_dream_job_id UUID,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    sections JSONB NOT NULL,
+    sections_policy_section VARCHAR(32) DEFAULT 'memory_document' NOT NULL,
+    sections_policy_version_id UUID NOT NULL,
     CONSTRAINT pk_memory_documents PRIMARY KEY (project_id, owner_user_id, namespace),
     CONSTRAINT fk_memory_documents_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_memory_documents_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_memory_documents_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_memory_documents_sections_policy_version FOREIGN KEY(sections_policy_section, sections_policy_version_id) REFERENCES system_runtime_policy_versions (section, id) ON DELETE RESTRICT,
     CONSTRAINT fk_memory_documents_active_dream_job FOREIGN KEY(active_dream_job_id, project_id, owner_user_id, namespace) REFERENCES jobs (id, project_id, owner_user_id, namespace) ON DELETE RESTRICT,
     CONSTRAINT uq_memory_documents_active_dream_job UNIQUE (active_dream_job_id),
     CONSTRAINT ck_memory_documents_namespace CHECK (namespace <> ''),
     CONSTRAINT ck_memory_documents_digest CHECK (content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_documents_content_size CHECK (char_length(content) <= 16000),
+    CONSTRAINT ck_memory_documents_sections CHECK (jsonb_typeof(sections) = 'array' AND jsonb_array_length(sections) BETWEEN 2 AND 8 AND NOT jsonb_path_exists(sections, '$[*] ? (@.type() != "string")')),
+    CONSTRAINT ck_memory_documents_sections_policy_section CHECK (sections_policy_section = 'memory_document'),
     CONSTRAINT ck_memory_documents_versions CHECK (version >= 0 AND dream_cursor >= 0)
 );
+
+CREATE OR REPLACE FUNCTION prevent_memory_document_sections_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.sections IS DISTINCT FROM OLD.sections
+       OR NEW.sections_policy_section IS DISTINCT FROM OLD.sections_policy_section
+       OR NEW.sections_policy_version_id IS DISTINCT FROM OLD.sections_policy_version_id THEN
+        RAISE EXCEPTION 'Memory document sections and policy provenance are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_memory_documents_sections_immutable
+BEFORE UPDATE ON memory_documents
+FOR EACH ROW EXECUTE FUNCTION prevent_memory_document_sections_mutation();
 
 CREATE TABLE memory_history_entries (
     id UUID NOT NULL,
@@ -2763,7 +2997,7 @@ CREATE TABLE memory_history_entries (
     CONSTRAINT ck_memory_history_entries_origin_source CHECK ((origin = 'snip' AND source_run_id IS NULL AND source_checkpoint_id IS NOT NULL AND source_checkpoint_id <> '' AND committed_checkpoint_id IS NOT NULL AND committed_checkpoint_id <> '' AND summary_model_ref IS NOT NULL) OR (origin = 'tool' AND source_run_id IS NOT NULL AND source_run_id <> '' AND source_checkpoint_id IS NULL AND committed_checkpoint_id IS NULL AND summary_model_ref IS NULL)),
     CONSTRAINT ck_memory_history_entries_digests CHECK (source_digest ~ '^[0-9a-f]{64}$' AND content_digest ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_memory_history_entries_preference_version CHECK (preference_version >= 1),
-    CONSTRAINT ck_memory_history_entries_contract CHECK (snip_prompt_version <> ''),
+    CONSTRAINT ck_memory_history_entries_contract CHECK ((origin = 'snip' AND snip_prompt_version <> '') OR (origin = 'tool' AND snip_prompt_version = 'remember-tool-v1')),
     CONSTRAINT ck_memory_history_entries_text_size CHECK (tagged_text IS NULL OR char_length(tagged_text) <= 1000),
     CONSTRAINT ck_memory_history_entries_lifecycle CHECK ((status = 'pending' AND tagged_text IS NOT NULL AND dream_job_id IS NULL AND consumed_at IS NULL) OR (status = 'processing' AND tagged_text IS NOT NULL AND dream_job_id IS NOT NULL AND consumed_at IS NULL) OR (status = 'consumed' AND tagged_text IS NULL AND dream_job_id IS NOT NULL AND consumed_at IS NOT NULL))
 );
@@ -2879,6 +3113,7 @@ CREATE TABLE run_memory_context_snapshots (
     content TEXT NOT NULL,
     content_digest CHAR(64) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    sections JSONB NOT NULL,
     CONSTRAINT pk_run_memory_context_snapshots PRIMARY KEY (project_id, owner_user_id, run_id, namespace),
     CONSTRAINT fk_run_memory_context_snapshots_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_run_memory_context_snapshots_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
@@ -2888,11 +3123,27 @@ CREATE TABLE run_memory_context_snapshots (
     CONSTRAINT ck_run_memory_context_snapshots_namespace CHECK (namespace <> ''),
     CONSTRAINT ck_run_memory_context_snapshots_version CHECK (document_version >= 1),
     CONSTRAINT ck_run_memory_context_snapshots_digest CHECK (content_digest ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT ck_run_memory_context_snapshots_content CHECK (content <> '' AND char_length(content) <= 16000)
+    CONSTRAINT ck_run_memory_context_snapshots_content CHECK (content <> '' AND char_length(content) <= 16000),
+    CONSTRAINT ck_run_memory_context_snapshots_sections CHECK (jsonb_typeof(sections) = 'array' AND jsonb_array_length(sections) BETWEEN 2 AND 8 AND NOT jsonb_path_exists(sections, '$[*] ? (@.type() != "string")'))
 );
+
+CREATE OR REPLACE FUNCTION prevent_run_memory_snapshot_sections_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.sections IS DISTINCT FROM OLD.sections THEN
+        RAISE EXCEPTION 'Run Memory snapshot sections are immutable'
+            USING ERRCODE = '55000';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_run_memory_context_snapshots_sections_immutable
+BEFORE UPDATE ON run_memory_context_snapshots
+FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('full_schema_v5');
+INSERT INTO alembic_version (version_num) VALUES ('full_schema_v9');
 
 COMMIT;

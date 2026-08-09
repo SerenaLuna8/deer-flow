@@ -1,4 +1,4 @@
-config_version: 36
+config_version: 37
 log_level: info
 logging:
   enhance:
@@ -142,3 +142,6 @@ worker:
     # Merge root assistant text deltas for at most this many milliseconds
     # (or 4 KiB) per durable frame. 0 disables coalescing (per-token frames).
     text_delta_flush_ms: 75
+    # Wake idle SSE consumers through PostgreSQL LISTEN/NOTIFY. false disables
+    # both Worker/Gateway NOTIFY writes and the Gateway listener, restoring polling.
+    run_event_notify_enabled: true

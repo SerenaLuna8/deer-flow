@@ -33,7 +33,11 @@ from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     LockedAgentRuntimePolicy,
 )
-from deerflow.agents.memory.dream import EMPTY_MEMORY_DOCUMENT
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    EMPTY_MEMORY_DOCUMENT,
+    render_empty_memory_document,
+)
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.jobs.model import WorkerNodeRow
 from deerflow.persistence.jobs.sql import (
@@ -46,6 +50,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     RunMemoryContextSnapshotRow,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
@@ -127,11 +132,13 @@ def _policy(*, enabled: bool = True, max_tokens: int = 2_000):
 
 @pytest.mark.asyncio
 async def test_run_admission_freezes_the_complete_current_document() -> None:
-    content = EMPTY_MEMORY_DOCUMENT
+    sections = ("协作方式", "架构边界", "当前目标")
+    content = render_empty_memory_document(sections)
     document = SimpleNamespace(
         version=8,
         content=content,
         content_digest=hashlib.sha256(content.encode()).hexdigest(),
+        sections=list(sections),
     )
     session = _Session(document)
     context = _context()
@@ -158,15 +165,18 @@ async def test_run_admission_freezes_the_complete_current_document() -> None:
     assert row.document_version == 8
     assert row.content == content
     assert row.content_digest == document.content_digest
+    assert row.sections == list(sections)
 
 
 @pytest.mark.asyncio
 async def test_clarification_continuation_inherits_the_source_run_snapshot() -> None:
-    content = EMPTY_MEMORY_DOCUMENT + "\n\n- source snapshot"
+    sections = ("协作方式", "架构边界", "当前目标")
+    content = render_empty_memory_document(sections) + "\n\n- source snapshot"
     source = SimpleNamespace(
         document_version=3,
         content=content,
         content_digest=hashlib.sha256(content.encode()).hexdigest(),
+        sections=list(sections),
     )
     session = _SequenceSession("source-run", source)
     context = _context()
@@ -195,6 +205,36 @@ async def test_clarification_continuation_inherits_the_source_run_snapshot() -> 
     assert inherited.document_version == source.document_version
     assert inherited.content == source.content
     assert inherited.content_digest == source.content_digest
+    assert inherited.sections == list(sections)
+
+
+@pytest.mark.asyncio
+async def test_run_admission_fails_closed_when_content_does_not_match_frozen_sections() -> None:
+    document = SimpleNamespace(
+        version=8,
+        content=EMPTY_MEMORY_DOCUMENT,
+        content_digest=hashlib.sha256(EMPTY_MEMORY_DOCUMENT.encode()).hexdigest(),
+        sections=["协作方式", "架构边界"],
+    )
+    session = _Session(document)
+    context = _context()
+    repository = RunSnapshotRepository(
+        lambda: None,
+        personalization_repository_builder=lambda current: _PreferenceRepository(
+            current,
+            enabled=True,
+        ),
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await repository._admit_memory_context_snapshot(
+            session,
+            context,
+            run_id="run-section-drift",
+            locked_policy=_policy(),
+        )
+
+    assert session.added == []
 
 
 @pytest.mark.asyncio
@@ -308,6 +348,7 @@ async def test_run_admission_degrades_an_over_budget_document_to_a_skip() -> Non
             version=2,
             content=content,
             content_digest=hashlib.sha256(content.encode()).hexdigest(),
+            sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
         )
     )
     context = _context()
@@ -344,6 +385,7 @@ async def test_run_admission_still_fails_closed_on_document_digest_drift() -> No
             version=2,
             content=content,
             content_digest="b" * 64,
+            sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
         )
     )
     context = _context()
@@ -370,6 +412,40 @@ async def test_run_admission_still_fails_closed_on_document_digest_drift() -> No
 
 
 @pytest.mark.asyncio
+async def test_run_admission_fails_closed_when_over_budget_document_digest_drifts() -> None:
+    content = EMPTY_MEMORY_DOCUMENT + "\n" + ("超" * 200)
+    session = _Session(
+        SimpleNamespace(
+            version=2,
+            content=content,
+            content_digest="b" * 64,
+            sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+        )
+    )
+    context = _context()
+    audit = _InjectionAudit()
+    repository = RunSnapshotRepository(
+        lambda: None,
+        personalization_repository_builder=lambda current: _PreferenceRepository(
+            current,
+            enabled=True,
+        ),
+        audit=audit,
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await repository._admit_memory_context_snapshot(
+            session,
+            context,
+            run_id="run-over-budget-drift",
+            locked_policy=_policy(max_tokens=100),
+        )
+
+    assert session.added == []
+    assert audit.calls == []
+
+
+@pytest.mark.asyncio
 async def test_run_admission_rejects_an_invalid_injection_audit_port() -> None:
     with pytest.raises(TypeError):
         RunSnapshotRepository(
@@ -385,6 +461,7 @@ async def test_continuation_degrades_an_over_budget_inherited_snapshot() -> None
         document_version=3,
         content=content,
         content_digest=hashlib.sha256(content.encode()).hexdigest(),
+        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
     )
     session = _SequenceSession("source-run", source)
     context = _context()
@@ -410,6 +487,41 @@ async def test_continuation_degrades_an_over_budget_inherited_snapshot() -> None
     assert session.added == []
     (skipped,) = audit.calls
     assert skipped["run_id"] == "answer-run"
+
+
+@pytest.mark.asyncio
+async def test_continuation_fails_closed_when_over_budget_snapshot_digest_drifts() -> None:
+    content = EMPTY_MEMORY_DOCUMENT + "\n" + ("超" * 200)
+    source = SimpleNamespace(
+        document_version=3,
+        content=content,
+        content_digest="b" * 64,
+        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+    )
+    session = _SequenceSession("source-run", source)
+    context = _context()
+    audit = _InjectionAudit()
+    repository = RunSnapshotRepository(
+        lambda: None,
+        personalization_repository_builder=lambda current: _PreferenceRepository(
+            current,
+            enabled=True,
+        ),
+        audit=audit,
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await repository._admit_memory_context_snapshot(
+            session,
+            context,
+            thread_id="thread-1",
+            run_id="answer-run",
+            continuation_source_run_id="source-run",
+            locked_policy=_policy(max_tokens=100),
+        )
+
+    assert session.added == []
+    assert audit.calls == []
 
 
 @pytest.mark.asyncio
@@ -584,6 +696,12 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
     scope = seed.owner_a.resource_scope
     try:
         async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await session.scalar(
+                sa.select(SystemRuntimePolicyRow.current_version_id).where(
+                    SystemRuntimePolicyRow.section == "memory_document",
+                )
+            )
+            assert sections_policy_version_id is not None
             session.add(
                 ThreadMetaRow(
                     thread_id=thread_id,
@@ -620,6 +738,8 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                     namespace="default",
                     content=content_v1,
                     content_digest=hashlib.sha256(content_v1.encode()).hexdigest(),
+                    sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                    sections_policy_version_id=sections_policy_version_id,
                     version=1,
                     dream_cursor=0,
                 )
@@ -701,6 +821,7 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
         assert frozen is not None
         assert frozen.document_version == 1
         assert frozen.content == content_v1
+        assert frozen.sections == DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
 
         async with seed.factory() as session, session.begin():
             document = await session.scalar(
@@ -752,6 +873,7 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
             assert snapshot is not None
             assert snapshot.document_version == 1
             assert snapshot.content == content_v1
+            assert snapshot.sections == list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES)
             preference = await AccountPersonalizationRepository(session).read_memory(scope.owner_user_id)
             reset = await AccountPersonalizationRepository(session).reset_memory(
                 uuid.UUID(scope.owner_user_id),

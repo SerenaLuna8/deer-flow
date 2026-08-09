@@ -1,6 +1,5 @@
 import { FolderIcon } from "lucide-react";
 
-import { Badge } from "@/components/ui/badge";
 import type { Project } from "@/core/projects/types";
 
 export function ProjectHeader({ project }: { project: Project }) {
@@ -16,23 +15,9 @@ export function ProjectHeader({ project }: { project: Project }) {
             </span>
           )}
         </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
-              {project.display_name}
-            </h1>
-            <Badge variant="secondary">{project.role}</Badge>
-          </div>
-          <div className="text-muted-foreground mt-0.5 flex min-w-0 items-center gap-2 text-sm">
-            <span className="shrink-0 font-mono text-xs">{project.slug}</span>
-            <span aria-hidden className="text-border">
-              ·
-            </span>
-            <span className="truncate">
-              {project.description || "暂无项目描述"}
-            </span>
-          </div>
-        </div>
+        <h1 className="min-w-0 truncate text-xl font-semibold tracking-tight">
+          {project.display_name}
+        </h1>
       </div>
     </header>
   );

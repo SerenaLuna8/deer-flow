@@ -781,22 +781,22 @@ function ToolCall({
     return (
       <ChainOfThoughtStep
         key={id}
-        label={resolveLabel(
-          rememberedLine ? t.toolCalls.remembered : t.toolCalls.rememberMemory,
-        )}
+        label={resolveLabel(t.toolCalls.rememberMemory)}
         icon={BrainIcon}
       >
         {rememberedLine && (
           <ChainOfThoughtSearchResult data-testid="remember-chip">
             {projectSlug ? (
               <Link
-                href={`/projects/${encodeURIComponent(projectSlug)}/memory`}
+                href={`/projects/${encodeURIComponent(projectSlug)}/memory#memory-pending`}
                 className="cursor-pointer"
               >
-                {rememberedLine}
+                {t.toolCalls.remembered} {rememberedLine}
               </Link>
             ) : (
-              rememberedLine
+              <>
+                {t.toolCalls.remembered} {rememberedLine}
+              </>
             )}
           </ChainOfThoughtSearchResult>
         )}

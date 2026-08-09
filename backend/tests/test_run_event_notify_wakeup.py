@@ -12,14 +12,20 @@ import asyncio
 import time
 import uuid
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from app.gateway.deps import _install_run_event_wakeup
 from app.gateway.routers import private_work as private_work_router
 from app.gateway.run_event_wakeup import RunEventWakeup
+from deerflow.config.worker_config import WorkerStreamConfig
 from deerflow.runtime.events.models import StoredStreamFrame
-from deerflow.runtime.events.store.db import RUN_EVENTS_NOTIFY_CHANNEL
+from deerflow.runtime.events.store.db import (
+    RUN_EVENTS_NOTIFY_CHANNEL,
+    DbRunEventStore,
+)
+from deerflow.runtime.events.stream import PostgresStreamBridge
 
 
 class _FakeConnection:
@@ -75,6 +81,105 @@ async def _until(predicate, *, timeout: float = 2.0) -> None:
     while not predicate():
         assert time.monotonic() < deadline, "condition was not reached in time"
         await asyncio.sleep(0.005)
+
+
+def test_run_event_notify_switch_defaults_on_and_accepts_off() -> None:
+    assert WorkerStreamConfig().run_event_notify_enabled is True
+    assert WorkerStreamConfig(run_event_notify_enabled=False).run_event_notify_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_disabled_event_store_does_not_queue_pg_notify() -> None:
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(
+            dialect=SimpleNamespace(name="postgresql"),
+        ),
+        execute=AsyncMock(),
+    )
+
+    store = DbRunEventStore(
+        object(),
+        run_event_notify_enabled=False,
+    )
+    await store._notify_stream_append(session, "run-a")
+
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_default_event_store_still_queues_pg_notify() -> None:
+    session = SimpleNamespace(
+        get_bind=lambda: SimpleNamespace(
+            dialect=SimpleNamespace(name="postgresql"),
+        ),
+        execute=AsyncMock(),
+    )
+
+    store = DbRunEventStore(object())
+    await store._notify_stream_append(session, "run-a")
+
+    session.execute.assert_awaited_once()
+    _statement, parameters = session.execute.await_args.args
+    assert parameters == {
+        "channel": RUN_EVENTS_NOTIFY_CHANNEL,
+        "payload": "run-a",
+    }
+
+
+def test_stream_bridge_forwards_disabled_notify_policy_to_writer() -> None:
+    bridge = PostgresStreamBridge(
+        object(),
+        run_event_notify_enabled=False,
+    )
+
+    assert bridge._events._run_event_notify_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_gateway_does_not_start_listener_when_notify_is_disabled() -> None:
+    app = SimpleNamespace(state=SimpleNamespace())
+    stack = SimpleNamespace(push_async_callback=Mock())
+    wakeup_factory = Mock(side_effect=AssertionError("listener must stay off"))
+
+    wakeup = await _install_run_event_wakeup(
+        app,
+        stack,
+        dsn="postgresql://unused/db",
+        enabled=False,
+        wakeup_factory=wakeup_factory,
+    )
+
+    assert wakeup is None
+    assert app.state.run_event_wakeup is None
+    request = SimpleNamespace(app=app)
+    assert private_work_router._run_event_wakeup(request) is None
+    wakeup_factory.assert_not_called()
+    stack.push_async_callback.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_gateway_installs_listener_when_notify_is_enabled() -> None:
+    app = SimpleNamespace(state=SimpleNamespace())
+    stack = SimpleNamespace(push_async_callback=Mock())
+    installed = SimpleNamespace(
+        start=AsyncMock(),
+        aclose=AsyncMock(),
+    )
+    wakeup_factory = Mock(return_value=installed)
+
+    wakeup = await _install_run_event_wakeup(
+        app,
+        stack,
+        dsn="postgresql://unused/db",
+        enabled=True,
+        wakeup_factory=wakeup_factory,
+    )
+
+    assert wakeup is installed
+    assert app.state.run_event_wakeup is installed
+    wakeup_factory.assert_called_once_with("postgresql://unused/db")
+    installed.start.assert_awaited_once_with()
+    stack.push_async_callback.assert_called_once_with(installed.aclose)
 
 
 @pytest.mark.asyncio
@@ -147,6 +252,61 @@ async def test_connect_failures_back_off_and_eventually_listen() -> None:
         assert connector.attempts == 3
     finally:
         await wakeup.aclose()
+
+
+@pytest.mark.asyncio
+async def test_real_postgres_listener_termination_wakes_and_reconnects(
+    postgres_database_url: str,
+) -> None:
+    """Kill the actual LISTEN backend, then prove poll fallback and recovery."""
+    import asyncpg
+
+    dsn = str(postgres_database_url).replace(
+        "postgresql+asyncpg://",
+        "postgresql://",
+        1,
+    )
+    listener_connections: list[asyncpg.Connection] = []
+
+    async def connect_listener(url: str) -> asyncpg.Connection:
+        connection = await asyncpg.connect(url)
+        listener_connections.append(connection)
+        return connection
+
+    wakeup = RunEventWakeup(
+        dsn,
+        connect=connect_listener,
+        reconnect_backoff_seconds=0.01,
+        probe_seconds=0.01,
+    )
+    control = await asyncpg.connect(dsn)
+    await wakeup.start()
+    try:
+        await _until(lambda: wakeup.listening and len(listener_connections) == 1)
+        waiter = wakeup.subscribe("run-real-reconnect")
+        assert not waiter.is_set()
+
+        terminated = await control.fetchval(
+            "SELECT pg_terminate_backend($1)",
+            listener_connections[0].get_server_pid(),
+        )
+        assert terminated is True
+
+        # Losing LISTEN wakes every parked consumer so it can immediately
+        # re-read by cursor instead of waiting out the healthy-listener delay.
+        await _until(waiter.is_set)
+        await _until(lambda: wakeup.listening and len(listener_connections) >= 2)
+
+        waiter.clear()
+        await control.execute(
+            "SELECT pg_notify($1, $2)",
+            RUN_EVENTS_NOTIFY_CHANNEL,
+            "run-real-reconnect",
+        )
+        await _until(waiter.is_set)
+    finally:
+        await wakeup.aclose()
+        await control.close()
 
 
 @pytest.mark.asyncio
@@ -279,8 +439,65 @@ async def test_idle_consumer_wakes_on_notify_instead_of_polling(
 
 
 @pytest.mark.asyncio
-async def test_append_stream_frame_notifies_listeners_only_on_commit(
+async def test_healthy_listener_parks_an_idle_stream_without_repeated_db_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Quantify the healthy LISTEN path instead of merely checking latency.
+
+    Over the same interval the legacy 10ms fallback would issue several
+    ``read_after``/Run-status queries. A healthy listener performs the initial
+    cursor read once and then parks without another database round trip.
+    """
+
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    monkeypatch.setattr(
+        private_work_router,
+        "_PRIVATE_STREAM_WAKEUP_WAIT_SECONDS",
+        30.0,
+    )
+    monkeypatch.setattr(private_work_router, "_PRIVATE_STREAM_POLL_SECONDS", 0.01)
+    wakeup = RunEventWakeup("postgresql://unused/db", connect=_FakeConnector())
+    wakeup._listening = True
+    first_read = asyncio.Event()
+
+    async def read_after(*_args, **_kwargs):
+        first_read.set()
+        return ()
+
+    bridge = SimpleNamespace(
+        read_after=AsyncMock(side_effect=read_after),
+        ensure_settled_terminal=AsyncMock(),
+    )
+    service = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(status="running")),
+    )
+    consumer = asyncio.create_task(
+        _collect_consumer(
+            bridge=bridge,
+            service=service,
+            run_id=run_id,
+            thread_id=thread_id,
+            wakeup=wakeup,
+        )
+    )
+    await asyncio.wait_for(first_read.wait(), timeout=1)
+    await asyncio.sleep(0.08)
+
+    assert bridge.read_after.await_count == 1
+    assert service.get.await_count == 1
+
+    consumer.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await consumer
+    assert wakeup._waiters == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notify_enabled", (True, False))
+async def test_append_stream_frame_notifies_only_on_commit_when_enabled(
     migrated_postgres_database_url: str,
+    notify_enabled: bool,
 ) -> None:
     import asyncpg
     from support.private_thread_seed import seed_private_thread_database
@@ -326,7 +543,10 @@ async def test_append_stream_frame_notifies_listeners_only_on_commit(
                 )
             )
 
-        store = DbRunEventStore(seed.factory)
+        store = DbRunEventStore(
+            seed.factory,
+            run_event_notify_enabled=notify_enabled,
+        )
         dsn = str(migrated_postgres_database_url).replace(
             "postgresql+asyncpg://",
             "postgresql://",
@@ -353,8 +573,13 @@ async def test_append_stream_frame_notifies_listeners_only_on_commit(
                     )
                     await asyncio.sleep(0.2)
                     assert received == [], "NOTIFY must ride the commit, not the write"
-            await asyncio.wait_for(delivered.wait(), timeout=5)
-            assert received == [run_id]
+            if notify_enabled:
+                await asyncio.wait_for(delivered.wait(), timeout=5)
+                assert received == [run_id]
+            else:
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(delivered.wait(), timeout=0.25)
+                assert received == []
         finally:
             await listener.close()
     finally:

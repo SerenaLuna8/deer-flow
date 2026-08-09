@@ -7,12 +7,12 @@ import {
   advanceAdminCursor,
   retreatAdminCursor,
 } from "@/components/admin/ui/admin-page";
+import { adminJobsQueryKey } from "@/core/admin-operations/query-keys";
 import {
   ADMIN_JOB_PAGE_SIZES,
   DEFAULT_ADMIN_JOB_PAGE_SIZE,
   adminJobPageSizeSchema,
 } from "@/core/admin-operations/types";
-import { adminJobsQueryKey } from "@/core/admin-operations/query-keys";
 
 describe("admin cursor helpers", () => {
   test("advances and retreats cursor history", () => {

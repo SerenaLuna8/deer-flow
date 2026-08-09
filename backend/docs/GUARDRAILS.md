@@ -546,7 +546,7 @@ uv run python -m pytest tests/test_create_deerflow_agent.py tests/test_run_worke
 ```
 
 The focused coverage protects middleware composition and server-issued guardrail
-attribution. The full backend gate remains `POSTGRES_TEST_URL=... make test`.
+attribution. The full backend gate remains `make test` using the development `DATABASE_URL`.
 
 ## Files
 

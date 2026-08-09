@@ -44,6 +44,8 @@ FINAL_REQUIRED_RELATIONS = (
     "memory_document_versions",
     "memory_episodes",
     "run_memory_context_snapshots",
+    "run_event_invariants",
+    "run_event_partition_state",
     "run_events",
     "project_usage_ledger",
     "audit_logs",

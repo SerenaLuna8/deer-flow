@@ -72,8 +72,16 @@ class SubagentChangeSignal:
         with self._lock:
             if terminal:
                 self._terminal = True
-            elif now - self._last_notify < self._debounce_seconds:
-                return
+            else:
+                # ``mark_running`` commonly fires before task_tool subscribes.
+                # With nobody to wake there is no event storm to debounce, and
+                # consuming the window here would suppress the first real
+                # progress notification after subscription for up to a full
+                # heartbeat.
+                if not self._waiters:
+                    return
+                if now - self._last_notify < self._debounce_seconds:
+                    return
             self._last_notify = now
             waiters = list(self._waiters)
         for loop, event in waiters:

@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.audit.models import SystemAuditContext, is_issued_system_audit_context
 from app.private_work.context import (
     PrivateWorkContext,
     is_issued_private_work_context,
@@ -328,18 +329,17 @@ class QuotaService:
         if project is None or membership is None:
             raise QuotaForbidden("project usage authority is required")
 
-    async def read_usage(
+    async def _usage_snapshot(
         self,
         session: AsyncSession,
-        context: ProjectContext,
+        project_id: uuid.UUID,
         *,
         now: datetime | None = None,
     ) -> ProjectQuotaUsage:
-        await self._require_usage_authority(session, context)
         selected_time = self._now(now)
         config = await self.current_config(session)
         repository = QuotaRepository(session)
-        row = await repository.policy(context.project_id)
+        row = await repository.policy(project_id)
         configured = ProjectQuotaLimits(
             member_limit=row.member_limit if row is not None else None,
             storage_bytes_limit=row.storage_bytes_limit if row is not None else None,
@@ -356,7 +356,7 @@ class QuotaService:
         dimensions: list[QuotaUsageDimension] = []
         for dimension in QUOTA_DIMENSIONS:
             bucket = self.bucket_for(dimension, now=selected_time)
-            counter = await repository.counter(context.project_id, dimension, bucket)
+            counter = await repository.counter(project_id, dimension, bucket)
             used = counter.used if counter is not None else 0
             reserved = counter.reserved if counter is not None else 0
             limit = limits[dimension]
@@ -382,6 +382,31 @@ class QuotaService:
             ),
             dimensions=tuple(dimensions),
         )
+
+    async def read_usage(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectQuotaUsage:
+        await self._require_usage_authority(session, context)
+        return await self._usage_snapshot(session, context.project_id, now=now)
+
+    async def read_usage_as_system_admin(
+        self,
+        session: AsyncSession,
+        context: SystemAuditContext,
+        project_id: uuid.UUID,
+        *,
+        now: datetime | None = None,
+    ) -> ProjectQuotaUsage:
+        if not is_issued_system_audit_context(context) or type(project_id) is not uuid.UUID:
+            raise QuotaForbidden("system admin quota authority is required")
+        project = (await session.execute(select(ProjectRow.id).where(ProjectRow.id == project_id))).scalar_one_or_none()
+        if project is None:
+            raise QuotaForbidden("system admin quota authority is required")
+        return await self._usage_snapshot(session, project_id, now=now)
 
     async def set_limits(
         self,
@@ -431,6 +456,74 @@ class QuotaService:
             bucket = self.bucket_for(dimension, now=changed_at)
             counter = await repository.lock_counter(
                 context.project_id,
+                dimension,
+                bucket,
+            )
+            await self._append_zero_net_threshold(
+                session,
+                counter,
+                owner_user_id=str(context.user_id),
+                limit=configured_limits[dimension],
+                source_kind="policy_threshold",
+                source_key=f"policy:{row.version}",
+                occurred_at=changed_at,
+                config=config,
+            )
+        return ProjectQuotaPolicy(
+            configured=limits,
+            effective=effective,
+            version=row.version,
+        )
+
+    async def set_limits_as_system_admin(
+        self,
+        session: AsyncSession,
+        context: SystemAuditContext,
+        project_id: uuid.UUID,
+        limits: ProjectQuotaLimits,
+        *,
+        expected_version: int,
+    ) -> ProjectQuotaPolicy:
+        if not is_issued_system_audit_context(context) or type(project_id) is not uuid.UUID:
+            raise QuotaForbidden("system admin quota authority is required")
+        if type(limits) is not ProjectQuotaLimits or type(expected_version) is not int or expected_version < 0:
+            raise QuotaPolicyInvalid("project quota policy is invalid")
+        project = (await session.execute(select(ProjectRow).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))).scalar_one_or_none()
+        if project is None or project.status != "active" or project.is_suspended:
+            raise QuotaForbidden("system admin quota authority is required")
+        config = await self.current_config(session)
+        self._validate_limits(limits, config)
+
+        row = await QuotaRepository(session).policy(project_id)
+        if row is None:
+            if expected_version != 0:
+                raise QuotaConflict("project quota version conflict")
+            row = ProjectQuotaRow(project_id=project_id, version=1)
+            session.add(row)
+        else:
+            if row.version != expected_version:
+                raise QuotaConflict("project quota version conflict")
+            row.version += 1
+        row.member_limit = limits.member_limit
+        row.storage_bytes_limit = limits.storage_bytes_limit
+        row.concurrent_run_limit = limits.concurrent_run_limit
+        row.mcp_calls_daily_limit = limits.mcp_calls_daily_limit
+        row.updated_by_user_id = str(context.user_id)
+        changed_at = datetime.now(UTC)
+        row.updated_at = changed_at
+        await session.flush()
+        repository = QuotaRepository(session)
+        effective = self._effective_limits(limits, config)
+        configured_limits = {
+            "members": effective.member_limit,
+            "storage_bytes": effective.storage_bytes_limit,
+            "concurrent_runs": effective.concurrent_run_limit,
+            "mcp_calls_daily": effective.mcp_calls_daily_limit,
+        }
+        for dimension in QUOTA_DIMENSIONS:
+            bucket = self.bucket_for(dimension, now=changed_at)
+            counter = await repository.lock_counter(
+                project_id,
                 dimension,
                 bucket,
             )

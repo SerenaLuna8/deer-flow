@@ -216,9 +216,9 @@ class SubagentResult:
     def update_token_usage_records(self, records: list[dict[str, int | str | None]]) -> None:
         """Publish the latest cumulative collector snapshot while still running.
 
-        Deliberately does not notify ``changes``: token totals ride along with
-        the next message/terminal wake-up or the heartbeat, keeping progress
-        notifications bounded.
+        The shared change signal is notified after the snapshot lands. Its
+        one-second debounce coalesces chatty token/message updates, while the
+        next delivered progress or terminal event carries the cumulative total.
         """
         updated = False
         with self._state_lock:

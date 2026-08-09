@@ -27,7 +27,13 @@ from deerflow.persistence.final_schema_contract import (
 # is the only marker the runtime accepts; any known ancestor classifies as
 # "behind" (explicit ``make upgrade-db`` required), and anything else stays
 # fail-closed.
-KNOWN_CHAIN_REVISIONS: tuple[str, ...] = ("full_schema_v5",)
+KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
+    "full_schema_v5",
+    "full_schema_v6",
+    "full_schema_v7",
+    "full_schema_v8",
+    "full_schema_v9",
+)
 
 # The migration-chain head revision id. ``full_schema.sql`` stamps exactly
 # this marker, so a fresh install is always already at head.
@@ -36,7 +42,7 @@ CURRENT_SCHEMA_REVISION = KNOWN_CHAIN_REVISIONS[-1]
 M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
 
 _FULL_SCHEMA_PATH = Path(__file__).resolve().parent / "full_schema.sql"
-_PG_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
+SCHEMA_MUTATION_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
 _PG_LOCK_POLL_SECONDS = 0.1
 
 _LANGGRAPH_TABLES = LANGGRAPH_TABLES
@@ -130,13 +136,19 @@ async def _postgres_lock(engine: AsyncEngine) -> AsyncIterator[None]:
             idle_session_timeout = await connection.scalar(text("SELECT current_setting('idle_session_timeout', true)"))
             if idle_session_timeout is not None:
                 await connection.execute(text("SET idle_session_timeout = 0"))
-            while not await connection.scalar(text("SELECT pg_try_advisory_lock(:key)"), {"key": _PG_LOCK_KEY}):
+            while not await connection.scalar(
+                text("SELECT pg_try_advisory_lock(:key)"),
+                {"key": SCHEMA_MUTATION_LOCK_KEY},
+            ):
                 await asyncio.sleep(_PG_LOCK_POLL_SECONDS)
             try:
                 yield
             finally:
                 try:
-                    await connection.scalar(text("SELECT pg_advisory_unlock(:key)"), {"key": _PG_LOCK_KEY})
+                    await connection.scalar(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": SCHEMA_MUTATION_LOCK_KEY},
+                    )
                 except Exception:
                     # Closing this dedicated session is the fail-safe unlock.
                     pass
@@ -216,6 +228,7 @@ __all__ = [
     "KNOWN_CHAIN_REVISIONS",
     "M7RecreateRequired",
     "M7_FINAL_SCHEMA_REVISION",
+    "SCHEMA_MUTATION_LOCK_KEY",
     "SchemaSetupRequired",
     "SchemaUpgradeRequired",
     "bootstrap_schema",

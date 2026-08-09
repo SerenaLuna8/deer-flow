@@ -49,6 +49,7 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trac
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
+    from deerflow.subagents.runtime_catalog import RuntimeAgentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -451,6 +452,63 @@ def _task_result_command(
     )
 
 
+async def _assemble_subagent_tools(
+    *,
+    parent_context: dict[str, Any],
+    runtime_agent_profile: "RuntimeAgentProfile | None",
+    effective_model: str,
+    effective_tool_groups: list[str] | tuple[str, ...] | None,
+    app_config: "AppConfig | None",
+) -> list[BaseTool]:
+    """Assemble the exact tool set used by a delegated Agent.
+
+    This is deliberately independent of the lead Agent's runtime context.
+    In particular, a parent ``__memory_authority`` never turns into the
+    lead-only ``recall_memory`` or ``remember`` tools here.
+    """
+
+    # Lazy import avoids the tools/__init__ -> task_tool import cycle.
+    from deerflow.tools import get_available_tools
+
+    private_run = "private_scope" in parent_context
+    available_tools_kwargs: dict[str, Any] = {
+        "model_name": effective_model,
+        "groups": effective_tool_groups,
+        "subagent_enabled": False,
+    }
+    if private_run:
+        # Private Runs may use only the exact admitted proxies installed by the
+        # Worker below. Never fall back to process-global MCP or ACP discovery.
+        available_tools_kwargs["include_mcp"] = False
+        available_tools_kwargs["include_acp"] = False
+    if app_config is not None:
+        available_tools_kwargs["app_config"] = app_config
+
+    from deerflow.assets.catalog import trusted_asset_context
+
+    raw_asset_context = parent_context.get("project_context") or parent_context.get("asset_context")
+    asset_context = trusted_asset_context(raw_asset_context)
+    if asset_context is not None:
+        available_tools_kwargs["asset_context"] = asset_context
+
+    tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
+    if private_run:
+        owner_loop = asyncio.get_running_loop()
+        admitted_mcp_tools = runtime_agent_profile.mcp_tools if runtime_agent_profile is not None else _trusted_private_mcp_tools(parent_context)
+        existing_names = {tool.name for tool in tools}
+        for admitted_tool in admitted_mcp_tools:
+            if admitted_tool.name in existing_names:
+                raise RuntimeError("Private MCP tool name conflicts with another tool")
+            tools.append(
+                _wrap_private_mcp_tool_for_owner_loop(
+                    admitted_tool,
+                    owner_loop,
+                )
+            )
+            existing_names.add(admitted_tool.name)
+    return tools
+
+
 @tool("task", parse_docstring=True)
 async def task_tool(
     runtime: Runtime,
@@ -608,10 +666,6 @@ async def task_tool(
     if overrides:
         config = replace(config, **overrides)
 
-    # Get available tools (excluding task tool to prevent nesting)
-    # Lazy import to avoid circular dependency
-    from deerflow.tools import get_available_tools
-
     # Inherit parent agent's tool_groups so subagents respect the same restrictions
     parent_tool_groups = metadata.get("tool_groups")
     effective_tool_groups = runtime_agent_profile.tool_groups if runtime_agent_profile is not None else parent_tool_groups
@@ -619,41 +673,13 @@ async def task_tool(
     if config.model == "inherit" and parent_model is None and resolved_app_config is None:
         resolved_app_config = get_app_config()
     effective_model = resolve_subagent_model_name(config, parent_model, app_config=resolved_app_config)
-
-    # Subagents should not have subagent tools enabled (prevent recursive nesting)
-    available_tools_kwargs = {
-        "model_name": effective_model,
-        "groups": effective_tool_groups,
-        "subagent_enabled": False,
-    }
-    if private_run:
-        # Private Runs may use only the exact admitted proxies installed by the
-        # Worker below. Never fall back to process-global MCP or ACP discovery.
-        available_tools_kwargs["include_mcp"] = False
-        available_tools_kwargs["include_acp"] = False
-    if resolved_app_config is not None:
-        available_tools_kwargs["app_config"] = resolved_app_config
-    from deerflow.assets.catalog import trusted_asset_context
-
-    raw_asset_context = parent_context.get("project_context") or parent_context.get("asset_context")
-    asset_context = trusted_asset_context(raw_asset_context)
-    if asset_context is not None:
-        available_tools_kwargs["asset_context"] = asset_context
-    tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
-    if private_run:
-        owner_loop = asyncio.get_running_loop()
-        admitted_mcp_tools = runtime_agent_profile.mcp_tools if runtime_agent_profile is not None else _trusted_private_mcp_tools(parent_context)
-        existing_names = {tool.name for tool in tools}
-        for admitted_tool in admitted_mcp_tools:
-            if admitted_tool.name in existing_names:
-                raise RuntimeError("Private MCP tool name conflicts with another tool")
-            tools.append(
-                _wrap_private_mcp_tool_for_owner_loop(
-                    admitted_tool,
-                    owner_loop,
-                )
-            )
-            existing_names.add(admitted_tool.name)
+    tools = await _assemble_subagent_tools(
+        parent_context=parent_context,
+        runtime_agent_profile=runtime_agent_profile,
+        effective_model=effective_model,
+        effective_tool_groups=effective_tool_groups,
+        app_config=resolved_app_config,
+    )
 
     # Create executor
     executor_kwargs = {

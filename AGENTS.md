@@ -68,7 +68,7 @@ deer-flow/
 Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
 `DATABASE_URL` is the only application persistence connection — PostgreSQL owns application
 data, checkpoints, stores, durable jobs, streams, quotas, and audit records. Model definitions,
-Agent runtime policy, auth policy, project-quota defaults, and provider Credentials are
+Agent runtime policy, Memory document templates, auth policy, project-quota defaults, and provider Credentials are
 PostgreSQL system settings managed by a system admin under `/admin/settings/*`; they are not
 `config.yaml` keys and not ambient process environment variables.
 
@@ -90,6 +90,7 @@ make check       # Check that required tools are installed
 make install     # Install backend and frontend dependencies
 make setup-db    # Explicitly create and fully initialize the PostgreSQL target database
 make upgrade-db  # Explicitly migrate an existing database to the current chain head (backup first)
+make prune-run-events ARGS="--before 2026-08-01T00:00:00Z"  # Preview global UTC-month retention; add --yes to DROP
 make rotate-credentials ARGS="--dry-run --key-id m3-next"  # Rotate credential envelopes in batches
 make check-db    # Read-only check of connection, schema marker, and required tables
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
@@ -106,7 +107,7 @@ Run `make help` for the full list.
 ```bash
 # Backend (see backend/AGENTS.md for the full set)
 cd backend && make dev        # Gateway API with reload (port 8001)
-POSTGRES_TEST_URL=... make test  # Backend core suite from the repository root
+make test                     # Backend core suite; loads the development DATABASE_URL
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 

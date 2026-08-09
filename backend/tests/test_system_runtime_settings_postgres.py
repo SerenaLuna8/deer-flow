@@ -22,6 +22,7 @@ from app.system_runtime_settings.materializer import (
     SystemRuntimePolicyMaterializer,
 )
 from app.system_runtime_settings.models import (
+    MemoryDocumentPolicy,
     RuntimePolicySection,
     default_policy_value,
 )
@@ -306,5 +307,112 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             snapshot.schema_version += 1
             with pytest.raises(DBAPIError):
                 await session.flush()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_postgres_memory_document_policy_bootstrap_cas_lock_and_audit(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin_id = uuid.uuid4()
+    try:
+        assert await bootstrap_system_runtime_policies(factory) == 1
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'system_admin',now(),false,0)"""
+                ),
+                {
+                    "id": str(admin_id),
+                    "email": f"{admin_id}@example.com",
+                },
+            )
+
+        service = SystemRuntimePolicyService(
+            factory,
+            AuditService(factory, AuditHmacKeyring.from_environment()),
+        )
+        context = resolve_system_audit_context(
+            SimpleNamespace(id=admin_id, system_role="system_admin"),
+            request_id=str(uuid.uuid4()),
+        )
+        catalog = await service.list_policies(context)
+        assert set(catalog.sections) == set(RuntimePolicySection)
+        memory_document = catalog.sections[RuntimePolicySection.MEMORY_DOCUMENT]
+        assert memory_document.effect_scope == "new_memory_documents"
+        assert isinstance(memory_document.value, MemoryDocumentPolicy)
+
+        async with factory() as session, session.begin():
+            locked_v1 = await service.lock_memory_document_for_creation(session)
+        assert locked_v1.revision == 1
+        assert locked_v1.value.sections == [
+            "用户偏好与协作方式",
+            "项目背景",
+            "长期约束与架构决策",
+            "当前仍有效的目标",
+        ]
+
+        updated = await service.update_policy(
+            context,
+            RuntimePolicySection.MEMORY_DOCUMENT,
+            expected_revision=1,
+            value={"sections": ["  Personal context ", "Architecture decisions"]},
+        )
+        assert updated.catalog_revision == 2
+        assert updated.policy.revision == 2
+        assert updated.policy.effect_scope == "new_memory_documents"
+        assert isinstance(updated.policy.value, MemoryDocumentPolicy)
+        assert updated.policy.value.sections == [
+            "Personal context",
+            "Architecture decisions",
+        ]
+        with pytest.raises(SystemRuntimePolicyConflict):
+            await service.update_policy(
+                context,
+                RuntimePolicySection.MEMORY_DOCUMENT,
+                expected_revision=1,
+                value={"sections": ["First", "Second"]},
+            )
+
+        async with factory() as session, session.begin():
+            locked_v2 = await service.lock_memory_document_for_creation(session)
+        assert locked_v2.revision == 2
+        assert locked_v2.policy_version_id != locked_v1.policy_version_id
+        assert locked_v2.value.sections == [
+            "Personal context",
+            "Architecture decisions",
+        ]
+
+        async with factory() as session:
+            assert await session.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 4
+            assert (
+                await session.scalar(
+                    text(
+                        """SELECT count(*)
+                           FROM system_runtime_policy_versions
+                          WHERE section='memory_document'"""
+                    )
+                )
+                == 2
+            )
+            audit_row = (
+                await session.execute(
+                    text(
+                        """SELECT metadata_json->>'section' AS section,
+                                  metadata_json->>'effect_scope' AS effect_scope
+                             FROM audit_logs
+                            WHERE action='system_setting.updated'
+                              AND metadata_json->>'section'='memory_document'"""
+                    )
+                )
+            ).one()
+            assert audit_row.section == "memory_document"
+            assert audit_row.effect_scope == "new_memory_documents"
     finally:
         await engine.dispose()

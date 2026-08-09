@@ -187,6 +187,10 @@
       "caller": "lead_agent",
       "conversation_hash": "b05575b134040837983b29e15bf39f94ae4382f12fec88d42a3e9e6e0c69b18a",
       "input_hash": "b5a3a0fc58777bc82bc59485403d99a66ac266ebb5527d613ed03cc32526db2f",
+      "stream": {
+        "provenance": "derived_from_recorded_output",
+        "text_chunk_chars": 1
+      },
       "output": {
         "type": "ai",
         "data": {

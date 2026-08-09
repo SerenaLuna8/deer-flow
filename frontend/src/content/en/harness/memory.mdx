@@ -9,6 +9,16 @@ Project Memory is one private, versioned Markdown document for each authenticate
 
 Thread summaries remain separate. They compact one Thread's model context and are preserved when long-term Memory is reset.
 
+## Document section template
+
+A platform administrator maintains two to eight ordered plain titles under
+**Admin → System settings → Memory**. The template is an independently versioned and audited
+PostgreSQL `memory_document` system policy, not a `config.yaml` setting. When a project/owner
+scope creates its Memory document for the first time, the server freezes those sections and the
+exact policy version on the document row; Run Memory snapshots freeze the same section contract.
+Later template changes affect only new documents. They never reorder existing documents, rewrite
+historical versions, or cancel in-flight Dreams.
+
 ## SNIP and pending history
 
 When a Thread is compacted, SNIP makes one bounded model call over complete older turns. Its validated tagged output becomes both the Thread's `summary_text` and a pending private history entry. An exact `(nothing)` still updates the Thread summary but creates no long-term entry. The checkpoint receipt and database transaction use an idempotent handshake so a retry cannot archive the same compaction twice.
@@ -25,7 +35,7 @@ Document replacement, a new immutable version, a real unified diff, cursor advan
 
 ## Recall
 
-Run admission reads the current bounded document once and freezes it in a single Run snapshot. Worker model boundaries reuse only that snapshot; first recall performs no model call, vector lookup, or ranking query. Dream finishing during a Run cannot change that Run's Memory.
+Run admission reads the current bounded document and its section contract once, then freezes both in a single Run snapshot. Worker model boundaries reuse only that snapshot; first recall performs no model call, vector lookup, or ranking query. A Dream finishing during a Run, or an administrator changing the section template, cannot change that Run's Memory.
 
 When enabled, the complete frozen document is injected as a hidden, low-authority Human message marked as private data rather than an instruction. Turning Memory off skips injection at the next model boundary. Reset removes long-term documents, history, versions, Dream records, and Run Memory snapshots while preserving chats and Thread summaries.
 

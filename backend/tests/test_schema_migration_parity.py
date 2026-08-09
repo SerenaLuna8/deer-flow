@@ -8,7 +8,6 @@ CI 等价契约（D1）：空库新装走 ``full_schema.sql``，存量库升级�
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 
 import pytest
@@ -60,12 +59,16 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
 
 
+def test_setup_and_upgrade_share_the_schema_mutation_advisory_lock() -> None:
+    assert upgrade_module._UPGRADE_LOCK_KEY == bootstrap_module.SCHEMA_MUTATION_LOCK_KEY
+
+
 def test_chain_root_is_a_noop_stamped_by_full_schema() -> None:
     script = _script_directory()
     root = script.get_revision(KNOWN_CHAIN_REVISIONS[0])
     assert root.down_revision is None
-    # full_schema.sql must stamp exactly the chain root's revision id so that
-    # every fresh install is natively adopted by Alembic without backfill (D2).
+    # A fresh snapshot stamps the chain head directly. The root marker appears
+    # only while root and head are the same revision.
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{KNOWN_CHAIN_REVISIONS[0]}');") == (1 if CURRENT_SCHEMA_REVISION == KNOWN_CHAIN_REVISIONS[0] else 0)
 
@@ -125,10 +128,14 @@ async def test_full_schema_and_baseline_plus_chain_produce_identical_catalogs(
     assert fresh_state == "current"
     assert fresh_signature == FINAL_M7_CATALOG_SIGNATURE
 
-    # Path B — existing install: frozen chain-root snapshot + alembic upgrade head.
+    # Path B — existing install: frozen chain-root snapshot through the public
+    # production upgrade entry (lock + Alembic + post-upgrade verification).
     async with temporary_postgres_database(postgres_admin_url) as upgraded_url:
         await _execute_sql_batch(upgraded_url, _baseline_sql())
-        await asyncio.to_thread(upgrade_module._run_alembic_upgrade_sync, upgraded_url)
+        result = await upgrade_postgres(upgraded_url, assume_yes=True)
+        assert result.applied is True
+        assert result.from_revision == KNOWN_CHAIN_REVISIONS[0]
+        assert result.to_revision == CURRENT_SCHEMA_REVISION
         upgraded_state, upgraded_signature = await _catalog_signature(upgraded_url)
         assert upgraded_state == "current"
         assert upgraded_signature == fresh_signature
@@ -161,7 +168,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_schema(engine)
-        _pretend_head_is(monkeypatch, "full_schema_v6_drill")
+        _pretend_head_is(monkeypatch, "full_schema_v9_drill")
 
         async with engine.connect() as connection:
             assert await classify_database(connection) == "behind"
@@ -169,7 +176,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
         with pytest.raises(SchemaUpgradeRequired) as validate_error:
             await validate_schema(engine)
         assert "make upgrade-db" in str(validate_error.value)
-        assert "full_schema_v5" in str(validate_error.value)
+        assert "full_schema_v9" in str(validate_error.value)
 
         # Setup never migrates a behind database (D3).
         with pytest.raises(SchemaUpgradeRequired):
@@ -234,7 +241,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     finally:
         await engine.dispose()
 
-    fake_head = "full_schema_v6_drill"
+    fake_head = "full_schema_v9_drill"
     _pretend_head_is(monkeypatch, fake_head)
 
     applied_urls: list[str] = []
@@ -248,7 +255,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     result = await upgrade_postgres(postgres_database_url, assume_yes=True)
     assert applied_urls == [postgres_database_url]
     assert result.applied is True
-    assert result.from_revision == "full_schema_v5"
+    assert result.from_revision == "full_schema_v9"
     assert result.to_revision == fake_head
 
     _, signature = await _catalog_signature(postgres_database_url)
@@ -266,7 +273,7 @@ async def test_upgrade_runner_fails_closed_when_the_migrated_catalog_does_not_ve
     finally:
         await engine.dispose()
 
-    _pretend_head_is(monkeypatch, "full_schema_v6_drill")
+    _pretend_head_is(monkeypatch, "full_schema_v9_drill")
     # A migration that "succeeds" without producing the head catalog must fail
     # the post-upgrade verification and instruct the operator to restore.
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", lambda url: None)

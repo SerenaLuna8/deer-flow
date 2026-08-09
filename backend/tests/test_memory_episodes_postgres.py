@@ -13,9 +13,19 @@ from sqlalchemy.exc import IntegrityError
 from support.private_thread_seed import seed_private_thread_database
 
 from app.private_work.retention_purge import purge_private_scope
-from deerflow.agents.memory.dream import DREAM_PROMPT_VERSION, EMPTY_MEMORY_DOCUMENT
-from deerflow.persistence.jobs.model import WorkerNodeRow
-from deerflow.persistence.jobs.sql import JobClaim, JobOwnerRef, JobRepository
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    DREAM_PROMPT_VERSION,
+    EMPTY_MEMORY_DOCUMENT,
+)
+from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
+from deerflow.persistence.jobs.sql import (
+    EnqueueJob,
+    JobClaim,
+    JobOwnerRef,
+    JobRepository,
+    JobScope,
+)
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryEpisodeRow,
     MemoryHistoryEntryRow,
@@ -26,6 +36,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamFrozenRuntime,
     memory_document_digest,
 )
+from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 
 
 def _owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -191,11 +202,19 @@ async def test_postgres_settlement_transfers_history_into_episodes(
             )
 
         async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await session.scalar(
+                sa.select(SystemRuntimePolicyRow.current_version_id).where(
+                    SystemRuntimePolicyRow.section == "memory_document",
+                )
+            )
+            assert isinstance(sections_policy_version_id, uuid.UUID)
             admission = await MemoryDocumentRepository(session, jobs=_jobs(session)).admit_dream(
                 scope,
                 trigger="manual_dream",
                 frozen=frozen,
                 initial_content=EMPTY_MEMORY_DOCUMENT,
+                initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                sections_policy_version_id=sections_policy_version_id,
                 now=base_time,
             )
         assert admission.disposition == "queued"
@@ -235,6 +254,7 @@ async def test_postgres_settlement_transfers_history_into_episodes(
                     expected_history_digest=run_digest,
                     expected_base_version=0,
                     expected_base_digest=memory_document_digest(EMPTY_MEMORY_DOCUMENT),
+                    expected_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
                     content=changed_content,
                     now=now,
                 )
@@ -442,6 +462,36 @@ async def test_postgres_reset_and_retention_purge_delete_episodes(
                     tagged_text="- [durable] owner-b-keeps-scope",
                 )
             )
+            dream_job_id = await _jobs(session).enqueue(
+                EnqueueJob(
+                    job_type="memory_dream",
+                    scope=JobScope(
+                        scope_b.project_id,
+                        scope_b.owner_user_id,
+                    ),
+                    namespace=scope_b.namespace,
+                    idempotency_key="d" * 64,
+                    run_id=None,
+                    occurrence_id=None,
+                    max_attempts=5,
+                    retry_safety="safe",
+                )
+            )
+            seal_job_id = await _jobs(session).enqueue(
+                EnqueueJob(
+                    job_type="memory_seal",
+                    scope=JobScope(
+                        scope_b.project_id,
+                        scope_b.owner_user_id,
+                    ),
+                    namespace="episode-retention-thread",
+                    idempotency_key="e" * 64,
+                    run_id=None,
+                    occurrence_id=None,
+                    max_attempts=5,
+                    retry_safety="safe",
+                )
+            )
 
         async with seed.factory() as session, session.begin():
             counts = await MemoryDocumentRepository(session, jobs=_jobs(session)).reset_owner(
@@ -469,6 +519,25 @@ async def test_postgres_reset_and_retention_purge_delete_episodes(
 
         async with seed.factory() as session:
             remaining = await session.scalar(sa.select(sa.func.count()).select_from(MemoryEpisodeRow))
+            cancelled_memory_jobs = tuple(
+                (
+                    await session.execute(
+                        sa.select(
+                            JobRow.id,
+                            JobRow.job_type,
+                            JobRow.cancel_requested_at,
+                            JobRow.cancel_reason,
+                        ).where(
+                            JobRow.id.in_((dream_job_id, seal_job_id)),
+                        )
+                    )
+                ).all()
+            )
         assert remaining == 0
+        assert {row.job_type for row in cancelled_memory_jobs} == {
+            "memory_dream",
+            "memory_seal",
+        }
+        assert all(row.cancel_requested_at is not None and row.cancel_reason == "retention_scope_purged" for row in cancelled_memory_jobs)
     finally:
         await seed.engine.dispose()

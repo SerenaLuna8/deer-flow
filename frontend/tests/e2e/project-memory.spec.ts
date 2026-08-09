@@ -47,21 +47,25 @@ function json(route: Route, body: unknown, status = 200) {
   });
 }
 
-async function mockProjectMemoryRoute(page: Page) {
+async function mockProjectMemoryRoute(
+  page: Page,
+  options: { budgetRewrite?: boolean } = {},
+) {
+  const budgetRewrite = options.budgetRewrite ?? false;
   let document = {
     content:
       "# Working preferences\n\nPrefers executable implementation plans.",
     version: 3,
     updatedAt: TIMESTAMP,
-    pendingCount: 2,
+    pendingCount: budgetRewrite ? 0 : 2,
     dreamRunning: false,
-    injectionStatus: "ok",
+    injectionStatus: budgetRewrite ? "skipped_over_budget" : "ok",
   };
   const details = new Map<
     number,
     {
       version: number;
-      trigger: "auto_dream" | "manual_dream" | "restore";
+      trigger: "auto_dream" | "manual_dream" | "restore" | "budget_rewrite";
       historyCount: number | null;
       changed: boolean;
       needsReview: boolean;
@@ -77,7 +81,7 @@ async function mockProjectMemoryRoute(page: Page) {
         trigger: "manual_dream",
         historyCount: 2,
         changed: true,
-        needsReview: false,
+        needsReview: true,
         createdAt: TIMESTAMP,
         content: document.content,
         unifiedDiff:
@@ -134,17 +138,28 @@ async function mockProjectMemoryRoute(page: Page) {
       return json(route, document);
     }
     if (path === `${memoryBase}/pending` && request.method() === "GET") {
-      return json(route, { items: [] });
+      return json(route, {
+        items: [
+          {
+            sequence: 1,
+            origin: "tool",
+            taggedText: "- [durable] Deployment target is region-eu",
+            createdAt: TIMESTAMP,
+          },
+        ],
+      });
     }
     if (path === `${memoryBase}/episodes` && request.method() === "GET") {
       return json(route, { items: [] });
     }
     if (path === `${memoryBase}/versions` && request.method() === "GET") {
       return json(route, {
-        items: [...details.values()].map(
-          ({ content: _content, unifiedDiff: _unifiedDiff, ...summary }) =>
-            summary,
-        ),
+        items: [...details.values()]
+          .sort((left, right) => right.version - left.version)
+          .map(
+            ({ content: _content, unifiedDiff: _unifiedDiff, ...summary }) =>
+              summary,
+          ),
       });
     }
     const detailMatch = new RegExp(
@@ -190,6 +205,36 @@ async function mockProjectMemoryRoute(page: Page) {
       return json(route, restored);
     }
     if (path === `${memoryBase}/dream` && request.method() === "POST") {
+      if (budgetRewrite) {
+        const compressed = {
+          version: 5,
+          trigger: "budget_rewrite",
+          historyCount: 0,
+          changed: true,
+          needsReview: false,
+          createdAt: TIMESTAMP,
+          content: "# Working preferences\n\nExecutable plans.",
+          unifiedDiff:
+            "@@ -1,3 +1,3 @@\n # Working preferences\n \n-Prefers executable implementation plans.\n+Executable plans.",
+        } as const;
+        details.set(5, compressed);
+        document = {
+          ...document,
+          content: compressed.content,
+          version: compressed.version,
+          injectionStatus: "ok",
+        };
+        return json(
+          route,
+          {
+            disposition: "queued",
+            historyCount: 0,
+            jobId: JOB_ID,
+            admissionKind: "budget_rewrite",
+          },
+          202,
+        );
+      }
       const organized = {
         version: 5,
         trigger: "manual_dream",
@@ -228,8 +273,9 @@ test("the Memory document page organizes, diffs and restores versions", async ({
   await expect(page).toHaveURL(/\/projects\/alpha\/memory$/u);
   await expect(page.getByTestId("project-shell")).toBeVisible();
   await expect(
-    page.getByRole("heading", { name: "Current memory document" }),
+    page.getByRole("tab", { name: "Current memory", exact: true }),
   ).toBeVisible();
+  await expect(page.getByText("MEMORY.md", { exact: true })).toBeVisible();
   await expect(
     page.getByText("Prefers executable implementation plans."),
   ).toBeVisible();
@@ -238,6 +284,8 @@ test("the Memory document page organizes, diffs and restores versions", async ({
     page.getByRole("button", { name: "Organize now" }),
   ).toBeEnabled();
 
+  await expect(page.getByText("Latest version needs review")).toBeVisible();
+  await page.getByText("Version history", { exact: true }).click();
   await page.getByRole("button", { name: /Version 3/u }).click();
   await expect(
     page.getByRole("heading", { name: "Document change" }),
@@ -262,4 +310,41 @@ test("the Memory document page organizes, diffs and restores versions", async ({
   await expect(
     page.getByText("Prefers explicit acceptance checks."),
   ).toBeVisible();
+});
+
+test("the remember link target focuses the pending memory section", async ({
+  page,
+}) => {
+  await mockProjectMemoryRoute(page);
+
+  await page.goto("/projects/alpha/memory#memory-pending");
+
+  const pending = page.locator("#memory-pending");
+  await expect(pending).toBeVisible();
+  await expect(pending).toBeFocused();
+  await expect(
+    pending.getByText("Deployment target is region-eu"),
+  ).toBeVisible();
+});
+
+test("an over-budget document can start a zero-history rescue rewrite", async ({
+  page,
+}) => {
+  await mockProjectMemoryRoute(page, { budgetRewrite: true });
+
+  await page.goto("/projects/alpha/memory");
+
+  await expect(
+    page.getByText("Memory document exceeds the injection budget"),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Compress document now" }).click();
+  await expect(
+    page.getByText(
+      "Started compressing the Memory document into the current injection budget.",
+    ),
+  ).toBeVisible();
+  await expect(
+    page.getByText("Memory document exceeds the injection budget"),
+  ).toHaveCount(0);
+  await expect(page.getByText("Executable plans.")).toBeVisible();
 });

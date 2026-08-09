@@ -131,7 +131,7 @@ export function AgentBuilderBlueprintReview({
       ) : null}
 
       {canAuthor && !effectiveEditing ? (
-        <div className="border-border/70 bg-background/95 sticky bottom-3 z-10 flex flex-col gap-3 rounded-2xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
+        <div className="border-border/70 bg-background/95 flex flex-col gap-3 rounded-2xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs leading-5">
             创建后默认停用，需手动启用
           </p>

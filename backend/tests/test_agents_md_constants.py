@@ -19,7 +19,11 @@ from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
 )
 from deerflow.agents.memory.snip import MAX_CONTINUITY_CHARS, MAX_SNIP_OUTPUT_CHARS
+from deerflow.agents.middlewares.summarization_middleware import (
+    MIN_SNIP_SUMMARY_OUTPUT_TOKENS,
+)
 from deerflow.agents.middlewares.view_image_middleware import _MAX_CURRENT_UPLOAD_IMAGES
+from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.skills_config import SkillsConfig
@@ -29,6 +33,7 @@ from deerflow.config.subagents_config import (
     MIN_CONCURRENT_SUBAGENT_CALLS,
     MIN_TOTAL_SUBAGENTS_PER_RUN,
 )
+from deerflow.config.worker_config import WorkerStreamConfig
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from deerflow.persistence.private_work.memory_document_repository import (
     DREAM_HISTORY_BATCH_SIZE,
@@ -86,7 +91,7 @@ _QUOTAS = QuotaConfig()
 
 DOCUMENTED_CONSTANTS = (
     DocumentedConstant(
-        pattern=r"`(full_schema_v\d+)`",
+        pattern=r"current marker is `(full_schema_v\d+)`",
         expected=CURRENT_SCHEMA_REVISION,
         source="deerflow.persistence.bootstrap.CURRENT_SCHEMA_REVISION",
     ),
@@ -156,9 +161,35 @@ DOCUMENTED_CONSTANTS = (
         source="deerflow.agents.memory.snip.MAX_CONTINUITY_CHARS",
     ),
     DocumentedConstant(
+        pattern=r"declared output cap below ([\d,]+) tokens",
+        expected=f"{MIN_SNIP_SUMMARY_OUTPUT_TOKENS:,}",
+        source="deerflow.agents.middlewares.summarization_middleware.MIN_SNIP_SUMMARY_OUTPUT_TOKENS",
+    ),
+    DocumentedConstant(
         pattern=r"tagged fact lines bounded to ([\d,]+) characters",
         expected=f"{MAX_SNIP_OUTPUT_CHARS:,}",
         source="deerflow.agents.memory.snip.MAX_SNIP_OUTPUT_CHARS",
+    ),
+    DocumentedConstant(
+        pattern=r"`worker\.stream\.text_delta_flush_ms`, default (\d+)ms",
+        expected=str(
+            WorkerStreamConfig.model_fields["text_delta_flush_ms"].default,
+        ),
+        source="deerflow.config.worker_config.WorkerStreamConfig.text_delta_flush_ms default",
+    ),
+    DocumentedConstant(
+        pattern=r"`worker\.stream\.run_event_notify_enabled` is (true|false) \(the default\)",
+        expected=str(
+            WorkerStreamConfig.model_fields["run_event_notify_enabled"].default,
+        ).lower(),
+        source="deerflow.config.worker_config.WorkerStreamConfig.run_event_notify_enabled default",
+    ),
+    DocumentedConstant(
+        pattern=r"`mcp_security\.run_session_reuse` \(default `(true|false)`\)",
+        expected=str(
+            McpSecurityConfig.model_fields["run_session_reuse"].default,
+        ).lower(),
+        source="deerflow.config.mcp_security_config.McpSecurityConfig.run_session_reuse default",
     ),
     DocumentedConstant(
         pattern=r"`dream_interval_minutes` \(`(\d+\.\.\d+)`",
@@ -214,6 +245,11 @@ DOCUMENTED_CONSTANTS = (
         pattern=r"pending for over (\d+) minutes",
         expected=str(TOOL_ENTRY_DUE_MINUTES),
         source="memory_document_repository.TOOL_ENTRY_DUE_MINUTES",
+    ),
+    DocumentedConstant(
+        pattern=r"per-Run audit cap of (\d+)",
+        expected=str(REMEMBER_RUN_LIMIT),
+        source="memory_document_repository.REMEMBER_RUN_LIMIT (recall audit)",
     ),
     DocumentedConstant(
         pattern=r"per-Run cap of (\d+)",

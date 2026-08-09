@@ -17,6 +17,8 @@ Main is the project-level orchestrator and the fallback when the project has no 
 
 A project administrator may instead select an active, published project Agent as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
 
+The current project default Agent cannot be deleted directly. Select Main or another available Agent as the default first. Agents referenced by conversations, Automations, or Run records are also retained; ActWeave does not cascade-delete those records.
+
 ### Custom agents
 
 Custom agents are named variants of the Lead Agent. Each one can have:

@@ -1475,9 +1475,7 @@ export function InputBox({
           model_name: resolvedModelName,
           model_selection_explicit: false,
           mode: resolveAgentMode(
-            context.mode_selection_explicit === true
-              ? context.mode
-              : undefined,
+            context.mode_selection_explicit === true ? context.mode : undefined,
             selectedModel?.supports_thinking ?? false,
             selectedModel?.supports_reasoning_effort ?? false,
           ),

@@ -57,7 +57,7 @@ Run backend-only commands from `backend/`:
 make gateway
 make worker
 make scheduler
-POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
+make test
 make lint
 make format
 make check-db
@@ -69,14 +69,30 @@ does not acquire the Scheduler ownership lock or start polling.
 ## PostgreSQL full-schema initialization
 
 `full_schema.sql` is the only complete application-schema source for fresh installs. The exact
-current marker is `full_schema_v5`, which is also the head of the incremental migration chain
-under `backend/migrations/`: the chain root revision id equals the release baseline marker, so
-every database installed through `make setup-db` is natively stamped at the chain root, and an
-existing database whose marker is a known ancestor revision upgrades only through explicit
+current marker is `full_schema_v9`, the head of the incremental migration chain under
+`backend/migrations/`; the v5 snapshot remains the frozen chain root. Every database installed
+through `make setup-db` is natively stamped at the current head, and an existing database whose
+marker is a known ancestor revision upgrades only through explicit
 `make upgrade-db` (backup first; no downgrade). Fresh installs never run the chain, and the
 runtime never migrates. `KNOWN_CHAIN_REVISIONS` in `deerflow/persistence/bootstrap.py` orders
 the chain; `tests/test_schema_migration_parity.py` enforces that a frozen-baseline-plus-chain
 database is catalog-identical to a fresh `full_schema.sql` install.
+
+`full_schema_v8` stores `run_events` in UTC-month RANGE partitions. The narrow
+`run_event_invariants` ledger preserves global event-id, per-Thread/private sequence, and
+single-terminal invariants across children. The singleton `run_event_partition_state` row owns a
+monotonic UTC-month `retained_from` watermark: target-month creation and raw/ORM writes older than
+that watermark fail closed, so an operational DROP cannot be undone by a later insert. `make
+prune-run-events ARGS="--before YYYY-MM-01T00:00:00Z"` is the production operator entry: it reads
+the normal `DATABASE_URL`, defaults to a read-only preview, requires an exact non-future UTC month
+boundary, and only calls the guarded DROP helper when `--yes` is present. Existing
+children use a lock-free creation fast path; a missing target month is created only after a parent
+lock and a second watermark check. The explicit global-cutoff DROP helper rejects future cutoffs,
+advances the watermark atomically, and leaves current/next-month children available. Project,
+account, and owner privacy retention still deletes only exact-scope rows through the parent. Catalog
+readiness requires one or more well-formed monthly children, intact enabled trigger clones, and one
+valid state row; it deliberately does not depend on wall-clock current/next names, so natural month
+rollover cannot turn an otherwise healthy database into schema drift.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the named
 empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
@@ -112,16 +128,19 @@ automatic deletion, and destructive reset are unsupported.
 
 The backend suite is intentionally small and protects the main client, authentication,
 Gateway/Worker stream, sandbox/path, Credential/MCP, Human Input, and PostgreSQL paths.
-Run the complete set only against a disposable PostgreSQL maintenance instance:
+Run the complete set with the development `DATABASE_URL` from the root `.env` or an explicit
+environment override:
 
 ```bash
-POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
+make test
 ```
 
-The URL must have create/drop/terminate authority for random `deerflow_test_*`
-databases. It must never be a production URL or the ordinary application
-URL. Missing `POSTGRES_TEST_URL` fails before pytest collection; the complete core suite must
-report zero skips. Focused non-database tests may still be run directly with `uv run pytest`.
+The test runner uses that URL only as the development PostgreSQL connection source, derives the
+maintenance connection, and creates/drops random `deerflow_test_*` databases. It never runs test
+DDL against the named development database. The URL's role must have create/drop/terminate
+authority for those isolated databases and must never be a production URL. Missing `DATABASE_URL`
+fails before pytest collection; the complete core suite must report zero skips. Focused
+non-database tests may still be run directly with `uv run pytest`.
 
 ## Repository layout
 
@@ -323,7 +342,7 @@ a partial update fails there. Reference tests: `tests/test_worker_service.py`,
 
 - Email is one case-insensitive account identifier. All user repository create, lookup, and
   update paths normalize with `strip + lowercase`; ORM and `full_schema.sql` both enforce the
-  unique `lower(email)` index. This schema shipped inside the `full_schema_v5` baseline and is
+  unique `lower(email)` index. This schema shipped inside the frozen v5 baseline and is
   never installed by the runtime or by ad-hoc patching.
 - A browser access token is valid only while its signed `sid`, user `token_version`, and
   PostgreSQL `auth_sessions` row all validate. Login persists the session before returning the
@@ -427,6 +446,9 @@ autonomous secret binding sourced from that evidence ends with it. Slash activat
 it encodes explicit user intent and stays active for the rest of the Run. Blocked-tool messages
 name the restricting Skill, the activation source, and the remaining window so the model can
 re-read the entry file or ask the user instead of retrying blindly.
+Entering or leaving an effective restriction emits exactly one content-free RunJournal middleware
+trace carrying only the activation source, admitted Skill names/version IDs, and allowed-tool count;
+unchanged restricted calls do not repeat the trace.
 
 Slash authority has priority over later successful reads. One authenticated run marker binds
 the slash to `project_id + owner_user_id + run_id + message id/hash`, so the same command reads,
@@ -476,8 +498,8 @@ repeated review of one exact version is byte-stable.
 Review has no Gateway API, model tool, LLM moderation step, persistence side effect, public
 `skill-reviewer` Skill, or runtime authorization effect. The changed-public-Skill check is a
 step in the existing consolidated release workflow, not a separate workflow. Its PostgreSQL
-exact-version integration test requires a real `POSTGRES_TEST_URL`; a local skip caused by a
-missing URL is not release evidence.
+exact-version integration test requires the real development `DATABASE_URL`; a local skip caused
+by a missing URL is not release evidence.
 
 ## Skill and Agent authoring, Builder, and lifecycle
 
@@ -522,14 +544,33 @@ template. Worker passes the same redacted in-memory bundle to subagents without 
 serialization.
 
 Project and admin-project Gateway APIs expose Agent revision history as read-only data and do
-not register manual Agent-version creation or publish mutations. Builder confirmation and
-instruction saving continue to create or advance immutable revisions through internal service
-operations; Run admission and snapshots continue to pin the exact published revision.
+not register raw Agent-version creation or publish mutations. Builder confirmation, instruction
+saving, the semantic capability-binding replacement operation, and historical-version restore
+create or advance immutable revisions through internal service operations. Restore validates the
+target published checksum and dependency closure, then copies it as the next published revision;
+it never mutates an old row or moves the pointer directly backward. A capability replacement accepts only exact
+Skill/MCP version IDs valid in the acting project's dependency closure, preserves every other
+current published payload field, publishes the replacement in the same transaction, and advances
+the Agent asset revision with optimistic concurrency. Run admission and snapshots continue to pin
+the exact published revision.
 
 Agent creation uses a dedicated project-and-owner scoped Builder session, not an ordinary
 private Thread or Run. Creating the session stores only the normalized name and does not call a
-model or create an Agent. Each generation turn builds a bounded, server-authorized context and
-stores only validated clarification/candidate results; raw prompts are never attached to tracing.
+model or create an Agent. The first user description always enters a model-generated discovery
+phase that returns exactly one brief-specific question with model-generated choices. Builder exposes
+only that current question; after its answer is saved, the next discovery call receives the original
+brief plus every prior question and answer and must generate one non-repeating next question. This
+continues for exactly three sequential interview turns, with each choice card also accepting a
+free-text alternative. Only the third answer enters composition, which may not ask another question.
+Composition also returns one concise plain-text catalog description derived from the completed
+Agent design. The initial user brief remains discovery input only: it is never reused as the
+created Agent description, and a model response that copies it verbatim receives the same bounded
+repair attempt as other invalid candidate output.
+An invalid model response receives one bounded repair attempt without echoing the rejected output;
+references to allowed capabilities that the model omitted from `capability_claims` are completed
+deterministically, while unavailable capabilities still fail closed. Each generation turn builds a
+bounded, server-authorized context and stores only validated clarification/candidate results; raw
+prompts are never attached to tracing.
 Final confirmation is one transaction that creates the project Agent as `suspended`, publishes
 complete version 1 with all four logical documents, advances the pointer, and marks the Builder
 session completed. Dependency child rows are inserted while version 1 is still Draft; only after
@@ -537,6 +578,8 @@ the complete Skill/MCP ref set is flushed may the same transaction transition it
 advance the pointer. The public confirmation response returns only the completed session and Agent;
 the internal revision is not exposed. Project-local Agent slugs remain unique. Interrupted generation is recoverable,
 and retention removes Builder messages and blueprints with the exact project/owner private scope.
+Incomplete-session list summaries expose the current session revision so a confirmed cancel can
+use optimistic concurrency and remove only that exact private design session from the resume list.
 
 Agent lifecycle does not expose an archive mutation. Project and project-override APIs retain
 capability-checked activate/suspend transitions; project UI labels these as enable/disable. A
@@ -582,8 +625,9 @@ enter a remote MCP call only through an approved encrypted Credential header or 
 query secrets are appended in Worker memory to the validated secret-free base URL for
 each discovery/tool-call client. With `mcp_security.run_session_reuse` enabled, an initialized
 project MCP session and its materialized secrets stay in Worker memory for at most the Run's
-lifetime, keyed to the exact version/checksum/grant closure and closed on key drift, idle
-timeout, or Run end. The configured base URL itself cannot contain a query/fragment
+life, keyed to the exact version/checksum/grant closure. A changed key never reuses the prior
+session; each distinct slot closes on its own idle timeout or at Run end. The configured base URL
+itself cannot contain a query/fragment
 delimiter, and runtime validation also prevents a slot from replacing an existing query parameter.
 They necessarily appear in the outbound request-target, so production egress proxies and
 upstream access logs must omit or fully redact query strings. Scoped project MCP clients suppress
@@ -705,10 +749,13 @@ not automatically inherit current-message images. The explicit `view_image` tool
 path for historical uploads and images discovered or created later in the Run.
 
 `run_events.id` and `run_events.seq` are signed PostgreSQL BIGINT values in the full schema.
-The schema change has no in-place upgrade path: an older database must be replaced with an
-empty target and initialized through `make setup-db`. A settled terminal is replayed only when
-its cursor is strictly greater than the request cursor; an exact terminal cursor returns an
-empty successful response rather than a duplicate `stream.end`.
+Schema revision `full_schema_v8` RANGE-partitions `run_events` by UTC month while a narrow
+non-partitioned ledger preserves global ID, Thread-sequence, and single-terminal invariants.
+Known v5/v6/v7 databases can be migrated in place only through the explicit, operator-driven
+`make upgrade-db` path after a backup; `make setup-db` still accepts only an empty target. A
+settled terminal is replayed only when its cursor is strictly greater than the request cursor;
+an exact terminal cursor returns an empty successful response rather than a duplicate
+`stream.end`.
 
 Durable stream appends additionally queue `pg_notify('run_events', run_id)` inside the writing
 transaction, so delivery rides the commit. Each Gateway process holds one dedicated LISTEN
@@ -744,7 +791,12 @@ assets plus enabled System bindings. Other projects are never eligible. The snap
 globally ordered lead -> delegates -> Skills -> MCPs closure; current Main Skill/MCP versions form
 the prefix and delegate-only historical versions follow. Ordinary project and System Agents never
 expand this pool and keep only the Skill/MCP versions explicitly referenced by their exact Agent
-version. Automation admission uses the same closure path as interactive private Runs.
+version. Agent Builder seeds a newly generated project Agent candidate with every configured
+internal tool group (plus `task`) and every active, published System Skill/MCP version in an
+enabled binding for that project; those IDs are frozen into the candidate and do not turn the
+ordinary Agent into a dynamic Main-style pool. Explicit blueprint updates remain exact rather
+than being silently augmented. Automation admission uses the same closure path as interactive
+private Runs.
 
 Every newly admitted Run advances its active Thread's `updated_at` in that same transaction without
 incrementing the Thread metadata `version`; semantic replay returns before this touch. Thread
@@ -766,6 +818,12 @@ leading-edge first flush and byte-equivalent accumulation; meaningful metadata s
 immediately. Provider transport-only metadata such as `model_provider` must neither flush nor
 publish a pending file batch. Every pending text or file batch is flushed on identity/mode/value,
 finish, and error boundaries.
+
+Durable stream commits queue `pg_notify('run_events', run_id)` only when
+`worker.stream.run_event_notify_enabled` is true (the default), and each Gateway then owns one
+dedicated listener connection. This is a restart-required, cross-process rollback switch: false
+disables both the Worker/Gateway writer wakeup and Gateway LISTEN startup, leaving SSE correctness
+on the existing cursor read plus polling cadence. NOTIFY remains a latency-only alarm clock.
 
 Worker-side RunJournal, subagent, and workspace-change event writes use the same exact private
 scope and raw Job lease. `DbRunEventStore` revalidates project membership, Job/Run state,
@@ -875,11 +933,20 @@ PostgreSQL is the only project Memory authority. Every row remains bound to
 `project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
 model arguments, request payloads, ambient user state, or a replaceable Memory backend.
 
-`full_schema_v5` contains exactly six Memory tables: `memory_history_entries`,
+The `full_schema_v9` head contains exactly six Memory tables: `memory_history_entries`,
 `memory_documents`, `memory_dream_runs`, `memory_document_versions`, `memory_episodes`, and
 `run_memory_context_snapshots`. The only Memory Job types are `memory_dream` and `memory_seal`.
 There is no legacy Source/Extractor/Candidate/Fact pipeline, v1/v2 mode, vector ranking, or
 runtime compatibility fallback.
+
+Memory document section titles are database-only platform policy under the independent
+`memory_document` section; the top-level YAML key is a fail-closed tombstone. A system-admin update
+has effect scope `new_memory_documents`: first creation locks the exact current policy version and
+freezes its 2..8 plain titles plus composite policy provenance on `memory_documents`. Existing
+documents never follow a later platform edit. Database triggers reject any later change to those
+frozen document fields. Run admission copies the document titles into
+`run_memory_context_snapshots`, whose own trigger rejects section updates while retaining the
+existing Run-owned delete lifecycle; continuation therefore never reads the latest global policy.
 
 Automatic Thread compaction, `/compact`, and the `/Dream` preflight all use the same fixed SNIP
 prompt and at most two summarization-model calls per compaction attempt: an invalid output permits
@@ -890,7 +957,9 @@ characters, then tagged fact lines bounded to 1,000 characters (or the single li
 either segment being invalid triggers the same single repair retry. The continuity segment becomes
 the Thread `summary_text`; only the tagged segment enters the checkpoint-carried archive receipt and
 `memory_history_entries`, so the memory pipeline input is byte-identical to the single-segment
-contract. Only a durable checkpoint `aput` may
+contract. For the packaged dual-segment prompt, a declared output cap below 4,096 tokens is raised
+to 4,096; an explicitly configured custom prompt keeps both its single-segment contract and its
+configured model cap. Only a durable checkpoint `aput` may
 activate the receipt into one `memory_history_entries` row; `aget` and the next direct `aput` repair
 the current checkpoint tuple idempotently after a post-checkpoint database failure. Never scan
 checkpoint history to repair receipts, and never copy a receipt into a branch. Disabled account or
@@ -898,6 +967,10 @@ platform Memory still permits short-term Thread compaction but produces no durab
 automatic path derives the source checkpoint from LangGraph `runtime.execution_info.checkpoint_id`;
 an explicit archive context must match it exactly, and the legacy configurable value is only a
 fallback when runtime execution information is unavailable.
+
+Tool-origin history has a separate database-enforced authority shape: checkpoint/model fields are
+null, `source_run_id` is present, and `snip_prompt_version` is exactly `remember-tool-v1`. SNIP
+history retains its nonempty prompt-version contract and exact checkpoint/model authority.
 
 The chat `/Dream` command repeatedly compacts with `keep=("messages", 0)` until every completed
 turn has reached checkpoint/history, then calls the same Dream admission used by the Memory page.
@@ -929,16 +1002,21 @@ stays idempotent. Episodes are scope-bound archive rows referencing only project
 membership — never Jobs, Threads, or documents — so they survive those deletions. The same
 settlement prunes episodes older than the effective retention window (`0` keeps them forever).
 Account reset, retention purge, and the privacy export cover the table like the history backlog.
+Account reset and project/owner retention purge request cancellation for active `memory_dream` and
+`memory_seal` Jobs in the exact affected scope before removing Memory payload; immutable Job rows
+remain as bounded governance shells.
 
 The Dream prompt forbids creating or updating an account-global profile, promoting project facts
 into one, and transferring memory from another project or namespace. Server-side scoping remains the
 authority; that rule is the prompt-level layer of the same boundary and must survive prompt edits.
 Changing the prompt text requires bumping `DREAM_PROMPT_VERSION`, because the Worker rejects frozen
-Dream work whose `prompt_version` no longer equals the current constant.
+Dream work whose `prompt_version` no longer equals the current constant. That permanent drift is
+cancelled without retry before model materialization; it is not a transient execution failure.
 
 Every Memory transaction uses the same global lock order: Project, Membership, Thread, and admitted
-assets first; then current runtime policy; then active model/version/Credential; then the account
-Memory preference; and finally Memory document, history, Dream, and Job rows. Scheduler due-scope
+assets first; then the current agent-runtime policy and, only for first document creation, the
+current memory-document policy; then active model/version/Credential; then the account Memory
+preference; and finally Memory document, history, Dream, and Job rows. Scheduler due-scope
 discovery takes no row locks, and each discovered scope is revalidated and admitted in its own short
 transaction; it never holds current policy/model locks across a batch.
 
@@ -953,6 +1031,15 @@ conflict as a no-op settlement rather than an error. The `memory_sealed_at` stam
 behind the locked archive barrier that re-proves the drained head, in the same transaction that
 settles the Job and records `memory.seal.settled` (admission records `memory.seal.admitted`); the
 stamp never advances the thread's `updated_at`.
+PostgreSQL enforces that activity-order invariant with a dedicated `threads_meta` update trigger:
+it preserves `OLD.updated_at` only when `memory_sealed_at` is the sole semantic row change and the
+caller leaves `updated_at` unchanged. Every other Thread update still advances `updated_at` to
+database `now()`.
+
+The three bounded seal attempts described for `/Dream` count locked-barrier head races, not
+compaction batches. Idle Seal must keep draining every distinct, progressing checkpoint batch;
+imposing a three-batch cap would truncate long Threads. A live Run or raced head instead settles
+the background Seal as a no-op and lets the next idle poll retry.
 
 A Run freezes the complete current Memory document in `run_memory_context_snapshots` during the
 same admission transaction that freezes its runtime policy. It never reads the mutable current
@@ -972,7 +1059,15 @@ snapshot and makes it unavailable.
 The lead agent has exactly two Memory tools, each registered only when the Worker-issued opaque
 authority exposes that capability, and both invisible to subagents by construction. `recall_memory`
 is a read-only ranked search over `memory_episodes` (exact match, then `pg_trgm` similarity with an
-explicit floor, then recency); results are HTML-escaped and framed as low-authority data. `remember`
+explicit floor, then recency); results are HTML-escaped and framed as low-authority data. Up to the
+first five successful searches in one Run write a content-free `memory.recall.executed` audit event with
+result bucket `0|1-2|3+`, match stage `exact|similarity|none`, tag-filter presence, and the trimmed
+query's Unicode code-point length bucket `1-4|5-16|17-64|65-200`; query and result text never enter
+audit. The sink re-locks the exact attached Job and Run and uses committed audit rows to enforce a
+per-Run audit cap of 5 from the same `REMEMBER_RUN_LIMIT` constant as `remember`; once the cap is
+reached, recall still returns its search result and only the audit append is skipped. Thirty-day
+quality ratios therefore describe this capped per-Run sample, not every recall invocation. Mutable
+loop detection remains a behavioral guard, never the audit-volume authority. `remember`
 proposes one `origin='tool'` pending history row: the model supplies only a closed durability tag
 and one bounded line, while the authority owns scope, thread, Run, and `tool_call_id`, derives a
 SNIP-grammar `tagged_text`, and enforces idempotency by source digest
@@ -1079,7 +1174,10 @@ identifiers.
 
 Quota reservation/consume/release occurs in the authoritative business transaction. Platform
 defaults are 20 members, 5 GiB storage, 3 concurrent Runs, and 10,000 MCP calls per UTC day;
-project Admins may only tighten them. Hard-limit HTTP responses use stable 429 plus
+project ceilings may only be tightened (never raised above platform defaults). Project members
+with `project.usage.read` observe occupancy; system admins tighten per-project ceilings through
+`GET/PATCH /api/admin/projects/{project_id}/usage[/limits]`. The membership-scoped
+`PATCH /api/projects/{project_id}/usage/limits` path remains for project Admin compatibility. Hard-limit HTTP responses use stable 429 plus
 `Retry-After: 1`. Already admitted work is not interrupted by a later policy tightening.
 Every immutable project Skill version reserves the sum of all stored version-file bytes in
 `storage_bytes`; system Skill versions are excluded. The reservation rolls back with failed
@@ -1130,16 +1228,18 @@ deployment-owned prompt/path policy remain supported. Infrastructure configurati
 restart-required. Unknown application extension fields remain allowed where their typed models
 permit them, but removed top-level keys fail validation instead of being ignored.
 
-The current example schema is `config_version: 36`. Version 36 replaces nothing: it adds the
+The current example schema is `config_version: 37`. Version 37 replaces nothing: it adds the
+optional `worker.stream.run_event_notify_enabled` rollback switch (default `true`; `false`
+restores polling-only SSE wakeups) with a backward-compatible default. Version 36 added the
 optional `worker.stream.text_delta_flush_ms` micro-batching window (default 75, `0` disables) and
 `mcp_security.run_session_reuse` (default `true`) with backward-compatible defaults. Version 35
 replaced the retired exact `mcp_security.project_remote_allowed_endpoints` list with CIDR-based
 `project_remote_allowed_networks`. `make config-upgrade` preserves an old empty endpoint list as
 an empty deny-all network list, but refuses to guess a CIDR for any nonempty endpoint list. In
-addition to the top-level `models:` and
-`authorization:` tombstones, YAML leaves now owned by the PostgreSQL `agent_runtime`, `auth`, and
-`quotas` policy sections are rejected; run `make config-upgrade` to remove them from an older local
-file. Deployment-owned siblings such as `title.prompt_template`,
+addition to the top-level `models:`, `memory_document:`, and `authorization:` tombstones, YAML
+leaves now owned by the PostgreSQL `agent_runtime`, `auth`, `memory_document`, and `quotas` policy
+sections are rejected; run `make config-upgrade` to remove them from an older local file.
+Deployment-owned siblings such as `title.prompt_template`,
 `summarization.summary_prompt`, `tool_output.storage_subdir`, and non-policy `subagents` fields stay
 in YAML. Model definitions, immutable versions, the default pointer, exact Credential
 references, and Run snapshots are PostgreSQL authority. A system admin manages the catalog at
@@ -1220,7 +1320,7 @@ Common commands:
 
 ```bash
 uv run pytest tests/test_<feature>.py -q
-POSTGRES_TEST_URL="postgresql+asyncpg://.../postgres" make test
+make test
 uvx ruff format --check .
 uvx ruff check .
 ```
@@ -1235,8 +1335,8 @@ interfaces should use precise types. Keep public errors stable and free of SQL, 
 credential, private resource, and exception detail.
 
 Historical pass counts do not certify the current checkout. The complete current core suite is
-`POSTGRES_TEST_URL=... make test` from the repository root. Its database cases use owned random
-`deerflow_test_*` databases and must finish with zero skips.
+`make test` from the repository root; it loads the development `DATABASE_URL`, while its database
+cases use owned random `deerflow_test_*` databases and must finish with zero skips.
 
 Numeric limits quoted in this guide are gated by `tests/test_agents_md_constants.py`, which pins
 each documented value to the constant that defines it. Changing such a constant fails that test

@@ -25,8 +25,11 @@ class DatabaseOneshotModelCaller:
         *,
         system_instruction: str,
         user_content: str,
+        model_ref: str | None = None,
     ) -> str:
-        model = await self.materializer.materialize_active(self.model_ref)
+        model = await self.materializer.materialize_active(
+            model_ref if model_ref is not None else self.model_ref,
+        )
         runtime_config = self.app_config.with_runtime_models((model,))
         return await run_oneshot_llm(
             system_instruction=system_instruction,

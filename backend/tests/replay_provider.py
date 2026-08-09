@@ -55,6 +55,13 @@ replayed run diverged from the fixture (graph changed, a new volatile field
 slipped through normalization, or a non-deterministic tool result changed a
 downstream input). Replace the fixture deliberately or extend normalization;
 never pass silently.
+
+An individual plain-text turn may add
+``{"stream": {"provenance": "derived_from_recorded_output", "text_chunk_chars": N}}``.
+That test-only option deterministically slices the already-recorded AIMessage
+without changing its text. It is explicit derived test input, not a claim about
+the historical provider's transport frames; the normal one-chunk replay stays
+the default for every turn without this metadata.
 """
 
 from __future__ import annotations
@@ -65,6 +72,7 @@ import os
 import re
 from collections import deque
 from collections.abc import Iterator
+from dataclasses import dataclass
 from typing import Any
 
 from langchain_core.callbacks import BaseCallbackHandler, CallbackManagerForLLMRun
@@ -242,16 +250,39 @@ def hash_input_key(conversation_hash: str, *, caller: str | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _load_fixture(fixture_path: str) -> dict[str, deque[AIMessage]]:
+@dataclass(frozen=True, slots=True)
+class _ReplayTurn:
+    message: AIMessage
+    text_chunk_chars: int | None = None
+
+
+def _load_fixture(fixture_path: str) -> dict[str, deque[_ReplayTurn]]:
     with open(fixture_path, encoding="utf-8") as handle:
         payload = json.load(handle)
-    table: dict[str, deque[AIMessage]] = {}
+    table: dict[str, deque[_ReplayTurn]] = {}
     for index, turn in enumerate(payload.get("turns", [])):
         input_hash = turn["input_hash"]
         (message,) = messages_from_dict([turn["output"]])
         if not isinstance(message, AIMessage):
             raise ValueError(f"replay fixture {fixture_path!r} turn {index} output is {type(message).__name__}, expected AIMessage")
-        table.setdefault(input_hash, deque()).append(message)
+        text_chunk_chars: int | None = None
+        stream = turn.get("stream")
+        if stream is not None:
+            if not isinstance(stream, dict) or set(stream) != {"provenance", "text_chunk_chars"}:
+                raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream metadata is invalid")
+            if stream.get("provenance") != "derived_from_recorded_output":
+                raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream provenance is invalid")
+            text_chunk_chars = stream.get("text_chunk_chars")
+            if type(text_chunk_chars) is not int or not 1 <= text_chunk_chars <= 256:
+                raise ValueError(f"replay fixture {fixture_path!r} turn {index} text chunk size is invalid")
+            if not isinstance(message.content, str) or not message.content or message.tool_calls or message.invalid_tool_calls:
+                raise ValueError(f"replay fixture {fixture_path!r} turn {index} cannot derive plain-text stream chunks")
+        table.setdefault(input_hash, deque()).append(
+            _ReplayTurn(
+                message=message,
+                text_chunk_chars=text_chunk_chars,
+            )
+        )
     return table
 
 
@@ -263,7 +294,7 @@ class ReplayChatModel(BaseChatModel):
     produced them.
     """
 
-    _table: dict[str, deque] = PrivateAttr(default_factory=dict)
+    _table: dict[str, deque[_ReplayTurn]] = PrivateAttr(default_factory=dict)
     _fixture_path: str = PrivateAttr(default="")
     _run_callers: dict[str, str] = PrivateAttr(default_factory=dict)
 
@@ -302,7 +333,7 @@ class ReplayChatModel(BaseChatModel):
             tags=getattr(run_manager, "tags", None),
         )
 
-    def _match(self, messages: list[BaseMessage], run_manager: CallbackManagerForLLMRun | None = None) -> AIMessage:
+    def _match(self, messages: list[BaseMessage], run_manager: CallbackManagerForLLMRun | None = None) -> _ReplayTurn:
         caller = self._caller_from_run_manager(run_manager)
         key = hash_replay_input(messages, caller=caller)
         bucket = self._table.get(key)
@@ -337,7 +368,7 @@ class ReplayChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
-        return ChatResult(generations=[ChatGeneration(message=self._match(messages, run_manager))])
+        return ChatResult(generations=[ChatGeneration(message=self._match(messages, run_manager).message)])
 
     def _stream(
         self,
@@ -347,18 +378,21 @@ class ReplayChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         turn = self._match(messages, run_manager)
-        text = turn.content if isinstance(turn.content, str) else ""
-        chunk = ChatGenerationChunk(
-            message=AIMessageChunk(
-                content=turn.content,
-                tool_calls=turn.tool_calls,
-                additional_kwargs=turn.additional_kwargs,
-                id=turn.id,
+        message = turn.message
+        text = message.content if isinstance(message.content, str) else ""
+        text_chunks = tuple(text[index : index + turn.text_chunk_chars] for index in range(0, len(text), turn.text_chunk_chars)) if turn.text_chunk_chars is not None else (message.content,)
+        for index, text_chunk in enumerate(text_chunks):
+            chunk = ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=text_chunk,
+                    tool_calls=message.tool_calls if turn.text_chunk_chars is None else [],
+                    additional_kwargs=message.additional_kwargs if index == 0 else {},
+                    id=message.id,
+                )
             )
-        )
-        if run_manager is not None and text:
-            run_manager.on_llm_new_token(text, chunk=chunk)
-        yield chunk
+            if run_manager is not None and isinstance(text_chunk, str) and text_chunk:
+                run_manager.on_llm_new_token(text_chunk, chunk=chunk)
+            yield chunk
 
     def bind_tools(self, tools: Any, **kwargs: Any) -> Runnable:  # type: ignore[override]
         return self

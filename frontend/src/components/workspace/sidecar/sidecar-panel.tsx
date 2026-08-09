@@ -210,7 +210,6 @@ export function SidecarPanel({ className }: { className?: string }) {
     loadMoreHistory,
     historyError,
     retryHistory,
-    runExecutionProfiles,
   } = useThreadStream({
     threadId: sidecar.sidecarThreadId ?? undefined,
     displayThreadId: sidecar.sidecarThreadId ?? undefined,
@@ -266,9 +265,7 @@ export function SidecarPanel({ className }: { className?: string }) {
 
     const currentModel =
       sidecar.context.model_selection_explicit === true
-        ? models.find(
-            (model) => model.name === sidecar.context.model_name,
-          )
+        ? models.find((model) => model.name === sidecar.context.model_name)
         : undefined;
     const fallbackModel = modelSelection.model ?? models[0]!;
     const nextModelName = fallbackModel.name;
@@ -716,7 +713,6 @@ export function SidecarPanel({ className }: { className?: string }) {
             isHistoryLoading={isHistoryLoading}
             historyError={historyError}
             retryHistory={retryHistory}
-            runExecutionProfiles={runExecutionProfiles}
             tokenUsageInlineMode={tokenUsageInlineMode}
             sidecarSurface
             initialScroll="instant"

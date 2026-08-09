@@ -15,6 +15,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/core/i18n/hooks";
 import type {
   Automation,
   AutomationRun,
@@ -232,6 +233,7 @@ export function AutomationWorkbench({
   const [createGeneration, setCreateGeneration] = useState(0);
   const [editOpen, setEditOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const { t } = useI18n();
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
@@ -295,12 +297,11 @@ export function AutomationWorkbench({
 
   return (
     <main className="mx-auto w-full max-w-[1440px] space-y-5 p-4 sm:p-6 lg:p-8">
-      <header className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+      <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Automation</h1>
-          <p className="text-muted-foreground mt-1 text-sm">
-            在当前项目与当前账号范围内安排可重复运行的任务。
-          </p>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            {t.automation.title}
+          </h1>
           {initialThreadId ? (
             <p className="text-muted-foreground mt-1 text-sm [overflow-wrap:anywhere]">
               已按 Thread {initialThreadId} 筛选
@@ -310,7 +311,7 @@ export function AutomationWorkbench({
         {canCreate ? (
           <Button type="button" onClick={openCreate}>
             <PlusIcon />
-            创建 Automation
+            {t.automation.create}
           </Button>
         ) : null}
       </header>
@@ -351,13 +352,15 @@ export function AutomationWorkbench({
           className="bg-card flex min-h-80 flex-col items-center justify-center rounded-2xl border p-8 text-center"
         >
           <CalendarClockIcon className="text-muted-foreground size-10" />
-          <h2 className="mt-4 text-lg font-semibold">还没有 Automation</h2>
+          <h2 className="mt-4 text-lg font-semibold">
+            {t.automation.emptyTitle}
+          </h2>
           <p className="text-muted-foreground mt-2 max-w-md text-sm">
-            创建后可按 Cron 或单次时间运行项目 Agent。
+            {t.automation.emptyDescription}
           </p>
           {canCreate ? (
             <Button className="mt-5" type="button" onClick={openCreate}>
-              创建 Automation
+              {t.automation.create}
             </Button>
           ) : null}
         </section>
@@ -407,7 +410,7 @@ export function AutomationWorkbench({
               data-testid="automation-filter-empty"
               className="rounded-xl border p-8 text-center"
             >
-              <h2 className="font-medium">没有符合筛选条件的 Automation</h2>
+              <h2 className="font-medium">{t.automation.filterEmptyTitle}</h2>
               <Button
                 type="button"
                 className="mt-4"
@@ -703,7 +706,7 @@ export function AutomationWorkbench({
                   </div>
                 ) : (
                   <p className="text-muted-foreground text-sm">
-                    请选择一个 Automation。
+                    {t.automation.selectPrompt}
                   </p>
                 )}
               </section>
@@ -718,9 +721,11 @@ export function AutomationWorkbench({
       >
         <DialogContent className="max-h-[92vh] gap-7 overflow-y-auto p-8 sm:w-[calc(100%-2rem)] sm:max-w-[1100px] sm:p-10">
           <DialogHeader>
-            <DialogTitle className="text-2xl">创建 Automation</DialogTitle>
-            <DialogDescription className="text-base">
-              Agent 来自当前项目可执行 catalog，运行时仍由服务端复核权限。
+            <DialogTitle className="text-2xl">
+              {t.automation.create}
+            </DialogTitle>
+            <DialogDescription className="sr-only">
+              {t.automation.create}
             </DialogDescription>
           </DialogHeader>
           <AutomationDialogFeedback
@@ -770,7 +775,7 @@ export function AutomationWorkbench({
       >
         <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>编辑 Automation</DialogTitle>
+            <DialogTitle>{t.automation.editTitle}</DialogTitle>
             <DialogDescription>
               计划类型、上下文模式与 Agent 在编辑时保持不变。
             </DialogDescription>
@@ -821,7 +826,7 @@ export function AutomationWorkbench({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除 Automation</DialogTitle>
+            <DialogTitle>{t.automation.deleteTitle}</DialogTitle>
             <DialogDescription>
               这会删除定义；已有运行历史仍按服务端保留策略处理。
             </DialogDescription>

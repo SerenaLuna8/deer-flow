@@ -20,6 +20,8 @@ Main 是项目级编排 Agent，也是项目未指定自定义默认 Agent 时�
 
 项目管理员可以把一个已启用、已发布的项目 Agent 设为默认 Agent。已配置的默认 Agent 如果失效会直接阻止创建，不会静默回退到 Main。
 
+项目当前默认 Agent 不能直接删除。请先在 Agent 页面把 Main 或其他可用 Agent 设为默认；已有对话、自动化或运行记录引用的 Agent 也会保留，系统不会级联删除这些记录。
+
 ### 自定义 Agent
 
 ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每个 Agent 使用 ActWeave Harness 相同的 Lead Agent 运行时，但具有不同的：

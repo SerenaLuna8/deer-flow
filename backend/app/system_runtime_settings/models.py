@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,6 +23,17 @@ from pydantic import (
 
 _JSON_SAFE_INTEGER = 2**53 - 1
 _MAX_CHARS = 10_000_000
+MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS = 80
+DEFAULT_MEMORY_DOCUMENT_SECTIONS = (
+    "用户偏好与协作方式",
+    "项目背景",
+    "长期约束与架构决策",
+    "当前仍有效的目标",
+)
+_FORBIDDEN_MEMORY_DOCUMENT_SECTION_MARKER = re.compile(
+    r"\[H:\d+\]|\[(?:skip|correction|permanent|durable|ephemeral)\]",
+    re.IGNORECASE,
+)
 ToolName = Annotated[
     str,
     StringConstraints(
@@ -44,6 +57,7 @@ ModelName = Annotated[
 class RuntimePolicySection(StrEnum):
     AGENT_RUNTIME = "agent_runtime"
     AUTH = "auth"
+    MEMORY_DOCUMENT = "memory_document"
     QUOTAS = "quotas"
 
 
@@ -152,6 +166,33 @@ class MemoryPolicy(_PolicyModel):
         return value
 
 
+class MemoryDocumentPolicy(_PolicyModel):
+    sections: list[str] = Field(
+        default_factory=lambda: list(DEFAULT_MEMORY_DOCUMENT_SECTIONS),
+        min_length=2,
+        max_length=8,
+    )
+
+    @field_validator("sections")
+    @classmethod
+    def validate_sections(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for raw_title in value:
+            if any((category := unicodedata.category(character)).startswith("C") or category in {"Zl", "Zp"} for character in raw_title):
+                raise ValueError("memory document section titles must not contain control characters or line separators")
+            title = raw_title.strip()
+            if not title or len(title) > MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS:
+                raise ValueError("memory document section title length is invalid")
+            if title.startswith("#"):
+                raise ValueError("memory document section titles must not contain Markdown prefixes")
+            if _FORBIDDEN_MEMORY_DOCUMENT_SECTION_MARKER.search(title) is not None:
+                raise ValueError("memory document section titles must not contain history markers")
+            normalized.append(title)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("memory document section titles must be unique")
+        return normalized
+
+
 class ToolSearchPolicy(_PolicyModel):
     enabled: bool = False
     auto_promote_top_k: int = Field(default=3, ge=1, le=5)
@@ -256,10 +297,11 @@ class QuotaPolicyValue(_PolicyModel):
     warning_threshold: float = Field(default=0.8, gt=0.0, lt=1.0)
 
 
-RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | QuotaPolicyValue
+RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | MemoryDocumentPolicy | QuotaPolicyValue
 RuntimePolicyEffectScope = Literal[
     "new_requests_and_runs",
     "new_requests",
+    "new_memory_documents",
     "next_authoritative_check",
 ]
 
@@ -309,11 +351,22 @@ class LockedAgentRuntimePolicy:
     value: AgentRuntimePolicyValue
 
 
+@dataclass(frozen=True, slots=True)
+class LockedMemoryDocumentPolicy:
+    policy_version_id: uuid.UUID
+    revision: int
+    schema_version: int
+    payload_checksum: str
+    value: MemoryDocumentPolicy
+
+
 def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
     if section is RuntimePolicySection.AGENT_RUNTIME:
         return AgentRuntimePolicyValue()
     if section is RuntimePolicySection.AUTH:
         return AuthPolicyValue()
+    if section is RuntimePolicySection.MEMORY_DOCUMENT:
+        return MemoryDocumentPolicy()
     if section is RuntimePolicySection.QUOTAS:
         return QuotaPolicyValue()
     raise AssertionError("unreachable runtime policy section")
@@ -322,6 +375,10 @@ def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
 __all__ = [
     "AgentRuntimePolicyValue",
     "AuthPolicyValue",
+    "DEFAULT_MEMORY_DOCUMENT_SECTIONS",
+    "LockedMemoryDocumentPolicy",
+    "MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS",
+    "MemoryDocumentPolicy",
     "QuotaPolicyValue",
     "RuntimePolicySection",
     "RuntimePolicyCatalogView",

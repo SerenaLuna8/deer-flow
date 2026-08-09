@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass
 from importlib import resources
 from typing import Protocol
@@ -16,17 +17,22 @@ from langchain_core.tools import BaseTool, StructuredTool
 MAX_MEMORY_DOCUMENT_CHARS = 16_000
 MAX_DREAM_HISTORY_ITEMS = 20
 MAX_DREAM_HISTORY_CHARS = 1_000
-DREAM_PROMPT_VERSION = "dream-prompt-v3"
+DREAM_PROMPT_VERSION = "dream-prompt-v4"
 DEFAULT_DREAM_TIMEOUT_SECONDS = 120.0
 DEFAULT_DREAM_MAX_ROUNDS = 8
 
-MEMORY_DOCUMENT_SECTIONS = (
-    "# 用户偏好与协作方式",
-    "# 项目背景",
-    "# 长期约束与架构决策",
-    "# 当前仍有效的目标",
+DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES = (
+    "用户偏好与协作方式",
+    "项目背景",
+    "长期约束与架构决策",
+    "当前仍有效的目标",
 )
+MEMORY_DOCUMENT_SECTIONS = tuple(f"# {title}" for title in DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES)
 EMPTY_MEMORY_DOCUMENT = "\n\n".join(MEMORY_DOCUMENT_SECTIONS)
+MAX_MEMORY_DOCUMENT_SECTIONS = 8
+MIN_MEMORY_DOCUMENT_SECTIONS = 2
+MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS = 80
+_DREAM_SECTIONS_PLACEHOLDER = "{{MEMORY_DOCUMENT_SECTIONS}}"
 
 _CJK_RANGES = (
     ("\u3400", "\u4dbf"),
@@ -40,11 +46,13 @@ _FORBIDDEN_HISTORY_MARKER = re.compile(
 )
 
 
-def _load_prompt() -> str:
+def _load_prompt_template() -> str:
     return resources.files("deerflow.agents.memory").joinpath("prompts", "dream.md").read_text(encoding="utf-8").strip()
 
 
-DREAM_PROMPT = _load_prompt()
+DREAM_PROMPT_TEMPLATE = _load_prompt_template()
+if DREAM_PROMPT_TEMPLATE.count(_DREAM_SECTIONS_PLACEHOLDER) != 1:
+    raise RuntimeError("Dream prompt sections placeholder contract is invalid")
 logger = logging.getLogger(__name__)
 
 
@@ -93,6 +101,52 @@ class MemoryDreamError(RuntimeError):
         super().__init__(code)
 
 
+def validate_memory_document_sections(sections: object) -> tuple[str, ...]:
+    """Validate one immutable ordered list of plain section titles."""
+
+    if not isinstance(sections, (tuple, list)) or not MIN_MEMORY_DOCUMENT_SECTIONS <= len(sections) <= MAX_MEMORY_DOCUMENT_SECTIONS:
+        raise MemoryDocumentInvalid("Memory document sections are invalid")
+    validated: list[str] = []
+    for title in sections:
+        if (
+            not isinstance(title, str)
+            or title != title.strip()
+            or not title
+            or len(title) > MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS
+            or title.startswith("#")
+            or len(title.splitlines()) != 1
+            or any((category := unicodedata.category(character)).startswith("C") or category in {"Zl", "Zp"} for character in title)
+            or _FORBIDDEN_HISTORY_MARKER.search(title) is not None
+        ):
+            raise MemoryDocumentInvalid("Memory document sections are invalid")
+        validated.append(title)
+    if len(validated) != len(set(validated)):
+        raise MemoryDocumentInvalid("Memory document sections are invalid")
+    return tuple(validated)
+
+
+def _render_section_headings(sections: object, *, separator: str) -> str:
+    return separator.join(f"# {title}" for title in validate_memory_document_sections(sections))
+
+
+def render_empty_memory_document(sections: object) -> str:
+    """Render the empty complete document for one frozen section contract."""
+
+    return _render_section_headings(sections, separator="\n\n")
+
+
+def render_dream_prompt(sections: object) -> str:
+    """Render exactly one frozen section list into the versioned prompt."""
+
+    return DREAM_PROMPT_TEMPLATE.replace(
+        _DREAM_SECTIONS_PLACEHOLDER,
+        _render_section_headings(sections, separator="\n"),
+    )
+
+
+DREAM_PROMPT = render_dream_prompt(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES)
+
+
 def estimate_memory_tokens(content: str) -> int:
     """Return a deterministic, offline and conservative token estimate."""
 
@@ -103,25 +157,35 @@ def estimate_memory_tokens(content: str) -> int:
     return cjk + ((non_cjk + 3) // 4)
 
 
-def _validate_memory_document_structure(content: str) -> str:
+def _validate_memory_document_structure(
+    content: str,
+    *,
+    sections: object = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+) -> str:
     if not isinstance(content, str):
         raise MemoryDocumentInvalid("Memory document must be text")
     if not content or len(content) > MAX_MEMORY_DOCUMENT_CHARS:
         raise MemoryDocumentInvalid("Memory document exceeds the character contract")
+    headings = tuple(f"# {title}" for title in validate_memory_document_sections(sections))
     top_level = tuple(line for line in content.splitlines() if line.startswith("# "))
-    if top_level != MEMORY_DOCUMENT_SECTIONS:
+    if top_level != headings:
         raise MemoryDocumentInvalid("Memory document sections are invalid")
     if _FORBIDDEN_HISTORY_MARKER.search(content) is not None:
         raise MemoryDocumentInvalid("Memory document contains a history marker")
     return content
 
 
-def validate_memory_document(content: str, max_tokens: int) -> str:
+def validate_memory_document(
+    content: str,
+    max_tokens: int,
+    *,
+    sections: object = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+) -> str:
     """Validate a complete Memory document without normalizing or truncating it."""
 
     if type(max_tokens) is not int or max_tokens < 1:
         raise ValueError("Memory token budget must be positive")
-    _validate_memory_document_structure(content)
+    _validate_memory_document_structure(content, sections=sections)
     estimated_tokens = estimate_memory_tokens(content)
     if estimated_tokens > max_tokens:
         target_tokens = _target_token_limit(max_tokens)
@@ -201,6 +265,7 @@ class MemoryDreamInput:
     document_version: int
     history: tuple[DreamHistoryInput, ...]
     max_tokens: int
+    sections: tuple[str, ...] = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
     # Only the server-decided `budget_rewrite` trigger may freeze an empty
     # batch; every other Dream must consume 1..20 history entries.
     budget_rewrite: bool = False
@@ -219,7 +284,9 @@ class MemoryDreamInput:
             raise ValueError("Dream history must be strictly ordered")
         if type(self.max_tokens) is not int or self.max_tokens < 1:
             raise ValueError("Memory token budget must be positive")
-        _validate_memory_document_structure(self.document)
+        validated_sections = validate_memory_document_sections(self.sections)
+        object.__setattr__(self, "sections", validated_sections)
+        _validate_memory_document_structure(self.document, sections=validated_sections)
 
 
 @dataclass(frozen=True, slots=True)
@@ -245,6 +312,9 @@ def render_dream_input(value: MemoryDreamInput) -> str:
             f"<token-limit>{value.max_tokens}</token-limit>",
             f"<target-token-limit>{_target_token_limit(value.max_tokens)}</target-token-limit>",
             f"<target-character-limit>{_target_character_limit(value.max_tokens)}</target-character-limit>",
+            "<document-sections>",
+            _render_section_headings(value.sections, separator="\n"),
+            "</document-sections>",
             "<current-memory>",
             value.document,
             "</current-memory>",
@@ -261,9 +331,13 @@ class _MemoryDraft:
     original: str
     max_tokens: int
     content: str
+    sections: tuple[str, ...] = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
     read: bool = False
     replaced: bool = False
     replacement_rejected: bool = False
+
+    def __post_init__(self) -> None:
+        self.sections = validate_memory_document_sections(self.sections)
 
 
 def build_dream_tools(draft: _MemoryDraft) -> tuple[StructuredTool, StructuredTool]:
@@ -287,7 +361,11 @@ def build_dream_tools(draft: _MemoryDraft) -> tuple[StructuredTool, StructuredTo
 
         if not draft.read:
             raise MemoryDocumentInvalid("Memory document must be read before replacement")
-        draft.content = validate_memory_document(content, draft.max_tokens)
+        draft.content = validate_memory_document(
+            content,
+            draft.max_tokens,
+            sections=draft.sections,
+        )
         draft.replaced = True
         return "memory draft replaced"
 
@@ -336,6 +414,7 @@ class MemoryDreamRunner:
             original=value.document,
             content=value.document,
             max_tokens=value.max_tokens,
+            sections=value.sections,
         )
         tools = build_dream_tools(draft)
         by_name = {tool.name: tool for tool in tools}
@@ -344,7 +423,7 @@ class MemoryDreamRunner:
         bound = self._model.bind_tools(list(tools))
         frozen_input = render_dream_input(value)
         messages: list[object] = [
-            SystemMessage(content=DREAM_PROMPT),
+            SystemMessage(content=render_dream_prompt(value.sections)),
             HumanMessage(content=frozen_input),
         ]
         rejected_content_digests: set[bytes] = set()
@@ -379,7 +458,11 @@ class MemoryDreamRunner:
                             continue
                         if not draft.read:
                             raise MemoryDreamError("MEMORY_DREAM_READ_REQUIRED")
-                        validate_memory_document(draft.content, value.max_tokens)
+                        validate_memory_document(
+                            draft.content,
+                            value.max_tokens,
+                            sections=value.sections,
+                        )
                         return MemoryDreamResult(
                             content=draft.content,
                             replaced=draft.replaced,
@@ -464,7 +547,7 @@ class MemoryDreamRunner:
                         draft.replaced = False
                         draft.replacement_rejected = False
                         messages = [
-                            SystemMessage(content=DREAM_PROMPT),
+                            SystemMessage(content=render_dream_prompt(value.sections)),
                             HumanMessage(content=frozen_input),
                             HumanMessage(
                                 content=_fresh_regeneration_instruction(
@@ -488,9 +571,11 @@ class MemoryDreamRunner:
 
 
 __all__ = [
+    "DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES",
     "DEFAULT_DREAM_MAX_ROUNDS",
     "DEFAULT_DREAM_TIMEOUT_SECONDS",
     "DREAM_PROMPT",
+    "DREAM_PROMPT_TEMPLATE",
     "DREAM_PROMPT_VERSION",
     "DreamHistoryInput",
     "EMPTY_MEMORY_DOCUMENT",
@@ -507,5 +592,8 @@ __all__ = [
     "build_dream_tools",
     "estimate_memory_tokens",
     "render_dream_input",
+    "render_dream_prompt",
+    "render_empty_memory_document",
     "validate_memory_document",
+    "validate_memory_document_sections",
 ]

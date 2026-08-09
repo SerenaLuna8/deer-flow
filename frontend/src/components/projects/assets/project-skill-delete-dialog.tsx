@@ -14,6 +14,19 @@ import {
 
 const SKILL_DELETE_DELAY_MS = 5_000;
 
+export function projectAssetDeleteDescription(
+  assetKind: "Skill" | "Agent" | "MCP",
+  assetName: string,
+): string {
+  if (assetKind === "Skill") {
+    return `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复。`;
+  }
+  if (assetKind === "Agent") {
+    return `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若该 Agent 是项目当前默认 Agent，请先将 Main 或其他 Agent 设为默认；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`;
+  }
+  return `将永久删除整个 MCP“${assetName}”及其配置与 Credential 槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或 Credential 授权快照引用时不会级联删除，需先解除引用。`;
+}
+
 export function skillDeleteSecondsRemaining(
   startedAt: number,
   now: number,
@@ -132,11 +145,7 @@ function ProjectAssetDeleteConfirmation({
       <DialogHeader>
         <DialogTitle>永久删除 {assetKind}？</DialogTitle>
         <DialogDescription>
-          {assetKind === "Skill"
-            ? `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复。`
-            : assetKind === "Agent"
-              ? `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`
-              : `将永久删除整个 MCP“${assetName}”及其配置与 Credential 槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或 Credential 授权快照引用时不会级联删除，需先解除引用。`}
+          {projectAssetDeleteDescription(assetKind, assetName)}
         </DialogDescription>
       </DialogHeader>
       {errorMessage ? (

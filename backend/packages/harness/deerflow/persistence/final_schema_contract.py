@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
@@ -54,20 +55,40 @@ LANGGRAPH_ROOT_OBJECTS = frozenset(
 REQUIRED_FUNCTIONS = frozenset(
     {
         "bump_asset_catalog_generation",
+        "cleanup_run_event_invariant",
+        "drop_run_event_partitions_before",
         "enforce_run_model_snapshot_credential_closure",
+        "enforce_run_event_identity_immutable",
         "enforce_scheduled_task_agent_project",
         "enforce_shared_asset_version_state_transition",
         "enforce_stream_terminal_invariant",
+        "ensure_run_events_month_partition",
         "ensure_system_binding_published_version",
         "prevent_bound_published_version_downgrade",
+        "prevent_memory_document_sections_mutation",
         "prevent_published_version_child_mutation",
+        "prevent_run_memory_snapshot_sections_mutation",
         "prevent_shared_asset_version_payload_update",
         "reject_m7_append_only_mutation",
         "reject_direct_run_model_snapshot_mutation",
         "reject_direct_run_runtime_policy_snapshot_mutation",
         "set_m7_updated_at",
+        "set_threads_meta_updated_at",
     }
 )
+_PARAMETERIZED_REQUIRED_FUNCTIONS = frozenset(
+    {
+        (
+            "drop_run_event_partitions_before",
+            "cutoff_at timestamp with time zone",
+        ),
+        (
+            "ensure_run_events_month_partition",
+            "target_at timestamp with time zone",
+        ),
+    }
+)
+REQUIRED_FUNCTION_IDENTITIES = frozenset({(name, "") for name in REQUIRED_FUNCTIONS if name not in {identity[0] for identity in _PARAMETERIZED_REQUIRED_FUNCTIONS}} | _PARAMETERIZED_REQUIRED_FUNCTIONS)
 
 
 @dataclass(frozen=True)
@@ -80,32 +101,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=81,
-        digest="d2c163c8849d02b0f83017eb349c69dbad430ce5ccee9561f880c715996994b6",
+        count=83,
+        digest="8cb3f55937d847107e1fc5ff63723b8677553cf415704bdbcef1c2546b936182",
     ),
     "columns": CatalogInvariant(
-        count=990,
-        digest="e8468fe72830f0167f03b90c72f703e5972dcc235c04d4a9beb80f8010b0a443",
+        count=1005,
+        digest="34440c7de2049d5c8dc918a7d37f28b9d6dbe347789997ca6ec66a6828d4b590",
     ),
     "sequences": CatalogInvariant(
         count=2,
         digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=716,
-        digest="f134dd3ee4d5e8453287425ddd090cf66f387bb4ff9d80b9514657b20f20f0e4",
+        count=724,
+        digest="b314324e9c33104bb94e979459ce711e747f7b9a104f705fef957e321c06a4f2",
     ),
     "indexes": CatalogInvariant(
-        count=280,
-        digest="545a7356f12a3f3d893b544394d5d846ad5e4b8d756553874b380aabd787ddbb",
+        count=284,
+        digest="ae895f7b29365c9978c3b54ba904bd67bcd8fc9b64f58eec5f6975e8b0e7aace",
     ),
     "functions": CatalogInvariant(
-        count=13,
-        digest="3986289c90206f94aa821fef7e8a58e253dec6a968d91c4cb43fde6722ea8f62",
+        count=20,
+        digest="4fe2de99b635074c5cd85b66e4eaab45339a49f9db4423863adda23fd97210ea",
     ),
     "triggers": CatalogInvariant(
-        count=82,
-        digest="e2cba6eab9bb8b3a50bb14cc4fd31133d776c0f0a83ce4d8617d8adb84e3d50d",
+        count=86,
+        digest="e8bd02aac4c6beff2dbce3648fac0807db23164fbb94cc2854ee9ff437794731",
     ),
 }
 
@@ -200,7 +221,7 @@ _CATALOG_QUERIES = {
         ORDER BY p.proname, pg_get_function_identity_arguments(p.oid)
     """,
     "triggers": """
-        SELECT c.relname, t.tgname, p.proname,
+        SELECT c.relname, t.tgname, t.tgenabled, p.proname,
                regexp_replace(pg_get_triggerdef(t.oid, true), '\\s+', ' ', 'g')
         FROM pg_trigger t
         JOIN pg_class c ON c.oid=t.tgrelid
@@ -262,7 +283,119 @@ async def verify_m7_catalog(connection: AsyncConnection) -> bool:
     """Return whether all current catalog invariants match exactly."""
 
     signature = await read_m7_catalog_signature(connection)
-    return signature == FINAL_M7_CATALOG_SIGNATURE
+    return signature == FINAL_M7_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection)
+
+
+_RUN_EVENT_PARTITION_NAME = re.compile(r"run_events_p(?P<month>[0-9]{6})\Z")
+_RUN_EVENT_PARTITION_BOUND = re.compile(
+    r"FOR VALUES FROM \('(?P<start>[^']+)'(?:\:\:[^)]+)?\) TO \('(?P<end>[^']+)'(?:\:\:[^)]+)?\)\Z",
+)
+_RUN_EVENT_REQUIRED_TRIGGERS = frozenset(
+    {
+        "trg_run_events_identity_immutable",
+        "trg_run_events_invariant_cleanup",
+        "trg_run_events_stream_terminal",
+    }
+)
+
+
+def _next_utc_month(value: datetime) -> datetime:
+    if value.month == 12:
+        return value.replace(year=value.year + 1, month=1)
+    return value.replace(month=value.month + 1)
+
+
+async def _run_event_partition_catalog_is_valid(connection: AsyncConnection) -> bool:
+    """Validate only actual direct monthly children of ``run_events``."""
+
+    state_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT singleton,
+                          retained_from IS NULL
+                          OR (
+                              isfinite(retained_from)
+                              AND retained_from = (
+                                  date_trunc('month', retained_from AT TIME ZONE 'UTC')
+                                  AT TIME ZONE 'UTC'
+                              )
+                              AND retained_from <= (
+                                  date_trunc('month', now() AT TIME ZONE 'UTC')
+                                  AT TIME ZONE 'UTC'
+                              )
+                          ) AS is_valid
+                     FROM run_event_partition_state"""
+            )
+        )
+    )
+    if len(state_rows) != 1 or state_rows[0][0] is not True or state_rows[0][1] is not True:
+        return False
+
+    result = await connection.execute(
+        text(
+            """SELECT child.relname,
+                      pg_get_expr(child.relpartbound, child.oid, true)
+                 FROM pg_inherits inheritance
+                 JOIN pg_class parent ON parent.oid = inheritance.inhparent
+                 JOIN pg_class child ON child.oid = inheritance.inhrelid
+                 JOIN pg_namespace namespace ON namespace.oid = child.relnamespace
+                WHERE parent.oid = 'run_events'::regclass
+                  AND namespace.nspname = current_schema()
+                ORDER BY child.relname"""
+        )
+    )
+    rows = tuple(result)
+    if not rows:
+        return False
+    child_names: set[str] = set()
+    for name_value, bound_value in rows:
+        name = str(name_value)
+        child_names.add(name)
+        bound = str(bound_value)
+        name_match = _RUN_EVENT_PARTITION_NAME.fullmatch(name)
+        bound_match = _RUN_EVENT_PARTITION_BOUND.fullmatch(bound)
+        if name_match is None or bound_match is None:
+            return False
+        try:
+            start = datetime.fromisoformat(bound_match.group("start")).astimezone(UTC)
+            end = datetime.fromisoformat(bound_match.group("end")).astimezone(UTC)
+        except ValueError:
+            return False
+        if start != datetime.strptime(name_match.group("month"), "%Y%m").replace(tzinfo=UTC) or end != _next_utc_month(start):
+            return False
+
+    trigger_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT child.relname,
+                          child_trigger.tgname,
+                          child_trigger.tgenabled,
+                          parent_trigger.tgname
+                     FROM pg_inherits inheritance
+                     JOIN pg_class parent ON parent.oid=inheritance.inhparent
+                     JOIN pg_class child ON child.oid=inheritance.inhrelid
+                     JOIN pg_namespace namespace ON namespace.oid=child.relnamespace
+                     JOIN pg_trigger child_trigger
+                       ON child_trigger.tgrelid=child.oid
+                      AND NOT child_trigger.tgisinternal
+                     LEFT JOIN pg_trigger parent_trigger
+                       ON parent_trigger.oid=child_trigger.tgparentid
+                    WHERE parent.oid='run_events'::regclass
+                      AND namespace.nspname=current_schema()
+                    ORDER BY child.relname, child_trigger.tgname"""
+            )
+        )
+    )
+    observed_triggers: set[tuple[str, str]] = set()
+    for child_value, trigger_value, enabled_value, parent_trigger_value in trigger_rows:
+        child_name = str(child_value)
+        trigger_name = str(trigger_value)
+        enabled = enabled_value.decode("ascii") if isinstance(enabled_value, bytes) else str(enabled_value)
+        if enabled != "O" or parent_trigger_value is None or str(parent_trigger_value) != trigger_name:
+            return False
+        observed_triggers.add((child_name, trigger_name))
+    expected_triggers = {(child_name, trigger_name) for child_name in child_names for trigger_name in _RUN_EVENT_REQUIRED_TRIGGERS}
+    return observed_triggers == expected_triggers
 
 
 _USER_SCHEMA_INVENTORY_SQL = """
@@ -274,6 +407,15 @@ _USER_SCHEMA_INVENTORY_SQL = """
               AND NOT EXISTS (
                   SELECT 1 FROM pg_depend d
                   WHERE d.classid='pg_class'::regclass AND d.objid=c.oid AND d.deptype='e'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_inherits inheritance
+                  JOIN pg_class partition_parent ON partition_parent.oid=inheritance.inhparent
+                  JOIN pg_namespace partition_namespace ON partition_namespace.oid=partition_parent.relnamespace
+                  WHERE inheritance.inhrelid=c.oid
+                    AND partition_parent.relname='run_events'
+                    AND partition_namespace.nspname=current_schema()
               )
             UNION ALL
             SELECT 'sequence:' || seq.relname || ':' || COALESCE(owner.relname, '')
@@ -298,6 +440,17 @@ _USER_SCHEMA_INVENTORY_SQL = """
               AND NOT EXISTS (
                   SELECT 1 FROM pg_depend ext
                   WHERE ext.classid='pg_class'::regclass AND ext.objid=idx.oid AND ext.deptype='e'
+              )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_inherits index_inheritance
+                  JOIN pg_class parent_index ON parent_index.oid=index_inheritance.inhparent
+                  JOIN pg_index parent_index_definition ON parent_index_definition.indexrelid=parent_index.oid
+                  JOIN pg_class partition_parent ON partition_parent.oid=parent_index_definition.indrelid
+                  JOIN pg_namespace partition_namespace ON partition_namespace.oid=partition_parent.relnamespace
+                  WHERE index_inheritance.inhrelid=idx.oid
+                    AND partition_parent.relname='run_events'
+                    AND partition_namespace.nspname=current_schema()
               )
             UNION ALL
             SELECT 'routine:' || p.proname || ':' || pg_get_function_identity_arguments(p.oid)
@@ -431,6 +584,15 @@ _USER_SCHEMA_INVENTORY_SQL = """
                   SELECT 1 FROM pg_depend d
                   WHERE d.classid='pg_trigger'::regclass AND d.objid=trigger.oid AND d.deptype='e'
               )
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM pg_trigger parent_trigger
+                  JOIN pg_class partition_parent ON partition_parent.oid=parent_trigger.tgrelid
+                  JOIN pg_namespace partition_namespace ON partition_namespace.oid=partition_parent.relnamespace
+                  WHERE parent_trigger.oid=trigger.tgparentid
+                    AND partition_parent.relname='run_events'
+                    AND partition_namespace.nspname=current_schema()
+              )
             """
 
 
@@ -487,7 +649,7 @@ def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
                 return False
         elif kind == "routine":
             name, _, identity_arguments = remainder.partition(":")
-            if name not in REQUIRED_FUNCTIONS or identity_arguments:
+            if (name, identity_arguments) not in REQUIRED_FUNCTION_IDENTITIES:
                 return False
         else:
             return False
@@ -508,6 +670,7 @@ __all__ = [
     "LANGGRAPH_SEQUENCES",
     "LANGGRAPH_TABLES",
     "REQUIRED_FUNCTIONS",
+    "REQUIRED_FUNCTION_IDENTITIES",
     "inventory_is_m7_allowed",
     "inventory_user_schema_objects",
     "read_m7_catalog_signature",

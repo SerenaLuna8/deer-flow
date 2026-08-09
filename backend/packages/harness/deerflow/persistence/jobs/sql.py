@@ -567,6 +567,7 @@ class JobRepository:
                 "retention_purge",
                 "mcp_discovery",
                 "memory_dream",
+                "memory_seal",
             }
         )
         if not job_types:

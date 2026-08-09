@@ -18,8 +18,16 @@ from app.private_work.memory_service import PrivateMemoryDocumentService
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.system_runtime_settings.models import AgentRuntimePolicyValue, MemoryPolicy
-from deerflow.agents.memory.dream import EMPTY_MEMORY_DOCUMENT
+from app.system_runtime_settings.models import (
+    AgentRuntimePolicyValue,
+    LockedMemoryDocumentPolicy,
+    MemoryDocumentPolicy,
+    MemoryPolicy,
+)
+from deerflow.agents.memory.dream import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    EMPTY_MEMORY_DOCUMENT,
+)
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentScope,
     MemoryDreamAdmissionRecord,
@@ -27,6 +35,19 @@ from deerflow.persistence.private_work.memory_document_repository import (
 from deerflow.runtime.context_compaction import ThreadCompactionResult
 
 NOW = datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC)
+SECTIONS_POLICY_VERSION_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+
+
+def _creation_policy(
+    sections: tuple[str, ...] = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+) -> LockedMemoryDocumentPolicy:
+    return LockedMemoryDocumentPolicy(
+        policy_version_id=SECTIONS_POLICY_VERSION_ID,
+        revision=5,
+        schema_version=1,
+        payload_checksum="d" * 64,
+        value=MemoryDocumentPolicy(sections=list(sections)),
+    )
 
 
 class _Personalization:
@@ -77,8 +98,14 @@ class _Session:
 
 
 class _Repository:
-    def __init__(self, scopes: tuple[MemoryDocumentScope, ...]) -> None:
+    def __init__(
+        self,
+        scopes: tuple[MemoryDocumentScope, ...],
+        *,
+        document_exists: bool = True,
+    ) -> None:
         self.scopes = scopes
+        self.document_exists = document_exists
         self.list_kwargs = None
         self.admissions = []
 
@@ -88,7 +115,11 @@ class _Repository:
 
     async def read_state(self, _scope_value, **_kwargs):
         return SimpleNamespace(
-            document=SimpleNamespace(version=1, content=EMPTY_MEMORY_DOCUMENT),
+            document=SimpleNamespace(
+                version=1,
+                content=EMPTY_MEMORY_DOCUMENT,
+                sections_policy_version_id=(SECTIONS_POLICY_VERSION_ID if self.document_exists else None),
+            ),
             pending_count=3,
         )
 
@@ -177,13 +208,75 @@ async def test_platform_runtime_freezes_one_locked_policy_pointer_and_model_vers
         staticmethod(materialize),
     )
     monkeypatch.setattr(service_module, "SystemModelRepository", Models)
+
+    async def lock_creation_policy(_session):
+        calls.append((_session, "memory_document", True))
+        return _creation_policy()
+
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyService,
+        "lock_memory_document_for_creation",
+        staticmethod(lock_creation_policy),
+    )
     session = object()
 
-    policy, revision, model = await MemoryDreamAdmissionService._platform_runtime(session)
+    policy, revision, model, creation_policy = await MemoryDreamAdmissionService._platform_runtime(
+        session,
+        create_document=True,
+    )
 
     assert policy == _runtime()[0]
     assert revision == 23
     assert model == _runtime()[2]
+    assert creation_policy == _creation_policy()
+    assert calls == [
+        (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
+        (session, "memory_document", True),
+        (session, "dream-model", False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_platform_runtime_does_not_read_current_document_policy_for_existing_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[object] = []
+
+    async def materialize(session, section, *, for_update=False):
+        calls.append((session, section, for_update))
+        return _runtime()[0], 23
+
+    async def forbidden_creation_policy(_session):
+        raise AssertionError("existing documents must not read current memory_document")
+
+    class Models:
+        def __init__(self, session) -> None:
+            self.session = session
+
+        async def resolve_active_model(self, model_ref, *, load_envelope):
+            calls.append((self.session, model_ref, load_envelope))
+            return _runtime()[2]
+
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_with_revision_in_session",
+        staticmethod(materialize),
+    )
+    monkeypatch.setattr(
+        service_module.SystemRuntimePolicyService,
+        "lock_memory_document_for_creation",
+        staticmethod(forbidden_creation_policy),
+    )
+    monkeypatch.setattr(service_module, "SystemModelRepository", Models)
+    session = object()
+
+    policy, revision, model, creation_policy = await MemoryDreamAdmissionService._platform_runtime(
+        session,
+        create_document=False,
+    )
+
+    assert (policy, revision, model) == _runtime()
+    assert creation_policy is None
     assert calls == [
         (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
         (session, "dream-model", False),
@@ -197,8 +290,9 @@ async def test_manual_admission_freezes_exact_four_field_runtime_and_model(
     repository = _Repository(())
     service = _service(repository)
 
-    async def runtime(_session):
-        return _runtime()
+    async def runtime(_session, *, create_document):
+        assert create_document is False
+        return (*_runtime(), None)
 
     monkeypatch.setattr(service, "_platform_runtime", runtime)
 
@@ -217,6 +311,38 @@ async def test_manual_admission_freezes_exact_four_field_runtime_and_model(
     assert frozen.model_config_id == _runtime()[2].model.id
     assert frozen.model_version_id == _runtime()[2].version.id
     assert frozen.model_payload_checksum == "c" * 64
+    assert kwargs["initial_content"] is None
+    assert kwargs["initial_sections"] is None
+    assert kwargs["sections_policy_version_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_first_document_creation_uses_only_the_locked_memory_document_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sections = ("协作方式", "交付约束", "当前任务")
+    creation_policy = _creation_policy(sections)
+    repository = _Repository((), document_exists=False)
+    service = _service(repository)
+
+    async def runtime(_session, *, create_document):
+        assert create_document is True
+        return (*_runtime(), creation_policy)
+
+    monkeypatch.setattr(service, "_platform_runtime", runtime)
+
+    result = await service.admit(
+        object(),
+        _scope(),
+        trigger="manual_dream",
+        now=NOW,
+    )
+
+    assert result.disposition == "queued"
+    _scope_value, kwargs = repository.admissions[0]
+    assert kwargs["initial_content"] == "# 协作方式\n\n# 交付约束\n\n# 当前任务"
+    assert kwargs["initial_sections"] == sections
+    assert kwargs["sections_policy_version_id"] == creation_policy.policy_version_id
 
 
 @pytest.mark.asyncio
@@ -232,8 +358,9 @@ async def test_scheduler_uses_dream_interval_and_admits_each_due_scope_once(
         assert for_update is False
         return _runtime()[0], _runtime()[1]
 
-    async def runtime(_session):
-        return _runtime()
+    async def runtime(_session, *, create_document):
+        assert create_document is False
+        return (*_runtime(), None)
 
     async def resolve(*_args, **_kwargs):
         context = _ProjectContext()
@@ -308,7 +435,11 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
 
         async def read_state(self, _scope_value, **_kwargs):
             return SimpleNamespace(
-                document=SimpleNamespace(version=1, content=EMPTY_MEMORY_DOCUMENT),
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
+                ),
                 pending_count=3,
             )
 
@@ -419,6 +550,16 @@ async def test_scheduler_rechecks_due_with_the_locked_current_interval(
             intervals.append(kwargs["interval_minutes"])
             return False
 
+        async def read_state(self, _scope_value, **_kwargs):
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
+                ),
+                pending_count=3,
+            )
+
         async def admit_dream(self, *_args, **_kwargs):
             raise AssertionError("stale interval must not admit Dream")
 
@@ -496,8 +637,18 @@ async def test_restore_locks_policy_before_user_memory_and_document(
             pass
 
         async def read_version(self, _scope_value, _version):
-            events.append("document")
+            events.append("version")
             return SimpleNamespace(content=EMPTY_MEMORY_DOCUMENT)
+
+        async def read_state(self, _scope_value, *, for_update=False):
+            assert for_update is True
+            events.append("document")
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                    sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
+                )
+            )
 
         async def restore_version(self, *_args, **_kwargs):
             events.append("restore")
@@ -527,7 +678,14 @@ async def test_restore_locks_policy_before_user_memory_and_document(
     )
 
     assert result.version == 2
-    assert events == ["project", "policy", "preference", "document", "restore"]
+    assert events == [
+        "project",
+        "policy",
+        "preference",
+        "document",
+        "version",
+        "restore",
+    ]
 
 
 @pytest.mark.asyncio

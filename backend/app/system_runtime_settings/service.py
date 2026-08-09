@@ -33,6 +33,8 @@ from app.system_runtime_settings.errors import (
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     LockedAgentRuntimePolicy,
+    LockedMemoryDocumentPolicy,
+    MemoryDocumentPolicy,
     RuntimePolicyCatalogView,
     RuntimePolicyEffectScope,
     RuntimePolicySection,
@@ -66,6 +68,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
 _EFFECT_SCOPE: Mapping[RuntimePolicySection, RuntimePolicyEffectScope] = {
     RuntimePolicySection.AGENT_RUNTIME: "new_requests_and_runs",
     RuntimePolicySection.AUTH: "new_requests",
+    RuntimePolicySection.MEMORY_DOCUMENT: "new_memory_documents",
     RuntimePolicySection.QUOTAS: "next_authoritative_check",
 }
 _T = TypeVar("_T")
@@ -357,6 +360,41 @@ class SystemRuntimePolicyService:
             session,
             for_update=True,
         )
+
+    @staticmethod
+    async def lock_memory_document_for_creation(
+        session: AsyncSession,
+    ) -> LockedMemoryDocumentPolicy:
+        """Lock the exact policy used to create one new Memory document."""
+
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise SystemRuntimePolicyRepositoryInvariant
+        try:
+            policy, version = await SystemRuntimePolicyRepository(session).current(
+                RuntimePolicySection.MEMORY_DOCUMENT,
+                for_update=True,
+            )
+            canonical = canonical_policy_payload(
+                RuntimePolicySection.MEMORY_DOCUMENT,
+                dict(version.value),
+            )
+            value = parse_policy_value(
+                RuntimePolicySection.MEMORY_DOCUMENT,
+                canonical.value,
+            )
+            if canonical.schema_version != int(version.schema_version) or canonical.checksum != version.payload_checksum or int(policy.revision) != int(version.version_number) or not isinstance(value, MemoryDocumentPolicy):
+                raise SystemRuntimePolicyRepositoryInvariant
+            return LockedMemoryDocumentPolicy(
+                policy_version_id=uuid.UUID(str(version.id)),
+                revision=int(version.version_number),
+                schema_version=canonical.schema_version,
+                payload_checksum=canonical.checksum,
+                value=value,
+            )
+        except SystemRuntimePolicyRepositoryInvariant:
+            raise
+        except (RuntimePolicyInvalid, TypeError, ValueError):
+            raise SystemRuntimePolicyRepositoryInvariant from None
 
     @staticmethod
     async def admit_run_snapshot(

@@ -211,15 +211,6 @@ class MemorySealAdmissionService:
             lock=True,
         )
         context.require(Capability.PRIVATE_WORK_CREATE)
-        idle_minutes = await self._platform_idle_minutes(session)
-        if idle_minutes is None:
-            return None
-        try:
-            preference = await self._personalization_repository_builder(session).read_memory(owner_user_id)
-        except AccountPersonalizationNotFound:
-            return None
-        if not preference.memory_enabled:
-            return None
         thread = (
             await session.execute(
                 sa.select(ThreadMetaRow)
@@ -232,6 +223,15 @@ class MemorySealAdmissionService:
             )
         ).scalar_one_or_none()
         if thread is None:
+            return None
+        idle_minutes = await self._platform_idle_minutes(session)
+        if idle_minutes is None:
+            return None
+        try:
+            preference = await self._personalization_repository_builder(session).read_memory(owner_user_id)
+        except AccountPersonalizationNotFound:
+            return None
+        if not preference.memory_enabled:
             return None
         still_due = await session.scalar(
             sa.select(sa.literal(True)).where(

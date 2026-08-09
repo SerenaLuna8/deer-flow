@@ -11,7 +11,10 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
-import { MemoryDocumentWorkbench } from "@/components/projects/private-work/memory/memory-document-workbench";
+import {
+  MemoryDocumentWorkbench,
+  type MemoryWorkbenchTab,
+} from "@/components/projects/private-work/memory/memory-document-workbench";
 import { GatewayApiError } from "@/core/api/errors";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -41,13 +44,20 @@ import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { runPrivateWorkAbortable } from "@/core/private-work/types";
 import type { Project } from "@/core/projects/types";
 
-const MEMORY_FETCH_LIMIT = MEMORY_VERSION_PAGE_SIZE + 1;
-
 function parseSelectedVersion(value: string | null) {
   if (!value || !/^[1-9][0-9]*$/u.test(value)) return null;
   const version = Number(value);
   return Number.isSafeInteger(version) ? version : null;
 }
+
+function parseActiveTab(value: string | null): MemoryWorkbenchTab {
+  return value === "archive" ? "archive" : "current";
+}
+
+const FIRST_VERSION_REQUEST = {
+  limit: MEMORY_VERSION_PAGE_SIZE + 1,
+  offset: 0,
+} as const;
 
 export function ProjectMemoryPage({ project }: { project: Project }) {
   const { locale } = useI18n();
@@ -57,24 +67,25 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
   const searchParams = useSearchParams();
   const scope = privateWork.scope;
   const permissions = projectMemoryPermissions(project.capabilities);
-  const [versionPage, setVersionPage] = useState(0);
   const previousDreamRunningRef = useRef(false);
   const selectedVersion = parseSelectedVersion(searchParams.get("version"));
-  const initialTab =
-    searchParams.get("tab") === "archive" ? "archive" : "records";
+  const activeTab = parseActiveTab(searchParams.get("tab"));
+  const [versionPage, setVersionPage] = useState(0);
   const versionRequest = useMemo(
-    () => ({
-      limit: MEMORY_FETCH_LIMIT,
-      offset: versionPage * MEMORY_VERSION_PAGE_SIZE,
-    }),
+    () =>
+      versionPage === 0
+        ? FIRST_VERSION_REQUEST
+        : {
+            limit: MEMORY_VERSION_PAGE_SIZE + 1,
+            offset: versionPage * MEMORY_VERSION_PAGE_SIZE,
+          },
     [versionPage],
   );
 
-  const selectVersion = useCallback(
-    (version: number | null) => {
+  const replaceMemoryQuery = useCallback(
+    (mutate: (parameters: URLSearchParams) => void) => {
       const parameters = new URLSearchParams(searchParams.toString());
-      if (version === null) parameters.delete("version");
-      else parameters.set("version", String(version));
+      mutate(parameters);
       const query = parameters.toString();
       router.replace(
         `/projects/${encodeURIComponent(project.slug)}/memory${query ? `?${query}` : ""}`,
@@ -82,6 +93,26 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       );
     },
     [project.slug, router, searchParams],
+  );
+
+  const selectVersion = useCallback(
+    (version: number | null) => {
+      replaceMemoryQuery((parameters) => {
+        if (version === null) parameters.delete("version");
+        else parameters.set("version", String(version));
+      });
+    },
+    [replaceMemoryQuery],
+  );
+
+  const selectTab = useCallback(
+    (tab: MemoryWorkbenchTab) => {
+      replaceMemoryQuery((parameters) => {
+        if (tab === "archive") parameters.set("tab", "archive");
+        else parameters.delete("tab");
+      });
+    },
+    [replaceMemoryQuery],
   );
 
   const documentQuery = useQuery({
@@ -99,6 +130,15 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     enabled: permissions.canRead,
     placeholderData: keepPreviousData,
   });
+  // Keep the actual latest summary live while the user pages through older
+  // versions. On page zero this shares the same React Query key/request as the
+  // paginated observer, so it does not add a duplicate network fetch.
+  const latestVersionsQuery = useQuery({
+    queryKey: projectMemoryVersionsQueryKey(scope, FIRST_VERSION_REQUEST),
+    queryFn: ({ signal }) =>
+      listProjectMemoryVersions(privateWork, FIRST_VERSION_REQUEST, signal),
+    enabled: permissions.canRead,
+  });
   const detailQuery = useQuery({
     queryKey:
       selectedVersion === null
@@ -113,6 +153,21 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     queryFn: ({ signal }) => listProjectMemoryPending(privateWork, {}, signal),
     enabled: permissions.canRead,
   });
+
+  useEffect(() => {
+    if (
+      !pendingQuery.data?.items.length ||
+      window.location.hash !== "#memory-pending"
+    ) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const target = document.getElementById("memory-pending");
+      target?.scrollIntoView({ block: "start" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [pendingQuery.data?.items.length]);
 
   const [episodeSearchInput, setEpisodeSearchInput] = useState("");
   const [episodeQuery, setEpisodeQuery] = useState<string | null>(null);
@@ -142,7 +197,6 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       ),
     initialPageParam: undefined as string | undefined,
     getNextPageParam: (lastPage) => {
-      // Ranked search has no stable cursor; browse pages by occurred-at.
       if (episodeQuery) return undefined;
       if (lastPage.items.length < MEMORY_EPISODE_PAGE_SIZE) return undefined;
       return lastPage.items[lastPage.items.length - 1]?.occurredAt;
@@ -200,9 +254,13 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       await refreshMemory();
       if (result.disposition === "queued") {
         toast.success(
-          locale === "zh-CN"
-            ? `已开始整理 ${result.historyCount} 条记忆。`
-            : `Started organizing ${result.historyCount} Memory items.`,
+          "admissionKind" in result && result.admissionKind === "budget_rewrite"
+            ? locale === "zh-CN"
+              ? "已开始将记忆文档压缩到当前注入预算。"
+              : "Started compressing the Memory document into the current injection budget."
+            : locale === "zh-CN"
+              ? `已开始整理 ${result.historyCount} 条记忆。`
+              : `Started organizing ${result.historyCount} Memory items.`,
         );
       } else if (result.disposition === "already_running") {
         toast.info(
@@ -228,6 +286,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
       );
     },
   });
+
   const restoreMutation = useMutation({
     mutationKey: projectMemoryMutationKey(scope, "restore"),
     mutationFn: (input: {
@@ -262,12 +321,10 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
     },
   });
 
-  const versionItems =
-    versionsQuery.data?.items.slice(0, MEMORY_VERSION_PAGE_SIZE) ?? [];
-
   return (
     <MemoryDocumentWorkbench
-      initialTab={initialTab}
+      activeTab={activeTab}
+      onTabChange={selectTab}
       document={{
         data: documentQuery.data,
         error: documentQuery.error,
@@ -275,15 +332,17 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
         retry: () => void documentQuery.refetch(),
       }}
       versions={{
-        data: versionItems,
+        data:
+          versionsQuery.data?.items.slice(0, MEMORY_VERSION_PAGE_SIZE) ?? [],
+        latest: latestVersionsQuery.data?.items[0] ?? null,
         error: versionsQuery.error,
         isLoading: versionsQuery.isLoading,
         retry: () => void versionsQuery.refetch(),
         page: versionPage,
         hasNext:
           (versionsQuery.data?.items.length ?? 0) > MEMORY_VERSION_PAGE_SIZE,
-        previous: () => setVersionPage((page) => Math.max(0, page - 1)),
-        next: () => setVersionPage((page) => page + 1),
+        previous: () => setVersionPage((current) => Math.max(0, current - 1)),
+        next: () => setVersionPage((current) => current + 1),
       }}
       detail={{
         data: detailQuery.data,
@@ -304,7 +363,7 @@ export function ProjectMemoryPage({ project }: { project: Project }) {
         activeQuery: episodeQuery,
         tags: episodeTags,
         toggleTag: toggleEpisodeTag,
-        hasMore: episodesQuery.hasNextPage,
+        hasMore: Boolean(episodesQuery.hasNextPage),
         loadMore: () => void episodesQuery.fetchNextPage(),
         loadingMore: episodesQuery.isFetchingNextPage,
       }}

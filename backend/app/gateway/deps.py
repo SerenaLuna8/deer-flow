@@ -48,9 +48,33 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.repositories.sql import SQLUserRepository
+    from app.gateway.run_event_wakeup import RunEventWakeup
 
 
 T = TypeVar("T")
+
+
+async def _install_run_event_wakeup(
+    app: FastAPI,
+    stack: AsyncExitStack,
+    *,
+    dsn: str,
+    enabled: bool,
+    wakeup_factory: Callable[[str], RunEventWakeup] | None = None,
+) -> RunEventWakeup | None:
+    """Install the optional Gateway listener or restore polling-only behavior."""
+
+    from app.gateway.run_event_wakeup import RunEventWakeup
+
+    if not enabled:
+        app.state.run_event_wakeup = None
+        return None
+    factory = wakeup_factory or RunEventWakeup
+    wakeup = factory(dsn)
+    await wakeup.start()
+    stack.push_async_callback(wakeup.aclose)
+    app.state.run_event_wakeup = wakeup
+    return wakeup
 
 
 def get_config() -> AppConfig:
@@ -378,7 +402,11 @@ async def gateway_platform_runtime(
 
         from deerflow.runtime.events.store.db import DbRunEventStore
 
-        app.state.private_run_event_store = DbRunEventStore(sf)
+        run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
+        app.state.private_run_event_store = DbRunEventStore(
+            sf,
+            run_event_notify_enabled=run_event_notify_enabled,
+        )
         from app.private_work.chat_controls import ProjectChatControlService
 
         app.state.project_chat_control_service = ProjectChatControlService(
@@ -395,16 +423,19 @@ async def gateway_platform_runtime(
         )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
-        app.state.private_stream_bridge = PostgresStreamBridge(sf)
-
-        from app.gateway.run_event_wakeup import RunEventWakeup
+        app.state.private_stream_bridge = PostgresStreamBridge(
+            sf,
+            run_event_notify_enabled=run_event_notify_enabled,
+        )
 
         # Per-process LISTEN/NOTIFY alarm clock for durable SSE consumers. A
         # broken listener only degrades those consumers to the poll cadence.
-        run_event_wakeup = RunEventWakeup(config.database.checkpointer_url)
-        await run_event_wakeup.start()
-        stack.push_async_callback(run_event_wakeup.aclose)
-        app.state.run_event_wakeup = run_event_wakeup
+        await _install_run_event_wakeup(
+            app,
+            stack,
+            dsn=config.database.checkpointer_url,
+            enabled=run_event_notify_enabled,
+        )
         yield
 
 

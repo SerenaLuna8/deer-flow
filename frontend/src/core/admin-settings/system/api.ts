@@ -7,12 +7,14 @@ import {
   adminSystemSettingsAccountIdSchema,
   replaceAgentRuntimeSettingsInputSchema,
   replaceAuthSettingsInputSchema,
+  replaceMemoryDocumentSettingsInputSchema,
   replaceQuotaSettingsInputSchema,
   systemSettingsCatalogSchema,
   systemSettingsMutationResponseSchema,
   systemSettingsSectionNameSchema,
   type ReplaceAgentRuntimeSettingsInput,
   type ReplaceAuthSettingsInput,
+  type ReplaceMemoryDocumentSettingsInput,
   type ReplaceQuotaSettingsInput,
   type SystemSettingsCatalog,
   type SystemSettingsMutationResponse,
@@ -45,6 +47,10 @@ export type ReplaceSystemSettingsSectionInput =
       input: ReplaceAgentRuntimeSettingsInput;
     }
   | { section: "auth"; input: ReplaceAuthSettingsInput }
+  | {
+      section: "memory_document";
+      input: ReplaceMemoryDocumentSettingsInput;
+    }
   | { section: "quotas"; input: ReplaceQuotaSettingsInput };
 
 const mutationControllers = new Map<string, Set<AbortController>>();
@@ -136,12 +142,15 @@ function parseReplaceInput(
 ):
   | ReplaceAgentRuntimeSettingsInput
   | ReplaceAuthSettingsInput
+  | ReplaceMemoryDocumentSettingsInput
   | ReplaceQuotaSettingsInput {
   switch (section) {
     case "agent_runtime":
       return replaceAgentRuntimeSettingsInputSchema.parse(input);
     case "auth":
       return replaceAuthSettingsInputSchema.parse(input);
+    case "memory_document":
+      return replaceMemoryDocumentSettingsInputSchema.parse(input);
     case "quotas":
       return replaceQuotaSettingsInputSchema.parse(input);
   }
@@ -161,6 +170,12 @@ export async function replaceAdminSystemSettingsSection(
 ): Promise<SystemSettingsMutationResponse>;
 export async function replaceAdminSystemSettingsSection(
   accountId: string,
+  section: "memory_document",
+  input: ReplaceMemoryDocumentSettingsInput,
+  signal?: AbortSignal,
+): Promise<SystemSettingsMutationResponse>;
+export async function replaceAdminSystemSettingsSection(
+  accountId: string,
   section: "quotas",
   input: ReplaceQuotaSettingsInput,
   signal?: AbortSignal,
@@ -171,6 +186,7 @@ export async function replaceAdminSystemSettingsSection(
   input:
     | ReplaceAgentRuntimeSettingsInput
     | ReplaceAuthSettingsInput
+    | ReplaceMemoryDocumentSettingsInput
     | ReplaceQuotaSettingsInput,
   signal?: AbortSignal,
 ): Promise<SystemSettingsMutationResponse> {

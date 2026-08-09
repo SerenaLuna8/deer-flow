@@ -3,6 +3,7 @@
 import {
   ArrowLeftIcon,
   BotIcon,
+  GaugeIcon,
   KeyRoundIcon,
   NetworkIcon,
   SparklesIcon,
@@ -18,6 +19,7 @@ const NAVIGATION = [
   { segment: "skills", labelKey: "skill", icon: SparklesIcon },
   { segment: "mcp", labelKey: "mcp", icon: NetworkIcon },
   { segment: "credentials", labelKey: "credential", icon: KeyRoundIcon },
+  { segment: "quotas", labelKey: "quota", icon: GaugeIcon },
 ] as const;
 
 export function AdminProjectAssetsShell({
@@ -74,7 +76,7 @@ export function AdminProjectAssetsShell({
           <nav
             aria-label={t.adminAssets.navigation.projectLabel}
             data-variant="line"
-            className="grid min-w-0 grid-cols-4 items-center gap-1 sm:flex sm:grid-cols-4 sm:gap-5"
+            className="grid min-w-0 grid-cols-5 items-center gap-1 sm:flex sm:grid-cols-5 sm:gap-5"
           >
             {NAVIGATION.map(({ segment, labelKey, icon: Icon }) => {
               const href = `${base}/${segment}`;

@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     AuthPolicyValue,
+    MemoryDocumentPolicy,
     QuotaPolicyValue,
     RuntimePolicySection,
     RuntimePolicyValue,
@@ -98,12 +99,14 @@ def parse_policy_value(
 ) -> RuntimePolicyValue:
     try:
         parsed_section = RuntimePolicySection(section)
-        raw: object = value.model_dump(mode="python") if isinstance(value, (AgentRuntimePolicyValue, AuthPolicyValue, QuotaPolicyValue)) else value
+        raw: object = value.model_dump(mode="python") if isinstance(value, (AgentRuntimePolicyValue, AuthPolicyValue, MemoryDocumentPolicy, QuotaPolicyValue)) else value
         _reject_secret_material(raw)
         if parsed_section is RuntimePolicySection.AGENT_RUNTIME:
             parsed: RuntimePolicyValue = AgentRuntimePolicyValue.model_validate(raw)
         elif parsed_section is RuntimePolicySection.AUTH:
             parsed = AuthPolicyValue.model_validate(raw)
+        elif parsed_section is RuntimePolicySection.MEMORY_DOCUMENT:
+            parsed = MemoryDocumentPolicy.model_validate(raw)
         else:
             parsed = QuotaPolicyValue.model_validate(raw)
         normalized = parsed.model_dump(mode="json")

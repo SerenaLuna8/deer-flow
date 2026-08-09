@@ -60,6 +60,29 @@ export function formatCompactTokenCount(value: number, locale: Locale): string {
   }).format(value);
 }
 
+function formatPathNumber(value: number): string {
+  return value.toFixed(2);
+}
+
+/** Cubic path with horizontal tangents so series stay smooth without Y overshoot. */
+export function buildSmoothTokenUsagePath(
+  points: ReadonlyArray<Pick<TokenUsageChartPoint, "x" | "y">>,
+): string {
+  if (points.length === 0) return "";
+  const first = points[0]!;
+  if (points.length === 1) {
+    return `M ${formatPathNumber(first.x)} ${formatPathNumber(first.y)}`;
+  }
+  let path = `M ${formatPathNumber(first.x)} ${formatPathNumber(first.y)}`;
+  for (let index = 0; index < points.length - 1; index += 1) {
+    const current = points[index]!;
+    const next = points[index + 1]!;
+    const deltaX = (next.x - current.x) / 2;
+    path += ` C ${formatPathNumber(current.x + deltaX)} ${formatPathNumber(current.y)}, ${formatPathNumber(next.x - deltaX)} ${formatPathNumber(next.y)}, ${formatPathNumber(next.x)} ${formatPathNumber(next.y)}`;
+  }
+  return path;
+}
+
 export function buildTokenUsageChartModel(
   data: ProjectTokenUsageSeries,
   locale: Locale,
@@ -92,12 +115,7 @@ export function buildTokenUsageChartModel(
     return {
       key,
       points,
-      path: points
-        .map(
-          (point, index) =>
-            `${index === 0 ? "M" : "L"} ${point.x.toFixed(2)} ${point.y.toFixed(2)}`,
-        )
-        .join(" "),
+      path: buildSmoothTokenUsagePath(points),
     };
   });
   const hourFormatter = new Intl.DateTimeFormat(locale, {

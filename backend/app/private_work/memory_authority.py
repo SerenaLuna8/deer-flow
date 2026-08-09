@@ -19,12 +19,16 @@ from app.private_work.context import (
     require_issued_private_work_context,
 )
 from app.private_work.run_repository import PrivateRunRepository
+from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.context import (
     ProjectContext,
     resolve_project_context_in_transaction,
 )
-from deerflow.agents.memory.dream import validate_memory_document
+from deerflow.agents.memory.dream import (
+    validate_memory_document,
+    validate_memory_document_sections,
+)
 from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.private_work.memory_document_model import (
@@ -55,6 +59,21 @@ def _recall_result_bucket(count: int) -> str:
     return "3+"
 
 
+def _recall_query_len_bucket(query: str) -> str:
+    """Bucket a normalized query's Unicode code-point length for quality audit."""
+
+    if not isinstance(query, str) or not 1 <= len(query) <= MAX_EPISODE_QUERY_CHARS:
+        raise ValueError("Episode query is out of contract")
+    length = len(query)
+    if length <= 4:
+        return "1-4"
+    if length <= 16:
+        return "5-16"
+    if length <= 64:
+        return "17-64"
+    return "65-200"
+
+
 def _recall_matched_stage(query: str, episodes: tuple[MemoryEpisodeRecord, ...]) -> str:
     """Report which ranking stage produced the top hit, without content.
 
@@ -77,6 +96,7 @@ class PrivateRunMemorySnapshot:
     document_version: int
     content: str
     content_digest: str
+    sections: tuple[str, ...]
 
     def __post_init__(self) -> None:
         if (
@@ -90,6 +110,11 @@ class PrivateRunMemorySnapshot:
             or hashlib.sha256(self.content.encode("utf-8")).hexdigest() != self.content_digest
         ):
             raise ValueError("Run Memory snapshot is invalid")
+        object.__setattr__(
+            self,
+            "sections",
+            validate_memory_document_sections(self.sections),
+        )
 
 
 class PrivateRunMemoryAuthority:
@@ -113,6 +138,7 @@ class PrivateRunMemoryAuthority:
         memory_config: MemoryConfig,
         personalization_repository_builder=AccountPersonalizationRepository,
         run_repository_builder=PrivateRunRepository,
+        thread_repository_builder=PrivateThreadRepository,
         audit=None,
     ) -> None:
         context = require_issued_private_work_context(context)
@@ -122,7 +148,7 @@ class PrivateRunMemoryAuthority:
             raise ValueError("Memory authority coordinates are invalid")
         if not isinstance(memory_config, MemoryConfig):
             raise ValueError("Memory authority configuration is invalid")
-        if not callable(personalization_repository_builder) or not callable(run_repository_builder):
+        if not callable(personalization_repository_builder) or not callable(run_repository_builder) or not callable(thread_repository_builder):
             raise ValueError("Memory authority repositories are invalid")
         if audit is not None and (not callable(getattr(audit, "memory_remembered", None)) or not callable(getattr(audit, "memory_recall_executed", None))):
             raise ValueError("Memory authority audit port is invalid")
@@ -135,6 +161,7 @@ class PrivateRunMemoryAuthority:
         self._memory_config = memory_config
         self._personalization_repository_builder = personalization_repository_builder
         self._run_repository_builder = run_repository_builder
+        self._thread_repository_builder = thread_repository_builder
 
     async def _require_live_run(self, session) -> None:
         """Revalidate membership, capability, Run, Job, lease, and Thread."""
@@ -149,6 +176,25 @@ class PrivateRunMemoryAuthority:
         if type(current) is not ProjectContext or current.membership_id != self._context.membership_id or current.membership_version != self._context.membership_version:
             raise AuthorizationRevoked
         current.require(Capability.PRIVATE_WORK_READ_OWN)
+
+        # The global Memory lock order requires the exact live Thread after the
+        # Project/Membership locks and before the Run Job/lease rows.  The
+        # repository's active-scope predicate excludes frozen and deleted
+        # threads; the explicit checks keep an injected repository fail-closed.
+        thread = await self._thread_repository_builder(session).get(
+            scope=self._context.resource_scope,
+            thread_id=self._thread_id,
+            lock=True,
+        )
+        if (
+            thread is None
+            or thread.thread_id != self._thread_id
+            or str(thread.project_id) != self._context.resource_scope.project_id
+            or thread.owner_user_id != self._context.resource_scope.owner_user_id
+            or thread.frozen_at is not None
+            or thread.deleted_at is not None
+        ):
+            raise AuthorizationRevoked
 
         active = await PrivateRunAuthorizationService.is_active(
             session,
@@ -209,11 +255,13 @@ class PrivateRunMemoryAuthority:
                 validate_memory_document(
                     row.content,
                     self._memory_config.max_injection_tokens,
+                    sections=row.sections,
                 )
                 return PrivateRunMemorySnapshot(
                     document_version=int(row.document_version),
                     content=row.content,
                     content_digest=row.content_digest,
+                    sections=tuple(row.sections),
                 )
         except asyncio.CancelledError:
             raise
@@ -236,7 +284,10 @@ class PrivateRunMemoryAuthority:
         mirroring :meth:`load_snapshot`.
         """
 
-        if not isinstance(query, str) or not query.strip() or len(query.strip()) > MAX_EPISODE_QUERY_CHARS:
+        if not isinstance(query, str):
+            raise ValueError("Episode query is out of contract")
+        normalized_query = query.strip()
+        if not normalized_query or len(normalized_query) > MAX_EPISODE_QUERY_CHARS:
             raise ValueError("Episode query is out of contract")
         if type(limit) is not int or not 1 <= limit <= 10:
             raise ValueError("Episode limit is out of contract")
@@ -256,7 +307,7 @@ class PrivateRunMemoryAuthority:
                         owner_user_id=str(self._context.user_id),
                         namespace=self._namespace,
                     ),
-                    query=query.strip(),
+                    query=normalized_query,
                     tags=normalized_tags,
                     limit=limit,
                     retention_days=self._memory_config.episode_retention_days,
@@ -273,10 +324,11 @@ class PrivateRunMemoryAuthority:
                         request_id=self._context.request_id,
                         result_bucket=_recall_result_bucket(len(episodes)),
                         matched_stage=_recall_matched_stage(
-                            query.strip(),
+                            normalized_query,
                             episodes,
                         ),
                         tags_filtered=bool(normalized_tags),
+                        query_len_bucket=_recall_query_len_bucket(normalized_query),
                     )
                 return episodes
         except asyncio.CancelledError:

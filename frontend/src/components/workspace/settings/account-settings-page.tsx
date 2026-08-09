@@ -14,8 +14,44 @@ import {
 } from "@/core/auth/request";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
+import { cn } from "@/lib/utils";
 
 import { SettingsSection } from "./settings-section";
+
+function ProfileField({
+  label,
+  value,
+  className,
+}: {
+  label: string;
+  value: string;
+  className?: string;
+}) {
+  return (
+    <div
+      className={cn(
+        "flex min-w-0 flex-col gap-1 px-4 py-3 sm:flex-row sm:items-baseline sm:gap-6",
+        className,
+      )}
+    >
+      <dt className="text-muted-foreground w-24 shrink-0 text-sm">{label}</dt>
+      <dd className="min-w-0 text-sm font-medium [overflow-wrap:anywhere]">
+        {value}
+      </dd>
+    </div>
+  );
+}
+
+function RequiredLabel({ label }: { label: string }) {
+  return (
+    <span className="inline-flex items-center gap-0.5 text-sm font-medium">
+      {label}
+      <span className="text-destructive" aria-hidden>
+        *
+      </span>
+    </span>
+  );
+}
 
 export function AccountSettingsPage() {
   const { user, logout } = useAuth();
@@ -100,66 +136,70 @@ export function AccountSettingsPage() {
     }
   };
 
+  const roleLabel = user?.system_role
+    ? t.settings.account.roles[user.system_role]
+    : "—";
+
   return (
     <div className="space-y-8">
       <SettingsSection title={t.settings.account.profileTitle}>
-        <div className="space-y-2">
-          <div className="grid grid-cols-[max-content_max-content] items-center gap-4">
-            <span className="text-muted-foreground text-sm">
-              {t.settings.account.email}
-            </span>
-            <span className="text-sm font-medium">{user?.email ?? "—"}</span>
-            <span className="text-muted-foreground text-sm">
-              {t.settings.account.role}
-            </span>
-            <span className="text-sm font-medium capitalize">
-              {user?.system_role ?? "—"}
-            </span>
-            {isSsoUser && (
-              <>
-                <span className="text-muted-foreground text-sm">
-                  {t.settings.account.ssoProvider}
-                </span>
-                <span className="text-sm font-medium capitalize">
-                  {user?.oauth_provider}
-                </span>
-              </>
-            )}
-          </div>
-        </div>
+        <dl className="divide-border bg-muted/20 max-w-xl divide-y rounded-xl border">
+          <ProfileField
+            label={t.settings.account.email}
+            value={user?.email ?? "—"}
+          />
+          <ProfileField label={t.settings.account.role} value={roleLabel} />
+          {isSsoUser ? (
+            <ProfileField
+              label={t.settings.account.ssoProvider}
+              value={user?.oauth_provider ?? "—"}
+            />
+          ) : null}
+        </dl>
       </SettingsSection>
 
       {!isSsoUser ? (
-        <SettingsSection
-          title={t.settings.account.changePasswordTitle}
-          description={t.settings.account.changePasswordDescription}
-        >
-          <form onSubmit={handleChangePassword} className="max-w-sm space-y-3">
-            <Input
-              type="password"
-              placeholder={t.settings.account.currentPassword}
-              value={currentPassword}
-              onChange={(e) => setCurrentPassword(e.target.value)}
-              required
-            />
-            <Input
-              type="password"
-              placeholder={t.settings.account.newPassword}
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-              minLength={8}
-            />
-            <Input
-              type="password"
-              placeholder={t.settings.account.confirmNewPassword}
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              required
-              minLength={8}
-            />
-            {error && <p className="text-sm text-red-500">{error}</p>}
-            {message && <p className="text-sm text-green-500">{message}</p>}
+        <SettingsSection title={t.settings.account.changePasswordTitle}>
+          <form onSubmit={handleChangePassword} className="max-w-sm space-y-4">
+            <label className="block space-y-2">
+              <RequiredLabel label={t.settings.account.currentPassword} />
+              <Input
+                type="password"
+                autoComplete="current-password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                required
+                aria-required="true"
+              />
+            </label>
+            <label className="block space-y-2">
+              <RequiredLabel label={t.settings.account.newPassword} />
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+                aria-required="true"
+                minLength={8}
+              />
+            </label>
+            <label className="block space-y-2">
+              <RequiredLabel label={t.settings.account.confirmNewPassword} />
+              <Input
+                type="password"
+                autoComplete="new-password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+                aria-required="true"
+                minLength={8}
+              />
+            </label>
+            {error ? <p className="text-destructive text-sm">{error}</p> : null}
+            {message ? (
+              <p className="text-sm text-emerald-600">{message}</p>
+            ) : null}
             <Button
               type="submit"
               variant="outline"
@@ -177,7 +217,7 @@ export function AccountSettingsPage() {
           title={t.settings.account.changePasswordTitle}
           description={t.settings.account.ssoPasswordDescription}
         >
-          <p className="text-muted-foreground text-sm">
+          <p className="text-muted-foreground max-w-xl text-sm">
             {t.settings.account.ssoPasswordMessage.replace(
               "{provider}",
               user?.oauth_provider ?? "",
@@ -186,7 +226,7 @@ export function AccountSettingsPage() {
         </SettingsSection>
       )}
 
-      <SettingsSection title="" description="">
+      <div className="border-t pt-6">
         <Button
           variant="destructive"
           size="sm"
@@ -196,7 +236,7 @@ export function AccountSettingsPage() {
           <LogOutIcon className="size-4" />
           {t.settings.account.signOut}
         </Button>
-      </SettingsSection>
+      </div>
     </div>
   );
 }

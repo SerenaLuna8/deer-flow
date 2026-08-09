@@ -5,10 +5,21 @@ import { z } from "zod";
 
 import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
+import {
+  usageResponseSchema,
+  updateQuotaLimitsSchema,
+  quotaPolicySchema,
+  type ProjectUsage,
+  type UpdateQuotaLimits,
+  type QuotaPolicy,
+} from "@/core/project-governance/usage";
+import { assetIdSchema } from "@/core/shared-assets/types";
 
 import {
   adminAuditQueryKey,
   adminProjectLifecycleMutationKey,
+  adminProjectQuotaLimitsMutationKey,
+  adminProjectUsageQueryKey,
   adminJobsQueryKey,
   adminOperationsRoot,
   adminProjectsQueryKey,
@@ -454,6 +465,95 @@ export function useSafeRequeue(accountId: string) {
     onSuccess: async () => {
       await queryClient.invalidateQueries({
         queryKey: adminOperationsRoot(parsed),
+      });
+    },
+  });
+}
+
+export async function fetchAdminProjectUsage(
+  accountId: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<ProjectUsage> {
+  accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  const response = await requestOperations(
+    `${operationsBaseURL()}/projects/${encodeURIComponent(parsedProjectId)}/usage`,
+    { signal },
+  );
+  return readOperationsResponse(response, usageResponseSchema);
+}
+
+export async function updateAdminProjectQuotaLimits(
+  accountId: string,
+  projectId: string,
+  input: UpdateQuotaLimits,
+  signal?: AbortSignal,
+): Promise<QuotaPolicy> {
+  accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  const body = updateQuotaLimitsSchema.parse(input);
+  const response = await requestOperations(
+    `${operationsBaseURL()}/projects/${encodeURIComponent(parsedProjectId)}/usage/limits`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return readOperationsResponse(response, quotaPolicySchema);
+}
+
+export function adminProjectUsageQueryOptions(
+  accountId: string,
+  projectId: string,
+  enabled = true,
+) {
+  const parsedAccountId = accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  return {
+    queryKey: adminProjectUsageQueryKey(parsedAccountId, parsedProjectId),
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      fetchAdminProjectUsage(parsedAccountId, parsedProjectId, signal),
+    enabled,
+    retry: false,
+    refetchOnWindowFocus: false,
+  };
+}
+
+export function useAdminProjectUsage(
+  accountId: string,
+  projectId: string,
+  enabled = true,
+) {
+  return useQuery(adminProjectUsageQueryOptions(accountId, projectId, enabled));
+}
+
+export function useUpdateAdminProjectQuotaLimits(
+  accountId: string,
+  projectId: string,
+) {
+  const parsedAccountId = accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: adminProjectQuotaLimitsMutationKey(
+      parsedAccountId,
+      parsedProjectId,
+    ),
+    mutationFn: (input: UpdateQuotaLimits) =>
+      runAbortableMutation(parsedAccountId, (signal) =>
+        updateAdminProjectQuotaLimits(
+          parsedAccountId,
+          parsedProjectId,
+          input,
+          signal,
+        ),
+      ),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: adminProjectUsageQueryKey(parsedAccountId, parsedProjectId),
       });
     },
   });

@@ -56,7 +56,7 @@ Fixes #
 
 <!-- What you actually ran. Run at least the checks for the area you changed:
        Backend lint: cd backend && make lint
-       Backend core: POSTGRES_TEST_URL=... make test  (from repository root)
+       Backend core: make test  (from repository root; uses development DATABASE_URL)
        Frontend: cd frontend && pnpm format && pnpm check && pnpm test
        Frontend E2E: cd frontend && pnpm test:e2e && pnpm test:e2e:static -->
 

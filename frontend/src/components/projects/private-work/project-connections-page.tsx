@@ -70,6 +70,15 @@ import {
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
 
+/** Project Connections UI currently exposes Feishu only; other providers stay API-capable. */
+export const VISIBLE_PROJECT_CHANNEL_PROVIDERS = ["feishu"] as const;
+
+export function isVisibleProjectChannelProvider(provider: string): boolean {
+  return (VISIBLE_PROJECT_CHANNEL_PROVIDERS as readonly string[]).includes(
+    provider,
+  );
+}
+
 export function connectionAgentRuntimeOptions(
   agents: readonly ExecutableProjectAgent[],
   assessments: readonly AgentMcpDependencyAssessment[],
@@ -308,8 +317,13 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
     provider: string;
     action: "configure" | "enable" | "disable" | "delete";
   } | null>(null);
-  const providerStates = providers.data?.providers ?? [];
-  const feishuInstance = channelInstances.data?.instances.find(
+  const providerStates = (providers.data?.providers ?? []).filter((provider) =>
+    isVisibleProjectChannelProvider(provider.provider),
+  );
+  const visibleChannelInstances = (
+    channelInstances.data?.instances ?? []
+  ).filter((instance) => isVisibleProjectChannelProvider(instance.provider));
+  const feishuInstance = visibleChannelInstances.find(
     (instance) => instance.provider === "feishu",
   );
   const groupBindingAvailability =
@@ -594,13 +608,13 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
               重试
             </Button>
           </div>
-        ) : (channelInstances.data?.instances.length ?? 0) === 0 ? (
+        ) : visibleChannelInstances.length === 0 ? (
           <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
             暂无可配置渠道。
           </p>
         ) : (
           <ul className="grid gap-3 md:grid-cols-2">
-            {channelInstances.data?.instances.map((instance) => (
+            {visibleChannelInstances.map((instance) => (
               <ChannelInstanceCard
                 key={instance.provider}
                 instance={instance}
