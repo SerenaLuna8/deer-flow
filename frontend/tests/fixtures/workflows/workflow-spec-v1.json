@@ -1,0 +1,438 @@
+{
+  "schema_version": 1,
+  "entry_node_id": "00000000-0000-4000-8000-000000000001",
+  "nodes": [
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "type": "llm",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": "摘要模型",
+      "description": "仅用于编辑器展示",
+      "input_bindings": {
+        "prompt": { "kind": "workflow_input", "input_id": "input-text" }
+      },
+      "execution_policy": {
+        "retry": { "mode": "bounded", "max_attempts": 2, "backoff_ms": 250 },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "model_ref": "default",
+        "mode": "chat",
+        "context_input_ids": ["input-text"],
+        "messages": [
+          {
+            "id": "message-system",
+            "role": "system",
+            "content": {
+              "version": 1,
+              "segments": [{ "kind": "text", "value": "请生成摘要。" }]
+            }
+          },
+          {
+            "id": "message-user",
+            "role": "user",
+            "content": {
+              "version": 1,
+              "segments": [
+                {
+                  "kind": "binding",
+                  "value": {
+                    "kind": "workflow_input",
+                    "input_id": "input-text"
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "model_parameters": { "temperature": 0.2 },
+        "stream": false,
+        "reasoning_output": "omit",
+        "structured_output": { "enabled": false, "schema": null }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "type": "start",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {},
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {}
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "type": "condition",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {},
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "branches": [
+          {
+            "id": "branch-long",
+            "output_port_id": "long",
+            "label": "长文本",
+            "predicate": {
+              "op": "and",
+              "items": [
+                {
+                  "left": {
+                    "kind": "workflow_input",
+                    "input_id": "input-limit"
+                  },
+                  "operator": "gte",
+                  "right": { "kind": "literal", "value": 100 }
+                }
+              ]
+            }
+          }
+        ],
+        "else_output_port_id": "short"
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "type": "transform",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {
+        "summary": {
+          "kind": "node_output",
+          "node_id": "00000000-0000-4000-8000-000000000002",
+          "output_id": "text"
+        }
+      },
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "mode": "text",
+        "input_variables": [
+          {
+            "id": "variable-summary",
+            "name": "summary",
+            "value_type": {
+              "kind": "string",
+              "collection": false,
+              "nullable": false
+            }
+          }
+        ],
+        "missing_variable": "error",
+        "template": {
+          "version": 1,
+          "segments": [
+            { "kind": "text", "value": "摘要：" },
+            {
+              "kind": "binding",
+              "value": {
+                "kind": "node_output",
+                "node_id": "00000000-0000-4000-8000-000000000002",
+                "output_id": "text"
+              }
+            }
+          ]
+        },
+        "output_schema": null
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "type": "variable_aggregate",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {
+        "long-candidate": {
+          "kind": "node_output",
+          "node_id": "00000000-0000-4000-8000-000000000004",
+          "output_id": "text"
+        },
+        "short-candidate": { "kind": "literal", "value": "短文本" }
+      },
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "strategy": "exclusive_branch",
+        "groups": [
+          {
+            "id": "summary",
+            "name": "summary",
+            "value_type": {
+              "kind": "string",
+              "collection": false,
+              "nullable": false
+            },
+            "candidate_input_ids": ["long-candidate", "short-candidate"]
+          }
+        ]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "type": "loop",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {
+        "initial-count": { "kind": "literal", "value": 0 },
+        "next-count": {
+          "kind": "node_output",
+          "node_id": "00000000-0000-4000-8000-000000000009",
+          "output_id": "result",
+          "path": "/count"
+        }
+      },
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "mode": "do_until",
+        "body_entry_node_id": "00000000-0000-4000-8000-000000000009",
+        "body_exit_node_id": "00000000-0000-4000-8000-000000000009",
+        "max_iterations": 3,
+        "termination_condition": {
+          "op": "and",
+          "items": [
+            {
+              "left": {
+                "kind": "loop_variable",
+                "loop_node_id": "00000000-0000-4000-8000-000000000006",
+                "variable_id": "loop-count"
+              },
+              "operator": "gte",
+              "right": { "kind": "literal", "value": 3 }
+            }
+          ]
+        },
+        "variables": [
+          {
+            "id": "loop-count",
+            "name": "count",
+            "value_type": {
+              "kind": "number",
+              "collection": false,
+              "nullable": false
+            },
+            "initial_input_id": "initial-count",
+            "next_input_id": "next-count",
+            "output_port_id": "count"
+          }
+        ]
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000007",
+      "type": "http_request",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {},
+      "execution_policy": {
+        "retry": { "mode": "bounded", "max_attempts": 2, "backoff_ms": 100 },
+        "on_error": { "mode": "route_error", "output_port_id": "error" }
+      },
+      "config": {
+        "method": "POST",
+        "base_origin": "https://api.example.com",
+        "path_template": {
+          "version": 1,
+          "segments": [{ "kind": "text", "value": "/summaries" }]
+        },
+        "query": [],
+        "headers": [
+          {
+            "id": "header-accept",
+            "name": "Accept",
+            "value": { "kind": "literal", "value": "application/json" }
+          }
+        ],
+        "auth": {
+          "mode": "endpoint_profile",
+          "injection_profile_id": "profile-api",
+          "credential_slot_id": "slot-api"
+        },
+        "body": {
+          "kind": "json",
+          "template": {
+            "version": 1,
+            "template": { "summary": "{{summary}}" },
+            "bindings": {
+              "summary": {
+                "kind": "node_output",
+                "node_id": "00000000-0000-4000-8000-000000000005",
+                "output_id": "summary"
+              }
+            }
+          }
+        },
+        "timeout": { "connect_ms": 1000, "read_ms": 5000, "write_ms": 5000 },
+        "response": {
+          "mode": "json",
+          "accepted_statuses": [{ "from": 200, "to": 299 }],
+          "schema": { "type": "object" }
+        }
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000009",
+      "type": "python_code",
+      "type_version": 1,
+      "scope": {
+        "kind": "loop_body",
+        "loop_node_id": "00000000-0000-4000-8000-000000000006"
+      },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {
+        "00000000-0000-4000-8000-100000000001": {
+          "kind": "loop_variable",
+          "loop_node_id": "00000000-0000-4000-8000-000000000006",
+          "variable_id": "loop-count"
+        }
+      },
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "fail_workflow" }
+      },
+      "config": {
+        "source": "def main(inputs):\n    return {'count': inputs['count'] + 1}\n",
+        "input_variables": [
+          {
+            "id": "00000000-0000-4000-8000-100000000001",
+            "name": "count",
+            "value_type": {
+              "kind": "number",
+              "collection": false,
+              "nullable": false
+            }
+          }
+        ],
+        "output_schema": {
+          "type": "object",
+          "properties": { "count": { "type": "number" } },
+          "required": ["count"]
+        },
+        "timeout_ms": null
+      }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000008",
+      "type": "end",
+      "type_version": 1,
+      "scope": { "kind": "root" },
+      "custom_label": null,
+      "description": null,
+      "input_bindings": {},
+      "execution_policy": {
+        "retry": { "mode": "none" },
+        "on_error": { "mode": "continue_with_typed_default", "value": null }
+      },
+      "config": {}
+    }
+  ],
+  "transitions": [
+    {
+      "id": "transition-2",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000002",
+        "port_id": "next"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000003",
+        "port_id": "in"
+      }
+    },
+    {
+      "id": "transition-1",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000001",
+        "port_id": "next"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000002",
+        "port_id": "in"
+      }
+    }
+  ],
+  "workflow_inputs": [
+    {
+      "id": "input-text",
+      "name": "input",
+      "label": "输入文本",
+      "description": "待处理文本",
+      "value_type": {
+        "kind": "string",
+        "collection": false,
+        "nullable": false
+      },
+      "required": true,
+      "constraints": { "kind": "string", "min_length": 1, "max_length": 20000 }
+    },
+    {
+      "id": "input-limit",
+      "name": "limit",
+      "label": null,
+      "description": null,
+      "value_type": {
+        "kind": "number",
+        "collection": false,
+        "nullable": false
+      },
+      "required": false,
+      "default": 100,
+      "constraints": { "kind": "number", "minimum": 0, "maximum": 10000 }
+    }
+  ],
+  "workflow_outputs": [
+    {
+      "id": "output-summary",
+      "name": "summary",
+      "description": "最终摘要",
+      "value_type": {
+        "kind": "string",
+        "collection": false,
+        "nullable": false
+      },
+      "source": {
+        "kind": "node_output",
+        "node_id": "00000000-0000-4000-8000-000000000005",
+        "output_id": "summary"
+      }
+    }
+  ],
+  "credential_slots": [
+    {
+      "id": "slot-api",
+      "name": "summary_api",
+      "purpose": "http_auth",
+      "payload_schema": {
+        "type": "object",
+        "properties": { "token": { "type": "string" } },
+        "required": ["token"]
+      },
+      "required": true
+    }
+  ]
+}

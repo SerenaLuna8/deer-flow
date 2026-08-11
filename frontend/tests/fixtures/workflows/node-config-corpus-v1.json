@@ -1,0 +1,155 @@
+{
+  "valid_config_source": "workflow-spec-v1.json",
+  "cases": [
+    {
+      "name": "start valid",
+      "node_type": "start",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "start rejects unknown",
+      "node_type": "start",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "llm valid",
+      "node_type": "llm",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "llm rejects unknown",
+      "node_type": "llm",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "condition valid",
+      "node_type": "condition",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "condition rejects unknown",
+      "node_type": "condition",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "transform valid",
+      "node_type": "transform",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "transform rejects unknown",
+      "node_type": "transform",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "aggregate valid",
+      "node_type": "variable_aggregate",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "aggregate rejects unknown",
+      "node_type": "variable_aggregate",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "loop valid",
+      "node_type": "loop",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "loop rejects unknown",
+      "node_type": "loop",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "http valid",
+      "node_type": "http_request",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "http rejects unknown",
+      "node_type": "http_request",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "code valid",
+      "node_type": "python_code",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "code rejects unknown",
+      "node_type": "python_code",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "end valid",
+      "node_type": "end",
+      "mutation": "none",
+      "valid": true
+    },
+    {
+      "name": "end rejects unknown",
+      "node_type": "end",
+      "mutation": "add_unknown_field",
+      "valid": false
+    },
+    {
+      "name": "transform text mode rejects JSON template shape",
+      "node_type": "transform",
+      "mutation": "transform_text_with_json_shape",
+      "valid": false
+    },
+    {
+      "name": "http rejects reversed accepted status range",
+      "node_type": "http_request",
+      "mutation": "http_reversed_status_range",
+      "valid": false
+    },
+    {
+      "name": "llm rejects explicit null node output path",
+      "node_type": "llm",
+      "mutation": "llm_null_node_output_path",
+      "valid": false
+    },
+    {
+      "name": "loop rejects explicit null value type schema ref",
+      "node_type": "loop",
+      "mutation": "loop_null_schema_ref",
+      "valid": false
+    },
+    {
+      "name": "condition rejects a fixed output port collision",
+      "node_type": "condition",
+      "mutation": "condition_fixed_output_collision",
+      "valid": false
+    },
+    {
+      "name": "aggregate rejects a fixed output port collision",
+      "node_type": "variable_aggregate",
+      "mutation": "aggregate_fixed_output_collision",
+      "valid": false
+    },
+    {
+      "name": "loop rejects a fixed output port collision",
+      "node_type": "loop",
+      "mutation": "loop_fixed_output_collision",
+      "valid": false
+    }
+  ]
+}

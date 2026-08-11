@@ -1,0 +1,37 @@
+[
+  {
+    "kind": "success",
+    "response": {
+      "status_code": 200,
+      "headers": [{ "name": "content-type", "value": "application/json" }],
+      "body": { "kind": "json", "value": { "ok": true } },
+      "duration_ms": 42,
+      "wire_byte_count": { "value": 17, "relation": "exact" },
+      "decoded_byte_count": { "value": 11, "relation": "exact" },
+      "retained_body_byte_count": 11
+    }
+  },
+  {
+    "kind": "http_error",
+    "response": {
+      "status_code": 429,
+      "headers": [],
+      "body": { "kind": "text", "text": "retry later" },
+      "duration_ms": 51,
+      "wire_byte_count": { "value": 11, "relation": "exact" },
+      "decoded_byte_count": { "value": 11, "relation": "exact" },
+      "retained_body_byte_count": 11
+    }
+  },
+  {
+    "kind": "response_invalid",
+    "status_code": 200,
+    "duration_ms": 60,
+    "wire_byte_count": { "value": 2097152, "relation": "at_least" },
+    "decoded_byte_count": { "value": 2097152, "relation": "at_least" },
+    "error": {
+      "code": "WORKFLOW_HTTP_RESPONSE_LIMIT",
+      "safe_message": "response exceeded the frozen limit"
+    }
+  }
+]

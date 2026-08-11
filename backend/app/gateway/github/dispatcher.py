@@ -214,12 +214,12 @@ async def fanout_event(
         #      resolves to something usable.
         #
         # An operator who sets ``channels.github.default_mention_login:
-        # deerflow-bot`` reasonably expects every ``@deerflow-bot``
+        # actweave-bot`` reasonably expects every ``@actweave-bot``
         # mention to gate on that handle by default. The previous version
         # of this expression skipped step 3 entirely, so an agent named
         # ``coder`` with ``require_mention: true`` and no per-trigger or
         # per-agent override silently required ``@coder`` mentions instead
-        # of ``@deerflow-bot``.
+        # of ``@actweave-bot``.
         operator_default = (operator_default_mention_login or "").strip() or None
         default_mention_login = github.bot_login or operator_default or agent.name
         fire, reason = event_should_fire(event, payload, trigger, default_mention_login)

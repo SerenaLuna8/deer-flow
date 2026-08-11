@@ -1,0 +1,13 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://actweave.local/charts/deer-flow/values.schema.json",
+  "title": "ActWeave Helm values authority boundary",
+  "description": "The chart remains otherwise permissive, but Workflow product policy belongs only to PostgreSQL System Settings.",
+  "type": "object",
+  "propertyNames": {
+    "not": {
+      "pattern": "(?i)^w[^a-z0-9]*o[^a-z0-9]*r[^a-z0-9]*k[^a-z0-9]*f[^a-z0-9]*l[^a-z0-9]*o[^a-z0-9]*w"
+    }
+  },
+  "additionalProperties": true
+}

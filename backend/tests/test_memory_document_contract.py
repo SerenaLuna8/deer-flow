@@ -46,7 +46,7 @@ REMOVED_MEMORY_TABLES = {
 
 
 def test_final_memory_schema_uses_only_the_document_model() -> None:
-    assert CURRENT_SCHEMA_REVISION == "full_schema_v9"
+    assert CURRENT_SCHEMA_REVISION == "full_schema_v12"
     assert MEMORY_DOCUMENT_TABLES <= set(Base.metadata.tables)
     assert REMOVED_MEMORY_TABLES.isdisjoint(Base.metadata.tables)
     assert MEMORY_DOCUMENT_TABLES <= set(FINAL_REQUIRED_RELATIONS)
@@ -61,7 +61,7 @@ def test_full_schema_contains_only_the_final_memory_tables_and_job() -> None:
     for table in REMOVED_MEMORY_TABLES:
         assert f"CREATE TABLE {table} (" not in schema_sql
 
-    assert "full_schema_v9" in schema_sql
+    assert "full_schema_v12" in schema_sql
     assert "full_schema_v4" not in schema_sql
     assert "memory_dream" in schema_sql
     assert "memory_seal" in schema_sql
@@ -134,6 +134,7 @@ def test_job_type_contract_is_consistent_across_persistence_and_public_models() 
     expected = {
         "private_run",
         "automation_run",
+        "workflow_run",
         "retention_purge",
         "mcp_discovery",
         "memory_dream",

@@ -44,7 +44,9 @@ def _document(*lines: str) -> str:
 
 
 def test_dream_prompt_and_document_sections_are_fixed() -> None:
-    assert DREAM_PROMPT_VERSION == "dream-prompt-v4"
+    assert DREAM_PROMPT_VERSION == "dream-prompt-v5"
+    assert "You are ActWeave Dream" in DREAM_PROMPT
+    assert "You are DeerFlow Dream" not in DREAM_PROMPT
     assert "Use only read_memory_document and replace_memory_document." in DREAM_PROMPT
     assert "You must not create or update an account-global profile" in DREAM_PROMPT
     assert "transfer memory from another project or namespace." in DREAM_PROMPT

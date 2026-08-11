@@ -5,6 +5,7 @@ import { useTheme } from "next-themes";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { RememberLoginField } from "@/components/auth/remember-login-field";
+import { ActWeaveLogo } from "@/components/branding/actweave-logo";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
 import { Input } from "@/components/ui/input";
@@ -262,15 +263,16 @@ export default function SetupPage() {
     return (
       <div className="bg-background flex min-h-screen items-center justify-center">
         <FlickeringGrid
-          className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+          className="absolute inset-0 z-0 [mask-image:radial-gradient(circle_at_center,black_0%,transparent_72%)]"
           squareSize={4}
           gridGap={4}
           color={actualTheme === "dark" ? "white" : "black"}
           maxOpacity={0.3}
           flickerChance={0.25}
         />
-        <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
+        <div className="border-border/20 bg-background/5 relative z-10 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
           <div className="text-center">
+            <ActWeaveLogo className="mx-auto mb-4" priority />
             <h1 className="font-serif text-3xl">ActWeave</h1>
             <p className="text-muted-foreground mt-1 text-sm">
               Weave intelligence into action.
@@ -344,15 +346,16 @@ export default function SetupPage() {
   return (
     <div className="bg-background flex min-h-screen items-center justify-center">
       <FlickeringGrid
-        className="absolute inset-0 z-0 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className="absolute inset-0 z-0 [mask-image:radial-gradient(circle_at_center,black_0%,transparent_72%)]"
         squareSize={4}
         gridGap={4}
         color={actualTheme === "dark" ? "white" : "black"}
         maxOpacity={0.3}
         flickerChance={0.25}
       />
-      <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
+      <div className="border-border/20 bg-background/5 relative z-10 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
+          <ActWeaveLogo className="mx-auto mb-4" priority />
           <h1 className="font-serif text-3xl">ActWeave</h1>
           <p className="text-muted-foreground mt-1 text-sm">
             Weave intelligence into action.

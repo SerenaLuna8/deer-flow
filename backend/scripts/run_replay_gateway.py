@@ -49,9 +49,11 @@ def main() -> int:
     cfg = home / "config.yaml"
     cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
 
-    # Override (not setdefault): the replay gateway must be hermetic, so an outer
-    # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
+    # Override (not setdefault): the replay gateway must be hermetic, so neither
+    # local runtime alias can leak in and shift prompt-affecting paths/skills.
+    os.environ["ACT_WEAVE_HOME"] = str(home)
     os.environ["DEER_FLOW_HOME"] = str(home)
+    os.environ["ACT_WEAVE_CONFIG_PATH"] = str(cfg)
     os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
     prepare_hermetic_skills(home)
     os.environ["DEERFLOW_REPLAY_FIXTURE"] = args.fixture

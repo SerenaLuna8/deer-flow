@@ -372,6 +372,51 @@ class OperationalAuditSink:
             AuditAction.AUTOMATION_CREATED,
         )
 
+    async def record(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        action: AuditAction,
+        target_id: uuid.UUID,
+    ) -> None:
+        """Append one content-free Workflow control-plane mutation event.
+
+        The target is always the project-shared Workflow Definition.  Version,
+        slot, Credential, policy, source, graph and idempotency material never
+        enter audit metadata; the closed action already identifies the safe
+        mutation class.
+        """
+
+        self._require_process(AuditProcess.GATEWAY)
+        if not is_issued_private_work_context(context) or type(target_id) is not uuid.UUID:
+            raise AuditAuthorityRejected()
+        if action not in {
+            AuditAction.WORKFLOW_DEFINITION_CREATED,
+            AuditAction.WORKFLOW_DEFINITION_UPDATED,
+            AuditAction.WORKFLOW_DEFINITION_ARCHIVED,
+            AuditAction.WORKFLOW_DRAFT_SAVED,
+            AuditAction.WORKFLOW_VERSION_PUBLISHED,
+            AuditAction.WORKFLOW_DRAFT_GRANT_INTENT_UPDATED,
+            AuditAction.WORKFLOW_DRAFT_GRANT_INTENT_DELETED,
+            AuditAction.WORKFLOW_VERSION_GRANT_UPDATED,
+            AuditAction.WORKFLOW_VERSION_GRANT_REVOKED,
+        }:
+            raise AuditAuthorityRejected()
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            action,
+            AuditTarget(
+                AuditTargetKind.WORKFLOW,
+                target_id,
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {},
+            request_id=context.request_id,
+        )
+
     async def automation_updated(
         self,
         session: AsyncSession,

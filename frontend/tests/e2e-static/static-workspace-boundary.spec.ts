@@ -73,8 +73,14 @@ test("static workspace stays local and project routes stay absent", async ({
   await expect(page.getByTestId("static-workspace-demo")).toBeVisible();
   await expect(page.locator('a[href^="/projects/"]')).toHaveCount(0);
 
-  const direct = await page.goto("/projects/demo/memory");
-  expect(direct?.status()).toBe(404);
-  await expect(page.getByText("This page could not be found.")).toBeVisible();
+  for (const projectPath of [
+    "/projects/demo/memory",
+    "/projects/demo/workflows",
+    "/projects/demo/workflows/11111111-1111-4111-8111-111111111111",
+  ]) {
+    const direct = await page.goto(projectPath);
+    expect(direct?.status(), projectPath).toBe(404);
+    await expect(page.getByText("This page could not be found.")).toBeVisible();
+  }
   expect(apiPaths).toEqual([]);
 });

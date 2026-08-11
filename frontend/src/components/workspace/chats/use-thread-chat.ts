@@ -5,7 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { uuid } from "@/core/utils/uuid";
 
-export const THREAD_CHAT_RESET_EVENT = "deer-flow:thread-chat-reset";
+export const THREAD_CHAT_RESET_EVENT = "actweave:thread-chat-reset";
 
 type ThreadChatResetDetail = {
   deletedThreadId: string;

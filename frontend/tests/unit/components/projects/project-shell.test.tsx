@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, test, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -10,11 +12,15 @@ import { ProjectHome } from "@/components/projects/project-home";
 import {
   isProjectNavigationItemActive,
   ProjectDesktopNav,
+  ProjectMobileNav,
   projectNavigationItems,
 } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
 import { I18nProvider } from "@/core/i18n/context";
+import { enUS, zhCN } from "@/core/i18n/locales";
 import { ProjectPrivateWorkProvider } from "@/core/private-work/provider";
+import type { ProjectWorkflowControlPlaneReadiness } from "@/core/project-workflows/navigation";
+import { projectWorkflowQueryKey } from "@/core/project-workflows/query-keys";
 import { CAPABILITIES, type Project } from "@/core/projects/types";
 
 const adminProject: Project = {
@@ -95,7 +101,58 @@ function renderExpandedDesktopNav(project: Project) {
   );
 }
 
+function renderWorkflowNavigation(
+  project: Project,
+  locale: "en-US" | "zh-CN",
+  variant: "expanded" | "collapsed" | "mobile",
+) {
+  const queryClient = new QueryClient();
+  queryClient.setQueryData(
+    projectWorkflowQueryKey(
+      {
+        accountId: "22222222-2222-4222-8222-222222222222",
+        projectId: project.id,
+      },
+      "readiness",
+    ),
+    {
+      status: "ready",
+      code: "WORKFLOW_CONTROL_PLANE_READY",
+      workflow_enabled: true,
+      schema_ready: true,
+      admission_ready: false,
+      request_id: "req-workflow-nav",
+    },
+  );
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale={locale}>
+      <QueryClientProvider client={queryClient}>
+        <ProjectPrivateWorkProvider
+          accountId="22222222-2222-4222-8222-222222222222"
+          projectId={project.id}
+        >
+          {variant === "mobile" ? (
+            <ProjectMobileNav project={project} account={null} />
+          ) : (
+            <ProjectDesktopNav
+              project={project}
+              collapsed={variant === "collapsed"}
+              footer={null}
+            />
+          )}
+        </ProjectPrivateWorkProvider>
+      </QueryClientProvider>
+    </I18nProvider>,
+  );
+}
+
 describe("project shell navigation", () => {
+  const workflowReadyWithoutAdmission: ProjectWorkflowControlPlaneReadiness = {
+    status: "ready",
+    workflow_enabled: true,
+    schema_ready: true,
+  };
+
   test("keeps the overview content free of a duplicate workspace-return link", () => {
     const html = renderToStaticMarkup(
       <ProjectHome
@@ -291,6 +348,119 @@ describe("project shell navigation", () => {
         "/projects/alpha/audit",
       ),
     ).toBe(true);
+    expect(
+      isProjectNavigationItemActive(
+        "/projects/alpha/workflows",
+        "/projects/alpha/workflows/33333333-3333-4333-8333-333333333333",
+      ),
+    ).toBe(true);
+  });
+
+  test("registers the workflow entry between chats and automations from control-plane authority only", () => {
+    const items = projectNavigationItems(
+      adminProject,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+      false,
+      workflowReadyWithoutAdmission,
+    );
+
+    expect(
+      items.filter((item) => item.section === "work").map((item) => item.label),
+    ).toEqual(["会话", "Workflows", "Automations"]);
+    expect(items.find((item) => item.label === "Workflows")).toMatchObject({
+      href: "/projects/alpha/workflows",
+      i18nKey: "workflows",
+    });
+    expect(zhCN.project.workflows).toBe("工作流");
+    expect(enUS.project.workflows).toBe("Workflows");
+  });
+
+  test("uses the same workflow readiness authority for expanded, collapsed, and mobile navigation", () => {
+    const expanded = renderWorkflowNavigation(
+      adminProject,
+      "en-US",
+      "expanded",
+    );
+    const collapsed = renderWorkflowNavigation(
+      adminProject,
+      "zh-CN",
+      "collapsed",
+    );
+    const mobile = renderWorkflowNavigation(adminProject, "zh-CN", "mobile");
+
+    expect(expanded).toContain('href="/projects/alpha/workflows"');
+    expect(expanded).toContain("Workflows</a>");
+    expect(collapsed).toMatch(
+      /<a[^>]*aria-label="工作流"[^>]*href="\/projects\/alpha\/workflows"/u,
+    );
+    expect(mobile).toContain('aria-label="打开项目导航"');
+    expect(
+      readFileSync("src/components/projects/project-nav.tsx", "utf8"),
+    ).toContain("<ProjectNavigationLinks project={project} mobile />");
+  });
+
+  test("hides workflow navigation for static, missing capability, disabled, unavailable, and unresolved states", () => {
+    const withoutRead = {
+      ...adminProject,
+      capabilities: adminProject.capabilities.filter(
+        (capability) => capability !== "workflow.read",
+      ),
+    };
+    const cases: Array<{
+      project: Project;
+      staticOnly: boolean;
+      readiness: ProjectWorkflowControlPlaneReadiness | undefined;
+    }> = [
+      {
+        project: adminProject,
+        staticOnly: true,
+        readiness: workflowReadyWithoutAdmission,
+      },
+      {
+        project: withoutRead,
+        staticOnly: false,
+        readiness: workflowReadyWithoutAdmission,
+      },
+      {
+        project: adminProject,
+        staticOnly: false,
+        readiness: {
+          status: "ready",
+          workflow_enabled: false,
+          schema_ready: true,
+        },
+      },
+      {
+        project: adminProject,
+        staticOnly: false,
+        readiness: {
+          status: "unavailable",
+          workflow_enabled: false,
+          schema_ready: true,
+        },
+      },
+      { project: adminProject, staticOnly: false, readiness: undefined },
+    ];
+
+    for (const testCase of cases) {
+      const labels = projectNavigationItems(
+        testCase.project,
+        true,
+        true,
+        true,
+        true,
+        testCase.staticOnly,
+        false,
+        false,
+        testCase.readiness,
+      ).map((item) => item.label);
+      expect(labels).not.toContain("Workflows");
+    }
   });
 
   test("gates governance destinations with their exact server capabilities", () => {

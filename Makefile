@@ -4,7 +4,7 @@
 
 .PHONY: \
 	help \
-	setup config config-upgrade check doctor install setup-sandbox support-bundle \
+	setup config config-upgrade check doctor install setup-sandbox support-bundle migrate-runtime-home \
 	setup-db upgrade-db check-db prune-run-events reconcile-usage rotate-credentials import-project-skills \
 	test \
 	detect-thread-boundaries detect-blocking-io \
@@ -43,7 +43,7 @@ help:
 	@echo "  make scheduler                        单独启动 Scheduler"
 	@echo "  make nginx                            单独启动本地 Nginx"
 	@echo "  make stop                             停止本地服务"
-	@echo "  make clean                            停止服务并清理本地运行状态和日志"
+	@echo "  make clean                            停止服务并清理日志（保留 .act-weave 持久状态）"
 	@echo ""
 	@echo "配置与安装："
 	@echo "  make setup                            运行交互式初始化向导"
@@ -54,6 +54,7 @@ help:
 	@echo "  make install                          安装前后端依赖"
 	@echo "  make setup-sandbox                    预拉取 Sandbox 容器镜像"
 	@echo "  make support-bundle                   生成脱敏诊断材料"
+	@echo "  make migrate-runtime-home ARGS=...    预览/复制旧本地运行目录到 .act-weave（默认仅预览）"
 	@echo ""
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装当前 head 并初始化"
@@ -115,6 +116,9 @@ prune-run-events:
 # Support and static diagnostics
 support-bundle:
 	@$(BACKEND_UV_RUN) python ../scripts/support_bundle.py --include-doctor
+
+migrate-runtime-home:
+	@$(BACKEND_UV_RUN) python ../scripts/migrate_runtime_home.py $(ARGS)
 
 detect-thread-boundaries:
 	@$(PYTHON) ./scripts/detect_thread_boundaries.py
@@ -179,8 +183,7 @@ stop:
 	@$(SERVE) --stop
 
 clean: stop
-	@echo "Cleaning up..."
-	@-rm -rf backend/.deer-flow 2>/dev/null || true
+	@echo "Cleaning up logs (preserving .act-weave runtime state)..."
 	@-rm -rf logs/*.log 2>/dev/null || true
 	@echo "✓ Cleanup complete"
 

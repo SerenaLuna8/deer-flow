@@ -40,6 +40,12 @@ Consider the setup successful when all of the following are true:
 - Confirm the current directory is the ActWeave repository root by checking that `Makefile`, `backend/`, `frontend/`, and `config.example.yaml` exist.
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
+- For a native local setup, treat repository-root `.act-weave` as the canonical runtime
+  directory. If `.act-weave` is absent but either `.deer-flow` or `backend/.deer-flow`
+  exists, run `make migrate-runtime-home` first to preview the non-destructive union,
+  then use `make migrate-runtime-home ARGS="--copy"` only after reviewing the sources and
+  target. The copy verifies the complete manifest before atomically publishing
+  `.act-weave`; it never deletes either legacy source and rejects target or entry conflicts.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
 - Require PostgreSQL-only `DATABASE_URL` and `POSTGRES_ADMIN_URL` entries in the root `.env` or explicit environment. Do not read or print their values. `make setup-db` loads the root `.env` only when it exists, and explicit environment works without the file. It is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v9`, and performs first-install bootstrap. It also requires `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and the Credential keyring environment in the same secret source; the command preflights them before database creation and stores only encrypted `model_api_key` envelopes. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded by setup; provision a new empty target instead. The one exception: a database stamped at a known older chain revision reports `upgrade_required` in `make check-db` and is upgraded explicitly with `make upgrade-db` after a backup. Run `make setup-db`, then run `make check-db`.
 - Never rely on application startup to initialize or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has a legacy or unknown marker, is unmarked and nonempty, or has catalog drift, stop and require a new empty target instead of stamping, resetting, or repairing it.
@@ -50,6 +56,10 @@ Consider the setup successful when all of the following are true:
   - Do not start long-running services unless the user explicitly asks or this setup request clearly includes launch verification.
   - Tell the user the recommended next command is `make docker-start`.
 - If Docker is not available:
+  - Resolve native local path overrides through `ACT_WEAVE_PROJECT_ROOT`,
+    `ACT_WEAVE_HOME`, `ACT_WEAVE_CONFIG_PATH`, and `ACT_WEAVE_SKILLS_PATH`. The matching
+    `DEER_FLOW_*` names remain compatibility aliases; when both spellings are set they
+    must normalize to the same path or startup fails closed.
   - Run `make check`.
   - If `make check` reports missing system dependencies such as `node`, `pnpm`, `uv`, or `nginx`, stop and report the missing tools instead of attempting privileged installs.
   - If prerequisites are satisfied, run `make install`.

@@ -46,6 +46,7 @@ from app.system_settings.validation import (
     validate_create_system_model,
     validate_system_model_connection_test,
     validate_update_system_model,
+    workflow_model_authoring_capability,
 )
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
@@ -288,10 +289,18 @@ class SystemModelCatalogService:
                         supports_reasoning_effort=(version.supports_reasoning_effort),
                         supports_vision=version.supports_vision,
                         is_default=model.id == default_id,
+                        workflow_authoring=workflow_model_authoring_capability(
+                            version.provider_adapter,
+                        ),
                     )
                     for model, version in rows
                 )
-        except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
+        except (
+            DBAPIError,
+            ModelSettingsInvalid,
+            RuntimeError,
+            SystemModelRepositoryInvariant,
+        ):
             raise SystemModelStorageUnavailable("public-model-catalog") from None
 
     async def create_model(

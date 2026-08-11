@@ -25,6 +25,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.shared_assets.crypto import EncryptedEnvelope, decrypt_credential_payload, encrypt_credential_payload
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from deerflow.config.database_config import DatabaseConfig
+from deerflow.config.runtime_paths import (
+    ACT_WEAVE_HOME_ENV,
+    DEER_FLOW_HOME_ENV,
+    resolve_environment_path,
+)
 from deerflow.persistence.shared_assets import CredentialEnvelopeRow, CredentialRow, CredentialVersionRow
 
 
@@ -35,6 +40,23 @@ class CredentialRotationError(RuntimeError):
 @dataclass(frozen=True)
 class RotationCursor:
     version_id: uuid.UUID
+
+
+def _default_rotation_ledger_path(
+    *,
+    repository_root: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> Path:
+    root = (repository_root or Path(__file__).resolve().parents[2]).resolve()
+    runtime_home = resolve_environment_path(
+        ACT_WEAVE_HOME_ENV,
+        DEER_FLOW_HOME_ENV,
+        environment=environment,
+        default=root / ".act-weave",
+        base=root,
+    )
+    assert runtime_home is not None
+    return runtime_home / "migrations" / "credentials"
 
 
 def _cursor(value: str) -> RotationCursor:
@@ -387,7 +409,7 @@ async def _run_cli(args: argparse.Namespace) -> RotationResult:
     config = DatabaseConfig(url=database_url)
     engine = create_async_engine(config.sqlalchemy_url)
     try:
-        ledger = RotationLedger(Path(__file__).resolve().parents[2] / ".deer-flow/migrations/credentials") if args.execute else None
+        ledger = RotationLedger(_default_rotation_ledger_path()) if args.execute else None
         runner = CredentialRotationRunner(
             async_sessionmaker(engine, expire_on_commit=False),
             keyring,

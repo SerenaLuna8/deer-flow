@@ -5,6 +5,19 @@ import { normalizeProjectSlug, PROJECT_SLUG_PATTERN } from "./slug";
 export const PROJECT_ROLES = ["admin", "editor", "runner", "viewer"] as const;
 export const INVITABLE_PROJECT_ROLES = ["editor", "runner", "viewer"] as const;
 
+export const WORKFLOW_CAPABILITIES = [
+  "workflow.read",
+  "workflow.edit",
+  "workflow.publish",
+  "workflow.execute",
+  "workflow.code.use",
+  "workflow.http.use",
+  "workflow.http.write",
+  "workflow.credential.grant",
+  "workflow.run.read_own",
+  "workflow.run.cancel_own",
+] as const;
+
 export const CAPABILITIES = [
   "project.read",
   "project.update",
@@ -23,6 +36,7 @@ export const CAPABILITIES = [
   "project.audit.read",
   "project.usage.read",
   "project.lifecycle.manage",
+  ...WORKFLOW_CAPABILITIES,
 ] as const;
 
 export const PROJECT_ERROR_CODES = [

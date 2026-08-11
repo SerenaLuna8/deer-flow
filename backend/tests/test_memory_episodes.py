@@ -464,6 +464,7 @@ async def test_privacy_export_streams_episode_rows_for_the_case_scope() -> None:
 
     assert transaction.rolled_back
     assert [line["record_type"] for line in lines] == ["manifest", "memory_episode"]
+    assert lines[0]["format"] == "deer-flow-privacy-ndjson"
     assert lines[1]["data"] == {
         "id": "33333333-3333-4333-8333-333333333333",
         "namespace": "default",

@@ -101,7 +101,7 @@ async def export_privacy_case(
             media_type="application/x-ndjson",
             headers={
                 "Cache-Control": "no-store",
-                "Content-Disposition": (f'attachment; filename="deer-flow-privacy-{project_id}.ndjson"'),
+                "Content-Disposition": (f'attachment; filename="act-weave-privacy-{project_id}.ndjson"'),
                 "X-Content-Type-Options": "nosniff",
             },
         )

@@ -7,6 +7,7 @@ from app.system_runtime_settings.models import (
     MemoryDocumentPolicy,
     QuotaPolicyValue,
     RuntimePolicySection,
+    WorkflowRuntimePolicyV1,
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
 
@@ -18,4 +19,5 @@ __all__ = [
     "RuntimePolicySection",
     "SystemRuntimePolicyMaterializer",
     "SystemRuntimePolicyService",
+    "WorkflowRuntimePolicyV1",
 ]

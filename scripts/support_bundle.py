@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from local_runtime_paths import resolve_environment_path
+
 try:
     import yaml
 except Exception:  # pragma: no cover - exercised only in broken environments
@@ -893,9 +895,21 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def _default_out_path(project_root: Path) -> Path:
+def _default_out_path(
+    project_root: Path,
+    *,
+    environment: dict[str, str] | None = None,
+) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return project_root / ".deer-flow" / "support-bundles" / f"deer-flow-support-bundle-{timestamp}.zip"
+    runtime_home = resolve_environment_path(
+        "ACT_WEAVE_HOME",
+        "DEER_FLOW_HOME",
+        environment=environment,
+        default=project_root / ".act-weave",
+        base=project_root,
+    )
+    assert runtime_home is not None
+    return runtime_home / "support-bundles" / f"actweave-support-bundle-{timestamp}.zip"
 
 
 def _write_json(zf: zipfile.ZipFile, name: str, data: Any) -> None:
@@ -924,7 +938,12 @@ def create_support_bundle(
 ) -> Path:
     """Create a redacted support bundle and return the zip path."""
     project_root = project_root.resolve()
-    config_path = (config_path or project_root / "config.yaml").resolve()
+    environment_config = resolve_environment_path(
+        "ACT_WEAVE_CONFIG_PATH",
+        "DEER_FLOW_CONFIG_PATH",
+        base=project_root,
+    )
+    config_path = (config_path or environment_config or project_root / "config.yaml").resolve()
     out_path = (out_path or _default_out_path(project_root)).resolve()
     if thread_id is not None:
         _validate_thread_id(thread_id)
@@ -984,7 +1003,13 @@ def create_support_bundle(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    repo_root = Path(__file__).resolve().parents[1]
+    repo_root = resolve_environment_path(
+        "ACT_WEAVE_PROJECT_ROOT",
+        "DEER_FLOW_PROJECT_ROOT",
+        default=Path(__file__).resolve().parents[1],
+        base=Path.cwd(),
+    )
+    assert repo_root is not None
     parser.add_argument("--project-root", type=Path, default=repo_root, help="ActWeave project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument(

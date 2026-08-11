@@ -1,0 +1,401 @@
+{
+  "workflow_spec": {
+    "schema_version": 1,
+    "entry_node_id": "00000000-0000-4000-8000-000000000001",
+    "nodes": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "type": "start",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {}
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000002",
+        "type": "condition",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "branches": [
+            {
+              "id": "rich-branch",
+              "output_port_id": "rich",
+              "label": "内容充足",
+              "predicate": {
+                "op": "and",
+                "items": [
+                  {
+                    "left": { "kind": "literal", "value": true },
+                    "operator": "eq",
+                    "right": { "kind": "literal", "value": true }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "empty-branch",
+              "output_port_id": "empty",
+              "label": null,
+              "predicate": {
+                "op": "and",
+                "items": [
+                  {
+                    "left": { "kind": "literal", "value": false },
+                    "operator": "eq",
+                    "right": { "kind": "literal", "value": true }
+                  }
+                ]
+              }
+            }
+          ],
+          "else_output_port_id": "fallback"
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000003",
+        "type": "variable_aggregate",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "strategy": "exclusive_branch",
+          "groups": [
+            {
+              "id": "summary",
+              "name": "摘要",
+              "value_type": {
+                "kind": "string",
+                "collection": false,
+                "nullable": false
+              },
+              "candidate_input_ids": []
+            },
+            {
+              "id": "documents",
+              "name": "文档集合",
+              "value_type": {
+                "kind": "messages",
+                "collection": true,
+                "nullable": false
+              },
+              "candidate_input_ids": []
+            }
+          ]
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000004",
+        "type": "loop",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "mode": "do_until",
+          "body_entry_node_id": "00000000-0000-4000-8000-000000000006",
+          "body_exit_node_id": "00000000-0000-4000-8000-000000000006",
+          "max_iterations": 3,
+          "termination_condition": {
+            "op": "and",
+            "items": [
+              {
+                "left": { "kind": "literal", "value": true },
+                "operator": "eq",
+                "right": { "kind": "literal", "value": true }
+              }
+            ]
+          },
+          "variables": [
+            {
+              "id": "draft",
+              "name": "最终草稿",
+              "value_type": {
+                "kind": "string",
+                "collection": false,
+                "nullable": true
+              },
+              "initial_input_id": "initial-draft",
+              "next_input_id": "next-draft",
+              "output_port_id": "final_draft"
+            }
+          ]
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000005",
+        "type": "http_request",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "method": "GET",
+          "base_origin": "https://example.invalid",
+          "path_template": {
+            "version": 1,
+            "segments": [{ "kind": "text", "value": "/health" }]
+          },
+          "query": [],
+          "headers": [],
+          "auth": { "mode": "none" },
+          "body": { "kind": "none" },
+          "timeout": {
+            "connect_ms": null,
+            "read_ms": null,
+            "write_ms": null
+          },
+          "response": {
+            "mode": "text",
+            "accepted_statuses": [{ "from": 200, "to": 299 }],
+            "schema": null
+          }
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000006",
+        "type": "end",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {}
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000007",
+        "type": "transform",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "input_variables": [],
+          "missing_variable": "error",
+          "mode": "text",
+          "template": {
+            "version": 1,
+            "segments": [{ "kind": "text", "value": "text" }]
+          },
+          "output_schema": null
+        }
+      },
+      {
+        "id": "00000000-0000-4000-8000-000000000008",
+        "type": "transform",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {
+          "input_variables": [],
+          "missing_variable": "error",
+          "mode": "json",
+          "template": {
+            "version": 1,
+            "template": { "value": true },
+            "bindings": {}
+          },
+          "output_schema": { "type": "object" }
+        }
+      }
+    ],
+    "transitions": [],
+    "workflow_inputs": [
+      {
+        "id": "topic",
+        "name": "主题",
+        "label": "主题",
+        "description": null,
+        "value_type": {
+          "kind": "string",
+          "collection": false,
+          "nullable": false
+        },
+        "required": true,
+        "constraints": { "kind": "none" }
+      },
+      {
+        "id": "source_documents",
+        "name": "来源文档",
+        "label": null,
+        "description": null,
+        "value_type": {
+          "kind": "messages",
+          "collection": true,
+          "nullable": false
+        },
+        "required": false,
+        "constraints": { "kind": "none" }
+      }
+    ],
+    "workflow_outputs": [],
+    "credential_slots": []
+  },
+  "expected": [
+    {
+      "node_id": "00000000-0000-4000-8000-000000000001",
+      "input_ports": [],
+      "output_ports": [
+        "control:next",
+        "data:topic:string:false:false",
+        "data:source_documents:messages:true:false"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000002",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:error",
+        "control:rich",
+        "control:empty",
+        "control:fallback"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000003",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:next",
+        "control:error",
+        "data:summary:string:false:false",
+        "data:documents:messages:true:false"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000004",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:body",
+        "control:next",
+        "control:error",
+        "data:iteration_count:number:false:false",
+        "data:final_draft:string:false:true"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000005",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:success",
+        "control:error",
+        "data:status_code:number:false:false",
+        "data:headers:json:false:false",
+        "data:duration_ms:number:false:false",
+        "data:body:string:false:false"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000006",
+      "input_ports": ["control:in"],
+      "output_ports": []
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000007",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:next",
+        "control:error",
+        "data:result:string:false:false"
+      ]
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000008",
+      "input_ports": ["control:in"],
+      "output_ports": [
+        "control:next",
+        "control:error",
+        "data:result:json:false:false"
+      ]
+    }
+  ],
+  "invalid_transitions": [
+    {
+      "id": "pseudo-condition-branch",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000002",
+        "port_id": "branch"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000006",
+        "port_id": "in"
+      }
+    },
+    {
+      "id": "pseudo-condition-else",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000002",
+        "port_id": "else"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000006",
+        "port_id": "in"
+      }
+    },
+    {
+      "id": "pseudo-aggregate-group",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000003",
+        "port_id": "group"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000006",
+        "port_id": "in"
+      }
+    },
+    {
+      "id": "pseudo-loop-variable",
+      "source": {
+        "node_id": "00000000-0000-4000-8000-000000000004",
+        "port_id": "variable"
+      },
+      "target": {
+        "node_id": "00000000-0000-4000-8000-000000000006",
+        "port_id": "in"
+      }
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "workflow_spec": {
+    "schema_version": 1,
+    "entry_node_id": "00000000-0000-4000-8000-000000000001",
+    "nodes": [
+      {
+        "id": "00000000-0000-4000-8000-000000000001",
+        "type": "start",
+        "type_version": 1,
+        "scope": { "kind": "root" },
+        "custom_label": null,
+        "description": null,
+        "input_bindings": {},
+        "execution_policy": {
+          "retry": { "mode": "none" },
+          "on_error": { "mode": "fail_workflow" }
+        },
+        "config": {}
+      }
+    ],
+    "transitions": [],
+    "workflow_inputs": [
+      {
+        "id": "topic",
+        "name": "主题",
+        "label": null,
+        "description": null,
+        "value_type": {
+          "kind": "string",
+          "collection": false,
+          "nullable": false
+        },
+        "required": false,
+        "constraints": { "kind": "none" }
+      }
+    ],
+    "workflow_outputs": [],
+    "credential_slots": []
+  },
+  "canvas_document": {
+    "schema_version": 1,
+    "node_layouts": [
+      {
+        "node_id": "00000000-0000-4000-8000-000000000001",
+        "position": { "x": 0, "y": 0 }
+      }
+    ],
+    "edge_layouts": []
+  },
+  "resolved_ports": {
+    "schema_version": 1,
+    "nodes": [
+      {
+        "node_id": "00000000-0000-4000-8000-000000000001",
+        "input_ports": [],
+        "output_ports": [
+          {
+            "id": "next",
+            "title_i18n": { "zh-CN": "下一步", "en-US": "Next" },
+            "kind": "control",
+            "value_type": null,
+            "cardinality": "many",
+            "required": true
+          },
+          {
+            "id": "topic",
+            "title_i18n": { "zh-CN": "主题", "en-US": "主题" },
+            "kind": "data",
+            "value_type": {
+              "kind": "string",
+              "collection": false,
+              "nullable": false
+            },
+            "cardinality": "many",
+            "required": true
+          }
+        ]
+      }
+    ]
+  }
+}

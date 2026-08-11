@@ -29,6 +29,8 @@ import re
 import sys
 from pathlib import Path
 
+from local_runtime_paths import resolve_environment_path
+
 # Mirrors uv's accepted shape for extra names — keeps the eventual
 # `uv sync --extra <name>` invocation free of shell metacharacters even when
 # `UV_EXTRAS` comes from `.env` or another semi-trusted source.
@@ -62,15 +64,15 @@ def parse_env_extras(value: str) -> list[str]:
 
 def find_config_file() -> Path | None:
     """Resolve explicit/env config first, otherwise repository-root config."""
-    explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
-    if explicit:
-        candidate = Path(explicit)
+    candidate = resolve_environment_path(
+        "ACT_WEAVE_CONFIG_PATH",
+        "DEER_FLOW_CONFIG_PATH",
+        base=Path.cwd(),
+    )
+    if candidate is not None:
         if not candidate.is_file():
-            raise FileNotFoundError(
-                "Config file specified by DEER_FLOW_CONFIG_PATH "
-                f"does not exist: {candidate}"
-            )
-        return candidate.resolve()
+            raise FileNotFoundError(f"Config file specified by ACT_WEAVE_CONFIG_PATH/DEER_FLOW_CONFIG_PATH does not exist: {candidate}")
+        return candidate
     path = REPO_ROOT / "config.yaml"
     if path.is_file():
         return path
@@ -233,9 +235,7 @@ def detect_from_config(path: Path) -> list[str]:
         return []
     lines = text.splitlines()
     extras: set[str] = set()
-    if (
-        nested_section_value(lines, "channels.discord", "enabled") or ""
-    ).lower() == "true":
+    if (nested_section_value(lines, "channels.discord", "enabled") or "").lower() == "true":
         extras.add("discord")
     return sorted(extras)
 

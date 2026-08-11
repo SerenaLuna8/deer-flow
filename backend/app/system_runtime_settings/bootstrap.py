@@ -31,6 +31,7 @@ from deerflow.persistence.user import UserRow
 
 _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_5254_504C
 _ID_NAMESPACE = uuid.UUID("e80287de-83d9-5d3a-a4c8-df0eeaa2a955")
+WORKFLOW_RUNTIME_DEFAULT_POLICY_VERSION_ID = uuid.UUID("ddf23bac-aa2c-5d9a-aa41-f014a66914a0")
 
 
 class SystemRuntimePolicyBootstrapConflict(RuntimeError):
@@ -44,6 +45,8 @@ class SystemRuntimePolicyBootstrapStorageUnavailable(RuntimeError):
 
 
 def _version_id(section: RuntimePolicySection) -> uuid.UUID:
+    if section is RuntimePolicySection.WORKFLOW_RUNTIME:
+        return WORKFLOW_RUNTIME_DEFAULT_POLICY_VERSION_ID
     return uuid.uuid5(_ID_NAMESPACE, f"{section.value}:version:1")
 
 
@@ -184,5 +187,6 @@ async def bootstrap_system_runtime_policies(
 __all__ = [
     "SystemRuntimePolicyBootstrapConflict",
     "SystemRuntimePolicyBootstrapStorageUnavailable",
+    "WORKFLOW_RUNTIME_DEFAULT_POLICY_VERSION_ID",
     "bootstrap_system_runtime_policies",
 ]

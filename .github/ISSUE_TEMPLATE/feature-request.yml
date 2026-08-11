@@ -7,7 +7,7 @@ body:
     attributes:
       value: |
         Thanks for the suggestion. For non-trivial features, please open a
-        [Discussion](https://github.com/bytedance/deer-flow/discussions/categories/ideas)
+        [Discussion](https://github.com/SerenaLuna8/deer-flow/discussions/categories/ideas)
         first to align on scope before writing code.
 
   - type: checkboxes
@@ -15,7 +15,7 @@ body:
     attributes:
       label: Before you start
       options:
-        - label: I searched [existing issues](https://github.com/bytedance/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.
+        - label: I searched [existing issues](https://github.com/SerenaLuna8/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.
           required: true
 
   - type: textarea

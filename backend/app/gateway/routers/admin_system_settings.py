@@ -6,13 +6,16 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.audit.models import SystemAuditContext
 from app.gateway.deps import get_system_runtime_policy_service
 from app.gateway.routers.admin_model_settings import current_model_admin_context
 from app.gateway.routers.admin_operations import AdminOperationsRoute
-from app.system_runtime_settings.errors import SystemRuntimePolicyError
+from app.system_runtime_settings.errors import (
+    SystemRuntimePolicyError,
+    SystemRuntimePolicyInvalid,
+)
 from app.system_runtime_settings.models import (
     RuntimePolicyCatalogView,
     RuntimePolicySection,
@@ -20,6 +23,11 @@ from app.system_runtime_settings.models import (
     RuntimePolicyView,
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
+from app.workflows.runtime_policy import (
+    WorkflowRuntimeAdminPolicyV1,
+    WorkflowRuntimePolicyUpdateRequestV1,
+    WorkflowRuntimePolicyUpdateResponseV1,
+)
 
 router = APIRouter(
     prefix="/api/admin/settings/system",
@@ -27,7 +35,27 @@ router = APIRouter(
     route_class=AdminOperationsRoute,
 )
 
-_SectionName = Literal["agent_runtime", "auth", "memory_document", "quotas"]
+_CatalogSectionName = Literal[
+    "agent_runtime",
+    "auth",
+    "memory_document",
+    "quotas",
+    "workflow_runtime",
+]
+_GenericMutableSectionName = Literal[
+    "agent_runtime",
+    "auth",
+    "memory_document",
+    "quotas",
+]
+_GENERIC_MUTABLE_SECTIONS = frozenset(
+    {
+        RuntimePolicySection.AGENT_RUNTIME.value,
+        RuntimePolicySection.AUTH.value,
+        RuntimePolicySection.MEMORY_DOCUMENT.value,
+        RuntimePolicySection.QUOTAS.value,
+    }
+)
 _EffectScope = Literal[
     "new_requests_and_runs",
     "new_requests",
@@ -47,7 +75,7 @@ class AdminSystemPolicyResponse(_StrictModel):
 
 
 class AdminSystemSectionResponse(AdminSystemPolicyResponse):
-    section: _SectionName
+    section: _GenericMutableSectionName
     effect_scope: _EffectScope
     effective_revision: int
     updated_at: datetime
@@ -55,7 +83,23 @@ class AdminSystemSectionResponse(AdminSystemPolicyResponse):
 
 class AdminSystemCatalogResponse(_StrictModel):
     catalog_revision: int
-    sections: dict[_SectionName, AdminSystemSectionResponse]
+    sections: dict[
+        _CatalogSectionName,
+        AdminSystemSectionResponse | WorkflowRuntimeAdminPolicyV1,
+    ]
+
+    @model_validator(mode="after")
+    def validate_section_shapes(self) -> AdminSystemCatalogResponse:
+        expected = {section.value for section in RuntimePolicySection}
+        if set(self.sections) != expected:
+            raise ValueError("system settings response requires the complete section catalog")
+        for key, value in self.sections.items():
+            if key == RuntimePolicySection.WORKFLOW_RUNTIME.value:
+                if not isinstance(value, WorkflowRuntimeAdminPolicyV1):
+                    raise ValueError("workflow_runtime requires its closed admin projection")
+            elif not isinstance(value, AdminSystemSectionResponse) or value.section != key:
+                raise ValueError("system settings section key and payload do not match")
+        return self
 
 
 class AdminSystemUpdateRequest(_StrictModel):
@@ -65,7 +109,7 @@ class AdminSystemUpdateRequest(_StrictModel):
 
 class AdminSystemUpdateResponse(_StrictModel):
     catalog_revision: int
-    section: _SectionName
+    section: _GenericMutableSectionName
     stored_revision: int
     effective_revision: int
     effect_scope: _EffectScope
@@ -89,7 +133,13 @@ def _section_response(view: RuntimePolicyView) -> AdminSystemSectionResponse:
 def _catalog_response(
     catalog: RuntimePolicyCatalogView,
 ) -> AdminSystemCatalogResponse:
-    sections = {section.value: _section_response(catalog.sections[section]) for section in RuntimePolicySection}
+    if catalog.workflow_runtime is None:
+        raise ValueError("workflow_runtime admin projection is unavailable")
+    sections: dict[
+        _CatalogSectionName,
+        AdminSystemSectionResponse | WorkflowRuntimeAdminPolicyV1,
+    ] = {section.value: _section_response(catalog.sections[section]) for section in RuntimePolicySection if section is not RuntimePolicySection.WORKFLOW_RUNTIME}
+    sections[RuntimePolicySection.WORKFLOW_RUNTIME.value] = catalog.workflow_runtime
     return AdminSystemCatalogResponse(
         catalog_revision=catalog.catalog_revision,
         sections=sections,
@@ -145,11 +195,32 @@ async def get_admin_system_settings(
 
 
 @router.put(
+    "/workflow_runtime",
+    response_model=WorkflowRuntimePolicyUpdateResponseV1,
+)
+async def update_admin_workflow_runtime_setting(
+    body: WorkflowRuntimePolicyUpdateRequestV1,
+    context: Annotated[
+        SystemAuditContext,
+        Depends(current_model_admin_context),
+    ],
+    service: Annotated[
+        SystemRuntimePolicyService,
+        Depends(get_system_runtime_policy_service),
+    ],
+) -> WorkflowRuntimePolicyUpdateResponseV1:
+    try:
+        return await service.update_workflow_runtime_policy(context, body)
+    except SystemRuntimePolicyError as error:
+        raise _http_exception(error) from None
+
+
+@router.put(
     "/{section}",
     response_model=AdminSystemUpdateResponse,
 )
 async def update_admin_system_setting(
-    section: RuntimePolicySection,
+    section: _GenericMutableSectionName,
     body: AdminSystemUpdateRequest,
     context: Annotated[
         SystemAuditContext,
@@ -160,11 +231,13 @@ async def update_admin_system_setting(
         Depends(get_system_runtime_policy_service),
     ],
 ) -> AdminSystemUpdateResponse:
+    if section not in _GENERIC_MUTABLE_SECTIONS:
+        raise _http_exception(SystemRuntimePolicyInvalid(context.request_id))
     try:
         return _update_response(
             await service.update_policy(
                 context,
-                section,
+                RuntimePolicySection(section),
                 expected_revision=body.expected_revision,
                 value=body.value,
             )

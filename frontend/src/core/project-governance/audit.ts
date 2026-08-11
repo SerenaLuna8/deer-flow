@@ -15,7 +15,19 @@ import {
   requestProjectGovernance,
 } from "./usage";
 
-export const auditActionSchema = z.enum([
+export const WORKFLOW_AUDIT_ACTIONS = [
+  "workflow.definition_created",
+  "workflow.definition_updated",
+  "workflow.definition_archived",
+  "workflow.draft_saved",
+  "workflow.version_published",
+  "workflow.draft_grant_intent_updated",
+  "workflow.draft_grant_intent_deleted",
+  "workflow.version_grant_updated",
+  "workflow.version_grant_revoked",
+] as const;
+
+export const AUDIT_ACTIONS = [
   "project.created",
   "project.updated",
   "project.suspended",
@@ -62,9 +74,31 @@ export const auditActionSchema = z.enum([
   "purge.completed",
   "audit.corrected",
   "system_setting.updated",
-]);
+  ...WORKFLOW_AUDIT_ACTIONS,
+] as const;
 
-type AuditAction = z.infer<typeof auditActionSchema>;
+export const AUDIT_TARGET_KINDS = [
+  "project",
+  "invitation",
+  "membership",
+  "asset",
+  "automation",
+  "quota",
+  "run",
+  "job",
+  "purge",
+  "audit",
+  "system_setting",
+  "workflow",
+] as const;
+
+export const auditActionSchema = z.enum(AUDIT_ACTIONS);
+export const auditTargetKindSchema = z.enum(AUDIT_TARGET_KINDS);
+
+export type AuditAction = z.infer<typeof auditActionSchema>;
+export type AuditTargetKind = z.infer<typeof auditTargetKindSchema>;
+
+const workflowAuditActionSet = new Set<AuditAction>(WORKFLOW_AUDIT_ACTIONS);
 
 const emptyMetadataSchema = z.object({}).strict();
 const roleSchema = z.enum(["admin", "editor", "runner", "viewer"]);
@@ -237,6 +271,15 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "purge.completed": purgeMetadataSchema,
   "audit.corrected": correctionMetadataSchema,
   "system_setting.updated": systemSettingMetadataSchema,
+  "workflow.definition_created": emptyMetadataSchema,
+  "workflow.definition_updated": emptyMetadataSchema,
+  "workflow.definition_archived": emptyMetadataSchema,
+  "workflow.draft_saved": emptyMetadataSchema,
+  "workflow.version_published": emptyMetadataSchema,
+  "workflow.draft_grant_intent_updated": emptyMetadataSchema,
+  "workflow.draft_grant_intent_deleted": emptyMetadataSchema,
+  "workflow.version_grant_updated": emptyMetadataSchema,
+  "workflow.version_grant_revoked": emptyMetadataSchema,
 };
 
 export const auditItemSchema = z
@@ -253,19 +296,7 @@ export const auditItemSchema = z
       "system_admin",
     ]),
     action: auditActionSchema,
-    target_kind: z.enum([
-      "project",
-      "invitation",
-      "membership",
-      "asset",
-      "automation",
-      "quota",
-      "run",
-      "job",
-      "purge",
-      "audit",
-      "system_setting",
-    ]),
+    target_kind: auditTargetKindSchema,
     outcome: z.enum(["success", "rejected", "failed"]),
     public_error_code: z
       .string()
@@ -275,6 +306,16 @@ export const auditItemSchema = z
   })
   .strict()
   .superRefine((item, context) => {
+    if (
+      workflowAuditActionSet.has(item.action) !==
+      (item.target_kind === "workflow")
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["target_kind"],
+        message: "Workflow audit actions require the Workflow target kind",
+      });
+    }
     const result = auditMetadataSchemas[item.action].safeParse(item.metadata);
     if (!result.success) {
       for (const issue of result.error.issues) {

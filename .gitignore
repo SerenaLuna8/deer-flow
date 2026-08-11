@@ -41,6 +41,7 @@ extensions_config.json
 # Coverage report
 coverage.xml
 coverage/
+.act-weave/
 .deer-flow/
 .claude/
 skills/custom/*

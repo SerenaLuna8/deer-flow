@@ -209,7 +209,7 @@ export function AgentBuilderConversationView({
   blueprintEditing: boolean;
   blueprintDraft: AgentBuilderBlueprint | null;
   blueprintDirty: boolean;
-  models?: Model[];
+  models?: readonly Model[];
   modelsLoading?: boolean;
   modelsError?: unknown;
   selectedGenerationModelName?: string | null;

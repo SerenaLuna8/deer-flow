@@ -105,7 +105,7 @@ class SystemRuntimePolicyRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')",
+            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas', 'workflow_runtime')",
             name="ck_system_runtime_policies_section",
         ),
         CheckConstraint("revision >= 1", name="ck_system_runtime_policies_revision"),
@@ -160,7 +160,7 @@ class SystemRuntimePolicyVersionRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas')",
+            "section IN ('agent_runtime', 'auth', 'memory_document', 'quotas', 'workflow_runtime')",
             name="ck_system_runtime_policy_versions_section",
         ),
         CheckConstraint("version_number >= 1", name="ck_system_runtime_policy_versions_number"),
@@ -186,6 +186,14 @@ class SystemRuntimePolicyVersionRow(Base):
             "schema_version",
             "payload_checksum",
             name="uq_system_runtime_policy_versions_exact",
+        ),
+        UniqueConstraint(
+            "section",
+            "id",
+            "version_number",
+            "schema_version",
+            "payload_checksum",
+            name="uq_system_runtime_policy_versions_revision_exact",
         ),
         ForeignKeyConstraint(
             ["section"],

@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 from app.system_settings.models import (
     CreateSystemModel,
+    PublicWorkflowModelAuthoringView,
+    PublicWorkflowModelParameterView,
     SystemModelConnectionCheck,
     UpdateSystemModel,
 )
@@ -111,12 +113,49 @@ _PROVIDER_SETTING_FIELDS: Mapping[str, frozenset[str]] = {
 }
 _ALL_SETTING_FIELDS = frozenset().union(*_PROVIDER_SETTING_FIELDS.values())
 
+_WORKFLOW_PARAMETER_CAPABILITIES = {
+    "temperature": PublicWorkflowModelParameterView(
+        name="temperature",
+        kind="number",
+        minimum=-2.0,
+        maximum=2.0,
+    ),
+    "max_tokens": PublicWorkflowModelParameterView(
+        name="max_tokens",
+        kind="integer",
+        minimum=1.0,
+        maximum=2_000_000.0,
+    ),
+}
+
 
 class ModelSettingsInvalid(ValueError):
     """One indistinguishable validation failure for every invalid setting."""
 
     def __init__(self) -> None:
         super().__init__("Model settings invalid")
+
+
+def workflow_model_authoring_capability(
+    provider_adapter: str,
+) -> PublicWorkflowModelAuthoringView:
+    """Project one current provider adapter into safe Workflow editor controls.
+
+    All registered providers are chat-model adapters.  Parameter controls are
+    exposed only when the same provider adapter already owns a bounded
+    system-setting validator for that field.  Provider identifiers and
+    settings never cross the public projection.
+    """
+
+    if type(provider_adapter) is not str or provider_adapter not in PROVIDER_ADAPTERS:
+        raise ModelSettingsInvalid
+    allowed = _PROVIDER_SETTING_FIELDS[provider_adapter]
+    parameters = tuple(_WORKFLOW_PARAMETER_CAPABILITIES[name] for name in ("temperature", "max_tokens") if name in allowed)
+    return PublicWorkflowModelAuthoringView(
+        modes=("chat",),
+        supports_streaming=True,
+        parameters=parameters,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,4 +718,5 @@ __all__ = [
     "validate_model_settings",
     "validate_system_model_connection_test",
     "validate_update_system_model",
+    "workflow_model_authoring_capability",
 ]

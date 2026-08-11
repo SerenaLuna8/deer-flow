@@ -37,7 +37,7 @@ make start     # optimized local build
 make stop
 ```
 
-The unified entry point is `http://localhost:2026`. Local logs are under `logs/{gateway,worker,scheduler,frontend,nginx}.log`, and local runtime state defaults to `backend/.deer-flow`.
+The unified entry point is `http://localhost:2026`. Local logs are under `logs/{gateway,worker,scheduler,frontend,nginx}.log`, and native local runtime state defaults to the repository-root `.act-weave` directory.
 
 ## Docker development
 
@@ -63,7 +63,7 @@ Before deployment, verify at least the following:
 - Configure TLS, network access control, strong authentication secrets, and a secret manager.
 - Gateway, Worker, and Scheduler use the same canonical `config.yaml` and `DATABASE_URL`.
 - Worker readiness, Scheduler ownership, durable stream reconnect, and project isolation pass in the target environment.
-- `backend/.deer-flow` contains local runtime files/Sandbox projections only; it is not the authority for project business data or the asset catalog.
+- Native `.act-weave` and deployment-configured runtime homes contain runtime files/Sandbox projections only; they are not the authority for project business data or the asset catalog.
 
 ## Kubernetes/Helm
 

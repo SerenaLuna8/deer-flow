@@ -15,6 +15,7 @@ import {
   ScrollTextIcon,
   SettingsIcon,
   SparklesIcon,
+  WorkflowIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -40,6 +41,12 @@ import {
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import { readProjectWorkflowReadiness } from "@/core/project-workflows/api";
+import { useProjectWorkflowReadiness } from "@/core/project-workflows/hooks";
+import {
+  projectWorkflowNavigationVisible,
+  type ProjectWorkflowControlPlaneReadiness,
+} from "@/core/project-workflows/navigation";
 import {
   PROJECT_AUTOMATION,
   PROJECT_PRIVATE_WORKSPACE,
@@ -59,7 +66,8 @@ type ProjectNavigationItem = {
     | "skills"
     | "mcp"
     | "memory"
-    | "usage";
+    | "usage"
+    | "workflows";
   label: string;
   section: ProjectNavigationSection | null;
 };
@@ -93,6 +101,7 @@ export function projectNavigationItems(
   staticWebsiteOnly = false,
   _usageReady = false,
   _auditReady = false,
+  workflowReadiness?: ProjectWorkflowControlPlaneReadiness,
 ): ProjectNavigationItem[] {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
@@ -125,6 +134,21 @@ export function projectNavigationItems(
         section: "management",
       },
     );
+  }
+  if (
+    projectWorkflowNavigationVisible({
+      staticWebsiteOnly,
+      canReadWorkflow: project.capabilities.includes("workflow.read"),
+      readiness: workflowReadiness,
+    })
+  ) {
+    items.push({
+      href: `${base}/workflows`,
+      icon: WorkflowIcon,
+      i18nKey: "workflows",
+      label: "Workflows",
+      section: "work",
+    });
   }
   if (
     projectAutomationEntryEnabled(
@@ -272,12 +296,17 @@ function ProjectNavigationLinks({
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
   );
+  const canReadWorkflow = project.capabilities.includes("workflow.read");
   const staticWebsiteOnly = isStaticWebsiteOnly();
   const readiness = useProjectPrivateWorkReadiness(
     canReadPrivateWork && !staticWebsiteOnly,
   );
   const automationReadiness = useProjectAutomationReadiness(
     PROJECT_AUTOMATION && canReadPrivateWork && !staticWebsiteOnly,
+  );
+  const workflowReadiness = useProjectWorkflowReadiness(
+    canReadWorkflow && !staticWebsiteOnly,
+    { readProjectWorkflowReadiness },
   );
   const privateWorkReady = readiness.data?.status === "ready";
   const automationReady =
@@ -291,6 +320,7 @@ function ProjectNavigationLinks({
       collapsed={collapsed && !mobile}
       privateWorkReady={privateWorkReady}
       automationReady={automationReady}
+      workflowReadiness={workflowReadiness.data}
       staticWebsiteOnly={staticWebsiteOnly}
     />
   );
@@ -302,6 +332,7 @@ function ProjectNavigationLinksContent({
   collapsed,
   privateWorkReady,
   automationReady,
+  workflowReadiness,
   staticWebsiteOnly,
 }: {
   project: Project;
@@ -309,6 +340,7 @@ function ProjectNavigationLinksContent({
   collapsed: boolean;
   privateWorkReady: boolean;
   automationReady: boolean;
+  workflowReadiness: ProjectWorkflowControlPlaneReadiness | undefined;
   staticWebsiteOnly: boolean;
 }) {
   const { t } = useI18n();
@@ -320,6 +352,9 @@ function ProjectNavigationLinksContent({
     automationReady,
     PROJECT_AUTOMATION,
     staticWebsiteOnly,
+    false,
+    false,
+    workflowReadiness,
   );
   const standaloneLinks = links.filter((item) => item.section === null);
   const renderLink = ({

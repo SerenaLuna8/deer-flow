@@ -41,6 +41,7 @@ from app.gateway.routers import (
     project_memory,
     project_skill_builder,
     project_usage,
+    project_workflows,
     projects,
 )
 from app.gateway.skill_version_body_limit import SkillVersionRequestBodyLimitMiddleware
@@ -352,6 +353,8 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(project_assets.project_router)
     app.include_router(project_agent_builder.router)
     app.include_router(project_skill_builder.router)
+    # Workflow readiness/catalog must precede future /{workflow_id} routes.
+    app.include_router(project_workflows.router)
     # Readiness must precede the dynamic /{task_id} project Automation route.
     app.include_router(project_automations.readiness_router)
     app.include_router(project_automations.router)
@@ -399,7 +402,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
         Returns:
             Service health status information.
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        return {"status": "healthy", "service": "act-weave-gateway"}
 
     return app
 

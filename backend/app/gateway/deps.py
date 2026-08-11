@@ -36,8 +36,12 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.feedback_service import PrivateFeedbackService
-from app.projects.context import resolve_project_context
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
+from app.projects.capabilities import Capability
+from app.projects.context import ProjectContext, resolve_project_context
+from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
+from app.workflows.authorization import ProjectWorkflowCapabilityPolicy, WorkflowAction
+from app.workflows.error_mapping import workflow_http_exception
+from app.workflows.errors import WorkflowForbidden, WorkflowNotFound, WorkflowUnavailable
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.persistence.feedback import FeedbackRepository
 from deerflow.runtime.events.store.base import RunEventStore
@@ -289,6 +293,26 @@ async def gateway_platform_runtime(
         )
         app.state.system_runtime_policy_service = runtime_policy_service
         app.state.system_runtime_policy_materializer = SystemRuntimePolicyMaterializer(sf)
+        from app.workflows.authorization import (
+            ProjectWorkflowCapabilityPolicy,
+            WorkflowAuthorizationService,
+        )
+        from app.workflows.definition_service import (
+            PostgresWorkflowDefinitionAuthorityReader,
+            WorkflowDefinitionControlService,
+            workflow_definition_repository_factory,
+        )
+        from app.workflows.project_control_service import WorkflowProjectControlService
+
+        app.state.workflow_project_control_service = WorkflowProjectControlService()
+        app.state.workflow_definition_service = WorkflowDefinitionControlService(
+            authorizer=WorkflowAuthorizationService(
+                policy=ProjectWorkflowCapabilityPolicy(),
+            ),
+            repository_factory=workflow_definition_repository_factory,
+            authority_reader=PostgresWorkflowDefinitionAuthorityReader(),
+            audit=operational_audit_sink,
+        )
         from app.gateway.system_model_callers import (
             DatabaseOneshotModelCaller,
         )
@@ -479,6 +503,24 @@ get_system_model_materializer = _require(
     "system_model_materializer",
     "System model materializer",
 )
+
+
+def get_workflow_project_control_service(request: Request):
+    """Return the Workflow control-plane reader through a stable error shape."""
+
+    value = getattr(request.app.state, "workflow_project_control_service", None)
+    if value is None:
+        raise workflow_http_exception(WorkflowUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
+
+
+def get_workflow_definition_service(request: Request):
+    """Return the Workflow Definition service through the closed error shape."""
+
+    value = getattr(request.app.state, "workflow_definition_service", None)
+    if value is None:
+        raise workflow_http_exception(WorkflowUnavailable(get_current_trace_id() or generate_trace_id()))
+    return value
 
 
 def _automation_state_dependency(
@@ -698,6 +740,55 @@ async def private_work_context(
         raise private_work_http_exception(PrivateWorkUnavailable(request_id)) from None
     except PrivateWorkError as exc:
         raise private_work_http_exception(exc) from None
+
+
+async def workflow_project_context(
+    project_id: uuid.UUID,
+    user=Depends(get_current_user_from_request),
+    session: AsyncSession = Depends(project_session, scope="function"),
+) -> ProjectContext:
+    """Resolve current membership and require explicit Workflow read authority."""
+
+    request_id = get_current_trace_id() or generate_trace_id()
+    try:
+        user_id = uuid.UUID(str(user.id))
+    except (AttributeError, TypeError, ValueError):
+        raise workflow_http_exception(WorkflowNotFound(request_id)) from None
+    try:
+        begin = getattr(session, "begin", None)
+        if callable(begin):
+            # Resolve the initial read authority in a bounded transaction so
+            # Definition endpoints can begin their caller-owned mutation
+            # transaction on the same request-scoped session.  The service
+            # revalidates and locks membership again inside that transaction.
+            async with begin():
+                project = await resolve_project_context(
+                    session,
+                    user_id,
+                    project_id,
+                    request_id,
+                )
+        else:
+            # Narrow test doubles may expose only the repository call; real
+            # Gateway sessions always provide ``AsyncSession.begin``.
+            project = await resolve_project_context(
+                session,
+                user_id,
+                project_id,
+                request_id,
+            )
+        if not ProjectWorkflowCapabilityPolicy().allows(
+            project,
+            WorkflowAction.READ,
+        ):
+            raise ProjectForbidden(Capability.WORKFLOW_READ)
+        return project
+    except ProjectNotFound:
+        raise workflow_http_exception(WorkflowNotFound(request_id)) from None
+    except ProjectForbidden:
+        raise workflow_http_exception(WorkflowForbidden(request_id)) from None
+    except ProjectDatabaseUnavailable:
+        raise workflow_http_exception(WorkflowUnavailable(request_id)) from None
 
 
 async def project_input_polish_context(

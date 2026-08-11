@@ -1,5 +1,14 @@
-const REMEMBER_LOGIN_KEY = "deerflow.auth.remember_login";
-const REMEMBERED_EMAIL_KEY = "deerflow.auth.remembered_email";
+import {
+  readMigratedStorageValue,
+  removeMigratedStorageValue,
+  writeMigratedStorageValue,
+  type BrandStorage,
+} from "@/core/storage/brand-key-migration";
+
+const REMEMBER_LOGIN_KEY = "actweave.auth.remember_login";
+const REMEMBERED_EMAIL_KEY = "actweave.auth.remembered_email";
+const LEGACY_REMEMBER_LOGIN_KEY = "deerflow.auth.remember_login";
+const LEGACY_REMEMBERED_EMAIL_KEY = "deerflow.auth.remembered_email";
 
 export interface RememberLoginPreference {
   email: string;
@@ -11,7 +20,11 @@ const DEFAULT_PREFERENCE: RememberLoginPreference = {
   rememberMe: true,
 };
 
-function getStorage(): Storage | null {
+function isStoredRememberLoginPreference(value: string): boolean {
+  return value === "0" || value === "1";
+}
+
+function getStorage(): BrandStorage | null {
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
   } catch {
@@ -23,17 +36,27 @@ export function loadRememberLoginPreference(): RememberLoginPreference {
   const storage = getStorage();
   if (!storage) return DEFAULT_PREFERENCE;
 
-  try {
-    const storedPreference = storage.getItem(REMEMBER_LOGIN_KEY);
-    const rememberMe =
-      storedPreference === null ? true : storedPreference === "1";
-    return {
-      email: rememberMe ? (storage.getItem(REMEMBERED_EMAIL_KEY) ?? "") : "",
-      rememberMe,
-    };
-  } catch {
-    return DEFAULT_PREFERENCE;
+  const storedPreference = readMigratedStorageValue(
+    storage,
+    REMEMBER_LOGIN_KEY,
+    [LEGACY_REMEMBER_LOGIN_KEY],
+    isStoredRememberLoginPreference,
+  );
+  const rememberMe =
+    storedPreference === null ? true : storedPreference === "1";
+  if (!rememberMe) {
+    removeMigratedStorageValue(storage, REMEMBERED_EMAIL_KEY, [
+      LEGACY_REMEMBERED_EMAIL_KEY,
+    ]);
   }
+  return {
+    email: rememberMe
+      ? (readMigratedStorageValue(storage, REMEMBERED_EMAIL_KEY, [
+          LEGACY_REMEMBERED_EMAIL_KEY,
+        ]) ?? "")
+      : "",
+    rememberMe,
+  };
 }
 
 /**
@@ -47,15 +70,19 @@ export function saveRememberLoginPreference({
   const storage = getStorage();
   if (!storage) return;
 
-  try {
-    if (rememberMe) {
-      storage.setItem(REMEMBER_LOGIN_KEY, "1");
-      storage.setItem(REMEMBERED_EMAIL_KEY, email);
-      return;
-    }
-    storage.setItem(REMEMBER_LOGIN_KEY, "0");
-    storage.removeItem(REMEMBERED_EMAIL_KEY);
-  } catch {
-    // Storage can be denied in private/locked-down browser contexts.
+  writeMigratedStorageValue(
+    storage,
+    REMEMBER_LOGIN_KEY,
+    rememberMe ? "1" : "0",
+    [LEGACY_REMEMBER_LOGIN_KEY],
+  );
+  if (rememberMe) {
+    writeMigratedStorageValue(storage, REMEMBERED_EMAIL_KEY, email, [
+      LEGACY_REMEMBERED_EMAIL_KEY,
+    ]);
+  } else {
+    removeMigratedStorageValue(storage, REMEMBERED_EMAIL_KEY, [
+      LEGACY_REMEMBERED_EMAIL_KEY,
+    ]);
   }
 }

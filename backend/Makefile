@@ -49,4 +49,4 @@ import-project-skills:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/import_project_skills.py $(ARGS)
 
 detect-blocking-io:
-	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.deer-flow/blocking-io-findings.json
+	@PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run python ../scripts/detect_blocking_io_static.py --output ../.act-weave/blocking-io-findings.json

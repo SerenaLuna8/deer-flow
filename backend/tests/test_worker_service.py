@@ -349,8 +349,9 @@ async def test_private_claim_with_invalid_trace_fails_before_mark_running() -> N
         occurrence_id=None,
         retry_safety="safe",
         cancel_requested=False,
-        origin_trace_id=None,
+        origin_trace_id="valid-before-corruption",
     )
+    object.__setattr__(claim, "origin_trace_id", None)
     service = WorkerService(
         _Factory(backend),
         _FakeRegistry(),

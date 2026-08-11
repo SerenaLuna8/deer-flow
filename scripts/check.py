@@ -12,7 +12,16 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
-PROJECT_ROOT = Path(os.getenv("DEER_FLOW_PROJECT_ROOT") or Path(__file__).resolve().parents[1]).resolve()
+from local_runtime_paths import resolve_environment_path
+
+_DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = resolve_environment_path(
+    "ACT_WEAVE_PROJECT_ROOT",
+    "DEER_FLOW_PROJECT_ROOT",
+    default=_DEFAULT_PROJECT_ROOT,
+    base=Path.cwd(),
+)
+assert PROJECT_ROOT is not None
 PNPM_SCRIPT_PATH = Path(__file__).with_name("pnpm.py")
 FRONTEND_DIR = PNPM_SCRIPT_PATH.parent.parent / "frontend"
 COREPACK_NOTICE = "Using pnpm via Corepack."

@@ -36,6 +36,10 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
+import {
+  readMigratedStorageValue,
+  writeMigratedStorageValue,
+} from "@/core/storage/brand-key-migration";
 import { cn } from "@/lib/utils";
 
 interface NavigationLabels {
@@ -66,13 +70,27 @@ const DEFAULT_NAVIGATION_LABELS: NavigationLabels = {
 };
 
 export const ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY =
+  "actweave:admin-navigation-expanded";
+const LEGACY_ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY =
   "deer-flow:admin-navigation-expanded";
 const ADMIN_NAVIGATION_EXPANDED_EVENT =
-  "deer-flow:admin-navigation-expanded-change";
+  "actweave:admin-navigation-expanded-change";
 let volatileAdminNavigationExpanded = false;
 
 export function parseAdminNavigationExpanded(value: string | null): boolean {
   return value === "true";
+}
+
+function isStoredAdminNavigationExpanded(value: string): boolean {
+  return value === "true" || value === "false";
+}
+
+function getAdminNavigationStorage(): Storage | null {
+  try {
+    return window.localStorage;
+  } catch {
+    return null;
+  }
 }
 
 export function adminDesktopSidebarLayout(expanded: boolean) {
@@ -88,16 +106,17 @@ export function adminDesktopSidebarLayout(expanded: boolean) {
 }
 
 function getAdminNavigationExpandedSnapshot(): boolean {
-  try {
-    const stored = window.localStorage.getItem(
-      ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY,
-    );
-    return stored === null
-      ? volatileAdminNavigationExpanded
-      : parseAdminNavigationExpanded(stored);
-  } catch {
-    return volatileAdminNavigationExpanded;
-  }
+  const storage = getAdminNavigationStorage();
+  if (!storage) return volatileAdminNavigationExpanded;
+  const stored = readMigratedStorageValue(
+    storage,
+    ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY,
+    [LEGACY_ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY],
+    isStoredAdminNavigationExpanded,
+  );
+  return stored === null
+    ? volatileAdminNavigationExpanded
+    : parseAdminNavigationExpanded(stored);
 }
 
 function getAdminNavigationExpandedServerSnapshot(): boolean {
@@ -106,9 +125,22 @@ function getAdminNavigationExpandedServerSnapshot(): boolean {
 
 function subscribeAdminNavigationExpanded(onChange: () => void) {
   const handleStorage = (event: StorageEvent) => {
-    if (event.key !== ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY) return;
+    if (
+      event.key !== ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY &&
+      event.key !== LEGACY_ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY
+    ) {
+      return;
+    }
+    const storage = getAdminNavigationStorage();
     volatileAdminNavigationExpanded = parseAdminNavigationExpanded(
-      event.newValue,
+      storage
+        ? readMigratedStorageValue(
+            storage,
+            ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY,
+            [LEGACY_ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY],
+            isStoredAdminNavigationExpanded,
+          )
+        : event.newValue,
     );
     onChange();
   };
@@ -122,13 +154,14 @@ function subscribeAdminNavigationExpanded(onChange: () => void) {
 
 function setAdminNavigationExpanded(expanded: boolean) {
   volatileAdminNavigationExpanded = expanded;
-  try {
-    window.localStorage.setItem(
+  const storage = getAdminNavigationStorage();
+  if (storage) {
+    writeMigratedStorageValue(
+      storage,
       ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY,
       String(expanded),
+      [LEGACY_ADMIN_NAVIGATION_EXPANDED_STORAGE_KEY],
     );
-  } catch {
-    // The in-memory state still keeps the control usable when storage is denied.
   }
   window.dispatchEvent(new Event(ADMIN_NAVIGATION_EXPANDED_EVENT));
 }

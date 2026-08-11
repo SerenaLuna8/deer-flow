@@ -41,6 +41,7 @@ JobStatus = Literal[
 JobType = Literal[
     "private_run",
     "automation_run",
+    "workflow_run",
     "retention_purge",
     "mcp_discovery",
     "memory_dream",

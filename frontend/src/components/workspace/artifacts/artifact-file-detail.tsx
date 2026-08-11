@@ -34,7 +34,7 @@ import {
   appendHtmlPreviewScrollRestoration,
   createHtmlPreviewScrollKey,
   getArtifactViewState,
-  HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
+  isHtmlPreviewScrollMessageSource,
 } from "@/core/artifacts/preview";
 import { extractCitationSources } from "@/core/citations/sources";
 import { writeTextToClipboard } from "@/core/clipboard";
@@ -473,7 +473,7 @@ export function ArtifactFilePreview({
 
       iframeRef.current?.contentWindow?.postMessage(
         {
-          source: HTML_PREVIEW_SCROLL_MESSAGE_SOURCE,
+          source: event.data.source,
           key: scrollMessageKey,
           type: "restore",
           ...scrollPositionRef.current,
@@ -541,6 +541,8 @@ function isArtifactScrollMessage(
   data: unknown,
   key: string,
 ): data is {
+  source: string;
+  key: string;
   type: "save" | "restore-request";
   x?: unknown;
   y?: unknown;
@@ -549,7 +551,7 @@ function isArtifactScrollMessage(
     typeof data === "object" &&
     data !== null &&
     "source" in data &&
-    data.source === HTML_PREVIEW_SCROLL_MESSAGE_SOURCE &&
+    isHtmlPreviewScrollMessageSource(data.source) &&
     "key" in data &&
     data.key === key &&
     "type" in data &&

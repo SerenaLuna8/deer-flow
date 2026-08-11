@@ -646,12 +646,20 @@ def test_seal_service_constructors_reject_invalid_ports() -> None:
 @pytest.mark.asyncio
 async def test_handler_cancels_claims_with_the_wrong_shape() -> None:
     handler = _handler(_Barrier())
+    wrong_job_type = _claim()
+    object.__setattr__(wrong_job_type, "job_type", "private_run")
+    missing_namespace = _claim()
+    object.__setattr__(missing_namespace, "namespace", None)
+    unexpected_run = _claim()
+    object.__setattr__(unexpected_run, "run_id", "run-1")
+    missing_owner = _claim()
+    object.__setattr__(missing_owner, "scope", JobScope(PROJECT_ID, None))
 
     for claim in (
-        _claim(job_type="private_run", run_id="run-1"),
-        _claim(namespace=None),
-        _claim(run_id="run-1"),
-        _claim(scope=JobScope(PROJECT_ID, None)),
+        wrong_job_type,
+        missing_namespace,
+        unexpected_run,
+        missing_owner,
     ):
         outcome = await handler(claim, _Authority())
         assert outcome.status == "cancelled"

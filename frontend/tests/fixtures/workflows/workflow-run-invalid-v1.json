@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "uuid_values": [
+    {
+      "id": "uuid-braced",
+      "value": "{aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
+    },
+    {
+      "id": "uuid-uppercase",
+      "value": "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"
+    },
+    {
+      "id": "uuid-compact",
+      "value": "aaaaaaaaaaaa4aaa8aaaaaaaaaaaaaaa"
+    }
+  ],
+  "input_cases": [
+    { "id": "input-id-non-ascii", "kind": "input_id", "value": "输入" },
+    { "id": "input-id-digit-prefix", "kind": "input_id", "value": "1bad" },
+    {
+      "id": "input-id-leading-underscore",
+      "kind": "input_id",
+      "value": "_bad"
+    },
+    { "id": "input-id-space", "kind": "input_id", "value": "has space" },
+    {
+      "id": "input-unpaired-surrogate-value",
+      "kind": "unpaired_surrogate_value"
+    },
+    { "id": "input-unpaired-surrogate-key", "kind": "unpaired_surrogate_key" },
+    { "id": "input-depth-65", "kind": "depth", "array_levels": 64 },
+    {
+      "id": "input-node-count-overflow",
+      "kind": "node_count",
+      "array_length": 65536
+    },
+    {
+      "id": "input-canonical-bytes-overflow",
+      "kind": "canonical_bytes",
+      "string_length": 2097152
+    }
+  ],
+  "time_values": [
+    "2026-08-10 01:00:00Z",
+    "2026-08-10T01:00:00z",
+    "2026-08-10T01:00:00+00:00",
+    "2026-08-10T09:00:00+08:00",
+    "2026-08-10T01:00:00",
+    "2026-08-10T01:00:00.120Z",
+    "2026-02-30T01:00:00Z"
+  ],
+  "run_cases": [
+    {
+      "id": "run-queued-started",
+      "status": "queued",
+      "started_at": "2026-08-10T01:00:01Z"
+    },
+    {
+      "id": "run-queued-completed",
+      "status": "queued",
+      "completed_at": "2026-08-10T01:00:02Z"
+    },
+    { "id": "run-running-no-start", "status": "running", "started_at": null },
+    {
+      "id": "run-running-completed",
+      "status": "running",
+      "completed_at": "2026-08-10T01:00:02Z"
+    },
+    {
+      "id": "run-succeeded-no-start",
+      "status": "succeeded",
+      "started_at": null
+    },
+    {
+      "id": "run-succeeded-no-complete",
+      "status": "succeeded",
+      "completed_at": null
+    },
+    {
+      "id": "run-succeeded-error",
+      "status": "succeeded",
+      "error_mode": "safe"
+    },
+    {
+      "id": "run-cancelled-error",
+      "status": "cancelled",
+      "error_mode": "safe"
+    },
+    {
+      "id": "run-cancelled-no-complete",
+      "status": "cancelled",
+      "completed_at": null
+    },
+    {
+      "id": "run-cancelled-pre-start-complete-before-create",
+      "status": "cancelled",
+      "started_at": null,
+      "created_at": "2026-08-10T01:00:02Z",
+      "completed_at": "2026-08-10T01:00:01Z"
+    },
+    { "id": "run-failed-no-error", "status": "failed", "error_mode": "none" },
+    {
+      "id": "run-unknown-no-error",
+      "status": "side_effect_unknown",
+      "error_mode": "none"
+    },
+    {
+      "id": "run-start-before-create",
+      "status": "running",
+      "created_at": "2026-08-10T01:00:02Z",
+      "started_at": "2026-08-10T01:00:01Z"
+    },
+    {
+      "id": "run-complete-before-start",
+      "status": "succeeded",
+      "started_at": "2026-08-10T01:00:02Z",
+      "completed_at": "2026-08-10T01:00:01Z"
+    }
+  ],
+  "job_cases": [
+    { "id": "job-queued-attempt", "status": "queued", "attempt_count": 1 },
+    {
+      "id": "job-queued-started",
+      "status": "queued",
+      "started_at": "2026-08-10T01:00:01Z"
+    },
+    { "id": "job-leased-attempt-zero", "status": "leased", "attempt_count": 0 },
+    { "id": "job-leased-no-start", "status": "leased", "started_at": null },
+    {
+      "id": "job-leased-completed",
+      "status": "leased",
+      "completed_at": "2026-08-10T01:00:02Z"
+    },
+    {
+      "id": "job-running-error",
+      "status": "running",
+      "public_error_code": "WORKFLOW_TEMPORARY"
+    },
+    {
+      "id": "job-retry-wait-attempt-zero",
+      "status": "retry_wait",
+      "attempt_count": 0
+    },
+    {
+      "id": "job-retry-wait-no-start",
+      "status": "retry_wait",
+      "started_at": null
+    },
+    {
+      "id": "job-retry-wait-no-error",
+      "status": "retry_wait",
+      "public_error_code": null
+    },
+    {
+      "id": "job-retry-wait-completed",
+      "status": "retry_wait",
+      "completed_at": "2026-08-10T01:00:02Z"
+    },
+    {
+      "id": "job-succeeded-no-start",
+      "status": "succeeded",
+      "started_at": null
+    },
+    {
+      "id": "job-succeeded-no-complete",
+      "status": "succeeded",
+      "completed_at": null
+    },
+    {
+      "id": "job-succeeded-error",
+      "status": "succeeded",
+      "public_error_code": "WORKFLOW_FAILED"
+    },
+    {
+      "id": "job-cancelled-error",
+      "status": "cancelled",
+      "public_error_code": "WORKFLOW_FAILED"
+    },
+    {
+      "id": "job-cancelled-pre-start-has-attempt",
+      "status": "cancelled",
+      "attempt_count": 1,
+      "started_at": null
+    },
+    {
+      "id": "job-cancelled-attempt-zero-has-start",
+      "status": "cancelled",
+      "attempt_count": 0,
+      "started_at": "2026-08-10T01:00:01Z"
+    },
+    {
+      "id": "job-cancelled-no-complete",
+      "status": "cancelled",
+      "completed_at": null
+    },
+    {
+      "id": "job-cancelled-pre-start-complete-before-create",
+      "status": "cancelled",
+      "attempt_count": 0,
+      "started_at": null,
+      "created_at": "2026-08-10T01:00:02Z",
+      "completed_at": "2026-08-10T01:00:01Z"
+    },
+    {
+      "id": "job-failed-no-error",
+      "status": "failed",
+      "public_error_code": null
+    },
+    { "id": "job-dead-no-error", "status": "dead", "public_error_code": null },
+    {
+      "id": "job-terminal-attempt-zero",
+      "status": "failed",
+      "attempt_count": 0
+    },
+    {
+      "id": "job-start-before-create",
+      "status": "running",
+      "created_at": "2026-08-10T01:00:02Z",
+      "started_at": "2026-08-10T01:00:01Z"
+    },
+    {
+      "id": "job-complete-before-start",
+      "status": "failed",
+      "started_at": "2026-08-10T01:00:02Z",
+      "completed_at": "2026-08-10T01:00:01Z"
+    }
+  ],
+  "public_error_codes": [
+    "lower_case",
+    "1STARTS_WITH_DIGIT",
+    "HAS-DASH",
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  ],
+  "strict_literal_one_invalid_values": [true, "1"]
+}

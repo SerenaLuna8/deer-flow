@@ -31,7 +31,7 @@ pnpm build:static
 - `/workspace` is the authenticated account-wide multi-project landing page. It shows
   project cards, invitations, and recoverable projects without a project sidebar.
 - `/projects/[project_slug]` is the only live project shell. Nested pages include project
-  overview, settings (including members), Audit, Chats, Memory, Connections,
+  overview, settings (including members), Audit, Chats, Workflows, Memory, Connections,
   Automation, shared assets, and Usage according to server-issued capabilities.
 - `/admin/assets/*`, `/admin/operations/*`, and `/admin/settings/*` are the platform
   administration shells.
@@ -68,6 +68,7 @@ frontend/src/
 │   ├── projects/                     # strict project contracts and provider
 │   ├── private-work/                 # account+project clients and keys
 │   ├── project-automations/          # Automation API and pure schedules
+│   ├── project-workflows/            # Workflow contracts, editor store, catalog
 │   ├── shared-assets/                # project/system asset contracts
 │   ├── admin-operations/             # system-admin safe operations contract
 │   ├── admin-settings/               # model catalog and global policy contracts
@@ -729,6 +730,55 @@ Manual trigger uses a UUID idempotency key and the same durable admission path a
 Remote-data starter recipes bound their tool attempts and require an explicit partial-result
 fallback instead of retrying an unavailable provider until the Run recursion ceiling.
 
+## Project Workflows
+
+Workflow authoring is a project-scoped Definition builder; the browser never executes a
+Workflow Run or a single node today. The Workflows navigation entry sits in the work group
+between Chats and Automation and renders only for a non-static build with `workflow.read`
+plus a readiness probe that passes control-plane status, effective enabled state, and schema
+readiness — never `admission_ready`, Worker presence, or Code/HTTP profile readiness. The
+list route `/projects/[project_slug]/workflows` and the workbench route
+`.../workflows/[workflow_id]` both return `notFound()` for static builds before dynamically
+importing the server capability gate and any authenticated client, so the static shell keeps
+zero `/api/` reachability.
+
+`src/core/project-workflows/` owns the strict Zod Catalog/Definition/Draft/Version/Issue/
+Run/Event/runtime-policy DTOs, the readiness client, canonical JSON and sha256 helpers, and
+the cURL parser. The golden fixtures under `tests/fixtures/workflows/` are read directly by
+backend contract tests, so a cross-end field or checksum change updates the fixtures and both
+ends in the same change set — never fork a second definition. The project capability enum
+carries the exact ten `workflow.*` capabilities issued by Gateway; the UI never derives them
+from roles. Every query and mutation keys under the account+project `projectWorkflowRoot`,
+which is registered in the private-work scope registry so scope transitions abort and remove
+it.
+
+The editor is four-layered: the persisted Spec/Canvas document, the per-Workbench editor
+session, and the runtime projection never bleed into each other. `createWorkflowEditorStore`
+creates one store per Workbench through Context — no module singleton. Structural edits are
+semantic commands (drag/connect/delete/reparent and the atomic "next step"; Loop scope moves
+only through reparent commands, never inferred from geometric containment) with
+baseline/dirty/history; Inspector session and runtime state never write Spec, Canvas, dirty
+state, or Undo history. CodeMirror keeps its own Undo stack, isolated from Workflow Undo.
+
+Node configuration uses a closed nine-kind panel registry. An unknown node type or a future
+`type_version` renders a read-only Unsupported panel (fail closed), while a partial Draft
+with `config: null` normalizes to an editable empty record with inline issues instead of
+locking read-only. Cards never render Code source, HTTP raw requests, or logs; safe preview
+shows only the server's safe projection. Controlled editors register in the flush registry,
+and every saved-Draft server action (validate, publish, grant mutations) flushes them first
+and then re-reads the active editor authority — a flush that materialized a local change must
+never be paired with the old server revision/checksum. Draft, publish, and grant mutations
+forward AbortSignal, CSRF, and Idempotency/CAS headers; a 409 preserves the local Draft and
+Canvas behind explicit reload/compare actions.
+
+Credential grant intent and grant readiness are independent query/mutation state and never
+enter the Spec, Canvas, dirty state, or Undo history. Ordinary editors see only safe
+readiness; without `workflow.credential.grant` the UI must not enumerate or bind Credentials.
+The cURL import dialog is a zero-network pure parser that rejects dangerous
+transport/file/secret options, previews a diff, and drops the raw command text when closed.
+Unit tests live under `tests/unit/core/project-workflows/` and
+`tests/unit/components/projects/workflows/`.
+
 ## Project governance and system administration
 
 Audit pages mount hooks only after their exact readiness and capability gates pass.
@@ -770,7 +820,9 @@ close label with an accessible hit target.
 System settings use strict, secret-free section contracts under the authenticated account query
 root. Each section is replaced atomically with its expected revision; conflict responses preserve
 the local draft, and the UI renders the server-confirmed effective revision, effect scope, and any
-pending runtime roles. Agent model references are limited to active system logical model names.
+pending runtime roles. For Workflow runtime, an exact effective revision may coexist with a pending
+Worker role: effective describes Gateway/control-plane materialization, while pending/readiness
+separately controls new-Run admission. Agent model references are limited to active system logical model names.
 The single Memory destination renders two independently versioned cards: the Memory fields inside
 `agent_runtime`, and the ordered 2..8-title `memory_document` template. The latter saves only
 through its own `expected_revision`, reports the `new_memory_documents` effect scope, and must state

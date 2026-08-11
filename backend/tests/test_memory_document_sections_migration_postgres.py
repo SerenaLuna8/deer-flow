@@ -241,7 +241,7 @@ async def test_v8_to_v9_backfills_frozen_sections_and_policy_provenance(
 
         result = await upgrade_postgres(database_url, assume_yes=True)
         assert result.from_revision == "full_schema_v8"
-        assert result.to_revision == CURRENT_SCHEMA_REVISION == "full_schema_v9"
+        assert result.to_revision == CURRENT_SCHEMA_REVISION == "full_schema_v12"
 
         upgraded = create_async_engine(database_url, poolclass=NullPool)
         try:

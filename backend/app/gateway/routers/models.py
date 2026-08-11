@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal, Self
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.gateway.deps import (
     get_current_agent_runtime_config,
@@ -26,6 +26,44 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+class WorkflowModelParameterResponse(_StrictModel):
+    """One bounded parameter that the Workflow Inspector may author."""
+
+    name: Literal["temperature", "max_tokens"]
+    kind: Literal["number", "integer"]
+    minimum: float
+    maximum: float
+
+    @model_validator(mode="after")
+    def validate_exact_parameter_contract(self) -> Self:
+        expected = {
+            "temperature": ("number", -2.0, 2.0),
+            "max_tokens": ("integer", 1.0, 2_000_000.0),
+        }[self.name]
+        if (self.kind, self.minimum, self.maximum) != expected:
+            raise ValueError("Workflow Model parameter contract is invalid")
+        return self
+
+
+class WorkflowModelAuthoringResponse(_StrictModel):
+    """Secret-free Workflow authoring capability for one logical Model."""
+
+    modes: list[Literal["chat", "completion"]]
+    supports_streaming: bool
+    parameters: list[WorkflowModelParameterResponse]
+
+    @model_validator(mode="after")
+    def validate_canonical_capability(self) -> Self:
+        mode_order = {"chat": 0, "completion": 1}
+        if not self.modes or len(self.modes) != len(set(self.modes)) or self.modes != sorted(self.modes, key=mode_order.__getitem__):
+            raise ValueError("Workflow Model modes must be unique and canonical")
+        parameter_order = {"temperature": 0, "max_tokens": 1}
+        names = [parameter.name for parameter in self.parameters]
+        if len(names) != len(set(names)) or names != sorted(names, key=parameter_order.__getitem__):
+            raise ValueError("Workflow Model parameters must be unique and canonical")
+        return self
+
+
 class ModelResponse(_StrictModel):
     """Safe selector metadata; provider configuration is admin-only."""
 
@@ -40,6 +78,7 @@ class ModelResponse(_StrictModel):
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
     is_default: bool = False
+    workflow_authoring: WorkflowModelAuthoringResponse
 
 
 class TokenUsageResponse(_StrictModel):
@@ -62,6 +101,19 @@ def _public_response(model: PublicSystemModelView) -> ModelResponse:
         supports_reasoning_effort=model.supports_reasoning_effort,
         supports_vision=model.supports_vision,
         is_default=model.is_default,
+        workflow_authoring=WorkflowModelAuthoringResponse(
+            modes=list(model.workflow_authoring.modes),
+            supports_streaming=model.workflow_authoring.supports_streaming,
+            parameters=[
+                WorkflowModelParameterResponse(
+                    name=parameter.name,
+                    kind=parameter.kind,
+                    minimum=parameter.minimum,
+                    maximum=parameter.maximum,
+                )
+                for parameter in model.workflow_authoring.parameters
+            ],
+        ),
     )
 
 
@@ -129,5 +181,7 @@ __all__ = [
     "ModelResponse",
     "ModelsListResponse",
     "TokenUsageResponse",
+    "WorkflowModelAuthoringResponse",
+    "WorkflowModelParameterResponse",
     "router",
 ]

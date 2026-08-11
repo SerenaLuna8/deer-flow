@@ -11,6 +11,7 @@ import {
 } from "@/core/private-work/scope-registry";
 import { automationRoot } from "@/core/project-automations/query-keys";
 import { governanceRoot } from "@/core/project-governance/query-keys";
+import { projectWorkflowRoot } from "@/core/project-workflows/query-keys";
 import { projectSharedAssetRoot } from "@/core/shared-assets/query-keys";
 import { skillBuilderRootKey } from "@/core/skill-builder/query-keys";
 
@@ -159,6 +160,10 @@ describe("project private-work scope registry", () => {
     );
     queryClient.setQueryData([...automationRoot(A_P1), "list", 50, 0], "old");
     queryClient.setQueryData(
+      [...projectWorkflowRoot(A_P1), "readiness"],
+      "old",
+    );
+    queryClient.setQueryData(
       [...projectSharedAssetRoot(A_P1), "skills"],
       "old",
     );
@@ -169,6 +174,7 @@ describe("project private-work scope registry", () => {
     await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
 
     expect(order).toEqual([
+      "cancel",
       "cancel",
       "cancel",
       "cancel",
@@ -190,6 +196,9 @@ describe("project private-work scope registry", () => {
     ).toBeUndefined();
     expect(
       queryClient.getQueryData([...automationRoot(A_P1), "list", 50, 0]),
+    ).toBeUndefined();
+    expect(
+      queryClient.getQueryData([...projectWorkflowRoot(A_P1), "readiness"]),
     ).toBeUndefined();
     expect(
       queryClient.getQueryData([...projectSharedAssetRoot(A_P1), "skills"]),

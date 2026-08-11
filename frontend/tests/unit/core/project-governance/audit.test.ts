@@ -1,7 +1,12 @@
 import { describe, expect, test } from "@rstest/core";
 
 import { adminAuditItemSchema } from "@/core/admin-operations/types";
-import { auditItemSchema } from "@/core/project-governance/audit";
+import {
+  WORKFLOW_AUDIT_ACTIONS,
+  auditActionSchema,
+  auditItemSchema,
+  auditTargetKindSchema,
+} from "@/core/project-governance/audit";
 
 const recallAuditItem = {
   id: "11111111-1111-4111-8111-111111111111",
@@ -20,6 +25,69 @@ const recallAuditItem = {
 } as const;
 
 describe("project audit contract", () => {
+  test("mirrors the closed Workflow action group and target kind", () => {
+    expect(WORKFLOW_AUDIT_ACTIONS).toEqual([
+      "workflow.definition_created",
+      "workflow.definition_updated",
+      "workflow.definition_archived",
+      "workflow.draft_saved",
+      "workflow.version_published",
+      "workflow.draft_grant_intent_updated",
+      "workflow.draft_grant_intent_deleted",
+      "workflow.version_grant_updated",
+      "workflow.version_grant_revoked",
+    ]);
+
+    for (const action of WORKFLOW_AUDIT_ACTIONS) {
+      expect(auditActionSchema.parse(action)).toBe(action);
+    }
+    expect(auditTargetKindSchema.parse("workflow")).toBe("workflow");
+    expect(auditActionSchema.safeParse("workflow.unknown").success).toBe(false);
+    expect(auditTargetKindSchema.safeParse("workflow_version").success).toBe(
+      false,
+    );
+  });
+
+  test("accepts only content-free Workflow control-plane audit events", () => {
+    for (const action of WORKFLOW_AUDIT_ACTIONS) {
+      const item = {
+        ...recallAuditItem,
+        actor: "user",
+        action,
+        target_kind: "workflow",
+        metadata: {},
+      };
+      expect(auditItemSchema.safeParse(item).success).toBe(true);
+      expect(
+        auditItemSchema.safeParse({
+          ...item,
+          metadata: { idempotency_key: "raw-key", secret: "never" },
+        }).success,
+      ).toBe(false);
+    }
+  });
+
+  test("keeps the Workflow action group paired with the Workflow target kind", () => {
+    expect(
+      auditItemSchema.safeParse({
+        ...recallAuditItem,
+        actor: "user",
+        action: WORKFLOW_AUDIT_ACTIONS[0],
+        target_kind: "run",
+        metadata: {},
+      }).success,
+    ).toBe(false);
+    expect(
+      auditItemSchema.safeParse({
+        ...recallAuditItem,
+        actor: "user",
+        action: "project.updated",
+        target_kind: "workflow",
+        metadata: {},
+      }).success,
+    ).toBe(false);
+  });
+
   test("accepts the complete closed memory recall metadata vocabulary", () => {
     expect(auditItemSchema.parse(recallAuditItem).metadata).toEqual(
       recallAuditItem.metadata,

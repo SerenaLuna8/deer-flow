@@ -2,6 +2,11 @@ import type { AgentMode } from "../threads";
 
 import {
   DEFAULT_LOCAL_SETTINGS,
+  LEGACY_LOCAL_SETTINGS_KEY,
+  LEGACY_THREAD_MODE_EXPLICIT_KEY_PREFIX,
+  LEGACY_THREAD_MODE_KEY_PREFIX,
+  LEGACY_THREAD_MODEL_EXPLICIT_KEY_PREFIX,
+  LEGACY_THREAD_MODEL_KEY_PREFIX,
   LOCAL_SETTINGS_KEY,
   THREAD_MODE_EXPLICIT_KEY_PREFIX,
   THREAD_MODE_KEY_PREFIX,
@@ -75,6 +80,20 @@ function mergeSettingsSection<K extends keyof LocalSettings>(
   } as LocalSettings;
 }
 
+function threadIdFromStorageKey(
+  key: string,
+  currentPrefix: string,
+  legacyPrefix: string,
+): string | null {
+  if (key.startsWith(currentPrefix)) {
+    return key.slice(currentPrefix.length);
+  }
+  if (key.startsWith(legacyPrefix)) {
+    return key.slice(legacyPrefix.length);
+  }
+  return null;
+}
+
 function handleStorage(event: StorageEvent) {
   if (event.storageArea && event.storageArea !== localStorage) {
     return;
@@ -92,42 +111,61 @@ function handleStorage(event: StorageEvent) {
     return;
   }
 
-  if (event.key === LOCAL_SETTINGS_KEY) {
+  if (
+    event.key === LOCAL_SETTINGS_KEY ||
+    event.key === LEGACY_LOCAL_SETTINGS_KEY
+  ) {
     baseSettings = getLocalSettings();
     emitChange();
     return;
   }
 
-  if (event.key.startsWith(THREAD_MODEL_EXPLICIT_KEY_PREFIX)) {
-    const threadId = event.key.slice(THREAD_MODEL_EXPLICIT_KEY_PREFIX.length);
+  const modelExplicitThreadId = threadIdFromStorageKey(
+    event.key,
+    THREAD_MODEL_EXPLICIT_KEY_PREFIX,
+    LEGACY_THREAD_MODEL_EXPLICIT_KEY_PREFIX,
+  );
+  if (modelExplicitThreadId !== null) {
     threadModelSelections.set(
-      threadId,
-      getThreadModelSelectionExplicit(threadId),
+      modelExplicitThreadId,
+      getThreadModelSelectionExplicit(modelExplicitThreadId),
     );
     emitChange();
     return;
   }
 
-  if (event.key.startsWith(THREAD_MODE_EXPLICIT_KEY_PREFIX)) {
-    const threadId = event.key.slice(THREAD_MODE_EXPLICIT_KEY_PREFIX.length);
+  const modeExplicitThreadId = threadIdFromStorageKey(
+    event.key,
+    THREAD_MODE_EXPLICIT_KEY_PREFIX,
+    LEGACY_THREAD_MODE_EXPLICIT_KEY_PREFIX,
+  );
+  if (modeExplicitThreadId !== null) {
     threadModeSelections.set(
-      threadId,
-      getThreadModeSelectionExplicit(threadId),
+      modeExplicitThreadId,
+      getThreadModeSelectionExplicit(modeExplicitThreadId),
     );
     emitChange();
     return;
   }
 
-  if (event.key.startsWith(THREAD_MODE_KEY_PREFIX)) {
-    const threadId = event.key.slice(THREAD_MODE_KEY_PREFIX.length);
-    threadModes.set(threadId, getThreadMode(threadId));
+  const modeThreadId = threadIdFromStorageKey(
+    event.key,
+    THREAD_MODE_KEY_PREFIX,
+    LEGACY_THREAD_MODE_KEY_PREFIX,
+  );
+  if (modeThreadId !== null) {
+    threadModes.set(modeThreadId, getThreadMode(modeThreadId));
     emitChange();
     return;
   }
 
-  if (!event.key.startsWith(THREAD_MODEL_KEY_PREFIX)) return;
-  const threadId = event.key.slice(THREAD_MODEL_KEY_PREFIX.length);
-  threadModelNames.set(threadId, getThreadModelName(threadId));
+  const modelThreadId = threadIdFromStorageKey(
+    event.key,
+    THREAD_MODEL_KEY_PREFIX,
+    LEGACY_THREAD_MODEL_KEY_PREFIX,
+  );
+  if (modelThreadId === null) return;
+  threadModelNames.set(modelThreadId, getThreadModelName(modelThreadId));
   emitChange();
 }
 

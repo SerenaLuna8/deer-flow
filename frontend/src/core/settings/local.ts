@@ -1,5 +1,11 @@
 import type { TokenUsageInlineMode } from "../messages/usage-model";
 import {
+  readMigratedStorageValue,
+  removeMigratedStorageValue,
+  writeMigratedStorageValue,
+  type BrandStorage,
+} from "../storage/brand-key-migration";
+import {
   isAgentMode,
   type AgentMode,
   type AgentThreadContext,
@@ -40,15 +46,50 @@ export const DEFAULT_LOCAL_SETTINGS: LocalSettings = {
   },
 };
 
-export const LOCAL_SETTINGS_KEY = "deerflow.local-settings";
-export const THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
+export const LOCAL_SETTINGS_KEY = "actweave.local-settings";
+export const THREAD_MODEL_KEY_PREFIX = "actweave.thread-model.";
 export const THREAD_MODEL_EXPLICIT_KEY_PREFIX =
+  "actweave.thread-explicit-model.";
+export const THREAD_MODE_KEY_PREFIX = "actweave.thread-mode.";
+export const THREAD_MODE_EXPLICIT_KEY_PREFIX = "actweave.thread-explicit-mode.";
+
+export const LEGACY_LOCAL_SETTINGS_KEY = "deerflow.local-settings";
+export const LEGACY_THREAD_MODEL_KEY_PREFIX = "deerflow.thread-model.";
+export const LEGACY_THREAD_MODEL_EXPLICIT_KEY_PREFIX =
   "deerflow.thread-explicit-model.";
-export const THREAD_MODE_KEY_PREFIX = "deerflow.thread-mode.";
-export const THREAD_MODE_EXPLICIT_KEY_PREFIX = "deerflow.thread-explicit-mode.";
+export const LEGACY_THREAD_MODE_KEY_PREFIX = "deerflow.thread-mode.";
+export const LEGACY_THREAD_MODE_EXPLICIT_KEY_PREFIX =
+  "deerflow.thread-explicit-mode.";
 
 function isBrowser(): boolean {
   return typeof window !== "undefined";
+}
+
+function getBrowserStorage(): BrandStorage | null {
+  try {
+    return typeof localStorage === "undefined" ? null : localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isStoredLocalSettings(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return (
+      typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isStoredModelName(value: string): boolean {
+  return value.length > 0;
+}
+
+function isStoredExplicitSelection(value: string): boolean {
+  return value === "1";
 }
 
 export interface LocalSettings {
@@ -124,38 +165,62 @@ function getThreadModelStorageKey(threadId: string): string {
   return `${THREAD_MODEL_KEY_PREFIX}${threadId}`;
 }
 
+function getLegacyThreadModelStorageKey(threadId: string): string {
+  return `${LEGACY_THREAD_MODEL_KEY_PREFIX}${threadId}`;
+}
+
 export function getThreadModelName(threadId: string): string | undefined {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return undefined;
   }
-  return localStorage.getItem(getThreadModelStorageKey(threadId)) ?? undefined;
+  return (
+    readMigratedStorageValue(
+      storage,
+      getThreadModelStorageKey(threadId),
+      [getLegacyThreadModelStorageKey(threadId)],
+      isStoredModelName,
+    ) ?? undefined
+  );
 }
 
 export function saveThreadModelName(
   threadId: string,
   modelName: string | undefined,
 ) {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return;
   }
   const key = getThreadModelStorageKey(threadId);
+  const legacyKeys = [getLegacyThreadModelStorageKey(threadId)];
   if (!modelName) {
-    localStorage.removeItem(key);
+    removeMigratedStorageValue(storage, key, legacyKeys);
     return;
   }
-  localStorage.setItem(key, modelName);
+  writeMigratedStorageValue(storage, key, modelName, legacyKeys);
 }
 
 function getThreadModelExplicitStorageKey(threadId: string): string {
   return `${THREAD_MODEL_EXPLICIT_KEY_PREFIX}${threadId}`;
 }
 
+function getLegacyThreadModelExplicitStorageKey(threadId: string): string {
+  return `${LEGACY_THREAD_MODEL_EXPLICIT_KEY_PREFIX}${threadId}`;
+}
+
 export function getThreadModelSelectionExplicit(threadId: string): boolean {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return false;
   }
   return (
-    localStorage.getItem(getThreadModelExplicitStorageKey(threadId)) === "1"
+    readMigratedStorageValue(
+      storage,
+      getThreadModelExplicitStorageKey(threadId),
+      [getLegacyThreadModelExplicitStorageKey(threadId)],
+      isStoredExplicitSelection,
+    ) === "1"
   );
 }
 
@@ -163,15 +228,17 @@ export function saveThreadModelSelectionExplicit(
   threadId: string,
   explicit: boolean,
 ) {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return;
   }
   const key = getThreadModelExplicitStorageKey(threadId);
+  const legacyKeys = [getLegacyThreadModelExplicitStorageKey(threadId)];
   if (!explicit) {
-    localStorage.removeItem(key);
+    removeMigratedStorageValue(storage, key, legacyKeys);
     return;
   }
-  localStorage.setItem(key, "1");
+  writeMigratedStorageValue(storage, key, "1", legacyKeys);
 }
 
 export function applyThreadModelOverride(
@@ -196,36 +263,58 @@ function getThreadModeStorageKey(threadId: string): string {
   return `${THREAD_MODE_KEY_PREFIX}${threadId}`;
 }
 
+function getLegacyThreadModeStorageKey(threadId: string): string {
+  return `${LEGACY_THREAD_MODE_KEY_PREFIX}${threadId}`;
+}
+
 export function getThreadMode(threadId: string): AgentMode | undefined {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return undefined;
   }
-  const mode = localStorage.getItem(getThreadModeStorageKey(threadId));
+  const mode = readMigratedStorageValue(
+    storage,
+    getThreadModeStorageKey(threadId),
+    [getLegacyThreadModeStorageKey(threadId)],
+    isAgentMode,
+  );
   return isAgentMode(mode) ? mode : undefined;
 }
 
 export function saveThreadMode(threadId: string, mode: AgentMode | undefined) {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return;
   }
   const key = getThreadModeStorageKey(threadId);
+  const legacyKeys = [getLegacyThreadModeStorageKey(threadId)];
   if (!mode) {
-    localStorage.removeItem(key);
+    removeMigratedStorageValue(storage, key, legacyKeys);
     return;
   }
-  localStorage.setItem(key, mode);
+  writeMigratedStorageValue(storage, key, mode, legacyKeys);
 }
 
 function getThreadModeExplicitStorageKey(threadId: string): string {
   return `${THREAD_MODE_EXPLICIT_KEY_PREFIX}${threadId}`;
 }
 
+function getLegacyThreadModeExplicitStorageKey(threadId: string): string {
+  return `${LEGACY_THREAD_MODE_EXPLICIT_KEY_PREFIX}${threadId}`;
+}
+
 export function getThreadModeSelectionExplicit(threadId: string): boolean {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return false;
   }
   return (
-    localStorage.getItem(getThreadModeExplicitStorageKey(threadId)) === "1"
+    readMigratedStorageValue(
+      storage,
+      getThreadModeExplicitStorageKey(threadId),
+      [getLegacyThreadModeExplicitStorageKey(threadId)],
+      isStoredExplicitSelection,
+    ) === "1"
   );
 }
 
@@ -233,15 +322,17 @@ export function saveThreadModeSelectionExplicit(
   threadId: string,
   explicit: boolean,
 ) {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return;
   }
   const key = getThreadModeExplicitStorageKey(threadId);
+  const legacyKeys = [getLegacyThreadModeExplicitStorageKey(threadId)];
   if (!explicit) {
-    localStorage.removeItem(key);
+    removeMigratedStorageValue(storage, key, legacyKeys);
     return;
   }
-  localStorage.setItem(key, "1");
+  writeMigratedStorageValue(storage, key, "1", legacyKeys);
 }
 
 export function applyThreadModeOverride(
@@ -263,17 +354,25 @@ export function applyThreadModeOverride(
 }
 
 export function getLocalSettings(): LocalSettings {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return DEFAULT_LOCAL_SETTINGS;
   }
-  const json = localStorage.getItem(LOCAL_SETTINGS_KEY);
+  const json = readMigratedStorageValue(
+    storage,
+    LOCAL_SETTINGS_KEY,
+    [LEGACY_LOCAL_SETTINGS_KEY],
+    isStoredLocalSettings,
+  );
   try {
     if (json) {
       const settings = JSON.parse(json) as Partial<LocalSettings>;
       const normalized = normalizeLocalSettings(settings);
       const normalizedJson = JSON.stringify(normalized);
       if (json !== normalizedJson) {
-        localStorage.setItem(LOCAL_SETTINGS_KEY, normalizedJson);
+        writeMigratedStorageValue(storage, LOCAL_SETTINGS_KEY, normalizedJson, [
+          LEGACY_LOCAL_SETTINGS_KEY,
+        ]);
       }
       return normalized;
     }
@@ -282,11 +381,14 @@ export function getLocalSettings(): LocalSettings {
 }
 
 export function saveLocalSettings(settings: LocalSettings) {
-  if (!isBrowser()) {
+  const storage = isBrowser() ? getBrowserStorage() : null;
+  if (!storage) {
     return;
   }
-  localStorage.setItem(
+  writeMigratedStorageValue(
+    storage,
     LOCAL_SETTINGS_KEY,
     JSON.stringify(normalizeLocalSettings(settings)),
+    [LEGACY_LOCAL_SETTINGS_KEY],
   );
 }

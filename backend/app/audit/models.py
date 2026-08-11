@@ -10,7 +10,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Literal, Protocol, TypeGuard
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, model_validator
 
 
 class AuditError(Exception):
@@ -84,6 +84,15 @@ class AuditAction(StrEnum):
     PURGE_COMPLETED = "purge.completed"
     AUDIT_CORRECTED = "audit.corrected"
     SYSTEM_SETTING_UPDATED = "system_setting.updated"
+    WORKFLOW_DEFINITION_CREATED = "workflow.definition_created"
+    WORKFLOW_DEFINITION_UPDATED = "workflow.definition_updated"
+    WORKFLOW_DEFINITION_ARCHIVED = "workflow.definition_archived"
+    WORKFLOW_DRAFT_SAVED = "workflow.draft_saved"
+    WORKFLOW_VERSION_PUBLISHED = "workflow.version_published"
+    WORKFLOW_DRAFT_GRANT_INTENT_UPDATED = "workflow.draft_grant_intent_updated"
+    WORKFLOW_DRAFT_GRANT_INTENT_DELETED = "workflow.draft_grant_intent_deleted"
+    WORKFLOW_VERSION_GRANT_UPDATED = "workflow.version_grant_updated"
+    WORKFLOW_VERSION_GRANT_REVOKED = "workflow.version_grant_revoked"
 
 
 class AuditTargetKind(StrEnum):
@@ -98,6 +107,7 @@ class AuditTargetKind(StrEnum):
     PURGE = "purge"
     AUDIT = "audit"
     SYSTEM_SETTING = "system_setting"
+    WORKFLOW = "workflow"
 
 
 class AuditOutcome(StrEnum):
@@ -428,6 +438,27 @@ _ACTION_CONTRACTS[AuditAction.SYSTEM_SETTING_UPDATED] = _contract(
     AuditScope.PLATFORM,
     "system",
 )
+for _action in (
+    AuditAction.WORKFLOW_DEFINITION_CREATED,
+    AuditAction.WORKFLOW_DEFINITION_UPDATED,
+    AuditAction.WORKFLOW_DEFINITION_ARCHIVED,
+    AuditAction.WORKFLOW_DRAFT_SAVED,
+    AuditAction.WORKFLOW_VERSION_PUBLISHED,
+    AuditAction.WORKFLOW_DRAFT_GRANT_INTENT_UPDATED,
+    AuditAction.WORKFLOW_DRAFT_GRANT_INTENT_DELETED,
+    AuditAction.WORKFLOW_VERSION_GRANT_UPDATED,
+    AuditAction.WORKFLOW_VERSION_GRANT_REVOKED,
+):
+    _ACTION_CONTRACTS[_action] = _contract(
+        AuditTargetKind.WORKFLOW,
+        AuditScope.PROJECT,
+        "user",
+        # Workflow control-plane events target the Definition while carrying
+        # its owning Project as the authorization scope.  Requiring the
+        # target UUID itself to equal the Project UUID would reject every
+        # correctly scoped Workflow event.
+        authority_matches_project=False,
+    )
 AUDIT_ACTION_CONTRACTS: Mapping[AuditAction, AuditActionContract] = MappingProxyType(_ACTION_CONTRACTS)
 
 
@@ -807,6 +838,7 @@ class JobAuditMetadata(_AuditMetadata):
     job_type: Literal[
         "private_run",
         "automation_run",
+        "workflow_run",
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
@@ -827,16 +859,28 @@ class CorrectionAuditMetadata(_AuditMetadata):
 
 
 class SystemSettingAuditMetadata(_AuditMetadata):
-    section: Literal["agent_runtime", "auth", "memory_document", "quotas"]
+    section: Literal[
+        "agent_runtime",
+        "auth",
+        "memory_document",
+        "quotas",
+        "workflow_runtime",
+    ]
+    previous_revision: StrictInt = Field(ge=1)
     revision: StrictInt = Field(ge=2)
-    schema_version: StrictInt = Field(ge=1)
-    payload_checksum: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
     effect_scope: Literal[
         "new_requests_and_runs",
         "new_requests",
         "new_memory_documents",
         "next_authoritative_check",
+        "new_workflow_runs",
     ]
+
+    @model_validator(mode="after")
+    def validate_revision_transition(self) -> SystemSettingAuditMetadata:
+        if self.revision != self.previous_revision + 1:
+            raise ValueError("system setting audit revisions must be contiguous")
+        return self
 
 
 _AUDIT_METADATA_MODELS: dict[AuditAction, type[_AuditMetadata]] = {action: EmptyAuditMetadata for action in AuditAction}

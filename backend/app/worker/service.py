@@ -95,12 +95,18 @@ class WorkerRegistryPort(Protocol):
         worker_id: uuid.UUID,
         capabilities: frozenset[str],
         max_concurrent_jobs: int,
-        **kwargs,
+        *,
+        runtime_profile_digests: frozenset[str],
     ) -> None: ...
 
-    async def heartbeat(self, worker_id: uuid.UUID, **kwargs) -> bool: ...
+    async def heartbeat(
+        self,
+        worker_id: uuid.UUID,
+        *,
+        runtime_profile_digests: frozenset[str],
+    ) -> bool: ...
 
-    async def mark_draining(self, worker_id: uuid.UUID, **kwargs) -> bool: ...
+    async def mark_draining(self, worker_id: uuid.UUID) -> bool: ...
 
     async def remove(self, worker_id: uuid.UUID) -> bool: ...
 
@@ -212,6 +218,7 @@ class WorkerService:
         *,
         repository_builder: RepositoryBuilder = JobRepository,
         worker_id: uuid.UUID | None = None,
+        runtime_profile_digests: frozenset[str] = frozenset(),
         after_claim_commit: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if not isinstance(config, WorkerConfig):
@@ -233,6 +240,9 @@ class WorkerService:
         self._handlers = dict(handlers)
         self._config = config
         self._after_claim_commit = after_claim_commit
+        if not isinstance(runtime_profile_digests, frozenset):
+            raise TypeError("Worker runtime profile digests must be a frozenset")
+        self._runtime_profile_digests = runtime_profile_digests
         self.worker_id = worker_id or uuid.uuid4()
         self._inflight: set[asyncio.Task[None]] = set()
         self._detached: set[asyncio.Task] = set()
@@ -451,7 +461,10 @@ class WorkerService:
                 )
             except TimeoutError:
                 try:
-                    alive = await self._registry.heartbeat(self.worker_id)
+                    alive = await self._registry.heartbeat(
+                        self.worker_id,
+                        runtime_profile_digests=self._runtime_profile_digests,
+                    )
                 except Exception:
                     self._accepting = False
                     raise
@@ -464,6 +477,7 @@ class WorkerService:
             self.worker_id,
             frozenset(self._handlers),
             self._config.max_concurrent_jobs,
+            runtime_profile_digests=self._runtime_profile_digests,
         )
         self._accepting = True
         self._draining = False

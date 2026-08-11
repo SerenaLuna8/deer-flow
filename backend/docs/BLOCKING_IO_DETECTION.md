@@ -13,7 +13,7 @@ make detect-blocking-io
 The report is written to:
 
 ```text
-.deer-flow/blocking-io-findings.json
+.act-weave/blocking-io-findings.json
 ```
 
 Each finding is a candidate for human review. Confirm that the call is actually

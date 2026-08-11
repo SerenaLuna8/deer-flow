@@ -22,15 +22,18 @@ easy to customize per environment.
 ActWeave resolves `config.yaml` using the following priority order:
 
 1. The path passed to `AppConfig.from_file(config_path)` explicitly.
-2. The `DEER_FLOW_CONFIG_PATH` environment variable.
-3. `config.yaml` in the repository root.
+2. The `ACT_WEAVE_CONFIG_PATH` environment variable.
+3. The legacy-compatible `DEER_FLOW_CONFIG_PATH` environment variable.
+4. `config.yaml` in the repository root.
+
+If both environment names are set, they must resolve to the same path.
 
 If none of these paths exist, the application raises an error at startup.
 
 To use a custom location:
 
 ```bash
-export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+export ACT_WEAVE_CONFIG_PATH=/path/to/my-config.yaml
 ```
 
 ## Environment variable interpolation

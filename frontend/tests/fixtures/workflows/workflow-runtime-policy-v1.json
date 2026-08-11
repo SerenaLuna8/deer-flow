@@ -1,0 +1,204 @@
+{
+  "policy": {
+    "schema_version": 1,
+    "enabled": false,
+    "admission_enabled": false,
+    "catalog": {
+      "allowed_type_versions": [
+        { "type": "start", "versions": [1] },
+        { "type": "llm", "versions": [1] },
+        { "type": "condition", "versions": [1] },
+        { "type": "transform", "versions": [1] },
+        { "type": "variable_aggregate", "versions": [1] },
+        { "type": "loop", "versions": [1] },
+        { "type": "http_request", "versions": [1] },
+        { "type": "python_code", "versions": [1] },
+        { "type": "end", "versions": [1] }
+      ]
+    },
+    "graph_limits": {
+      "max_nodes": 100,
+      "max_edges": 200,
+      "max_depth": 20,
+      "max_total_steps": 1000,
+      "max_recursion_depth": 2000,
+      "max_parallelism": 8,
+      "max_fan_out": 16,
+      "max_loops": 8,
+      "max_loop_body_nodes": 32,
+      "max_loop_body_edges": 64,
+      "max_loop_iterations": 100,
+      "max_total_iterations": 500,
+      "max_total_activations": 2000,
+      "max_aggregate_groups": 32,
+      "max_aggregate_candidates": 64
+    },
+    "execution_limits": {
+      "max_node_timeout_ms": 30000,
+      "max_run_timeout_ms": 300000,
+      "max_human_wait_timeout_ms": 86400000,
+      "max_input_bytes": 1048576,
+      "max_state_bytes": 4194304,
+      "max_output_bytes": 524288,
+      "max_event_preview_bytes": 65536,
+      "max_retry_attempts": 3,
+      "retry_backoff_initial_ms": 100,
+      "retry_backoff_max_ms": 5000,
+      "max_llm_tokens_per_call": 32768,
+      "max_llm_calls": 100,
+      "max_code_activations": 0,
+      "max_code_duration_ms": 300000,
+      "max_http_calls": 0,
+      "max_http_request_bytes": 1048576,
+      "max_http_response_bytes": 1048576,
+      "max_http_total_bytes": 8388608,
+      "max_mcp_calls": 0,
+      "max_files": 0,
+      "max_file_bytes": 0
+    },
+    "code": {
+      "enabled": false,
+      "provider_adapter_key": null,
+      "execution_profile_id": null,
+      "runtime_contract": "python3.12-v1",
+      "image_digest": null,
+      "isolation_profile": null,
+      "network_policy": "deny_all",
+      "dns_policy": "deny_all",
+      "hard_limits": {
+        "cpu_millicores": 1000,
+        "memory_bytes": 268435456,
+        "max_pids": 32,
+        "tmpfs_bytes": 67108864,
+        "wall_timeout_ms": 30000,
+        "max_source_bytes": 65536,
+        "max_stdout_bytes": 65536,
+        "max_stderr_bytes": 65536,
+        "max_result_bytes": 524288,
+        "max_total_log_bytes": 262144,
+        "read_only_root_filesystem": true,
+        "allow_mounts": false,
+        "allow_host_environment": false,
+        "allow_credentials": false,
+        "allow_runtime_sockets": false
+      }
+    },
+    "http": {
+      "enabled": false,
+      "write_enabled": false,
+      "egress_profile_id": null,
+      "egress_profile_digest": null,
+      "endpoint_policies": [],
+      "injection_profiles": [],
+      "transport": {
+        "connect_timeout_ms": 5000,
+        "read_timeout_ms": 30000,
+        "write_timeout_ms": 30000,
+        "total_timeout_ms": 60000,
+        "max_headers": 64,
+        "max_header_name_bytes": 128,
+        "max_header_value_bytes": 4096,
+        "max_request_bytes": 1048576,
+        "max_wire_response_bytes": 1048576,
+        "max_decompressed_response_bytes": 2097152,
+        "max_json_depth": 32,
+        "max_retries": 3,
+        "retry_backoff_initial_ms": 100,
+        "retry_backoff_max_ms": 5000,
+        "max_retry_after_ms": 30000,
+        "tls_verify": true,
+        "follow_redirects": false,
+        "cookie_jar": false,
+        "trust_env": false
+      }
+    },
+    "retention": {
+      "terminal_run_days": 30,
+      "event_days": 30,
+      "http_effect_days": 30,
+      "destroyed_code_lease_days": 7
+    },
+    "future": {
+      "human_input_enabled": false,
+      "agent_enabled": false,
+      "tool_enabled": false,
+      "mcp_enabled": false,
+      "iteration_enabled": false,
+      "subworkflow_enabled": false,
+      "automation_enabled": false,
+      "chatflow_enabled": false
+    }
+  },
+  "payload_checksum": "4ca136425002aa3a3a2426b4687f2e8091b6e4c23bf1d4db88b952730e1431e4",
+  "stored_identity": {
+    "policy_version_id": "53f5a2b9-1c63-43ec-92d4-2aa799f18857",
+    "revision": 7,
+    "schema_version": 1
+  },
+  "effective_identity": {
+    "policy_version_id": "53f5a2b9-1c63-43ec-92d4-2aa799f18857",
+    "revision": 7,
+    "schema_version": 1
+  },
+  "update_request": {
+    "expected_revision": 6
+  },
+  "admin_projection": {
+    "section": "workflow_runtime",
+    "effect_scope": "new_workflow_runs",
+    "pending_roles": [],
+    "readiness": {
+      "status": "ready",
+      "code": "WORKFLOW_RUNTIME_DISABLED",
+      "admission_ready": false
+    }
+  },
+  "catalog_revision": 12,
+  "audit_negative_cases": {
+    "allowed_origins": [
+      "https://api.example.com",
+      "https://api.example.com:443"
+    ],
+    "rejected_origins": [
+      "https://93.184.216.34",
+      "https://[2606:2800:220:1:248:1893:25c8:1946]",
+      "https://2130706433",
+      "https://0x7f000001",
+      "https://0177.0.0.1",
+      "https://127.1",
+      "https://api.example.com:",
+      "https://api.example.com:0443",
+      "https://localhost",
+      "https://metadata.internal"
+    ],
+    "transport_controlled_headers": [
+      "connection",
+      "content-length",
+      "cookie",
+      "forwarded",
+      "host",
+      "proxy-authenticate",
+      "proxy-authorization",
+      "set-cookie",
+      "te",
+      "transfer-encoding",
+      "upgrade",
+      "x-forwarded-for"
+    ],
+    "credential_controlled_headers": ["authorization"],
+    "max_safe_integer": 9007199254740991,
+    "unsafe_integer": 9007199254740992,
+    "transport_limit_overrides": {
+      "max_headers": 65,
+      "max_header_name_bytes": 129,
+      "max_header_value_bytes": 4097
+    },
+    "graph_limit_overrides": {
+      "max_aggregate_groups": 255
+    },
+    "execution_limit_overrides": {
+      "max_input_bytes": 2097153,
+      "max_event_preview_bytes": 65537
+    }
+  }
+}

@@ -3108,7 +3108,7 @@ export const INFINITE_THREADS_QUERY_KEY_PREFIX = [
 ] as const;
 
 const INFINITE_THREADS_NEXT_PAGE_PARAM = Symbol(
-  "deerflow.infiniteThreads.nextPageParam",
+  "actweave.infiniteThreads.nextPageParam",
 );
 
 type InfiniteThreadsParams = Omit<

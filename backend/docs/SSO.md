@@ -63,8 +63,8 @@ auth:
     providers:
       keycloak:
         display_name: Keycloak
-        issuer: http://localhost:8080/realms/deerflow
-        client_id: deerflow
+        issuer: http://localhost:8080/realms/actweave
+        client_id: actweave
         client_secret: $KEYCLOAK_CLIENT_SECRET
         redirect_uri: http://localhost:8001/api/v1/auth/callback/keycloak
         scopes:
@@ -173,10 +173,10 @@ docker run -d \
 
 1. Open the Keycloak admin console: http://localhost:8080
 2. Log in with `admin` / `admin`
-3. Create a new realm called `deerflow`
-4. In the `deerflow` realm, go to **Clients** → **Create client**
+3. Create a new realm called `actweave`
+4. In the `actweave` realm, go to **Clients** → **Create client**
 5. Configure:
-   - **Client ID**: `deerflow`
+   - **Client ID**: `actweave`
    - **Client authentication**: On (makes it a confidential client)
    - **Standard flow**: Enabled
    - **Valid redirect URIs**: `http://localhost:8001/api/v1/auth/callback/keycloak`
@@ -187,7 +187,7 @@ docker run -d \
 
 ### 3. Create a Test User
 
-1. In the `deerflow` realm, go to **Users** → **Add user**
+1. In the `actweave` realm, go to **Users** → **Add user**
 2. Set **Username**: `testuser`
 3. Set **Email**: `testuser@example.com`
 4. Set **Email verified**: On
@@ -207,8 +207,8 @@ auth:
     providers:
       keycloak:
         display_name: Keycloak
-        issuer: http://localhost:8080/realms/deerflow
-        client_id: deerflow
+        issuer: http://localhost:8080/realms/actweave
+        client_id: actweave
         client_secret: $KEYCLOAK_CLIENT_SECRET
         redirect_uri: http://localhost:8001/api/v1/auth/callback/keycloak
         scopes:

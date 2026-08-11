@@ -24,6 +24,7 @@ from deerflow.trace_context import normalize_trace_id
 JobType = Literal[
     "private_run",
     "automation_run",
+    "workflow_run",
     "retention_purge",
     "mcp_discovery",
     "memory_dream",
@@ -32,6 +33,7 @@ JobType = Literal[
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_EMPTY_WORKFLOW_PROFILE_KEY = "0" * 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +65,9 @@ class EnqueueJob:
     priority: int = 0
     available_at: datetime | None = None
     predecessor_dead_job_id: uuid.UUID | None = None
+    workflow_run_id: uuid.UUID | None = None
+    workflow_epoch: int | None = None
+    required_worker_profile_digest: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.scope) is not JobScope:
@@ -70,6 +75,7 @@ class EnqueueJob:
         if self.job_type not in {
             "private_run",
             "automation_run",
+            "workflow_run",
             "retention_purge",
             "mcp_discovery",
             "memory_dream",
@@ -92,6 +98,18 @@ class EnqueueJob:
         elif self.job_type == "automation_run":
             if self.scope.owner_user_id is None or not self.run_id or not self.occurrence_id:
                 raise ValueError("automation_run requires owner, run, and occurrence authority")
+        elif self.job_type == "workflow_run":
+            if self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None:
+                raise ValueError("workflow_run requires standalone Workflow authority")
+            try:
+                workflow_run_id = uuid.UUID(str(self.workflow_run_id))
+            except (TypeError, ValueError):
+                raise ValueError("workflow_run requires a valid Workflow Run UUID") from None
+            if type(self.workflow_epoch) is not int or self.workflow_epoch < 1:
+                raise ValueError("workflow_run requires a positive execution epoch")
+            if self.required_worker_profile_digest is not None and _SHA256_HEX.fullmatch(self.required_worker_profile_digest) is None:
+                raise ValueError("workflow_run profile digest must be a lowercase SHA-256 digest")
+            object.__setattr__(self, "workflow_run_id", workflow_run_id)
         elif self.job_type == "retention_purge" and (self.run_id is not None or self.occurrence_id is not None):
             raise ValueError(
                 "retention_purge requires project or exact former-owner authority",
@@ -114,13 +132,21 @@ class EnqueueJob:
                 raise ValueError("memory_seal requires a bounded thread coordinate")
         if self.job_type not in {"memory_dream", "memory_seal"} and self.namespace is not None:
             raise ValueError(f"{self.job_type} does not accept a memory namespace")
+        if self.job_type != "workflow_run" and (self.workflow_run_id is not None or self.workflow_epoch is not None or self.required_worker_profile_digest is not None):
+            raise ValueError(f"{self.job_type} does not accept Workflow authority")
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
-        if self.job_type in {"private_run", "automation_run"}:
+        if self.job_type in {"private_run", "automation_run", "workflow_run"}:
             if normalized_trace_id is None:
                 raise ValueError("Run jobs require a valid origin trace")
             object.__setattr__(self, "origin_trace_id", normalized_trace_id)
         elif self.origin_trace_id is not None:
             raise ValueError(f"{self.job_type} does not accept an origin trace")
+
+    @property
+    def workflow_profile_key(self) -> str | None:
+        if self.job_type != "workflow_run":
+            return None
+        return self.required_worker_profile_digest or _EMPTY_WORKFLOW_PROFILE_KEY
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +162,64 @@ class JobClaim:
     cancel_requested: bool
     namespace: str | None = None
     origin_trace_id: str | None = None
+    workflow_run_id: uuid.UUID | None = None
+    workflow_epoch: int | None = None
+    required_worker_profile_digest: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.scope) is not JobScope:
+            raise TypeError("JobScope is required")
+        if not self.lease_token:
+            raise ValueError("job claim requires an opaque lease token")
+        if self.job_type not in {
+            "private_run",
+            "automation_run",
+            "workflow_run",
+            "retention_purge",
+            "mcp_discovery",
+            "memory_dream",
+            "memory_seal",
+        }:
+            raise ValueError("unsupported job type")
+        if self.retry_safety not in {"safe", "unknown", "unsafe"}:
+            raise ValueError("unsupported retry safety")
+        normalized_trace_id = normalize_trace_id(self.origin_trace_id)
+        if self.job_type == "workflow_run":
+            if self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None or self.namespace is not None:
+                raise ValueError("workflow_run claim requires standalone Workflow authority")
+            try:
+                workflow_run_id = uuid.UUID(str(self.workflow_run_id))
+            except (TypeError, ValueError):
+                raise ValueError("workflow_run claim requires a valid Workflow Run UUID") from None
+            if type(self.workflow_epoch) is not int or self.workflow_epoch < 1:
+                raise ValueError("workflow_run claim requires a positive execution epoch")
+            if self.required_worker_profile_digest is not None and _SHA256_HEX.fullmatch(self.required_worker_profile_digest) is None:
+                raise ValueError("workflow_run claim profile digest must be a lowercase SHA-256 digest")
+            if normalized_trace_id is None:
+                raise ValueError("workflow_run claim requires a valid origin trace")
+            object.__setattr__(self, "workflow_run_id", workflow_run_id)
+            object.__setattr__(self, "origin_trace_id", normalized_trace_id)
+            return
+        if self.workflow_run_id is not None or self.workflow_epoch is not None or self.required_worker_profile_digest is not None:
+            raise ValueError(f"{self.job_type} claim does not accept Workflow authority")
+        if self.job_type == "private_run":
+            valid = self.scope.owner_user_id is not None and self.run_id is not None and self.occurrence_id is None and self.namespace is None
+        elif self.job_type == "automation_run":
+            valid = self.scope.owner_user_id is not None and self.run_id is not None and self.occurrence_id is not None and self.namespace is None
+        elif self.job_type in {"memory_dream", "memory_seal"}:
+            valid = self.scope.owner_user_id is not None and self.run_id is None and self.occurrence_id is None and self.namespace is not None and 1 <= len(self.namespace) <= 255
+        elif self.job_type == "mcp_discovery":
+            valid = self.scope.owner_user_id is not None and self.run_id is None and self.occurrence_id is None and self.namespace is None
+        else:
+            valid = self.run_id is None and self.occurrence_id is None and self.namespace is None
+        if not valid:
+            raise ValueError(f"{self.job_type} claim authority is invalid")
+        if self.job_type in {"private_run", "automation_run"}:
+            if normalized_trace_id is None:
+                raise ValueError("Run claim requires a valid origin trace")
+            object.__setattr__(self, "origin_trace_id", normalized_trace_id)
+        elif self.origin_trace_id is not None:
+            raise ValueError(f"{self.job_type} claim does not accept an origin trace")
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +415,9 @@ class JobRepository:
             row.project_id == request.scope.project_id
             and row.owner_user_id == request.scope.owner_user_id
             and row.run_id == request.run_id
+            and row.workflow_run_id == request.workflow_run_id
+            and row.workflow_epoch == request.workflow_epoch
+            and row.required_worker_profile_digest == request.required_worker_profile_digest
             and row.automation_occurrence_id == request.occurrence_id
             and row.namespace == request.namespace
             and row.predecessor_dead_job_id == request.predecessor_dead_job_id
@@ -354,6 +441,10 @@ class JobRepository:
                 owner_user_id=request.scope.owner_user_id,
                 namespace=request.namespace,
                 run_id=request.run_id,
+                workflow_run_id=request.workflow_run_id,
+                workflow_epoch=request.workflow_epoch,
+                required_worker_profile_digest=request.required_worker_profile_digest,
+                workflow_profile_key=request.workflow_profile_key,
                 automation_occurrence_id=request.occurrence_id,
                 predecessor_dead_job_id=request.predecessor_dead_job_id,
                 origin_trace_id=request.origin_trace_id,
@@ -726,6 +817,9 @@ class JobRepository:
                 cancel_requested=False,
                 namespace=row.namespace,
                 origin_trace_id=row.origin_trace_id,
+                workflow_run_id=row.workflow_run_id,
+                workflow_epoch=row.workflow_epoch,
+                required_worker_profile_digest=row.required_worker_profile_digest,
             )
         return None
 
@@ -1155,7 +1249,9 @@ class JobRepository:
         dead, predecessor = pair
         if dead.retry_safety != "safe" or predecessor.status != "dead" or predecessor.retry_safety != "safe":
             raise JobRequeueForbidden("dead job is unavailable for safe requeue")
-        if platform_requeue and (predecessor.job_type != "retention_purge" or predecessor.owner_user_id is not None or predecessor.run_id is not None or predecessor.automation_occurrence_id is not None):
+        if platform_requeue and (
+            predecessor.job_type != "retention_purge" or predecessor.owner_user_id is not None or predecessor.run_id is not None or predecessor.workflow_run_id is not None or predecessor.automation_occurrence_id is not None
+        ):
             raise JobRequeueForbidden("dead job is unavailable for safe requeue")
 
         existing_successor = (await self.session.execute(sa.select(JobRow).where(JobRow.predecessor_dead_job_id == predecessor.id).with_for_update(of=JobRow))).scalar_one_or_none()
@@ -1166,6 +1262,9 @@ class JobRepository:
                 and same_owner
                 and existing_successor.job_type == predecessor.job_type
                 and existing_successor.run_id == predecessor.run_id
+                and existing_successor.workflow_run_id == predecessor.workflow_run_id
+                and existing_successor.workflow_epoch == predecessor.workflow_epoch
+                and existing_successor.required_worker_profile_digest == predecessor.required_worker_profile_digest
                 and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
                 and existing_successor.namespace == predecessor.namespace
                 and existing_successor.origin_trace_id == predecessor.origin_trace_id
@@ -1188,6 +1287,9 @@ class JobRepository:
             priority=predecessor.priority,
             predecessor_dead_job_id=predecessor.id,
             origin_trace_id=predecessor.origin_trace_id,
+            workflow_run_id=predecessor.workflow_run_id,
+            workflow_epoch=predecessor.workflow_epoch,
+            required_worker_profile_digest=predecessor.required_worker_profile_digest,
         )
         successor_id, created = await self._enqueue(request)
         if created:
@@ -1201,6 +1303,9 @@ class JobRepository:
                         successor_owner,
                         JobRow.job_type == predecessor.job_type,
                         JobRow.run_id == predecessor.run_id,
+                        JobRow.workflow_run_id == predecessor.workflow_run_id,
+                        JobRow.workflow_epoch == predecessor.workflow_epoch,
+                        JobRow.required_worker_profile_digest == predecessor.required_worker_profile_digest,
                         JobRow.automation_occurrence_id == predecessor.automation_occurrence_id,
                         JobRow.predecessor_dead_job_id == predecessor.id,
                         JobRow.status == "queued",

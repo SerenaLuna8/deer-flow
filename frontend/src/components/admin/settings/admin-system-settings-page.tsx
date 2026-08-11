@@ -708,7 +708,7 @@ function ModelField({
   onChange,
   value,
 }: {
-  activeModels: Model[];
+  activeModels: readonly Model[];
   disabled?: boolean;
   modelsStatus: ModelsStatus;
   name: string;
@@ -1342,7 +1342,7 @@ function AgentRuntimeEditor({
   value,
 }: {
   activeGroup: AgentRuntimeGroupValue;
-  activeModels: Model[];
+  activeModels: readonly Model[];
   modelsStatus: ModelsStatus;
   onChange: (value: AgentRuntimeSettingsValue) => void;
   value: AgentRuntimeSettingsValue;
@@ -1915,7 +1915,7 @@ function EditableSection<Value>({
   value,
   renderEditor,
 }: {
-  activeModels: Model[];
+  activeModels: readonly Model[];
   description: string;
   effectScope: SystemSettingsEffectScope;
   effectiveRevision: number;
@@ -1934,7 +1934,7 @@ function EditableSection<Value>({
   renderEditor: (
     draft: Value,
     setDraft: (value: Value) => void,
-    activeModels: Model[],
+    activeModels: readonly Model[],
     modelsStatus: ModelsStatus,
   ) => ReactNode;
 }) {
@@ -2100,7 +2100,7 @@ export function AdminSystemSettingsStateView({
   sectionErrors,
   state,
 }: {
-  activeModels: Model[];
+  activeModels: readonly Model[];
   lastResults: LastResults;
   modelsStatus: ModelsStatus;
   onRetry: () => void;

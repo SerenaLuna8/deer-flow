@@ -5,7 +5,12 @@ import re
 import shutil
 from pathlib import Path, PureWindowsPath
 
-from deerflow.config.runtime_paths import runtime_home
+from deerflow.config.runtime_paths import (
+    ACT_WEAVE_HOME_ENV,
+    DEER_FLOW_HOME_ENV,
+    resolve_environment_path,
+    runtime_home,
+)
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
@@ -108,8 +113,11 @@ class Paths:
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
-        2. DEER_FLOW_HOME environment variable
-        3. Caller project fallback: `{project_root}/.deer-flow`
+        2. ACT_WEAVE_HOME environment variable
+        3. DEER_FLOW_HOME compatibility environment variable
+        4. Caller project fallback: `{project_root}/.act-weave`
+
+    When both environment names are set, their normalized values must agree.
     """
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
@@ -139,12 +147,15 @@ class Paths:
     @property
     def base_dir(self) -> Path:
         """Root directory for all application data."""
+        # Detect an unsafe dual-alias conflict even when an explicit constructor
+        # path otherwise has higher precedence.
+        resolve_environment_path(
+            ACT_WEAVE_HOME_ENV,
+            DEER_FLOW_HOME_ENV,
+            base=Path.cwd(),
+        )
         if self._base_dir is not None:
             return self._base_dir
-
-        if env_home := os.getenv("DEER_FLOW_HOME"):
-            return Path(env_home).resolve()
-
         return _default_local_base_dir()
 
     @property

@@ -1,0 +1,89 @@
+{
+  "definition": {
+    "id": "10000000-0000-4000-8000-000000000001",
+    "name": "订单审核",
+    "description": "严格的 Workflow Definition 投影",
+    "lifecycle": "active",
+    "publication": "published",
+    "revision": 4,
+    "current_published_version_id": "10000000-0000-4000-8000-000000000002",
+    "current_published_version_number": 1,
+    "draft_revision": 3,
+    "draft_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "created_at": "2026-08-10T00:00:00Z",
+    "updated_at": "2026-08-10T00:01:00Z"
+  },
+  "draft": {
+    "workflow_id": "10000000-0000-4000-8000-000000000001",
+    "revision": 3,
+    "spec": {
+      "schema_version": 1,
+      "entry_node_id": null,
+      "nodes": [
+        {
+          "id": "00000000-0000-4000-8000-000000000001",
+          "type": "start",
+          "type_version": 1,
+          "scope": { "kind": "root" },
+          "custom_label": null,
+          "description": null,
+          "input_bindings": {},
+          "execution_policy": null,
+          "config": {}
+        }
+      ],
+      "transitions": null,
+      "workflow_inputs": null,
+      "workflow_outputs": null,
+      "credential_slots": null
+    },
+    "canvas": {
+      "schema_version": 1,
+      "node_layouts": null,
+      "edge_layouts": null
+    },
+    "draft_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "updated_at": "2026-08-10T00:01:00Z"
+  },
+  "requirements": {
+    "node_types": ["start", "end"],
+    "model_refs": [],
+    "code": [],
+    "http": [],
+    "credential_slots": [],
+    "requires_code": false,
+    "requires_http": false,
+    "requires_http_write": false
+  },
+  "validation": {
+    "request_id": "req-g16-validate",
+    "workflow_id": "10000000-0000-4000-8000-000000000001",
+    "draft_revision": 3,
+    "draft_checksum": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "valid": true,
+    "issues": [],
+    "semantic_checksum": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "catalog_generation": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "policy_revision": 7
+  },
+  "grant_intent": {
+    "workflow_id": "10000000-0000-4000-8000-000000000001",
+    "slot_id": "http_auth",
+    "slot_schema_checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "credential_id": "10000000-0000-4000-8000-000000000003",
+    "expected_credential_version_id": "10000000-0000-4000-8000-000000000004",
+    "updated_at": "2026-08-10T00:02:00Z"
+  },
+  "grant": {
+    "workflow_id": "10000000-0000-4000-8000-000000000001",
+    "workflow_version_id": "10000000-0000-4000-8000-000000000002",
+    "slot_id": "http_auth",
+    "payload_schema_checksum": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "credential_id": "10000000-0000-4000-8000-000000000003",
+    "credential_version_id": "10000000-0000-4000-8000-000000000004",
+    "status": "active",
+    "revision": 1,
+    "created_at": "2026-08-10T00:02:00Z",
+    "revoked_at": null
+  }
+}

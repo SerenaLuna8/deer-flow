@@ -20,6 +20,12 @@
 {{- if hasKey $appConfig "Error" -}}
 {{- fail "config must contain valid YAML" -}}
 {{- end -}}
+{{- range $key, $unused := $appConfig -}}
+{{- $normalizedKey := regexReplaceAll "[^a-z0-9]+" (lower (toString $key)) "" -}}
+{{- if hasPrefix "workflow" $normalizedKey -}}
+{{- fail (printf "WORKFLOW_PRODUCT_CONFIG_FORBIDDEN: config.%s; configure Workflow product policy through the PostgreSQL workflow_runtime System Settings section" $key) -}}
+{{- end -}}
+{{- end -}}
 {{- if hasKey $appConfig "models" -}}
 {{- fail "config.models is retired; models are stored in PostgreSQL and configured at /admin/settings/models" -}}
 {{- end -}}

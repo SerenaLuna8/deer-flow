@@ -336,16 +336,88 @@ else
     FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
 fi
 
-# Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
-# so pin ActWeave-owned state to the expected backend runtime directory and
-# create it before uvicorn builds its reload exclude filter.
-if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
-    export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
-fi
+# Resolve native local path aliases before creating anything.  New ActWeave
+# names are canonical; DEER_FLOW_* remains a compatibility spelling, but two
+# simultaneously configured spellings must normalize to the same path.
+_normalize_local_path() {
+    "$DEERFLOW_PNPM_PYTHON" -c '
+import sys
+from pathlib import Path
 
-BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
-if [ -z "$DEER_FLOW_HOME" ]; then
-    export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
+value = Path(sys.argv[1]).expanduser()
+base = Path(sys.argv[2]).expanduser()
+if not value.is_absolute():
+    value = base / value
+print(value.resolve(strict=False))
+' "$1" "$2"
+}
+
+_resolve_local_path_alias() {
+    local canonical_name=$1
+    local legacy_name=$2
+    local default_value=$3
+    local base=$4
+    local canonical_value=${!canonical_name:-}
+    local legacy_value=${!legacy_name:-}
+    local canonical_path=""
+    local legacy_path=""
+
+    if [ -n "$canonical_value" ]; then
+        canonical_path="$(_normalize_local_path "$canonical_value" "$base")"
+    fi
+    if [ -n "$legacy_value" ]; then
+        legacy_path="$(_normalize_local_path "$legacy_value" "$base")"
+    fi
+    if [ -n "$canonical_path" ] && [ -n "$legacy_path" ] && [ "$canonical_path" != "$legacy_path" ]; then
+        echo "✗ $canonical_name resolves to '$canonical_path', but $legacy_name resolves to '$legacy_path'." >&2
+        echo "  Refusing conflicting local runtime paths." >&2
+        return 1
+    fi
+    if [ -n "$canonical_path" ]; then
+        RESOLVED_LOCAL_PATH="$canonical_path"
+    elif [ -n "$legacy_path" ]; then
+        RESOLVED_LOCAL_PATH="$legacy_path"
+    elif [ -n "$default_value" ]; then
+        RESOLVED_LOCAL_PATH="$(_normalize_local_path "$default_value" "$base")"
+    else
+        RESOLVED_LOCAL_PATH=""
+    fi
+}
+
+_resolve_local_path_alias ACT_WEAVE_PROJECT_ROOT DEER_FLOW_PROJECT_ROOT "$REPO_ROOT" "$REPO_ROOT"
+ACT_WEAVE_PROJECT_ROOT="$RESOLVED_LOCAL_PATH"
+DEER_FLOW_PROJECT_ROOT="$RESOLVED_LOCAL_PATH"
+if [ ! -d "$ACT_WEAVE_PROJECT_ROOT" ]; then
+    echo "✗ ACT_WEAVE_PROJECT_ROOT/DEER_FLOW_PROJECT_ROOT is not a directory: $ACT_WEAVE_PROJECT_ROOT" >&2
+    exit 1
+fi
+export ACT_WEAVE_PROJECT_ROOT DEER_FLOW_PROJECT_ROOT
+
+DEFAULT_RUNTIME_HOME="$REPO_ROOT/.act-weave"
+RUNTIME_HOME_WAS_CONFIGURED=false
+if [ -n "${ACT_WEAVE_HOME:-}" ] || [ -n "${DEER_FLOW_HOME:-}" ]; then
+    RUNTIME_HOME_WAS_CONFIGURED=true
+fi
+_resolve_local_path_alias ACT_WEAVE_HOME DEER_FLOW_HOME "$DEFAULT_RUNTIME_HOME" "$REPO_ROOT"
+ACT_WEAVE_HOME="$RESOLVED_LOCAL_PATH"
+DEER_FLOW_HOME="$RESOLVED_LOCAL_PATH"
+
+# Never make an existing native installation appear empty just because the
+# canonical default changed.  Migration is explicit, dry-run by default, and
+# leaves every legacy directory untouched.
+if ! $RUNTIME_HOME_WAS_CONFIGURED && [ ! -e "$ACT_WEAVE_HOME" ] && [ ! -L "$ACT_WEAVE_HOME" ]; then
+    LEGACY_RUNTIME_HOMES=""
+    for legacy_home in "$REPO_ROOT/.deer-flow" "$REPO_ROOT/backend/.deer-flow"; do
+        if [ -e "$legacy_home" ] || [ -L "$legacy_home" ]; then
+            LEGACY_RUNTIME_HOMES="$LEGACY_RUNTIME_HOMES $legacy_home"
+        fi
+    done
+    if [ -n "$LEGACY_RUNTIME_HOMES" ]; then
+        echo "✗ Legacy native runtime data exists:$LEGACY_RUNTIME_HOMES" >&2
+        echo "  Canonical runtime home is absent: $ACT_WEAVE_HOME" >&2
+        echo "  Run 'make migrate-runtime-home' (dry-run by default), or explicitly set ACT_WEAVE_HOME/DEER_FLOW_HOME." >&2
+        exit 1
+    fi
 fi
 
 # `backend/sandbox` is excluded from uvicorn's reload watcher below. uvicorn only
@@ -353,15 +425,15 @@ fi
 # otherwise it globs the pattern, and Python 3.12's pathlib rejects absolute glob
 # patterns with NotImplementedError, crashing `make dev` on a fresh checkout
 # (#3459 / #3454). Creating it here keeps every absolute exclude on the is_dir path.
-mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"
-DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
-BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
-export DEER_FLOW_HOME
+mkdir -p "$ACT_WEAVE_HOME" "$REPO_ROOT/backend/sandbox"
+ACT_WEAVE_HOME="$(cd "$ACT_WEAVE_HOME" && pwd -P)"
+DEER_FLOW_HOME="$ACT_WEAVE_HOME"
+export ACT_WEAVE_HOME DEER_FLOW_HOME
 
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
     GATEWAY_WORKERS=1
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$ACT_WEAVE_HOME'"
 else
     GATEWAY_WORKERS="${GATEWAY_WORKERS:-1}"
     case "$GATEWAY_WORKERS" in
@@ -376,21 +448,15 @@ export GATEWAY_WORKERS
 
 # ── Config check ─────────────────────────────────────────────────────────────
 
-if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
-    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
-        exit 1
-    fi
-    CONFIG_DIR="$(builtin cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" >/dev/null 2>&1 && pwd -P)"
-    export DEER_FLOW_CONFIG_PATH="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
-else
-    export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
-fi
+_resolve_local_path_alias ACT_WEAVE_CONFIG_PATH DEER_FLOW_CONFIG_PATH "$REPO_ROOT/config.yaml" "$REPO_ROOT"
+ACT_WEAVE_CONFIG_PATH="$RESOLVED_LOCAL_PATH"
+DEER_FLOW_CONFIG_PATH="$RESOLVED_LOCAL_PATH"
+export ACT_WEAVE_CONFIG_PATH DEER_FLOW_CONFIG_PATH
 
 RUNTIME_ROOT="$REPO_ROOT"
 LOG_ROOT="$RUNTIME_ROOT/logs"
 
-if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+if [ ! -f "$ACT_WEAVE_CONFIG_PATH" ]; then
     echo "✗ No ActWeave config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1

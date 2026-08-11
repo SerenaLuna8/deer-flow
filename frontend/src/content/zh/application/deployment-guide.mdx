@@ -37,7 +37,7 @@ make start     # 本地优化构建
 make stop
 ```
 
-统一入口为 `http://localhost:2026`。本地日志位于 `logs/{gateway,worker,scheduler,frontend,nginx}.log`，运行状态默认位于 `backend/.deer-flow`。
+统一入口为 `http://localhost:2026`。本地日志位于 `logs/{gateway,worker,scheduler,frontend,nginx}.log`，原生本地运行状态默认位于仓库根目录 `.act-weave`。
 
 ## Docker 开发环境
 
@@ -63,7 +63,7 @@ make down
 - 配置 TLS、网络访问控制、强认证密钥和 secret manager。
 - Gateway、Worker 和 Scheduler 使用相同的 canonical `config.yaml` 与 `DATABASE_URL`。
 - Worker readiness、Scheduler ownership、durable stream 重连和项目隔离均在目标环境通过。
-- `backend/.deer-flow` 只承载本地运行文件/Sandbox 投影，不是项目业务数据或资产 catalog 权威。
+- 原生 `.act-weave` 及部署显式配置的 runtime home 只承载运行文件/Sandbox 投影，不是项目业务数据或资产 catalog 权威。
 
 ## Kubernetes/Helm
 

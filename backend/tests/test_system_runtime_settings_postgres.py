@@ -343,7 +343,8 @@ async def test_postgres_memory_document_policy_bootstrap_cas_lock_and_audit(
             request_id=str(uuid.uuid4()),
         )
         catalog = await service.list_policies(context)
-        assert set(catalog.sections) == set(RuntimePolicySection)
+        assert set(catalog.sections) == set(RuntimePolicySection) - {RuntimePolicySection.WORKFLOW_RUNTIME}
+        assert catalog.workflow_runtime is not None
         memory_document = catalog.sections[RuntimePolicySection.MEMORY_DOCUMENT]
         assert memory_document.effect_scope == "new_memory_documents"
         assert isinstance(memory_document.value, MemoryDocumentPolicy)
@@ -390,7 +391,7 @@ async def test_postgres_memory_document_policy_bootstrap_cas_lock_and_audit(
         ]
 
         async with factory() as session:
-            assert await session.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 4
+            assert await session.scalar(text("SELECT count(*) FROM system_runtime_policies")) == len(RuntimePolicySection)
             assert (
                 await session.scalar(
                     text(

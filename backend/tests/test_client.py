@@ -1206,6 +1206,11 @@ class TestGetModel:
             "supports_reasoning_effort": True,
             "supports_vision": False,
             "is_default": True,
+            "workflow_authoring": {
+                "modes": ["chat"],
+                "supports_streaming": True,
+                "parameters": [],
+            },
         }
 
     def test_not_found(self, client):

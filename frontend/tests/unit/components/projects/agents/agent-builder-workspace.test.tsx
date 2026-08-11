@@ -87,6 +87,11 @@ const MODELS: Model[] = [
     supports_reasoning_effort: true,
     supports_vision: true,
     is_default: true,
+    workflow_authoring: {
+      modes: ["chat"],
+      supports_streaming: true,
+      parameters: [],
+    },
   },
 ];
 

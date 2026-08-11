@@ -624,10 +624,10 @@ Recent breakthroughs in language models have also accelerated progress
 ```markdown
 ## Executive Summary
 
-DeerFlow is an open-source AI agent framework that gained significant traction in early 2026
-[citation:GitHub Repository](https://github.com/bytedance/deer-flow). The project focuses on
+ActWeave is an open-source AI agent system built on an established upstream agent framework
+[citation:Upstream Repository](https://github.com/bytedance/deer-flow). The project focuses on
 providing a production-ready agent system with sandbox execution and memory management
-[citation:DeerFlow Documentation](https://deer-flow.dev/docs).
+[citation:Project Documentation](https://github.com/SerenaLuna8/deer-flow/tree/main/docs).
 
 ## Key Analysis
 
@@ -639,8 +639,8 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 ## Sources
 
 ### Primary Sources
-- [GitHub Repository](https://github.com/bytedance/deer-flow) - Official source code and documentation
-- [DeerFlow Documentation](https://deer-flow.dev/docs) - Technical specifications
+- [Upstream Repository](https://github.com/bytedance/deer-flow) - Upstream source code and historical documentation
+- [Project Documentation](https://github.com/SerenaLuna8/deer-flow/tree/main/docs) - Technical specifications
 
 ### Media Coverage
 - [AI Trends 2026](https://techcrunch.com/ai-trends) - Industry analysis
@@ -652,7 +652,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - The `[citation:Title](URL)` format is ONLY for inline citations within the report body
 - ❌ WRONG: `GitHub 仓库 - 官方源代码和文档` (no URL!)
 - ❌ WRONG in Sources: `[citation:GitHub Repository](url)` (citation prefix is for inline only!)
-- ✅ RIGHT in Sources: `[GitHub Repository](https://github.com/bytedance/deer-flow) - 官方源代码和文档`
+- ✅ RIGHT in Sources: `[Upstream Repository](https://github.com/bytedance/deer-flow) - 上游源代码和文档`
 
 **WORKFLOW for Research Tasks:**
 1. Use web_search to find sources → Extract {{title, url, snippet}} from results

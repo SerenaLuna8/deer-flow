@@ -1,0 +1,5 @@
+{
+  "astral_character": "😀",
+  "port_title": { "minimum": 1, "maximum": 128 },
+  "json_pointer": { "minimum": 0, "maximum": 2048 }
+}

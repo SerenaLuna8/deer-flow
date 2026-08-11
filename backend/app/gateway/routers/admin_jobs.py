@@ -35,6 +35,7 @@ class AdminJobResponse(BaseModel):
     job_type: Literal[
         "private_run",
         "automation_run",
+        "workflow_run",
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
@@ -117,6 +118,7 @@ async def list_admin_jobs(
     type: Literal[
         "private_run",
         "automation_run",
+        "workflow_run",
         "retention_purge",
         "mcp_discovery",
         "memory_dream",

@@ -150,6 +150,42 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已更新系统设置",
     "en-US": "System setting updated",
   },
+  "workflow.definition_created": {
+    "zh-CN": "已创建工作流",
+    "en-US": "Workflow created",
+  },
+  "workflow.definition_updated": {
+    "zh-CN": "已更新工作流",
+    "en-US": "Workflow updated",
+  },
+  "workflow.definition_archived": {
+    "zh-CN": "已归档工作流",
+    "en-US": "Workflow archived",
+  },
+  "workflow.draft_saved": {
+    "zh-CN": "已保存工作流草稿",
+    "en-US": "Workflow draft saved",
+  },
+  "workflow.version_published": {
+    "zh-CN": "已发布工作流版本",
+    "en-US": "Workflow version published",
+  },
+  "workflow.draft_grant_intent_updated": {
+    "zh-CN": "已更新工作流草稿凭据授权意图",
+    "en-US": "Workflow draft credential grant intent updated",
+  },
+  "workflow.draft_grant_intent_deleted": {
+    "zh-CN": "已删除工作流草稿凭据授权意图",
+    "en-US": "Workflow draft credential grant intent deleted",
+  },
+  "workflow.version_grant_updated": {
+    "zh-CN": "已更新工作流版本凭据授权",
+    "en-US": "Workflow version credential grant updated",
+  },
+  "workflow.version_grant_revoked": {
+    "zh-CN": "已撤销工作流版本凭据授权",
+    "en-US": "Workflow version credential grant revoked",
+  },
 };
 
 const ACTOR_LABELS: Record<ProjectAuditItem["actor"], LocalizedLabel> = {
@@ -174,6 +210,7 @@ const TARGET_LABELS: Record<ProjectAuditItem["target_kind"], LocalizedLabel> = {
   purge: { "zh-CN": "数据清理", "en-US": "Purge" },
   audit: { "zh-CN": "审计记录", "en-US": "Audit record" },
   system_setting: { "zh-CN": "系统设置", "en-US": "System setting" },
+  workflow: { "zh-CN": "工作流", "en-US": "Workflow" },
 };
 
 const OUTCOME_LABELS: Record<ProjectAuditItem["outcome"], LocalizedLabel> = {

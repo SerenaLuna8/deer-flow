@@ -66,6 +66,12 @@ deer-flow/
 ```
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
+Native local Gateway/Worker/Scheduler roles store writable runtime state under the repo-root
+`.act-weave/`. `ACT_WEAVE_PROJECT_ROOT`, `ACT_WEAVE_HOME`, `ACT_WEAVE_CONFIG_PATH`, and
+`ACT_WEAVE_SKILLS_PATH` are the canonical local path environment names; matching
+`DEER_FLOW_*` aliases remain accepted only when their normalized values agree. Existing
+`.deer-flow/` and `backend/.deer-flow/` data is never auto-migrated: preview the verified,
+non-destructive union with `make migrate-runtime-home`, then explicitly pass `ARGS="--copy"`.
 `DATABASE_URL` is the only application persistence connection — PostgreSQL owns application
 data, checkpoints, stores, durable jobs, streams, quotas, and audit records. Model definitions,
 Agent runtime policy, Memory document templates, auth policy, project-quota defaults, and provider Credentials are

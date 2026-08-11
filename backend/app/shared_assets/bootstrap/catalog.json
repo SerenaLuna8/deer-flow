@@ -79,7 +79,7 @@
       "version": 1,
       "payload_path": "content/public-skills/frontend-design-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "ae40a8cdc9a22a8f064897d8c9d9737187b2c524965b4a60e1144787aff64d3b"
+      "sha256": "08efc1e04145f29cf6cc518dd3487b532e564fdbfb7d3898d920b7150bb17871"
     },
     {
       "source_key": "builtin:skill:github-deep-research",
@@ -129,7 +129,7 @@
       "version": 1,
       "payload_path": "content/public-skills/systematic-literature-review-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "cbc9978a0723c1c2a57303543818e2efbe9981d3db1eb780a699868851d567df"
+      "sha256": "e6deec989c06088b549919e206baef9b93e4d8d071ad434b386481226ca86e08"
     },
     {
       "source_key": "builtin:skill:web-design-guidelines",

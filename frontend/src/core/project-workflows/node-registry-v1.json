@@ -1,0 +1,2824 @@
+[
+  {
+    "type": "start",
+    "version": 1,
+    "renderer_key": "start",
+    "title_i18n": {
+      "zh-CN": "开始",
+      "en-US": "Start"
+    },
+    "config_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "title": "StartNodeConfigV1",
+      "type": "object"
+    },
+    "input_ports": [],
+    "output_ports": [
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "workflow_inputs"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "pure",
+    "supports_streaming": false
+  },
+  {
+    "type": "llm",
+    "version": 1,
+    "renderer_key": "llm",
+    "title_i18n": {
+      "zh-CN": "大模型",
+      "en-US": "LLM"
+    },
+    "config_schema": {
+      "$defs": {
+        "BindingTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "binding",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "discriminator": {
+                "mapping": {
+                  "literal": "#/$defs/LiteralValueBinding",
+                  "loop_variable": "#/$defs/LoopVariableValueBinding",
+                  "node_output": "#/$defs/NodeOutputValueBinding",
+                  "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/LiteralValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/WorkflowInputValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/LoopVariableValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/NodeOutputValueBinding"
+                }
+              ],
+              "title": "Value"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "BindingTemplateSegment",
+          "type": "object"
+        },
+        "BoundedJsonPointer": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonSchema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "LiteralValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "literal",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "LiteralValueBinding",
+          "type": "object"
+        },
+        "LlmMessageV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "role": {
+              "enum": ["system", "user", "assistant"],
+              "title": "Role",
+              "type": "string"
+            },
+            "content": {
+              "$ref": "#/$defs/RestrictedTemplate"
+            }
+          },
+          "required": ["id", "role", "content"],
+          "title": "LlmMessageV1",
+          "type": "object"
+        },
+        "LlmStructuredOutputV1": {
+          "additionalProperties": false,
+          "properties": {
+            "enabled": {
+              "title": "Enabled",
+              "type": "boolean"
+            },
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JsonSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": ["enabled", "schema"],
+          "title": "LlmStructuredOutputV1",
+          "type": "object"
+        },
+        "LoopVariableValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "loop_variable",
+              "title": "Kind",
+              "type": "string"
+            },
+            "loop_node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "variable_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "required": ["kind", "loop_node_id", "variable_id"],
+          "title": "LoopVariableValueBinding",
+          "type": "object"
+        },
+        "NodeOutputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "node_output",
+              "title": "Kind",
+              "type": "string"
+            },
+            "node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "output_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoundedJsonPointer"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "node_id", "output_id"],
+          "title": "NodeOutputValueBinding",
+          "type": "object"
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "RestrictedTemplate": {
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/StrictLiteralOne"
+            },
+            "segments": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "binding": "#/$defs/BindingTemplateSegment",
+                    "text": "#/$defs/TextTemplateSegment"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/TextTemplateSegment"
+                  },
+                  {
+                    "$ref": "#/$defs/BindingTemplateSegment"
+                  }
+                ]
+              },
+              "title": "Segments",
+              "type": "array"
+            }
+          },
+          "required": ["version", "segments"],
+          "title": "RestrictedTemplate",
+          "type": "object"
+        },
+        "StrictLiteralOne": {
+          "const": 1,
+          "type": "integer"
+        },
+        "TextTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "TextTemplateSegment",
+          "type": "object"
+        },
+        "WorkflowInputId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workflow_input",
+              "title": "Kind",
+              "type": "string"
+            },
+            "input_id": {
+              "$ref": "#/$defs/WorkflowInputId"
+            }
+          },
+          "required": ["kind", "input_id"],
+          "title": "WorkflowInputValueBinding",
+          "type": "object"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "model_ref": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "mode": {
+          "enum": ["chat", "completion"],
+          "title": "Mode",
+          "type": "string"
+        },
+        "context_input_ids": {
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          },
+          "title": "Context Input Ids",
+          "type": "array"
+        },
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/LlmMessageV1"
+          },
+          "title": "Messages",
+          "type": "array"
+        },
+        "model_parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Model Parameters",
+          "type": "object"
+        },
+        "stream": {
+          "title": "Stream",
+          "type": "boolean"
+        },
+        "reasoning_output": {
+          "enum": ["omit", "provider_summary"],
+          "title": "Reasoning Output",
+          "type": "string"
+        },
+        "structured_output": {
+          "$ref": "#/$defs/LlmStructuredOutputV1"
+        }
+      },
+      "required": [
+        "model_ref",
+        "mode",
+        "context_input_ids",
+        "messages",
+        "model_parameters",
+        "stream",
+        "reasoning_output",
+        "structured_output"
+      ],
+      "title": "LlmNodeConfigV1",
+      "type": "object"
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      },
+      {
+        "id": "text",
+        "title_i18n": {
+          "zh-CN": "文本",
+          "en-US": "Text"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "string",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "usage",
+        "title_i18n": {
+          "zh-CN": "用量",
+          "en-US": "Usage"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "json",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "llm_result_v1"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "read",
+    "supports_streaming": true
+  },
+  {
+    "type": "condition",
+    "version": 1,
+    "renderer_key": "condition",
+    "title_i18n": {
+      "zh-CN": "条件分支",
+      "en-US": "Condition"
+    },
+    "config_schema": {
+      "$defs": {
+        "BoundedJsonPointer": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "ConditionBranchV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/PortTitle"
+            },
+            "output_port_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "label": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/PortTitle"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "predicate": {
+              "$ref": "#/$defs/PredicateAst"
+            }
+          },
+          "required": ["id", "output_port_id", "label", "predicate"],
+          "title": "ConditionBranchV1",
+          "type": "object"
+        },
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "LiteralValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "literal",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "LiteralValueBinding",
+          "type": "object"
+        },
+        "LoopVariableValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "loop_variable",
+              "title": "Kind",
+              "type": "string"
+            },
+            "loop_node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "variable_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "required": ["kind", "loop_node_id", "variable_id"],
+          "title": "LoopVariableValueBinding",
+          "type": "object"
+        },
+        "NodeOutputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "node_output",
+              "title": "Kind",
+              "type": "string"
+            },
+            "node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "output_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoundedJsonPointer"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "node_id", "output_id"],
+          "title": "NodeOutputValueBinding",
+          "type": "object"
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "PortTitle": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "PredicateAst": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "enum": ["and", "or"],
+              "title": "Op",
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PredicateAst"
+                  },
+                  {
+                    "$ref": "#/$defs/PredicateClause"
+                  }
+                ]
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "required": ["op", "items"],
+          "title": "PredicateAst",
+          "type": "object"
+        },
+        "PredicateClause": {
+          "additionalProperties": false,
+          "properties": {
+            "left": {
+              "discriminator": {
+                "mapping": {
+                  "literal": "#/$defs/LiteralValueBinding",
+                  "loop_variable": "#/$defs/LoopVariableValueBinding",
+                  "node_output": "#/$defs/NodeOutputValueBinding",
+                  "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/LiteralValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/WorkflowInputValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/LoopVariableValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/NodeOutputValueBinding"
+                }
+              ],
+              "title": "Left"
+            },
+            "operator": {
+              "enum": [
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "contains",
+                "starts_with",
+                "ends_with",
+                "is_null",
+                "is_not_null"
+              ],
+              "title": "Operator",
+              "type": "string"
+            },
+            "right": {
+              "anyOf": [
+                {
+                  "discriminator": {
+                    "mapping": {
+                      "literal": "#/$defs/LiteralValueBinding",
+                      "loop_variable": "#/$defs/LoopVariableValueBinding",
+                      "node_output": "#/$defs/NodeOutputValueBinding",
+                      "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/LiteralValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/LoopVariableValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/NodeOutputValueBinding"
+                    }
+                  ]
+                }
+              ],
+              "title": "Right"
+            }
+          },
+          "required": ["left", "operator"],
+          "title": "PredicateClause",
+          "type": "object"
+        },
+        "WorkflowInputId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workflow_input",
+              "title": "Kind",
+              "type": "string"
+            },
+            "input_id": {
+              "$ref": "#/$defs/WorkflowInputId"
+            }
+          },
+          "required": ["kind", "input_id"],
+          "title": "WorkflowInputValueBinding",
+          "type": "object"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "branches": {
+          "items": {
+            "$ref": "#/$defs/ConditionBranchV1"
+          },
+          "maxItems": 254,
+          "minItems": 1,
+          "title": "Branches",
+          "type": "array"
+        },
+        "else_output_port_id": {
+          "$ref": "#/$defs/WorkflowPortId"
+        }
+      },
+      "required": ["branches", "else_output_port_id"],
+      "title": "ConditionNodeConfigV1",
+      "type": "object",
+      "x-actweave-validation": {
+        "version": 1,
+        "rules": ["condition_output_ports_resolvable"]
+      }
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "condition_branches"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "pure",
+    "supports_streaming": false
+  },
+  {
+    "type": "transform",
+    "version": 1,
+    "renderer_key": "transform",
+    "title_i18n": {
+      "zh-CN": "模板转换",
+      "en-US": "Template Transform"
+    },
+    "config_schema": {
+      "$defs": {
+        "BindingTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "binding",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "discriminator": {
+                "mapping": {
+                  "literal": "#/$defs/LiteralValueBinding",
+                  "loop_variable": "#/$defs/LoopVariableValueBinding",
+                  "node_output": "#/$defs/NodeOutputValueBinding",
+                  "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/LiteralValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/WorkflowInputValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/LoopVariableValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/NodeOutputValueBinding"
+                }
+              ],
+              "title": "Value"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "BindingTemplateSegment",
+          "type": "object"
+        },
+        "BoundedJsonPointer": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonSchema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "LiteralValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "literal",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "LiteralValueBinding",
+          "type": "object"
+        },
+        "LoopVariableValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "loop_variable",
+              "title": "Kind",
+              "type": "string"
+            },
+            "loop_node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "variable_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "required": ["kind", "loop_node_id", "variable_id"],
+          "title": "LoopVariableValueBinding",
+          "type": "object"
+        },
+        "NodeOutputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "node_output",
+              "title": "Kind",
+              "type": "string"
+            },
+            "node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "output_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoundedJsonPointer"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "node_id", "output_id"],
+          "title": "NodeOutputValueBinding",
+          "type": "object"
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "RestrictedJsonTemplate": {
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/StrictLiteralOne"
+            },
+            "template": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "bindings": {
+              "additionalProperties": {
+                "discriminator": {
+                  "mapping": {
+                    "literal": "#/$defs/LiteralValueBinding",
+                    "loop_variable": "#/$defs/LoopVariableValueBinding",
+                    "node_output": "#/$defs/NodeOutputValueBinding",
+                    "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/LiteralValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/WorkflowInputValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/LoopVariableValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/NodeOutputValueBinding"
+                  }
+                ]
+              },
+              "title": "Bindings",
+              "type": "object"
+            }
+          },
+          "required": ["version", "template", "bindings"],
+          "title": "RestrictedJsonTemplate",
+          "type": "object"
+        },
+        "RestrictedTemplate": {
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/StrictLiteralOne"
+            },
+            "segments": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "binding": "#/$defs/BindingTemplateSegment",
+                    "text": "#/$defs/TextTemplateSegment"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/TextTemplateSegment"
+                  },
+                  {
+                    "$ref": "#/$defs/BindingTemplateSegment"
+                  }
+                ]
+              },
+              "title": "Segments",
+              "type": "array"
+            }
+          },
+          "required": ["version", "segments"],
+          "title": "RestrictedTemplate",
+          "type": "object"
+        },
+        "StrictLiteralOne": {
+          "const": 1,
+          "type": "integer"
+        },
+        "TextTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "TextTemplateSegment",
+          "type": "object"
+        },
+        "TransformInputVariableV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "value_type": {
+              "$ref": "#/$defs/WorkflowValueType"
+            }
+          },
+          "required": ["id", "name", "value_type"],
+          "title": "TransformInputVariableV1",
+          "type": "object"
+        },
+        "WorkflowInputId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workflow_input",
+              "title": "Kind",
+              "type": "string"
+            },
+            "input_id": {
+              "$ref": "#/$defs/WorkflowInputId"
+            }
+          },
+          "required": ["kind", "input_id"],
+          "title": "WorkflowInputValueBinding",
+          "type": "object"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        "WorkflowValueType": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": ["string", "number", "boolean", "json", "messages"],
+              "title": "Kind",
+              "type": "string"
+            },
+            "collection": {
+              "title": "Collection",
+              "type": "boolean"
+            },
+            "nullable": {
+              "title": "Nullable",
+              "type": "boolean"
+            },
+            "schema_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "collection", "nullable"],
+          "title": "WorkflowValueType",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "input_variables": {
+          "items": {
+            "$ref": "#/$defs/TransformInputVariableV1"
+          },
+          "title": "Input Variables",
+          "type": "array"
+        },
+        "missing_variable": {
+          "enum": ["error", "null", "empty"],
+          "title": "Missing Variable",
+          "type": "string"
+        },
+        "mode": {
+          "enum": ["text", "json"],
+          "title": "Mode",
+          "type": "string"
+        },
+        "template": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RestrictedTemplate"
+            },
+            {
+              "$ref": "#/$defs/RestrictedJsonTemplate"
+            }
+          ],
+          "title": "Template"
+        },
+        "output_schema": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JsonSchema"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "input_variables",
+        "missing_variable",
+        "mode",
+        "template",
+        "output_schema"
+      ],
+      "title": "TransformNodeConfigV1",
+      "type": "object",
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "text"
+              }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": {
+              "template": {
+                "$ref": "#/$defs/RestrictedTemplate"
+              },
+              "output_schema": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "json"
+              }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "properties": {
+              "template": {
+                "$ref": "#/$defs/RestrictedJsonTemplate"
+              },
+              "output_schema": {
+                "$ref": "#/$defs/JsonSchema"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "transform_result_v1"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "pure",
+    "supports_streaming": false
+  },
+  {
+    "type": "variable_aggregate",
+    "version": 1,
+    "renderer_key": "variable_aggregate",
+    "title_i18n": {
+      "zh-CN": "变量聚合",
+      "en-US": "Variable Aggregate"
+    },
+    "config_schema": {
+      "$defs": {
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "PortTitle": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "VariableAggregateGroupV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "name": {
+              "$ref": "#/$defs/PortTitle"
+            },
+            "value_type": {
+              "$ref": "#/$defs/WorkflowValueType"
+            },
+            "candidate_input_ids": {
+              "items": {
+                "$ref": "#/$defs/NonEmptyString"
+              },
+              "title": "Candidate Input Ids",
+              "type": "array"
+            }
+          },
+          "required": ["id", "name", "value_type", "candidate_input_ids"],
+          "title": "VariableAggregateGroupV1",
+          "type": "object"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        "WorkflowValueType": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": ["string", "number", "boolean", "json", "messages"],
+              "title": "Kind",
+              "type": "string"
+            },
+            "collection": {
+              "title": "Collection",
+              "type": "boolean"
+            },
+            "nullable": {
+              "title": "Nullable",
+              "type": "boolean"
+            },
+            "schema_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "collection", "nullable"],
+          "title": "WorkflowValueType",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "strategy": {
+          "const": "exclusive_branch",
+          "title": "Strategy",
+          "type": "string"
+        },
+        "groups": {
+          "items": {
+            "$ref": "#/$defs/VariableAggregateGroupV1"
+          },
+          "maxItems": 254,
+          "minItems": 1,
+          "title": "Groups",
+          "type": "array"
+        }
+      },
+      "required": ["strategy", "groups"],
+      "title": "VariableAggregateNodeConfigV1",
+      "type": "object",
+      "x-actweave-validation": {
+        "version": 1,
+        "rules": ["aggregate_output_ports_resolvable"]
+      }
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "aggregate_groups"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "pure",
+    "supports_streaming": false
+  },
+  {
+    "type": "loop",
+    "version": 1,
+    "renderer_key": "loop",
+    "title_i18n": {
+      "zh-CN": "循环",
+      "en-US": "Loop"
+    },
+    "config_schema": {
+      "$defs": {
+        "BoundedJsonPointer": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "LiteralValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "literal",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "LiteralValueBinding",
+          "type": "object"
+        },
+        "LoopVariableV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "name": {
+              "$ref": "#/$defs/PortTitle"
+            },
+            "value_type": {
+              "$ref": "#/$defs/WorkflowValueType"
+            },
+            "initial_input_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "next_input_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "output_port_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            }
+          },
+          "required": [
+            "id",
+            "name",
+            "value_type",
+            "initial_input_id",
+            "next_input_id",
+            "output_port_id"
+          ],
+          "title": "LoopVariableV1",
+          "type": "object"
+        },
+        "LoopVariableValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "loop_variable",
+              "title": "Kind",
+              "type": "string"
+            },
+            "loop_node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "variable_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "required": ["kind", "loop_node_id", "variable_id"],
+          "title": "LoopVariableValueBinding",
+          "type": "object"
+        },
+        "NodeOutputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "node_output",
+              "title": "Kind",
+              "type": "string"
+            },
+            "node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "output_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoundedJsonPointer"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "node_id", "output_id"],
+          "title": "NodeOutputValueBinding",
+          "type": "object"
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "PortTitle": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "PositiveInteger": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "PredicateAst": {
+          "additionalProperties": false,
+          "properties": {
+            "op": {
+              "enum": ["and", "or"],
+              "title": "Op",
+              "type": "string"
+            },
+            "items": {
+              "items": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/PredicateAst"
+                  },
+                  {
+                    "$ref": "#/$defs/PredicateClause"
+                  }
+                ]
+              },
+              "title": "Items",
+              "type": "array"
+            }
+          },
+          "required": ["op", "items"],
+          "title": "PredicateAst",
+          "type": "object"
+        },
+        "PredicateClause": {
+          "additionalProperties": false,
+          "properties": {
+            "left": {
+              "discriminator": {
+                "mapping": {
+                  "literal": "#/$defs/LiteralValueBinding",
+                  "loop_variable": "#/$defs/LoopVariableValueBinding",
+                  "node_output": "#/$defs/NodeOutputValueBinding",
+                  "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/LiteralValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/WorkflowInputValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/LoopVariableValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/NodeOutputValueBinding"
+                }
+              ],
+              "title": "Left"
+            },
+            "operator": {
+              "enum": [
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte",
+                "contains",
+                "starts_with",
+                "ends_with",
+                "is_null",
+                "is_not_null"
+              ],
+              "title": "Operator",
+              "type": "string"
+            },
+            "right": {
+              "anyOf": [
+                {
+                  "discriminator": {
+                    "mapping": {
+                      "literal": "#/$defs/LiteralValueBinding",
+                      "loop_variable": "#/$defs/LoopVariableValueBinding",
+                      "node_output": "#/$defs/NodeOutputValueBinding",
+                      "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/LiteralValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/LoopVariableValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/NodeOutputValueBinding"
+                    }
+                  ]
+                }
+              ],
+              "title": "Right"
+            }
+          },
+          "required": ["left", "operator"],
+          "title": "PredicateClause",
+          "type": "object"
+        },
+        "WorkflowInputId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workflow_input",
+              "title": "Kind",
+              "type": "string"
+            },
+            "input_id": {
+              "$ref": "#/$defs/WorkflowInputId"
+            }
+          },
+          "required": ["kind", "input_id"],
+          "title": "WorkflowInputValueBinding",
+          "type": "object"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        },
+        "WorkflowValueType": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": ["string", "number", "boolean", "json", "messages"],
+              "title": "Kind",
+              "type": "string"
+            },
+            "collection": {
+              "title": "Collection",
+              "type": "boolean"
+            },
+            "nullable": {
+              "title": "Nullable",
+              "type": "boolean"
+            },
+            "schema_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "collection", "nullable"],
+          "title": "WorkflowValueType",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "const": "do_until",
+          "title": "Mode",
+          "type": "string"
+        },
+        "body_entry_node_id": {
+          "$ref": "#/$defs/WorkflowNodeId"
+        },
+        "body_exit_node_id": {
+          "$ref": "#/$defs/WorkflowNodeId"
+        },
+        "max_iterations": {
+          "$ref": "#/$defs/PositiveInteger"
+        },
+        "termination_condition": {
+          "$ref": "#/$defs/PredicateAst"
+        },
+        "variables": {
+          "items": {
+            "$ref": "#/$defs/LoopVariableV1"
+          },
+          "maxItems": 252,
+          "minItems": 1,
+          "title": "Variables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "mode",
+        "body_entry_node_id",
+        "body_exit_node_id",
+        "max_iterations",
+        "termination_condition",
+        "variables"
+      ],
+      "title": "LoopNodeConfigV1",
+      "type": "object",
+      "x-actweave-validation": {
+        "version": 1,
+        "rules": ["loop_output_ports_resolvable"]
+      }
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "body",
+        "title_i18n": {
+          "zh-CN": "循环体",
+          "en-US": "Loop Body"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": true
+      },
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      },
+      {
+        "id": "iteration_count",
+        "title_i18n": {
+          "zh-CN": "循环次数",
+          "en-US": "Iteration Count"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "number",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "loop_variables"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "loop_body_v1",
+    "supports_streaming": false
+  },
+  {
+    "type": "http_request",
+    "version": 1,
+    "renderer_key": "http_request",
+    "title_i18n": {
+      "zh-CN": "HTTP 请求",
+      "en-US": "HTTP Request"
+    },
+    "config_schema": {
+      "$defs": {
+        "BindingTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "binding",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "discriminator": {
+                "mapping": {
+                  "literal": "#/$defs/LiteralValueBinding",
+                  "loop_variable": "#/$defs/LoopVariableValueBinding",
+                  "node_output": "#/$defs/NodeOutputValueBinding",
+                  "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/LiteralValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/WorkflowInputValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/LoopVariableValueBinding"
+                },
+                {
+                  "$ref": "#/$defs/NodeOutputValueBinding"
+                }
+              ],
+              "title": "Value"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "BindingTemplateSegment",
+          "type": "object"
+        },
+        "BoundedJsonPointer": {
+          "maxLength": 2048,
+          "type": "string"
+        },
+        "EndpointProfileHttpRequestAuthV1": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "endpoint_profile",
+              "title": "Mode",
+              "type": "string"
+            },
+            "injection_profile_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "credential_slot_id": {
+              "$ref": "#/$defs/WorkflowCredentialSlotId"
+            }
+          },
+          "required": ["mode", "injection_profile_id", "credential_slot_id"],
+          "title": "EndpointProfileHttpRequestAuthV1",
+          "type": "object"
+        },
+        "FormUrlencodedHttpBodyV1": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "form_urlencoded",
+              "title": "Kind",
+              "type": "string"
+            },
+            "fields": {
+              "items": {
+                "$ref": "#/$defs/HttpKeyValueBinding"
+              },
+              "title": "Fields",
+              "type": "array"
+            }
+          },
+          "required": ["kind", "fields"],
+          "title": "FormUrlencodedHttpBodyV1",
+          "type": "object"
+        },
+        "HttpAcceptedStatusRangeV1": {
+          "additionalProperties": false,
+          "properties": {
+            "from": {
+              "maximum": 599,
+              "minimum": 100,
+              "title": "From",
+              "type": "integer"
+            },
+            "to": {
+              "maximum": 599,
+              "minimum": 100,
+              "title": "To",
+              "type": "integer"
+            }
+          },
+          "required": ["from", "to"],
+          "title": "HttpAcceptedStatusRangeV1",
+          "type": "object"
+        },
+        "HttpKeyValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "discriminator": {
+                    "mapping": {
+                      "literal": "#/$defs/LiteralValueBinding",
+                      "loop_variable": "#/$defs/LoopVariableValueBinding",
+                      "node_output": "#/$defs/NodeOutputValueBinding",
+                      "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    "propertyName": "kind"
+                  },
+                  "oneOf": [
+                    {
+                      "$ref": "#/$defs/LiteralValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/WorkflowInputValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/LoopVariableValueBinding"
+                    },
+                    {
+                      "$ref": "#/$defs/NodeOutputValueBinding"
+                    }
+                  ]
+                },
+                {
+                  "$ref": "#/$defs/RestrictedTemplate"
+                }
+              ],
+              "title": "Value"
+            }
+          },
+          "required": ["id", "name", "value"],
+          "title": "HttpKeyValueBinding",
+          "type": "object"
+        },
+        "HttpRequestResponseV1": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "enum": ["json", "text"],
+              "title": "Mode",
+              "type": "string"
+            },
+            "accepted_statuses": {
+              "items": {
+                "$ref": "#/$defs/HttpAcceptedStatusRangeV1"
+              },
+              "title": "Accepted Statuses",
+              "type": "array"
+            },
+            "schema": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/JsonSchema"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": ["mode", "accepted_statuses", "schema"],
+          "title": "HttpRequestResponseV1",
+          "type": "object"
+        },
+        "HttpRequestTimeoutV1": {
+          "additionalProperties": false,
+          "properties": {
+            "connect_ms": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonNegativeInteger"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "read_ms": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonNegativeInteger"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "write_ms": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonNegativeInteger"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": ["connect_ms", "read_ms", "write_ms"],
+          "title": "HttpRequestTimeoutV1",
+          "type": "object"
+        },
+        "JsonHttpBodyV1": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "json",
+              "title": "Kind",
+              "type": "string"
+            },
+            "template": {
+              "$ref": "#/$defs/RestrictedJsonTemplate"
+            }
+          },
+          "required": ["kind", "template"],
+          "title": "JsonHttpBodyV1",
+          "type": "object"
+        },
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonSchema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "LiteralValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "literal",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "$ref": "#/$defs/JsonValue"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "LiteralValueBinding",
+          "type": "object"
+        },
+        "LoopVariableValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "loop_variable",
+              "title": "Kind",
+              "type": "string"
+            },
+            "loop_node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "variable_id": {
+              "$ref": "#/$defs/NonEmptyString"
+            }
+          },
+          "required": ["kind", "loop_node_id", "variable_id"],
+          "title": "LoopVariableValueBinding",
+          "type": "object"
+        },
+        "MultipartTextHttpBodyV1": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "multipart_text",
+              "title": "Kind",
+              "type": "string"
+            },
+            "fields": {
+              "items": {
+                "$ref": "#/$defs/HttpKeyValueBinding"
+              },
+              "title": "Fields",
+              "type": "array"
+            }
+          },
+          "required": ["kind", "fields"],
+          "title": "MultipartTextHttpBodyV1",
+          "type": "object"
+        },
+        "NoHttpBodyV1": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "none",
+              "title": "Kind",
+              "type": "string"
+            }
+          },
+          "required": ["kind"],
+          "title": "NoHttpBodyV1",
+          "type": "object"
+        },
+        "NoHttpRequestAuthV1": {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "none",
+              "title": "Mode",
+              "type": "string"
+            }
+          },
+          "required": ["mode"],
+          "title": "NoHttpRequestAuthV1",
+          "type": "object"
+        },
+        "NodeOutputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "node_output",
+              "title": "Kind",
+              "type": "string"
+            },
+            "node_id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "output_id": {
+              "$ref": "#/$defs/WorkflowPortId"
+            },
+            "path": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/BoundedJsonPointer"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "node_id", "output_id"],
+          "title": "NodeOutputValueBinding",
+          "type": "object"
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "NonNegativeInteger": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "RawTextHttpBodyV1": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw_text",
+              "title": "Kind",
+              "type": "string"
+            },
+            "content_type": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "template": {
+              "$ref": "#/$defs/RestrictedTemplate"
+            }
+          },
+          "required": ["kind", "content_type", "template"],
+          "title": "RawTextHttpBodyV1",
+          "type": "object"
+        },
+        "RestrictedJsonTemplate": {
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/StrictLiteralOne"
+            },
+            "template": {
+              "$ref": "#/$defs/JsonValue"
+            },
+            "bindings": {
+              "additionalProperties": {
+                "discriminator": {
+                  "mapping": {
+                    "literal": "#/$defs/LiteralValueBinding",
+                    "loop_variable": "#/$defs/LoopVariableValueBinding",
+                    "node_output": "#/$defs/NodeOutputValueBinding",
+                    "workflow_input": "#/$defs/WorkflowInputValueBinding"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/LiteralValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/WorkflowInputValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/LoopVariableValueBinding"
+                  },
+                  {
+                    "$ref": "#/$defs/NodeOutputValueBinding"
+                  }
+                ]
+              },
+              "title": "Bindings",
+              "type": "object"
+            }
+          },
+          "required": ["version", "template", "bindings"],
+          "title": "RestrictedJsonTemplate",
+          "type": "object"
+        },
+        "RestrictedTemplate": {
+          "additionalProperties": false,
+          "properties": {
+            "version": {
+              "$ref": "#/$defs/StrictLiteralOne"
+            },
+            "segments": {
+              "items": {
+                "discriminator": {
+                  "mapping": {
+                    "binding": "#/$defs/BindingTemplateSegment",
+                    "text": "#/$defs/TextTemplateSegment"
+                  },
+                  "propertyName": "kind"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/TextTemplateSegment"
+                  },
+                  {
+                    "$ref": "#/$defs/BindingTemplateSegment"
+                  }
+                ]
+              },
+              "title": "Segments",
+              "type": "array"
+            }
+          },
+          "required": ["version", "segments"],
+          "title": "RestrictedTemplate",
+          "type": "object"
+        },
+        "StrictLiteralOne": {
+          "const": 1,
+          "type": "integer"
+        },
+        "TextTemplateSegment": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "text",
+              "title": "Kind",
+              "type": "string"
+            },
+            "value": {
+              "title": "Value",
+              "type": "string"
+            }
+          },
+          "required": ["kind", "value"],
+          "title": "TextTemplateSegment",
+          "type": "object"
+        },
+        "WorkflowCredentialSlotId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z][A-Za-z0-9_.:-]*$",
+          "type": "string"
+        },
+        "WorkflowInputValueBinding": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "workflow_input",
+              "title": "Kind",
+              "type": "string"
+            },
+            "input_id": {
+              "$ref": "#/$defs/WorkflowInputId"
+            }
+          },
+          "required": ["kind", "input_id"],
+          "title": "WorkflowInputValueBinding",
+          "type": "object"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowPortId": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "enum": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+          "title": "Method",
+          "type": "string"
+        },
+        "base_origin": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "path_template": {
+          "$ref": "#/$defs/RestrictedTemplate"
+        },
+        "query": {
+          "items": {
+            "$ref": "#/$defs/HttpKeyValueBinding"
+          },
+          "title": "Query",
+          "type": "array"
+        },
+        "headers": {
+          "items": {
+            "$ref": "#/$defs/HttpKeyValueBinding"
+          },
+          "title": "Headers",
+          "type": "array"
+        },
+        "auth": {
+          "discriminator": {
+            "mapping": {
+              "endpoint_profile": "#/$defs/EndpointProfileHttpRequestAuthV1",
+              "none": "#/$defs/NoHttpRequestAuthV1"
+            },
+            "propertyName": "mode"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/NoHttpRequestAuthV1"
+            },
+            {
+              "$ref": "#/$defs/EndpointProfileHttpRequestAuthV1"
+            }
+          ],
+          "title": "Auth"
+        },
+        "body": {
+          "discriminator": {
+            "mapping": {
+              "form_urlencoded": "#/$defs/FormUrlencodedHttpBodyV1",
+              "json": "#/$defs/JsonHttpBodyV1",
+              "multipart_text": "#/$defs/MultipartTextHttpBodyV1",
+              "none": "#/$defs/NoHttpBodyV1",
+              "raw_text": "#/$defs/RawTextHttpBodyV1"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/NoHttpBodyV1"
+            },
+            {
+              "$ref": "#/$defs/JsonHttpBodyV1"
+            },
+            {
+              "$ref": "#/$defs/FormUrlencodedHttpBodyV1"
+            },
+            {
+              "$ref": "#/$defs/MultipartTextHttpBodyV1"
+            },
+            {
+              "$ref": "#/$defs/RawTextHttpBodyV1"
+            }
+          ],
+          "title": "Body"
+        },
+        "timeout": {
+          "$ref": "#/$defs/HttpRequestTimeoutV1"
+        },
+        "response": {
+          "$ref": "#/$defs/HttpRequestResponseV1"
+        }
+      },
+      "required": [
+        "method",
+        "base_origin",
+        "path_template",
+        "query",
+        "headers",
+        "auth",
+        "body",
+        "timeout",
+        "response"
+      ],
+      "title": "HttpRequestNodeConfigV1",
+      "type": "object",
+      "x-actweave-validation": {
+        "version": 1,
+        "rules": ["http_accepted_status_ranges_ordered"]
+      }
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "success",
+        "title_i18n": {
+          "zh-CN": "成功",
+          "en-US": "Success"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      },
+      {
+        "id": "status_code",
+        "title_i18n": {
+          "zh-CN": "状态码",
+          "en-US": "Status Code"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "number",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "headers",
+        "title_i18n": {
+          "zh-CN": "响应头",
+          "en-US": "Response Headers"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "json",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "duration_ms",
+        "title_i18n": {
+          "zh-CN": "耗时（毫秒）",
+          "en-US": "Duration (ms)"
+        },
+        "kind": "data",
+        "value_type": {
+          "kind": "number",
+          "collection": false,
+          "nullable": false
+        },
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "http_response_body"
+    },
+    "required_capabilities": ["workflow.http.use"],
+    "retry_semantics": "http_method_v1",
+    "supports_streaming": false
+  },
+  {
+    "type": "python_code",
+    "version": 1,
+    "renderer_key": "python_code",
+    "title_i18n": {
+      "zh-CN": "代码执行",
+      "en-US": "Code Execution"
+    },
+    "config_schema": {
+      "$defs": {
+        "JsonNumber": {
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991,
+          "type": "number"
+        },
+        "JsonSchema": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "type": "object"
+        },
+        "JsonValue": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "$ref": "#/$defs/JsonNumber"
+            },
+            {
+              "type": "string"
+            },
+            {
+              "items": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "array"
+            },
+            {
+              "additionalProperties": {
+                "$ref": "#/$defs/JsonValue"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "NonEmptyString": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "PositiveInteger": {
+          "exclusiveMinimum": 0,
+          "type": "integer"
+        },
+        "PythonCodeInputVariableV1": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/WorkflowNodeId"
+            },
+            "name": {
+              "$ref": "#/$defs/PythonIdentifier"
+            },
+            "value_type": {
+              "$ref": "#/$defs/WorkflowValueType"
+            }
+          },
+          "required": ["id", "name", "value_type"],
+          "title": "PythonCodeInputVariableV1",
+          "type": "object"
+        },
+        "PythonIdentifier": {
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "type": "string"
+        },
+        "WorkflowNodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "WorkflowValueType": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "enum": ["string", "number", "boolean", "json", "messages"],
+              "title": "Kind",
+              "type": "string"
+            },
+            "collection": {
+              "title": "Collection",
+              "type": "boolean"
+            },
+            "nullable": {
+              "title": "Nullable",
+              "type": "boolean"
+            },
+            "schema_ref": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/NonEmptyString"
+                }
+              ]
+            }
+          },
+          "required": ["kind", "collection", "nullable"],
+          "title": "WorkflowValueType",
+          "type": "object"
+        }
+      },
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "input_variables": {
+          "items": {
+            "$ref": "#/$defs/PythonCodeInputVariableV1"
+          },
+          "title": "Input Variables",
+          "type": "array"
+        },
+        "output_schema": {
+          "$ref": "#/$defs/JsonSchema"
+        },
+        "timeout_ms": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PositiveInteger"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": ["source", "input_variables", "output_schema", "timeout_ms"],
+      "title": "PythonCodeNodeConfigV1",
+      "type": "object"
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [
+      {
+        "id": "next",
+        "title_i18n": {
+          "zh-CN": "下一步",
+          "en-US": "Next"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      },
+      {
+        "id": "error",
+        "title_i18n": {
+          "zh-CN": "异常",
+          "en-US": "Error"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "one",
+        "required": false
+      }
+    ],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "python_result_v1"
+    },
+    "required_capabilities": ["workflow.code.use"],
+    "retry_semantics": "isolated_compute",
+    "supports_streaming": false
+  },
+  {
+    "type": "end",
+    "version": 1,
+    "renderer_key": "end",
+    "title_i18n": {
+      "zh-CN": "结束",
+      "en-US": "End"
+    },
+    "config_schema": {
+      "additionalProperties": false,
+      "properties": {},
+      "title": "EndNodeConfigV1",
+      "type": "object"
+    },
+    "input_ports": [
+      {
+        "id": "in",
+        "title_i18n": {
+          "zh-CN": "输入",
+          "en-US": "Input"
+        },
+        "kind": "control",
+        "value_type": null,
+        "cardinality": "many",
+        "required": true
+      }
+    ],
+    "output_ports": [],
+    "port_derivation": {
+      "version": 1,
+      "input_source": "none",
+      "output_source": "none"
+    },
+    "required_capabilities": [],
+    "retry_semantics": "pure",
+    "supports_streaming": false
+  }
+]

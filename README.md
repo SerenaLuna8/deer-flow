@@ -191,7 +191,16 @@ DeepSeek V4 Pro 和 GPT 5.6 Luna，并将 Flash 设为默认；system admin 可�
 `/admin/settings/models` 检查或调整模型目录与加密 Credential。provider
 key 只在 `make setup-db` 时由 `.env`/显式环境导入加密 envelope，Gateway、Worker 与 Scheduler
 启动时不会接收该 key。本地全栈默认把运行状态写入
-`backend/.deer-flow`，日志写入 `logs/`；停止服务使用：
+仓库根目录 `.act-weave`，日志写入 `logs/`。升级前若存在旧的根目录 `.deer-flow`
+或 `backend/.deer-flow`，启动器会停止并要求显式迁移，绝不会自动覆盖或删除旧数据：
+
+```bash
+make migrate-runtime-home                 # 仅预览来源、目标和完整性清单
+make migrate-runtime-home ARGS="--copy"   # 经哈希验证后复制；旧目录仍保留
+```
+
+目标 `.act-weave` 已存在或多个来源中同名条目的类型、内容、权限不一致时，复制会拒绝执行。
+完成检查后，停止服务使用：
 
 平台管理员可从 `/admin/operations` 进入统一管理界面，在同一导航中查看运行状态、项目、
 任务、审计、系统资产和模型设置。桌面导航可在图标栏与完整菜单间展开/折叠，折叠后悬停仍显示

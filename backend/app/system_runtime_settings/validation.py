@@ -19,8 +19,13 @@ from app.system_runtime_settings.models import (
     RuntimePolicySection,
     RuntimePolicyValue,
 )
+from app.workflows.runtime_policy import (
+    WorkflowRuntimePolicyV1,
+    revalidate_trusted_workflow_runtime_policy,
+)
 
 RUNTIME_POLICY_SCHEMA_VERSION = 2
+WORKFLOW_RUNTIME_POLICY_SCHEMA_VERSION = 1
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -64,6 +69,18 @@ class CanonicalRuntimePolicy:
     checksum: str
 
 
+def runtime_policy_schema_version(
+    section: RuntimePolicySection | str,
+) -> int:
+    try:
+        parsed_section = RuntimePolicySection(section)
+    except (TypeError, ValueError):
+        raise RuntimePolicyInvalid from None
+    if parsed_section is RuntimePolicySection.WORKFLOW_RUNTIME:
+        return WORKFLOW_RUNTIME_POLICY_SCHEMA_VERSION
+    return RUNTIME_POLICY_SCHEMA_VERSION
+
+
 def _secret_like_text(value: str) -> bool:
     if any(ord(character) < 32 and character not in "\n\t" for character in value):
         return True
@@ -83,7 +100,8 @@ def _reject_secret_material(value: object) -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             normalized_key = re.sub(r"[^a-z0-9]", "", key.lower()) if type(key) is str else ""
-            if type(key) is not str or _SECRET_KEY.search(key) or normalized_key in {"secret", "token"} or any(normalized_key.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES):
+            safe_disabled_transport_flag = normalized_key == "cookiejar" and item is False
+            if type(key) is not str or (not safe_disabled_transport_flag and (_SECRET_KEY.search(key) or normalized_key in {"secret", "token"} or any(normalized_key.endswith(suffix) for suffix in _SECRET_KEY_SUFFIXES))):
                 raise RuntimePolicyInvalid
             _reject_secret_material(item)
     elif isinstance(value, list):
@@ -99,7 +117,8 @@ def parse_policy_value(
 ) -> RuntimePolicyValue:
     try:
         parsed_section = RuntimePolicySection(section)
-        raw: object = value.model_dump(mode="python") if isinstance(value, (AgentRuntimePolicyValue, AuthPolicyValue, MemoryDocumentPolicy, QuotaPolicyValue)) else value
+        trusted_workflow_policy = type(value) is WorkflowRuntimePolicyV1
+        raw: object = value.model_dump(mode="json") if isinstance(value, (AgentRuntimePolicyValue, AuthPolicyValue, MemoryDocumentPolicy, QuotaPolicyValue, WorkflowRuntimePolicyV1)) else value
         _reject_secret_material(raw)
         if parsed_section is RuntimePolicySection.AGENT_RUNTIME:
             parsed: RuntimePolicyValue = AgentRuntimePolicyValue.model_validate(raw)
@@ -107,8 +126,10 @@ def parse_policy_value(
             parsed = AuthPolicyValue.model_validate(raw)
         elif parsed_section is RuntimePolicySection.MEMORY_DOCUMENT:
             parsed = MemoryDocumentPolicy.model_validate(raw)
-        else:
+        elif parsed_section is RuntimePolicySection.QUOTAS:
             parsed = QuotaPolicyValue.model_validate(raw)
+        else:
+            parsed = revalidate_trusted_workflow_runtime_policy(value) if trusted_workflow_policy else WorkflowRuntimePolicyV1.model_validate(raw)
         normalized = parsed.model_dump(mode="json")
         _reject_secret_material(normalized)
         encoded = json.dumps(
@@ -139,7 +160,7 @@ def canonical_policy_payload(
         ensure_ascii=False,
     ).encode("utf-8")
     return CanonicalRuntimePolicy(
-        schema_version=RUNTIME_POLICY_SCHEMA_VERSION,
+        schema_version=runtime_policy_schema_version(section),
         value=normalized,
         checksum=hashlib.sha256(encoded).hexdigest(),
     )
@@ -149,7 +170,9 @@ __all__ = [
     "CanonicalRuntimePolicy",
     "MAX_RUNTIME_POLICY_BYTES",
     "RUNTIME_POLICY_SCHEMA_VERSION",
+    "WORKFLOW_RUNTIME_POLICY_SCHEMA_VERSION",
     "RuntimePolicyInvalid",
     "canonical_policy_payload",
     "parse_policy_value",
+    "runtime_policy_schema_version",
 ]

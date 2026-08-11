@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "node_layouts": [
+    {
+      "node_id": "00000000-0000-4000-8000-000000000001",
+      "position": { "x": 80, "y": 120 }
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000006",
+      "position": { "x": 720, "y": 120 },
+      "collapsed": false
+    },
+    {
+      "node_id": "00000000-0000-4000-8000-000000000009",
+      "position": { "x": 40, "y": 80 },
+      "parent_node_id": "00000000-0000-4000-8000-000000000006"
+    }
+  ],
+  "edge_layouts": [
+    { "edge_id": "transition-1", "routing": "smoothstep" },
+    { "edge_id": "transition-2", "routing": "bezier" }
+  ]
+}

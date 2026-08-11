@@ -11,17 +11,44 @@ set -e
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
-# Resolve config.yaml location: explicit environment path > repository root.
+# Resolve config.yaml location: canonical environment path > compatibility
+# environment path > repository root.  Dual aliases must agree after
+# normalization so an upgrade can never modify an unintended file.
+_normalize_config_path() {
+    local raw_path=$1
+    local path_dir
+    if ! path_dir="$(cd "$(dirname "$raw_path")" 2>/dev/null && pwd -P)"; then
+        echo "✗ Config path parent directory does not exist: $raw_path" >&2
+        return 1
+    fi
+    printf '%s/%s\n' "$path_dir" "$(basename "$raw_path")"
+}
+
+ACT_CONFIG=""
+LEGACY_CONFIG=""
+if [ -n "${ACT_WEAVE_CONFIG_PATH:-}" ]; then
+    ACT_CONFIG="$(_normalize_config_path "$ACT_WEAVE_CONFIG_PATH")"
+fi
 if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
-    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+    LEGACY_CONFIG="$(_normalize_config_path "$DEER_FLOW_CONFIG_PATH")"
+fi
+if [ -n "$ACT_CONFIG" ] && [ -n "$LEGACY_CONFIG" ] && [ "$ACT_CONFIG" != "$LEGACY_CONFIG" ]; then
+    echo "✗ ACT_WEAVE_CONFIG_PATH resolves to '$ACT_CONFIG', but DEER_FLOW_CONFIG_PATH resolves to '$LEGACY_CONFIG'." >&2
+    echo "  Refusing conflicting config paths." >&2
+    exit 1
+fi
+
+if [ -n "$ACT_CONFIG" ] || [ -n "$LEGACY_CONFIG" ]; then
+    CONFIG="${ACT_CONFIG:-$LEGACY_CONFIG}"
+    if [ ! -f "$CONFIG" ]; then
+        echo "✗ ACT_WEAVE_CONFIG_PATH/DEER_FLOW_CONFIG_PATH does not name a file: $CONFIG"
         exit 1
     fi
-    CONFIG_DIR="$(cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" && pwd -P)"
-    CONFIG="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
 else
     CONFIG="$REPO_ROOT/config.yaml"
 fi
+export ACT_WEAVE_CONFIG_PATH="$CONFIG"
+export DEER_FLOW_CONFIG_PATH="$CONFIG"
 
 if [ ! -f "$EXAMPLE" ]; then
     echo "✗ config.example.yaml not found at $EXAMPLE"

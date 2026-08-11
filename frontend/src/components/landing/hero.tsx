@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "motion/react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+import { ActWeaveLogo } from "@/components/branding/actweave-logo";
 import { AuroraText } from "@/components/ui/aurora-text";
 import { Button } from "@/components/ui/button";
 import { FlickeringGrid } from "@/components/ui/flickering-grid";
@@ -47,7 +48,7 @@ export function Hero({ className }: { className?: string }) {
         />
       </div>
       <FlickeringGrid
-        className="absolute inset-0 z-0 translate-y-8 mask-[url(/images/deer.svg)] mask-size-[100vw] mask-center mask-no-repeat md:mask-size-[72vh]"
+        className="absolute inset-0 z-0 translate-y-8 [mask-image:radial-gradient(circle_at_center,black_0%,transparent_72%)]"
         squareSize={4}
         gridGap={4}
         color={"white"}
@@ -55,6 +56,10 @@ export function Hero({ className }: { className?: string }) {
         flickerChance={0.25}
       />
       <div className="container-md relative z-10 mx-auto flex min-h-[92svh] flex-col items-center justify-center px-4 pt-20 pb-14">
+        <ActWeaveLogo
+          className="mb-6 size-24 rounded-3xl sm:size-28"
+          priority
+        />
         <h1 className="text-center text-5xl leading-tight font-bold break-words md:text-6xl">
           ActWeave
         </h1>

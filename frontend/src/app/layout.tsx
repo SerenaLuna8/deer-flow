@@ -12,6 +12,20 @@ export const metadata: Metadata = {
   title: "ActWeave — Weave intelligence into action.",
   description:
     "Weave intelligence into action. An open-source super-agent execution platform.",
+  icons: {
+    icon: [
+      {
+        url: "/images/actweave-logo-concept-v1.png",
+        type: "image/png",
+      },
+    ],
+    apple: [
+      {
+        url: "/images/actweave-logo-concept-v1.png",
+        type: "image/png",
+      },
+    ],
+  },
 };
 
 export default async function RootLayout({

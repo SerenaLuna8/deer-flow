@@ -1,9 +1,14 @@
-import os
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from deerflow.config.runtime_paths import project_root, resolve_path
+from deerflow.config.runtime_paths import (
+    ACT_WEAVE_SKILLS_PATH_ENV,
+    DEER_FLOW_SKILLS_PATH_ENV,
+    project_root,
+    resolve_environment_path,
+    resolve_path,
+)
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 
 
@@ -48,18 +53,24 @@ class SkillsConfig(BaseModel):
 
         Resolution order:
             1. Explicit ``path`` field
-            2. ``DEER_FLOW_SKILLS_PATH`` environment variable
-            3. ``skills`` under the caller project root (``project_root()``)
-            4. Legacy repo-root candidates for monorepo compatibility (``_legacy_skills_candidates``)
+            2. ``ACT_WEAVE_SKILLS_PATH`` environment variable
+            3. ``DEER_FLOW_SKILLS_PATH`` compatibility environment variable
+            4. ``skills`` under the caller project root (``project_root()``)
+            5. Legacy repo-root candidates for monorepo compatibility (``_legacy_skills_candidates``)
 
         When none of (3) or (4) exist on disk, the project-root default is returned so callers
         can still surface a stable "no skills" location without raising.
         """
+        env_path = resolve_environment_path(
+            ACT_WEAVE_SKILLS_PATH_ENV,
+            DEER_FLOW_SKILLS_PATH_ENV,
+            base=project_root(),
+        )
         if self.path:
             # Use configured path (can be absolute or relative to project root)
             return resolve_path(self.path)
-        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
-            return resolve_path(env_path)
+        if env_path is not None:
+            return env_path
 
         project_default = project_root() / "skills"
         if project_default.is_dir():

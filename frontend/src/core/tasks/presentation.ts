@@ -3,7 +3,7 @@ import type { Model } from "@/core/models/types";
 
 export function resolveSubtaskModelLabel(
   modelName: string | undefined,
-  models: Model[],
+  models: readonly Model[],
 ): string | undefined {
   if (!modelName) {
     return undefined;

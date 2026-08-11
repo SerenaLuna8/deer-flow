@@ -258,6 +258,10 @@ async def run_worker(
             active_handlers,
             config.worker,
             repository_builder=repository_builder,
+            # G32 will supply the exact Code/HTTP execution profile digests
+            # together with the real workflow_run handler. Policy identity is
+            # materialized independently by WorkerRegistry on every write.
+            runtime_profile_digests=frozenset(),
             after_claim_commit=reconcile_deferred_automation_terminals,
         )
         await service.run(stop_event or asyncio.Event())

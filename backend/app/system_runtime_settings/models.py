@@ -6,7 +6,7 @@ import re
 import unicodedata
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from types import MappingProxyType
@@ -19,6 +19,16 @@ from pydantic import (
     StringConstraints,
     field_validator,
     model_validator,
+)
+
+from app.system_runtime_settings.workflow_defaults import (
+    default_workflow_runtime_policy,
+)
+from app.workflows.runtime_policy import (
+    WorkflowRuntimeAdminPolicyV1,
+    WorkflowRuntimePolicyV1,
+    revalidate_trusted_workflow_runtime_policy,
+    workflow_runtime_policy_checksum,
 )
 
 _JSON_SAFE_INTEGER = 2**53 - 1
@@ -59,6 +69,7 @@ class RuntimePolicySection(StrEnum):
     AUTH = "auth"
     MEMORY_DOCUMENT = "memory_document"
     QUOTAS = "quotas"
+    WORKFLOW_RUNTIME = "workflow_runtime"
 
 
 class _PolicyModel(BaseModel):
@@ -297,12 +308,13 @@ class QuotaPolicyValue(_PolicyModel):
     warning_threshold: float = Field(default=0.8, gt=0.0, lt=1.0)
 
 
-RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | MemoryDocumentPolicy | QuotaPolicyValue
+RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | MemoryDocumentPolicy | QuotaPolicyValue | WorkflowRuntimePolicyV1
 RuntimePolicyEffectScope = Literal[
     "new_requests_and_runs",
     "new_requests",
     "new_memory_documents",
     "next_authoritative_check",
+    "new_workflow_runs",
 ]
 
 
@@ -321,16 +333,23 @@ class RuntimePolicyView:
 class RuntimePolicyCatalogView:
     catalog_revision: int
     sections: Mapping[RuntimePolicySection, RuntimePolicyView]
+    workflow_runtime: WorkflowRuntimeAdminPolicyV1 | None = None
 
     @classmethod
     def create(
         cls,
         catalog_revision: int,
         sections: Mapping[RuntimePolicySection, RuntimePolicyView],
+        *,
+        workflow_runtime: WorkflowRuntimeAdminPolicyV1 | None = None,
     ) -> RuntimePolicyCatalogView:
+        expected_generic_sections = set(RuntimePolicySection) - {RuntimePolicySection.WORKFLOW_RUNTIME}
+        if set(sections) != expected_generic_sections or type(workflow_runtime) is not WorkflowRuntimeAdminPolicyV1:
+            raise ValueError("runtime policy catalog requires four generic sections and one closed Workflow projection")
         return cls(
             catalog_revision=catalog_revision,
             sections=MappingProxyType(dict(sections)),
+            workflow_runtime=workflow_runtime,
         )
 
 
@@ -360,6 +379,58 @@ class LockedMemoryDocumentPolicy:
     value: MemoryDocumentPolicy
 
 
+_LOCKED_WORKFLOW_RUNTIME_FACTORY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class LockedWorkflowRuntimePolicy:
+    policy_version_id: uuid.UUID
+    revision: int
+    schema_version: int
+    payload_checksum: str
+    value: WorkflowRuntimePolicyV1
+    _factory_token: object = field(repr=False, compare=False, kw_only=True)
+
+    def __post_init__(self) -> None:
+        if self._factory_token is not _LOCKED_WORKFLOW_RUNTIME_FACTORY_TOKEN:
+            raise TypeError("Locked Workflow runtime policy must use its trusted factory")
+        if type(self.policy_version_id) is not uuid.UUID:
+            raise TypeError("Locked Workflow runtime policy requires an exact UUID identity")
+        if type(self.revision) is not int or not 1 <= self.revision <= _JSON_SAFE_INTEGER:
+            raise ValueError("Locked Workflow runtime policy revision is invalid")
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("Locked Workflow runtime policy schema version is invalid")
+        if type(self.payload_checksum) is not str or re.fullmatch(r"[0-9a-f]{64}", self.payload_checksum) is None:
+            raise ValueError("Locked Workflow runtime policy checksum is invalid")
+        value = revalidate_trusted_workflow_runtime_policy(self.value)
+        if value.schema_version != self.schema_version or workflow_runtime_policy_checksum(value) != self.payload_checksum:
+            raise ValueError("Locked Workflow runtime policy identity does not match its value")
+        object.__setattr__(self, "value", value)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        policy_version_id: uuid.UUID,
+        revision: int,
+        schema_version: int,
+        payload_checksum: str,
+        value: WorkflowRuntimePolicyV1,
+    ) -> LockedWorkflowRuntimePolicy:
+        """Freeze one exact materialized policy behind an explicit trusted seam."""
+
+        if type(value) is not WorkflowRuntimePolicyV1:
+            raise TypeError("Locked Workflow runtime policy requires an exact validated v1 value")
+        return cls(
+            policy_version_id=policy_version_id,
+            revision=revision,
+            schema_version=schema_version,
+            payload_checksum=payload_checksum,
+            value=value,
+            _factory_token=_LOCKED_WORKFLOW_RUNTIME_FACTORY_TOKEN,
+        )
+
+
 def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
     if section is RuntimePolicySection.AGENT_RUNTIME:
         return AgentRuntimePolicyValue()
@@ -369,6 +440,8 @@ def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
         return MemoryDocumentPolicy()
     if section is RuntimePolicySection.QUOTAS:
         return QuotaPolicyValue()
+    if section is RuntimePolicySection.WORKFLOW_RUNTIME:
+        return default_workflow_runtime_policy()
     raise AssertionError("unreachable runtime policy section")
 
 
@@ -377,6 +450,7 @@ __all__ = [
     "AuthPolicyValue",
     "DEFAULT_MEMORY_DOCUMENT_SECTIONS",
     "LockedMemoryDocumentPolicy",
+    "LockedWorkflowRuntimePolicy",
     "MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS",
     "MemoryDocumentPolicy",
     "QuotaPolicyValue",
@@ -386,6 +460,7 @@ __all__ = [
     "RuntimePolicyUpdateResult",
     "RuntimePolicyValue",
     "RuntimePolicyView",
+    "WorkflowRuntimePolicyV1",
     "LockedAgentRuntimePolicy",
     "default_policy_value",
 ]

@@ -141,7 +141,7 @@ The sandbox uses path mappings to bridge the host filesystem and the container's
 | Host path                                   | Container path                               | Access     |
 | ------------------------------------------- | -------------------------------------------- | ---------- |
 | `skills/` (from `skills.path`)              | `/mnt/skills` (from `skills.container_path`) | Read-only  |
-| `.deer-flow/threads/{thread_id}/user-data/` | `/mnt/user-data/`                            | Read-write |
+| `.act-weave/threads/{thread_id}/user-data/` | `/mnt/user-data/`                            | Read-write |
 
 The skills directory is always mounted read-only. Threads write their working data (uploads, outputs, intermediate files) to `/mnt/user-data/`.
 

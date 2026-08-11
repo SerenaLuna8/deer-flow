@@ -223,6 +223,7 @@ export interface Translations {
   project: {
     audit: string;
     automations: string;
+    workflows: string;
     agents: string;
     skills: string;
     mcp: string;

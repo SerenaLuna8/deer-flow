@@ -22,7 +22,8 @@ ActWeave Harness 不仅仅是一个独立应用程序——它是一个可以导
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
 
-# 加载配置（读取 config.yaml 或 DEER_FLOW_CONFIG_PATH）
+# 加载配置（读取 config.yaml 或 ACT_WEAVE_CONFIG_PATH；
+# DEER_FLOW_CONFIG_PATH 保留为兼容别名）
 load_config()
 
 client = DeerFlowClient()
@@ -117,7 +118,7 @@ app = FastAPI()
 
 # 挂载 ActWeave Gateway
 from deerflow.app.gateway.main import app as gateway_app
-app.mount("/deerflow", gateway_app)
+app.mount("/actweave", gateway_app)
 ```
 
 或者在你自己的 FastAPI 路由中直接使用 `DeerFlowClient` 进行流式传输：
@@ -144,7 +145,7 @@ async def chat(thread_id: str, body: dict):
 
 ```python
 import os
-os.environ["DEER_FLOW_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
+os.environ["ACT_WEAVE_CONFIG_PATH"] = "/path/to/my-actweave-config.yaml"
 
 from deerflow.config import load_config
 load_config()
@@ -154,7 +155,7 @@ load_config()
 
 ```python
 from deerflow.config import load_config
-load_config(config_path="/path/to/my-deerflow-config.yaml")
+load_config(config_path="/path/to/my-actweave-config.yaml")
 ```
 
 <Cards num={2}>

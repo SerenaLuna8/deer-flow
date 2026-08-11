@@ -34,6 +34,7 @@ from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     LockedAgentRuntimePolicy,
     LockedMemoryDocumentPolicy,
+    LockedWorkflowRuntimePolicy,
     MemoryDocumentPolicy,
     RuntimePolicyCatalogView,
     RuntimePolicyEffectScope,
@@ -47,9 +48,18 @@ from app.system_runtime_settings.repository import (
     SystemRuntimePolicyRepositoryInvariant,
 )
 from app.system_runtime_settings.validation import (
+    CanonicalRuntimePolicy,
     RuntimePolicyInvalid,
     canonical_policy_payload,
     parse_policy_value,
+)
+from app.system_runtime_settings.workflow_runtime import WorkflowRuntimeConvergence
+from app.workflows.runtime_policy import (
+    WorkflowRuntimeAdminPolicyV1,
+    WorkflowRuntimePolicyUpdateRequestV1,
+    WorkflowRuntimePolicyUpdateResponseV1,
+    WorkflowRuntimePolicyV1,
+    create_workflow_runtime_update_response,
 )
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
@@ -70,6 +80,7 @@ _EFFECT_SCOPE: Mapping[RuntimePolicySection, RuntimePolicyEffectScope] = {
     RuntimePolicySection.AUTH: "new_requests",
     RuntimePolicySection.MEMORY_DOCUMENT: "new_memory_documents",
     RuntimePolicySection.QUOTAS: "next_authoritative_check",
+    RuntimePolicySection.WORKFLOW_RUNTIME: "new_workflow_runs",
 }
 _T = TypeVar("_T")
 
@@ -126,9 +137,12 @@ class SystemRuntimePolicyService:
         self,
         session_factory: Callable[[], AsyncSession],
         audit_service: AuditService,
+        *,
+        workflow_runtime_convergence: WorkflowRuntimeConvergence | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._audit = audit_service
+        self._workflow_runtime_convergence = workflow_runtime_convergence or WorkflowRuntimeConvergence()
 
     @staticmethod
     def _require_admin(context: object) -> SystemAuditContext:
@@ -169,9 +183,16 @@ class SystemRuntimePolicyService:
             if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
                 raise SystemRuntimePolicyConflict(issued.request_id) from None
             raise SystemRuntimePolicyInvalid(issued.request_id) from None
-        except (RuntimePolicyInvalid, SystemRuntimePolicyRepositoryInvariant):
+        except RuntimePolicyInvalid:
             raise SystemRuntimePolicyInvalid(issued.request_id) from None
-        except (AuditError, DBAPIError, RuntimeError):
+        except (
+            AuditError,
+            DBAPIError,
+            RuntimeError,
+            SystemRuntimePolicyRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
             raise SystemRuntimePolicyStorageUnavailable(issued.request_id) from None
 
     async def list_policies(
@@ -186,17 +207,26 @@ class SystemRuntimePolicyService:
             # pointers one coherent committed view under READ COMMITTED.
             state = await repository.catalog_state(for_update=True)
             sections: dict[RuntimePolicySection, RuntimePolicyView] = {}
+            workflow_runtime: WorkflowRuntimeAdminPolicyV1 | None = None
             for policy, version in await repository.list_current():
                 section = RuntimePolicySection(policy.section)
-                sections[section] = _view(
-                    section,
-                    int(policy.revision),
-                    version,
-                    policy.updated_at,
-                )
+                if section is RuntimePolicySection.WORKFLOW_RUNTIME:
+                    locked = self._locked_workflow_runtime(policy, version)
+                    workflow_runtime = await self._workflow_runtime_convergence.project_in_session(
+                        repository.session,
+                        locked,
+                    )
+                else:
+                    sections[section] = _view(
+                        section,
+                        int(policy.revision),
+                        version,
+                        policy.updated_at,
+                    )
             return RuntimePolicyCatalogView.create(
                 int(state.revision),
                 sections,
+                workflow_runtime=workflow_runtime,
             )
 
         return await self._admin_operation(context, operation)
@@ -212,6 +242,8 @@ class SystemRuntimePolicyService:
         issued = self._require_admin(context)
         try:
             parsed_section = RuntimePolicySection(section)
+            if parsed_section is RuntimePolicySection.WORKFLOW_RUNTIME:
+                raise RuntimePolicyInvalid
             if type(expected_revision) is not int or expected_revision < 1:
                 raise RuntimePolicyInvalid
             canonical = canonical_policy_payload(parsed_section, value)
@@ -223,85 +255,170 @@ class SystemRuntimePolicyService:
             repository: SystemRuntimePolicyRepository,
             actor: SystemAuditContext,
         ) -> RuntimePolicyUpdateResult:
-            state = await repository.catalog_state(for_update=True)
-            policy, previous = await repository.current(
-                parsed_section,
+            return await self._apply_policy_update(
+                repository,
+                actor,
+                section=parsed_section,
+                expected_revision=expected_revision,
+                canonical=canonical,
+                parsed_value=parsed_value,
+            )
+
+        return await self._admin_operation(issued, operation)
+
+    async def _apply_policy_update(
+        self,
+        repository: SystemRuntimePolicyRepository,
+        actor: SystemAuditContext,
+        *,
+        section: RuntimePolicySection,
+        expected_revision: int,
+        canonical: CanonicalRuntimePolicy,
+        parsed_value: RuntimePolicyValue,
+    ) -> RuntimePolicyUpdateResult:
+        """Apply one CAS, immutable version and content-free audit atomically."""
+
+        state = await repository.catalog_state(for_update=True)
+        policy, previous = await repository.current(
+            section,
+            for_update=True,
+        )
+        if int(policy.revision) != expected_revision:
+            raise SystemRuntimePolicyConflict(actor.request_id)
+
+        refs = _model_refs(parsed_value)
+        if refs:
+            active_refs = frozenset(
+                (
+                    await repository.session.execute(
+                        select(SystemModelConfigRow.logical_name)
+                        .where(
+                            SystemModelConfigRow.status == "active",
+                            SystemModelConfigRow.logical_name.in_(refs),
+                        )
+                        .with_for_update(
+                            read=True,
+                            of=SystemModelConfigRow,
+                        )
+                    )
+                ).scalars()
+            )
+            if active_refs != refs:
+                raise SystemRuntimePolicyInvalid(actor.request_id)
+
+        now = datetime.now(UTC)
+        next_revision = int(policy.revision) + 1
+        version = SystemRuntimePolicyVersionRow(
+            id=uuid.uuid4(),
+            section=section.value,
+            version_number=next_revision,
+            schema_version=canonical.schema_version,
+            value=canonical.value,
+            payload_checksum=canonical.checksum,
+            supersedes_version_id=previous.id,
+            created_by_user_id=str(actor.user_id),
+            created_at=now,
+        )
+        await repository.add_version(policy, version)
+        policy.revision = next_revision
+        policy.updated_by_user_id = str(actor.user_id)
+        policy.updated_at = now
+        state.revision = int(state.revision) + 1
+        state.updated_by_user_id = str(actor.user_id)
+        state.updated_at = now
+        await repository.session.flush()
+
+        await self._audit.append(
+            repository.session,
+            AuditActor.system_admin(actor),
+            AuditAction.SYSTEM_SETTING_UPDATED,
+            AuditTarget(
+                kind=AuditTargetKind.SYSTEM_SETTING,
+                authority_id=uuid.uuid5(
+                    _TARGET_NAMESPACE,
+                    section.value,
+                ),
+                project_id=None,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "section": section.value,
+                "previous_revision": next_revision - 1,
+                "revision": next_revision,
+                "effect_scope": _EFFECT_SCOPE[section],
+            },
+            request_id=actor.request_id,
+            occurred_at=now,
+        )
+        await repository.session.flush()
+        view = _view(section, next_revision, version, now)
+        return RuntimePolicyUpdateResult(
+            catalog_revision=int(state.revision),
+            policy=view,
+            effective_at=now,
+        )
+
+    async def read_workflow_runtime_policy(
+        self,
+        context: SystemAuditContext,
+    ) -> WorkflowRuntimeAdminPolicyV1:
+        catalog = await self.list_policies(context)
+        if catalog.workflow_runtime is None:
+            raise SystemRuntimePolicyStorageUnavailable(context.request_id)
+        return catalog.workflow_runtime
+
+    async def update_workflow_runtime_policy(
+        self,
+        context: SystemAuditContext,
+        request: WorkflowRuntimePolicyUpdateRequestV1,
+    ) -> WorkflowRuntimePolicyUpdateResponseV1:
+        issued = self._require_admin(context)
+        if type(request) is not WorkflowRuntimePolicyUpdateRequestV1:
+            raise SystemRuntimePolicyInvalid(issued.request_id)
+        try:
+            if request.expected_revision < 1:
+                raise RuntimePolicyInvalid
+            canonical = canonical_policy_payload(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
+                request.value,
+            )
+            parsed_value = parse_policy_value(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
+                canonical.value,
+            )
+            if type(parsed_value) is not WorkflowRuntimePolicyV1:
+                raise RuntimePolicyInvalid
+        except (RuntimePolicyInvalid, TypeError, ValueError):
+            raise SystemRuntimePolicyInvalid(issued.request_id) from None
+
+        async def operation(
+            repository: SystemRuntimePolicyRepository,
+            actor: SystemAuditContext,
+        ) -> WorkflowRuntimePolicyUpdateResponseV1:
+            result = await self._apply_policy_update(
+                repository,
+                actor,
+                section=RuntimePolicySection.WORKFLOW_RUNTIME,
+                expected_revision=request.expected_revision,
+                canonical=canonical,
+                parsed_value=parsed_value,
+            )
+            policy, version = await repository.current(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
                 for_update=True,
             )
-            if int(policy.revision) != expected_revision:
-                raise SystemRuntimePolicyConflict(actor.request_id)
-
-            refs = _model_refs(parsed_value)
-            if refs:
-                active_refs = frozenset(
-                    (
-                        await repository.session.execute(
-                            select(SystemModelConfigRow.logical_name)
-                            .where(
-                                SystemModelConfigRow.status == "active",
-                                SystemModelConfigRow.logical_name.in_(refs),
-                            )
-                            .with_for_update(
-                                read=True,
-                                of=SystemModelConfigRow,
-                            )
-                        )
-                    ).scalars()
-                )
-                if active_refs != refs:
-                    raise SystemRuntimePolicyInvalid(actor.request_id)
-
-            now = datetime.now(UTC)
-            next_revision = int(policy.revision) + 1
-            version = SystemRuntimePolicyVersionRow(
-                id=uuid.uuid4(),
-                section=parsed_section.value,
-                version_number=next_revision,
-                schema_version=canonical.schema_version,
-                value=canonical.value,
-                payload_checksum=canonical.checksum,
-                supersedes_version_id=previous.id,
-                created_by_user_id=str(actor.user_id),
-                created_at=now,
-            )
-            await repository.add_version(policy, version)
-            policy.revision = next_revision
-            policy.updated_by_user_id = str(actor.user_id)
-            policy.updated_at = now
-            state.revision = int(state.revision) + 1
-            state.updated_by_user_id = str(actor.user_id)
-            state.updated_at = now
-            await repository.session.flush()
-
-            await self._audit.append(
+            locked = self._locked_workflow_runtime(policy, version)
+            if locked.revision != result.policy.revision:
+                raise SystemRuntimePolicyRepositoryInvariant
+            projection = await self._workflow_runtime_convergence.project_in_session(
                 repository.session,
-                AuditActor.system_admin(actor),
-                AuditAction.SYSTEM_SETTING_UPDATED,
-                AuditTarget(
-                    kind=AuditTargetKind.SYSTEM_SETTING,
-                    authority_id=uuid.uuid5(
-                        _TARGET_NAMESPACE,
-                        parsed_section.value,
-                    ),
-                    project_id=None,
-                ),
-                AuditOutcome.SUCCESS,
-                {
-                    "section": parsed_section.value,
-                    "revision": next_revision,
-                    "schema_version": canonical.schema_version,
-                    "payload_checksum": canonical.checksum,
-                    "effect_scope": _EFFECT_SCOPE[parsed_section],
-                },
-                request_id=actor.request_id,
-                occurred_at=now,
+                locked,
             )
-            await repository.session.flush()
-            view = _view(parsed_section, next_revision, version, now)
-            return RuntimePolicyUpdateResult(
-                catalog_revision=int(state.revision),
-                policy=view,
-                effective_at=now,
+            if projection.stored.revision != result.policy.revision:
+                raise SystemRuntimePolicyRepositoryInvariant
+            return create_workflow_runtime_update_response(
+                catalog_revision=result.catalog_revision,
+                projection=projection,
             )
 
         return await self._admin_operation(issued, operation)
@@ -360,6 +477,98 @@ class SystemRuntimePolicyService:
             session,
             for_update=True,
         )
+
+    @staticmethod
+    async def _workflow_runtime_for_admission(
+        session: AsyncSession,
+        *,
+        for_update: bool,
+    ) -> LockedWorkflowRuntimePolicy:
+        if not isinstance(session, AsyncSession) or not session.in_transaction():
+            raise SystemRuntimePolicyRepositoryInvariant
+        try:
+            policy, version = await SystemRuntimePolicyRepository(session).current(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
+                for_update=for_update,
+            )
+            return SystemRuntimePolicyService._locked_workflow_runtime(
+                policy,
+                version,
+            )
+        except SystemRuntimePolicyRepositoryInvariant:
+            raise
+        except (RuntimePolicyInvalid, TypeError, ValueError):
+            raise SystemRuntimePolicyRepositoryInvariant from None
+
+    @staticmethod
+    def _locked_workflow_runtime(
+        policy: object,
+        version: SystemRuntimePolicyVersionRow,
+    ) -> LockedWorkflowRuntimePolicy:
+        try:
+            canonical = canonical_policy_payload(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
+                dict(version.value),
+            )
+            value = parse_policy_value(
+                RuntimePolicySection.WORKFLOW_RUNTIME,
+                canonical.value,
+            )
+            if (
+                canonical.schema_version != int(version.schema_version)
+                or canonical.checksum != version.payload_checksum
+                or int(getattr(policy, "revision")) != int(version.version_number)
+                or getattr(policy, "current_version_id") != version.id
+                or type(value) is not WorkflowRuntimePolicyV1
+            ):
+                raise SystemRuntimePolicyRepositoryInvariant
+            return LockedWorkflowRuntimePolicy.create(
+                policy_version_id=uuid.UUID(str(version.id)),
+                revision=int(version.version_number),
+                schema_version=canonical.schema_version,
+                payload_checksum=canonical.checksum,
+                value=value,
+            )
+        except SystemRuntimePolicyRepositoryInvariant:
+            raise
+        except (RuntimePolicyInvalid, TypeError, ValueError):
+            raise SystemRuntimePolicyRepositoryInvariant from None
+
+    @staticmethod
+    async def read_workflow_runtime_policy_in_session(
+        session: AsyncSession,
+    ) -> LockedWorkflowRuntimePolicy:
+        return await SystemRuntimePolicyService._workflow_runtime_for_admission(
+            session,
+            for_update=False,
+        )
+
+    @staticmethod
+    async def lock_workflow_runtime_policy(
+        session: AsyncSession,
+    ) -> LockedWorkflowRuntimePolicy:
+        return await SystemRuntimePolicyService._workflow_runtime_for_admission(
+            session,
+            for_update=True,
+        )
+
+    async def lock_workflow_runtime_for_admission(
+        self,
+        session: AsyncSession,
+    ) -> LockedWorkflowRuntimePolicy:
+        """Lock the exact current policy and require executable convergence.
+
+        G32 has not installed the Workflow Job handler yet, so the code-level
+        capability gate keeps this path fail-closed even if database Worker
+        capability rows are forged or stale.
+        """
+
+        locked = await self.lock_workflow_runtime_policy(session)
+        await self._workflow_runtime_convergence.require_admission_ready_in_session(
+            session,
+            locked,
+        )
+        return locked
 
     @staticmethod
     async def lock_memory_document_for_creation(

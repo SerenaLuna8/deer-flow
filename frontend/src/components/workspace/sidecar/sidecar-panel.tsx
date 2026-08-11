@@ -1093,7 +1093,7 @@ function SidecarModelSelector({
 }: {
   className?: string;
   context: ThreadStreamOptions["context"];
-  models: Model[];
+  models: readonly Model[];
   open: boolean;
   selectedModel?: Model;
   selectedModelName?: string;

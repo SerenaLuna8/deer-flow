@@ -1,0 +1,30 @@
+{
+  "accepted": [
+    {
+      "value": {
+        "2": "two",
+        "10": "ten",
+        "\ue000": "bmp-private-use",
+        "\ud800\udc00": "supplementary",
+        "accent": "e\u0301",
+        "array": [-0, 0.2, null, true, { "\u03b2": "beta", "a": "A" }]
+      },
+      "canonical": "{\"10\":\"ten\",\"2\":\"two\",\"accent\":\"\u00e9\",\"array\":[0,2.00000000000000011102230246251565404236316680908203125e-1,null,true,{\"a\":\"A\",\"\u03b2\":\"beta\"}],\"\ue000\":\"bmp-private-use\",\"\ud800\udc00\":\"supplementary\"}"
+    },
+    {
+      "value": [0, -1.25, "\u6d41\u7a0b", { "nested": [false, null] }],
+      "canonical": "[0,-1.25e0,\"\u6d41\u7a0b\",{\"nested\":[false,null]}]"
+    }
+  ],
+  "rejected": [
+    {
+      "reason": "nfc_collision",
+      "value": { "\u00e9": 1, "e\u0301": 2 }
+    },
+    { "reason": "unpaired_surrogate_value", "value": "\ud800" },
+    {
+      "reason": "unpaired_surrogate_key",
+      "value": { "\udc00": "invalid" }
+    }
+  ]
+}

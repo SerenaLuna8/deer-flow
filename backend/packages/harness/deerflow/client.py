@@ -1075,6 +1075,15 @@ class DeerFlowClient:
                     ),
                     "supports_vision": (getattr(model, "supports_vision", False) is True),
                     "is_default": index == 0,
+                    # The embedded client lacks the PostgreSQL adapter identity
+                    # used by Gateway to derive bounded parameter controls.
+                    # Keep the same wire shape but expose no editable parameter
+                    # rather than guessing from a provider class path.
+                    "workflow_authoring": {
+                        "modes": ["chat"],
+                        "supports_streaming": True,
+                        "parameters": [],
+                    },
                 }
                 for index, model in enumerate(models)
             ],
@@ -1104,6 +1113,11 @@ class DeerFlowClient:
             "supports_reasoning_effort": (getattr(model, "supports_reasoning_effort", False) is True),
             "supports_vision": (getattr(model, "supports_vision", False) is True),
             "is_default": bool(models and getattr(models[0], "name", None) == model.name),
+            "workflow_authoring": {
+                "modes": ["chat"],
+                "supports_streaming": True,
+                "parameters": [],
+            },
         }
 
     # ------------------------------------------------------------------

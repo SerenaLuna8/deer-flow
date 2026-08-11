@@ -103,6 +103,25 @@ class SystemModelView:
 
 
 @dataclass(frozen=True, slots=True)
+class PublicWorkflowModelParameterView:
+    """One bounded, secret-free Workflow authoring parameter."""
+
+    name: str
+    kind: str
+    minimum: float
+    maximum: float
+
+
+@dataclass(frozen=True, slots=True)
+class PublicWorkflowModelAuthoringView:
+    """Capabilities that the Workflow editor may safely author."""
+
+    modes: tuple[str, ...]
+    supports_streaming: bool
+    parameters: tuple[PublicWorkflowModelParameterView, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PublicSystemModelView:
     logical_name: str
     display_name: str
@@ -111,6 +130,7 @@ class PublicSystemModelView:
     supports_reasoning_effort: bool
     supports_vision: bool
     is_default: bool
+    workflow_authoring: PublicWorkflowModelAuthoringView
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +201,8 @@ __all__ = [
     "CreateSystemModel",
     "LockedSystemModelMaterial",
     "PublicSystemModelView",
+    "PublicWorkflowModelAuthoringView",
+    "PublicWorkflowModelParameterView",
     "RunModelConfigSnapshotView",
     "SystemModelCatalogStateView",
     "SystemModelCatalogView",

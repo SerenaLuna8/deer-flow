@@ -69,7 +69,7 @@ does not acquire the Scheduler ownership lock or start polling.
 ## PostgreSQL full-schema initialization
 
 `full_schema.sql` is the only complete application-schema source for fresh installs. The exact
-current marker is `full_schema_v9`, the head of the incremental migration chain under
+current marker is `full_schema_v12`, the head of the incremental migration chain under
 `backend/migrations/`; the v5 snapshot remains the frozen chain root. Every database installed
 through `make setup-db` is natively stamped at the current head, and an existing database whose
 marker is a known ancestor revision upgrades only through explicit
@@ -85,14 +85,50 @@ monotonic UTC-month `retained_from` watermark: target-month creation and raw/ORM
 that watermark fail closed, so an operational DROP cannot be undone by a later insert. `make
 prune-run-events ARGS="--before YYYY-MM-01T00:00:00Z"` is the production operator entry: it reads
 the normal `DATABASE_URL`, defaults to a read-only preview, requires an exact non-future UTC month
-boundary, and only calls the guarded DROP helper when `--yes` is present. Existing
-children use a lock-free creation fast path; a missing target month is created only after a parent
+boundary, and only calls the guarded DROP helper when `--yes` is present. Existing children use a
+lock-free creation fast path; a missing target month is created only after a parent
 lock and a second watermark check. The explicit global-cutoff DROP helper rejects future cutoffs,
 advances the watermark atomically, and leaves current/next-month children available. Project,
 account, and owner privacy retention still deletes only exact-scope rows through the parent. Catalog
 readiness requires one or more well-formed monthly children, intact enabled trigger clones, and one
 valid state row; it deliberately does not depend on wall-clock current/next names, so natural month
 rollover cannot turn an otherwise healthy database into schema drift.
+
+`full_schema_v10` adds the independent Workflow definition, immutable-version, admission,
+snapshot, effect, code-lease, and UTC-month event authorities. A `workflow_run` is never a hidden
+chat Thread: it has its own Run identity, execution epoch, exact Worker-profile fence, append-only
+Run-to-Job history, and resumable snapshots. The Job type is persistable at this schema head, but
+Workers must not advertise or claim `workflow_run` until the Workflow executor milestone enables
+that capability explicitly.
+
+`full_schema_v11` adds the project-scoped, append-only
+`workflow_control_operations` authority. It stores only publish idempotency and request digests
+plus the exact resulting Workflow Version; raw Idempotency-Key, Draft/Canvas content, Credential
+material, and runtime authority never enter this receipt. The same revision normalizes immutable
+published Code and HTTP requirements into `workflow_version_code_requirements` and
+`workflow_version_http_requirements`: they freeze only the first-batch runtime contract and
+endpoint/injection/slot references under exact Version/project foreign keys. Runtime images,
+policy revisions, grants, exact Credential versions, envelopes, secrets, header values, and final
+URLs are not Version fields; Run admission owns their exact snapshots.
+
+`full_schema_v12` keeps that table as the single control-plane idempotency authority and extends
+it to every Definition state mutation. Receipts bind project, operation, exact route scope,
+the non-secret `scope_key` contract `^[a-z][A-Za-z0-9:._-]{0,511}$`, hashed Idempotency-Key,
+canonical request digest, and only scalar safe result coordinates. They
+never store the raw key, request/response JSON, Spec, Canvas, Credential material, headers, or
+secrets. Service and repository independently derive `scope_key` from the operation plus the real
+project/Workflow/Version/slot coordinates; callers cannot supply it, and the database repeats the
+operation-specific equality check. Definition create/update/archive retries rebuild the original
+public projection from bounded safe scalar receipt columns, so a later Definition mutation cannot
+change a replay result. Publish freezes its original missing-Credential-slot projection in one
+canonical comma-separated scalar (never JSON), so later Grant changes cannot alter Publish replay.
+Credential-bearing receipt operations require the Credential ID, exact
+Credential-version ID, and checksum as one all-or-nothing group; every other operation requires
+that group to be entirely null. Same-key exact retries replay without a second mutation or audit;
+a changed request conflicts. Draft-save replay additionally requires the current Draft revision
+and checksum to still equal the receipt result, otherwise it conflicts instead of treating newer
+content as the old saved baseline. The same revision aligns persisted Workflow Credential slot identifiers with
+the public Definition slot grammar `^[A-Za-z_][A-Za-z0-9_.:-]{0,127}$`.
 
 `make setup-db` requires an explicit administrator URL and application URL. It creates the named
 empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
@@ -933,7 +969,7 @@ PostgreSQL is the only project Memory authority. Every row remains bound to
 `project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
 model arguments, request payloads, ambient user state, or a replaceable Memory backend.
 
-The `full_schema_v9` head contains exactly six Memory tables: `memory_history_entries`,
+The `full_schema_v12` head contains exactly six Memory tables: `memory_history_entries`,
 `memory_documents`, `memory_dream_runs`, `memory_document_versions`, `memory_episodes`, and
 `run_memory_context_snapshots`. The only Memory Job types are `memory_dream` and `memory_seal`.
 There is no legacy Source/Extractor/Candidate/Fact pipeline, v1/v2 mode, vector ranking, or
@@ -1222,8 +1258,16 @@ references remain outside that cleanup.
 
 ## Configuration
 
-Configuration is read only from an explicit `DEER_FLOW_CONFIG_PATH` or the repository-root
-`config.yaml`. `database`, `worker`, `scheduler`, `channels`, sandbox, tools, logging, and
+Configuration is read only from an explicit `ACT_WEAVE_CONFIG_PATH` (or the
+`DEER_FLOW_CONFIG_PATH` compatibility alias) or the repository-root `config.yaml`. Native local
+state defaults to the repository-root `.act-weave/`; the canonical local path names are
+`ACT_WEAVE_PROJECT_ROOT`, `ACT_WEAVE_HOME`, `ACT_WEAVE_CONFIG_PATH`, and
+`ACT_WEAVE_SKILLS_PATH`. Their `DEER_FLOW_*` compatibility aliases remain accepted, but dual
+spellings must normalize to the same value or startup fails closed. Existing `.deer-flow/` and
+`backend/.deer-flow/` trees are never selected, copied, overwritten, or removed automatically;
+`make migrate-runtime-home` previews a verified union and `ARGS="--copy"` explicitly publishes
+it to an absent `.act-weave/` while retaining every source. `database`, `worker`, `scheduler`,
+`channels`, sandbox, tools, logging, and
 deployment-owned prompt/path policy remain supported. Infrastructure configuration is
 restart-required. Unknown application extension fields remain allowed where their typed models
 permit them, but removed top-level keys fail validation instead of being ignored.
@@ -1239,6 +1283,22 @@ an empty deny-all network list, but refuses to guess a CIDR for any nonempty end
 addition to the top-level `models:`, `memory_document:`, and `authorization:` tombstones, YAML
 leaves now owned by the PostgreSQL `agent_runtime`, `auth`, `memory_document`, and `quotas` policy
 sections are rejected; run `make config-upgrade` to remove them from an older local file.
+`workflow_runtime` is likewise a PostgreSQL-only, secret-free System Settings section. It has one
+closed `PUT /api/admin/settings/system/workflow_runtime` DTO; the generic section mutation route
+and service must reject it. Its CAS, immutable version/current pointer, content-free audit, and
+stored/effective/readiness response commit in one catalog-lock transaction. Gateway reports the
+exact PostgreSQL current identity as `effective` as soon as control-plane materialization succeeds;
+Worker pending state never hides it. Policy JSON arrays materialize as immutable tuples inside the
+backend contracts and serialize back to JSON arrays, so a validated value cannot drift before its
+checksum or Run snapshot is frozen. Worker registration, every fleet heartbeat, and draining use
+the PostgreSQL statement clock; caller process time is never liveness authority. They atomically
+write the exact version/revision/schema/checksum into dedicated `worker_nodes` columns under an
+all-null-or-exact `MATCH FULL` foreign key, independently of `runtime_profile_digests_json`, which
+contains only actual Code/HTTP execution profile digests. Gateway evaluates freshness in one query
+against that same PostgreSQL clock and rejects future heartbeats.
+Builder-only policy (`enabled=true`, `admission_enabled=false`) needs no Worker. Until the real
+Workflow Job handler lands, a code-level capability gate keeps admission-enabled policy pending and
+admission closed even if a database Worker capability, profile, and exact-policy row is forged.
 Deployment-owned siblings such as `title.prompt_template`,
 `summarization.summary_prompt`, `tool_output.storage_subdir`, and non-policy `subagents` fields stay
 in YAML. Model definitions, immutable versions, the default pointer, exact Credential

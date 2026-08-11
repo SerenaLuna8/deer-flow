@@ -1,6 +1,7 @@
 import hashlib
 import logging
 import os
+import re
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from pathlib import Path
@@ -29,6 +30,11 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.config.quota_config import QuotaConfig
 from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
+from deerflow.config.runtime_paths import (
+    ACT_WEAVE_CONFIG_PATH_ENV,
+    DEER_FLOW_CONFIG_PATH_ENV,
+    resolve_environment_path,
+)
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.scheduler_config import SchedulerConfig
@@ -82,6 +88,25 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
 )
 
 YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models"})
+
+
+def is_workflow_product_config_key(value: object) -> bool:
+    """Return whether a top-level key could name Workflow product policy.
+
+    Workflow product settings are an atomic PostgreSQL ``workflow_runtime``
+    System Settings section.  ``AppConfig`` deliberately keeps
+    ``extra="allow"`` for unrelated application extensions, so this guard
+    canonicalizes case and common namespace separators before checking the
+    reserved ``workflow`` prefix.  Callers must apply it only to the
+    top-level AppConfig mapping: tool/provider-specific nested data may use
+    Workflow-related labels without becoming product-policy authority.
+    """
+
+    if not isinstance(value, str):
+        return False
+    compact = re.sub(r"[^a-z0-9]+", "", value.casefold())
+    return compact.startswith("workflow")
+
 
 DATABASE_RUNTIME_POLICY_PATHS = frozenset(
     {
@@ -328,6 +353,9 @@ class AppConfig(BaseModel):
         info: ValidationInfo,
     ) -> object:
         if isinstance(value, Mapping):
+            workflow_product_keys = {str(key) for key in value if is_workflow_product_config_key(key)}
+            if workflow_product_keys:
+                raise ValueError("WORKFLOW_PRODUCT_CONFIG_FORBIDDEN: " + ",".join(sorted(workflow_product_keys, key=str.casefold)) + "; PostgreSQL System Settings section workflow_runtime is the only product-policy authority")
             unsupported_middlewares = set(DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES.intersection(value))
             if unsupported_middlewares:
                 raise ValueError("DYNAMIC_MIDDLEWARE_CONFIG_UNSUPPORTED: " + ",".join(sorted(unsupported_middlewares)))
@@ -381,7 +409,11 @@ class AppConfig(BaseModel):
             if "checkpointer" in copied_data:
                 raise ValueError("the independent checkpointer configuration has been removed; configure database.url instead")
             yaml_source = bool(info.context and info.context.get("config_source") == "yaml")
-            return {key: value for key, value in copied_data.items() if value is not None or key in LEGACY_CONFIG_TOMBSTONES or (yaml_source and key in (YAML_CONFIG_TOMBSTONES | DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES))}
+            return {
+                key: value
+                for key, value in copied_data.items()
+                if value is not None or key in LEGACY_CONFIG_TOMBSTONES or is_workflow_product_config_key(key) or (yaml_source and key in (YAML_CONFIG_TOMBSTONES | DATABASE_RUNTIME_YAML_TOP_LEVEL_TOMBSTONES))
+            }
         return data
 
     @classmethod
@@ -390,19 +422,27 @@ class AppConfig(BaseModel):
 
         Priority:
         1. If provided `config_path` argument, use it.
-        2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
-        3. Otherwise, use ``config.yaml`` at the ActWeave repository root.
+        2. If provided `ACT_WEAVE_CONFIG_PATH` environment variable, use it.
+        3. If provided `DEER_FLOW_CONFIG_PATH` compatibility environment variable, use it.
+        4. Otherwise, use ``config.yaml`` at the ActWeave repository root.
+
+        The two environment aliases must resolve to the same path when both are
+        set, including when an explicit function argument takes precedence.
         """
+        env_path = resolve_environment_path(
+            ACT_WEAVE_CONFIG_PATH_ENV,
+            DEER_FLOW_CONFIG_PATH_ENV,
+            base=Path.cwd(),
+        )
         if config_path:
             path = Path(config_path)
             if not Path.exists(path):
                 raise FileNotFoundError(f"Config file specified by param `config_path` not found at {path}")
             return path
-        elif os.getenv("DEER_FLOW_CONFIG_PATH"):
-            path = Path(os.getenv("DEER_FLOW_CONFIG_PATH"))
-            if not Path.exists(path):
-                raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
-            return path
+        if env_path is not None:
+            if not env_path.exists():
+                raise FileNotFoundError(f"Config file specified by ACT_WEAVE_CONFIG_PATH/DEER_FLOW_CONFIG_PATH not found at {env_path}")
+            return env_path
         path = REPO_ROOT / "config.yaml"
         if path.exists():
             return path

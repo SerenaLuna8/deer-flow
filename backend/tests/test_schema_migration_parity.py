@@ -168,7 +168,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_schema(engine)
-        _pretend_head_is(monkeypatch, "full_schema_v9_drill")
+        _pretend_head_is(monkeypatch, "full_schema_v12_drill")
 
         async with engine.connect() as connection:
             assert await classify_database(connection) == "behind"
@@ -176,7 +176,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
         with pytest.raises(SchemaUpgradeRequired) as validate_error:
             await validate_schema(engine)
         assert "make upgrade-db" in str(validate_error.value)
-        assert "full_schema_v9" in str(validate_error.value)
+        assert "full_schema_v12" in str(validate_error.value)
 
         # Setup never migrates a behind database (D3).
         with pytest.raises(SchemaUpgradeRequired):
@@ -241,7 +241,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     finally:
         await engine.dispose()
 
-    fake_head = "full_schema_v9_drill"
+    fake_head = "full_schema_v12_drill"
     _pretend_head_is(monkeypatch, fake_head)
 
     applied_urls: list[str] = []
@@ -255,7 +255,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     result = await upgrade_postgres(postgres_database_url, assume_yes=True)
     assert applied_urls == [postgres_database_url]
     assert result.applied is True
-    assert result.from_revision == "full_schema_v9"
+    assert result.from_revision == "full_schema_v12"
     assert result.to_revision == fake_head
 
     _, signature = await _catalog_signature(postgres_database_url)
@@ -273,7 +273,7 @@ async def test_upgrade_runner_fails_closed_when_the_migrated_catalog_does_not_ve
     finally:
         await engine.dispose()
 
-    _pretend_head_is(monkeypatch, "full_schema_v9_drill")
+    _pretend_head_is(monkeypatch, "full_schema_v12_drill")
     # A migration that "succeeds" without producing the head catalog must fail
     # the post-upgrade verification and instruct the operator to restore.
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", lambda url: None)

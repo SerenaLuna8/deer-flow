@@ -620,24 +620,30 @@ managed in `/admin/settings/models`. Do not broadcast `OPENAI_API_KEY`,
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
-- `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
-- `DEER_FLOW_CONFIG_PATH` - Custom config file path
-- `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
-- `DEER_FLOW_SKILLS_PATH` - Local harness Skill source directory when `skills.path` is omitted; project Run authority still comes from the admitted PostgreSQL snapshot
+- `ACT_WEAVE_PROJECT_ROOT` - Project root for relative native runtime paths (`DEER_FLOW_PROJECT_ROOT` remains a compatibility alias)
+- `ACT_WEAVE_CONFIG_PATH` - Custom config file path (`DEER_FLOW_CONFIG_PATH` remains a compatibility alias)
+- `ACT_WEAVE_HOME` - Native runtime state directory (defaults to `.act-weave` under the project root; `DEER_FLOW_HOME` remains a compatibility alias)
+- `ACT_WEAVE_SKILLS_PATH` - Local harness Skill source directory when `skills.path` is omitted (`DEER_FLOW_SKILLS_PATH` remains a compatibility alias); project Run authority still comes from the admitted PostgreSQL snapshot
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)
+
+When both names in a canonical/compatibility pair are set, their normalized paths must agree or
+the native runtime fails closed. Existing `.deer-flow` and `backend/.deer-flow` trees are not
+auto-migrated; use `make migrate-runtime-home` to preview and
+`make migrate-runtime-home ARGS="--copy"` for a verified, non-destructive union into an absent
+repo-root `.act-weave` target.
 
 ## Configuration Location
 
-The configuration file should be placed in the **project root directory** (`deer-flow/config.yaml`). Set `DEER_FLOW_PROJECT_ROOT` when the process may start from another working directory, or set `DEER_FLOW_CONFIG_PATH` to point at a specific file.
+The configuration file should be placed in the **project root directory** (`config.yaml`). Set `ACT_WEAVE_PROJECT_ROOT` when the process may start from another working directory, or set `ACT_WEAVE_CONFIG_PATH` to point at a specific file. The corresponding `DEER_FLOW_*` compatibility aliases remain accepted under the agreement rule above.
 
 ## Configuration Priority
 
 ActWeave searches for configuration in this order:
 
 1. Path specified in code via `config_path` argument
-2. Path from `DEER_FLOW_CONFIG_PATH` environment variable
-3. `config.yaml` under `DEER_FLOW_PROJECT_ROOT`, or under the current working directory when `DEER_FLOW_PROJECT_ROOT` is unset
-4. Legacy backend/repository-root locations for monorepo compatibility
+2. Path from `ACT_WEAVE_CONFIG_PATH` environment variable
+3. Path from the `DEER_FLOW_CONFIG_PATH` compatibility alias
+4. Repository-root `config.yaml`
 
 ## Security Notes
 ### Sandbox Isolation and the Docker Socket (DooD)
@@ -708,7 +714,7 @@ Credential binding instead.
 
 ## Best Practices
 
-1. **Place `config.yaml` in project root** - Set `DEER_FLOW_PROJECT_ROOT` if the runtime starts elsewhere
+1. **Place `config.yaml` in project root** - Set `ACT_WEAVE_PROJECT_ROOT` if the runtime starts elsewhere
 2. **Never commit `config.yaml`** - It's already in `.gitignore`
 3. **Keep secret domains explicit** - Use environment variables only for documented process/tool secrets; use encrypted Credentials for model-provider keys
 4. **Keep `config.example.yaml` updated** - Document all new options
@@ -718,9 +724,9 @@ Credential binding instead.
 ## Troubleshooting
 
 ### "Config file not found"
-- Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
-- If the runtime starts outside the project root, set `DEER_FLOW_PROJECT_ROOT`
-- Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location
+- Ensure `config.yaml` exists in the **project root** directory
+- If the runtime starts outside the project root, set `ACT_WEAVE_PROJECT_ROOT`
+- Alternatively, set `ACT_WEAVE_CONFIG_PATH` to a custom location
 
 ### "Invalid API key"
 - Verify environment variables are set correctly
@@ -728,7 +734,7 @@ Credential binding instead.
 
 ### "Skills not loading"
 - Project Run：检查 Skill 是否已经发布、绑定到当前项目并被本次 Run snapshot 固定；业务运行不会把仓库目录当作授权来源。
-- 独立 harness/TUI：检查本地 Skill 目录、`SKILL.md`，以及 `skills.path` 或 `DEER_FLOW_SKILLS_PATH`。
+- 独立 harness/TUI：检查本地 Skill 目录、`SKILL.md`，以及 `skills.path` 或 `ACT_WEAVE_SKILLS_PATH`。
 
 ### "Docker sandbox fails to start"
 - Ensure Docker is running

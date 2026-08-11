@@ -1,5 +1,12 @@
+import {
+  readMigratedStorageValue,
+  removeMigratedStorageValue,
+  writeMigratedStorageValue,
+} from "@/core/storage/brand-key-migration";
+
 const COMPOSER_DRAFT_VERSION = 1;
-const COMPOSER_DRAFT_PREFIX = "deerflow:composer-draft:v1";
+const COMPOSER_DRAFT_PREFIX = "actweave:composer-draft:v1";
+const LEGACY_COMPOSER_DRAFT_PREFIX = "deerflow:composer-draft:v1";
 
 export type ComposerDraft = {
   text: string;
@@ -39,12 +46,38 @@ export function buildComposerDraftKey({
   ].join(":");
 }
 
+function legacyComposerDraftKeys(key: string): string[] {
+  if (!key.startsWith(`${COMPOSER_DRAFT_PREFIX}:`)) {
+    return [];
+  }
+  return [key.replace(COMPOSER_DRAFT_PREFIX, LEGACY_COMPOSER_DRAFT_PREFIX)];
+}
+
+function isSerializedComposerDraft(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    return (
+      parsed.version === COMPOSER_DRAFT_VERSION &&
+      typeof parsed.text === "string" &&
+      (parsed.skillName === null || typeof parsed.skillName === "string")
+    );
+  } catch {
+    return false;
+  }
+}
+
 export function readComposerDraft(
   storage: ComposerDraftStorage | null | undefined,
   key: string,
 ): ComposerDraft | null {
   try {
-    const raw = storage?.getItem(key);
+    if (!storage) return null;
+    const raw = readMigratedStorageValue(
+      storage,
+      key,
+      legacyComposerDraftKeys(key),
+      isSerializedComposerDraft,
+    );
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     if (
@@ -68,12 +101,14 @@ export function writeComposerDraft(
   try {
     if (!storage) return;
     if (!draft.text && !draft.skillName) {
-      storage.removeItem(key);
+      removeMigratedStorageValue(storage, key, legacyComposerDraftKeys(key));
       return;
     }
-    storage.setItem(
+    writeMigratedStorageValue(
+      storage,
       key,
       JSON.stringify({ version: COMPOSER_DRAFT_VERSION, ...draft }),
+      legacyComposerDraftKeys(key),
     );
   } catch {
     // Storage may be disabled or full. Drafting must remain usable.
@@ -85,7 +120,8 @@ export function clearComposerDraft(
   key: string,
 ) {
   try {
-    storage?.removeItem(key);
+    if (!storage) return;
+    removeMigratedStorageValue(storage, key, legacyComposerDraftKeys(key));
   } catch {
     // Sending must remain usable when browser storage is unavailable.
   }
