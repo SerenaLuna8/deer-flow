@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.gateway.deps import get_system_model_catalog
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
     AssetItemResponse,
@@ -18,6 +20,13 @@ from app.gateway.routers.project_assets import (
 )
 from app.projects.context import ProjectContext
 from app.shared_assets.errors import AssetStorageUnavailable
+from app.shared_assets.skill_builder_run_admission import (
+    SkillBuilderRunAdmission,
+    SkillBuilderRunAdmissionService,
+)
+from app.shared_assets.skill_design_generation import (
+    MAX_SKILL_DESIGN_ATTACHMENTS,
+)
 from app.shared_assets.skill_design_service import (
     CancelSkillDesignSession,
     CommitSkillDesignSession,
@@ -30,10 +39,16 @@ from app.shared_assets.skill_design_service import (
     SkillDesignService,
     SkillDesignSessionSummary,
     SkillDesignSessionView,
+    SkillDesignTurnAttachment,
     SubmitSkillDesignTurn,
     ValidateSkillDesignSession,
 )
 from app.shared_assets.skill_service import SkillFileChange, SkillService
+from app.system_settings import (
+    PublicSystemModelView,
+    SystemModelCatalogService,
+)
+from app.system_settings.errors import SystemModelStorageUnavailable
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
@@ -54,9 +69,23 @@ class CreateSkillDesignSessionRequest(_StrictModel):
     idempotency_key: str
 
 
+SkillDesignReasoningEffort = Literal["none", "low", "medium", "high"]
+
+
+class SkillDesignAttachmentRequest(_StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    content: str
+
+
 class SkillDesignMessageTurnRequest(_StrictModel):
     kind: Literal["message"]
     message: str
+    model_name: str | None = None
+    reasoning_effort: SkillDesignReasoningEffort | None = None
+    attachments: list[SkillDesignAttachmentRequest] = Field(
+        default_factory=list,
+        max_length=MAX_SKILL_DESIGN_ATTACHMENTS,
+    )
 
 
 class SkillDesignClarificationResponseRequest(_StrictModel):
@@ -72,6 +101,8 @@ class SkillDesignClarificationResponseRequest(_StrictModel):
 class SkillDesignClarificationTurnRequest(_StrictModel):
     kind: Literal["clarification"]
     response: SkillDesignClarificationResponseRequest
+    model_name: str | None = None
+    reasoning_effort: SkillDesignReasoningEffort | None = None
 
 
 class SkillDesignFileChangeRequest(_StrictModel):
@@ -181,6 +212,62 @@ class SkillDesignValidationResponse(_StrictModel):
     scan_summary: dict[str, object]
 
 
+class SkillDesignActiveRunResponse(_StrictModel):
+    runId: uuid.UUID = Field(validation_alias="run_id")
+    status: Literal["pending", "running"]
+    streamUrl: str = ""
+
+
+class SkillDesignSkillDependencyResponse(_StrictModel):
+    kind: Literal["skill"]
+    reference: str
+    scope: Literal["project", "system"]
+    skill_id: uuid.UUID
+    version_id: uuid.UUID
+    version_number: int = Field(ge=1)
+    slug: str
+    display_name: str
+    payload_checksum: str
+    authoring_only: Literal[True]
+    runtime_authorized: Literal[False]
+
+
+class SkillDesignMcpToolDependencyResponse(_StrictModel):
+    kind: Literal["mcp_tool"]
+    reference: str
+    scope: Literal["project", "system"]
+    mcp_server_id: uuid.UUID
+    version_id: uuid.UUID
+    version_number: int = Field(ge=1)
+    server_slug: str
+    server_name: str
+    tool_name: str
+    payload_checksum: str
+    inventory_status: Literal["ready", "degraded"]
+    inventory_error_code: (
+        Literal[
+            "mcp_discovery_unavailable",
+            "mcp_catalog_invalid",
+        ]
+        | None
+    )
+    last_success_at: datetime
+    authoring_only: Literal[True]
+    runtime_authorized: Literal[False]
+
+
+class SkillDesignDependencySnapshotResponse(_StrictModel):
+    version: Literal[1]
+    draft_checksum: str
+    requirements: tuple[
+        Annotated[
+            SkillDesignSkillDependencyResponse | SkillDesignMcpToolDependencyResponse,
+            Field(discriminator="kind"),
+        ],
+        ...,
+    ]
+
+
 class SkillDesignSessionItemResponse(_StrictModel):
     id: uuid.UUID
     project_id: uuid.UUID
@@ -209,6 +296,11 @@ class SkillDesignSessionItemResponse(_StrictModel):
     error_code: str | None
     error_message: str | None
     created_skill_id: uuid.UUID | None
+    authoring_dependencies: SkillDesignDependencySnapshotResponse | None
+    activeRun: SkillDesignActiveRunResponse | None = Field(
+        default=None,
+        validation_alias="active_run",
+    )
     created_at: datetime
     updated_at: datetime
 
@@ -228,12 +320,19 @@ class SkillDesignSessionSummaryResponse(_StrictModel):
         "failed",
         "cancelled",
     ]
+    revision: int = Field(ge=1)
     updated_at: datetime
 
 
 class SkillDesignSessionResponse(_StrictModel):
     data: SkillDesignSessionItemResponse
     request_id: str
+
+
+class SkillDesignRunAdmissionResponse(_StrictModel):
+    runId: uuid.UUID
+    status: Literal["pending", "running"]
+    streamUrl: str
 
 
 class SkillDesignSessionListResponse(_StrictModel):
@@ -266,20 +365,53 @@ def get_skill_design_service(request: Request) -> SkillDesignService:
     governance_sink = getattr(request.app.state, "shared_asset_audit_sink", None)
     if governance_sink is None:
         raise_asset_domain(AssetStorageUnavailable(_request_id()))
-    generator = getattr(
-        request.app.state,
-        "skill_design_generation_service",
-        None,
-    )
     skill_service = SkillService(
         session_factory,
         governance_sink=governance_sink,
         quota=getattr(request.app.state, "project_quota_enforcer", None),
     )
+    model_catalog = getattr(request.app.state, "system_model_catalog", None)
+    runtime_policy = getattr(
+        request.app.state,
+        "system_runtime_policy_service",
+        None,
+    )
+    if model_catalog is None or runtime_policy is None:
+        raise_asset_domain(AssetStorageUnavailable(_request_id()))
+    run_admission = SkillBuilderRunAdmissionService(
+        session_factory,
+        model_catalog=model_catalog,
+        runtime_policy=runtime_policy,
+        endpoint_policy=getattr(
+            request.app.state,
+            "mcp_endpoint_policy",
+            None,
+        ),
+        quota=getattr(
+            request.app.state,
+            "project_quota_enforcer",
+            None,
+        ),
+        audit=getattr(
+            request.app.state,
+            "operational_audit_sink",
+            None,
+        ),
+    )
     service = SkillDesignService(
         session_factory,
-        generator=generator,
         skill_service=skill_service,
+        run_admission=run_admission,
+        quota=getattr(
+            request.app.state,
+            "project_quota_enforcer",
+            None,
+        ),
+        audit=getattr(
+            request.app.state,
+            "operational_audit_sink",
+            None,
+        ),
     )
     request.app.state.skill_design_service = service
     return service
@@ -288,7 +420,19 @@ def get_skill_design_service(request: Request) -> SkillDesignService:
 def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
     turn = body.input
     if isinstance(turn, SkillDesignMessageTurnRequest):
-        value = SkillDesignMessageTurn(kind="message", message=turn.message)
+        value = SkillDesignMessageTurn(
+            kind="message",
+            message=turn.message,
+            model_name=turn.model_name,
+            reasoning_effort=turn.reasoning_effort,
+            attachments=tuple(
+                SkillDesignTurnAttachment(
+                    name=attachment.name,
+                    content=attachment.content,
+                )
+                for attachment in turn.attachments
+            ),
+        )
     elif isinstance(turn, SkillDesignClarificationTurnRequest):
         response = turn.response
         value = SkillDesignClarificationTurn(
@@ -302,6 +446,8 @@ def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
                 value=response.value,
                 option_id=response.option_id,
             ),
+            model_name=turn.model_name,
+            reasoning_effort=turn.reasoning_effort,
         )
     else:
         value = SkillDesignDraftUpdateTurn(
@@ -327,9 +473,20 @@ def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
 def _session_item(
     view: SkillDesignSessionView,
 ) -> SkillDesignSessionItemResponse:
-    return SkillDesignSessionItemResponse.model_validate(
-        view,
+    item = SkillDesignSessionItemResponse.model_validate(
+        replace(view, active_run=None),
         from_attributes=True,
+    )
+    if view.active_run is None:
+        return item
+    return item.model_copy(
+        update={
+            "activeRun": SkillDesignActiveRunResponse(
+                run_id=uuid.UUID(view.active_run.run_id),
+                status=view.active_run.status,
+                streamUrl=(f"/api/projects/{view.project_id}/private-work/threads/{view.thread_id}/runs/{view.active_run.run_id}/stream"),
+            )
+        }
     )
 
 
@@ -422,23 +579,102 @@ async def get_skill_design_session(
         raise_asset_domain(exc)
 
 
+def _execution_options_error(
+    code: str,
+    message: str,
+    request_id: str,
+) -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail={
+            "code": code,
+            "message": message,
+            "request_id": request_id,
+        },
+    )
+
+
+def require_admissible_execution_options(
+    models: list[PublicSystemModelView],
+    *,
+    model_name: str | None,
+    reasoning_effort: str | None,
+    request_id: str,
+) -> None:
+    """Fail closed when a turn requests a model or effort the catalog denies."""
+
+    wants_thinking = reasoning_effort is not None and reasoning_effort != "none"
+    if model_name is None and not wants_thinking:
+        return
+    selected: PublicSystemModelView | None = None
+    if model_name is not None:
+        selected = next(
+            (model for model in models if model.logical_name == model_name),
+            None,
+        )
+        if selected is None:
+            raise _execution_options_error(
+                "SKILL_BUILDER_MODEL_UNAVAILABLE",
+                "所选模型当前不可用，请重新选择模型。",
+                request_id,
+            )
+    if wants_thinking:
+        thinking_model = selected or next(
+            (model for model in models if model.is_default),
+            models[0] if models else None,
+        )
+        if thinking_model is None or not thinking_model.supports_thinking:
+            raise _execution_options_error(
+                "SKILL_BUILDER_EFFORT_UNSUPPORTED",
+                "所选模型不支持扩展思考，请调整思考强度。",
+                request_id,
+            )
+
+
 @router.post(
     "/{session_id}/turns",
-    response_model=SkillDesignSessionResponse,
+    response_model=SkillDesignSessionResponse | SkillDesignRunAdmissionResponse,
 )
 async def submit_skill_design_turn(
     session_id: uuid.UUID,
     body: SkillDesignTurnRequest,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
-) -> SkillDesignSessionResponse:
+    model_catalog: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+    response: Response,
+) -> SkillDesignSessionResponse | SkillDesignRunAdmissionResponse:
+    turn = body.input
+    if isinstance(
+        turn,
+        SkillDesignMessageTurnRequest | SkillDesignClarificationTurnRequest,
+    ) and (turn.model_name is not None or turn.reasoning_effort is not None):
+        try:
+            models = await model_catalog.list_available_models()
+        except SystemModelStorageUnavailable:
+            raise_asset_domain(AssetStorageUnavailable(context.request_id))
+        require_admissible_execution_options(
+            list(models),
+            model_name=turn.model_name,
+            reasoning_effort=turn.reasoning_effort,
+            request_id=context.request_id,
+        )
     try:
-        view = await service.submit_turn(
+        result = await service.submit_turn(
             context,
             session_id,
             _turn(body),
         )
-        return _session_response(view, context)
+        if isinstance(result, SkillBuilderRunAdmission):
+            response.status_code = status.HTTP_202_ACCEPTED
+            return SkillDesignRunAdmissionResponse(
+                runId=uuid.UUID(result.run_id),
+                status=result.status,
+                streamUrl=(f"/api/projects/{context.project_id}/private-work/threads/{result.thread_id}/runs/{result.run_id}/stream"),
+            )
+        return _session_response(result, context)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -520,6 +756,7 @@ async def cancel_skill_design_session(
 
 __all__ = [
     "CreateSkillDesignSessionRequest",
+    "SkillDesignAttachmentRequest",
     "SkillDesignCancelRequest",
     "SkillDesignCommitRequest",
     "SkillDesignCommitResponse",
@@ -528,5 +765,6 @@ __all__ = [
     "SkillDesignTurnRequest",
     "SkillDesignValidateRequest",
     "get_skill_design_service",
+    "require_admissible_execution_options",
     "router",
 ]

@@ -7,7 +7,10 @@ import {
   adminAssetListSchema,
   adminCredentialListSchema,
   agentCapabilityBindingsInputSchema,
+  agentCreateResponseSchema,
   agentInstructionsInputSchema,
+  agentRuntimeAssessmentsInputSchema,
+  agentRuntimeAssessmentsResponseSchema,
   agentVersionHistoryResponseSchema,
   agentVersionResponseSchema,
   approveMcpInputSchema,
@@ -17,6 +20,7 @@ import {
   assetMutationResponseSchema,
   configuredMcpResponseSchema,
   createAssetInputSchema,
+  createAgentInputSchema,
   createConfiguredMcpInputSchema,
   createCredentialInputSchema,
   configureSystemMcpCredentialGrantsInputSchema,
@@ -58,7 +62,9 @@ import {
   type AdminProjectAssetStatusAction,
   type AdminCredentialList,
   type AgentCapabilityBindingsInput,
+  type AgentCreateResponse,
   type AgentInstructionsInput,
+  type AgentRuntimeAssessmentsResponse,
   type AgentVersionResponse,
   type ApproveMcpInput,
   type AssetKind,
@@ -66,6 +72,7 @@ import {
   type AssetMutationResponse,
   type ConfiguredMcpResponse,
   type CreateAssetInput,
+  type CreateAgentInput,
   type CreateConfiguredMcpInput,
   type CreateCredentialInput,
   type ConfigureSystemMcpCredentialGrantsInput,
@@ -103,7 +110,7 @@ import {
 } from "./types";
 
 type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
-type VersionedAssetListKind = Exclude<MutableAssetListKind, "agents">;
+type VersionedAssetListKind = MutableAssetListKind;
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -300,6 +307,7 @@ function versionHistorySchema(
 function publishVersionSchema(
   kind: VersionedAssetListKind,
 ): z.ZodType<VersionResponse> {
+  if (kind === "agents") return agentVersionResponseSchema;
   if (kind === "skills") return skillVersionResponseSchema;
   return mcpVersionResponseSchema;
 }
@@ -425,6 +433,32 @@ export async function createProjectAsset(
   signal?: AbortSignal,
 ): Promise<AssetMutationResponse> {
   return await createAsset(projectAssetUrl(projectId, kind), input, signal);
+}
+
+export async function createProjectAgent(
+  projectId: string,
+  input: CreateAgentInput,
+  signal?: AbortSignal,
+): Promise<AgentCreateResponse> {
+  const body = parseInput(createAgentInputSchema, input);
+  const response = await request(projectAssetUrl(projectId, "agents"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(
+    response,
+    agentCreateResponseSchema.superRefine((value, context) => {
+      if (value.item.project_id !== projectId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["item", "project_id"],
+          message: "Created Agent must belong to the requested project",
+        });
+      }
+    }),
+  );
 }
 
 function configuredMcpResponseSchemaForRequest({
@@ -694,6 +728,32 @@ export async function createAdminProjectAsset(
     adminProjectAssetUrl(projectId, kind),
     input,
     signal,
+  );
+}
+
+export async function createAdminProjectAgent(
+  projectId: string,
+  input: CreateAgentInput,
+  signal?: AbortSignal,
+): Promise<AgentCreateResponse> {
+  const body = parseInput(createAgentInputSchema, input);
+  const response = await request(adminProjectAssetUrl(projectId, "agents"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+  return parseResponse(
+    response,
+    agentCreateResponseSchema.superRefine((value, context) => {
+      if (value.item.project_id !== projectId) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["item", "project_id"],
+          message: "Created Agent must belong to the requested project",
+        });
+      }
+    }),
   );
 }
 
@@ -1010,6 +1070,43 @@ export async function listProjectAssetVersions(
     { signal },
   );
   return parseResponse(response, versionHistorySchema(kind));
+}
+
+export async function assessProjectAgentRuntime(
+  projectId: string,
+  agentIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<AgentRuntimeAssessmentsResponse> {
+  const body = parseInput(agentRuntimeAssessmentsInputSchema, {
+    agent_ids: [...agentIds],
+  });
+  const response = await request(
+    `${projectAssetUrl(projectId, "agents")}/runtime-assessments`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+  return parseResponse(
+    response,
+    agentRuntimeAssessmentsResponseSchema.superRefine((value, context) => {
+      if (
+        value.items.length !== body.agent_ids.length ||
+        value.items.some(
+          (item, index) => item.agent_asset_id !== body.agent_ids[index],
+        )
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Agent runtime assessments must match the requested input order",
+          path: ["items"],
+        });
+      }
+    }),
+  );
 }
 
 export async function getProjectMcpToolInventory(

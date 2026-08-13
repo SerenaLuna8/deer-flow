@@ -1,7 +1,7 @@
 "use client";
 
 import type { Thread } from "@langchain/langgraph-sdk";
-import { useCallback, useMemo } from "react";
+import { useCallback, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -10,6 +10,7 @@ import {
 } from "@/components/workspace/project-chat";
 import {
   resolveThreadAgentIdentity,
+  resolveThreadAgentSelection,
   ThreadAgentIndicator,
 } from "@/components/workspace/thread-agent-indicator";
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
@@ -18,9 +19,16 @@ import type { Project } from "@/core/projects/types";
 import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
 import type { AgentThread } from "@/core/threads";
 
+import {
+  ProjectAgentSelectorDialog,
+  type ProjectThreadAgentSelection,
+} from "./agent-selector-dialog";
+
 export type ProjectChatRouteScope = Omit<ScopedChatRouteScope, "privateWork">;
 
-export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
+export function projectChatRouteScope(
+  project: Pick<Project, "slug" | "capabilities">,
+): ProjectChatRouteScope {
   const base = `/projects/${encodeURIComponent(project.slug)}/chats`;
   const canCreate = project.capabilities.includes("private_work.create");
   const canRun =
@@ -28,7 +36,7 @@ export function projectChatRouteScope(project: Project): ProjectChatRouteScope {
   const canRead = project.capabilities.includes("private_work.read_own");
   return {
     threadBasePath: base,
-    newThreadPath: base,
+    threadListPath: base,
     canCreate,
     canRun,
     canUpload: canRun,
@@ -77,9 +85,15 @@ export function ProjectChatNotFound({ chatsPath }: { chatsPath: string }) {
 
 export function ProjectChatPage({ project }: { project: Project }) {
   const privateWork: ProjectPrivateWorkScope = useProjectPrivateWorkScope();
+  const [agentSelectorOpen, setAgentSelectorOpen] = useState(false);
+  const [currentAgent, setCurrentAgent] =
+    useState<ProjectThreadAgentSelection | null>(null);
   const canReadPrivateWork = project.capabilities.includes(
     "private_work.read_own",
   );
+  const canStartNewChat =
+    project.capabilities.includes("private_work.create") &&
+    project.capabilities.includes("shared_assets.execute");
   const agents = useProjectAssets(
     privateWork.scope.accountId,
     project.id,
@@ -90,16 +104,27 @@ export function ProjectChatPage({ project }: { project: Project }) {
   const agentCatalogSettled =
     agentCatalog !== undefined || (!agents.isLoading && !agents.isFetching);
   const renderHeaderAccessory = useCallback(
-    (thread: AgentThread | null | undefined) => (
-      <ThreadAgentIndicator
-        identity={resolveThreadAgentIdentity(
-          thread,
-          agentCatalog,
-          agentCatalogSettled,
-        )}
-      />
-    ),
-    [agentCatalog, agentCatalogSettled],
+    (thread: AgentThread | null | undefined) => {
+      const selection = resolveThreadAgentSelection(thread);
+      return (
+        <ThreadAgentIndicator
+          identity={resolveThreadAgentIdentity(
+            thread,
+            agentCatalog,
+            agentCatalogSettled,
+          )}
+          onStartNewChat={
+            canStartNewChat
+              ? () => {
+                  setCurrentAgent(selection);
+                  setAgentSelectorOpen(true);
+                }
+              : undefined
+          }
+        />
+      );
+    },
+    [agentCatalog, agentCatalogSettled, canStartNewChat],
   );
   const scope = useMemo(
     () => ({
@@ -109,16 +134,24 @@ export function ProjectChatPage({ project }: { project: Project }) {
     [privateWork, project],
   );
   return (
-    <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">
-      <ScopedChatPage
-        scope={scope}
-        renderHeaderAccessory={renderHeaderAccessory}
-        missingThreadFallback={
-          <ProjectChatNotFound
-            chatsPath={`/projects/${encodeURIComponent(project.slug)}/chats`}
-          />
-        }
+    <>
+      <div className="h-[calc(100vh-3.5rem)] min-h-0 md:h-screen">
+        <ScopedChatPage
+          scope={scope}
+          renderHeaderAccessory={renderHeaderAccessory}
+          missingThreadFallback={
+            <ProjectChatNotFound
+              chatsPath={`/projects/${encodeURIComponent(project.slug)}/chats`}
+            />
+          }
+        />
+      </div>
+      <ProjectAgentSelectorDialog
+        project={project}
+        open={agentSelectorOpen}
+        currentAgent={currentAgent}
+        onOpenChange={setAgentSelectorOpen}
       />
-    </div>
+    </>
   );
 }

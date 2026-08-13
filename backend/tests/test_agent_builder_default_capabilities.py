@@ -65,6 +65,7 @@ async def test_default_blueprint_freezes_all_enabled_system_dependencies(
     )
     service = AgentDesignService(
         lambda: None,  # type: ignore[arg-type]
+        generator=SimpleNamespace(),  # type: ignore[arg-type]
         default_tool_groups_provider=lambda: (
             "web",
             "file:read",

@@ -57,6 +57,7 @@ def test_default_model_bootstrap_prepares_deepseek_and_opencode_models(
         "deepseek-v4-pro",
         "gpt-5.6-luna",
     ]
+    assert [entry.command.settings["max_tokens"] for entry in material.models if entry.command.provider_adapter == "patched_deepseek"] == [51_200, 51_200]
     assert material.default_model_id == DEFAULT_MODEL_ID
     assert material.models[0].model_id == material.default_model_id
     assert material.models[-1].model_id == GPT_5_6_LUNA_MODEL_ID
@@ -166,6 +167,10 @@ async def test_default_model_bootstrap_persists_flash_as_default(
             "deepseek-v4-flash",
             "deepseek-v4-pro",
             "gpt-5.6-luna",
+        }
+        assert {version.provider_model: version.settings["max_tokens"] for version in versions if version.provider_adapter == "patched_deepseek"} == {
+            "deepseek-v4-flash": 51_200,
+            "deepseek-v4-pro": 51_200,
         }
         assert {
             (

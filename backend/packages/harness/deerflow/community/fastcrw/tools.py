@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 
 from firecrawl import FirecrawlApp
 from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
 
-from deerflow.community.url_safety import validate_public_http_url
+from deerflow.community.errors import CommunityToolError, community_error_json, no_results_json
+from deerflow.community.url_safety import sanitize_public_http_reference_url, validate_public_http_url
 from deerflow.config import get_app_config
 
 # fastCRW is a Firecrawl-compatible web data engine (single Rust binary; self-host
@@ -12,6 +15,43 @@ from deerflow.config import get_app_config
 # Firecrawl client and only swaps the base URL. Cloud default points at the managed
 # service; override `base_url` in the tool config (or set CRW_API_URL) for self-host.
 DEFAULT_BASE_URL = "https://fastcrw.com/api"
+logger = logging.getLogger(__name__)
+
+
+def _fastcrw_error(context: str, error: Exception) -> str:
+    if isinstance(error, CommunityToolError):
+        return community_error_json(error, query=context)
+    response = getattr(error, "response", None)
+    status_code = getattr(response, "status_code", None) or getattr(error, "status_code", None)
+    if isinstance(error, (FileNotFoundError, TypeError, ValueError)):
+        code, message, retryable = "configuration_error", "fastCRW is not configured correctly", False
+    elif status_code in {401, 403}:
+        code, message, retryable = "provider_authentication_failed", "fastCRW authentication failed", False
+    elif status_code == 429:
+        code, message, retryable = "provider_rate_limited", "fastCRW rate limit exceeded", True
+    elif isinstance(status_code, int) and status_code < 500:
+        code, message, retryable = "provider_request_failed", "fastCRW request failed", False
+    else:
+        code, message, retryable = "provider_unavailable", "fastCRW is temporarily unavailable", True
+    logger.error("fastCRW request failed; provider_error_type=%s", type(error).__name__)
+    return community_error_json(
+        CommunityToolError(provider="fastcrw", code=code, message=message, retryable=retryable),
+        query=context,
+    )
+
+
+def _fastcrw_url_error(url: str, validation_error: str | None) -> str | None:
+    if validation_error is None:
+        return None
+    return community_error_json(
+        CommunityToolError(
+            provider="fastcrw",
+            code="url_not_public",
+            message="Only public http(s) URLs may be fetched",
+            retryable=False,
+        ),
+        query=url,
+    )
 
 
 def _get_fastcrw_client(tool_name: str = "web_search") -> FirecrawlApp:
@@ -58,25 +98,38 @@ def web_search_tool(query: str) -> str:
         config = get_app_config().get_tool_config("web_search")
         max_results = 5
         if config is not None:
-            max_results = config.model_extra.get("max_results", max_results)
+            max_results = (config.model_extra or {}).get("max_results", max_results)
 
         client = _get_fastcrw_client("web_search")
         result = client.search(query, limit=max_results)
 
         # result.web contains list of SearchResultWeb objects
         web_results = result.web or []
-        normalized_results = [
-            {
-                "title": getattr(item, "title", "") or "",
-                "url": getattr(item, "url", "") or "",
-                "snippet": getattr(item, "description", "") or "",
-            }
-            for item in web_results
-        ]
+        normalized_results = []
+        for item in web_results:
+            safe_url = sanitize_public_http_reference_url(getattr(item, "url", ""))
+            if not safe_url:
+                continue
+            normalized_results.append(
+                {
+                    "title": getattr(item, "title", "") or "",
+                    "url": safe_url,
+                    "snippet": getattr(item, "description", "") or "",
+                }
+            )
+        if not normalized_results:
+            return no_results_json(
+                provider="fastcrw",
+                query=query,
+                message="No safe results found",
+                code="no_safe_results" if web_results else "no_results",
+            )
         json_results = json.dumps(normalized_results, indent=2, ensure_ascii=False)
         return json_results
-    except Exception as e:
-        return f"Error: {str(e)}"
+    except GraphBubbleUp:
+        raise
+    except Exception as error:
+        return _fastcrw_error(query, error)
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -93,8 +146,14 @@ def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config_extra("web_fetch")
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses"), False)
-        url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
-        if url_error:
+        # fastCRW can be self-hosted inside the deployment, so this delegated
+        # fetch uses DNS-aware validation. The remote-only providers use the
+        # weaker reference sanitizer because they never fetch from our network.
+        url_error = _fastcrw_url_error(
+            url,
+            validate_public_http_url(url, allow_private_addresses=allow_private_addresses),
+        )
+        if url_error is not None:
             return url_error
         client = _get_fastcrw_client("web_fetch")
         result = client.scrape(url, formats=["markdown"])
@@ -104,8 +163,14 @@ def web_fetch_tool(url: str) -> str:
         title = metadata.title if metadata and metadata.title else "Untitled"
 
         if not markdown_content:
-            return "Error: No content found"
-    except Exception as e:
-        return f"Error: {str(e)}"
+            return no_results_json(
+                provider="fastcrw",
+                query=url,
+                message="No content found",
+            )
+    except GraphBubbleUp:
+        raise
+    except Exception as error:
+        return _fastcrw_error(url, error)
 
     return f"# {title}\n\n{markdown_content[:4096]}"

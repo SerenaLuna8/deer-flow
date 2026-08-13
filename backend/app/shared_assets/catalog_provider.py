@@ -16,7 +16,7 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
-from app.shared_assets.agent_service import AgentService
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum_matches
 from app.shared_assets.credential_closure import (
     McpCredentialClosureInvalid,
     McpCredentialClosureTarget,
@@ -358,6 +358,7 @@ class PostgresAssetCatalogProvider:
                         SkillRow.project_id.is_(None),
                         SkillRow.status == "active",
                         SkillVersionRow.workflow_status == "published",
+                        SkillVersionRow.revoked_at.is_(None),
                     )
                     .order_by(AgentVersionSkillRefRow.sort_order)
                 )
@@ -384,7 +385,7 @@ class PostgresAssetCatalogProvider:
                 model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
             except ValidationError:
                 raise AssetCatalogUnavailable("system agent catalog is invalid") from None
-            if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty):
+            if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty) or not isinstance(version.tool_groups, list):
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
             payload = AgentPayload(
                 description=version.description,
@@ -399,12 +400,9 @@ class PostgresAssetCatalogProvider:
                 user_context=version.user_context,
                 model_settings=model_settings,
             )
-            if (
-                AgentService._payload_checksum(
-                    payload,
-                    payload_schema_version=version.payload_schema_version,
-                )
-                != version.payload_checksum
+            if not agent_payload_checksum_matches(
+                payload,
+                version.payload_checksum,
             ):
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
             snapshots.append(
@@ -443,6 +441,7 @@ class PostgresAssetCatalogProvider:
                     SkillRow.project_id.is_(None),
                     SkillRow.status == "active",
                     SkillVersionRow.workflow_status == "published",
+                    SkillVersionRow.revoked_at.is_(None),
                 )
                 .order_by(SkillRow.slug)
             )

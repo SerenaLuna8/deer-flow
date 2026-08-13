@@ -30,6 +30,16 @@ export interface RunExecutionProfile {
   supports_vision: boolean;
 }
 
+export function buildOutputLimitRetryProfile(
+  profile: RunExecutionProfileRequest,
+): RunExecutionProfileRequest {
+  return {
+    ...profile,
+    thinking_enabled: false,
+    reasoning_effort: "none",
+  };
+}
+
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
   return REASONING_EFFORTS.some((effort) => effort === value);
 }

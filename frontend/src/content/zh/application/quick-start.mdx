@@ -26,11 +26,11 @@ make check
 
 <Steps>
 
-### 克隆并安装
+### 进入私有项目并安装
+
+通过项目批准的内部分发渠道取得源码，进入仓库根目录后执行：
 
 ```bash
-git clone https://github.com/SerenaLuna8/deer-flow.git
-cd deer-flow
 make install
 ```
 
@@ -69,7 +69,7 @@ make dev
 - Frontend `3000`
 - Gateway `8001`
 - Worker（无公开端口）
-- Scheduler（仅 `scheduler.enabled=true` 时启动，无公开端口）
+- Scheduler（无公开端口；自动轮询由平台配置 `automations.enabled` 控制）
 
 ### 停止
 

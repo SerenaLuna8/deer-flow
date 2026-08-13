@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Protocol
+from typing import Literal, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -29,6 +28,11 @@ from app.private_work.execution_profile import (
     persisted_run_execution_profile,
     resolve_admitted_run_execution_profile,
     selected_run_model_ref,
+)
+from app.private_work.memory_injection import (
+    MemoryInjectionCandidate,
+    assess_memory_injection,
+    memory_injection_disabled_reason,
 )
 from app.private_work.run_repository import (
     PrivateRunConflict,
@@ -63,7 +67,10 @@ from app.shared_assets.skill_credential_closure import (
     SkillCredentialClosureTarget,
     lock_skill_credential_closures,
 )
-from app.system_runtime_settings.models import LockedAgentRuntimePolicy
+from app.system_runtime_settings.models import (
+    LockedAgentRuntimePolicy,
+    auxiliary_model_snapshot_ref,
+)
 from app.system_runtime_settings.repository import (
     SystemRuntimePolicyRepositoryInvariant,
 )
@@ -77,16 +84,12 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     validate_model_settings,
 )
-from deerflow.agents.memory.dream import (
-    MemoryDocumentOverBudget,
-    validate_memory_document,
-    validate_memory_document_sections,
-)
 from deerflow.mcp_definition_policy import (
     McpDefinitionPolicyError,
     McpEndpointPolicy,
     validate_project_mcp_definition,
 )
+from deerflow.memory_contract import validate_memory_document_sections
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     RunMemoryContextSnapshotRow,
@@ -331,32 +334,27 @@ class RunSnapshotRepository:
             if source_snapshot is None:
                 return
             try:
-                if not isinstance(source_snapshot.content, str) or not isinstance(
-                    source_snapshot.content_digest,
-                    str,
-                ):
-                    raise ValueError("Run Memory snapshot digest is invalid")
-                digest = hashlib.sha256(
-                    source_snapshot.content.encode("utf-8"),
-                ).hexdigest()
-                if digest != source_snapshot.content_digest:
-                    raise ValueError("Run Memory snapshot digest drift")
-                # Corruption must be detected before the recoverable budget
-                # branch.  A drifted row must never be normalized into an
-                # over-budget skip.
-                validate_memory_document(
-                    source_snapshot.content,
-                    memory.max_injection_tokens,
-                    sections=source_snapshot.sections,
+                assessment = assess_memory_injection(
+                    # Continuations intentionally inherit the source Run's
+                    # frozen result. Current switches do not rewrite that
+                    # logical-task decision.
+                    platform_enabled=True,
+                    account_enabled=True,
+                    max_injection_tokens=memory.max_injection_tokens,
+                    candidate=MemoryInjectionCandidate(
+                        content=source_snapshot.content,
+                        content_digest=source_snapshot.content_digest,
+                        sections=source_snapshot.sections,
+                    ),
                 )
                 source_sections = validate_memory_document_sections(
                     source_snapshot.sections,
                 )
-            except MemoryDocumentOverBudget:
-                await self._skip_memory_injection(session, context, run_id)
-                return
             except (TypeError, ValueError):
                 raise PrivateWorkConflict(context.request_id) from None
+            if assessment.status == "skipped_over_budget":
+                await self._skip_memory_injection(session, context, run_id)
+                return
             session.add(
                 RunMemoryContextSnapshotRow(
                     project_id=context.project_id,
@@ -370,13 +368,25 @@ class RunSnapshotRepository:
                 )
             )
             return
-        if not memory.enabled:
+        if (
+            memory_injection_disabled_reason(
+                platform_enabled=memory.enabled,
+                account_enabled=True,
+            )
+            is not None
+        ):
             return
         preference = await self._personalization_repository_builder(session).read_memory(
             str(context.user_id),
             for_update=True,
         )
-        if not preference.memory_enabled:
+        if (
+            memory_injection_disabled_reason(
+                platform_enabled=memory.enabled,
+                account_enabled=preference.memory_enabled,
+            )
+            is not None
+        ):
             return
         document = (
             await session.execute(
@@ -389,32 +399,32 @@ class RunSnapshotRepository:
                 .with_for_update(of=MemoryDocumentRow)
             )
         ).scalar_one_or_none()
-        if document is None or int(document.version) < 1:
-            return
-        try:
-            if not isinstance(document.content, str) or not isinstance(
-                document.content_digest,
-                str,
-            ):
-                raise ValueError("Memory document digest is invalid")
-            digest = hashlib.sha256(document.content.encode("utf-8")).hexdigest()
-            if digest != document.content_digest:
-                raise ValueError("Memory document digest drift")
-            # Validate integrity first so an over-budget document with a bad
-            # digest still fails admission closed.
-            validate_memory_document(
-                document.content,
-                memory.max_injection_tokens,
+        candidate = None
+        if document is not None and int(document.version) >= 1:
+            candidate = MemoryInjectionCandidate(
+                content=document.content,
+                content_digest=document.content_digest,
                 sections=document.sections,
             )
+        try:
+            assessment = assess_memory_injection(
+                platform_enabled=memory.enabled,
+                account_enabled=preference.memory_enabled,
+                max_injection_tokens=memory.max_injection_tokens,
+                candidate=candidate,
+            )
+            if assessment.status == "inactive":
+                return
+            if document is None:
+                raise ValueError("Memory document assessment is inconsistent")
             document_sections = validate_memory_document_sections(
                 document.sections,
             )
-        except MemoryDocumentOverBudget:
-            await self._skip_memory_injection(session, context, run_id)
-            return
         except (TypeError, ValueError):
             raise PrivateWorkConflict(context.request_id) from None
+        if assessment.status == "skipped_over_budget":
+            await self._skip_memory_injection(session, context, run_id)
+            return
         session.add(
             RunMemoryContextSnapshotRow(
                 project_id=context.project_id,
@@ -503,6 +513,7 @@ class RunSnapshotRepository:
                 )
                 or asset.status != "active"
                 or version.workflow_status != "published"
+                or (asset.scope == "system" and version.revoked_at is not None)
             ):
                 raise RunSnapshotAssetStale
             rows.append((asset, version))
@@ -691,6 +702,8 @@ class RunSnapshotRepository:
         resolved_agent: ResolvedAgentSnapshot | ResolvedRunAssetClosure,
         *,
         continuation_source_run_id: str | None = None,
+        runtime_kind: Literal["chat", "skill_builder"] = "chat",
+        admit_memory: bool = True,
     ) -> PrivateRunRecord:
         """Write a pending run and exact closure in a caller-owned transaction."""
 
@@ -703,6 +716,10 @@ class RunSnapshotRepository:
         ):
             raise PrivateWorkConflict(context.request_id)
         if request.follow_up_to_run_id != continuation_source_run_id:
+            raise PrivateWorkConflict(context.request_id)
+        if runtime_kind not in {"chat", "skill_builder"} or type(admit_memory) is not bool:
+            raise PrivateWorkConflict(context.request_id)
+        if runtime_kind == "skill_builder" and (continuation_source_run_id is not None or admit_memory):
             raise PrivateWorkConflict(context.request_id)
         resolved_closure = resolved_agent if type(resolved_agent) is ResolvedRunAssetClosure else None
         lead_agent = resolved_closure.lead_agent if resolved_closure is not None else resolved_agent
@@ -871,7 +888,14 @@ class RunSnapshotRepository:
                 )
                 try:
                     for purpose, model_ref in auxiliary_model_refs:
-                        if model_ref is not None:
+                        snapshot_ref = auxiliary_model_snapshot_ref(
+                            purpose,
+                            model_ref,
+                            title_enabled=locked_runtime_policy.value.title.enabled,
+                        )
+                        if snapshot_ref is None:
+                            continue
+                        try:
                             await self._model_catalog.admit_model_snapshot(
                                 session,
                                 project_id=context.project_id,
@@ -879,8 +903,12 @@ class RunSnapshotRepository:
                                 thread_id=thread_id,
                                 run_id=run.run_id,
                                 purpose=purpose,
-                                model_ref=model_ref,
+                                model_ref=snapshot_ref,
                             )
+                        except SystemModelNotFound:
+                            if purpose == "title" and model_ref is None:
+                                continue
+                            raise
                 except (
                     SystemModelConflict,
                     SystemModelInvalid,
@@ -911,7 +939,7 @@ class RunSnapshotRepository:
             if refreshed is None:
                 raise RunSnapshotAssetStale
             run = refreshed
-        if locked_runtime_policy is not None:
+        if locked_runtime_policy is not None and admit_memory:
             await self._admit_memory_context_snapshot(
                 session,
                 context,
@@ -1025,6 +1053,7 @@ class RunSnapshotRepository:
             scope=context.resource_scope,
             thread_id=thread_id,
             occurred_at=run.created_at,
+            thread_kind=runtime_kind,
         )
         return run
 

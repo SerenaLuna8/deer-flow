@@ -13,9 +13,11 @@ from typing import Annotated
 from langchain.tools import InjectedToolCallId, tool
 
 from deerflow.agents.memory.authority_resolution import resolve_memory_authority
+from deerflow.memory_contract import EPISODE_SEARCH_TAGS
 from deerflow.tools.types import Runtime
 
-REMEMBER_KINDS = ("permanent", "durable", "ephemeral", "correction")
+# Compatibility alias for callers that imported the tool-local vocabulary.
+REMEMBER_KINDS = EPISODE_SEARCH_TAGS
 MAX_REMEMBER_CHARS = 500
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")

@@ -2,10 +2,15 @@ import { describe, expect, test } from "@rstest/core";
 
 import { agentDependencyOptions } from "@/components/projects/assets/agent-capability-workbench";
 import {
+  projectAgentDeleteBlockedReason,
   projectAgentVersionCanRestore,
-  projectAssetDetailShowsVersionHistory,
 } from "@/components/projects/assets/project-asset-detail-sheet";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import { projectAgentDeleteErrorMessage } from "@/components/projects/assets/project-asset-view-model";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
+import {
+  SharedAssetApiError,
+  type ProjectAssetList,
+} from "@/core/shared-assets";
 
 const PROJECT_ID = "00000000-0000-4000-8000-000000000001";
 const SYSTEM_ASSET_ID = "00000000-0000-4000-8000-000000000010";
@@ -98,23 +103,41 @@ function catalog(): ProjectAssetList {
 }
 
 describe("Agent capability bindings", () => {
-  test("offers only enabled System bindings and active published Project assets", () => {
-    expect(agentDependencyOptions("skill", catalog())).toEqual([
-      expect.objectContaining({
-        assetId: SYSTEM_ASSET_ID,
-        versionId: SYSTEM_VERSION_ID,
-        scope: "system",
-      }),
-      expect.objectContaining({
-        assetId: PROJECT_ASSET_ID,
-        versionId: PROJECT_VERSION_ID,
-        scope: "project",
-      }),
-    ]);
-  });
+  test("shows every dependency and marks unavailable choices as disabled", () => {
+    const options = agentDependencyOptions(
+      "skill",
+      catalog(),
+      zhCN.agents.capabilities,
+    );
 
-  test("shows Agent version history in the detail sheet", () => {
-    expect(projectAssetDetailShowsVersionHistory("agents")).toBe(true);
+    expect(options).toHaveLength(4);
+    expect(options).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          assetId: SYSTEM_ASSET_ID,
+          versionId: SYSTEM_VERSION_ID,
+          scope: "system",
+          disabled: false,
+        }),
+        expect.objectContaining({
+          assetId: PROJECT_ASSET_ID,
+          versionId: PROJECT_VERSION_ID,
+          scope: "project",
+          disabled: false,
+        }),
+        expect.objectContaining({
+          slug: "disabled-system-skill",
+          disabled: true,
+          reason: expect.stringContaining("系统绑定未启用"),
+        }),
+        expect.objectContaining({
+          slug: "draft-project-skill",
+          versionId: null,
+          disabled: true,
+          reason: expect.stringContaining("尚未发布"),
+        }),
+      ]),
+    );
   });
 
   test("restores only a historical published Project Agent version", () => {
@@ -150,5 +173,32 @@ describe("Agent capability bindings", () => {
         SYSTEM_VERSION_ID,
       ),
     ).toBe(false);
+  });
+
+  test("fails closed when deleting the default Agent cannot be proven safe", () => {
+    expect(
+      projectAgentDeleteBlockedReason(
+        PROJECT_ASSET_ID,
+        PROJECT_ASSET_ID,
+        false,
+        false,
+      ),
+    ).not.toBeNull();
+    expect(
+      projectAgentDeleteBlockedReason(PROJECT_ASSET_ID, undefined, false, true),
+    ).not.toBeNull();
+    expect(
+      projectAgentDeleteBlockedReason(
+        PROJECT_ASSET_ID,
+        SYSTEM_ASSET_ID,
+        false,
+        false,
+      ),
+    ).toBeNull();
+    expect(
+      projectAgentDeleteErrorMessage(
+        new SharedAssetApiError(409, "ASSET_CONFLICT", "Asset conflict"),
+      ),
+    ).toContain("Agent");
   });
 });

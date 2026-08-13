@@ -130,6 +130,7 @@ class SkillCredentialRepository:
                 SkillVersionRow.id == asset.current_published_version_id,
                 SkillVersionRow.skill_id == asset.id,
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
             )
             .with_for_update(read=read, of=SkillVersionRow)
         )

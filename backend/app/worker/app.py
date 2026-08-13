@@ -31,6 +31,7 @@ from app.system_runtime_settings.materializer import (
 from app.system_settings import SystemModelMaterializer
 from app.worker.mcp_discovery import McpToolDiscoveryJobHandler
 from app.worker.memory_dream import MemoryDreamJobHandler
+from app.worker.memory_dream_prepare import MemoryDreamPrepareJobHandler
 from app.worker.memory_seal import MemorySealJobHandler
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import JobHandler, WorkerService
@@ -207,6 +208,17 @@ async def run_worker(
                 quota=quota_enforcer,
                 audit=audit_sink,
             )
+            memory_archive_barrier = ProjectChatControlService(
+                session_factory,
+                project_checkpointer,
+                PrivateThreadService(
+                    session_factory,
+                    project_checkpointer,
+                ),
+                run_event_store,
+                endpoint_policy=mcp_endpoint_policy,
+                model_materializer=model_materializer,
+            )
             active_handlers = {
                 "private_run": private_run_handler,
                 "automation_run": private_run_handler,
@@ -233,20 +245,19 @@ async def run_worker(
                     retry_max_seconds=config.worker.retry_max_seconds,
                     audit=audit_sink,
                 ),
+                "memory_dream_prepare": MemoryDreamPrepareJobHandler(
+                    session_factory,
+                    app_config=config,
+                    barrier=memory_archive_barrier,
+                    job_repository_builder=repository_builder,
+                    retry_initial_seconds=config.worker.retry_initial_seconds,
+                    retry_max_seconds=config.worker.retry_max_seconds,
+                    audit=audit_sink,
+                ),
                 "memory_seal": MemorySealJobHandler(
                     session_factory,
                     app_config=config,
-                    barrier=ProjectChatControlService(
-                        session_factory,
-                        project_checkpointer,
-                        PrivateThreadService(
-                            session_factory,
-                            project_checkpointer,
-                        ),
-                        run_event_store,
-                        endpoint_policy=mcp_endpoint_policy,
-                        model_materializer=model_materializer,
-                    ),
+                    barrier=memory_archive_barrier,
                     job_repository_builder=repository_builder,
                     audit=audit_sink,
                 ),

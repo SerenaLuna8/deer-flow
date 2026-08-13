@@ -6,9 +6,30 @@ import {
 } from "@/components/projects/assets/agent-instructions-workbench";
 import { Button } from "@/components/ui/button";
 import {
-  agentBuilderBlueprintValidationError,
+  agentBuilderBlueprintValidationIssue,
   type AgentBuilderBlueprint,
 } from "@/core/agent-builder";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
+
+export function agentBuilderBlueprintValidationMessage(
+  blueprint: AgentBuilderBlueprint,
+  copy: Translations["agents"]["builder"]["blueprint"]["validation"],
+): string | null {
+  const issue = agentBuilderBlueprintValidationIssue(blueprint);
+  switch (issue?.code) {
+    case "description-required":
+      return copy.descriptionRequired;
+    case "model-required":
+      return copy.modelRequired;
+    case "tool-group-required":
+      return copy.toolGroupRequired;
+    case "document-required":
+      return copy.documentRequired(issue.document);
+    default:
+      return null;
+  }
+}
 
 export function AgentBuilderBlueprintReview({
   blueprint,
@@ -51,21 +72,28 @@ export function AgentBuilderBlueprintReview({
   onDiscard: () => void;
   onCreate: () => void;
 }) {
-  const blueprintError = agentBuilderBlueprintValidationError(blueprint);
+  const { t } = useI18n();
+  const copy = t.agents.builder.blueprint;
+  const blueprintError = agentBuilderBlueprintValidationMessage(
+    blueprint,
+    copy.validation,
+  );
   const effectiveEditing = editing && canAuthor;
 
   return (
     <section className="space-y-6" aria-labelledby="agent-blueprint-title">
       <div>
-        <p className="text-muted-foreground text-xs font-medium">生成结果</p>
+        <p className="text-muted-foreground text-xs font-medium">
+          {copy.result}
+        </p>
         <h2
           id="agent-blueprint-title"
           className="mt-1 text-xl font-semibold tracking-tight"
         >
-          Agent 设计稿
+          {copy.title}
         </h2>
         <p className="text-muted-foreground mt-2 text-sm leading-6">
-          请检查模型生成的四项设置。你可以先编辑，确认后再创建 Agent。
+          {copy.description}
         </p>
       </div>
 
@@ -79,23 +107,25 @@ export function AgentBuilderBlueprintReview({
             className="flex items-center gap-2 text-sm font-semibold"
           >
             <BotIcon aria-hidden className="size-4" />
-            运行配置
+            {copy.runtime}
           </h3>
           <p className="text-muted-foreground mt-2 text-sm leading-6">
-            {blueprint.description || "暂未生成 Agent 简介。"}
+            {blueprint.description || copy.noDescription}
           </p>
         </div>
         <div className="bg-muted/25 rounded-xl p-3">
-          <p className="text-muted-foreground text-xs">模型</p>
+          <p className="text-muted-foreground text-xs">{copy.model}</p>
           <p className="mt-1 font-mono text-sm">{blueprint.model_ref}</p>
         </div>
         <div className="bg-muted/25 rounded-xl p-3">
-          <p className="text-muted-foreground text-xs">能力与依赖</p>
+          <p className="text-muted-foreground text-xs">{copy.capabilities}</p>
           <p className="mt-1 flex items-center gap-1.5 text-sm">
             <WrenchIcon aria-hidden className="size-3.5" />
-            {blueprint.tool_groups.length} 个工具组 ·{" "}
-            {blueprint.skill_version_ids.length} 个 Skill ·{" "}
-            {blueprint.mcp_version_ids.length} 个 MCP
+            {copy.dependencySummary(
+              blueprint.tool_groups.length,
+              blueprint.skill_version_ids.length,
+              blueprint.mcp_version_ids.length,
+            )}
           </p>
         </div>
       </section>
@@ -110,6 +140,7 @@ export function AgentBuilderBlueprintReview({
         dirty={dirty}
         errorMessage={errorMessage ?? blueprintError}
         saveDisabledReason={blueprintError}
+        saveTarget="blueprint"
         onSelect={onSelectedFieldChange}
         onDisplayModeChange={onDisplayModeChange}
         onChange={(field, value) =>
@@ -122,7 +153,7 @@ export function AgentBuilderBlueprintReview({
 
       {mcpDependencyLoading ? (
         <p role="status" className="text-muted-foreground text-sm">
-          正在检查 MCP 依赖…
+          {copy.checkingMcp}
         </p>
       ) : mcpDependencyBlockReason ? (
         <p role="alert" className="text-destructive text-sm">
@@ -133,7 +164,7 @@ export function AgentBuilderBlueprintReview({
       {canAuthor && !effectiveEditing ? (
         <div className="border-border/70 bg-background/95 flex flex-col gap-3 rounded-2xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs leading-5">
-            创建后默认停用，需手动启用
+            {copy.createHint}
           </p>
           <Button
             type="button"
@@ -152,7 +183,7 @@ export function AgentBuilderBlueprintReview({
             {creating ? (
               <Loader2Icon aria-hidden className="size-4 animate-spin" />
             ) : null}
-            {creating ? "正在创建…" : "创建 Agent"}
+            {creating ? copy.creating : copy.createDraft}
           </Button>
         </div>
       ) : null}

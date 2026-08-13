@@ -27,6 +27,7 @@ describe("buildRootThreadStreamOptions", () => {
 
     expect(options).toEqual({
       streamResumable: true,
+      onDisconnect: "continue",
       config: { recursion_limit: 1000 },
     });
     expect("streamSubgraphs" in options).toBe(false);

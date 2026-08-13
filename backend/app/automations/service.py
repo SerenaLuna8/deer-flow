@@ -26,6 +26,11 @@ from app.automations.models import (
     AutomationCreate,
     AutomationView,
 )
+from app.automations.system_policy import (
+    AutomationsPolicyPort,
+    AutomationsPolicyUnavailable,
+    current_automations_policy,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -52,6 +57,7 @@ from app.shared_assets.models import (
     ResolvedAgentSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.system_runtime_settings import AutomationsPolicyValue
 from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_tasks import (
     ScheduledTaskCreate,
@@ -107,13 +113,17 @@ class ProjectAutomationService:
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         *,
         min_once_delay_seconds: int = 60,
+        policy_reader: AutomationsPolicyPort | None = None,
         audit: AutomationDefinitionAuditPort | None = None,
     ) -> None:
         if type(min_once_delay_seconds) is not int or min_once_delay_seconds < 0:
             raise ValueError("min_once_delay_seconds must be a non-negative integer")
         self._session_factory = session_factory
         self._clock = clock
-        self._min_once_delay_seconds = min_once_delay_seconds
+        self._fallback_policy = AutomationsPolicyValue(
+            min_once_delay_seconds=min_once_delay_seconds,
+        )
+        self._policy_reader = policy_reader
         self._audit = audit or _NoopAutomationDefinitionAudit()
         self._revalidator = PrivateWorkRevalidator()
         self._resolver = ProjectAssetResolver(session_factory)
@@ -159,6 +169,10 @@ class ProjectAutomationService:
                     command.schedule_type,
                     next_run_at,
                     now,
+                    min_once_delay_seconds=await self._min_once_delay_seconds(
+                        session,
+                        context.request_id,
+                    ),
                 )
                 record = await ScheduledTaskRepository(session).create(
                     context.resource_scope,
@@ -271,6 +285,10 @@ class ProjectAutomationService:
                     task,
                     changes,
                     now,
+                    min_once_delay_seconds=await self._min_once_delay_seconds(
+                        session,
+                        context.request_id,
+                    ),
                 )
                 await self._prepare_mutation(
                     session,
@@ -565,6 +583,8 @@ class ProjectAutomationService:
         task: ScheduledTaskRecord,
         changes: AutomationChanges,
         now: datetime,
+        *,
+        min_once_delay_seconds: int,
     ) -> dict[str, object]:
         values: dict[str, object] = {}
         if changes.title is not None:
@@ -604,6 +624,7 @@ class ProjectAutomationService:
                 task.schedule_type,
                 next_run_at,
                 now,
+                min_once_delay_seconds=min_once_delay_seconds,
             )
             values["next_run_at"] = next_run_at if task.status == "enabled" else None
         return values
@@ -614,9 +635,26 @@ class ProjectAutomationService:
         schedule_type: str,
         next_run_at: datetime,
         now: datetime,
+        *,
+        min_once_delay_seconds: int,
     ) -> None:
-        if schedule_type == "once" and next_run_at < now + timedelta(seconds=self._min_once_delay_seconds):
+        if schedule_type == "once" and next_run_at < now + timedelta(seconds=min_once_delay_seconds):
             raise AutomationInvalid(request_id)
+
+    async def _min_once_delay_seconds(
+        self,
+        session: AsyncSession,
+        request_id: str,
+    ) -> int:
+        try:
+            policy = await current_automations_policy(
+                session,
+                self._policy_reader,
+                fallback=self._fallback_policy,
+            )
+        except AutomationsPolicyUnavailable as error:
+            raise AutomationUnavailable(request_id) from error
+        return policy.min_once_delay_seconds
 
     @classmethod
     def _validated_create(

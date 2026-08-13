@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import String, cast, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -53,6 +53,12 @@ def _group_models():
 
 
 class PostgresProjectChannelGroupBindingRepository:
+    @staticmethod
+    def _group_connection_ids(principal_model, binding):
+        return select(
+            func.replace(cast(principal_model.id, String), "-", ""),
+        ).where(principal_model.group_binding_id == binding.id)
+
     async def lock_project_context(
         self,
         session: AsyncSession,
@@ -186,6 +192,7 @@ class PostgresProjectChannelGroupBindingRepository:
             raise GroupBindingRepositoryNotFound
         if row.revision != expected_revision or row.revision >= _MAX_BIGINT:
             raise GroupBindingRepositoryConflict
+        agent_changed = agent_asset_id is not None and agent_scope is not None and (row.agent_asset_id != agent_asset_id or row.agent_scope != agent_scope)
         if enabled is not None:
             row.status = "active" if enabled else "disabled"
         if agent_asset_id is not None and agent_scope is not None:
@@ -210,7 +217,17 @@ class PostgresProjectChannelGroupBindingRepository:
                 status="frozen",
                 now=now,
             )
-        elif agent_asset_id is not None and agent_scope is not None:
+            if agent_changed:
+                # Agent routing changes invalidate conversation-to-Thread
+                # affinity even while the binding remains disabled. Connection
+                # activation still waits for a later authenticated inbound.
+                await self._update_group_connection_agents(
+                    session,
+                    ChannelExternalPrincipalRow,
+                    row,
+                    now=now,
+                )
+        elif agent_changed:
             await self._update_group_connection_agents(
                 session,
                 ChannelExternalPrincipalRow,
@@ -245,11 +262,9 @@ class PostgresProjectChannelGroupBindingRepository:
             raise GroupBindingRepositoryNotFound
         if row.revision != expected_revision or row.revision >= _MAX_BIGINT:
             raise GroupBindingRepositoryConflict
-        row.status = "disabled"
-        row.deleted_at = now
-        row.updated_at = now
-        row.updated_by_user_id = str(context.user_id)
-        row.revision += 1
+        # Freeze every retained identity before releasing the Agent pair. The
+        # lifecycle constraint makes this order significant: once deleted_at
+        # is visible, both Agent columns must already be NULL.
         await session.execute(
             update(ChannelExternalPrincipalRow)
             .where(
@@ -264,7 +279,20 @@ class PostgresProjectChannelGroupBindingRepository:
             row,
             status="frozen",
             now=now,
+            clear_agent_reference=True,
         )
+        await self._delete_group_conversations(
+            session,
+            ChannelExternalPrincipalRow,
+            row,
+        )
+        row.status = "disabled"
+        row.deleted_at = now
+        row.agent_asset_id = None
+        row.agent_scope = None
+        row.updated_at = now
+        row.updated_by_user_id = str(context.user_id)
+        row.revision += 1
         await session.flush()
 
     @staticmethod
@@ -275,36 +303,45 @@ class PostgresProjectChannelGroupBindingRepository:
         *,
         status: str,
         now: datetime,
+        clear_agent_reference: bool = False,
     ) -> None:
-        owners = select(principal_model.principal_user_id).where(principal_model.group_binding_id == binding.id)
+        connection_ids = PostgresProjectChannelGroupBindingRepository._group_connection_ids(
+            principal_model,
+            binding,
+        )
+        values: dict[str, object] = {
+            "status": status,
+            "frozen_at": now if status == "frozen" else None,
+            "updated_at": now,
+        }
+        if clear_agent_reference:
+            values["metadata_json"] = {"group_binding_id": str(binding.id)}
         await session.execute(
             update(ChannelConnectionRow)
             .where(
                 ChannelConnectionRow.project_id == binding.project_id,
                 ChannelConnectionRow.channel_instance_id == binding.channel_instance_id,
-                ChannelConnectionRow.owner_user_id.in_(owners),
+                ChannelConnectionRow.id.in_(connection_ids),
                 ChannelConnectionRow.status != "revoked",
             )
-            .values(
-                status=status,
-                frozen_at=(now if status == "frozen" else None),
-                updated_at=now,
-            )
+            .values(**values)
         )
 
     @staticmethod
-    async def _update_group_connection_agents(
+    async def _delete_group_conversations(
         session: AsyncSession,
         principal_model,
         binding,
-        *,
-        now: datetime,
     ) -> None:
         owners = select(principal_model.principal_user_id).where(principal_model.group_binding_id == binding.id)
+        principal_connection_ids = PostgresProjectChannelGroupBindingRepository._group_connection_ids(
+            principal_model,
+            binding,
+        )
         connection_ids = select(ChannelConnectionRow.id).where(
             ChannelConnectionRow.project_id == binding.project_id,
             ChannelConnectionRow.channel_instance_id == binding.channel_instance_id,
-            ChannelConnectionRow.owner_user_id.in_(owners),
+            ChannelConnectionRow.id.in_(principal_connection_ids),
             ChannelConnectionRow.status != "revoked",
         )
         await session.execute(
@@ -314,12 +351,28 @@ class PostgresProjectChannelGroupBindingRepository:
                 ChannelConversationRow.connection_id.in_(connection_ids),
             )
         )
+
+    @classmethod
+    async def _update_group_connection_agents(
+        cls,
+        session: AsyncSession,
+        principal_model,
+        binding,
+        *,
+        now: datetime,
+    ) -> None:
+        connection_ids = cls._group_connection_ids(principal_model, binding)
+        await cls._delete_group_conversations(
+            session,
+            principal_model,
+            binding,
+        )
         await session.execute(
             update(ChannelConnectionRow)
             .where(
                 ChannelConnectionRow.project_id == binding.project_id,
                 ChannelConnectionRow.channel_instance_id == binding.channel_instance_id,
-                ChannelConnectionRow.owner_user_id.in_(owners),
+                ChannelConnectionRow.id.in_(connection_ids),
                 ChannelConnectionRow.status != "revoked",
             )
             .values(
@@ -345,69 +398,174 @@ class PostgresProjectChannelGroupBindingRepository:
         now: datetime,
     ) -> object | None:
         ProjectChannelGroupBindingRow, ChannelExternalPrincipalRow = _group_models()
-        challenge = (
+        # Discover only immutable authority keys first. Locks are then acquired
+        # in the repository-wide parent-before-child order: Project,
+        # Membership, Instance, Agent, and finally the challenge row. The final
+        # challenge query repeats every discovered key so a concurrent consume
+        # or out-of-band mutation fails closed.
+        challenge_snapshot = (
             await session.execute(
-                select(ProjectChannelGroupBindingChallengeRow)
-                .where(
+                select(
+                    ProjectChannelGroupBindingChallengeRow.id,
+                    ProjectChannelGroupBindingChallengeRow.project_id,
+                    ProjectChannelGroupBindingChallengeRow.membership_id,
+                    ProjectChannelGroupBindingChallengeRow.membership_version,
+                    ProjectChannelGroupBindingChallengeRow.created_by_user_id,
+                    ProjectChannelGroupBindingChallengeRow.agent_asset_id,
+                    ProjectChannelGroupBindingChallengeRow.agent_scope,
+                ).where(
                     ProjectChannelGroupBindingChallengeRow.code_digest == code_digest,
                     ProjectChannelGroupBindingChallengeRow.provider == provider,
                     ProjectChannelGroupBindingChallengeRow.channel_instance_id == channel_instance_id,
                     ProjectChannelGroupBindingChallengeRow.consumed_at.is_(None),
                     ProjectChannelGroupBindingChallengeRow.expires_at > now,
                 )
-                .with_for_update(of=ProjectChannelGroupBindingChallengeRow)
             )
-        ).scalar_one_or_none()
-        if challenge is None:
+        ).one_or_none()
+        if challenge_snapshot is None:
             return None
-        authority = (
+
+        locked_project_id = (
             await session.execute(
-                select(ProjectMembershipRow)
-                .join(ProjectRow, ProjectRow.id == ProjectMembershipRow.project_id)
-                .join(
-                    ProjectChannelInstanceRow,
-                    (ProjectChannelInstanceRow.project_id == ProjectRow.id) & (ProjectChannelInstanceRow.id == challenge.channel_instance_id),
-                )
+                select(ProjectRow.id)
                 .where(
-                    ProjectRow.id == challenge.project_id,
+                    ProjectRow.id == challenge_snapshot.project_id,
                     ProjectRow.status == "active",
                     ProjectRow.is_suspended.is_(False),
-                    ProjectMembershipRow.id == challenge.membership_id,
-                    ProjectMembershipRow.project_id == challenge.project_id,
-                    ProjectMembershipRow.user_id == challenge.created_by_user_id,
+                )
+                .with_for_update(read=True, of=ProjectRow)
+            )
+        ).scalar_one_or_none()
+        if locked_project_id is None:
+            return None
+
+        locked_membership_id = (
+            await session.execute(
+                select(ProjectMembershipRow.id)
+                .where(
+                    ProjectMembershipRow.id == challenge_snapshot.membership_id,
+                    ProjectMembershipRow.project_id == locked_project_id,
+                    ProjectMembershipRow.user_id == challenge_snapshot.created_by_user_id,
                     ProjectMembershipRow.role == "admin",
                     ProjectMembershipRow.status == "active",
-                    ProjectMembershipRow.version == challenge.membership_version,
+                    ProjectMembershipRow.version == challenge_snapshot.membership_version,
+                )
+                .with_for_update(read=True, of=ProjectMembershipRow)
+            )
+        ).scalar_one_or_none()
+        if locked_membership_id is None:
+            return None
+
+        locked_instance_id = (
+            await session.execute(
+                select(ProjectChannelInstanceRow.id)
+                .where(
+                    ProjectChannelInstanceRow.project_id == locked_project_id,
+                    ProjectChannelInstanceRow.id == channel_instance_id,
                     ProjectChannelInstanceRow.provider == provider,
                     ProjectChannelInstanceRow.desired_status == "enabled",
                     ProjectChannelInstanceRow.observed_status == "running",
                     ProjectChannelInstanceRow.deleted_at.is_(None),
                 )
-                .with_for_update(
-                    read=True,
-                    of=[ProjectRow, ProjectMembershipRow, ProjectChannelInstanceRow],
-                )
+                # Binding completion is rare and must serialize distinct
+                # challenges for the same instance before either inspects the
+                # shared live/tombstone identity set.
+                .with_for_update(of=ProjectChannelInstanceRow)
             )
         ).scalar_one_or_none()
-        if authority is None or not await self._agent_is_available(
+        if locked_instance_id is None or not await self._agent_is_available(
             session,
-            project_id=challenge.project_id,
-            agent_asset_id=challenge.agent_asset_id,
-            agent_scope=challenge.agent_scope,
+            project_id=locked_project_id,
+            agent_asset_id=challenge_snapshot.agent_asset_id,
+            agent_scope=challenge_snapshot.agent_scope,
         ):
             return None
 
-        row = (
+        challenge = (
             await session.execute(
-                select(ProjectChannelGroupBindingRow)
+                select(ProjectChannelGroupBindingChallengeRow)
                 .where(
-                    ProjectChannelGroupBindingRow.channel_instance_id == channel_instance_id,
-                    ProjectChannelGroupBindingRow.external_group_ref.in_(external_group_refs),
-                    ProjectChannelGroupBindingRow.deleted_at.is_(None),
+                    ProjectChannelGroupBindingChallengeRow.id == challenge_snapshot.id,
+                    ProjectChannelGroupBindingChallengeRow.project_id == locked_project_id,
+                    ProjectChannelGroupBindingChallengeRow.membership_id == locked_membership_id,
+                    ProjectChannelGroupBindingChallengeRow.membership_version == challenge_snapshot.membership_version,
+                    ProjectChannelGroupBindingChallengeRow.created_by_user_id == challenge_snapshot.created_by_user_id,
+                    ProjectChannelGroupBindingChallengeRow.agent_asset_id == challenge_snapshot.agent_asset_id,
+                    ProjectChannelGroupBindingChallengeRow.agent_scope == challenge_snapshot.agent_scope,
+                    ProjectChannelGroupBindingChallengeRow.code_digest == code_digest,
+                    ProjectChannelGroupBindingChallengeRow.provider == provider,
+                    ProjectChannelGroupBindingChallengeRow.channel_instance_id == locked_instance_id,
+                    ProjectChannelGroupBindingChallengeRow.consumed_at.is_(None),
+                    ProjectChannelGroupBindingChallengeRow.expires_at > now,
                 )
-                .with_for_update(of=ProjectChannelGroupBindingRow)
+                .with_for_update(of=ProjectChannelGroupBindingChallengeRow)
+                .execution_options(populate_existing=True)
             )
         ).scalar_one_or_none()
+        if challenge is None:
+            return None
+
+        live_rows = tuple(
+            (
+                await session.execute(
+                    select(ProjectChannelGroupBindingRow)
+                    .where(
+                        ProjectChannelGroupBindingRow.project_id == challenge.project_id,
+                        ProjectChannelGroupBindingRow.channel_instance_id == channel_instance_id,
+                        ProjectChannelGroupBindingRow.provider == provider,
+                        ProjectChannelGroupBindingRow.external_group_ref.in_(external_group_refs),
+                        ProjectChannelGroupBindingRow.deleted_at.is_(None),
+                    )
+                    .order_by(ProjectChannelGroupBindingRow.id)
+                    .with_for_update(of=ProjectChannelGroupBindingRow)
+                )
+            ).scalars()
+        )
+        if len(live_rows) > 1:
+            raise GroupBindingRepositoryConflict
+        row = live_rows[0] if live_rows else None
+        resurrected = False
+        if row is None:
+            tombstones = tuple(
+                (
+                    await session.execute(
+                        select(ProjectChannelGroupBindingRow)
+                        .where(
+                            ProjectChannelGroupBindingRow.project_id == challenge.project_id,
+                            ProjectChannelGroupBindingRow.channel_instance_id == channel_instance_id,
+                            ProjectChannelGroupBindingRow.provider == provider,
+                            ProjectChannelGroupBindingRow.external_group_ref.in_(external_group_refs),
+                            ProjectChannelGroupBindingRow.deleted_at.is_not(None),
+                        )
+                        .order_by(ProjectChannelGroupBindingRow.id)
+                        .with_for_update(of=ProjectChannelGroupBindingRow)
+                    )
+                ).scalars()
+            )
+            if len(tombstones) > 1:
+                raise GroupBindingRepositoryConflict
+            if tombstones:
+                row = tombstones[0]
+                if row.revision >= _MAX_BIGINT:
+                    raise GroupBindingRepositoryConflict
+                row.external_group_ref = external_group_ref
+                row.external_group_name = display_name
+                row.agent_asset_id = challenge.agent_asset_id
+                row.agent_scope = challenge.agent_scope
+                row.status = "active"
+                row.deleted_at = None
+                row.revision += 1
+                row.updated_by_user_id = challenge.created_by_user_id
+                row.updated_at = now
+                resurrected = True
+                # A tombstone can predate the v13 cleanup, or be restored from
+                # an older backup. Never let its retained identity route a new
+                # Agent into a Thread created for the previous Agent.
+                await self._delete_group_conversations(
+                    session,
+                    ChannelExternalPrincipalRow,
+                    row,
+                )
         if row is None:
             row = ProjectChannelGroupBindingRow(
                 project_id=challenge.project_id,
@@ -425,7 +583,7 @@ class PostgresProjectChannelGroupBindingRepository:
                 updated_at=now,
             )
             session.add(row)
-        else:
+        elif not resurrected:
             if row.project_id != challenge.project_id or row.revision >= _MAX_BIGINT:
                 raise GroupBindingRepositoryConflict
             agent_changed = row.agent_asset_id != challenge.agent_asset_id or row.agent_scope != challenge.agent_scope
@@ -599,17 +757,6 @@ class PostgresProjectChannelGroupBindingRepository:
                 external_account_refs[0],
                 now,
             )
-        elif principal.status == "frozen":
-            principal.status = "active"
-            principal.last_seen_at = now
-            principal.updated_at = now
-        else:
-            principal.last_seen_at = now
-            principal.updated_at = now
-        binding.last_activity_at = now
-        if binding.first_activity_at is None:
-            binding.first_activity_at = now
-        binding.updated_at = now
         membership = (
             await session.execute(
                 select(ProjectMembershipRow).where(
@@ -631,6 +778,17 @@ class PostgresProjectChannelGroupBindingRepository:
             external_group_ref=binding.external_group_ref,
             now=now,
         )
+        if connection is None:
+            # Explicit disconnect is terminal. Retain the principal and its
+            # stable identity anchor, but do not restore authority implicitly.
+            return None
+        principal.status = "active"
+        principal.last_seen_at = now
+        principal.updated_at = now
+        binding.last_activity_at = now
+        if binding.first_activity_at is None:
+            binding.first_activity_at = now
+        binding.updated_at = now
         await session.flush()
         return self._runtime_connection_mapping(
             connection,
@@ -646,7 +804,7 @@ class PostgresProjectChannelGroupBindingRepository:
         external_account_ref: str,
         external_group_ref: str,
         now: datetime,
-    ) -> ChannelConnectionRow:
+    ) -> ChannelConnectionRow | None:
         connection_id = principal.id.hex
         row = (
             await session.execute(
@@ -684,6 +842,8 @@ class PostgresProjectChannelGroupBindingRepository:
             )
             session.add(row)
         else:
+            if row.status == "revoked":
+                return None
             row.status = "connected"
             row.external_account_id = external_account_ref
             row.workspace_id = external_group_ref

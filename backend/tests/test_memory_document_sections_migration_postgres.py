@@ -241,7 +241,7 @@ async def test_v8_to_v9_backfills_frozen_sections_and_policy_provenance(
 
         result = await upgrade_postgres(database_url, assume_yes=True)
         assert result.from_revision == "full_schema_v8"
-        assert result.to_revision == CURRENT_SCHEMA_REVISION == "full_schema_v9"
+        assert result.to_revision == CURRENT_SCHEMA_REVISION == "full_schema_v17"
 
         upgraded = create_async_engine(database_url, poolclass=NullPool)
         try:
@@ -292,7 +292,26 @@ async def test_v8_to_v9_backfills_frozen_sections_and_policy_provenance(
                 )
                 assert policy.schema_version == expected_policy.schema_version
                 assert policy.payload_checksum == expected_policy.checksum
-                assert await connection.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 4
+                assert await connection.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 5
+                automations = (
+                    await connection.execute(
+                        text(
+                            """SELECT policy.revision, version.value, version.payload_checksum
+                                 FROM system_runtime_policies AS policy
+                                 JOIN system_runtime_policy_versions AS version
+                                   ON version.section=policy.section
+                                  AND version.id=policy.current_version_id
+                                WHERE policy.section='automations'"""
+                        ),
+                    )
+                ).one()
+                expected_automations = canonical_policy_payload(
+                    RuntimePolicySection.AUTOMATIONS,
+                    default_policy_value(RuntimePolicySection.AUTOMATIONS),
+                )
+                assert automations.revision == 1
+                assert automations.value == expected_automations.value
+                assert automations.payload_checksum == expected_automations.checksum
                 assert (
                     await connection.scalar(
                         text(

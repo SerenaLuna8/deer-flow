@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from weakref import ReferenceType, ref
 
 from sqlalchemy import (
     JSON,
@@ -23,6 +24,32 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, synonym
 
 from deerflow.persistence.base import Base
+
+_PARTITION_MEMO_INFO_KEY = "deerflow.run_event_partition_months"
+
+
+def _run_event_utc_month(created_at: datetime) -> tuple[int, int] | None:
+    """Return the database partition key when the timestamp is unambiguous."""
+
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        return None
+    utc_created_at = created_at.astimezone(UTC)
+    return utc_created_at.year, utc_created_at.month
+
+
+def _partition_month_memo(connection, created_at: datetime) -> set[tuple[int, int]] | None:
+    """Return the ensured-month set for the connection's current transaction."""
+
+    month = _run_event_utc_month(created_at)
+    transaction = connection.get_nested_transaction() or connection.get_transaction()
+    if month is None or transaction is None:
+        return None
+
+    memo: tuple[ReferenceType[object], set[tuple[int, int]]] | None = connection.info.get(_PARTITION_MEMO_INFO_KEY)
+    if memo is None or memo[0]() is not transaction:
+        memo = (ref(transaction), set())
+        connection.info[_PARTITION_MEMO_INFO_KEY] = memo
+    return memo[1]
 
 
 class ThreadEventSequenceRow(Base):
@@ -200,12 +227,18 @@ class RunEventRow(Base):
 
 @event.listens_for(RunEventRow, "before_insert")
 def _ensure_run_event_month_partition(_mapper, connection, target: RunEventRow) -> None:
-    """Create the target UTC month before PostgreSQL routes the ORM insert."""
+    """Ensure the target UTC month once per transaction before ORM inserts."""
 
     if connection.dialect.name == "postgresql":
         if target.created_at is None:
             target.created_at = datetime.now(UTC)
+        ensured_months = _partition_month_memo(connection, target.created_at)
+        month = _run_event_utc_month(target.created_at)
+        if ensured_months is not None and month in ensured_months:
+            return
         connection.execute(
             text("SELECT ensure_run_events_month_partition(:created_at)"),
             {"created_at": target.created_at},
         )
+        if ensured_months is not None and month is not None:
+            ensured_months.add(month)

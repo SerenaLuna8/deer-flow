@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import {
   Code2Icon,
   EyeIcon,
@@ -11,7 +12,7 @@ import {
   SaveIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
@@ -33,6 +34,7 @@ import {
   type ProjectAssetItem,
   type SkillFileChange,
 } from "@/core/shared-assets";
+import { invalidateProjectSkillConflictQueries } from "@/core/shared-assets/hooks";
 import { SafeStreamdown } from "@/core/streamdown/components";
 
 import type { SkillAssetVersion } from "./skill-asset-detail";
@@ -131,6 +133,54 @@ export function selectedSkillFileAncestorFolders(path: string): string[] {
   return foldersThrough(directoryPath(path));
 }
 
+type SkillVersionConflictRecovery = {
+  assetId: string;
+  assetVersion: number;
+  sourceVersionId: string;
+};
+
+type PendingSavedSkillVersion = {
+  assetId: string;
+  assetVersion: number;
+};
+
+export function skillVersionConflictHasLatestServerState(
+  conflict: SkillVersionConflictRecovery | null,
+  item: Pick<ProjectAssetItem, "id" | "version">,
+  sourceVersion: Pick<SkillAssetVersion, "id">,
+): boolean {
+  return (
+    conflict?.assetId === item.id &&
+    conflict.sourceVersionId === sourceVersion.id &&
+    item.version > conflict.assetVersion
+  );
+}
+
+export function skillVersionSaveIsPending(
+  pending: PendingSavedSkillVersion | null,
+  item: Pick<ProjectAssetItem, "id" | "version">,
+): boolean {
+  return pending?.assetId === item.id && item.version < pending.assetVersion;
+}
+
+export function skillVersionDraftMatchesSubmittedChanges(
+  submitted: readonly SkillFileChange[],
+  current: readonly SkillFileChange[],
+): boolean {
+  if (submitted.length !== current.length) return false;
+  return submitted.every((submittedChange, index) => {
+    const currentChange = current[index];
+    if (submittedChange.op !== currentChange?.op) return false;
+    if (submittedChange.path !== currentChange.path) return false;
+    if (submittedChange.op === "delete") return true;
+    return (
+      currentChange.op !== "delete" &&
+      submittedChange.content === currentChange.content &&
+      submittedChange.media_type === currentChange.media_type
+    );
+  });
+}
+
 export function SkillVersionWorkbench({
   accountId,
   projectId,
@@ -181,7 +231,20 @@ export function SkillVersionWorkbench({
   const [deletePath, setDeletePath] = useState<string | null>(null);
   const [discardOpen, setDiscardOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
+  const changesRef = useRef(changes);
+  const expectedAssetVersionRef = useRef(item.version);
+  const appliedServerStateRef = useRef(
+    `${item.id}:${item.version}:${version.id}`,
+  );
+  const conflictRecoveryRef = useRef<SkillVersionConflictRecovery | null>(null);
+  const pendingSavedVersionRef = useRef<PendingSavedSkillVersion | null>(null);
+  const queryClient = useQueryClient();
   const fork = useForkProjectSkillVersion(accountId, projectId);
+
+  function replaceChanges(next: SkillFileChange[]) {
+    changesRef.current = next;
+    setChanges(next);
+  }
 
   const workingFiles = useMemo(
     () => listWorkingSkillFiles(version.file_views, changes),
@@ -224,6 +287,7 @@ export function SkillVersionWorkbench({
   );
   const dirty = changes.length > 0;
   const isEditing = canAuthor && editing;
+  const serverState = `${item.id}:${item.version}:${version.id}`;
   const emptyExplicitFolders = explicitFolders.filter(
     (folder) =>
       !workingFiles.some((file) => file.path.startsWith(`${folder}/`)),
@@ -244,17 +308,47 @@ export function SkillVersionWorkbench({
   }, [dirty, onDirtyChange]);
 
   useEffect(() => {
+    const conflictRecovery = conflictRecoveryRef.current;
+    if (
+      skillVersionConflictHasLatestServerState(conflictRecovery, item, version)
+    ) {
+      expectedAssetVersionRef.current = item.version;
+      appliedServerStateRef.current = serverState;
+      conflictRecoveryRef.current = null;
+      setLocalError(
+        "已加载最新资产修订并保留本地修改。再次保存仍会基于当前所选的不可变 Skill 版本创建新草稿，请确认后重试。",
+      );
+      return;
+    }
+    if (
+      conflictRecovery &&
+      (conflictRecovery.assetId !== item.id ||
+        conflictRecovery.sourceVersionId !== version.id)
+    ) {
+      conflictRecoveryRef.current = null;
+    }
+
+    const pendingSavedVersion = pendingSavedVersionRef.current;
+    if (pendingSavedVersion?.assetId === item.id) {
+      if (skillVersionSaveIsPending(pendingSavedVersion, item)) return;
+      pendingSavedVersionRef.current = null;
+    } else if (pendingSavedVersion) {
+      pendingSavedVersionRef.current = null;
+    }
+    if (serverState === appliedServerStateRef.current || dirty) return;
+
+    expectedAssetVersionRef.current = item.version;
+    appliedServerStateRef.current = serverState;
+  }, [dirty, item, item.id, item.version, serverState, version, version.id]);
+
+  useEffect(() => {
     if (canAuthor || !editing) return;
-    setChanges([]);
-    setExplicitFolders([]);
-    setLoadedSources({});
-    setDiscardOpen(false);
-    setLocalError(null);
-    setSelection(initialPath ? { kind: "file", path: initialPath } : null);
-    setDisplayMode("source");
-    onDirtyChange(false);
-    onEditingChange(false);
-  }, [canAuthor, editing, initialPath, onDirtyChange, onEditingChange]);
+    setLocalError(
+      dirty
+        ? "Skill 状态或编辑权限已发生变化，本地修改仍保留在当前页面。恢复权限后可继续保存，离开前也可以先复制内容。"
+        : "Skill 状态或编辑权限已发生变化，当前页面已切换为只读。",
+    );
+  }, [canAuthor, dirty, editing]);
 
   useEffect(() => {
     if (!dirty) return;
@@ -302,6 +396,7 @@ export function SkillVersionWorkbench({
   }
 
   function beginPathDialog(mode: PathDialogMode) {
+    if (fork.isPending) return;
     setPathDialog(mode);
     if (mode === "rename") {
       setPathInput(selectedPath);
@@ -315,6 +410,7 @@ export function SkillVersionWorkbench({
   }
 
   function commitPathDialog() {
+    if (fork.isPending) return;
     try {
       if (pathDialog === "add") {
         const nextPath = joinSkillFilePath(targetFolder, fileNameInput);
@@ -328,7 +424,7 @@ export function SkillVersionWorkbench({
           "",
           mediaTypeForPath(nextPath),
         );
-        setChanges(next);
+        replaceChanges(next);
         setSelection({ kind: "file", path: nextPath });
         expandFolder(targetFolder);
       } else if (
@@ -348,7 +444,7 @@ export function SkillVersionWorkbench({
           sourceContent,
           mediaTypeForPath(pathInput),
         );
-        setChanges(next);
+        replaceChanges(next);
         if (previousFolder && previousFolder !== directoryPath(pathInput)) {
           setExplicitFolders((current) =>
             current.includes(previousFolder)
@@ -391,6 +487,7 @@ export function SkillVersionWorkbench({
   }
 
   function commitFolderDialog() {
+    if (fork.isPending) return;
     try {
       createFolder({
         parent: folderParent,
@@ -406,6 +503,7 @@ export function SkillVersionWorkbench({
   }
 
   function commitInlineFolder() {
+    if (fork.isPending) return;
     try {
       const path = createFolder({
         parent: targetFolder,
@@ -422,6 +520,7 @@ export function SkillVersionWorkbench({
   }
 
   function beginFolderDialog() {
+    if (fork.isPending) return;
     setFolderParent(defaultSkillFileFolder(selection));
     setFolderNameInput("");
     setFolderError(null);
@@ -429,11 +528,11 @@ export function SkillVersionWorkbench({
   }
 
   function confirmDelete() {
-    if (!deletePath) return;
+    if (!deletePath || fork.isPending) return;
     try {
       const previousFolder = directoryPath(deletePath);
       const next = deleteSkillFile(changes, version.file_views, deletePath);
-      setChanges(next);
+      replaceChanges(next);
       if (previousFolder) {
         setExplicitFolders((current) =>
           current.includes(previousFolder)
@@ -456,7 +555,9 @@ export function SkillVersionWorkbench({
   }
 
   function discardChanges() {
-    setChanges([]);
+    if (fork.isPending) return;
+    conflictRecoveryRef.current = null;
+    replaceChanges([]);
     setExplicitFolders([]);
     setLoadedSources({});
     onEditingChange(false);
@@ -467,13 +568,16 @@ export function SkillVersionWorkbench({
   }
 
   async function saveAsDraft() {
+    if (fork.isPending) return;
     setLocalError(null);
+    const expectedAssetVersion = expectedAssetVersionRef.current;
+    const submittedChanges = changes.map((change) => ({ ...change }));
     try {
       const result = await fork.mutateAsync({
         assetId: item.id,
         sourceVersionId: version.id,
         input: {
-          expected_asset_version: item.version,
+          expected_asset_version: expectedAssetVersion,
           expected_source_payload_checksum: version.payload_checksum,
           changes,
         },
@@ -482,21 +586,51 @@ export function SkillVersionWorkbench({
         setLocalError("服务返回了无效的 Skill 版本。请重试。");
         return;
       }
-      setSelection(initialPath ? { kind: "file", path: initialPath } : null);
-      setChanges([]);
-      setExplicitFolders([]);
-      setLoadedSources({});
-      onEditingChange(false);
-      onDirtyChange(false);
-      onVersionCreated(result.data.id);
+      conflictRecoveryRef.current = null;
+      const savedAssetVersion = expectedAssetVersion + 1;
+      expectedAssetVersionRef.current = savedAssetVersion;
+      pendingSavedVersionRef.current = {
+        assetId: item.id,
+        assetVersion: savedAssetVersion,
+      };
+      if (
+        skillVersionDraftMatchesSubmittedChanges(
+          submittedChanges,
+          changesRef.current,
+        )
+      ) {
+        setSelection(initialPath ? { kind: "file", path: initialPath } : null);
+        replaceChanges([]);
+        setExplicitFolders([]);
+        setLoadedSources({});
+        onEditingChange(false);
+        onDirtyChange(false);
+        onVersionCreated(result.data.id);
+      } else {
+        setLocalError(
+          "提交时的修改已保存为新版本；保存期间产生的后续修改仍保留在当前编辑副本中，请再次保存或手动放弃。",
+        );
+        onDirtyChange(true);
+      }
     } catch (error) {
       if (
         error instanceof SharedAssetApiError &&
         error.code === "ASSET_CONFLICT"
       ) {
+        conflictRecoveryRef.current = {
+          assetId: item.id,
+          assetVersion: expectedAssetVersion,
+          sourceVersionId: version.id,
+        };
         setLocalError(
-          "资产已在其他窗口发生变化。本地修改仍然保留，请刷新版本后重新提交。",
+          "资产已在其他窗口发生变化。本地修改仍然保留，正在加载最新资产修订…",
         );
+        void invalidateProjectSkillConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          item.id,
+        ).catch(() => undefined);
       } else {
         setLocalError(adminAssetErrorMessage(error));
       }
@@ -554,6 +688,7 @@ export function SkillVersionWorkbench({
                   size="sm"
                   variant="outline"
                   className="bg-background min-w-0 px-2"
+                  disabled={fork.isPending}
                   onClick={() => beginPathDialog("add")}
                 >
                   <FilePlus2Icon aria-hidden className="size-4" />
@@ -564,6 +699,7 @@ export function SkillVersionWorkbench({
                   size="sm"
                   variant="outline"
                   className="bg-background min-w-0 px-2"
+                  disabled={fork.isPending}
                   onClick={beginFolderDialog}
                 >
                   <FolderPlusIcon aria-hidden className="size-4" />
@@ -646,7 +782,7 @@ export function SkillVersionWorkbench({
                           type="button"
                           size="sm"
                           variant="outline"
-                          disabled={sourceContent === null}
+                          disabled={sourceContent === null || fork.isPending}
                           onClick={() => beginPathDialog("rename")}
                         >
                           重命名
@@ -655,6 +791,7 @@ export function SkillVersionWorkbench({
                           type="button"
                           size="sm"
                           variant="outline"
+                          disabled={fork.isPending}
                           onClick={() => setDeletePath(selectedFile.path)}
                         >
                           <Trash2Icon aria-hidden className="size-4" />
@@ -731,11 +868,13 @@ export function SkillVersionWorkbench({
                     <Textarea
                       aria-label={`编辑 ${selectedFile.path}`}
                       value={sourceContent}
+                      disabled={fork.isPending}
                       spellCheck={false}
                       className="min-h-[50vh] resize-y rounded-none border-0 p-5 font-mono text-sm leading-6 shadow-none focus-visible:ring-0 md:min-h-[520px]"
                       onChange={(event) => {
+                        if (fork.isPending) return;
                         try {
-                          setChanges(
+                          replaceChanges(
                             editSkillFile(
                               changes,
                               version.file_views,
@@ -786,6 +925,7 @@ export function SkillVersionWorkbench({
               type="button"
               variant="outline"
               className="min-h-11 flex-1 sm:flex-none"
+              disabled={fork.isPending}
               onClick={() => (dirty ? setDiscardOpen(true) : discardChanges())}
             >
               放弃修改
@@ -959,7 +1099,11 @@ export function SkillVersionWorkbench({
             >
               取消
             </Button>
-            <Button type="button" onClick={commitPathDialog}>
+            <Button
+              type="button"
+              disabled={fork.isPending}
+              onClick={commitPathDialog}
+            >
               {pathDialog === "rename" ? "确认重命名" : "创建文件"}
             </Button>
           </DialogFooter>
@@ -1034,7 +1178,11 @@ export function SkillVersionWorkbench({
             >
               取消
             </Button>
-            <Button type="button" onClick={commitFolderDialog}>
+            <Button
+              type="button"
+              disabled={fork.isPending}
+              onClick={commitFolderDialog}
+            >
               创建文件夹
             </Button>
           </DialogFooter>
@@ -1060,7 +1208,12 @@ export function SkillVersionWorkbench({
             >
               取消
             </Button>
-            <Button type="button" variant="destructive" onClick={confirmDelete}>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={fork.isPending}
+              onClick={confirmDelete}
+            >
               删除文件
             </Button>
           </DialogFooter>
@@ -1086,6 +1239,7 @@ export function SkillVersionWorkbench({
             <Button
               type="button"
               variant="destructive"
+              disabled={fork.isPending}
               onClick={discardChanges}
             >
               放弃修改

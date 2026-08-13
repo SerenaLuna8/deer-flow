@@ -79,13 +79,21 @@ def _version(asset_id: uuid.UUID, version_id: uuid.UUID) -> AgentVersionRecord:
 
 
 @pytest.mark.asyncio
-async def test_update_capability_bindings_publishes_a_replacement_version(
+async def test_update_capability_bindings_creates_a_draft_replacement_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
     current_version_id = uuid.uuid4()
     asset = _asset(context, current_version_id)
     current = _version(asset.id, current_version_id)
+    latest_draft = _version(asset.id, uuid.uuid4())
+    latest_draft.row.workflow_status = "draft"
+    latest_draft.row.version_number = 2
+    latest_draft.row.supersedes_version_id = current_version_id
+    latest_draft.row.agents_instructions = "# AGENTS.md\n\nKeep this unpublished edit."
+    latest_draft.row.soul = "# SOUL.md\n\nDraft soul."
+    latest_draft.row.identity = "# IDENTITY.md\n\nDraft identity."
+    latest_draft.row.user_context = "# USER.md\n\nDraft context."
     selected_skills = (uuid.uuid4(), uuid.uuid4())
     selected_mcps = (uuid.uuid4(),)
     created: list[AgentVersionRecord] = []
@@ -112,6 +120,14 @@ async def test_update_capability_bindings_publishes_a_replacement_version(
             assert version_id == current_version_id
             return current
 
+        async def get_latest_project_version(
+            self,
+            _actor: object,
+            _asset_id: uuid.UUID,
+            **_kwargs,
+        ) -> AgentVersionRecord:
+            return latest_draft
+
         async def resolve_project_skill_versions(self, *_args) -> tuple[uuid.UUID, ...]:
             return selected_skills
 
@@ -123,7 +139,7 @@ async def test_update_capability_bindings_publishes_a_replacement_version(
             return ("first-skill", "second-skill")
 
         async def next_project_version_number(self, *_args) -> int:
-            return 2
+            return 3
 
         async def create_project_version(
             self,
@@ -182,18 +198,18 @@ async def test_update_capability_bindings_publishes_a_replacement_version(
         expected_asset_version=3,
     )
 
-    assert result.version_number == 2
-    assert result.workflow_status.value == "published"
+    assert result.version_number == 3
+    assert result.workflow_status.value == "draft"
     assert result.skill_version_ids == selected_skills
     assert result.mcp_version_ids == selected_mcps
-    assert result.agents_instructions == current.row.agents_instructions
-    assert result.soul == current.row.soul
-    assert result.identity == current.row.identity
-    assert result.user_context == current.row.user_context
+    assert result.agents_instructions == latest_draft.row.agents_instructions
+    assert result.soul == latest_draft.row.soul
+    assert result.identity == latest_draft.row.identity
+    assert result.user_context == latest_draft.row.user_context
     assert result.tool_groups == tuple(current.row.tool_groups)
     assert len(created) == 1
     assert created[0].row.supersedes_version_id == current_version_id
-    assert asset.current_published_version_id == created[0].row.id
+    assert asset.current_published_version_id == current_version_id
     assert asset.version == 4
     assert audit_actions == ["agent.capability_bindings.update"]
 
@@ -231,6 +247,13 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
         async def get_project_version(self, *_args, **_kwargs) -> AgentVersionRecord:
             return current
 
+        async def get_latest_project_version(
+            self,
+            *_args,
+            **_kwargs,
+        ) -> AgentVersionRecord:
+            return current
+
         async def resolve_project_skill_versions(self, *_args) -> tuple[uuid.UUID, ...]:
             return ()
 
@@ -250,7 +273,7 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
 
 
 @pytest.mark.asyncio
-async def test_restore_version_publishes_a_new_copy_without_rewriting_history(
+async def test_restore_version_creates_a_draft_copy_without_rewriting_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
@@ -349,12 +372,12 @@ async def test_restore_version_publishes_a_new_copy_without_rewriting_history(
     )
 
     assert restored.version_number == 5
-    assert restored.workflow_status.value == "published"
+    assert restored.workflow_status.value == "draft"
     assert restored.description == "历史版本"
     assert restored.skill_version_ids == target.skill_version_ids
     assert restored.mcp_version_ids == target.mcp_version_ids
     assert created[0].row.supersedes_version_id == current_version_id
     assert target.row.version_number == 2
     assert target.row.workflow_status == "published"
-    assert asset.current_published_version_id == created[0].row.id
+    assert asset.current_published_version_id == current_version_id
     assert asset.version == 8

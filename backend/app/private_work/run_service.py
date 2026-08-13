@@ -37,6 +37,7 @@ from deerflow.persistence.private_work.model import (
     RunMcpGrantSnapshotRow,
     RunSkillCredentialSnapshotRow,
 )
+from deerflow.persistence.shared_assets import SkillDesignOperationRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 TERMINAL_PRIVATE_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
@@ -144,6 +145,16 @@ class PrivateRunService:
             thread_id=thread_id,
             lock=lock,
         )
+        if thread is None:
+            # Hidden Builder threads are never returned by the chat directory,
+            # but their owner may consume the same durable Run/SSE substrate
+            # through a server-issued exact thread/run link.
+            thread = await PrivateThreadRepository(session).get(
+                scope=context.resource_scope,
+                thread_id=thread_id,
+                lock=lock,
+                thread_kind="skill_builder",
+            )
         if thread is None:
             raise PrivateWorkNotFound(context.request_id)
 
@@ -264,6 +275,18 @@ class PrivateRunService:
                     raise PrivateWorkNotFound(context.request_id)
                 if record.status not in TERMINAL_PRIVATE_RUN_STATUSES:
                     raise PrivateWorkConflict(context.request_id)
+                # Builder idempotency records outlive deletable Run telemetry.
+                # Clear only the scoped optional link; the durable operation
+                # outcome and result revision remain available for replay.
+                await session.execute(
+                    sa.update(SkillDesignOperationRow)
+                    .where(
+                        SkillDesignOperationRow.project_id == context.project_id,
+                        SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                        SkillDesignOperationRow.run_id == run_id,
+                    )
+                    .values(run_id=None)
+                )
                 await session.execute(
                     sa.delete(RunEventRow).where(
                         RunEventRow.project_id == context.project_id,

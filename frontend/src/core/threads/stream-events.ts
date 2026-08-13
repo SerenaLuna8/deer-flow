@@ -22,6 +22,7 @@ export function isRootStreamCallback(
 export function buildRootThreadStreamOptions() {
   return {
     streamResumable: true,
+    onDisconnect: "continue",
     config: { recursion_limit: 1000 },
   } as const;
 }

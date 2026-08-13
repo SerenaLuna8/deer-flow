@@ -8,6 +8,7 @@ import {
   Loader2Icon,
   SaveIcon,
   ShieldCheckIcon,
+  XIcon,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
@@ -67,6 +68,7 @@ export function SkillBuilderCandidateWorkbench({
   onValidate,
   onAcknowledgeWarningsChange,
   onCommit,
+  onClose,
 }: {
   files: SkillBuilderFile[];
   selectedPath: string | null;
@@ -91,6 +93,7 @@ export function SkillBuilderCandidateWorkbench({
   onValidate: () => void;
   onAcknowledgeWarningsChange: (value: boolean) => void;
   onCommit: () => void;
+  onClose?: () => void;
 }) {
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
     () => new Set(ancestorFolders(selectedPath)),
@@ -139,14 +142,27 @@ export function SkillBuilderCandidateWorkbench({
             {files.length} 个 UTF-8 文本文件
           </p>
         </div>
-        {readOnly ? (
-          <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
-            {pending ? (
-              <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
-            ) : null}
-            {pending ? "正在更新" : "只读"}
-          </span>
-        ) : null}
+        <div className="flex shrink-0 items-center gap-1">
+          {readOnly ? (
+            <span className="text-muted-foreground flex items-center gap-1.5 text-xs">
+              {pending ? (
+                <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
+              ) : null}
+              {pending ? "正在更新" : "只读"}
+            </span>
+          ) : null}
+          {onClose ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label="关闭候选文件包"
+              onClick={onClose}
+            >
+              <XIcon />
+            </Button>
+          ) : null}
+        </div>
       </div>
 
       <div className="grid min-h-0 flex-1 md:grid-cols-[15rem_minmax(0,1fr)]">

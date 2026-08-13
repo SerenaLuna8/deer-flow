@@ -48,6 +48,11 @@ import { isMcpRuntimeTransport } from "@/core/shared-assets/mcp-runtime";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
 type VersionedKind = Exclude<MutableKind, "agents">;
+export const CREATE_CREDENTIAL_TYPE_OPTIONS = [
+  "mcp_auth",
+  "skill_auth",
+  "model_api_key",
+] as const;
 export type VersionAuthoringInput =
   | SkillVersionInput
   | UpdateConfiguredMcpInput;
@@ -745,12 +750,13 @@ export function McpVersionFields({
   }, [authMode, fields, onDraftChange, transport, url]);
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
       <label className="grid gap-2 text-sm">
         {t.adminAssets.dialogs.description}
         <Textarea
           name="description"
-          rows={2}
+          rows={5}
+          className="min-h-32 resize-y lg:min-h-40"
           readOnly={configurationLocked}
           defaultValue={initialVersion?.definition.description ?? ""}
         />
@@ -931,7 +937,7 @@ export function McpCreateSafetyPreview({
   const fieldSummary = draft.fields.join(", ");
 
   return (
-    <aside className="bg-muted/20 border-border/70 space-y-7 border-t p-5 lg:border-t-0 lg:border-l lg:p-6">
+    <aside className="bg-muted/20 border-border/70 flex h-full min-h-full flex-col space-y-7 border-t p-5 lg:border-t-0 lg:border-l lg:p-6">
       <section className="space-y-3" aria-labelledby="mcp-safety-preview-title">
         <div className="flex items-center gap-2">
           <ShieldCheckIcon aria-hidden className="text-primary size-5" />
@@ -1290,7 +1296,7 @@ export function AddProjectMcpDialogContent({
       >
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(24rem,0.95fr)]">
-            <section className="space-y-4 p-5 sm:p-6">
+            <section className="space-y-5 p-5 sm:p-6 lg:space-y-6">
               <h3 className="font-semibold">
                 {t.adminAssets.dialogs.connectionAndAuthentication}
               </h3>
@@ -1399,7 +1405,7 @@ export function AddProjectMcpDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         closeLabel={t.adminOperations.ui.close}
-        className="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-3rem)] xl:max-w-[92rem]"
+        className="flex max-h-[calc(100dvh-2rem)] min-h-0 flex-col gap-0 overflow-hidden p-0 sm:max-w-[calc(100vw-3rem)] lg:h-[min(88dvh,56rem)] xl:max-w-[92rem]"
       >
         <AddProjectMcpDialogContent
           pending={pending}
@@ -1692,13 +1698,25 @@ export function CredentialSecretDialog({
               {fixedCredentialType ? null : (
                 <label className="grid gap-2 text-sm">
                   {t.adminAssets.common.type}
-                  <Input
+                  <select
                     name="credential_type"
                     required
-                    maxLength={32}
-                    pattern="[a-z][a-z0-9._-]{0,31}"
-                    placeholder="token"
-                  />
+                    defaultValue=""
+                    className="border-input bg-background h-10 w-full rounded-md border px-3 text-sm"
+                  >
+                    <option value="" disabled>
+                      {t.adminAssets.common.selectCredentialType}
+                    </option>
+                    {CREATE_CREDENTIAL_TYPE_OPTIONS.map((credentialType) => (
+                      <option key={credentialType} value={credentialType}>
+                        {credentialType === "mcp_auth"
+                          ? t.adminAssets.common.credentialTypes.mcpAuth
+                          : credentialType === "skill_auth"
+                            ? t.adminAssets.common.credentialTypes.skillAuth
+                            : t.adminAssets.common.credentialTypes.modelApiKey}
+                      </option>
+                    ))}
+                  </select>
                 </label>
               )}
             </>

@@ -71,6 +71,7 @@ import {
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
+  projectAgentRuntimeAssessmentsRoot,
   projectDefaultAgentKey,
   projectMcpEditableConfigurationKey,
   projectMcpToolInventoryKey,
@@ -115,7 +116,8 @@ import type {
 } from "./types";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-type VersionedAssetKind = Exclude<MutableAssetKind, "agents">;
+type PublishableVersionKind = MutableAssetKind;
+type AuthorableVersionKind = Exclude<PublishableVersionKind, "agents">;
 type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
 export const MCP_TOOL_INVENTORY_POLL_INTERVAL_MS = 2_000;
@@ -135,6 +137,64 @@ export function invalidateProjectAssetQueries(
   return queryClient.invalidateQueries({
     queryKey: projectAssetKey(accountId, projectId, kind),
   });
+}
+
+export function invalidateProjectAgentRuntimeAssessments(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+) {
+  return queryClient.invalidateQueries({
+    queryKey: projectAgentRuntimeAssessmentsRoot(accountId, projectId),
+  });
+}
+
+export function invalidateProjectSkillConflictQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: projectAssetKey(accountId, projectId, "skills"),
+      exact: true,
+    }),
+    queryClient.invalidateQueries({
+      queryKey: projectAssetVersionsKey(
+        accountId,
+        projectId,
+        "skills",
+        assetId,
+      ),
+      exact: true,
+    }),
+  ]);
+}
+
+export function projectAgentMutationQueryKeys(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return [
+    projectAssetKey(accountId, projectId, "agents"),
+    projectAssetVersionsKey(accountId, projectId, "agents", assetId),
+  ] as const;
+}
+
+function invalidateProjectAgentMutationQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId: string,
+) {
+  return Promise.all([
+    ...projectAgentMutationQueryKeys(accountId, projectId, assetId).map(
+      (queryKey) => queryClient.invalidateQueries({ queryKey, exact: true }),
+    ),
+    invalidateProjectAgentRuntimeAssessments(queryClient, accountId, projectId),
+  ]);
 }
 
 export function invalidateAdminAssetQueries(
@@ -167,6 +227,11 @@ function useProjectInvalidation(
   return () =>
     Promise.all([
       invalidateProjectAssetQueries(queryClient, accountId, projectId, kind),
+      invalidateProjectAgentRuntimeAssessments(
+        queryClient,
+        accountId,
+        projectId,
+      ),
       queryClient.invalidateQueries({
         queryKey: projectKeys.workspace(accountId),
       }),
@@ -180,7 +245,14 @@ function useProjectAssetListInvalidation(
 ) {
   const queryClient = useQueryClient();
   return () =>
-    invalidateProjectAssetQueries(queryClient, accountId, projectId, kind);
+    Promise.all([
+      invalidateProjectAssetQueries(queryClient, accountId, projectId, kind),
+      invalidateProjectAgentRuntimeAssessments(
+        queryClient,
+        accountId,
+        projectId,
+      ),
+    ]);
 }
 
 function useProjectMutationRunner(accountId: string, projectId: string) {
@@ -491,6 +563,11 @@ export function useUpdateProjectSkillCredentialBindings(
       ),
     onSuccess: whenActive((response: SkillCredentialBindingsResponse) => {
       queryClient.setQueryData(key, response);
+      return invalidateProjectAgentRuntimeAssessments(
+        queryClient,
+        accountId,
+        projectId,
+      );
     }),
   });
 }
@@ -652,7 +729,7 @@ function isMcpVersionInput(
 
 function createProjectVersionForKind(
   projectId: string,
-  kind: VersionedAssetKind,
+  kind: AuthorableVersionKind,
   assetId: string,
   input: VersionAuthoringInput,
   signal?: AbortSignal,
@@ -668,7 +745,7 @@ function createProjectVersionForKind(
 
 function createAdminProjectVersionForKind(
   projectId: string,
-  kind: VersionedAssetKind,
+  kind: AuthorableVersionKind,
   assetId: string,
   input: VersionAuthoringInput,
 ) {
@@ -684,7 +761,7 @@ function createAdminProjectVersionForKind(
 export function useCreateProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: VersionedAssetKind | null,
+  kind: AuthorableVersionKind | null,
 ) {
   const queryKind = kind ?? "agents";
   const invalidate = useProjectInvalidation(accountId, projectId, queryKind);
@@ -723,7 +800,7 @@ export function useUpdateProjectAgentInstructions(
   accountId: string,
   projectId: string,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const queryClient = useQueryClient();
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -745,7 +822,15 @@ export function useUpdateProjectAgentInstructions(
       runMutation((signal) =>
         updateProjectAgentInstructions(projectId, assetId, input, signal),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(
+      (_data, variables: { assetId: string; input: AgentInstructionsInput }) =>
+        invalidateProjectAgentMutationQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        ),
+    ),
   });
 }
 
@@ -753,7 +838,7 @@ export function useUpdateProjectAgentCapabilityBindings(
   accountId: string,
   projectId: string,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const queryClient = useQueryClient();
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -775,7 +860,18 @@ export function useUpdateProjectAgentCapabilityBindings(
       runMutation((signal) =>
         updateProjectAgentCapabilityBindings(projectId, assetId, input, signal),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(
+      (
+        _data,
+        variables: { assetId: string; input: AgentCapabilityBindingsInput },
+      ) =>
+        invalidateProjectAgentMutationQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        ),
+    ),
   });
 }
 
@@ -783,7 +879,7 @@ export function useRestoreProjectAgentVersion(
   accountId: string,
   projectId: string,
 ) {
-  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
+  const queryClient = useQueryClient();
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -813,14 +909,29 @@ export function useRestoreProjectAgentVersion(
           signal,
         ),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(
+      (
+        _data,
+        variables: {
+          assetId: string;
+          versionId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) =>
+        invalidateProjectAgentMutationQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        ),
+    ),
   });
 }
 
 export function useCreateAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: VersionedAssetKind | null,
+  kind: AuthorableVersionKind | null,
 ) {
   const queryKind = kind ?? "agents";
   const invalidate = useAdminProjectInvalidation(
@@ -1131,9 +1242,10 @@ export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
 export function usePublishProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: VersionedAssetKind | null,
+  kind: PublishableVersionKind,
 ) {
-  const queryKind = kind ?? "agents";
+  const queryClient = useQueryClient();
+  const queryKind = kind;
   const invalidate = useProjectInvalidation(accountId, projectId, queryKind);
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
@@ -1155,11 +1267,6 @@ export function usePublishProjectAssetVersion(
       versionId: string;
       input: ExpectedAssetVersionInput;
     }) => {
-      if (kind === null) {
-        return Promise.reject(
-          new TypeError("Agent revisions are managed internally"),
-        );
-      }
       return runMutation((signal) =>
         publishProjectAssetVersion(
           projectId,
@@ -1171,16 +1278,33 @@ export function usePublishProjectAssetVersion(
         ),
       );
     },
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(
+      (
+        _data,
+        variables: {
+          assetId: string;
+          versionId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) =>
+        kind === "agents"
+          ? invalidateProjectAgentMutationQueries(
+              queryClient,
+              accountId,
+              projectId,
+              variables.assetId,
+            )
+          : invalidate(),
+    ),
   });
 }
 
 export function usePublishAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: VersionedAssetKind | null,
+  kind: PublishableVersionKind,
 ) {
-  const queryKind = kind ?? "agents";
+  const queryKind = kind;
   const invalidate = useAdminProjectInvalidation(
     accountId,
     projectId,
@@ -1196,11 +1320,6 @@ export function usePublishAdminProjectAssetVersion(
       versionId: string;
       input: ExpectedAssetVersionInput;
     }) => {
-      if (kind === null) {
-        return Promise.reject(
-          new TypeError("Agent revisions are managed internally"),
-        );
-      }
       return publishAdminProjectAssetVersion(
         projectId,
         kind,

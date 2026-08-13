@@ -3,10 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   AdminSystemSettingsStateView,
+  formatSystemDefaultModelOption,
   isSystemSettingsSaveDisabled,
   MemoryDocumentSectionsEditor,
   moveMemoryDocumentSection,
-  SystemSettingsEffectBadge,
 } from "@/components/admin/settings/admin-system-settings-page";
 import type { SystemSettingsCatalog } from "@/core/admin-settings/system/types";
 import { I18nProvider } from "@/core/i18n/context";
@@ -31,6 +31,20 @@ function catalog(): SystemSettingsCatalog {
         effect_scope: "new_requests",
         updated_at: TIMESTAMP,
         value: { allow_registration: true },
+      },
+      automations: {
+        section: "automations",
+        revision: 1,
+        schema_version: 2,
+        effective_revision: 1,
+        effect_scope: "new_requests",
+        updated_at: TIMESTAMP,
+        value: {
+          enabled: true,
+          poll_interval_seconds: 5,
+          max_concurrent_runs: 3,
+          min_once_delay_seconds: 60,
+        },
       },
       quotas: {
         section: "quotas",
@@ -198,18 +212,38 @@ describe("admin Memory document settings", () => {
     );
 
     expect(html.match(/data-settings-destination="memory"/gu)).toHaveLength(1);
+    expect(html).toContain('data-settings-destination="automations"');
+    expect(html).toContain("bg-blue-50 text-blue-600");
+    expect(html).toContain("hover:bg-blue-50");
     expect(html).toContain('data-settings-save-footer="agent_runtime"');
     expect(html).toContain('data-settings-save-footer="memory_document"');
     expect(html).toContain(
       "仅影响新建文档；已有文档继续使用创建时冻结的章节结构",
     );
   });
+});
 
-  test("renders the translated new-document effect scope", () => {
-    const html = renderChinese(
-      <SystemSettingsEffectBadge scope="new_memory_documents" />,
+describe("formatSystemDefaultModelOption", () => {
+  test("keeps the fallback label when no default model is published", () => {
+    expect(formatSystemDefaultModelOption("使用系统默认模型", undefined)).toBe(
+      "使用系统默认模型",
     );
-    expect(html).toContain('data-effect-scope="new_memory_documents"');
-    expect(html).toContain("仅新建 Memory 文档");
+  });
+
+  test("names the current default model in the empty option", () => {
+    expect(
+      formatSystemDefaultModelOption(
+        "使用系统默认模型",
+        "DeepSeek Flash",
+        "zh-CN",
+      ),
+    ).toBe("使用系统默认模型（DeepSeek Flash）");
+    expect(
+      formatSystemDefaultModelOption(
+        "Use the system default model",
+        "DeepSeek Flash",
+        "en-US",
+      ),
+    ).toBe("Use the system default model (DeepSeek Flash)");
   });
 });

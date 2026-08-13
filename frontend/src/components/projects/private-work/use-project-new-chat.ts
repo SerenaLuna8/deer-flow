@@ -6,6 +6,7 @@ import { useCallback, useMemo, useState } from "react";
 import { toast } from "sonner";
 
 import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-mcp-dependency-runtime";
+import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { Project } from "@/core/projects/types";
 import {
@@ -17,11 +18,14 @@ import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 
 import {
   createProjectChatWithDefaultAgent,
+  projectDefaultAgentUnavailableMessage,
   resolveProjectDefaultAgent,
 } from "./agent-selector-dialog";
 import { projectNewChatErrorMessage } from "./project-new-chat-error";
 
 export function useProjectNewChat(project: Project) {
+  const { t } = useI18n();
+  const copy = t.agents.newChat;
   const router = useRouter();
   const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
@@ -63,21 +67,20 @@ export function useProjectNewChat(project: Project) {
   const startNewChat = useCallback(async () => {
     if (isCreating || isLoading) return;
     if (assets.error || defaultAgent.error) {
-      toast.error("无法加载项目默认 Agent，请稍后重试");
+      toast.error(copy.loadDefaultFailed);
       return;
     }
     if (resolution.status === "unavailable") {
-      toast.error(resolution.reason);
+      toast.error(
+        projectDefaultAgentUnavailableMessage(resolution.reason, copy),
+      );
       return;
     }
     if (
       resolution.source === "project" &&
       customAgentAssessment?.status !== "ready"
     ) {
-      toast.error(
-        customAgentAssessment?.reason ??
-          "无法验证项目默认 Agent 的运行依赖，请稍后重试。",
-      );
+      toast.error(customAgentAssessment?.reason ?? copy.dependencyFailed);
       return;
     }
 
@@ -86,6 +89,7 @@ export function useProjectNewChat(project: Project) {
       await createProjectChatWithDefaultAgent({
         scope: privateWork.scope,
         projectSlug: project.slug,
+        threadDisplayName: copy.threadName,
         invalidateThreadLists: () =>
           invalidateStoppedThreadCaches(
             queryClient,
@@ -100,7 +104,8 @@ export function useProjectNewChat(project: Project) {
         await projectNewChatErrorMessage(
           error,
           () => refetchDefaultAgent(),
-          "无法创建项目对话",
+          copy.createFailed,
+          copy.defaultAdmissionUnavailable,
         ),
       );
     } finally {
@@ -108,6 +113,7 @@ export function useProjectNewChat(project: Project) {
     }
   }, [
     assets.error,
+    copy,
     customAgentAssessment,
     defaultAgent.error,
     isCreating,
@@ -128,7 +134,7 @@ export function useProjectNewChat(project: Project) {
       resolution.status === "ready" ? resolution.agent.display_name : null,
     unavailableReason:
       resolution.status === "unavailable"
-        ? resolution.reason
+        ? projectDefaultAgentUnavailableMessage(resolution.reason, copy)
         : customAgentAssessment?.status === "blocked"
           ? customAgentAssessment.reason
           : null,

@@ -7,6 +7,7 @@ import {
   adminSystemSettingsAccountIdSchema,
   replaceAgentRuntimeSettingsInputSchema,
   replaceAuthSettingsInputSchema,
+  replaceAutomationsSettingsInputSchema,
   replaceMemoryDocumentSettingsInputSchema,
   replaceQuotaSettingsInputSchema,
   systemSettingsCatalogSchema,
@@ -14,6 +15,7 @@ import {
   systemSettingsSectionNameSchema,
   type ReplaceAgentRuntimeSettingsInput,
   type ReplaceAuthSettingsInput,
+  type ReplaceAutomationsSettingsInput,
   type ReplaceMemoryDocumentSettingsInput,
   type ReplaceQuotaSettingsInput,
   type SystemSettingsCatalog,
@@ -47,6 +49,10 @@ export type ReplaceSystemSettingsSectionInput =
       input: ReplaceAgentRuntimeSettingsInput;
     }
   | { section: "auth"; input: ReplaceAuthSettingsInput }
+  | {
+      section: "automations";
+      input: ReplaceAutomationsSettingsInput;
+    }
   | {
       section: "memory_document";
       input: ReplaceMemoryDocumentSettingsInput;
@@ -142,6 +148,7 @@ function parseReplaceInput(
 ):
   | ReplaceAgentRuntimeSettingsInput
   | ReplaceAuthSettingsInput
+  | ReplaceAutomationsSettingsInput
   | ReplaceMemoryDocumentSettingsInput
   | ReplaceQuotaSettingsInput {
   switch (section) {
@@ -149,6 +156,8 @@ function parseReplaceInput(
       return replaceAgentRuntimeSettingsInputSchema.parse(input);
     case "auth":
       return replaceAuthSettingsInputSchema.parse(input);
+    case "automations":
+      return replaceAutomationsSettingsInputSchema.parse(input);
     case "memory_document":
       return replaceMemoryDocumentSettingsInputSchema.parse(input);
     case "quotas":
@@ -170,6 +179,12 @@ export async function replaceAdminSystemSettingsSection(
 ): Promise<SystemSettingsMutationResponse>;
 export async function replaceAdminSystemSettingsSection(
   accountId: string,
+  section: "automations",
+  input: ReplaceAutomationsSettingsInput,
+  signal?: AbortSignal,
+): Promise<SystemSettingsMutationResponse>;
+export async function replaceAdminSystemSettingsSection(
+  accountId: string,
   section: "memory_document",
   input: ReplaceMemoryDocumentSettingsInput,
   signal?: AbortSignal,
@@ -186,6 +201,7 @@ export async function replaceAdminSystemSettingsSection(
   input:
     | ReplaceAgentRuntimeSettingsInput
     | ReplaceAuthSettingsInput
+    | ReplaceAutomationsSettingsInput
     | ReplaceMemoryDocumentSettingsInput
     | ReplaceQuotaSettingsInput,
   signal?: AbortSignal,

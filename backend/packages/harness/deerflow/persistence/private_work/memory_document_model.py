@@ -371,6 +371,141 @@ class MemoryDreamRunRow(Base):
     )
 
 
+class MemoryDreamPrepareRunRow(Base):
+    """Durable, resumable drain that precedes one thread-scoped Dream."""
+
+    __tablename__ = "memory_dream_prepare_runs"
+
+    job_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    namespace: Mapped[str] = mapped_column(String(255), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    request_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    phase: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="queued",
+        server_default=text("'queued'"),
+    )
+    compacted_passes: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    last_checkpoint_id: Mapped[str | None] = mapped_column(String(128))
+    dream_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    history_count: Mapped[int | None] = mapped_column(Integer)
+    admission_kind: Mapped[str | None] = mapped_column(String(16))
+    result_disposition: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="queued",
+        server_default=text("'queued'"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (
+        *_scope_constraints("memory_dream_prepare_runs"),
+        UniqueConstraint(
+            "job_id",
+            "project_id",
+            "owner_user_id",
+            "namespace",
+            name="uq_memory_dream_prepare_runs_job_scope",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "operation_id",
+            name="uq_memory_dream_prepare_runs_operation",
+        ),
+        ForeignKeyConstraint(
+            ["job_id", "project_id", "owner_user_id", "namespace"],
+            ["jobs.id", "jobs.project_id", "jobs.owner_user_id", "jobs.namespace"],
+            name="fk_memory_dream_prepare_runs_job",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            [
+                "threads_meta.project_id",
+                "threads_meta.owner_user_id",
+                "threads_meta.thread_id",
+            ],
+            name="fk_memory_dream_prepare_runs_thread",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["dream_job_id", "project_id", "owner_user_id", "namespace"],
+            [
+                "memory_dream_runs.job_id",
+                "memory_dream_runs.project_id",
+                "memory_dream_runs.owner_user_id",
+                "memory_dream_runs.namespace",
+            ],
+            name="fk_memory_dream_prepare_runs_dream",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint("namespace <> ''", name="ck_memory_dream_prepare_runs_namespace"),
+        CheckConstraint("request_id <> ''", name="ck_memory_dream_prepare_runs_request"),
+        CheckConstraint(
+            "phase IN ('queued', 'draining', 'verifying', 'dream_admitted', 'succeeded', 'cancelled', 'failed')",
+            name="ck_memory_dream_prepare_runs_phase",
+        ),
+        CheckConstraint(
+            "result_disposition IN ('queued', 'already_running', 'nothing_pending', 'cancelled', 'failed')",
+            name="ck_memory_dream_prepare_runs_disposition",
+        ),
+        CheckConstraint(
+            "compacted_passes >= 0",
+            name="ck_memory_dream_prepare_runs_passes",
+        ),
+        CheckConstraint(
+            "(phase IN ('succeeded', 'cancelled', 'failed')) = (completed_at IS NOT NULL)",
+            name="ck_memory_dream_prepare_runs_terminal",
+        ),
+        CheckConstraint(
+            "(dream_job_id IS NULL AND admission_kind IS NULL AND (history_count IS NULL OR (result_disposition = 'nothing_pending' AND history_count = 0))) OR "
+            "(dream_job_id IS NOT NULL AND history_count BETWEEN 0 AND 20 AND admission_kind IN ('history', 'budget_rewrite'))",
+            name="ck_memory_dream_prepare_runs_child",
+        ),
+        CheckConstraint(
+            "(admission_kind = 'budget_rewrite') = (dream_job_id IS NOT NULL AND history_count = 0)",
+            name="ck_memory_dream_prepare_runs_admission_kind",
+        ),
+        Index(
+            "uq_memory_dream_prepare_runs_active_thread",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            unique=True,
+            postgresql_where=text("completed_at IS NULL"),
+        ),
+        Index(
+            "ix_memory_dream_prepare_runs_scope_updated",
+            "project_id",
+            "owner_user_id",
+            text("updated_at DESC"),
+            text("job_id DESC"),
+        ),
+    )
+
+
 class MemoryDocumentVersionRow(Base):
     __tablename__ = "memory_document_versions"
 
@@ -598,6 +733,7 @@ class RunMemoryContextSnapshotRow(Base):
 __all__ = [
     "MemoryDocumentRow",
     "MemoryDocumentVersionRow",
+    "MemoryDreamPrepareRunRow",
     "MemoryDreamRunRow",
     "MemoryEpisodeRow",
     "MemoryHistoryEntryRow",

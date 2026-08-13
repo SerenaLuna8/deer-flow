@@ -5,7 +5,7 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db upgrade-db check-db prune-run-events reconcile-usage rotate-credentials import-project-skills \
+	setup-db upgrade-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage rotate-credentials import-project-skills \
 	test \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
@@ -59,6 +59,8 @@ help:
 	@echo "  make setup-db                         空库安装当前 head 并初始化"
 	@echo "  make upgrade-db                       显式升级存量库到迁移链头（先备份）"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
+	@echo "  make upgrade-system-assets            在维护窗口应用新增 System Asset release"
+	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"
 	@echo "  make prune-run-events ARGS=...        预览/执行 run_events 全局月分区保留"
 	@echo "  make reconcile-usage ARGS=...         校准配额用量"
 	@echo "  make rotate-credentials ARGS=...      轮换 Credential envelope"
@@ -108,6 +110,12 @@ import-project-skills:
 
 check-db:
 	@$(MAKE) -C backend check-db
+
+upgrade-system-assets:
+	@$(MAKE) -C backend upgrade-system-assets ARGS="$(ARGS)"
+
+prepare-run-event-partitions:
+	@$(MAKE) -C backend prepare-run-event-partitions
 
 prune-run-events:
 	@$(MAKE) -C backend prune-run-events ARGS="$(ARGS)"

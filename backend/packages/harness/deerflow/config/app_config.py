@@ -31,7 +31,6 @@ from deerflow.config.read_before_write_config import ReadBeforeWriteConfig
 from deerflow.config.reload_boundary import format_field_description
 from deerflow.config.safety_finish_reason_config import SafetyFinishReasonConfig
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
@@ -81,7 +80,7 @@ LEGACY_CONFIG_PATH_TOMBSTONES = frozenset(
     }
 )
 
-YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models"})
+YAML_CONFIG_TOMBSTONES = frozenset({"memory_document", "models", "scheduler"})
 
 DATABASE_RUNTIME_POLICY_PATHS = frozenset(
     {
@@ -292,13 +291,6 @@ class AppConfig(BaseModel):
         description=format_field_description(
             "database",
             field_doc="PostgreSQL connection shared by LangGraph persistence and ActWeave application data.",
-        ),
-    )
-    scheduler: SchedulerConfig = Field(
-        default_factory=SchedulerConfig,
-        description=format_field_description(
-            "scheduler",
-            field_doc="Scheduled task runtime configuration (background poller for one-time and cron agent runs).",
         ),
     )
     worker: WorkerConfig = Field(

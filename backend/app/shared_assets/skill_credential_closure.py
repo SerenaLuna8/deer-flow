@@ -129,6 +129,7 @@ async def lock_skill_credential_closures(
                     SkillVersionRow.id == version_id,
                     SkillVersionRow.skill_id == target.skill_id,
                     SkillVersionRow.workflow_status == "published",
+                    SkillVersionRow.revoked_at.is_(None),
                 )
                 .with_for_update(read=True, of=SkillVersionRow)
             )

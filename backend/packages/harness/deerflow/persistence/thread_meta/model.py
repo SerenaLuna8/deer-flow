@@ -34,6 +34,12 @@ class ThreadMetaRow(Base):
     memory_sealed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     checkpoint_delete_status: Mapped[str] = mapped_column(String(24), nullable=False, default="not_requested", server_default="not_requested")
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
+    thread_kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="chat",
+        server_default="chat",
+    )
 
     __table_args__ = (
         UniqueConstraint("project_id", "owner_user_id", "thread_id", name="uq_threads_meta_private_scope"),
@@ -52,6 +58,10 @@ class ThreadMetaRow(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint("agent_scope IN ('system', 'project')", name="ck_threads_meta_agent_scope"),
+        CheckConstraint(
+            "thread_kind IN ('chat', 'skill_builder')",
+            name="ck_threads_meta_kind",
+        ),
         CheckConstraint(
             "checkpoint_delete_status IN ('not_requested', 'pending', 'complete', 'retry_required')",
             name="ck_threads_meta_checkpoint_delete_status",

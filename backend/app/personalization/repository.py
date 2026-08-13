@@ -10,7 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryDocumentConflict,
     MemoryDocumentRepository,
+    MemoryResetSettledDream,
 )
 from deerflow.persistence.user.model import UserRow
 
@@ -37,8 +39,12 @@ class AccountMemoryResetCounts:
     documents: int
     versions: int
     dream_runs: int
+    prepare_runs: int
     snapshots: int
+    episodes: int
     jobs_cancelled: int
+    affected_project_ids: tuple[uuid.UUID, ...]
+    settled_dreams: tuple[MemoryResetSettledDream, ...]
 
 
 class AccountPersonalizationRepository:
@@ -94,14 +100,20 @@ class AccountPersonalizationRepository:
         expected_version: int,
         now: datetime,
     ) -> AccountMemoryResetCounts:
+        memory = MemoryDocumentRepository(self.session)
+        authority_project_ids = await memory.lock_owner_projects(str(user_id))
         current = await self.read_memory(user_id, for_update=True)
         if current.version != expected_version:
             raise AccountPersonalizationConflict
         owner_user_id = str(user_id)
-        reset = await MemoryDocumentRepository(self.session).reset_owner(
-            owner_user_id,
-            now=now,
-        )
+        try:
+            reset = await memory.reset_owner(
+                owner_user_id,
+                now=now,
+                authority_project_ids=authority_project_ids,
+            )
+        except MemoryDocumentConflict:
+            raise AccountPersonalizationConflict from None
         row = await self.session.scalar(select(UserRow).where(UserRow.id == owner_user_id).with_for_update(of=UserRow))
         if row is None:
             raise AccountPersonalizationNotFound
@@ -114,8 +126,12 @@ class AccountPersonalizationRepository:
             documents=reset.documents,
             versions=reset.versions,
             dream_runs=reset.dream_runs,
+            prepare_runs=reset.prepare_runs,
             snapshots=reset.snapshots,
+            episodes=reset.episodes,
             jobs_cancelled=reset.jobs_cancelled,
+            affected_project_ids=reset.affected_project_ids,
+            settled_dreams=reset.settled_dreams,
         )
 
 

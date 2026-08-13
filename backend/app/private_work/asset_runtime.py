@@ -43,6 +43,7 @@ from app.private_work.run_repository import PrivateRunRepository
 from app.private_work.snapshot_repository import RunSnapshotAssetStale, RunSnapshotRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum_matches
 from app.shared_assets.crypto import (
     CredentialDecryptFailed,
     EncryptedEnvelope,
@@ -820,6 +821,8 @@ def _private_agent_manifest(
 ) -> PrivateAgentManifest:
     """Build the secret-free runtime manifest from one exact snapshot."""
 
+    if not agent_payload_checksum_matches(agent.payload, agent.checksum):
+        raise RunSnapshotAssetStale
     return PrivateAgentManifest(
         agent_asset_id=agent.asset_id,
         agent_version_id=agent.version_id,
@@ -2361,6 +2364,7 @@ class PrivateAssetRuntime:
         *,
         authorization_boundary: object | None = None,
         delegate_model_names: Mapping[uuid.UUID, str] | None = None,
+        runtime_kind: Literal["chat", "skill_builder"] = "chat",
     ) -> PrivateAgentRuntime:
         context = require_issued_private_work_context(context)
         if type(admitted) is not AdmittedPrivateRun:
@@ -2386,11 +2390,21 @@ class PrivateAssetRuntime:
         agent_identities: tuple[_AgentRuntimeIdentity, ...]
         try:
             async with self._session_factory() as session, session.begin():
+                required_capabilities = (
+                    (
+                        Capability.SHARED_ASSETS_READ,
+                        Capability.SHARED_ASSETS_EDIT,
+                    )
+                    if runtime_kind == "skill_builder"
+                    else (
+                        Capability.PRIVATE_WORK_CREATE,
+                        Capability.SHARED_ASSETS_EXECUTE,
+                    )
+                )
                 current = await self._revalidator.require(
                     session,
                     context,
-                    Capability.PRIVATE_WORK_CREATE,
-                    Capability.SHARED_ASSETS_EXECUTE,
+                    *required_capabilities,
                     lock=True,
                 )
                 run = await PrivateRunRepository(session).get(
@@ -2438,10 +2452,23 @@ class PrivateAssetRuntime:
                         kind = AssetKind(asset.asset_kind)
                     except ValueError:
                         raise RunSnapshotAssetStale from None
-                    snapshot = await self._resolver.resolve_run_asset_snapshot_in_session(
-                        session,
-                        current,
-                        AssetSelection(kind, asset.asset_id, asset.version_id),
+                    selection = AssetSelection(
+                        kind,
+                        asset.asset_id,
+                        asset.version_id,
+                    )
+                    snapshot = (
+                        await self._resolver.resolve_internal_skill_builder_snapshot_in_session(
+                            session,
+                            current,
+                            selection,
+                        )
+                        if runtime_kind == "skill_builder"
+                        else await self._resolver.resolve_run_asset_snapshot_in_session(
+                            session,
+                            current,
+                            selection,
+                        )
                     )
                     if snapshot.kind is not kind or snapshot.scope.value != asset.asset_scope or snapshot.asset_id != asset.asset_id or snapshot.version_id != asset.version_id or snapshot.checksum != asset.payload_checksum:
                         raise RunSnapshotAssetStale

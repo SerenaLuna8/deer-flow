@@ -4,23 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import uuid
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Literal, TypedDict
 
-MAX_SNIP_OUTPUT_CHARS = 1000
+from deerflow.memory_contract.history import (
+    MAX_SNIP_OUTPUT_CHARS,
+    SNIP_NOTHING,
+    SnipOutputInvalid,
+    compute_snip_content_digest,
+    normalize_snip_output,
+    validate_snip_line,
+    validate_snip_output,
+)
+
 MAX_CONTINUITY_CHARS = 2000
 SNIP_ARCHIVE_PROMPT_VERSION = "snip-archive-prompt-v2"
-SNIP_NOTHING = "(nothing)"
 MEMORY_ARCHIVE_CONTEXT_KEY = "__memory_archive_context"
 MEMORY_ARCHIVE_RECEIPT_KEY = "memory_archive_receipt"
 MEMORY_ARCHIVE_RECEIPT_VERSION = "memory-archive-receipt-v1"
 
 _SOURCE_DIGEST_DOMAIN = "deerflow.snip.source.v1"
-_VALID_SNIP_LINE = re.compile(r"^- \[(?:permanent|durable|ephemeral|correction|skip)\] \S(?:.*\S)?$")
 _CONTINUITY_OPEN = "<continuity>"
 _CONTINUITY_CLOSE = "</continuity>"
 
@@ -44,10 +50,6 @@ def _load_prompt() -> str:
 
 
 SNIP_ARCHIVE_PROMPT = _load_prompt()
-
-
-class SnipOutputInvalid(ValueError):
-    """Raised when a model response does not satisfy the fixed SNIP contract."""
 
 
 class MemoryArchiveReceipt(TypedDict):
@@ -114,31 +116,6 @@ class SnipArchiveContext:
         object.__setattr__(self, "summary_model_ref", summary_model_ref)
 
 
-def normalize_snip_output(raw: str) -> str:
-    """Apply the only permitted SNIP output normalization.
-
-    Newlines are converted to LF and whitespace surrounding the complete output
-    is removed. Individual lines and fact ordering are otherwise untouched.
-    """
-
-    if not isinstance(raw, str):
-        raise SnipOutputInvalid("SNIP output must be text")
-    return raw.replace("\r\n", "\n").replace("\r", "\n").strip()
-
-
-def validate_snip_output(raw: str) -> str:
-    """Return the normalized SNIP text or fail closed on any contract drift."""
-
-    normalized = normalize_snip_output(raw)
-    if not normalized or len(normalized) > MAX_SNIP_OUTPUT_CHARS:
-        raise SnipOutputInvalid("SNIP output is empty or over the character limit")
-    if normalized == SNIP_NOTHING:
-        return normalized
-    if any(line and _VALID_SNIP_LINE.fullmatch(line) is None for line in normalized.split("\n")):
-        raise SnipOutputInvalid("SNIP output has an invalid line")
-    return normalized
-
-
 def parse_snip_dual_output(raw: str) -> tuple[str, str]:
     """Split one dual-segment SNIP response into ``(continuity, tagged_text)``.
 
@@ -164,16 +141,6 @@ def parse_snip_dual_output(raw: str) -> tuple[str, str]:
     if _CONTINUITY_OPEN in continuity or _CONTINUITY_OPEN in remainder or _CONTINUITY_CLOSE in remainder:
         raise SnipOutputInvalid("SNIP output has more than one continuity segment")
     return continuity, validate_snip_output(remainder)
-
-
-def validate_snip_line(line: str) -> str:
-    """Validate exactly one tagged fact line against the SNIP line grammar."""
-
-    if not isinstance(line, str) or len(line) > MAX_SNIP_OUTPUT_CHARS:
-        raise SnipOutputInvalid("SNIP line is not bounded text")
-    if _VALID_SNIP_LINE.fullmatch(line) is None:
-        raise SnipOutputInvalid("SNIP line grammar is invalid")
-    return line
 
 
 def _message_identity(message: object) -> dict[str, Any]:
@@ -238,13 +205,6 @@ def compute_snip_source_digest(
     except (TypeError, ValueError):
         raise ValueError("SNIP source content is not canonical JSON") from None
     return hashlib.sha256(canonical).hexdigest()
-
-
-def compute_snip_content_digest(tagged_text: str) -> str:
-    """Return the identity retained after a history entry becomes a tombstone."""
-
-    normalized = validate_snip_output(tagged_text)
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def build_memory_archive_receipt(

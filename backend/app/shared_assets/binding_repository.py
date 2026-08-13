@@ -15,6 +15,9 @@ from app.shared_assets.credential_closure import (
     lock_mcp_credential_closures,
 )
 from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetValidationFailed
+from app.shared_assets.internal_assets import (
+    BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+)
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
 from app.shared_assets.skill_credential_closure import (
     SkillCredentialClosureInvalid,
@@ -203,6 +206,10 @@ class BindingRepository:
         asset = (await self.session.execute(asset_statement)).scalar_one_or_none()
         if asset is None:
             raise AssetNotFound(context.request_id)
+        if selection.kind is AssetKind.AGENT and isinstance(asset, AgentRow) and asset.source_key == BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY:
+            # The Builder is a server implementation detail. Knowing its UUID
+            # must not turn it into a project-bindable System Agent.
+            raise AssetNotFound(context.request_id)
         if asset.status == "suspended" or (asset.status == "archived" and not allow_archived):
             raise AssetValidationFailed(context.request_id)
         version_statement = (
@@ -214,6 +221,10 @@ class BindingRepository:
             )
             .with_for_update(read=read, of=version_type)
         )
+        if selection.kind is AssetKind.SKILL:
+            version_statement = version_statement.where(
+                SkillVersionRow.revoked_at.is_(None),
+            )
         version = (await self.session.execute(version_statement)).scalar_one_or_none()
         if version is None:
             raise AssetValidationFailed(context.request_id)
@@ -267,6 +278,7 @@ class BindingRepository:
         version_id: uuid.UUID,
         *,
         read: bool = False,
+        allow_revoked: bool = False,
     ):
         self._require_actor(context)
         _asset_type, version_type, parent_column = _TARGET_TYPES[kind]
@@ -279,6 +291,8 @@ class BindingRepository:
             )
             .with_for_update(read=read, of=version_type)
         )
+        if kind is AssetKind.SKILL and not allow_revoked:
+            statement = statement.where(SkillVersionRow.revoked_at.is_(None))
         version = (await self.session.execute(statement)).scalar_one_or_none()
         if version is None:
             raise AssetNotFound(context.request_id)
@@ -420,6 +434,8 @@ class BindingRepository:
                     .with_for_update(read=True, of=version_type)
                 )
             ).scalar_one_or_none()
+            if kind is AssetKind.SKILL and version is not None and version.revoked_at is not None:
+                return False
             if version is None:
                 return False
         return True

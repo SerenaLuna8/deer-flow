@@ -100,6 +100,9 @@ class SkillVersionRow(Base):
     review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
+    revocation_reason_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         CheckConstraint("version_number >= 1", name="ck_skill_versions_number"),
@@ -109,6 +112,14 @@ class SkillVersionRow(Base):
         ),
         CheckConstraint("scan_decision IN ('allow', 'warn', 'block')", name="ck_skill_versions_scan_decision"),
         CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_skill_versions_checksum"),
+        CheckConstraint(
+            "(revoked_at IS NULL) = (revoked_by_user_id IS NULL) AND (revoked_at IS NULL) = (revocation_reason_code IS NULL)",
+            name="ck_skill_versions_revocation",
+        ),
+        CheckConstraint(
+            "revocation_reason_code IS NULL OR revocation_reason_code IN ('security', 'policy', 'integrity')",
+            name="ck_skill_versions_revocation_reason",
+        ),
         UniqueConstraint("skill_id", "version_number", name="uq_skill_versions_asset_number"),
         UniqueConstraint("skill_id", "id", name="uq_skill_versions_asset_id"),
     )

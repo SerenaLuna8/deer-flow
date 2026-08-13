@@ -49,17 +49,21 @@ function json(route: Route, body: unknown, status = 200) {
 
 async function mockProjectMemoryRoute(
   page: Page,
-  options: { budgetRewrite?: boolean } = {},
+  options: { capabilities?: Capability[] } = {},
 ) {
-  const budgetRewrite = options.budgetRewrite ?? false;
+  const routedProject = {
+    ...project,
+    capabilities: options.capabilities ?? project.capabilities,
+  };
+  const memoryRequests: string[] = [];
   let document = {
     content:
       "# Working preferences\n\nPrefers executable implementation plans.",
     version: 3,
     updatedAt: TIMESTAMP,
-    pendingCount: budgetRewrite ? 0 : 2,
+    pendingCount: 2,
     dreamRunning: false,
-    injectionStatus: budgetRewrite ? "skipped_over_budget" : "ok",
+    injectionStatus: "ok",
   };
   const details = new Map<
     number,
@@ -72,6 +76,7 @@ async function mockProjectMemoryRoute(
       createdAt: string;
       content: string;
       unifiedDiff: string;
+      diffTruncated: boolean;
     }
   >([
     [
@@ -86,6 +91,7 @@ async function mockProjectMemoryRoute(
         content: document.content,
         unifiedDiff:
           "@@ -1,1 +1,3 @@\n+# Working preferences\n+\n+Prefers executable implementation plans.",
+        diffTruncated: true,
       },
     ],
     [
@@ -99,6 +105,7 @@ async function mockProjectMemoryRoute(
         createdAt: "2026-08-04T00:00:00Z",
         content: "# Working preferences",
         unifiedDiff: "",
+        diffTruncated: false,
       },
     ],
   ]);
@@ -124,16 +131,19 @@ async function mockProjectMemoryRoute(
       });
     }
     if (path === "/api/projects" && request.method() === "GET") {
-      return json(route, { items: [project], next_cursor: null });
+      return json(route, { items: [routedProject], next_cursor: null });
     }
     if (
       path === `/api/projects/${PROJECT_ID}/enter` &&
       request.method() === "POST"
     ) {
-      return json(route, project);
+      return json(route, routedProject);
     }
 
     const memoryBase = `/api/projects/${PROJECT_ID}/memory`;
+    if (path === memoryBase || path.startsWith(`${memoryBase}/`)) {
+      memoryRequests.push(path);
+    }
     if (path === memoryBase && request.method() === "GET") {
       return json(route, document);
     }
@@ -150,15 +160,19 @@ async function mockProjectMemoryRoute(
       });
     }
     if (path === `${memoryBase}/episodes` && request.method() === "GET") {
-      return json(route, { items: [] });
+      return json(route, { items: [], nextCursor: null });
     }
     if (path === `${memoryBase}/versions` && request.method() === "GET") {
       return json(route, {
         items: [...details.values()]
           .sort((left, right) => right.version - left.version)
           .map(
-            ({ content: _content, unifiedDiff: _unifiedDiff, ...summary }) =>
-              summary,
+            ({
+              content: _content,
+              unifiedDiff: _unifiedDiff,
+              diffTruncated: _diffTruncated,
+              ...summary
+            }) => summary,
           ),
       });
     }
@@ -195,6 +209,7 @@ async function mockProjectMemoryRoute(
         content: source.content,
         unifiedDiff:
           "@@ -1,3 +1,1 @@\n # Working preferences\n-\n-Prefers executable implementation plans.",
+        diffTruncated: false,
       } as const;
       details.set(4, restored);
       document = {
@@ -205,36 +220,6 @@ async function mockProjectMemoryRoute(
       return json(route, restored);
     }
     if (path === `${memoryBase}/dream` && request.method() === "POST") {
-      if (budgetRewrite) {
-        const compressed = {
-          version: 5,
-          trigger: "budget_rewrite",
-          historyCount: 0,
-          changed: true,
-          needsReview: false,
-          createdAt: TIMESTAMP,
-          content: "# Working preferences\n\nExecutable plans.",
-          unifiedDiff:
-            "@@ -1,3 +1,3 @@\n # Working preferences\n \n-Prefers executable implementation plans.\n+Executable plans.",
-        } as const;
-        details.set(5, compressed);
-        document = {
-          ...document,
-          content: compressed.content,
-          version: compressed.version,
-          injectionStatus: "ok",
-        };
-        return json(
-          route,
-          {
-            disposition: "queued",
-            historyCount: 0,
-            jobId: JOB_ID,
-            admissionKind: "budget_rewrite",
-          },
-          202,
-        );
-      }
       const organized = {
         version: 5,
         trigger: "manual_dream",
@@ -245,6 +230,7 @@ async function mockProjectMemoryRoute(
         content: `${document.content}\n\nPrefers explicit acceptance checks.`,
         unifiedDiff:
           "@@ -1 +1,3 @@\n # Working preferences\n+\n+Prefers explicit acceptance checks.",
+        diffTruncated: false,
       } as const;
       details.set(5, organized);
       document = {
@@ -261,12 +247,13 @@ async function mockProjectMemoryRoute(
     }
     return json(route, { detail: "not found" }, 404);
   });
+  return { memoryRequests };
 }
 
 test("the Memory document page organizes, diffs and restores versions", async ({
   page,
 }) => {
-  await mockProjectMemoryRoute(page);
+  const { memoryRequests } = await mockProjectMemoryRoute(page);
 
   await page.goto("/projects/alpha/memory");
 
@@ -283,12 +270,26 @@ test("the Memory document page organizes, diffs and restores versions", async ({
   await expect(
     page.getByRole("button", { name: "Organize now" }),
   ).toBeEnabled();
+  expect(
+    memoryRequests.filter(
+      (path) => path === `/api/projects/${PROJECT_ID}/memory/versions`,
+    ),
+  ).toHaveLength(1);
 
   await expect(page.getByText("Latest version needs review")).toBeVisible();
   await page.getByText("Version history", { exact: true }).click();
   await page.getByRole("button", { name: /Version 3/u }).click();
   await expect(
     page.getByRole("heading", { name: "Document change" }),
+  ).toBeVisible();
+  await expect(page.getByText("Document change is truncated")).toBeVisible();
+  await expect(
+    page.getByText(
+      "Up to the first 64,000 characters are shown on complete line boundaries",
+      {
+        exact: false,
+      },
+    ),
   ).toBeVisible();
   await expect(
     page.getByText("+Prefers executable implementation plans."),
@@ -312,39 +313,23 @@ test("the Memory document page organizes, diffs and restores versions", async ({
   ).toBeVisible();
 });
 
-test("the remember link target focuses the pending memory section", async ({
+test("a direct Memory URL shows 403 without mounting Memory queries", async ({
   page,
 }) => {
-  await mockProjectMemoryRoute(page);
-
-  await page.goto("/projects/alpha/memory#memory-pending");
-
-  const pending = page.locator("#memory-pending");
-  await expect(pending).toBeVisible();
-  await expect(pending).toBeFocused();
-  await expect(
-    pending.getByText("Deployment target is region-eu"),
-  ).toBeVisible();
-});
-
-test("an over-budget document can start a zero-history rescue rewrite", async ({
-  page,
-}) => {
-  await mockProjectMemoryRoute(page, { budgetRewrite: true });
+  const { memoryRequests } = await mockProjectMemoryRoute(page, {
+    capabilities: ["project.read", "project.enter"],
+  });
 
   await page.goto("/projects/alpha/memory");
 
+  const denied = page.locator('[data-error-status="403"]');
+  await expect(denied).toHaveAttribute("role", "alert");
   await expect(
-    page.getByText("Memory document exceeds the injection budget"),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Compress document now" }).click();
-  await expect(
-    page.getByText(
-      "Started compressing the Memory document into the current injection budget.",
-    ),
+    page.getByRole("heading", { name: "没有访问权限" }),
   ).toBeVisible();
   await expect(
-    page.getByText("Memory document exceeds the injection budget"),
-  ).toHaveCount(0);
-  await expect(page.getByText("Executable plans.")).toBeVisible();
+    page.getByText("无权访问项目记忆", { exact: false }),
+  ).toBeVisible();
+  await expect(page.getByText("No historical versions yet.")).toHaveCount(0);
+  expect(memoryRequests).toEqual([]);
 });

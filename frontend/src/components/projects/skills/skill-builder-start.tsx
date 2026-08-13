@@ -24,6 +24,12 @@ export function skillBuilderErrorMessage(error: unknown): string {
   if (!(error instanceof SkillBuilderApiError)) {
     return "Skill 设计服务暂时不可用，请稍后重试。";
   }
+  if (error.serverCode === "SKILL_BUILDER_MODEL_UNAVAILABLE") {
+    return "所选模型当前不可用，请重新选择模型。";
+  }
+  if (error.serverCode === "SKILL_BUILDER_EFFORT_UNSUPPORTED") {
+    return "所选模型不支持扩展思考，请调整思考强度。";
+  }
   if (error.code === "SKILL_BUILDER_CONFLICT") {
     return "当前项目中已存在同名 Skill，请换一个名字。";
   }

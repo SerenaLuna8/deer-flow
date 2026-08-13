@@ -228,6 +228,17 @@ export const enUS: Translations = {
     dreamAttachmentsUnsupported: "Memory commands cannot include attachments.",
     dreamFailed: "Failed to organize Memory.",
     dreamRequiresThread: "/Dream requires an existing chat.",
+    dreamPreparationStarted: "Dream preparation started in the background.",
+    dreamPreparationQueued: "Dream preparation is queued.",
+    dreamPreparationRunning: "Archiving earlier chat turns for Dream…",
+    dreamPreparationVerifying:
+      "Verifying the archived chat and starting Dream…",
+    dreamPreparationCompleted: "Dream preparation completed.",
+    dreamPreparationCancelled: "Dream preparation was cancelled.",
+    dreamPreparationFailed: "Dream preparation failed.",
+    dreamPreparationPasses: "({count} archive passes)",
+    dreamPreparationCancel: "Cancel",
+    dreamPreparationCancelRequested: "Cancellation requested",
     dreamRouteUnavailable: "Memory is not available from this chat.",
     dreamRestoreSuccess: "Restored Memory as new version {version}.",
     dreamRestoreFailed: "Failed to restore this Memory version.",
@@ -376,6 +387,110 @@ export const enUS: Translations = {
           error: "Error",
         },
       },
+    },
+  },
+
+  projectMemory: {
+    title: "Memory",
+    description:
+      "A private long-term document gradually organized from your conversations.",
+    currentTab: "Current memory",
+    archiveTab: "Archive",
+    documentFileName: "MEMORY.md",
+    mediaType: "text/markdown",
+    version: (value) => `Version ${value}`,
+    updated: "Last updated",
+    neverUpdated: "Not organized yet",
+    viewMode: "Document display mode",
+    source: "Source",
+    preview: "Preview",
+    viewChanges: "View changes",
+    versionsTitle: "Version history",
+    versionsDescription:
+      "Inspect the real document version created by every organization or restore.",
+    versionsFailed: "Version history could not be loaded",
+    noVersions: "No historical versions yet.",
+    previous: "Previous",
+    next: "Next",
+    reviewTitle: "Latest version needs review",
+    reviewDescription:
+      "This organization removed a large share of existing content. Inspect the real diff to confirm that no important memory was lost.",
+    reviewAction: "Review this version",
+    emptyTitle: "No long-term memory yet",
+    emptyDescription:
+      "As you keep talking, ActWeave records pending notes and Dream organizes them into this document.",
+    pending: "Pending",
+    pendingUnit: (value) => `${value} ${value === 1 ? "item" : "items"}`,
+    dream: "Organize now",
+    dreaming: "Organizing",
+    dreamRunning: "An organization job is already running",
+    dreamUnavailable: "You do not have permission to run an organization job.",
+    dreamQueuedBudget:
+      "Started compressing the Memory document into the current injection budget.",
+    dreamQueuedItems: (value) =>
+      `Started organizing ${value} Memory ${value === 1 ? "item" : "items"}.`,
+    dreamAlreadyRunning: "A Memory organization job is already running.",
+    dreamNothingPending: "There is no Memory waiting to be organized.",
+    dreamFailed: "Memory organization failed.",
+    restoreSucceeded: (version) => `Restored as new version ${version}.`,
+    restoreFailed: "Memory restore failed.",
+    autoDream: "Automatic Dream",
+    manualDream: "Manual Dream",
+    restoreTrigger: "Version restore",
+    budgetRewrite: "Budget compression",
+    handled: (value) => `Processed ${value} ${value === 1 ? "item" : "items"}`,
+    changed: "Document changed",
+    unchanged: "No content change",
+    needsReview: "Review suggested",
+    overBudgetTitle: "Memory document exceeds the injection budget",
+    overBudgetDescription:
+      "New conversations temporarily run without this memory document until it is compressed into budget.",
+    injectionInactiveTitle:
+      "Memory is not currently injected into new conversations",
+    injectionPlatformDisabledDescription:
+      "Long-term Memory is currently disabled by the platform. This reflects current settings only and does not prove what any existing conversation injected.",
+    injectionAccountDisabledDescription:
+      "Long-term Memory is currently disabled for your account. This reflects current settings only and does not prove what any existing conversation injected.",
+    compressNow: "Compress document now",
+    detailsTitle: (value) => `Version ${value}`,
+    detailsDescription:
+      "View the saved document and its real diff from the preceding version.",
+    diffTitle: "Document change",
+    diffTruncatedTitle: "Document change is truncated",
+    diffTruncatedDescription:
+      "Up to the first 64,000 characters are shown on complete line boundaries. Use the full saved document below for a complete review.",
+    documentTitle: "Document at this version",
+    noDiff: "This organization run did not change the document.",
+    restore: "Restore this version",
+    restoring: "Restoring",
+    restoreTitle: (value) => `Restore version ${value}?`,
+    restoreDescription:
+      "Restore writes this historical content as a new current version. Later history remains available.",
+    cancel: "Cancel",
+    confirmRestore: "Restore",
+    loadFailed: "Memory could not be loaded",
+    detailFailed: "Version details could not be loaded",
+    retry: "Retry",
+    archiveDescription:
+      "Original memory items already organized into the document are archived here and searchable by text and tag.",
+    searchPlaceholder: "Search archived memory…",
+    search: "Search",
+    archiveFailed: "Archive could not be loaded",
+    archiveEmpty: "No archived memory items yet.",
+    archiveNoMatch: "No archived memory matched this search.",
+    loadMore: "Load more",
+    loadingMore: "Loading",
+    originSnip: "Auto summary",
+    originRemember: "Remembered",
+    pendingTitle: "Pending items",
+    pendingDescription:
+      "These items are recorded and will be organized into the memory document by the next Dream.",
+    pendingFailed: "Pending items could not be loaded",
+    tags: {
+      permanent: "Permanent",
+      durable: "Durable",
+      ephemeral: "Ephemeral",
+      correction: "Correction",
     },
   },
 
@@ -557,6 +672,7 @@ export const enUS: Translations = {
         retention_purge: "Retention purge",
         mcp_discovery: "MCP tool discovery",
         memory_dream: "Memory Dream",
+        memory_dream_prepare: "Memory Dream preparation",
         memory_seal: "Memory idle seal",
       },
       retrySafetyLabel: "Safe retry",
@@ -784,6 +900,11 @@ export const enUS: Translations = {
         description:
           "Control new local-account registration requests without changing administrator setup or OIDC.",
       },
+      automations: {
+        title: "Automation scheduling",
+        description:
+          "Control Scheduler polling, the global concurrent Automation cap, and the minimum one-time delay. Manual triggers remain available when polling is off.",
+      },
       quotas: {
         title: "Default quotas",
         description:
@@ -902,11 +1023,13 @@ export const enUS: Translations = {
       details: "Details",
       dangerZone: "Danger zone",
       type: "Type",
+      selectCredentialType: "Select a Credential type",
       credentialTypes: {
-        modelApiKey: "Model API key",
+        modelApiKey: "LLM key",
         apiKey: "API key",
         token: "Access token",
         mcpAuth: "MCP authentication",
+        skillAuth: "Skill authentication",
         oauth: "OAuth authorization",
         database: "Database Credential",
       },
@@ -1583,53 +1706,359 @@ export const enUS: Translations = {
 
   // Agents
   agents: {
-    title: "Agents",
-    description:
-      "Create and manage custom agents with specialized prompts and capabilities.",
-    newAgent: "New Agent",
-    emptyTitle: "No custom agents yet",
-    emptyDescription:
-      "Create your first custom agent with a specialized system prompt.",
-    featureDisabledTitle: "Agents feature is not enabled",
-    featureDisabledDescription:
-      "This feature is not enabled on this server. Please contact your administrator.",
-    chat: "Chat",
-    delete: "Delete",
-    deleteConfirm:
-      "Are you sure you want to delete this agent? This action cannot be undone.",
-    deleteSuccess: "Agent deleted",
-    newChat: "New chat",
-    createPageTitle: "Design your Agent",
-    createPageSubtitle:
-      "Describe the agent you want — I'll help you create it through conversation.",
-    nameStepTitle: "Name your new Agent",
-    nameStepHint:
-      "Letters, digits, and hyphens only — stored lowercase (e.g. code-reviewer)",
-    nameStepPlaceholder: "e.g. code-reviewer",
-    nameStepContinue: "Continue",
-    nameStepInvalidError:
-      "Invalid name — use only letters, digits, and hyphens",
-    nameStepAlreadyExistsError: "An agent with this name already exists",
-    nameStepNetworkError:
-      "Network request failed — check your network or backend connection",
-    nameStepCheckError: "Could not verify name availability — please try again",
-    nameStepCheckErrorWithDetail: "Name check failed: {detail}",
-    nameStepApiDisabledError:
-      "Custom agent management is not enabled on this server. Please contact your administrator.",
-    nameStepBootstrapMessage:
-      "The new custom agent name is {name}. Help me design its purpose, behavior, and SOUL.md before saving it.",
-    save: "Save agent",
-    saving: "Saving agent...",
-    saveRequested:
-      "Save requested. ActWeave is generating and saving an initial version now.",
-    saveHint:
-      "You can save this agent at any time from the top-right menu, even if this is only a first draft.",
-    agentCreatedPendingRefresh:
-      "The agent was created, but ActWeave could not load it yet. Please refresh this page in a moment.",
-    more: "More actions",
-    agentCreated: "Agent created!",
-    startChatting: "Start chatting",
-    backToGallery: "Back to Gallery",
+    common: {
+      cancel: "Cancel",
+      close: "Close",
+      retry: "Retry",
+      retrying: "Retrying…",
+      send: "Send",
+      system: "System",
+      project: "Project",
+      defaultSuffix: "Default",
+      count: (value) => `${value}`,
+    },
+    builder: {
+      errors: {
+        unavailable:
+          "The Agent design service is unavailable. Try again later.",
+        conflict: "An Agent with that name already exists in this project.",
+        forbidden: "Your account cannot create Agents.",
+        notFound: "This Agent design session no longer exists.",
+        validationFailed:
+          "The submitted content is invalid. Review it and try again.",
+        invalidResponse:
+          "The model returned an invalid result. Retry this operation.",
+        network:
+          "Could not reach the Agent design service. Check your connection and retry.",
+        commitUncertain:
+          "The creation result could not be confirmed. Do not create a duplicate. Check the Agent list first, then retry only if it is absent.",
+        stale:
+          "The design changed on the server. Reload the latest state before continuing.",
+      },
+      start: {
+        title: "Name your new Agent",
+        hint: "Use letters, numbers, and hyphens. Input is stored in lowercase (for example, code-reviewer).",
+        nameLabel: "Agent name",
+        placeholder: "For example, code-reviewer",
+        savedAs: (value) => `Will be saved as ${value}`,
+        creating: "Creating…",
+        continue: "Continue",
+        forbidden: "Your account cannot create Agents.",
+        nameTooShort: "The name must contain at least 3 characters",
+        nameTooLong: "The name cannot exceed 63 characters",
+        nameInvalid: "Use lowercase letters, numbers, and single hyphens only",
+      },
+      progress: {
+        stepsAria: "Design steps",
+        designing: "Designing Agent…",
+        steps: "Design steps",
+        settingsProgressAria: "Progress for the four Agent settings",
+      },
+      resume: {
+        title: "Continue unfinished Agent designs",
+        lastUpdated: (value) => `Last updated ${value}`,
+        deleteAria: (name) => `Delete unfinished Agent: ${name}`,
+        deleteTitle: "Delete unfinished Agent?",
+        deleteDescription: (name) =>
+          `This deletes the design draft for “${name}”, so it cannot be continued. Existing Agents are not affected.`,
+        deleting: "Deleting…",
+        confirmDelete: "Delete draft",
+      },
+      blueprint: {
+        result: "Generated result",
+        title: "Agent blueprint",
+        description:
+          "Review the four generated settings. You can edit them before creating the Agent.",
+        runtime: "Runtime configuration",
+        noDescription: "No Agent description has been generated.",
+        model: "Model",
+        capabilities: "Capabilities and dependencies",
+        dependencySummary: (toolGroups, skills, mcps) =>
+          `${toolGroups} tool groups · ${skills} Skills · ${mcps} MCPs`,
+        checkingMcp: "Checking MCP dependencies…",
+        createHint:
+          "Creates an inactive Agent draft. An administrator must publish it before activation.",
+        creating: "Creating…",
+        createDraft: "Create Agent draft",
+        validation: {
+          descriptionRequired: "Agent description is required",
+          modelRequired: "Agent model is required",
+          toolGroupRequired: "Agent requires at least one valid tool group",
+          documentRequired: (name) => `${name} is required before saving`,
+        },
+      },
+      conversation: {
+        permissionReadOnly:
+          "Your account cannot continue designing this Agent. Saved session content remains available to view.",
+        newAgentIntro: (name) =>
+          `The new Agent is named ${name}. Use the conversation below to describe its purpose, behavior, and collaboration boundaries.`,
+        creatingAgent: "Creating Agent…",
+        designingAgent: "Designing Agent…",
+        composerAria: "Describe the Agent you want",
+        saveLocalChangesFirst: "Save or discard the changes above first",
+        answerQuestionFirst: "Answer the question above first",
+        generatingBlueprint: "Generating Agent blueprint…",
+        composerPlaceholder:
+          "Describe the Agent you want and I will help design it through conversation.",
+        loadingModels: "Loading conversation models…",
+        modelLoadFailed: "Conversation models could not be loaded.",
+        noModels: "No conversation models are available.",
+        selectModelAria: "Select the model used to design the Agent",
+        selectModel: "Select conversation model",
+        modelLabel: "Conversation model used to design the Agent",
+        backToAgents: "Continue later and return to Agents",
+        designAgent: "Design Agent",
+        autosave: "Automatically saved; continue later",
+        more: "More actions",
+        abandon: "Abandon this design",
+        conversationAria: "Agent design conversation",
+        sessionUnavailable: "The Agent design session is unavailable.",
+        abandonTitle: "Abandon this Agent design?",
+        abandonDescription:
+          "This design session will end and disappear from the unfinished list. Existing Agents are not affected.",
+        continueDesign: "Continue designing",
+        abandoning: "Abandoning…",
+        confirmAbandon: "Abandon design",
+        discardTitle: "Discard unsaved changes?",
+        discardDescription:
+          "The Agent design session remains available, but local changes to the four settings will be discarded.",
+        continueEditing: "Continue editing",
+        discardAndLeave: "Discard changes and leave",
+      },
+    },
+    instructions: {
+      files: {
+        agents: "Collaboration rules and task boundaries",
+        soul: "Personality, voice, and values",
+        identity: "Name, role, and identity",
+        user: "Long-term user context",
+      },
+      sectionAria: "Agent instruction documents",
+      title: "Instruction documents",
+      draftDescription:
+        "Edit the four fixed Markdown documents and save a new Agent draft version.",
+      blueprintDescription:
+        "Review and edit the four fixed Markdown documents.",
+      edit: "Edit",
+      fixedFiles: "Fixed files",
+      displayMode: "Display mode",
+      source: "Source",
+      preview: "Preview",
+      empty: "No content",
+      editFile: (name) => `Edit ${name}`,
+      draftSaveHint:
+        "Saving creates a new Agent draft version. An administrator must still publish it.",
+      blueprintSaveHint:
+        "Saving updates the current blueprint before an Agent draft can be created.",
+      discard: "Discard changes",
+      saving: "Saving…",
+      save: "Save draft",
+      permissionLost:
+        "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
+      recoveryPreserved:
+        "The server draft changed. Local changes were preserved; review them before saving again.",
+      recoverySynced:
+        "The server draft changed and the latest version has been loaded.",
+      recoveryFailed:
+        "The latest draft could not be recovered. Local changes were preserved.",
+      recoveryReloading: "Recovering the latest draft…",
+      invalidResponse: "The server returned an invalid Agent draft version.",
+      conflictDetected: "A version conflict was detected.",
+      reloadRequired: "Reload the latest draft before editing.",
+      reloading: "Reloading…",
+      reload: "Reload",
+      discardTitle: "Discard instruction changes?",
+      discardDescription:
+        "Changes to the four instruction documents will not be saved.",
+      continueEditing: "Continue editing",
+    },
+    capabilities: {
+      reasons: {
+        archived: "Asset is archived",
+        inactive: "Asset is inactive",
+        bindingDisabled: "System binding is disabled",
+        bindingMissing: "System binding is missing",
+        noPublishedVersion: "No published version",
+      },
+      remediation: {
+        restoreSystemAsset: "Ask an administrator to restore the system asset",
+        enableSystemBinding:
+          "Ask an administrator to enable the system binding",
+        publishVersion: "Publish a version of this project asset first",
+        activateProjectAsset: "Activate this project asset first",
+      },
+      explanationSeparator: "; ",
+      boundCount: (value) => `${value} bound`,
+      unavailablePrefix: (reason) => `Unavailable: ${reason}`,
+      remediationPrefix: (reason) => `Next step: ${reason}`,
+      historicalDisabled:
+        "Capability bindings cannot be edited on historical versions.",
+      historicalVersion: "Historical version",
+      historicalVersionDescription:
+        "Capability bindings are read-only for this historical version.",
+      permissionLost:
+        "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
+      recoverySynced:
+        "The server draft changed and the latest version has been loaded.",
+      recoveryPreserved:
+        "The server draft changed. Local changes were preserved; review them before saving again.",
+      recoveryFailed:
+        "The latest draft could not be recovered. Local changes were preserved.",
+      recoveryReloading: "Recovering the latest draft…",
+      conflictDetected: "A version conflict was detected.",
+      reloadRequired: "Reload the latest draft before editing.",
+      reloading: "Reloading…",
+      permissionBlocked: "Your account cannot edit Agent capabilities.",
+      preparingDraft: "Preparing the latest draft…",
+      catalogLoading: "Loading capability catalog…",
+      catalogLoadFailed: "Capability catalog could not be loaded.",
+      validatingMcp: "Validating MCP dependencies…",
+      mcpValidationFailed: "MCP dependency validation failed.",
+      title: "Capability bindings",
+      description:
+        "Choose the tool groups, Skills, and MCPs this Agent can use.",
+      saving: "Saving…",
+      saveDraft: "Save draft",
+      edit: "Edit",
+      builtinGroups: "Built-in tool groups",
+      unchanged: "Unchanged",
+      searchPlaceholder: "Search Skills or MCPs",
+      searchAria: "Search capability catalog",
+      catalogLoadingStatus: "Loading capability catalog…",
+      catalogLoadFailedStatus: "Capability catalog could not be loaded.",
+      emptySkills: "No Skills are available.",
+      emptyMcps: "No MCPs are available.",
+      reload: "Reload",
+    },
+    catalog: {
+      title: "Agents",
+      authoringLoadFailed: "The Agent authoring base could not be loaded.",
+      authoringLoading: "Loading the latest Agent draft…",
+      detailTabsAria: "Agent detail tabs",
+      instructionsTab: "Instructions",
+      capabilitiesTab: "Capabilities",
+      viewModeAria: "Agent catalog view",
+      cards: "Cards",
+      list: "List",
+      chatForbidden: "Your account cannot create chats in this project.",
+      unavailable: "This Agent is unavailable.",
+      executeForbidden: "Your account cannot run Agents.",
+      publishRequired: "The Agent must be published and active first.",
+      defaultAdminOnly: "Only administrators can set the default Agent.",
+      defaultUnavailable: "This Agent cannot be set as default.",
+      systemDefaultUnavailable:
+        "Enable this system Agent in the project first.",
+      mainUnavailable: "The main Agent is unavailable.",
+      mainExecuteForbidden: "Your account cannot run the main Agent.",
+      mainVersionUnavailable: "The main Agent has no available version.",
+      emptySystem: "No system Agents are available.",
+      emptyProject: "No project Agents yet.",
+      defaultLoadFailed: "The default Agent could not be loaded.",
+      defaultLoading: "Loading default Agent…",
+      defaultUnknown: "Default Agent unavailable",
+      setDefaultBlockedAria: (name, reason) =>
+        `Cannot set ${name} as default: ${reason}`,
+      setDefaultAria: (name) => `Set ${name} as default Agent`,
+      settingDefault: "Setting…",
+      setDefault: "Set as default",
+      activateAria: (name) => `Activate ${name}`,
+      activating: "Activating…",
+      activate: "Activate",
+      chatBlockedAria: (name, reason) => `Cannot chat with ${name}: ${reason}`,
+      chatAria: (name) => `Start a new chat with ${name}`,
+      creatingChat: "Creating…",
+      chat: "Chat",
+      builtIn: "Built in",
+      currentDefault: "Current default",
+      suspended: "Inactive",
+      viewDetails: (name) => `View ${name} details`,
+      mainDescription: "The project's built-in main Agent.",
+      noDescription: "No description.",
+      mcpValidationFailed: "MCP dependency validation failed.",
+      systemSection: "System Agents",
+      systemDescription:
+        "Agents provided by the platform and enabled for this project.",
+      projectSection: "Project Agents",
+      projectDescription: "Agents designed and managed in this project.",
+      createChatFailed: "Could not create the Agent chat.",
+      activated: (name) => `${name} activated`,
+      defaultSet: (name) => `${name} is now the default Agent`,
+      mainDefaultSet: "The main Agent is now the default",
+    },
+    selector: {
+      title: "Choose an Agent",
+      description: "Choose an available Agent for the new chat.",
+      emptyTitle: "No Agents available",
+      emptyDescription: "This project has no Agent that can start a chat.",
+      loading: "Loading Agents…",
+      loadFailed: "Agents could not be loaded.",
+      projectAgent: "Project Agent",
+      systemAgent: "System Agent",
+      enableNow: "Enable now",
+      enableAndChat: (name) => `Enable ${name} and start a chat`,
+      dependencyTitle: "Dependencies not ready",
+      dependencyDescription: "This Agent's dependencies are unavailable.",
+      mcpBlockedTitle: "MCP dependencies not ready",
+      mcpBlockedDescription:
+        "Fix the MCP configuration before starting a chat.",
+      configure: "Open configuration",
+      createProjectAgent: "Create project Agent",
+      contactEditor: "Contact project editor",
+      alternateTitle: "Choose another Agent",
+      alternateDescription:
+        "The default Agent is unavailable. Choose another available Agent.",
+      alternateEmptyTitle: "No other Agent available",
+      alternateEmptyDescription:
+        "Repair the default Agent or configure another Agent.",
+      dependencyLoadFailed: "Agent dependency status could not be loaded.",
+      createChatFailed: "Could not create the Agent chat.",
+      enableFailed: "Could not enable the system Agent.",
+      systemUnavailable: "This system Agent is unavailable.",
+    },
+    startContinuation: {
+      waitingForService: {
+        title: "Waiting for the service",
+        detail: "The system will keep trying to create the chat.",
+      },
+      waitingForAgent: {
+        title: "Waiting for the Agent",
+        detail: "The chat will be created after the Agent is ready.",
+      },
+      creatingChat: {
+        title: "Creating chat",
+        detail: "Please wait and do not submit again.",
+      },
+      readOnly: {
+        title: "Action unavailable",
+        detail: "Your account lacks the permissions required to create a chat.",
+      },
+      error: {
+        title: "Could not create chat",
+        detail: "Review the Agent status and try again.",
+      },
+      retryChat: "Retry chat creation",
+      configuredRetry: "Retry after configuration",
+      defaultLoadFailed: "The default Agent could not be loaded.",
+      dependencyFailed: "Agent dependencies could not be checked.",
+    },
+    newChat: {
+      threadName: "New chat",
+      defaultUnknown: "Default Agent unavailable",
+      mainUnavailable: "Main Agent unavailable",
+      projectUnavailable: "Project default Agent unavailable",
+      loadDefaultFailed: "The default Agent could not be loaded.",
+      dependencyFailed: "Agent dependencies could not be checked.",
+      createFailed: "Could not create a new chat.",
+      defaultAdmissionUnavailable:
+        "The default Agent cannot start a chat right now.",
+    },
+    indicator: {
+      unavailable: "Current Agent unavailable",
+      label: "Current Agent",
+      startWithOther: (current) =>
+        `Currently using ${current}. Choose another Agent to start a new chat`,
+      current: (current) => `Current Agent: ${current}`,
+    },
   },
 
   // Breadcrumb
@@ -1641,10 +2070,7 @@ export const enUS: Translations = {
   // Workspace
   workspace: {
     officialWebsite: "ActWeave's official website",
-    githubTooltip: "ActWeave on GitHub",
     settingsAndMore: "Settings and more",
-    visitGithub: "ActWeave on GitHub",
-    reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About ActWeave",
     logout: "Log out",
@@ -1661,6 +2087,11 @@ export const enUS: Translations = {
     runFailedTitle: "Run did not finish",
     runFailedDescription:
       "The agent could not produce a response. Check the selected model, asset dependencies, and credentials, then edit or send the message again.",
+    modelOutputLimitTitle: "Model output limit reached",
+    modelOutputLimitDescription:
+      "The model reached its per-request output limit, so this response is incomplete.",
+    modelOutputLimitRetry: "Retry without deep thinking",
+    modelOutputLimitRetrying: "Retrying…",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
       "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",

@@ -53,6 +53,7 @@ export type ProjectStreamFrameDecision = {
 
 export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
 export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
+export const MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT";
 
 const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "error",
@@ -60,12 +61,60 @@ const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "timeout",
 ]);
 
+export function projectStreamFailureName(
+  frame: ProjectStreamFrame,
+): typeof MODEL_OUTPUT_LIMIT | null {
+  if (
+    (frame.event !== "error" && frame.event !== "end") ||
+    typeof frame.data !== "object" ||
+    frame.data === null
+  ) {
+    return null;
+  }
+  const name = Reflect.get(frame.data, "name");
+  const legacyError = Reflect.get(frame.data, "error");
+  const errorCode = Reflect.get(frame.data, "error_code");
+  return name === MODEL_OUTPUT_LIMIT ||
+    legacyError === MODEL_OUTPUT_LIMIT ||
+    errorCode === MODEL_OUTPUT_LIMIT
+    ? MODEL_OUTPUT_LIMIT
+    : null;
+}
+
+export function isModelOutputLimitError(error: unknown): boolean {
+  if (error === MODEL_OUTPUT_LIMIT) {
+    return true;
+  }
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  if (
+    Reflect.get(error, "name") === MODEL_OUTPUT_LIMIT ||
+    Reflect.get(error, "message") === MODEL_OUTPUT_LIMIT ||
+    Reflect.get(error, "error_code") === MODEL_OUTPUT_LIMIT
+  ) {
+    return true;
+  }
+  const nestedError = Reflect.get(error, "error");
+  return (
+    nestedError === MODEL_OUTPUT_LIMIT ||
+    (nestedError instanceof Error &&
+      (nestedError.name === MODEL_OUTPUT_LIMIT ||
+        nestedError.message === MODEL_OUTPUT_LIMIT))
+  );
+}
+
 export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
   frame: T,
+  precedingFailureName: typeof MODEL_OUTPUT_LIMIT | null = null,
 ): T {
   if (frame.event !== "end" || typeof frame.data !== "object" || !frame.data) {
     return frame;
   }
+  const failureName =
+    projectStreamFailureName(frame) ??
+    precedingFailureName ??
+    PROJECT_RUN_TERMINAL_FAILURE;
   const status = Reflect.get(frame.data, "status");
   if (
     typeof status !== "string" ||
@@ -81,8 +130,8 @@ export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
     ...frame,
     event: "error",
     data: {
-      error: PROJECT_RUN_TERMINAL_FAILURE,
-      message: PROJECT_RUN_TERMINAL_FAILURE,
+      error: failureName,
+      message: failureName,
     },
   } as T;
 }
@@ -721,6 +770,7 @@ function installProjectStreamAdapter(
     let state = emptyProjectStreamCursorState();
     let started = false;
     let terminal = false;
+    let failureName: typeof MODEL_OUTPUT_LIMIT | null = null;
     for await (const frame of originalRunStream(
       threadId,
       assistantId,
@@ -742,9 +792,10 @@ function installProjectStreamAdapter(
         // Worker failures are persisted as a diagnostic error frame followed
         // by the authoritative durable end frame. Exposing the first frame to
         // LangGraph's StreamManager would stop consumption before that end.
+        failureName = projectStreamFailureName(projectFrame) ?? failureName;
         continue;
       }
-      yield projectStreamFrameForUI(frame);
+      yield projectStreamFrameForUI(frame, failureName);
     }
     assertDurableProjectStreamCompleted({
       started,
@@ -781,6 +832,7 @@ function installProjectStreamAdapter(
     let state = emptyProjectStreamCursorState();
     let started = false;
     let terminal = false;
+    let failureName: typeof MODEL_OUTPUT_LIMIT | null = null;
     for await (const frame of originalJoinStream(
       threadId,
       runId,
@@ -798,9 +850,10 @@ function installProjectStreamAdapter(
         clearReconnectRun(threadId, runId, reconnectStorage);
       }
       if (projectFrame.event === "error") {
+        failureName = projectStreamFailureName(projectFrame) ?? failureName;
         continue;
       }
-      yield projectStreamFrameForUI(frame);
+      yield projectStreamFrameForUI(frame, failureName);
     }
     assertDurableProjectStreamCompleted({
       started,

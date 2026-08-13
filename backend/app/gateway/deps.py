@@ -16,6 +16,7 @@ Initialization is handled directly in ``app.py`` via :class:`AsyncExitStack`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping
@@ -263,6 +264,9 @@ async def gateway_platform_runtime(
         from app.private_work.human_input_response import (
             CheckpointHumanInputResponsePromoter,
         )
+        from app.private_work.memory_dream_prepare_service import (
+            MemoryDreamPrepareService,
+        )
         from app.private_work.memory_service import PrivateMemoryDocumentService
         from app.private_work.run_admission import PrivateRunAdmissionService
         from app.private_work.run_service import PrivateRunService
@@ -295,22 +299,12 @@ async def gateway_platform_runtime(
         from app.shared_assets.agent_design_generation import (
             AgentDesignGenerationService,
         )
-        from app.shared_assets.skill_design_generation import (
-            SkillDesignGenerationService,
-        )
 
         app.state.agent_design_generation_service = AgentDesignGenerationService(
             model_caller=DatabaseOneshotModelCaller(
                 app_config=config,
                 materializer=model_materializer,
                 run_name="agent_design_generation",
-            ),
-        )
-        app.state.skill_design_generation_service = SkillDesignGenerationService(
-            model_caller=DatabaseOneshotModelCaller(
-                app_config=config,
-                materializer=model_materializer,
-                run_name="skill_design_generation",
             ),
         )
         raw_mcp_security = getattr(config, "mcp_security", None)
@@ -357,7 +351,10 @@ async def gateway_platform_runtime(
         app.state.private_file_streamer = PrivateFileStreamer(sf)
         from app.personalization.service import AccountPersonalizationService
 
-        app.state.account_personalization_service = AccountPersonalizationService(sf)
+        app.state.account_personalization_service = AccountPersonalizationService(
+            sf,
+            audit=operational_audit_sink,
+        )
         app.state.channel_connection_repo = ChannelConnectionRepository(sf)
         app.state.project_connection_service = ProjectConnectionService(
             sf,
@@ -373,13 +370,12 @@ async def gateway_platform_runtime(
         from app.automations.occurrences import AutomationOccurrenceService
         from app.automations.readiness import AutomationReadinessService
         from app.automations.service import ProjectAutomationService
-        from deerflow.config.scheduler_config import SchedulerConfig
+        from app.automations.system_policy import SystemAutomationsPolicyReader
 
-        scheduler_config = getattr(config, "scheduler", None)
-        effective_scheduler_config = scheduler_config or SchedulerConfig()
+        automations_policy = SystemAutomationsPolicyReader()
         app.state.automation_service = ProjectAutomationService(
             sf,
-            min_once_delay_seconds=effective_scheduler_config.min_once_delay_seconds,
+            policy_reader=automations_policy,
             audit=operational_audit_sink,
         )
         # Gateway reports configured-but-external scheduling as stopped. M6
@@ -387,18 +383,17 @@ async def gateway_platform_runtime(
         app.state.automation_readiness_service = AutomationReadinessService()
         app.state.automation_occurrence_service = AutomationOccurrenceService(
             sf,
-            max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+            policy_reader=automations_policy,
         )
         app.state.automation_dispatcher = AutomationDispatcher(
             sf,
-            max_concurrent_runs=effective_scheduler_config.max_concurrent_runs,
+            policy_reader=automations_policy,
             model_catalog=model_catalog,
             runtime_policy=runtime_policy_service,
             endpoint_policy=mcp_endpoint_policy,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
         )
-        app.state.automation_scheduler_enabled = effective_scheduler_config.enabled
 
         from deerflow.runtime.events.store.db import DbRunEventStore
 
@@ -419,7 +414,11 @@ async def gateway_platform_runtime(
         )
         app.state.project_memory_service = PrivateMemoryDocumentService(
             sf,
-            dream_archive_barrier=app.state.project_chat_control_service,
+            audit=operational_audit_sink,
+        )
+        app.state.memory_dream_prepare_service = MemoryDreamPrepareService(
+            sf,
+            audit=operational_audit_sink,
         )
         from deerflow.runtime.events.stream import PostgresStreamBridge
 
@@ -479,6 +478,10 @@ get_system_model_materializer = _require(
     "system_model_materializer",
     "System model materializer",
 )
+get_memory_dream_prepare_service = _require(
+    "memory_dream_prepare_service",
+    "Memory Dream preparation service",
+)
 
 
 def _automation_state_dependency(
@@ -518,11 +521,32 @@ def get_automation_readiness_service(request: Request):
     return _automation_state_dependency(request, "automation_readiness_service")
 
 
-def get_automation_scheduler_enabled(request: Request) -> bool:
-    value = getattr(request.app.state, "automation_scheduler_enabled", None)
-    if type(value) is not bool:
-        raise automation_http_exception(AutomationUnavailable(get_current_trace_id() or generate_trace_id()))
-    return value
+async def get_automation_scheduler_enabled(request: Request) -> bool:
+    from app.system_runtime_settings import (
+        AutomationsPolicyValue,
+        RuntimePolicySection,
+    )
+
+    materializer = getattr(
+        request.app.state,
+        "system_runtime_policy_materializer",
+        None,
+    )
+    try:
+        if materializer is None:
+            raise RuntimeError
+        policy = await materializer.materialize_current(
+            RuntimePolicySection.AUTOMATIONS,
+        )
+        if type(policy) is not AutomationsPolicyValue:
+            raise RuntimeError
+        return policy.enabled
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        raise automation_http_exception(
+            AutomationUnavailable(get_current_trace_id() or generate_trace_id()),
+        ) from None
 
 
 def get_project_quota_enforcer(request: Request):

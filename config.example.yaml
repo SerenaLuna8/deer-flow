@@ -1,4 +1,4 @@
-config_version: 37
+config_version: 38
 log_level: info
 logging:
   enhance:
@@ -6,7 +6,7 @@ logging:
     format: text
 auth:
   # Only these TCP peers may supply X-Real-IP. Loopback covers repository-owned
-  # local nginx; container/Helm nginx uses a separate generated proxy token.
+  # local nginx; container nginx uses a separate generated proxy token.
   trusted_proxies:
   - 127.0.0.1/32
   - ::1/128
@@ -124,11 +124,6 @@ database:
     # In delta mode, persist a complete messages seed every N delta writes.
     # This value is also restart-required and must match across all processes.
     snapshot_frequency: 10
-scheduler:
-  enabled: false
-  poll_interval_seconds: 5
-  max_concurrent_runs: 3
-  min_once_delay_seconds: 60
 worker:
   enabled: true
   poll_interval_seconds: 0.5

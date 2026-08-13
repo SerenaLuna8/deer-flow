@@ -1,6 +1,15 @@
 import type { Capability } from "@/core/projects/types";
 
-import type { SkillBuilderFile, SkillBuilderSession } from "./types";
+import {
+  SKILL_BUILDER_MAX_ATTACHMENT_BYTES,
+  SKILL_BUILDER_MAX_ATTACHMENTS,
+  SKILL_BUILDER_MAX_ATTACHMENTS_TOTAL_BYTES,
+  skillBuilderAttachmentSchema,
+  type SkillBuilderAttachment,
+  type SkillBuilderFile,
+  type SkillBuilderRunStatus,
+  type SkillBuilderSession,
+} from "./types";
 
 const SKILL_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
 
@@ -63,6 +72,7 @@ export function skillBuilderComposerDisabled(
   return (
     mutationPending ||
     localDraftDirty ||
+    Boolean(session.activeRun) ||
     session.status === "generating" ||
     session.status === "awaiting_clarification" ||
     session.status === "committing" ||
@@ -87,4 +97,119 @@ export function skillBuilderCanCommit(session: SkillBuilderSession): boolean {
     session.files.some((file) => file.path === "SKILL.md") &&
     skillBuilderValidationCurrent(session)
   );
+}
+
+export type SkillBuilderRunPresentationStatus =
+  | SkillBuilderRunStatus
+  | "cancelled";
+
+export type SkillBuilderRunPresentation = {
+  runId: string;
+  status: SkillBuilderRunPresentationStatus;
+};
+
+/**
+ * Project the latest known Builder Run without inventing stream data.
+ *
+ * Gateway exposes only pending/running through `activeRun`; after settlement,
+ * the durable Skill Design session is the authority for the terminal outcome.
+ * `trackedRunId` ensures a terminal session state is not presented as a Run
+ * result unless this UI actually observed or admitted that Run.
+ */
+export function skillBuilderRunPresentation(
+  session: SkillBuilderSession,
+  trackedRunId: string | null,
+): SkillBuilderRunPresentation | null {
+  if (session.activeRun) {
+    return {
+      runId: session.activeRun.runId,
+      status: session.activeRun.status,
+    };
+  }
+  if (!trackedRunId) return null;
+
+  if (session.status === "generating") {
+    return { runId: trackedRunId, status: "running" };
+  }
+  if (session.status === "cancelled") {
+    return { runId: trackedRunId, status: "cancelled" };
+  }
+  if (session.status === "failed") {
+    const errorCode = session.error_code?.toUpperCase() ?? "";
+    if (errorCode.includes("TIMEOUT")) {
+      return { runId: trackedRunId, status: "timeout" };
+    }
+    if (errorCode.includes("INTERRUPTED")) {
+      return { runId: trackedRunId, status: "interrupted" };
+    }
+    return { runId: trackedRunId, status: "error" };
+  }
+  if (
+    session.status === "awaiting_clarification" ||
+    session.status === "draft_ready" ||
+    session.status === "validated" ||
+    session.status === "committing" ||
+    session.status === "completed"
+  ) {
+    return { runId: trackedRunId, status: "success" };
+  }
+  return null;
+}
+
+export type SkillBuilderMergeAttachmentResult =
+  | { ok: true; attachments: SkillBuilderAttachment[] }
+  | { ok: false; error: string };
+
+/** Merge one uploaded reference file into the composer queue, replacing a same-name entry. */
+export function skillBuilderMergeAttachment(
+  current: readonly SkillBuilderAttachment[],
+  attachment: SkillBuilderAttachment,
+): SkillBuilderMergeAttachmentResult {
+  const candidate = {
+    name: attachment.name.trim(),
+    content: attachment.content,
+  };
+  const parsed = skillBuilderAttachmentSchema.safeParse(candidate);
+  if (!parsed.success) {
+    if (
+      new TextEncoder().encode(candidate.content).byteLength >
+      SKILL_BUILDER_MAX_ATTACHMENT_BYTES
+    ) {
+      return { ok: false, error: "单个附件不能超过 256 KB。" };
+    }
+    return { ok: false, error: "附件名包含不支持的字符，请重命名后重试。" };
+  }
+  const next = current.filter((item) => item.name !== parsed.data.name);
+  next.push(parsed.data);
+  if (next.length > SKILL_BUILDER_MAX_ATTACHMENTS) {
+    return {
+      ok: false,
+      error: `一次最多附加 ${SKILL_BUILDER_MAX_ATTACHMENTS} 个参考文件。`,
+    };
+  }
+  const total = next.reduce(
+    (sum, item) => sum + new TextEncoder().encode(item.content).byteLength,
+    0,
+  );
+  if (total > SKILL_BUILDER_MAX_ATTACHMENTS_TOTAL_BYTES) {
+    return { ok: false, error: "附件总大小不能超过 512 KB。" };
+  }
+  return { ok: true, attachments: next };
+}
+
+export type SkillBuilderFilesPanelReveal = "open" | "close" | "keep";
+
+export function skillBuilderHasCandidateFiles(
+  files: readonly unknown[],
+): boolean {
+  return files.length > 0;
+}
+
+export function skillBuilderFilesPanelReveal(
+  previousHadFiles: boolean,
+  fileCount: number,
+): SkillBuilderFilesPanelReveal {
+  if (fileCount <= 0) return "close";
+  if (!previousHadFiles) return "open";
+  return "keep";
 }

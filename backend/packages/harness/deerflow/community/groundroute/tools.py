@@ -23,6 +23,12 @@ import os
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.errors import (
+    CommunityToolError,
+    community_error_json,
+    no_results_json,
+)
+from deerflow.community.url_safety import sanitize_public_http_reference_url
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -68,7 +74,47 @@ def _missing_key_error(tool_name: str, **context: str) -> str:
             "GroundRoute API key is not set for '%s'. Set GROUNDROUTE_API_KEY in your environment or provide api_key in config.yaml. Get a free key at https://groundroute.ai/keys",
             tool_name,
         )
-    return json.dumps({"error": "GROUNDROUTE_API_KEY is not configured", **context}, ensure_ascii=False)
+    return community_error_json(
+        CommunityToolError(
+            provider="groundroute",
+            code="configuration_error",
+            message="GROUNDROUTE_API_KEY is not configured",
+            retryable=False,
+        ),
+        query=context.get("query") or context.get("url") or "",
+    )
+
+
+def _groundroute_http_error(query: str, status_code: int) -> str:
+    if status_code in {401, 403}:
+        code, retryable = "provider_authentication_failed", False
+    elif status_code == 429:
+        code, retryable = "provider_rate_limited", True
+    elif status_code >= 500:
+        code, retryable = "provider_unavailable", True
+    else:
+        code, retryable = "provider_request_failed", False
+    return community_error_json(
+        CommunityToolError(
+            provider="groundroute",
+            code=code,
+            message=f"GroundRoute API request failed with HTTP {status_code}",
+            retryable=retryable,
+        ),
+        query=query,
+    )
+
+
+def _groundroute_unavailable(query: str) -> str:
+    return community_error_json(
+        CommunityToolError(
+            provider="groundroute",
+            code="provider_unavailable",
+            message="GroundRoute is temporarily unavailable",
+            retryable=True,
+        ),
+        query=query,
+    )
 
 
 def _post_search(api_key: str, body: dict) -> dict:
@@ -107,18 +153,22 @@ def web_search_tool(query: str, max_results: int | None = None) -> str:
     try:
         data = _post_search(api_key, {"query": query, "max_results": count})
     except httpx.HTTPStatusError as e:
-        logger.error("GroundRoute API returned HTTP %s: %s", e.response.status_code, e.response.text)
-        return json.dumps(
-            {"error": f"GroundRoute API error: HTTP {e.response.status_code}", "query": query},
-            ensure_ascii=False,
+        logger.error("GroundRoute API returned HTTP %s", e.response.status_code)
+        return _groundroute_http_error(query, e.response.status_code)
+    except Exception as exc:
+        logger.error(
+            "GroundRoute search failed; provider_error_type=%s",
+            type(exc).__name__,
         )
-    except Exception as e:
-        logger.error("GroundRoute search failed: %s: %s", type(e).__name__, e)
-        return json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
+        return _groundroute_unavailable(query)
 
     results = data.get("results") or []
     if not results:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="groundroute",
+            query=query,
+            message="No results found",
+        )
 
     normalized_results = [
         {
@@ -143,6 +193,20 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
+    # GroundRoute performs the network fetch in its remote SaaS, not inside the
+    # ActWeave deployment. Reject unsafe literal references here without local
+    # DNS resolution; a local downloader would require validate_public_http_url.
+    if not sanitize_public_http_reference_url(url):
+        return community_error_json(
+            CommunityToolError(
+                provider="groundroute",
+                code="url_not_public",
+                message="Only public http(s) URLs may be fetched",
+                retryable=False,
+            ),
+            query=url,
+        )
+
     api_key = _get_api_key("web_fetch")
     if not api_key:
         return _missing_key_error("web_fetch", url=url)
@@ -150,15 +214,22 @@ def web_fetch_tool(url: str) -> str:
     try:
         data = _post_search(api_key, {"query": url, "mode": "page", "max_results": 1})
     except httpx.HTTPStatusError as e:
-        logger.error("GroundRoute fetch returned HTTP %s: %s", e.response.status_code, e.response.text)
-        return f"Error: GroundRoute API error: HTTP {e.response.status_code}"
-    except Exception as e:
-        logger.error("GroundRoute fetch failed: %s: %s", type(e).__name__, e)
-        return f"Error: {e}"
+        logger.error("GroundRoute fetch returned HTTP %s", e.response.status_code)
+        return _groundroute_http_error(url, e.response.status_code)
+    except Exception as exc:
+        logger.error(
+            "GroundRoute fetch failed; provider_error_type=%s",
+            type(exc).__name__,
+        )
+        return _groundroute_unavailable(url)
 
     results = data.get("results") or []
     if not results:
-        return "Error: No results found"
+        return no_results_json(
+            provider="groundroute",
+            query=url,
+            message="No results found",
+        )
 
     result = results[0]
     content = result.get("content") or result.get("snippet") or ""

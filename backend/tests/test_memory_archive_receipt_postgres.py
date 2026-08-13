@@ -24,7 +24,6 @@ from app.gateway.deps import (
     require_project_private_open,
 )
 from app.gateway.routers import private_work as private_work_router
-from app.gateway.routers import project_memory as memory_router
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.chat_controls import ProjectChatControlService
 from app.private_work.checkpoint_state import (
@@ -34,7 +33,6 @@ from app.private_work.checkpoint_state import (
 )
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.errors import PrivateWorkUnavailable
-from app.private_work.memory_service import PrivateMemoryDocumentService
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import (
@@ -43,6 +41,8 @@ from app.private_work.thread_repository import (
 )
 from app.private_work.thread_service import PrivateThreadService
 from app.reliability.execution import PrivateRunExecutionBoundary
+from app.worker.memory_dream_prepare import MemoryDreamPrepareJobHandler, _PrepareWork
+from app.worker.service import JobSettlement
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_CONTEXT_KEY,
     MEMORY_ARCHIVE_RECEIPT_KEY,
@@ -57,13 +57,14 @@ from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.persistence.jobs.model import WorkerNodeRow
-from deerflow.persistence.jobs.sql import JobRepository
+from deerflow.persistence.jobs.sql import JobClaim, JobRepository, JobScope
 from deerflow.persistence.models.run_event import RunEventRow, ThreadEventSequenceRow
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryHistoryEntryRow,
 )
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentRepository,
+    MemoryDocumentScope,
     MemoryDreamAdmissionRecord,
 )
 from deerflow.persistence.user.model import UserRow
@@ -807,7 +808,7 @@ async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_ba
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_direct_dream_endpoint_drains_real_thread_and_activates_before_admission(
+async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_before_admission(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -867,34 +868,82 @@ async def test_direct_dream_endpoint_drains_real_thread_and_activates_before_adm
             object(),  # type: ignore[arg-type]
             model_materializer=ModelMaterializer(),  # type: ignore[arg-type]
         )
-        service = PrivateMemoryDocumentService(
+
+        class PreparationRepository:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def set_phase(self, _scope, **_kwargs) -> None:
+                self.calls.append("phase")
+
+            async def record_pass(self, _scope, **_kwargs) -> None:
+                self.calls.append("pass")
+
+            async def link_dream(self, _scope, **_kwargs) -> None:
+                self.calls.append("link")
+
+            async def settle_success(self, _scope, **_kwargs) -> None:
+                self.calls.append("success")
+
+        preparation = PreparationRepository()
+        handler = MemoryDreamPrepareJobHandler(
             seed.factory,
-            dream_admission=admission,  # type: ignore[arg-type]
-            dream_archive_barrier=barrier,
+            app_config=app_config,
+            barrier=barrier,
+            admission=admission,  # type: ignore[arg-type]
+            repository_builder=lambda _session, *, jobs: preparation,
         )
-        app = FastAPI()
-        app.include_router(memory_router.router)
-        app.dependency_overrides[private_work_context] = lambda: seed.owner_a
-        app.dependency_overrides[require_project_private_open] = lambda: None
-        app.dependency_overrides[get_current_agent_runtime_config] = lambda: app_config
-        monkeypatch.setattr(memory_router, "_service", lambda _request: service)
+        claim = JobClaim(
+            job_id=uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+            attempt_id=uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"),
+            lease_token="durable-prepare-lease",
+            job_type="memory_dream_prepare",
+            scope=JobScope(
+                seed.owner_a.project_id,
+                str(seed.owner_a.user_id),
+            ),
+            run_id=None,
+            occurrence_id=None,
+            retry_safety="safe",
+            cancel_requested=False,
+            namespace="default",
+        )
+        work = _PrepareWork(
+            context=seed.owner_a,
+            scope=MemoryDocumentScope(
+                project_id=seed.owner_a.project_id,
+                owner_user_id=str(seed.owner_a.user_id),
+            ),
+            thread_id=thread_id,
+            request_id="durable-dream-prepare-test",
+        )
 
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app),
-            base_url="http://test",
-        ) as client:
-            response = await client.post(
-                f"/api/projects/{seed.owner_a.project_id}/memory/dream",
-                json={"threadId": thread_id},
-            )
+        async def authorize(_claim):
+            return work
 
-        assert response.status_code == 200
-        assert response.json() == {
-            "disposition": "queued",
-            "jobId": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
-            "historyCount": 1,
-        }
+        monkeypatch.setattr(handler, "_authorize", authorize)
+
+        class Authority:
+            cancel_requested = False
+
+            async def heartbeat(self) -> None:
+                return None
+
+        settlement = await handler(claim, Authority())  # type: ignore[arg-type]
+
+        assert isinstance(settlement, JobSettlement)
+        assert settlement.outcome.status == "succeeded"
+        assert admission.calls == 0
+        await settlement.commit()
         assert admission.calls == 1
+        assert preparation.calls == [
+            "phase",
+            "pass",
+            "phase",
+            "phase",
+            "link",
+            "success",
+        ]
         rows = await _history_rows(seed)
         assert len(rows) == 1
         assert rows[0].tagged_text == ("- [durable] Direct Dream requests archive the Thread before admission")

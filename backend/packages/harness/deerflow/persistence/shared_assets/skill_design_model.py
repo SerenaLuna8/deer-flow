@@ -129,6 +129,10 @@ class SkillDesignSessionRow(Base):
         onupdate=_now,
         server_default=text("now()"),
     )
+    authoring_dependencies_json: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_skill_design_sessions"),
@@ -167,6 +171,19 @@ class SkillDesignSessionRow(Base):
         CheckConstraint(
             "(status = 'awaiting_clarification' AND active_clarification_json IS NOT NULL) OR (status <> 'awaiting_clarification' AND active_clarification_json IS NULL)",
             name="ck_skill_design_sessions_clarification",
+        ),
+        CheckConstraint(
+            "authoring_dependencies_json IS NULL OR ("
+            "jsonb_typeof(authoring_dependencies_json) = 'object' AND "
+            "authoring_dependencies_json ->> 'version' = '1' AND "
+            "(authoring_dependencies_json ->> 'draft_checksum') "
+            "~ '^[0-9a-f]{64}$' AND "
+            "CASE WHEN jsonb_typeof("
+            "authoring_dependencies_json -> 'requirements') = 'array' "
+            "THEN jsonb_array_length("
+            "authoring_dependencies_json -> 'requirements') <= 64 "
+            "ELSE FALSE END)",
+            name="ck_skill_design_sessions_authoring_dependencies",
         ),
         CheckConstraint(
             "(status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)",
@@ -283,6 +300,12 @@ class SkillDesignOperationRow(Base):
         onupdate=_now,
         server_default=text("now()"),
     )
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    terminal_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    terminal_request_checksum: Mapped[str | None] = mapped_column(
+        CHAR(64),
+        nullable=True,
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_skill_design_operations"),
@@ -297,6 +320,18 @@ class SkillDesignOperationRow(Base):
         CheckConstraint(
             "result_revision IS NULL OR result_revision >= 1",
             name="ck_skill_design_operations_result_revision",
+        ),
+        CheckConstraint(
+            "terminal_kind IS NULL OR terminal_kind IN ('clarification', 'candidate')",
+            name="ck_skill_design_operations_terminal_kind",
+        ),
+        CheckConstraint(
+            "terminal_request_checksum IS NULL OR terminal_request_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_skill_design_operations_terminal_checksum",
+        ),
+        CheckConstraint(
+            "(terminal_kind IS NULL AND terminal_request_checksum IS NULL) OR (terminal_kind IS NOT NULL AND terminal_request_checksum IS NOT NULL)",
+            name="ck_skill_design_operations_terminal_pair",
         ),
         CheckConstraint(
             "(status = 'in_progress' AND result_revision IS NULL "
@@ -317,12 +352,24 @@ class SkillDesignOperationRow(Base):
             name="fk_skill_design_operations_session",
             ondelete="CASCADE",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "run_id"],
+            ["runs.project_id", "runs.owner_user_id", "runs.run_id"],
+            name="fk_skill_design_operations_run",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "project_id",
             "owner_user_id",
             "operation_kind",
             "idempotency_key_hash",
             name="uq_skill_design_operations_idempotency",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            name="uq_skill_design_operations_run",
         ),
         Index(
             "ix_skill_design_operations_session",

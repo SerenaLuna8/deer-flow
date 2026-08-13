@@ -595,6 +595,22 @@ async def purge_private_scope(
 
     # Runs referenced by immutable jobs/audit are scrubbed, while unreferenced
     # Runs and then empty Thread shells are physically removed.
+    # Skill Builder operation outcomes remain useful for idempotent replay, but
+    # their optional Run link must not pin otherwise deletable private telemetry.
+    await session.execute(
+        text(
+            f"""UPDATE skill_design_operations operation
+                    SET run_id=NULL
+                  WHERE operation.project_id=:project_id{owner_for("operation")}
+                    AND operation.run_id IS NOT NULL
+                    AND NOT EXISTS (
+                        SELECT 1 FROM jobs
+                         WHERE jobs.run_id=operation.run_id
+                           AND jobs.project_id=operation.project_id
+                    )"""
+        ),
+        parameters,
+    )
     await session.execute(
         text(
             f"""DELETE FROM runs run

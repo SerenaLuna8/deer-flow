@@ -92,9 +92,19 @@ class _Session:
 class _Jobs:
     def __init__(self) -> None:
         self.succeeded = []
+        self.cancel_requested = []
+        self.cancel_settled = []
 
     async def settle_success(self, job_id, **kwargs):
         self.succeeded.append((job_id, kwargs))
+        return True
+
+    async def request_cancel(self, scope, job_id, **kwargs):
+        self.cancel_requested.append((scope, job_id, kwargs))
+        return True
+
+    async def settle_requested_cancel(self, scope, job_id, **kwargs):
+        self.cancel_settled.append((scope, job_id, kwargs))
         return True
 
 
@@ -478,18 +488,43 @@ async def test_privacy_export_streams_episode_rows_for_the_case_scope() -> None:
 @pytest.mark.asyncio
 async def test_reset_owner_deletes_and_counts_episodes_and_cancels_seal_jobs() -> None:
     owner = "22222222-2222-4222-8222-222222222222"
+    project_id = _scope().project_id
+    dream_job_id = uuid.UUID("44444444-4444-4444-8444-444444444444")
+    seal_job_id = uuid.UUID("55555555-5555-4555-8555-555555555555")
+    jobs = _Jobs()
     session = _Session(
-        _Result(rows=()),
-        _Result(rows=()),
-        _Result(rows=()),
+        _Result(rows=(project_id,)),
+        _Result(),
+        _Result(),
+        _Result(
+            rows=(
+                type(
+                    "ScopeRow",
+                    (),
+                    {"project_id": project_id, "namespace": "episode-only"},
+                )(),
+            )
+        ),
         _Result(),
         _Result(),
         _Result(),
         _Result(),
-        scalars=[7, 1, 2, 3, 4, 5],
+        _Result(),
+        _Result(
+            rows=(
+                (dream_job_id, project_id, owner, "memory_dream"),
+                (seal_job_id, project_id, owner, "memory_seal"),
+            )
+        ),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        _Result(),
+        scalars=[7, 1, 2, 3, 0, 4, 5],
     )
 
-    counts = await MemoryDocumentRepository(session, jobs=_Jobs()).reset_owner(
+    counts = await MemoryDocumentRepository(session, jobs=jobs).reset_owner(
         owner,
         now=NOW,
     )
@@ -498,10 +533,46 @@ async def test_reset_owner_deletes_and_counts_episodes_and_cancels_seal_jobs() -
     assert counts.documents == 1
     assert counts.versions == 2
     assert counts.dream_runs == 3
+    assert counts.prepare_runs == 0
     assert counts.snapshots == 4
     assert counts.episodes == 5
+    assert counts.scopes_reset == 1
+    assert counts.affected_project_ids == (project_id,)
+    assert counts.jobs_cancelled == 2
+    assert [(item.project_id, item.job_id) for item in counts.settled_dreams] == [(project_id, dream_job_id)]
+    assert [item[1] for item in jobs.cancel_requested] == [
+        dream_job_id,
+        seal_job_id,
+    ]
+    assert [item[1] for item in jobs.cancel_settled] == [
+        dream_job_id,
+        seal_job_id,
+    ]
 
     compiled = [_compiled(statement) for statement in session.executed]
+    scope_union = next(sql for sql in compiled if "memory_documents.project_id AS project_id" in sql and "memory_episodes.project_id AS project_id" in sql)
+    assert all(
+        table in scope_union
+        for table in (
+            "memory_documents",
+            "memory_history_entries",
+            "memory_document_versions",
+            "memory_dream_runs",
+            "memory_dream_prepare_runs",
+            "run_memory_context_snapshots",
+            "memory_episodes",
+            "jobs",
+        )
+    )
+    project_lock = next(index for index, sql in enumerate(compiled) if "FROM projects" in sql and "FOR UPDATE" in sql)
+    membership_lock = next(index for index, sql in enumerate(compiled) if "FROM project_memberships" in sql and "FOR UPDATE" in sql)
+    thread_lock = next(index for index, sql in enumerate(compiled) if "FROM threads_meta" in sql and "FOR UPDATE" in sql)
+    prepare_lock = next(index for index, sql in enumerate(compiled) if "FROM memory_dream_prepare_runs" in sql and "FOR UPDATE" in sql)
+    document_lock = next(index for index, sql in enumerate(compiled) if "FROM memory_documents" in sql and "FOR UPDATE" in sql)
+    dream_lock = next(index for index, sql in enumerate(compiled) if "FROM memory_dream_runs" in sql and "FOR UPDATE" in sql)
+    history_lock = next(index for index, sql in enumerate(compiled) if "FROM memory_history_entries" in sql and "FOR UPDATE" in sql)
+    job_lock = next(index for index, sql in enumerate(compiled) if "FROM jobs" in sql and "FOR UPDATE" in sql)
+    assert project_lock < membership_lock < thread_lock < prepare_lock < document_lock < dream_lock < history_lock < job_lock
     assert any("DELETE FROM memory_episodes" in sql for sql in compiled)
     active_jobs = next(statement for statement, sql in zip(session.executed, compiled, strict=True) if "jobs.job_type" in sql)
     active_jobs_sql = _compiled(active_jobs, literal=True)

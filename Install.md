@@ -1,6 +1,6 @@
 # ActWeave Install
 
-This file is for coding agents. If the ActWeave repository is not already cloned and open, clone `https://github.com/SerenaLuna8/deer-flow.git` first, then continue from the repository root.
+This file is for coding agents working from an ActWeave source tree obtained through the private project's approved internal distribution channel. Continue from the repository root; do not invent or assume a public clone URL.
 
 ## Goal
 
@@ -26,7 +26,7 @@ Do not assume API keys or model credentials exist. Set up everything that can be
 
 Consider the setup successful when all of the following are true:
 
-- The ActWeave repository is cloned and the current working directory is the repo root.
+- The ActWeave source tree is available and the current working directory is the repo root.
 - `config.yaml` exists.
 - `DATABASE_URL` points to an existing PostgreSQL database and `make check-db` passes.
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
@@ -36,12 +36,12 @@ Consider the setup successful when all of the following are true:
 
 ## Steps
 
-- If the current directory is not the ActWeave repository root, clone `https://github.com/SerenaLuna8/deer-flow.git` if needed, then change into the repository root.
+- If the current directory is not the ActWeave repository root, ask for the approved internal source location or an existing checkout, then change into the repository root.
 - Confirm the current directory is the ActWeave repository root by checking that `Makefile`, `backend/`, `frontend/`, and `config.example.yaml` exist.
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
-- Require PostgreSQL-only `DATABASE_URL` and `POSTGRES_ADMIN_URL` entries in the root `.env` or explicit environment. Do not read or print their values. `make setup-db` loads the root `.env` only when it exists, and explicit environment works without the file. It is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v9`, and performs first-install bootstrap. It also requires `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and the Credential keyring environment in the same secret source; the command preflights them before database creation and stores only encrypted `model_api_key` envelopes. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded by setup; provision a new empty target instead. The one exception: a database stamped at a known older chain revision reports `upgrade_required` in `make check-db` and is upgraded explicitly with `make upgrade-db` after a backup. Run `make setup-db`, then run `make check-db`.
+- Require PostgreSQL-only `DATABASE_URL` and `POSTGRES_ADMIN_URL` entries in the root `.env` or explicit environment. Do not read or print their values. `make setup-db` loads the root `.env` only when it exists, and explicit environment works without the file. It is the only initialization entry point: it requires an empty target, executes the complete `full_schema.sql`, records `full_schema_v17`, and performs first-install bootstrap. It also requires `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and the Credential keyring environment in the same secret source; the command preflights them before database creation and stores only encrypted `model_api_key` envelopes. Existing legacy, unknown, or nonempty unmanaged databases are not upgraded by setup; provision a new empty target instead. The one exception: a database stamped at a known older chain revision reports `upgrade_required` in `make check-db` and is upgraded explicitly with `make upgrade-db` after a backup. Run `make setup-db`, then run `make check-db`.
 - Never rely on application startup to initialize or repair PostgreSQL. Runtime startup and `make check-db` are read-only schema consumers. If an existing database has a legacy or unknown marker, is unmarked and nonempty, or has catalog drift, stop and require a new empty target instead of stamping, resetting, or repairing it.
 - The application compose stack does not provision PostgreSQL. When Docker is available, a standalone `postgres:17-alpine` container is acceptable, but use placeholders for credentials and keep the application role non-superuser. ActWeave does not use RLS; project access is enforced by `ProjectContext` and scoped repositories.
 - If Docker is available:

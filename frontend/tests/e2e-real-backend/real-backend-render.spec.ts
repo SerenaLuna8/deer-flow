@@ -18,7 +18,7 @@ const here = dirname(fileURLToPath(import.meta.url));
  *
  * The prompt is read from the same fixture the gateway replays, so the input
  * hash matches and the recorded model turns reproduce deterministically. The
- * default auto-title is local fallback state, not a replayed model turn.
+ * default auto-title is the recorded ``middleware:title`` turn.
  */
 // Register through the frontend origin (same-origin proxy) so the auth cookies
 // are stored for and sent to the browser origin — the gateway is reached via the
@@ -37,6 +37,7 @@ const fixture = JSON.parse(
 ) as {
   prompt: string;
   turns: Array<{
+    caller?: unknown;
     stream?: {
       provenance?: unknown;
       text_chunk_chars?: unknown;
@@ -46,17 +47,9 @@ const fixture = JSON.parse(
 };
 
 const PROMPT = fixture.prompt;
-const FALLBACK_TITLE_MAX_CHARS = 50;
 
-function fallbackTitle(userMsg: string): string {
-  if (!userMsg) return "New Conversation";
-  if (userMsg.length <= FALLBACK_TITLE_MAX_CHARS) return userMsg;
-  return `${userMsg.slice(0, FALLBACK_TITLE_MAX_CHARS).trimEnd()}...`;
-}
-
-// Suggestions still come from the recorded model fixture. The default title no
-// longer does: TitleMiddleware uses a local fallback when title.model_name is
-// unset, so derive that expected title from the prompt.
+// Suggestions still come from the recorded model fixture. The default title
+// uses the system default model, so it is the recorded middleware:title turn.
 const textTurns = fixture.turns
   .map((t) => t.output?.data?.content)
   .filter((c): c is string => typeof c === "string" && c.trim().length > 0);
@@ -73,7 +66,13 @@ const EXPECTED_SUGGESTION = ((): string => {
     return "";
   }
 })();
-const EXPECTED_TITLE = fallbackTitle(PROMPT);
+const titleTurn = fixture.turns.find(
+  (turn) => turn.caller === "middleware:title",
+);
+const EXPECTED_TITLE =
+  typeof titleTurn?.output.data.content === "string"
+    ? titleTurn.output.data.content
+    : "";
 
 const derivedBurstTurn = fixture.turns.find(
   (turn) =>
@@ -135,7 +134,7 @@ test.describe("real backend render (replay, no API key)", () => {
     // chat/artifact surfaces; the suggestion is a Gateway auxiliary model call.
     expect(
       EXPECTED_TITLE,
-      "default local fallback title should be derived from the prompt",
+      "fixture should contain a title model turn",
     ).not.toBe("");
     expect(
       EXPECTED_SUGGESTION,

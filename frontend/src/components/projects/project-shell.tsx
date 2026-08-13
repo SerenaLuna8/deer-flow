@@ -142,7 +142,7 @@ export function ProjectShell({
           "bg-background min-h-screen w-full overflow-x-clip md:grid md:transition-[grid-template-columns] md:duration-200 md:ease-out",
           desktopNavCollapsed
             ? "md:grid-cols-[3.5rem_minmax(0,1fr)]"
-            : "md:grid-cols-[16rem_minmax(0,1fr)]",
+            : "md:grid-cols-[15rem_minmax(0,1fr)]",
         )}
       >
         <ProjectDesktopNav

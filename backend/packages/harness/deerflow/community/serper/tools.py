@@ -8,12 +8,21 @@ API. An API key is required. Sign up at https://serper.dev to get one.
 import json
 import logging
 import os
-from ipaddress import IPv4Address, ip_address
-from urllib.parse import urlparse
 
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.errors import (
+    CommunityToolError,
+    community_error_json,
+    no_results_json,
+)
+from deerflow.community.url_safety import (
+    is_url_value_present as _is_url_present,
+)
+from deerflow.community.url_safety import (
+    sanitize_public_http_reference_url as _safe_public_url,
+)
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -51,16 +60,46 @@ def _missing_key_error(query: str, tool_name: str) -> str:
     if tool_name not in _api_key_warned:
         _api_key_warned.add(tool_name)
         logger.warning("Serper API key is not set for '%s'. Set SERPER_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://serper.dev", tool_name)
-    return json.dumps(
-        {"error": "SERPER_API_KEY is not configured", "query": query},
-        ensure_ascii=False,
+    return community_error_json(
+        CommunityToolError(
+            provider="serper",
+            code="configuration_error",
+            message="SERPER_API_KEY is not configured",
+            retryable=False,
+        ),
+        query=query,
     )
 
 
 def _unexpected_format_error(query: str) -> str:
-    return json.dumps(
-        {"error": "Serper returned an unexpected response format", "query": query},
-        ensure_ascii=False,
+    return community_error_json(
+        CommunityToolError(
+            provider="serper",
+            code="provider_response_invalid",
+            message="Serper returned an unexpected response format",
+            retryable=True,
+        ),
+        query=query,
+    )
+
+
+def _serper_http_error(query: str, status_code: int) -> str:
+    if status_code in {401, 403}:
+        code, retryable = "provider_authentication_failed", False
+    elif status_code == 429:
+        code, retryable = "provider_rate_limited", True
+    elif status_code >= 500:
+        code, retryable = "provider_unavailable", True
+    else:
+        code, retryable = "provider_request_failed", False
+    return community_error_json(
+        CommunityToolError(
+            provider="serper",
+            code=code,
+            message=f"Serper API request failed with HTTP {status_code}",
+            retryable=retryable,
+        ),
+        query=query,
     )
 
 
@@ -82,93 +121,6 @@ def _clean_query(query: str) -> str:
     if len(query) > 500:
         query = query[:500]
     return query
-
-
-def _decode_ipv4(host: str) -> IPv4Address | None:
-    """Decode obfuscated IPv4 literals that ``ip_address`` rejects.
-
-    Mirrors the permissive ``inet_aton`` parsing many HTTP clients use, so that
-    integer (``2130706433``), hex (``0x7f000001``) and octal (``0177.0.0.1``)
-    encodings of an address are recognized. Returns an ``IPv4Address`` when the
-    host decodes to one, otherwise ``None`` (e.g. real domains like
-    ``cafe.com`` fail to decode and are left for the caller to treat as a host).
-    """
-    parts = host.split(".")
-    if not 1 <= len(parts) <= 4:
-        return None
-
-    values: list[int] = []
-    for part in parts:
-        if not part:
-            return None
-        try:
-            if part.startswith(("0x", "0X")):
-                values.append(int(part, 16))
-            elif part.startswith("0") and len(part) > 1:
-                values.append(int(part, 8))
-            else:
-                values.append(int(part, 10))
-        except ValueError:
-            return None
-
-    *leading, last = values
-    for value in leading:
-        if not 0 <= value <= 0xFF:
-            return None
-    max_last = (1 << (8 * (4 - len(leading)))) - 1
-    if not 0 <= last <= max_last:
-        return None
-
-    result = 0
-    for value in leading:
-        result = (result << 8) | value
-    result = (result << (8 * (4 - len(leading)))) | last
-    return ip_address(result)
-
-
-def _is_url_present(value: object) -> bool:
-    """Return ``True`` when *value* is a non-empty URL string.
-
-    Used to distinguish a field that was *absent* (eligible for cross-field
-    fallback) from one that was *present but filtered* by the SSRF guard (which
-    must stay empty rather than collapse onto its counterpart).
-    """
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _safe_public_url(value: object) -> str:
-    """Return ``value`` only if it is a safe, public http(s) URL, else "".
-
-    This is a best-effort SSRF guard that rejects non-http(s) schemes,
-    ``localhost``, and private/non-global IP literals (including obfuscated
-    decimal/hex/octal encodings). It only inspects the URL string and cannot
-    catch public hostnames that resolve to internal IPs (e.g. DNS rebinding);
-    any consumer that actually downloads these URLs must re-validate the
-    resolved IP at fetch time.
-    """
-    if not isinstance(value, str):
-        return ""
-    url = value.strip()
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        return ""
-
-    # Strip a single trailing dot (FQDN root label). ``localhost.`` and
-    # ``127.0.0.1.`` resolve to loopback on common resolvers but would
-    # otherwise slip past the localhost/IP checks below.
-    host = parsed.hostname.lower().rstrip(".")
-    if not host:
-        return ""
-    if host == "localhost" or host.endswith(".localhost"):
-        return ""
-
-    try:
-        ip = ip_address(host)
-    except ValueError:
-        ip = _decode_ipv4(host)
-        if ip is None:
-            return url
-    return url if ip.is_global else ""
 
 
 def _serper_post(endpoint: str, api_key: str, query: str, max_results: int) -> tuple[dict | None, str | None]:
@@ -196,15 +148,22 @@ def _serper_post(endpoint: str, api_key: str, query: str, max_results: int) -> t
             return None, _unexpected_format_error(query)
         return data, None
     except httpx.HTTPStatusError as e:
-        resp_text = (e.response.text or "")[:500]
-        logger.error("Serper API returned HTTP %s: %s", e.response.status_code, resp_text)
-        return None, json.dumps(
-            {"error": f"Serper API error: HTTP {e.response.status_code}", "query": query},
-            ensure_ascii=False,
+        logger.error("Serper API returned HTTP %s", e.response.status_code)
+        return None, _serper_http_error(query, e.response.status_code)
+    except Exception as exc:
+        logger.error(
+            "Serper request failed; provider_error_type=%s",
+            type(exc).__name__,
         )
-    except Exception as e:
-        logger.error("Serper request failed: %s: %s", type(e).__name__, str(e)[:500])
-        return None, json.dumps({"error": str(e)[:500], "query": query}, ensure_ascii=False)
+        return None, community_error_json(
+            CommunityToolError(
+                provider="serper",
+                code="provider_unavailable",
+                message="Serper is temporarily unavailable",
+                retryable=True,
+            ),
+            query=query,
+        )
 
 
 @tool("web_search", parse_docstring=True)
@@ -233,7 +192,11 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
     if error_json is not None:
         return error_json
     if not organic:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="serper",
+            query=query,
+            message="No results found",
+        )
 
     # Search result links are returned verbatim (not passed through
     # _safe_public_url): they are surfaced as citations for the model to read,
@@ -283,7 +246,11 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
     if error_json is not None:
         return error_json
     if not images:
-        return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="serper",
+            query=query,
+            message="No images found",
+        )
 
     normalized_results = []
     for r in images:
@@ -312,7 +279,12 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
             break
 
     if not normalized_results:
-        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="serper",
+            query=query,
+            message="No safe image URLs found",
+            code="no_safe_results",
+        )
 
     output = {
         "query": query,

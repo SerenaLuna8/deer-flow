@@ -21,6 +21,7 @@ from deerflow.agents.memory.dream import (
     render_empty_memory_document,
 )
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.error_codes import MemoryAuthorityUnavailable
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 
@@ -363,5 +364,5 @@ async def test_worker_authority_fails_closed_on_snapshot_digest_drift(
         active,
     )
 
-    with pytest.raises(AuthorizationRevoked):
+    with pytest.raises(MemoryAuthorityUnavailable):
         await authority.load_snapshot()

@@ -79,16 +79,16 @@ Warning 介入会按 thread 和 run 排队，并在下一次模型调用时合�
 
 ### TitleMiddleware
 
-在第一次交互后自动为线程生成标题。默认从用户的第一条消息生成快速本地 fallback 标题；只有设置 `title.model_name` 时，才启用可选的 LLM 标题路径。
+在第一次交互后自动为线程生成标题。`title.model_name` 为空时使用系统默认模型；模型调用失败时回退到从用户第一条消息截取的本地标题。
 
-**配置**：`config.yaml` 中的 `title:` 部分。
+**配置**：平台设置 `/admin/settings/system` 中的 `agent_runtime.title`，不是 `config.yaml`。
 
 ```yaml
 title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # 本地 fallback；填模型名才启用 LLM 标题
+  model_name: null # 系统默认模型；也可指定逻辑模型名
 ```
 
 ---

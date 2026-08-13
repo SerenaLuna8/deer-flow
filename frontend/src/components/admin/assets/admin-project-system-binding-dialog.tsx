@@ -15,6 +15,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  SharedAssetApiError,
   useAdminAssetVersions,
   useDisableAdminProjectSystemBinding,
   useEnableAdminProjectSystemBinding,
@@ -22,6 +23,7 @@ import {
   useUpgradeAdminProjectSystemBinding,
   type AssetKind,
   type AssetListKind,
+  type AssetVersion,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
@@ -34,6 +36,29 @@ const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
   "mcp-servers": "mcp",
 };
 
+type AdminSystemSkillBindingVersion = Pick<
+  Extract<AssetVersion, { skill_id: string }>,
+  "binding_eligible" | "governance_status" | "workflow_status"
+>;
+
+export function adminSystemSkillVersionIsBindable(
+  version: AdminSystemSkillBindingVersion,
+): boolean {
+  return (
+    version.workflow_status === "published" &&
+    version.governance_status === "active" &&
+    version.binding_eligible
+  );
+}
+
+export function isAdminSystemBindingConflict(error: unknown): boolean {
+  return (
+    error instanceof SharedAssetApiError &&
+    error.status === 409 &&
+    error.code === "ASSET_CONFLICT"
+  );
+}
+
 export function AdminProjectSystemBindingDialog({
   accountId,
   projectId,
@@ -41,6 +66,7 @@ export function AdminProjectSystemBindingDialog({
   item,
   open,
   onOpenChange,
+  onConflict,
 }: {
   accountId: string;
   projectId: string;
@@ -48,6 +74,7 @@ export function AdminProjectSystemBindingDialog({
   item: ProjectAssetItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onConflict?: () => void;
 }) {
   const { t } = useI18n();
   const assetKind = BINDING_KIND[kind];
@@ -84,16 +111,22 @@ export function AdminProjectSystemBindingDialog({
   );
   const bindablePublished = useMemo(
     () =>
-      published.filter(
-        (version) =>
+      published.filter((version) => {
+        if (kind === "skills") {
+          return (
+            "skill_id" in version && adminSystemSkillVersionIsBindable(version)
+          );
+        }
+        return (
           kind !== "mcp-servers" ||
           !("mcp_server_id" in version) ||
           mcpVersionRuntimeBlockReason(
             version,
             item.scope,
             t.adminAssets.runtime,
-          ) === null,
-      ),
+          ) === null
+        );
+      }),
     [item.scope, kind, published, t.adminAssets.runtime],
   );
   const firstRuntimeBlockReason = useMemo(
@@ -122,15 +155,29 @@ export function AdminProjectSystemBindingDialog({
         : null,
     [item.scope, kind, published, t.adminAssets.runtime],
   );
+  const currentPublished = published.find(
+    (version) => version.id === item.current_published_version_id,
+  );
+  const defaultUnboundVersionId =
+    kind === "skills"
+      ? currentPublished &&
+        "skill_id" in currentPublished &&
+        adminSystemSkillVersionIsBindable(currentPublished)
+        ? currentPublished.id
+        : ""
+      : (item.current_published_version_id ?? "");
 
   useEffect(() => {
     if (!open) return;
     setSelectedVersionId(
-      item.binding?.enabled
-        ? item.binding.version_id
-        : (item.current_published_version_id ?? ""),
+      item.binding?.enabled ? item.binding.version_id : defaultUnboundVersionId,
     );
-  }, [item, open]);
+  }, [
+    defaultUnboundVersionId,
+    item.binding?.enabled,
+    item.binding?.version_id,
+    open,
+  ]);
 
   const pending =
     enable.isPending ||
@@ -143,6 +190,9 @@ export function AdminProjectSystemBindingDialog({
   const pinned = published.find(
     (version) => version.id === item.binding?.version_id,
   );
+  const pinnedRevoked = Boolean(
+    pinned && "skill_id" in pinned && pinned.governance_status === "revoked",
+  );
   const canSubmit =
     !history.isLoading &&
     !history.error &&
@@ -152,16 +202,30 @@ export function AdminProjectSystemBindingDialog({
     selectedVersionId !==
       (item.binding?.enabled ? item.binding.version_id : "");
 
+  function mutationSucceeded() {
+    onOpenChange(false);
+  }
+
+  function mutationFailed(mutationError: unknown) {
+    if (!isAdminSystemBindingConflict(mutationError)) return;
+    setSelectedVersionId("");
+    void history.refetch();
+    onConflict?.();
+  }
+
   function save() {
     if (!canSubmit || !target) return;
     if (!item.binding?.enabled) {
-      enable.mutate({
-        asset_id: item.id,
-        version_id: target.id,
-        ...(item.binding
-          ? { expected_binding_version: item.binding.version }
-          : {}),
-      });
+      enable.mutate(
+        {
+          asset_id: item.id,
+          version_id: target.id,
+          ...(item.binding
+            ? { expected_binding_version: item.binding.version }
+            : {}),
+        },
+        { onSuccess: mutationSucceeded, onError: mutationFailed },
+      );
       return;
     }
     if (!pinned || target.id === pinned.id) return;
@@ -173,9 +237,15 @@ export function AdminProjectSystemBindingDialog({
       },
     };
     if (target.version_number > pinned.version_number) {
-      upgrade.mutate(variables);
+      upgrade.mutate(variables, {
+        onSuccess: mutationSucceeded,
+        onError: mutationFailed,
+      });
     } else {
-      rollback.mutate(variables);
+      rollback.mutate(variables, {
+        onSuccess: mutationSucceeded,
+        onError: mutationFailed,
+      });
     }
   }
 
@@ -215,7 +285,9 @@ export function AdminProjectSystemBindingDialog({
             </p>
             <p className="mt-1.5 text-sm font-semibold">
               {pinned
-                ? t.adminAssets.version.number(pinned.version_number)
+                ? `${t.adminAssets.version.number(pinned.version_number)}${
+                    pinnedRevoked ? ` · ${t.adminAssets.status.revoked}` : ""
+                  }`
                 : t.adminAssets.dialogs.binding.notEnabled}
             </p>
             <p className="text-muted-foreground mt-1 min-w-0 font-mono text-xs [overflow-wrap:anywhere]">
@@ -276,13 +348,16 @@ export function AdminProjectSystemBindingDialog({
                   key={version.id}
                   value={version.id}
                   disabled={
-                    kind === "mcp-servers" &&
-                    "mcp_server_id" in version &&
-                    mcpVersionRuntimeBlockReason(
-                      version,
-                      item.scope,
-                      t.adminAssets.runtime,
-                    ) !== null
+                    (kind === "skills" &&
+                      "skill_id" in version &&
+                      !adminSystemSkillVersionIsBindable(version)) ||
+                    (kind === "mcp-servers" &&
+                      "mcp_server_id" in version &&
+                      mcpVersionRuntimeBlockReason(
+                        version,
+                        item.scope,
+                        t.adminAssets.runtime,
+                      ) !== null)
                   }
                 >
                   {t.adminAssets.version.number(version.version_number)}
@@ -294,6 +369,11 @@ export function AdminProjectSystemBindingDialog({
                     t.adminAssets.runtime,
                   ) !== null
                     ? t.adminAssets.dialogs.binding.unavailableSuffix
+                    : ""}
+                  {kind === "skills" &&
+                  "skill_id" in version &&
+                  version.governance_status === "revoked"
+                    ? ` · ${t.adminAssets.status.revoked}${t.adminAssets.dialogs.binding.unavailableSuffix}`
                     : ""}
                 </option>
               ))}
@@ -313,12 +393,24 @@ export function AdminProjectSystemBindingDialog({
             {firstRuntimeBlockReason}
           </p>
         ) : null}
+        {pinnedRevoked && item.binding?.enabled ? (
+          <p
+            role="alert"
+            className="border-destructive/30 bg-destructive/5 text-destructive rounded-lg border px-3 py-2 text-sm"
+          >
+            {t.adminAssets.status.revoked}:{" "}
+            {t.adminAssets.dialogs.binding.selectPublished} /{" "}
+            {t.adminAssets.dialogs.binding.disable}
+          </p>
+        ) : null}
         {error ? (
           <p
             role="alert"
             className="border-destructive/30 bg-destructive/5 text-destructive rounded-lg border px-3 py-2 text-sm"
           >
-            {adminAssetErrorMessage(error, t.adminAssets.errors)}
+            {isAdminSystemBindingConflict(error)
+              ? t.adminAssets.errors.conflict
+              : adminAssetErrorMessage(error, t.adminAssets.errors)}
           </p>
         ) : null}
         <DialogFooter className="border-border/70 gap-2 border-t pt-4 sm:justify-between">
@@ -328,10 +420,16 @@ export function AdminProjectSystemBindingDialog({
               variant="outline"
               disabled={pending}
               onClick={() =>
-                disable.mutate({
-                  assetId: item.id,
-                  input: { expected_binding_version: item.binding!.version },
-                })
+                disable.mutate(
+                  {
+                    assetId: item.id,
+                    input: { expected_binding_version: item.binding!.version },
+                  },
+                  {
+                    onSuccess: mutationSucceeded,
+                    onError: mutationFailed,
+                  },
+                )
               }
             >
               {t.adminAssets.dialogs.binding.disable}

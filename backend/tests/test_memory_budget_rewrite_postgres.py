@@ -41,9 +41,11 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentScope,
     memory_document_digest,
 )
+from deerflow.persistence.projects.model import ProjectMembershipRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.persistence.user.model import UserRow
 
 
 class _InjectionAudit:
@@ -65,10 +67,204 @@ class _InjectionAudit:
 
 @pytest.mark.postgres
 @pytest.mark.anyio
+async def test_budget_rewrite_candidate_limit_applies_after_exact_token_check(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    budget = 100
+    false_candidate = EMPTY_MEMORY_DOCUMENT + "\n\n" + ("a" * (budget + 1))
+    true_candidate = EMPTY_MEMORY_DOCUMENT + "\n\n" + ("真" * (budget + 1))
+    assert len(false_candidate) > budget
+    assert estimate_memory_tokens(false_candidate) <= budget
+    assert estimate_memory_tokens(true_candidate) > budget
+    now = datetime.now(UTC)
+
+    try:
+        async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await session.scalar(
+                sa.select(SystemRuntimePolicyRow.current_version_id).where(
+                    SystemRuntimePolicyRow.section == "memory_document",
+                )
+            )
+            assert isinstance(sections_policy_version_id, uuid.UUID)
+            documents = (
+                *(
+                    (
+                        f"false-{index:03d}",
+                        false_candidate,
+                        now + timedelta(seconds=index),
+                    )
+                    for index in range(101)
+                ),
+                ("true-oldest", true_candidate, now + timedelta(seconds=101)),
+                ("true-next", true_candidate, now + timedelta(seconds=102)),
+            )
+            session.add_all(
+                MemoryDocumentRow(
+                    project_id=seed.owner_a.project_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    namespace=namespace,
+                    content=content,
+                    content_digest=memory_document_digest(content),
+                    sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                    sections_policy_version_id=sections_policy_version_id,
+                    version=1,
+                    dream_cursor=0,
+                    updated_at=updated_at,
+                )
+                for namespace, content, updated_at in documents
+            )
+
+        async with seed.factory() as session:
+            repository = MemoryDocumentRepository(
+                session,
+            )
+            first = await repository.list_budget_rewrite_scope_page(
+                budget_tokens=budget,
+                admissible_roles=("admin", "editor", "runner", "channel_guest"),
+                limit=2,
+            )
+            assert first.scopes == ()
+            assert first.next_cursor is not None
+            second = await repository.list_budget_rewrite_scope_page(
+                budget_tokens=budget,
+                admissible_roles=("admin", "editor", "runner", "channel_guest"),
+                cursor=first.next_cursor,
+                limit=2,
+            )
+
+        assert tuple(scope.namespace for scope in second.scopes) == (
+            "true-oldest",
+            "true-next",
+        )
+        assert second.next_cursor is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_budget_rewrite_discovery_keyset_pages_past_one_hundred_scopes(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    budget = 100
+    true_candidate = EMPTY_MEMORY_DOCUMENT + "\n\n" + ("真" * (budget + 1))
+    assert estimate_memory_tokens(true_candidate) > budget
+    now = datetime.now(UTC)
+    viewer_id = uuid.uuid4()
+
+    try:
+        async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await session.scalar(
+                sa.select(SystemRuntimePolicyRow.current_version_id).where(
+                    SystemRuntimePolicyRow.section == "memory_document",
+                )
+            )
+            assert isinstance(sections_policy_version_id, uuid.UUID)
+            disabled_owner = await session.get(UserRow, str(seed.owner_b.user_id))
+            assert disabled_owner is not None
+            disabled_owner.memory_enabled = False
+            session.add(
+                UserRow(
+                    id=str(viewer_id),
+                    email=f"{viewer_id}@example.com",
+                    system_role="user",
+                )
+            )
+            # Persist the referenced user before adding its membership.  These
+            # independently mapped rows have no ORM relationship that can make
+            # SQLAlchemy order one combined pending flush for us.
+            await session.flush()
+            session.add(
+                ProjectMembershipRow(
+                    id=uuid.uuid4(),
+                    project_id=seed.owner_a.project_id,
+                    user_id=str(viewer_id),
+                    role="viewer",
+                    status="active",
+                    version=1,
+                )
+            )
+            # Establish the synthetic viewer's membership authority before
+            # seeding a document that references both foreign keys.
+            await session.flush()
+            eligible_documents = tuple(
+                MemoryDocumentRow(
+                    project_id=seed.owner_a.project_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    namespace=f"eligible-{index:03d}",
+                    content=true_candidate,
+                    content_digest=memory_document_digest(true_candidate),
+                    sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                    sections_policy_version_id=sections_policy_version_id,
+                    version=1,
+                    dream_cursor=0,
+                    updated_at=now + timedelta(seconds=index),
+                )
+                for index in range(102)
+            )
+            session.add_all(
+                (
+                    *eligible_documents,
+                    MemoryDocumentRow(
+                        project_id=seed.owner_a.project_id,
+                        owner_user_id=str(seed.owner_b.user_id),
+                        namespace="disabled-owner",
+                        content=true_candidate,
+                        content_digest=memory_document_digest(true_candidate),
+                        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                        sections_policy_version_id=sections_policy_version_id,
+                        version=1,
+                        dream_cursor=0,
+                        updated_at=now - timedelta(seconds=2),
+                    ),
+                    MemoryDocumentRow(
+                        project_id=seed.owner_a.project_id,
+                        owner_user_id=str(viewer_id),
+                        namespace="viewer-owner",
+                        content=true_candidate,
+                        content_digest=memory_document_digest(true_candidate),
+                        sections=list(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES),
+                        sections_policy_version_id=sections_policy_version_id,
+                        version=1,
+                        dream_cursor=0,
+                        updated_at=now - timedelta(seconds=1),
+                    ),
+                )
+            )
+
+        async with seed.factory() as session:
+            repository = MemoryDocumentRepository(session)
+            first = await repository.list_budget_rewrite_scope_page(
+                budget_tokens=budget,
+                admissible_roles=("admin", "editor", "runner", "channel_guest"),
+                limit=100,
+            )
+            assert first.next_cursor is not None
+            second = await repository.list_budget_rewrite_scope_page(
+                budget_tokens=budget,
+                admissible_roles=("admin", "editor", "runner", "channel_guest"),
+                cursor=first.next_cursor,
+                limit=100,
+            )
+
+        assert [scope.namespace for scope in first.scopes] == [f"eligible-{index:03d}" for index in range(100)]
+        assert [scope.namespace for scope in second.scopes] == [
+            "eligible-100",
+            "eligible-101",
+        ]
+        assert second.next_cursor is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
 async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
     migrated_postgres_database_url: str,
 ) -> None:
-    """Prove the PR5 rescue path without crossing the external model boundary."""
+    """Prove the budget-rewrite rescue path without crossing the external model boundary."""
 
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     scope = MemoryDocumentScope(
@@ -215,10 +411,10 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
             )
 
         memory_service = PrivateMemoryDocumentService(seed.factory)
-        before_state, before_status = await memory_service.get(seed.owner_a)
+        before_state, before_advisory = await memory_service.get_with_injection_advisory(seed.owner_a)
         assert before_state.pending_count == 0
         assert before_state.document.version == 1
-        assert before_status == "skipped_over_budget"
+        assert before_advisory.status == "skipped_over_budget"
 
         locked_policy = LockedAgentRuntimePolicy(
             policy_version_id=uuid.uuid4(),
@@ -347,8 +543,8 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
         )
         await settlement.commit()
 
-        after_state, after_status = await memory_service.get(seed.owner_a)
-        assert after_status == "ok"
+        after_state, after_advisory = await memory_service.get_with_injection_advisory(seed.owner_a)
+        assert after_advisory.status == "eligible"
         assert after_state.pending_count == 0
         assert after_state.document.version == 2
         assert after_state.document.content == rewritten_content

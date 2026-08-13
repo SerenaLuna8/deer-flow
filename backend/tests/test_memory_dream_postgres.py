@@ -39,10 +39,11 @@ from deerflow.persistence.private_work.memory_document_model import (
     MemoryHistoryEntryRow,
 )
 from deerflow.persistence.private_work.memory_document_repository import (
-    MemoryDocumentConflict,
     MemoryDocumentRepository,
     MemoryDocumentScope,
     MemoryDreamFrozenRuntime,
+    MemoryDreamLeaseConflict,
+    MemoryDreamReleaseResult,
     MemoryDreamTrigger,
     memory_document_digest,
 )
@@ -258,7 +259,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
             "# 项目背景\n\n- 当前项目使用 PostgreSQL。",
         )
 
-        with pytest.raises(MemoryDocumentConflict):
+        with pytest.raises(MemoryDreamLeaseConflict):
             async with seed.factory() as session, session.begin():
                 await MemoryDocumentRepository(
                     session,
@@ -343,7 +344,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
         assert failure_claim.job_id == failure_job_id
 
         async with seed.factory() as session, session.begin():
-            await MemoryDocumentRepository(
+            retry_result = await MemoryDocumentRepository(
                 session,
                 jobs=_jobs(session),
             ).release_dream(
@@ -355,6 +356,9 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                 public_error_code="MEMORY_DREAM_MODEL_FAILED",
                 retry_initial_seconds=1,
                 retry_max_seconds=1,
+            )
+            assert retry_result == MemoryDreamReleaseResult(
+                disposition="retry_wait",
             )
 
         async with seed.factory() as session:
@@ -378,7 +382,10 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                 == 5
             )
 
-        for attempt_index in (2, 3):
+        for attempt_index, expected_disposition in (
+            (2, "retry_wait"),
+            (3, "dead"),
+        ):
             retry_claim = await _claim_dream(
                 seed.factory,
                 worker_id=worker_id,
@@ -386,7 +393,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
             )
             assert retry_claim.job_id == failure_job_id
             async with seed.factory() as session, session.begin():
-                await MemoryDocumentRepository(
+                release_result = await MemoryDocumentRepository(
                     session,
                     jobs=_jobs(session),
                 ).release_dream(
@@ -399,6 +406,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                     retry_initial_seconds=1,
                     retry_max_seconds=1,
                 )
+                assert release_result.disposition == expected_disposition
 
         async with seed.factory() as session:
             document = await session.get(
@@ -451,7 +459,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
             now=base_time + timedelta(seconds=20),
         )
         async with seed.factory() as session, session.begin():
-            await MemoryDocumentRepository(
+            cancelled_result = await MemoryDocumentRepository(
                 session,
                 jobs=_jobs(session),
             ).release_dream(
@@ -460,6 +468,9 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                 lease_token=cancelled_claim.lease_token,
                 now=base_time + timedelta(seconds=21),
                 cancelled=True,
+            )
+            assert cancelled_result == MemoryDreamReleaseResult(
+                disposition="cancelled",
             )
 
         async with seed.factory() as session:
@@ -785,6 +796,249 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
             *(task for task in (worker_task, scheduler_task) if task is not None),
             return_exceptions=True,
         )
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_release_settlement_locks_document_before_active_job(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    scope = MemoryDocumentScope(
+        project_id=uuid.UUID(seed.owner_a.resource_scope.project_id),
+        owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+    )
+    now = datetime.now(UTC)
+    worker_id = uuid.uuid4()
+    model_id = uuid.uuid4()
+    model_version_id = uuid.uuid4()
+    model_checksum = "e" * 64
+    frozen = MemoryDreamFrozenRuntime(
+        preference_version=1,
+        policy_revision=1,
+        model_config_id=model_id,
+        model_version_id=model_version_id,
+        model_payload_checksum=model_checksum,
+        prompt_version=DREAM_PROMPT_VERSION,
+    )
+    release_scope_locked = asyncio.Event()
+    release_backend_pid: int | None = None
+    release_task: asyncio.Task[None] | None = None
+
+    async def coordinated_scope_validator(session, claim, *, lock):
+        nonlocal release_backend_pid
+        allowed = await memory_dream_worker_module._default_scope_validator(
+            session,
+            claim,
+            lock=lock,
+        )
+        if lock:
+            release_backend_pid = int(
+                await session.scalar(text("SELECT pg_backend_pid()")),
+            )
+            release_scope_locked.set()
+        return allowed
+
+    async def wait_until_release_waits_for_lock() -> None:
+        assert release_backend_pid is not None
+        for _ in range(200):
+            async with seed.factory() as monitor:
+                wait_event_type = await monitor.scalar(
+                    text(
+                        """SELECT wait_event_type
+                        FROM pg_stat_activity WHERE pid=:pid"""
+                    ),
+                    {"pid": release_backend_pid},
+                )
+            if wait_event_type == "Lock":
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("Dream release did not wait for the Document lock")
+
+    try:
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO system_model_configs
+                    (id,logical_name,display_name,description,status,
+                     current_version_id,revision,sort_order,created_by_user_id,
+                     updated_by_user_id)
+                    VALUES (:id,:name,'Dream release lock-order model',
+                            'PostgreSQL Dream release lock-order test','active',
+                            NULL,1,0,:owner,:owner)"""
+                ),
+                {
+                    "id": model_id,
+                    "name": f"dream-release-lock-order-{model_id.hex}",
+                    "owner": scope.owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO system_model_config_versions
+                    (id,model_config_id,version_number,provider_adapter,
+                     provider_model,settings,supports_thinking,
+                     supports_reasoning_effort,supports_vision,credential_id,
+                     credential_version_id,credential_env_key,payload_checksum,
+                     supersedes_version_id,created_by_user_id)
+                    VALUES (:id,:model,1,'codex_cli','dream-release-lock-order',
+                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
+                            :checksum,NULL,:owner)"""
+                ),
+                {
+                    "id": model_version_id,
+                    "model": model_id,
+                    "checksum": model_checksum,
+                    "owner": scope.owner_user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """UPDATE system_model_configs
+                    SET current_version_id=:version WHERE id=:model"""
+                ),
+                {"version": model_version_id, "model": model_id},
+            )
+
+        async with seed.factory() as session, session.begin():
+            session.add(
+                WorkerNodeRow(
+                    id=worker_id,
+                    version="memory-dream-release-lock-order-test",
+                    capabilities_json=["memory_dream"],
+                    max_concurrent_jobs=1,
+                    draining=False,
+                    started_at=now,
+                    heartbeat_at=now,
+                )
+            )
+            tagged_text = "- [durable] Dream release preserves lock order."
+            session.add(
+                MemoryHistoryEntryRow(
+                    id=uuid.uuid4(),
+                    project_id=scope.project_id,
+                    owner_user_id=scope.owner_user_id,
+                    namespace=scope.namespace,
+                    thread_id="memory-dream-release-lock-order",
+                    source_checkpoint_id="source-release-lock-order",
+                    committed_checkpoint_id="committed-release-lock-order",
+                    source_digest=hashlib.sha256(b"source-release-lock-order").hexdigest(),
+                    status="pending",
+                    tagged_text=tagged_text,
+                    content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
+                    preference_version=1,
+                    snip_prompt_version="snip-prompt-v1",
+                    summary_model_ref=model_version_id,
+                    created_at=now,
+                )
+            )
+
+        async with seed.factory() as session, session.begin():
+            sections_policy_version_id = await _memory_document_policy_version_id(
+                session,
+            )
+            admission = await MemoryDocumentRepository(
+                session,
+                jobs=_jobs(session),
+            ).admit_dream(
+                scope,
+                trigger="manual_dream",
+                frozen=frozen,
+                initial_content=EMPTY_MEMORY_DOCUMENT,
+                initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                sections_policy_version_id=sections_policy_version_id,
+                now=now,
+            )
+        assert admission.disposition == "queued"
+        assert admission.job_id is not None
+        claim = await _claim_dream(
+            seed.factory,
+            worker_id=worker_id,
+            now=now + timedelta(seconds=1),
+        )
+        assert claim.job_id == admission.job_id
+
+        handler = MemoryDreamJobHandler(
+            seed.factory,
+            app_config=None,
+            runner_factory=lambda _model: object(),
+            job_repository_builder=_jobs,
+            scope_validator=coordinated_scope_validator,
+        )
+        settlement = handler._release_settlement(
+            claim,
+            cancelled=True,
+            retryable=False,
+        )
+
+        async with seed.factory() as blocker, blocker.begin():
+            document = (
+                await blocker.execute(
+                    sa.select(MemoryDocumentRow)
+                    .where(
+                        MemoryDocumentRow.project_id == scope.project_id,
+                        MemoryDocumentRow.owner_user_id == scope.owner_user_id,
+                        MemoryDocumentRow.namespace == scope.namespace,
+                    )
+                    .with_for_update(of=MemoryDocumentRow)
+                )
+            ).scalar_one()
+            assert document.active_dream_job_id == claim.job_id
+
+            release_task = asyncio.create_task(settlement.commit())
+            await asyncio.wait_for(release_scope_locked.wait(), timeout=2)
+            await asyncio.wait_for(
+                wait_until_release_waits_for_lock(),
+                timeout=3,
+            )
+
+            # The release transaction is waiting on Document and must not yet
+            # own Job.  The inverse Job -> Document implementation fails this
+            # NOWAIT probe and can deadlock with active-Dream admission.
+            active_job = (await blocker.execute(sa.select(JobRow).where(JobRow.id == claim.job_id).with_for_update(of=JobRow, nowait=True))).scalar_one()
+            assert active_job.status == "running"
+            probe = await MemoryDocumentRepository(
+                blocker,
+                jobs=_jobs(blocker),
+            ).admit_dream(
+                scope,
+                trigger="manual_dream",
+                frozen=frozen,
+                initial_content=EMPTY_MEMORY_DOCUMENT,
+                initial_sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                sections_policy_version_id=sections_policy_version_id,
+                now=now + timedelta(seconds=2),
+            )
+            assert probe.disposition == "already_running"
+            assert probe.job_id == claim.job_id
+
+        await asyncio.wait_for(release_task, timeout=5)
+
+        async with seed.factory() as session:
+            document = await session.get(
+                MemoryDocumentRow,
+                (scope.project_id, scope.owner_user_id, scope.namespace),
+            )
+            job = await session.get(JobRow, claim.job_id)
+            history = (
+                await session.execute(
+                    sa.select(MemoryHistoryEntryRow).where(
+                        MemoryHistoryEntryRow.project_id == scope.project_id,
+                        MemoryHistoryEntryRow.owner_user_id == scope.owner_user_id,
+                        MemoryHistoryEntryRow.namespace == scope.namespace,
+                    )
+                )
+            ).scalar_one()
+        assert document is not None and document.active_dream_job_id is None
+        assert job is not None and job.status == "cancelled"
+        assert history.status == "pending"
+        assert history.dream_job_id is None
+    finally:
+        if release_task is not None and not release_task.done():
+            release_task.cancel()
+        if release_task is not None:
+            await asyncio.gather(release_task, return_exceptions=True)
         await seed.engine.dispose()
 
 

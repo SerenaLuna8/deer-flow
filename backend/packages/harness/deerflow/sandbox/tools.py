@@ -1749,6 +1749,7 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
         description: Explain why you are listing this directory in short words. ALWAYS PROVIDE THIS PARAMETER FIRST.
         path: The **absolute** path to the directory to list.
     """
+    requested_path = path
     try:
         # Block access to disabled skill directories
         if not _is_trusted_run_scoped_skill_path(runtime, path) and _is_disabled_skill_path(path, user_id=resolve_runtime_user_id(runtime)):
@@ -1756,7 +1757,6 @@ def ls_tool(runtime: Runtime, description: str, path: str) -> str:
             return f"Error: Skill '{skill_name}' is disabled. Access to its files is blocked. Enable the skill in settings before using it."
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         thread_data = None
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
@@ -1820,10 +1820,10 @@ def glob_tool(
         include_dirs: Whether matching directories should also be returned. Default is False.
         max_results: Maximum number of paths to return. Default is 200.
     """
+    requested_path = path
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "glob",
             max_results,
@@ -1896,10 +1896,10 @@ def grep_tool(
         case_sensitive: Whether matching is case-sensitive. Default is False.
         max_results: Maximum number of matching lines to return. Default is 100.
     """
+    requested_path = path
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         effective_max_results = _resolve_max_results(
             "grep",
             max_results,
@@ -2221,10 +2221,10 @@ def str_replace_tool(
         new_str: The new substring. ALWAYS PROVIDE THIS PARAMETER FOURTH.
         replace_all: Whether to replace all occurrences of the substring. If False, only the first occurrence will be replaced. Default is False.
     """
+    requested_path = path
     try:
         sandbox = ensure_sandbox_initialized(runtime)
         ensure_thread_directories_exist(runtime)
-        requested_path = path
         if is_local_sandbox(runtime):
             thread_data = get_thread_data(runtime)
             validate_local_tool_path(path, thread_data)

@@ -49,6 +49,12 @@ class AssetStorageQuotaExceeded(SharedAssetError):
     public_message = "Project Skill storage quota exceeded"
 
 
+class AssetRunQuotaExceeded(SharedAssetError):
+    code = "asset_run_quota_exceeded"
+    status_code = 429
+    public_message = "Project concurrent Run quota exceeded"
+
+
 class AssetResolutionUnavailable(SharedAssetError):
     code = "asset_resolution_unavailable"
     status_code = 503

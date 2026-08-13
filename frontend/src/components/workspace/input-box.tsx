@@ -75,11 +75,12 @@ import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import {
-  dreamProjectMemory,
   getProjectMemory,
-  projectMemoryRootQueryKey,
   restoreProjectMemoryVersion,
-} from "@/core/private-work/memory";
+} from "@/core/private-work/memory/api";
+import { useMemoryDreamPreparation } from "@/core/private-work/memory/preparation-hooks";
+import { projectMemoryRootQueryKey } from "@/core/private-work/memory/query-keys";
+import { commitProjectMemoryCacheChange } from "@/core/private-work/memory-freshness";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { privateWorkQueryKey } from "@/core/private-work/query-keys";
 import { useProjectRuntimeSlashSkills } from "@/core/shared-assets";
@@ -94,11 +95,7 @@ import {
   resolveAgentMode,
   type AgentMode,
 } from "@/core/threads/agent-mode";
-import {
-  compactThreadContext,
-  compactThreadForDream,
-  DreamThreadCompactionError,
-} from "@/core/threads/api";
+import { compactThreadContext } from "@/core/threads/api";
 import {
   buildComposerDraftKey,
   clearComposerDraft,
@@ -167,6 +164,11 @@ import {
   shouldContinueFromLatestCheckpoint,
   type SlashSuggestion,
 } from "./input-box-helpers";
+import {
+  memoryDreamPreparationCanCancel,
+  memoryDreamPreparationLabelKind,
+  memoryDreamPreparationTerminalNotice,
+} from "./memory-dream-preparation-view-model";
 import { useThread } from "./messages/context";
 import { ModeHoverGuide } from "./mode-hover-guide";
 import {
@@ -403,7 +405,6 @@ export function InputBox({
   const inlineSkillComposingRef = useRef(false);
   const goalRequestStateRef = useRef(createGoalRequestState());
   const compactRequestStateRef = useRef(createGoalRequestState());
-  const dreamRequestStateRef = useRef(createGoalRequestState());
   const dreamRestoreRequestStateRef = useRef(createGoalRequestState());
   const [pendingDreamRestoreVersion, setPendingDreamRestoreVersion] = useState<
     number | null
@@ -437,6 +438,7 @@ export function InputBox({
     draft: ComposerDraft;
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
+  const dreamPreparationNotificationRef = useRef<string | null>(null);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -457,6 +459,11 @@ export function InputBox({
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
+  const dreamPreparation = useMemoryDreamPreparation({
+    privateWork,
+    threadId,
+    enabled: compactCommandEnabled && threadExists && !isMock,
+  });
   const latestAiId = useMemo(() => {
     const id = [...thread.messages]
       .reverse()
@@ -875,13 +882,11 @@ export function InputBox({
   useEffect(() => {
     const goalRequestState = goalRequestStateRef.current;
     const compactRequestState = compactRequestStateRef.current;
-    const dreamRequestState = dreamRequestStateRef.current;
     const dreamRestoreRequestState = dreamRestoreRequestStateRef.current;
     resetLatestCheckpointContinuation(latestCheckpointContinuationRef.current);
     return () => {
       abortGoalRequest(goalRequestState);
       abortGoalRequest(compactRequestState);
-      abortGoalRequest(dreamRequestState);
       abortGoalRequest(dreamRestoreRequestState);
     };
   }, [threadId]);
@@ -1131,6 +1136,15 @@ export function InputBox({
             ...threadContextUsageQueryKey(threadId),
           ),
         }),
+        ...(result.compacted
+          ? [
+              commitProjectMemoryCacheChange(
+                queryClient,
+                privateWork.scope,
+                "pending",
+              ),
+            ]
+          : []),
       ]);
     } catch (error) {
       if (
@@ -1178,115 +1192,28 @@ export function InputBox({
       toast.info(t.inputBox.dreamRequiresThread);
       return;
     }
-    const request = beginGoalRequest(dreamRequestStateRef.current, threadId);
-    let compactedCurrentThread = false;
-    let compactedThreadRefreshed = false;
-    const refreshCompactedThread = () =>
-      Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(
-            privateWork.scope,
-            ...threadTokenUsageQueryKey(threadId),
-          ),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(
-            privateWork.scope,
-            ...threadContextUsageQueryKey(threadId),
-          ),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: projectMemoryRootQueryKey(privateWork.scope),
-        }),
-      ]);
     try {
-      await compactThreadForDream(
-        threadId,
-        {
-          apiBaseURL: privateWork.apiBaseURL,
-          signal: request.controller.signal,
-        },
-        () => {
-          compactedCurrentThread = true;
-          markLatestCheckpointContinuation(
-            latestCheckpointContinuationRef.current,
-            threadId,
-          );
-        },
-      );
-      if (compactedCurrentThread) {
-        await refreshCompactedThread();
-        compactedThreadRefreshed = true;
-      }
-      const result = await dreamProjectMemory(
-        privateWork,
-        { threadId },
-        request.controller.signal,
-      );
-      if (
-        !isCurrentGoalRequest(dreamRequestStateRef.current, request, threadId)
-      ) {
-        throw new DOMException("Dream request superseded", "AbortError");
-      }
+      const result = await dreamPreparation.start(crypto.randomUUID());
       clearMemoryCommandInput();
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: projectMemoryRootQueryKey(privateWork.scope),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(
-            privateWork.scope,
-            ...threadContextUsageQueryKey(threadId),
-          ),
-        }),
-      ]);
-      if (result.disposition === "queued") {
-        toast.success(
-          t.inputBox.dreamQueued.replace(
-            "{count}",
-            String(result.historyCount),
-          ),
-        );
-      } else if (result.disposition === "already_running") {
+      if (result.disposition === "already_running") {
         toast.info(t.inputBox.dreamAlreadyRunning);
       } else {
-        toast.info(t.inputBox.dreamNothingPending);
+        toast.success(t.inputBox.dreamPreparationStarted);
       }
     } catch (error) {
-      if (compactedCurrentThread && !compactedThreadRefreshed) {
-        await refreshCompactedThread().catch(() => undefined);
-      }
-      if (
-        isAbortError(error) ||
-        !isCurrentGoalRequest(dreamRequestStateRef.current, request, threadId)
-      ) {
-        throw error;
-      }
       toast.error(
-        error instanceof DreamThreadCompactionError
-          ? t.inputBox.dreamFailed
-          : error instanceof Error
-            ? error.message
-            : t.inputBox.dreamFailed,
+        error instanceof Error ? error.message : t.inputBox.dreamFailed,
       );
       throw error;
-    } finally {
-      finishGoalRequest(dreamRequestStateRef.current, request);
     }
   }, [
     clearMemoryCommandInput,
-    privateWork,
-    queryClient,
+    dreamPreparation,
     t.inputBox.dreamAlreadyRunning,
     t.inputBox.dreamFailed,
-    t.inputBox.dreamNothingPending,
-    t.inputBox.dreamQueued,
+    t.inputBox.dreamPreparationStarted,
     t.inputBox.dreamRequiresThread,
     threadExists,
-    threadId,
   ]);
 
   const handleDreamLogCommand = useCallback(
@@ -1306,6 +1233,88 @@ export function InputBox({
       t.inputBox.dreamRouteUnavailable,
     ],
   );
+
+  useEffect(() => {
+    const preparation = dreamPreparation.preparation;
+    if (!preparation) return;
+    if (preparation.compactedPasses > 0) {
+      markLatestCheckpointContinuation(
+        latestCheckpointContinuationRef.current,
+        threadId,
+      );
+    }
+    const terminalNotice = memoryDreamPreparationTerminalNotice(preparation);
+    if (terminalNotice.kind === "none") return;
+    const notificationKey = `${preparation.jobId}:${preparation.status}`;
+    if (dreamPreparationNotificationRef.current === notificationKey) return;
+    dreamPreparationNotificationRef.current = notificationKey;
+    void Promise.all([
+      queryClient.invalidateQueries({
+        queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: privateWorkQueryKey(
+          privateWork.scope,
+          ...threadTokenUsageQueryKey(threadId),
+        ),
+      }),
+      queryClient.invalidateQueries({
+        queryKey: privateWorkQueryKey(
+          privateWork.scope,
+          ...threadContextUsageQueryKey(threadId),
+        ),
+      }),
+      commitProjectMemoryCacheChange(queryClient, privateWork.scope, "pending"),
+      commitProjectMemoryCacheChange(
+        queryClient,
+        privateWork.scope,
+        "document",
+      ),
+    ]).catch(() => undefined);
+    if (terminalNotice.kind === "nothing_pending") {
+      toast.info(t.inputBox.dreamNothingPending);
+    } else if (terminalNotice.kind === "already_running") {
+      toast.info(t.inputBox.dreamAlreadyRunning);
+    } else if (terminalNotice.kind === "budget_rewrite") {
+      toast.success(t.projectMemory.dreamQueuedBudget);
+    } else if (terminalNotice.kind === "queued") {
+      toast.success(
+        t.inputBox.dreamQueued.replace(
+          "{count}",
+          String(terminalNotice.historyCount),
+        ),
+      );
+    } else if (terminalNotice.kind === "cancelled") {
+      toast.info(t.inputBox.dreamPreparationCancelled);
+    } else {
+      toast.error(t.inputBox.dreamFailed);
+    }
+  }, [
+    dreamPreparation.preparation,
+    privateWork.scope,
+    queryClient,
+    t.inputBox.dreamAlreadyRunning,
+    t.inputBox.dreamFailed,
+    t.inputBox.dreamNothingPending,
+    t.inputBox.dreamPreparationCancelled,
+    t.inputBox.dreamQueued,
+    t.projectMemory.dreamQueuedBudget,
+    threadId,
+  ]);
+
+  const dreamPreparationLabel = useMemo(() => {
+    const preparation = dreamPreparation.preparation;
+    if (!preparation) return null;
+    const labels = {
+      queued: t.inputBox.dreamPreparationQueued,
+      running: t.inputBox.dreamPreparationRunning,
+      verifying: t.inputBox.dreamPreparationVerifying,
+      completed: t.inputBox.dreamPreparationCompleted,
+      cancelled: t.inputBox.dreamPreparationCancelled,
+      failed: t.inputBox.dreamPreparationFailed,
+    } as const;
+    return labels[memoryDreamPreparationLabelKind(preparation)];
+  }, [dreamPreparation.preparation, t.inputBox]);
 
   const handleDreamRestoreCommand = useCallback(
     (version: number): void => {
@@ -1350,9 +1359,11 @@ export function InputBox({
       ) {
         throw new DOMException("Memory restore superseded", "AbortError");
       }
-      await queryClient.invalidateQueries({
-        queryKey: projectMemoryRootQueryKey(privateWork.scope),
-      });
+      await commitProjectMemoryCacheChange(
+        queryClient,
+        privateWork.scope,
+        "document",
+      );
       setPendingDreamRestoreVersion(null);
       toast.success(
         t.inputBox.dreamRestoreSuccess.replace(
@@ -2543,6 +2554,62 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          {dreamPreparation.preparation && dreamPreparationLabel && (
+            <div
+              aria-live="polite"
+              className="bg-muted/70 text-muted-foreground flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-xs"
+              data-testid="dream-preparation-status"
+              role="status"
+            >
+              {dreamPreparation.preparation.status === "queued" ||
+              dreamPreparation.preparation.status === "running" ? (
+                <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              ) : dreamPreparation.preparation.status === "succeeded" ? (
+                <CheckIcon className="size-3.5 shrink-0" />
+              ) : (
+                <XIcon className="size-3.5 shrink-0" />
+              )}
+              <span className="min-w-0 flex-1">
+                {dreamPreparationLabel}
+                {dreamPreparation.preparation.compactedPasses > 0 && (
+                  <span className="ml-1">
+                    {t.inputBox.dreamPreparationPasses.replace(
+                      "{count}",
+                      String(dreamPreparation.preparation.compactedPasses),
+                    )}
+                  </span>
+                )}
+              </span>
+              {(dreamPreparation.preparation.status === "queued" ||
+                dreamPreparation.preparation.status === "running") && (
+                <Button
+                  className="h-6 px-2 text-xs"
+                  disabled={
+                    dreamPreparation.cancelling ||
+                    !memoryDreamPreparationCanCancel(
+                      dreamPreparation.preparation,
+                    )
+                  }
+                  onClick={() => {
+                    void dreamPreparation.cancel().catch((error) => {
+                      toast.error(
+                        error instanceof Error
+                          ? error.message
+                          : t.inputBox.dreamPreparationFailed,
+                      );
+                    });
+                  }}
+                  size="sm"
+                  type="button"
+                  variant="ghost"
+                >
+                  {dreamPreparation.preparation.cancelRequested
+                    ? t.inputBox.dreamPreparationCancelRequested
+                    : t.inputBox.dreamPreparationCancel}
+                </Button>
+              )}
+            </div>
+          )}
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">

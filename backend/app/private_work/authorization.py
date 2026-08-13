@@ -125,8 +125,12 @@ class PrivateRunAuthorizationService:
         owner_user_id: str,
         run_id: str,
         lock: bool = False,
+        executable_roles: tuple[str, ...] = _EXECUTABLE_ROLES,
     ) -> bool:
         """Revalidate a running scope without pinning its admission-time version."""
+
+        if not isinstance(executable_roles, tuple) or not executable_roles or any(not isinstance(role, str) or role not in {item.value for item in ProjectRole} for role in executable_roles):
+            raise ValueError("executable_roles must be a non-empty role tuple")
 
         statement = (
             select(RunRow.run_id)
@@ -145,7 +149,7 @@ class PrivateRunAuthorizationService:
                 ProjectRow.status == "active",
                 ProjectRow.is_suspended.is_(False),
                 ProjectMembershipRow.status == "active",
-                ProjectMembershipRow.role.in_(_EXECUTABLE_ROLES),
+                ProjectMembershipRow.role.in_(executable_roles),
             )
             .limit(1)
         )
@@ -166,6 +170,7 @@ class PrivateRunAuthorizationBoundary:
         run_id: str,
         abort_event: asyncio.Event | None = None,
         on_revoke: Callable[[], Awaitable[None] | None] | None = None,
+        executable_roles: tuple[str, ...] = _EXECUTABLE_ROLES,
     ) -> None:
         self._session_factory = session_factory
         self._project_id = project_id
@@ -173,6 +178,7 @@ class PrivateRunAuthorizationBoundary:
         self._run_id = run_id
         self._abort_event = abort_event
         self._on_revoke = on_revoke
+        self._executable_roles = executable_roles
 
     def bind_abort_event(self, abort_event: asyncio.Event) -> None:
         """Attach the process-local abort only after the run is registered."""
@@ -191,6 +197,7 @@ class PrivateRunAuthorizationBoundary:
                     project_id=self._project_id,
                     owner_user_id=self._owner_user_id,
                     run_id=self._run_id,
+                    executable_roles=self._executable_roles,
                 )
         except AuthorizationRevoked:
             raise

@@ -3,8 +3,28 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from langgraph.errors import GraphBubbleUp
+
+from deerflow.community.errors import CommunityToolError
 
 logger = logging.getLogger(__name__)
+
+
+def _browserless_http_error(status_code: int) -> CommunityToolError:
+    if status_code in {401, 403}:
+        code, retryable = "provider_authentication_failed", False
+    elif status_code == 429:
+        code, retryable = "provider_rate_limited", True
+    elif status_code >= 500:
+        code, retryable = "provider_unavailable", True
+    else:
+        code, retryable = "provider_request_failed", False
+    return CommunityToolError(
+        provider="browserless",
+        code=code,
+        message=f"Browserless request failed with HTTP {status_code}",
+        retryable=retryable,
+    )
 
 
 @dataclass(frozen=True)
@@ -59,7 +79,7 @@ class BrowserlessClient:
             reject_resource_types=reject_resource_types,
             reject_request_pattern=reject_request_pattern,
         )
-        return result.html if isinstance(result, BrowserlessFetchResult) else result
+        return result.html
 
     async def fetch_html_with_status(
         self,
@@ -70,7 +90,7 @@ class BrowserlessClient:
         wait_for_selector_timeout_ms: int = 5000,
         reject_resource_types: list[str] | None = None,
         reject_request_pattern: list[str] | None = None,
-    ) -> BrowserlessFetchResult | str:
+    ) -> BrowserlessFetchResult:
         """Fetch rendered HTML and expose the target page's real status.
 
         Only sends accepted parameters for the current Browserless API version.
@@ -86,7 +106,10 @@ class BrowserlessClient:
             reject_request_pattern: URL patterns to block.
 
         Returns:
-            A status-aware fetch result, or an ``Error: ...`` string.
+            A status-aware fetch result.
+
+        Raises:
+            CommunityToolError: When Browserless fails or returns no content.
         """
         payload: dict[str, Any] = {
             "url": url,
@@ -108,7 +131,7 @@ class BrowserlessClient:
         if reject_request_pattern:
             payload["rejectRequestPattern"] = reject_request_pattern
 
-        logger.debug(f"Fetching URL via Browserless: {url}")
+        logger.debug("Fetching public URL via Browserless")
         try:
             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
                 resp = await client.post(
@@ -127,11 +150,16 @@ class BrowserlessClient:
                 logger.debug(f"Browserless response: code={code}, target_code={target_code}, target_status={target_status}")
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    raise _browserless_http_error(code)
 
                 html = resp.text
                 if not html or not html.strip():
-                    return "Error: Browserless returned empty response"
+                    raise CommunityToolError(
+                        provider="browserless",
+                        code="no_results",
+                        message="Browserless returned no content",
+                        retryable=False,
+                    )
 
                 return BrowserlessFetchResult(
                     html=html,
@@ -145,14 +173,34 @@ class BrowserlessClient:
                     ),
                 )
 
-        except httpx.TimeoutException:
-            return f"Error: Browserless request timed out after {self.timeout_s}s"
-        except httpx.RequestError as e:
-            logger.error(f"Browserless request failed: {e}")
-            return f"Error: Browserless request failed: {e!s}"
-        except Exception as e:
-            logger.error(f"Browserless fetch failed: {e}")
-            return f"Error: Browserless fetch failed: {e!s}"
+        except GraphBubbleUp:
+            raise
+        except CommunityToolError:
+            raise
+        except httpx.TimeoutException as error:
+            logger.error("Browserless request timed out")
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error
+        except httpx.RequestError as error:
+            logger.error("Browserless request failed; provider_error_type=%s", type(error).__name__)
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error
+        except Exception as error:
+            logger.error("Browserless fetch failed; provider_error_type=%s", type(error).__name__)
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error
 
     async def capture_screenshot(
         self,
@@ -165,7 +213,7 @@ class BrowserlessClient:
         wait_for_selector_timeout_ms: int = 5000,
         wait_for_timeout_ms: int = 0,
         best_attempt: bool = False,
-    ) -> BrowserlessScreenshotResult | str:
+    ) -> BrowserlessScreenshotResult:
         """Capture a rendered screenshot of a URL using Browserless.
 
         Args:
@@ -180,7 +228,10 @@ class BrowserlessClient:
             best_attempt: Continue when waits time out.
 
         Returns:
-            Screenshot result with binary content, or an error string.
+            Screenshot result with binary content.
+
+        Raises:
+            CommunityToolError: When Browserless fails or returns no image.
         """
         payload: dict[str, Any] = {
             "url": url,
@@ -205,7 +256,7 @@ class BrowserlessClient:
 
         params = {"token": self.token} if self.token else None
 
-        logger.debug(f"Capturing URL screenshot via Browserless: {url}")
+        logger.debug("Capturing public URL screenshot via Browserless")
         try:
             async with httpx.AsyncClient(timeout=self.timeout_s) as client:
                 resp = await client.post(
@@ -227,11 +278,16 @@ class BrowserlessClient:
                 )
 
                 if code != 200:
-                    return f"Error: Browserless HTTP {code}: {resp.text[:200]}"
+                    raise _browserless_http_error(code)
 
                 content = resp.content
                 if not content:
-                    return "Error: Browserless returned empty screenshot response"
+                    raise CommunityToolError(
+                        provider="browserless",
+                        code="no_results",
+                        message="Browserless returned no screenshot",
+                        retryable=False,
+                    )
 
                 return BrowserlessScreenshotResult(
                     content=content,
@@ -241,11 +297,31 @@ class BrowserlessClient:
                     final_url=_get_header(resp.headers, "X-Response-URL"),
                 )
 
-        except httpx.TimeoutException:
-            return f"Error: Browserless screenshot request timed out after {self.timeout_s}s"
-        except httpx.RequestError as e:
-            logger.error(f"Browserless screenshot request failed: {e}")
-            return f"Error: Browserless screenshot request failed: {e!s}"
-        except Exception as e:
-            logger.error(f"Browserless screenshot failed: {e}")
-            return f"Error: Browserless screenshot failed: {e!s}"
+        except GraphBubbleUp:
+            raise
+        except CommunityToolError:
+            raise
+        except httpx.TimeoutException as error:
+            logger.error("Browserless screenshot request timed out")
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error
+        except httpx.RequestError as error:
+            logger.error("Browserless screenshot request failed; provider_error_type=%s", type(error).__name__)
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error
+        except Exception as error:
+            logger.error("Browserless screenshot failed; provider_error_type=%s", type(error).__name__)
+            raise CommunityToolError(
+                provider="browserless",
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ) from error

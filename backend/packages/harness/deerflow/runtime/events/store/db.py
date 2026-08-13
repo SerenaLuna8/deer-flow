@@ -174,58 +174,6 @@ class DbRunEventStore(RunEventStore):
         sequence.high_watermark += count
         return first
 
-    @classmethod
-    async def _require_parent_run(
-        cls,
-        session: AsyncSession,
-        *,
-        scope: PrivateResourceScope,
-        thread_id: str,
-        run_id: str,
-    ) -> tuple[uuid.UUID, str]:
-        project_id, owner_user_id = cls._coordinates(scope)
-        parent = (
-            await session.execute(
-                select(RunRow.project_id, RunRow.owner_user_id).where(
-                    RunRow.project_id == project_id,
-                    RunRow.owner_user_id == owner_user_id,
-                    RunRow.thread_id == thread_id,
-                    RunRow.run_id == run_id,
-                )
-            )
-        ).one_or_none()
-        if parent is None:
-            raise ValueError("scoped parent run not found")
-        return parent.project_id, parent.owner_user_id
-
-    @classmethod
-    async def _require_stream_parent_run(
-        cls,
-        session: AsyncSession,
-        *,
-        scope: PrivateResourceScope,
-        thread_id: str,
-        run_id: str,
-    ) -> tuple[uuid.UUID, str, uuid.UUID | None]:
-        project_id, owner_user_id = cls._coordinates(scope)
-        parent = (
-            await session.execute(
-                select(
-                    RunRow.project_id,
-                    RunRow.owner_user_id,
-                    RunRow.job_id,
-                ).where(
-                    RunRow.project_id == project_id,
-                    RunRow.owner_user_id == owner_user_id,
-                    RunRow.thread_id == thread_id,
-                    RunRow.run_id == run_id,
-                )
-            )
-        ).one_or_none()
-        if parent is None:
-            raise ValueError("scoped parent run not found")
-        return parent.project_id, parent.owner_user_id, parent.job_id
-
     @staticmethod
     def _reject_reserved_stream_write(*, event_type: str, category: str) -> None:
         if category == "stream" or event_type == "stream.end":
@@ -243,7 +191,7 @@ class DbRunEventStore(RunEventStore):
     ) -> None:
         """Lock and revalidate current private stream mutation authority."""
 
-        project = (await session.execute(select(ProjectRow).where(ProjectRow.id == project_id).with_for_update(of=ProjectRow))).scalar_one_or_none()
+        project = (await session.execute(select(ProjectRow).where(ProjectRow.id == project_id).with_for_update(read=True, of=ProjectRow))).scalar_one_or_none()
         membership = (
             await session.execute(
                 select(ProjectMembershipRow)
@@ -251,7 +199,7 @@ class DbRunEventStore(RunEventStore):
                     ProjectMembershipRow.project_id == project_id,
                     ProjectMembershipRow.user_id == owner_user_id,
                 )
-                .with_for_update(of=ProjectMembershipRow)
+                .with_for_update(read=True, of=ProjectMembershipRow)
             )
         ).scalar_one_or_none()
         if project is None or project.status != "active" or project.is_suspended or membership is None or membership.status != "active" or membership.role not in _EXECUTABLE_ROLES or membership.version != membership_version:
@@ -266,13 +214,13 @@ class DbRunEventStore(RunEventStore):
         project_id: uuid.UUID,
         owner_user_id: str,
         membership_version: int,
+        thread_id: str,
         run_id: str,
-        job_id: uuid.UUID,
         lease: StreamLeaseProof,
     ) -> bool:
-        if type(lease) is not StreamLeaseProof or lease.job_id != job_id:
+        if type(lease) is not StreamLeaseProof:
             raise StreamWriteLeaseLost(
-                "stream lease capability does not match the Run job",
+                "stream lease capability is invalid",
             )
         await DbRunEventStore._lock_stream_governance(
             session,
@@ -300,6 +248,7 @@ class DbRunEventStore(RunEventStore):
                 .where(
                     RunRow.project_id == project_id,
                     RunRow.owner_user_id == owner_user_id,
+                    RunRow.thread_id == thread_id,
                     RunRow.run_id == run_id,
                     RunRow.job_id == lease.job_id,
                 )
@@ -346,30 +295,40 @@ class DbRunEventStore(RunEventStore):
     ) -> tuple[uuid.UUID, str]:
         """Resolve the parent and, when supplied, atomically enforce Job authority."""
 
+        project_id, owner_user_id = cls._coordinates(scope)
         if lease is None:
-            return await cls._require_parent_run(
+            await cls._lock_stream_governance(
                 session,
-                scope=scope,
-                thread_id=thread_id,
-                run_id=run_id,
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                membership_version=scope.membership_version,
             )
-        project_id, owner_user_id, job_id = await cls._require_stream_parent_run(
-            session,
-            scope=scope,
-            thread_id=thread_id,
-            run_id=run_id,
-        )
-        if job_id is None:
-            raise StreamWriteAuthorityRequired(
-                "jobless event write cannot accept a job lease",
-            )
+            parent = (
+                await session.execute(
+                    select(RunRow)
+                    .where(
+                        RunRow.project_id == project_id,
+                        RunRow.owner_user_id == owner_user_id,
+                        RunRow.thread_id == thread_id,
+                        RunRow.run_id == run_id,
+                    )
+                    .with_for_update(of=RunRow)
+                )
+            ).scalar_one_or_none()
+            if parent is None:
+                raise ValueError("scoped parent run not found")
+            if parent.job_id is not None:
+                raise StreamWriteAuthorityRequired(
+                    "job-owned event write requires live execution authority",
+                )
+            return parent.project_id, parent.owner_user_id
         cancel_requested = await cls._authorize_stream_lease(
             session,
             project_id=project_id,
             owner_user_id=owner_user_id,
             membership_version=scope.membership_version,
+            thread_id=thread_id,
             run_id=run_id,
-            job_id=job_id,
             lease=lease,
         )
         if cancel_requested:
@@ -489,20 +448,40 @@ class DbRunEventStore(RunEventStore):
 
         if type(frame) is not StreamFrame:
             raise TypeError("StreamFrame is required")
+        project_id, owner_user_id = self._coordinates(scope)
+        if lease is not None:
+            cancel_requested = await self._authorize_stream_lease(
+                session,
+                project_id=project_id,
+                owner_user_id=owner_user_id,
+                membership_version=scope.membership_version,
+                thread_id=thread_id,
+                run_id=run_id,
+                lease=lease,
+            )
+        else:
+            try:
+                await self._require_authorized_event_parent(
+                    session,
+                    scope=scope,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    lease=None,
+                )
+            except ValueError:
+                raise StreamScopeNotFound(
+                    "scoped stream Run was not found",
+                ) from None
+            cancel_requested = False
+
+        # All governance and execution rows are locked before the thread
+        # advisory/sequence lock.  Keep the terminal lookup after the sequence
+        # lock so a concurrent terminal publisher cannot pass this recheck.
         sequence = await self._lock_event_sequence(
             session,
             scope=scope,
             thread_id=thread_id,
         )
-        try:
-            project_id, owner_user_id, job_id = await self._require_stream_parent_run(
-                session,
-                scope=scope,
-                thread_id=thread_id,
-                run_id=run_id,
-            )
-        except ValueError:
-            raise StreamScopeNotFound("scoped stream Run was not found") from None
         terminal = (
             await session.execute(
                 select(RunEventRow).where(
@@ -520,27 +499,6 @@ class DbRunEventStore(RunEventStore):
                 return self._stream_row(terminal, created=False)
             raise StreamClosed("run stream is already terminal")
 
-        if job_id is not None and lease is None:
-            raise StreamWriteAuthorityRequired(
-                "job-owned stream append requires live execution authority",
-            )
-        if job_id is None and lease is not None:
-            raise StreamWriteAuthorityRequired(
-                "jobless stream append cannot accept a job lease",
-            )
-        cancel_requested = (
-            await self._authorize_stream_lease(
-                session,
-                project_id=project_id,
-                owner_user_id=owner_user_id,
-                membership_version=scope.membership_version,
-                run_id=run_id,
-                job_id=job_id,
-                lease=lease,
-            )
-            if job_id is not None and lease is not None
-            else False
-        )
         if cancel_requested:
             if not frame.terminal:
                 raise StreamWriteCancelled(
@@ -645,6 +603,7 @@ class DbRunEventStore(RunEventStore):
         thread_id: str,
         run_id: str,
         status: str,
+        error_code: str | None = None,
     ) -> StoredStreamFrame:
         """Persist the missing terminal fact for an already-settled Run.
 
@@ -653,12 +612,7 @@ class DbRunEventStore(RunEventStore):
         and, when present, Job rows already reached a consistent terminal pair.
         """
 
-        frame = StreamFrame.end(status=status)
-        sequence = await self._lock_event_sequence(
-            session,
-            scope=scope,
-            thread_id=thread_id,
-        )
+        frame = StreamFrame.end(status=status, error_code=error_code)
         project_id, owner_user_id = self._coordinates(scope)
         await self._lock_stream_governance(
             session,
@@ -714,7 +668,10 @@ class DbRunEventStore(RunEventStore):
             "timeout": "timeout",
             "interrupted": "interrupted",
         }.get(run.status)
-        if expected_status is None or frame.data != {"status": expected_status}:
+        expected_data: dict[str, str] = {"status": expected_status or ""}
+        if run.error == "MODEL_OUTPUT_LIMIT":
+            expected_data["error_code"] = "MODEL_OUTPUT_LIMIT"
+        if expected_status is None or frame.data != expected_data:
             raise StreamWriteAuthorityRequired(
                 "stream terminal repair requires the exact settled Run state",
             )
@@ -730,6 +687,14 @@ class DbRunEventStore(RunEventStore):
                     "stream terminal repair requires the exact settled Job state",
                 )
 
+        # Match every other event writer's global lock order.  The terminal
+        # lookup must remain after the sequence lock to make repair idempotence
+        # atomic with concurrent publishers.
+        sequence = await self._lock_event_sequence(
+            session,
+            scope=scope,
+            thread_id=thread_id,
+        )
         db_content, metadata = self._content_to_db(
             frame.data,
             {"stream_terminal": True},
@@ -854,7 +819,7 @@ class DbRunEventStore(RunEventStore):
                 # All events belong to the same thread (validated above).
                 thread_id = events[0]["thread_id"]
                 parent_by_run: dict[str, tuple[uuid.UUID, str]] = {}
-                for run_id in {e["run_id"] for e in events}:
+                for run_id in sorted({e["run_id"] for e in events}):
                     parent_by_run[run_id] = await self._require_authorized_event_parent(
                         session,
                         scope=scope,

@@ -57,6 +57,7 @@ ModelName = Annotated[
 class RuntimePolicySection(StrEnum):
     AGENT_RUNTIME = "agent_runtime"
     AUTH = "auth"
+    AUTOMATIONS = "automations"
     MEMORY_DOCUMENT = "memory_document"
     QUOTAS = "quotas"
 
@@ -289,6 +290,13 @@ class AuthPolicyValue(_PolicyModel):
     allow_registration: bool = True
 
 
+class AutomationsPolicyValue(_PolicyModel):
+    enabled: bool = True
+    poll_interval_seconds: int = Field(default=5, ge=1, le=300)
+    max_concurrent_runs: int = Field(default=3, ge=1, le=32)
+    min_once_delay_seconds: int = Field(default=60, ge=0, le=86_400)
+
+
 class QuotaPolicyValue(_PolicyModel):
     default_member_limit: int = Field(default=20, ge=1, le=_JSON_SAFE_INTEGER)
     default_storage_bytes_limit: int = Field(default=5_368_709_120, ge=0, le=_JSON_SAFE_INTEGER)
@@ -297,7 +305,7 @@ class QuotaPolicyValue(_PolicyModel):
     warning_threshold: float = Field(default=0.8, gt=0.0, lt=1.0)
 
 
-RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | MemoryDocumentPolicy | QuotaPolicyValue
+RuntimePolicyValue = AgentRuntimePolicyValue | AuthPolicyValue | AutomationsPolicyValue | MemoryDocumentPolicy | QuotaPolicyValue
 RuntimePolicyEffectScope = Literal[
     "new_requests_and_runs",
     "new_requests",
@@ -360,11 +368,35 @@ class LockedMemoryDocumentPolicy:
     value: MemoryDocumentPolicy
 
 
+CATALOG_DEFAULT_MODEL_REF = "default"
+
+
+def auxiliary_model_snapshot_ref(
+    purpose: str,
+    model_name: str | None,
+    *,
+    title_enabled: bool,
+) -> str | None:
+    """Return the catalog ref to freeze for one auxiliary Run purpose.
+
+    ``title.model_name is None`` means the current system default model, not
+    "skip the LLM". Other auxiliary purposes still omit a snapshot when unset.
+    """
+
+    if model_name is not None:
+        return model_name
+    if purpose == "title" and title_enabled:
+        return CATALOG_DEFAULT_MODEL_REF
+    return None
+
+
 def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
     if section is RuntimePolicySection.AGENT_RUNTIME:
         return AgentRuntimePolicyValue()
     if section is RuntimePolicySection.AUTH:
         return AuthPolicyValue()
+    if section is RuntimePolicySection.AUTOMATIONS:
+        return AutomationsPolicyValue()
     if section is RuntimePolicySection.MEMORY_DOCUMENT:
         return MemoryDocumentPolicy()
     if section is RuntimePolicySection.QUOTAS:
@@ -375,6 +407,8 @@ def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
 __all__ = [
     "AgentRuntimePolicyValue",
     "AuthPolicyValue",
+    "AutomationsPolicyValue",
+    "CATALOG_DEFAULT_MODEL_REF",
     "DEFAULT_MEMORY_DOCUMENT_SECTIONS",
     "LockedMemoryDocumentPolicy",
     "MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS",
@@ -387,5 +421,6 @@ __all__ = [
     "RuntimePolicyValue",
     "RuntimePolicyView",
     "LockedAgentRuntimePolicy",
+    "auxiliary_model_snapshot_ref",
     "default_policy_value",
 ]

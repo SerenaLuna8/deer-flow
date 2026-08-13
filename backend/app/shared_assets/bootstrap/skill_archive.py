@@ -7,9 +7,15 @@ import binascii
 import json
 from collections.abc import Sequence
 from pathlib import PurePosixPath
-from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    ValidationError,
+    model_validator,
+)
 
 from app.shared_assets.bootstrap.catalog import BootstrapCatalogError
 from app.shared_assets.models import SkillArchiveFile
@@ -20,7 +26,7 @@ from app.shared_assets.skill_archive import (
 
 
 class _ArchiveFile(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     path: str = Field(min_length=1, max_length=1024)
     media_type: str = Field(min_length=1, max_length=255)
@@ -28,9 +34,9 @@ class _ArchiveFile(BaseModel):
 
 
 class _SkillArchive(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    schema_version: Literal[1]
+    schema_version: StrictInt = Field(ge=1, le=1)
     files: tuple[_ArchiveFile, ...] = Field(
         min_length=1,
         max_length=MAX_SKILL_ARCHIVE_FILES,

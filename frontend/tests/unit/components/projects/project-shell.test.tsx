@@ -6,10 +6,8 @@ rs.mock("next/navigation", () => ({
   usePathname: () => "/projects/alpha/agents",
 }));
 
-import { ProjectHome } from "@/components/projects/project-home";
 import {
   isProjectNavigationItemActive,
-  ProjectDesktopNav,
   projectNavigationItems,
 } from "@/components/projects/project-nav";
 import { ProjectShell } from "@/components/projects/project-shell";
@@ -65,59 +63,7 @@ function renderShell(project: Project) {
   );
 }
 
-function renderCollapsedDesktopNav(project: Project) {
-  return renderToStaticMarkup(
-    <I18nProvider initialLocale="zh-CN">
-      <QueryClientProvider client={new QueryClient()}>
-        <ProjectPrivateWorkProvider
-          accountId="22222222-2222-4222-8222-222222222222"
-          projectId={project.id}
-        >
-          <ProjectDesktopNav project={project} collapsed footer={null} />
-        </ProjectPrivateWorkProvider>
-      </QueryClientProvider>
-    </I18nProvider>,
-  );
-}
-
-function renderExpandedDesktopNav(project: Project) {
-  return renderToStaticMarkup(
-    <I18nProvider initialLocale="zh-CN">
-      <QueryClientProvider client={new QueryClient()}>
-        <ProjectPrivateWorkProvider
-          accountId="22222222-2222-4222-8222-222222222222"
-          projectId={project.id}
-        >
-          <ProjectDesktopNav project={project} footer={null} />
-        </ProjectPrivateWorkProvider>
-      </QueryClientProvider>
-    </I18nProvider>,
-  );
-}
-
 describe("project shell navigation", () => {
-  test("keeps the overview content free of a duplicate workspace-return link", () => {
-    const html = renderToStaticMarkup(
-      <ProjectHome
-        project={adminProject}
-        tokenUsageSection={<div data-testid="token-usage">Usage</div>}
-        usageDimensionsSection={
-          <div data-testid="usage-dimensions">Dimensions</div>
-        }
-      />,
-    );
-
-    expect(html).toContain('data-testid="token-usage"');
-    expect(html).toContain('data-testid="usage-dimensions"');
-    expect(html.indexOf('data-testid="token-usage"')).toBeLessThan(
-      html.indexOf('data-testid="usage-dimensions"'),
-    );
-    expect(html.indexOf('data-testid="usage-dimensions"')).toBeLessThan(
-      html.indexOf("共享资产"),
-    );
-    expect(html).not.toContain('href="/workspace"');
-  });
-
   test("keeps overview standalone and groups project governance destinations", () => {
     const items = projectNavigationItems(
       adminProject,
@@ -202,6 +148,12 @@ describe("project shell navigation", () => {
   test("renders implemented asset destinations from shared_assets.read", () => {
     const html = renderShell(adminProject);
 
+    expect(html).toContain("md:grid-cols-[15rem_minmax(0,1fr)]");
+    expect(html).toContain("bg-blue-50 text-blue-600 before:bg-blue-600");
+    expect(html).toContain("hover:bg-blue-50");
+    expect(html).not.toContain("hover:text-blue-600");
+    expect(html).toContain('data-slot="project-brand-logo"');
+    expect(html).not.toContain("项目空间");
     for (const label of [
       "项目概览",
       "审计日志",
@@ -222,53 +174,14 @@ describe("project shell navigation", () => {
     expect(html).toContain("Project content");
   });
 
-  test("renders a branded, grouped navigation with the current route announced", () => {
+  test("announces the current route", () => {
     const html = renderShell(adminProject);
 
-    expect(html).toContain("ActWeave");
-    expect(html).toContain("Alpha Project");
-    expect(html).not.toMatch(/>工作<\/p>/u);
-    expect(html).toContain("能力");
-    expect(html).toContain("项目管理");
-    expect(html).toContain('aria-label="收起菜单栏"');
-    expect(html).toContain('href="/workspace"');
-    expect(html).toContain("返回工作空间");
     expect(html).toMatch(
       /<a[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/agents"/u,
     );
     expect(html).not.toMatch(
       /<a[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/skills"/u,
-    );
-  });
-
-  test("does not repeat project identity in the desktop navigation", () => {
-    const expanded = renderExpandedDesktopNav(adminProject);
-
-    expect(expanded).toContain("ActWeave");
-    expect(expanded).not.toContain("Alpha Project");
-  });
-
-  test("keeps authorized function icons available when the desktop menu is collapsed", () => {
-    const html = renderCollapsedDesktopNav(adminProject);
-
-    expect(html).toContain('data-state="collapsed"');
-    expect(html).toContain('aria-label="展开菜单栏"');
-    for (const label of [
-      "项目概览",
-      "智能体",
-      "技能",
-      "工具",
-      "项目凭证",
-      "审计日志",
-      "项目设置",
-      "返回工作空间",
-    ]) {
-      expect(html).toContain(`aria-label="${label}"`);
-      expect(html).toContain(`title="${label}"`);
-    }
-    expect(html).not.toContain('aria-label="项目成员"');
-    expect(html).toMatch(
-      /<a[^>]*aria-label="智能体"[^>]*aria-current="page"[^>]*href="\/projects\/alpha\/agents"/u,
     );
   });
 

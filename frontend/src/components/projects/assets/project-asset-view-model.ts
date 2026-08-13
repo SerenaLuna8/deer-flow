@@ -14,7 +14,14 @@ type ProjectLifecycleItem = Pick<
   ProjectAssetItem,
   "capabilities" | "current_published_version_id" | "status"
 >;
-type ProjectAssetDeleteItem = Pick<ProjectAssetItem, "capabilities" | "scope">;
+type ProjectAssetDeleteItem = Pick<
+  ProjectAssetItem,
+  "capabilities" | "current_published_version_id" | "scope"
+>;
+type ProjectAgentPublishItem = Pick<
+  ProjectAssetItem,
+  "capabilities" | "current_published_version_id" | "scope"
+>;
 type ProjectSkillStatusItem = Pick<
   ProjectAssetItem,
   "capabilities" | "current_published_version_id" | "scope" | "status"
@@ -74,6 +81,23 @@ export function projectAssetCanAuthor(
     item.capabilities.includes("shared_assets.edit") &&
     (item.status === "active" ||
       ((kind === "skills" || kind === "agents") && item.status === "suspended"))
+  );
+}
+
+export function projectAgentVersionCanPublish(
+  item: ProjectAgentPublishItem,
+  projectCapabilities: readonly Capability[],
+  version: {
+    workflow_status: string;
+    supersedes_version_id: string | null;
+  } | null,
+): boolean {
+  return (
+    item.scope === "project" &&
+    version?.workflow_status === "draft" &&
+    version.supersedes_version_id === item.current_published_version_id &&
+    projectCapabilities.includes("shared_assets.manage_bindings") &&
+    item.capabilities.includes("shared_assets.manage_bindings")
   );
 }
 
@@ -212,9 +236,14 @@ export function projectAssetCanDelete(
   kind: MutableAssetKind,
   item: ProjectAssetDeleteItem,
 ): boolean {
-  return (
+  const canEdit =
     (kind === "skills" || kind === "agents" || kind === "mcp-servers") &&
     item.scope === "project" &&
-    item.capabilities.includes("shared_assets.edit")
+    item.capabilities.includes("shared_assets.edit");
+  if (!canEdit) return false;
+  return (
+    kind !== "agents" ||
+    item.current_published_version_id === null ||
+    item.capabilities.includes("shared_assets.manage_bindings")
   );
 }

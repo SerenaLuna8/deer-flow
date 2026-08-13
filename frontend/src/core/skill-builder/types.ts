@@ -15,6 +15,9 @@ export const SKILL_BUILDER_MAX_MESSAGE_CHARS = 8_000;
 export const SKILL_BUILDER_MAX_FILES = 128;
 export const SKILL_BUILDER_MAX_FILE_BYTES = 512 * 1024;
 export const SKILL_BUILDER_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+export const SKILL_BUILDER_MAX_ATTACHMENTS = 4;
+export const SKILL_BUILDER_MAX_ATTACHMENT_BYTES = 256 * 1024;
+export const SKILL_BUILDER_MAX_ATTACHMENTS_TOTAL_BYTES = 512 * 1024;
 
 function utf8ByteLength(value: string): number {
   return new TextEncoder().encode(value).byteLength;
@@ -90,6 +93,73 @@ export const skillBuilderClarificationRequestSchema = z
       });
     }
   });
+
+/**
+ * Canonical durable Run states. The Builder stream adapter projects its
+ * provider-specific events into this small, public lifecycle before UI code
+ * sees them.
+ */
+export const skillBuilderRunStatusSchema = z.enum([
+  "pending",
+  "running",
+  "success",
+  "error",
+  "timeout",
+  "interrupted",
+]);
+
+export const skillBuilderRunAdmissionStatusSchema = z.enum([
+  "pending",
+  "running",
+]);
+
+export const skillBuilderRunAdmissionSchema = z
+  .object({
+    runId: uuidSchema,
+    status: skillBuilderRunAdmissionStatusSchema,
+    streamUrl: z
+      .string()
+      .trim()
+      .min(1)
+      .max(2048)
+      .refine((value) => !/[\u0000-\u001f]/u.test(value)),
+  })
+  .strict();
+
+export const skillBuilderRunToolStepStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "failed",
+]);
+
+/**
+ * Safe UI projection for one tool step. Raw arguments and results are
+ * deliberately absent; a future stream adapter must reduce them to a trusted
+ * display name before parsing this contract.
+ */
+export const skillBuilderRunToolStepProjectionSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    toolName: z.string().trim().min(1).max(255),
+    status: skillBuilderRunToolStepStatusSchema,
+  })
+  .strict();
+
+/**
+ * Builder-owned stream projection. This is intentionally not the raw SSE
+ * wire shape: the eventual stream adapter is responsible for ordering and
+ * reducing durable events into this strict, secret-free view.
+ */
+export const skillBuilderRunStreamProjectionSchema = z
+  .object({
+    runId: uuidSchema,
+    status: skillBuilderRunStatusSchema,
+    messages: z.array(skillBuilderMessageSchema),
+    toolSteps: z.array(skillBuilderRunToolStepProjectionSchema),
+    clarification: skillBuilderClarificationRequestSchema.nullable(),
+  })
+  .strict();
 
 export const skillBuilderFilePathSchema = z
   .string()
@@ -172,6 +242,86 @@ export const skillBuilderValidationSchema = z
   })
   .strict();
 
+export const skillBuilderSkillDependencySchema = z
+  .object({
+    kind: z.literal("skill"),
+    reference: z.string().trim().min(1).max(512),
+    scope: z.enum(["project", "system"]),
+    skill_id: uuidSchema,
+    version_id: uuidSchema,
+    version_number: z.number().int().positive(),
+    slug: z.string().trim().min(1).max(63),
+    display_name: z.string().trim().min(1).max(120),
+    payload_checksum: checksumSchema,
+    authoring_only: z.literal(true),
+    runtime_authorized: z.literal(false),
+  })
+  .strict();
+
+export const skillBuilderMcpToolDependencySchema = z
+  .object({
+    kind: z.literal("mcp_tool"),
+    reference: z.string().trim().min(1).max(512),
+    scope: z.enum(["project", "system"]),
+    mcp_server_id: uuidSchema,
+    version_id: uuidSchema,
+    version_number: z.number().int().positive(),
+    server_slug: z.string().trim().min(1).max(63),
+    server_name: z.string().trim().min(1).max(120),
+    tool_name: z
+      .string()
+      .regex(/^[A-Za-z0-9_-]+$/u)
+      .max(255),
+    payload_checksum: checksumSchema,
+    inventory_status: z.enum(["ready", "degraded"]),
+    inventory_error_code: z
+      .enum(["mcp_discovery_unavailable", "mcp_catalog_invalid"])
+      .nullable(),
+    last_success_at: timestampSchema,
+    authoring_only: z.literal(true),
+    runtime_authorized: z.literal(false),
+  })
+  .strict();
+
+export const skillBuilderDependencySchema = z.discriminatedUnion("kind", [
+  skillBuilderSkillDependencySchema,
+  skillBuilderMcpToolDependencySchema,
+]);
+
+export const skillBuilderDependencySnapshotSchema = z
+  .object({
+    version: z.literal(1),
+    draft_checksum: checksumSchema,
+    requirements: z
+      .array(skillBuilderDependencySchema)
+      .max(64)
+      .superRefine((requirements, context) => {
+        const references = requirements.map((item) => item.reference);
+        if (new Set(references).size !== references.length) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Skill Builder dependencies must be unique",
+          });
+        }
+      }),
+  })
+  .strict()
+  .superRefine((snapshot, context) => {
+    snapshot.requirements.forEach((item, index) => {
+      if (
+        item.kind === "mcp_tool" &&
+        (item.inventory_status === "ready") !==
+          (item.inventory_error_code === null)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "MCP inventory status is inconsistent",
+          path: ["requirements", index, "inventory_error_code"],
+        });
+      }
+    });
+  });
+
 export const skillBuilderSessionSchema = z
   .object({
     id: uuidSchema,
@@ -191,6 +341,10 @@ export const skillBuilderSessionSchema = z
     error_code: z.string().trim().min(1).nullable(),
     error_message: z.string().trim().min(1).nullable(),
     created_skill_id: uuidSchema.nullable(),
+    authoring_dependencies: skillBuilderDependencySnapshotSchema.nullish(),
+    // Rolling-compatible durable Builder extension. Legacy Gateway responses
+    // omit this property; an active asynchronous Run supplies it.
+    activeRun: skillBuilderRunAdmissionSchema.nullish(),
     created_at: timestampSchema,
     updated_at: timestampSchema,
   })
@@ -202,6 +356,7 @@ export const skillBuilderSessionSummarySchema = z
     slug: z.string().trim().min(1),
     display_name: z.string().trim().min(1),
     status: skillBuilderStatusSchema,
+    revision: z.number().int().positive(),
     updated_at: timestampSchema,
   })
   .strict();
@@ -212,6 +367,12 @@ export const skillBuilderSessionResponseSchema = z
     request_id: z.string().trim().min(1),
   })
   .strict();
+
+/** A turn is either the legacy synchronous session response or Run admission. */
+export const skillBuilderTurnResponseSchema = z.union([
+  skillBuilderSessionResponseSchema,
+  skillBuilderRunAdmissionSchema,
+]);
 
 export const skillBuilderSessionListResponseSchema = z
   .object({
@@ -228,10 +389,74 @@ export const createSkillBuilderSessionInputSchema = z
   })
   .strict();
 
+export const skillBuilderReasoningEffortSchema = z.enum([
+  "none",
+  "low",
+  "medium",
+  "high",
+]);
+
+// Mirrors the Gateway attachment rules: display-only name (no control chars
+// or path separators) plus bounded UTF-8 text content.
+export const skillBuilderAttachmentSchema = z
+  .object({
+    name: z
+      .string()
+      .trim()
+      .min(1)
+      .max(120)
+      .refine(
+        (name) =>
+          !name.startsWith(".") && !/[\u0000-\u001f/\\:*?"<>|]/u.test(name),
+        "附件名不能包含路径分隔符或控制字符",
+      ),
+    content: z
+      .string()
+      .refine(
+        (content) =>
+          !content.includes("\0") &&
+          utf8ByteLength(content) <= SKILL_BUILDER_MAX_ATTACHMENT_BYTES,
+        "附件内容超出大小限制",
+      ),
+  })
+  .strict();
+
+const skillBuilderAttachmentsSchema = z
+  .array(skillBuilderAttachmentSchema)
+  .max(SKILL_BUILDER_MAX_ATTACHMENTS)
+  .superRefine((attachments, context) => {
+    if (
+      new Set(attachments.map((item) => item.name)).size !== attachments.length
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "附件名不能重复",
+      });
+    }
+    if (
+      attachments.reduce(
+        (total, item) => total + utf8ByteLength(item.content),
+        0,
+      ) > SKILL_BUILDER_MAX_ATTACHMENTS_TOTAL_BYTES
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "附件总大小超出限制",
+      });
+    }
+  });
+
+const skillBuilderExecutionModelNameSchema = z
+  .string()
+  .regex(/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u);
+
 export const skillBuilderMessageTurnSchema = z
   .object({
     kind: z.literal("message"),
     message: z.string().trim().min(1).max(SKILL_BUILDER_MAX_MESSAGE_CHARS),
+    model_name: skillBuilderExecutionModelNameSchema.optional(),
+    reasoning_effort: skillBuilderReasoningEffortSchema.optional(),
+    attachments: skillBuilderAttachmentsSchema.optional(),
   })
   .strict();
 
@@ -251,6 +476,8 @@ export const skillBuilderClarificationTurnSchema = z
   .object({
     kind: z.literal("clarification"),
     response: skillBuilderClarificationResponseSchema,
+    model_name: skillBuilderExecutionModelNameSchema.optional(),
+    reasoning_effort: skillBuilderReasoningEffortSchema.optional(),
   })
   .strict();
 
@@ -368,6 +595,22 @@ export const skillBuilderCommitResponseSchema = z
   .strict();
 
 export type SkillBuilderStatus = z.infer<typeof skillBuilderStatusSchema>;
+export type SkillBuilderRunStatus = z.infer<typeof skillBuilderRunStatusSchema>;
+export type SkillBuilderRunAdmission = z.infer<
+  typeof skillBuilderRunAdmissionSchema
+>;
+export type SkillBuilderRunToolStepProjection = z.infer<
+  typeof skillBuilderRunToolStepProjectionSchema
+>;
+export type SkillBuilderRunStreamProjection = z.infer<
+  typeof skillBuilderRunStreamProjectionSchema
+>;
+export type SkillBuilderReasoningEffort = z.infer<
+  typeof skillBuilderReasoningEffortSchema
+>;
+export type SkillBuilderAttachment = z.infer<
+  typeof skillBuilderAttachmentSchema
+>;
 export type SkillBuilderProgressItem = z.infer<
   typeof skillBuilderProgressItemSchema
 >;
@@ -379,6 +622,12 @@ export type SkillBuilderFileChange = z.infer<
 export type SkillBuilderValidation = z.infer<
   typeof skillBuilderValidationSchema
 >;
+export type SkillBuilderDependency = z.infer<
+  typeof skillBuilderDependencySchema
+>;
+export type SkillBuilderDependencySnapshot = z.infer<
+  typeof skillBuilderDependencySnapshotSchema
+>;
 export type SkillBuilderSession = z.infer<typeof skillBuilderSessionSchema>;
 export type SkillBuilderSessionSummary = z.infer<
   typeof skillBuilderSessionSummarySchema
@@ -387,6 +636,9 @@ export type CreateSkillBuilderSessionInput = z.input<
   typeof createSkillBuilderSessionInputSchema
 >;
 export type SkillBuilderTurnInput = z.input<typeof skillBuilderTurnInputSchema>;
+export type SkillBuilderTurnResponse = z.infer<
+  typeof skillBuilderTurnResponseSchema
+>;
 export type ValidateSkillBuilderSessionInput = z.input<
   typeof validateSkillBuilderSessionInputSchema
 >;
@@ -396,3 +648,9 @@ export type CommitSkillBuilderSessionInput = z.input<
 export type CancelSkillBuilderSessionInput = z.input<
   typeof cancelSkillBuilderSessionInputSchema
 >;
+
+export function isSkillBuilderRunAdmission(
+  response: SkillBuilderTurnResponse,
+): response is SkillBuilderRunAdmission {
+  return "runId" in response;
+}

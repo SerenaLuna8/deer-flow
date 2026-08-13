@@ -12,6 +12,10 @@ from app.private_work.context import (
     require_issued_private_work_context,
 )
 from app.projects.context import resolve_project_context_in_transaction
+from app.shared_assets.agent_catalog import (
+    AgentCatalogValidator,
+    StaticToolGroupCatalog,
+)
 from app.shared_assets.agent_service import AgentService, CreateAgent
 from app.shared_assets.models import AgentPayload
 from deerflow.persistence.engine import get_session_factory
@@ -44,6 +48,9 @@ async def prepare_replay_agent(
         )
         created = await AgentService(
             session_factory,
+            catalog_validator=AgentCatalogValidator(
+                StaticToolGroupCatalog(("file:read", "file:write")),
+            ),
         ).create_project_from_design_in_session(
             session,
             project_context,
@@ -56,6 +63,7 @@ async def prepare_replay_agent(
                 skill_version_ids=(),
                 mcp_version_ids=(),
             ),
+            publish=True,
         )
 
     return {

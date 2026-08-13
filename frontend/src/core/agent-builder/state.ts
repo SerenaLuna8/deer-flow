@@ -22,13 +22,28 @@ export function normalizeAgentBuilderSlug(value: string): string {
     .replace(/^-+|-+$/gu, "");
 }
 
-export function agentBuilderSlugError(value: string): string | null {
-  if (value.length < 3) return "名称至少需要 3 个字符";
-  if (value.length > 63) return "名称不能超过 63 个字符";
-  if (!AGENT_SLUG_PATTERN.test(value)) {
-    return "仅支持小写字母、数字和单个连字符";
-  }
+export type AgentBuilderSlugErrorCode = "too-short" | "too-long" | "invalid";
+
+export function agentBuilderSlugErrorCode(
+  value: string,
+): AgentBuilderSlugErrorCode | null {
+  if (value.length < 3) return "too-short";
+  if (value.length > 63) return "too-long";
+  if (!AGENT_SLUG_PATTERN.test(value)) return "invalid";
   return null;
+}
+
+export function agentBuilderSlugError(value: string): string | null {
+  switch (agentBuilderSlugErrorCode(value)) {
+    case "too-short":
+      return "名称至少需要 3 个字符";
+    case "too-long":
+      return "名称不能超过 63 个字符";
+    case "invalid":
+      return "仅支持小写字母、数字和单个连字符";
+    default:
+      return null;
+  }
 }
 
 export function agentBuilderCanAuthor(
@@ -40,13 +55,41 @@ export function agentBuilderCanAuthor(
 export function agentBuilderBlueprintValidationError(
   blueprint: AgentBuilderBlueprint,
 ): string | null {
-  if (blueprint.description.trim() === "") return "Agent 简介不能为空";
-  if (blueprint.model_ref.trim() === "") return "Agent 模型不能为空";
+  const issue = agentBuilderBlueprintValidationIssue(blueprint);
+  switch (issue?.code) {
+    case "description-required":
+      return "Agent 简介不能为空";
+    case "model-required":
+      return "Agent 模型不能为空";
+    case "tool-group-required":
+      return "Agent 至少需要一个有效工具组";
+    case "document-required":
+      return `${issue.document} 不能为空，请补充后再保存`;
+    default:
+      return null;
+  }
+}
+
+export type AgentBuilderBlueprintValidationIssue =
+  | { code: "description-required" }
+  | { code: "model-required" }
+  | { code: "tool-group-required" }
+  | { code: "document-required"; document: string };
+
+export function agentBuilderBlueprintValidationIssue(
+  blueprint: AgentBuilderBlueprint,
+): AgentBuilderBlueprintValidationIssue | null {
+  if (blueprint.description.trim() === "") {
+    return { code: "description-required" };
+  }
+  if (blueprint.model_ref.trim() === "") {
+    return { code: "model-required" };
+  }
   if (
     blueprint.tool_groups.length === 0 ||
     blueprint.tool_groups.some((group) => group.trim() === "")
   ) {
-    return "Agent 至少需要一个有效工具组";
+    return { code: "tool-group-required" };
   }
   const documents = [
     ["AGENTS.md", blueprint.agents_instructions],
@@ -55,7 +98,9 @@ export function agentBuilderBlueprintValidationError(
     ["USER.md", blueprint.user_context],
   ] as const;
   const emptyDocument = documents.find(([, content]) => content.trim() === "");
-  return emptyDocument ? `${emptyDocument[0]} 不能为空，请补充后再保存` : null;
+  return emptyDocument
+    ? { code: "document-required", document: emptyDocument[0] }
+    : null;
 }
 
 export function agentBuilderDisplayState(

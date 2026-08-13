@@ -38,6 +38,7 @@ class AdminJobResponse(BaseModel):
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
+        "memory_dream_prepare",
         "memory_seal",
     ]
     status: Literal[
@@ -120,6 +121,7 @@ async def list_admin_jobs(
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
+        "memory_dream_prepare",
         "memory_seal",
     ]
     | None = None,

@@ -10,6 +10,7 @@ import re
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
 
@@ -17,6 +18,7 @@ import sqlalchemy as sa
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
+from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.personalization.repository import AccountPersonalizationRepository
@@ -66,12 +68,22 @@ from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.projects.models import ProjectRole
 from app.reliability.jobs import (
     AdmittedJobRecord,
     automation_run_idempotency_key,
     private_run_idempotency_key,
 )
 from app.shared_assets.model_refs import resolve_model_ref
+from app.shared_assets.skill_builder_agent_runtime import (
+    SkillBuilderAgentFactory,
+    WorkerSkillBuilderAuthoringCatalog,
+)
+from app.shared_assets.skill_design_generation import (
+    SkillBuilderDependencySnapshot,
+)
+from app.shared_assets.skill_design_service import SkillDesignService
+from app.system_runtime_settings.models import auxiliary_model_snapshot_ref
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -88,6 +100,12 @@ from deerflow.config.app_config import (
 )
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.error_codes import (
+    PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+    MemoryAuthorityUnavailable,
+    PublicRunError,
+    PublicRunErrorCode,
+)
 from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
 from deerflow.mcp_definition_policy import (
     McpEndpointPolicy,
@@ -100,6 +118,9 @@ from deerflow.persistence.jobs.sql import (
     JobTerminalEvent,
     JobTerminalResult,
 )
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDreamPrepareRunRow,
+)
 from deerflow.persistence.private_work.memory_document_repository import (
     DEFAULT_MEMORY_NAMESPACE,
 )
@@ -108,6 +129,11 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.shared_assets import (
+    SkillDesignOperationRow,
+    SkillDesignSessionRow,
+)
+from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime import (
     DisconnectMode,
     RunContext,
@@ -138,6 +164,7 @@ from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
 logger = logging.getLogger(__name__)
 
 
@@ -253,10 +280,18 @@ class TransientExecutionError(RuntimeError):
 class PermanentExecutionError(RuntimeError):
     """A deterministic public-safe failure that must not be retried."""
 
-    def __init__(self, public_error_code: str) -> None:
+    def __init__(
+        self,
+        public_error_code: str,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot | None = None,
+    ) -> None:
         if _PUBLIC_ERROR_CODE.fullmatch(public_error_code) is None:
             raise ValueError("permanent execution error requires a public code")
+        if attempt_usage is not None and type(attempt_usage) is not PrivateRunUsageSnapshot:
+            raise TypeError("attempt_usage must be a PrivateRunUsageSnapshot or None")
         self.public_error_code = public_error_code
+        self.attempt_usage = attempt_usage
         super().__init__(public_error_code)
 
 
@@ -323,6 +358,20 @@ class AgentExecutionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class _RecoveredPrivateRunTerminal:
+    result: AgentExecutionResult
+    ensure_stream_terminal: bool = False
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, AgentExecutionResult):
+            raise TypeError("recovered terminal requires an AgentExecutionResult")
+        if type(self.ensure_stream_terminal) is not bool:
+            raise TypeError("ensure_stream_terminal must be a boolean")
+        if self.ensure_stream_terminal and self.result.status != "succeeded":
+            raise ValueError("only recovered success can repair a stream terminal")
+
+
+@dataclass(frozen=True, slots=True)
 class PrivateRunExecution:
     context: PrivateWorkContext
     run: PrivateRunRecord
@@ -336,6 +385,7 @@ class PrivateRunExecution:
     stream_mode: list[str]
     stream_subgraphs: bool
     resume_from_checkpoint: bool = False
+    runtime_kind: Literal["chat", "skill_builder"] = "chat"
 
 
 class PrivateRunExecutor(Protocol):
@@ -499,6 +549,28 @@ class PrivateRunJobTerminalPort:
         session: AsyncSession,
         event: JobTerminalEvent,
     ) -> JobTerminalResult:
+        if event.job_type == "memory_dream_prepare":
+            # ``JobRepository.claim_next`` owns Project -> Membership -> Thread
+            # -> preparation -> Job before generic reclaim terminalization.
+            # Custom handler settlements also own that prefix and update the row
+            # before this idempotent convergence step.
+            phase = "cancelled" if event.status == "cancelled" else "failed"
+            disposition = "cancelled" if event.status == "cancelled" else "failed"
+            await session.execute(
+                sa.update(MemoryDreamPrepareRunRow)
+                .where(
+                    MemoryDreamPrepareRunRow.job_id == event.job_id,
+                    MemoryDreamPrepareRunRow.project_id == event.project_id,
+                    MemoryDreamPrepareRunRow.owner_user_id == event.owner_user_id,
+                    MemoryDreamPrepareRunRow.completed_at.is_(None),
+                )
+                .values(
+                    phase=phase,
+                    result_disposition=disposition,
+                    completed_at=event.occurred_at,
+                    updated_at=event.occurred_at,
+                )
+            )
         if event.job_type not in {"private_run", "automation_run"}:
             await self._audit.job_terminalized(session, event)
             return JobTerminalResult(run_terminal_published=False)
@@ -660,12 +732,14 @@ class LeaseAuthorizedStreamBridge:
         scope: PrivateResourceScope | None = None,
         thread_id: str | None = None,
         terminal_status: Callable[[], str] | None = None,
+        terminal_error_code: Callable[[], str | None] | None = None,
     ) -> None:
         self._bridge = bridge
         self._boundary = boundary
         self._scope = scope
         self._thread_id = thread_id
         self._terminal_status = terminal_status
+        self._terminal_error_code = terminal_error_code
 
     @property
     def supports_cross_process(self) -> bool:
@@ -704,6 +778,7 @@ class LeaseAuthorizedStreamBridge:
                     self._thread_id,
                     run_id,
                     status=(self._terminal_status() if self._terminal_status is not None else "completed"),
+                    error_code=(self._terminal_error_code() if self._terminal_error_code is not None else None),
                     lease=self._boundary.stream_lease_proof(),
                 )
             except StreamWriteAuthorizationRevoked:
@@ -797,6 +872,7 @@ class PrivateRunExecutionBoundary:
         context: PrivateWorkContext,
         claim: JobClaim,
         quota: PrivateRunAgentQuotaPort | None = None,
+        runtime_kind: Literal["chat", "skill_builder"] = "chat",
     ) -> None:
         if claim.run_id is None:
             raise ValueError("private execution claim requires a Run")
@@ -804,11 +880,23 @@ class PrivateRunExecutionBoundary:
         self._context = context
         self._claim = claim
         self._quota = quota or _NoopPrivateRunAgentQuota()
+        self._runtime_kind = runtime_kind
+        executable_roles = (
+            (ProjectRole.ADMIN.value, ProjectRole.EDITOR.value)
+            if runtime_kind == "skill_builder"
+            else (
+                ProjectRole.ADMIN.value,
+                ProjectRole.EDITOR.value,
+                ProjectRole.RUNNER.value,
+                ProjectRole.CHANNEL_GUEST.value,
+            )
+        )
         self._authorization = PrivateRunAuthorizationBoundary(
             session_factory,
             project_id=context.project_id,
             owner_user_id=str(context.user_id),
             run_id=claim.run_id,
+            executable_roles=executable_roles,
         )
         self._abort_event: asyncio.Event | None = None
         self._lease_lost = False
@@ -918,6 +1006,9 @@ class PrivateRunExecutionBoundary:
         )
 
     async def before_read_only_tool_call(self) -> None:
+        await self._check("before_tool_call")
+
+    async def before_idempotent_tool_call(self) -> None:
         await self._check("before_tool_call")
 
     async def before_mcp_call(self) -> None:
@@ -1130,11 +1221,32 @@ class RunAgentPrivateExecutor:
             token_usage_by_model=record.token_usage_by_model,
         )
 
+    @classmethod
+    def _output_limit_error(
+        cls,
+        record: RunRecord | None,
+        *,
+        lease_lost: bool,
+    ) -> PermanentExecutionError:
+        return PermanentExecutionError(
+            PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+            attempt_usage=(cls._usage_snapshot(record) if record is not None and not lease_lost else None),
+        )
+
     async def _memory_archive_context(
         self,
         execution: PrivateRunExecution,
         app_config: Any,
     ) -> SnipArchiveContext:
+        if execution.runtime_kind == "skill_builder":
+            return SnipArchiveContext(
+                enabled=False,
+                project_id=execution.context.project_id,
+                owner_user_id=str(execution.context.user_id),
+                namespace=DEFAULT_MEMORY_NAMESPACE,
+                preference_version=1,
+                summary_model_ref=None,
+            )
         try:
             async with self._factory() as session, session.begin():
                 preference = await AccountPersonalizationRepository(
@@ -1310,6 +1422,7 @@ class RunAgentPrivateExecutor:
             context=execution.context,
             claim=claim,
             quota=self._quota,
+            runtime_kind=execution.runtime_kind,
         )
         admitted = self._admitted(execution, claim)
         private_runtime = None
@@ -1343,6 +1456,7 @@ class RunAgentPrivateExecutor:
                         "RUN_POLICY_STALE",
                     ) from None
             if self._model_materializer is not None:
+                title_bound_name: str | None = None
                 try:
                     lead_model = await self._model_materializer.materialize_snapshot(
                         project_id=execution.context.project_id,
@@ -1383,15 +1497,29 @@ class RunAgentPrivateExecutor:
                             ("memory", runtime_app_config.memory.model_name),
                         )
                         for purpose, model_ref in auxiliary_model_refs:
-                            if model_ref is None:
-                                continue
-                            auxiliary_model = await self._model_materializer.materialize_snapshot(
-                                project_id=execution.context.project_id,
-                                owner_user_id=str(execution.context.user_id),
-                                run_id=execution.run.run_id,
-                                purpose=purpose,
+                            snapshot_ref = auxiliary_model_snapshot_ref(
+                                purpose,
+                                model_ref,
+                                title_enabled=runtime_app_config.title.enabled,
                             )
-                            if auxiliary_model.name != model_ref:
+                            if snapshot_ref is None:
+                                continue
+                            try:
+                                auxiliary_model = await self._model_materializer.materialize_snapshot(
+                                    project_id=execution.context.project_id,
+                                    owner_user_id=str(execution.context.user_id),
+                                    run_id=execution.run.run_id,
+                                    purpose=purpose,
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception:
+                                if purpose == "title" and model_ref is None:
+                                    continue
+                                raise PermanentExecutionError(
+                                    "RUN_ASSET_STALE",
+                                ) from None
+                            if model_ref is not None and auxiliary_model.name != model_ref:
                                 raise PermanentExecutionError(
                                     "RUN_ASSET_STALE",
                                 )
@@ -1401,6 +1529,8 @@ class RunAgentPrivateExecutor:
                                     "RUN_ASSET_STALE",
                                 )
                             runtime_models[auxiliary_model.name] = auxiliary_model
+                            if purpose == "title" and model_ref is None:
+                                title_bound_name = auxiliary_model.name
                 except asyncio.CancelledError:
                     raise
                 except PermanentExecutionError:
@@ -1414,6 +1544,14 @@ class RunAgentPrivateExecutor:
                 runtime_app_config = runtime_app_config.with_runtime_models(
                     tuple(runtime_models.values()),
                 )
+                if title_bound_name is not None:
+                    runtime_app_config = runtime_app_config.model_copy(
+                        update={
+                            "title": runtime_app_config.title.model_copy(
+                                update={"model_name": title_bound_name},
+                            ),
+                        },
+                    )
             elif runtime_app_config.get_model_config(exact_model_name) is None:
                 # Compatibility path for isolated unit tests. Production
                 # composition always injects the PostgreSQL materializer.
@@ -1427,6 +1565,7 @@ class RunAgentPrivateExecutor:
             runtime_config_pushed = True
             materialize_kwargs: dict[str, object] = {
                 "authorization_boundary": boundary,
+                "runtime_kind": execution.runtime_kind,
             }
             if delegate_model_names:
                 materialize_kwargs["delegate_model_names"] = delegate_model_names
@@ -1460,22 +1599,23 @@ class RunAgentPrivateExecutor:
                 if isinstance(skill_container_path, str) and skill_root is not None
                 else ()
             )
-            file_authority = PrivateRunFileAuthority(
-                PrivateFileRunScope(
-                    execution.context,
-                    thread_id=execution.run.thread_id,
-                    run_id=execution.run.run_id,
-                    authorization_boundary=boundary,
-                ),
-                PrivateSandboxFileProjection(self._factory),
-                PrivateFileFinalizer(
-                    self._factory,
-                    quota=self._quota,
-                    audit=self._file_finalization_audit,
-                ),
-                mounts=mounts,
-                current_upload_snapshot=current_upload_snapshot,
-            )
+            if execution.runtime_kind == "chat":
+                file_authority = PrivateRunFileAuthority(
+                    PrivateFileRunScope(
+                        execution.context,
+                        thread_id=execution.run.thread_id,
+                        run_id=execution.run.run_id,
+                        authorization_boundary=boundary,
+                    ),
+                    PrivateSandboxFileProjection(self._factory),
+                    PrivateFileFinalizer(
+                        self._factory,
+                        quota=self._quota,
+                        audit=self._file_finalization_audit,
+                    ),
+                    mounts=mounts,
+                    current_upload_snapshot=current_upload_snapshot,
+                )
             run_manager = RunManager()
             record = await run_manager.register_persisted(
                 run_id=execution.run.run_id,
@@ -1504,14 +1644,18 @@ class RunAgentPrivateExecutor:
             )
             if callable(set_boundary):
                 set_boundary(boundary)
-            memory_authority = PrivateRunMemoryAuthority(
-                self._factory,
-                context=execution.context,
-                claim=claim,
-                thread_id=execution.run.thread_id,
-                namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
-                memory_config=runtime_app_config.memory,
-                audit=self._file_finalization_audit,
+            memory_authority = (
+                PrivateRunMemoryAuthority(
+                    self._factory,
+                    context=execution.context,
+                    claim=claim,
+                    thread_id=execution.run.thread_id,
+                    namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
+                    memory_config=runtime_app_config.memory,
+                    audit=self._file_finalization_audit,
+                )
+                if execution.runtime_kind == "chat"
+                else None
             )
             run_context = RunContext(
                 checkpointer=checkpointer,
@@ -1522,16 +1666,21 @@ class RunAgentPrivateExecutor:
                     scope=execution.context.resource_scope,
                 ),
                 run_events_config=None,
-                thread_store=_PrivateRunThreadMetadataStore(
-                    self._factory,
-                    scope=execution.context.resource_scope,
-                    boundary=boundary,
+                thread_store=(
+                    _PrivateRunThreadMetadataStore(
+                        self._factory,
+                        scope=execution.context.resource_scope,
+                        boundary=boundary,
+                    )
+                    if execution.runtime_kind == "chat"
+                    else None
                 ),
                 app_config=runtime_app_config,
                 private_scope=execution.context.resource_scope,
                 authorization_boundary=boundary,
                 file_authority=file_authority,
                 memory_authority=memory_authority,
+                memory_archive_context=archive_context,
                 guardrail_attribution=_private_guardrail_attribution(
                     execution.context,
                     execution.run,
@@ -1545,6 +1694,20 @@ class RunAgentPrivateExecutor:
                 execution.run.owner_user_id,
             )
             try:
+                agent_factory = self._agent_factory
+                if execution.runtime_kind == "skill_builder":
+                    agent_factory = SkillBuilderAgentFactory(
+                        catalog=WorkerSkillBuilderAuthoringCatalog(
+                            self._factory,
+                            execution.context,
+                        ),
+                        draft_sink=SkillDesignService(
+                            self._factory,
+                        ).terminal_sink(
+                            execution.context,
+                            claim,
+                        ),
+                    )
                 await self._runner(
                     LeaseAuthorizedStreamBridge(
                         self._bridge,
@@ -1552,11 +1715,12 @@ class RunAgentPrivateExecutor:
                         scope=execution.context.resource_scope,
                         thread_id=execution.run.thread_id,
                         terminal_status=lambda: str(record.status),
+                        terminal_error_code=lambda: PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value if record.error == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value else None,
                     ),
                     run_manager,
                     record,
                     ctx=run_context,
-                    agent_factory=self._agent_factory,
+                    agent_factory=agent_factory,
                     graph_input=self._graph_input(execution),
                     config=self._runner_config(
                         execution,
@@ -1586,6 +1750,12 @@ class RunAgentPrivateExecutor:
                 )
             if record.status is RunStatus.interrupted:
                 return AgentExecutionResult.cancelled(
+                    attempt_usage=attempt_usage,
+                )
+            if record.status is RunStatus.error and record.error == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value:
+                return AgentExecutionResult.failed(
+                    PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                    retryable=False,
                     attempt_usage=attempt_usage,
                 )
             if boundary.ambiguous_side_effect:
@@ -1630,6 +1800,21 @@ class RunAgentPrivateExecutor:
                 error.code,
                 attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
             ) from None
+        except MemoryAuthorityUnavailable:
+            raise TransientExecutionError(
+                PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+            ) from None
+        except PublicRunError as error:
+            if error.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
+                raise self._output_limit_error(
+                    record,
+                    lease_lost=boundary.lease_lost,
+                ) from error
+            raise TransientExecutionError(
+                PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
+            ) from None
         except AuthorizationRevoked:
             if boundary.lease_lost:
                 raise TransientExecutionError(
@@ -1644,7 +1829,7 @@ class RunAgentPrivateExecutor:
                     attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
                 ) from None
             raise TransientExecutionError(
-                "PRIVATE_RUN_EXECUTION_FAILED",
+                PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
                 attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
             ) from None
         finally:
@@ -1672,6 +1857,16 @@ class RunAgentPrivateExecutor:
 
 class PrivateRunJobHandler:
     """The sole M6 adapter from a private_run Job claim to Agent execution."""
+
+    @staticmethod
+    def _permanent_failure(
+        error: PermanentExecutionError,
+    ) -> AgentExecutionResult:
+        return AgentExecutionResult.failed(
+            error.public_error_code,
+            retryable=False,
+            attempt_usage=error.attempt_usage,
+        )
 
     def __init__(
         self,
@@ -1709,6 +1904,75 @@ class PrivateRunJobHandler:
         )
 
     @staticmethod
+    async def _project_skill_builder_terminal(
+        session: AsyncSession,
+        claim: JobClaim,
+        *,
+        settled_status: str,
+        public_error_code: str | None,
+    ) -> None:
+        """Close an unfinished Builder operation in the Run settlement tx."""
+
+        if claim.run_id is None or claim.scope.owner_user_id is None:
+            return
+        pair = (
+            await session.execute(
+                sa.select(SkillDesignOperationRow, SkillDesignSessionRow)
+                .join(
+                    SkillDesignSessionRow,
+                    sa.and_(
+                        SkillDesignSessionRow.project_id == SkillDesignOperationRow.project_id,
+                        SkillDesignSessionRow.owner_user_id == SkillDesignOperationRow.owner_user_id,
+                        SkillDesignSessionRow.id == SkillDesignOperationRow.session_id,
+                    ),
+                )
+                .where(
+                    SkillDesignOperationRow.project_id == claim.scope.project_id,
+                    SkillDesignOperationRow.owner_user_id == claim.scope.owner_user_id,
+                    SkillDesignOperationRow.run_id == claim.run_id,
+                    SkillDesignOperationRow.operation_kind == "turn",
+                )
+                .with_for_update(
+                    of=[SkillDesignOperationRow, SkillDesignSessionRow],
+                )
+            )
+        ).one_or_none()
+        if pair is None:
+            return
+        operation, design = pair
+        if operation.status != "in_progress":
+            return
+        code = "SKILL_DESIGN_INVALID_MODEL_OUTPUT" if settled_status == "success" else public_error_code or "SKILL_DESIGN_GENERATION_UNAVAILABLE"
+        if not _PUBLIC_ERROR_CODE.fullmatch(code):
+            code = "SKILL_DESIGN_GENERATION_UNAVAILABLE"
+        message = "生成结果不是有效的 Skill 文件包，请调整描述后重试。" if code == "SKILL_DESIGN_INVALID_MODEL_OUTPUT" else "Skill 生成暂时不可用，请稍后重试。"
+        design.status = "failed"
+        design.active_clarification_json = None
+        design.validation_json = None
+        design.validated_draft_checksum = None
+        design.error_code = code
+        design.error_message = message
+        design.progress_json = [
+            {"id": "interview", "label": "确认需求", "status": "completed"},
+            {"id": "package", "label": "生成候选文件", "status": "failed"},
+            {"id": "validate", "label": "检查 Skill", "status": "pending"},
+        ]
+        design.messages_json = [
+            *design.messages_json,
+            {
+                "id": uuid.uuid4().hex,
+                "role": "assistant",
+                "content": message,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        ]
+        design.revision += 1
+        operation.status = "failed"
+        operation.result_revision = design.revision
+        operation.public_error_code = code
+        await session.flush()
+
+    @staticmethod
     async def _claim_scope(
         session: AsyncSession,
         claim: JobClaim,
@@ -1733,13 +1997,155 @@ class PrivateRunJobHandler:
             membership_version=membership_version,
         )
 
+    @staticmethod
+    async def _runtime_kind_in_session(
+        session: AsyncSession,
+        claim: JobClaim,
+        *,
+        lock_builder: bool = False,
+    ) -> tuple[Literal["chat", "skill_builder"], str | None]:
+        """Classify the trusted Run purpose from its durable owning relation."""
+
+        if claim.run_id is None or claim.scope.owner_user_id is None:
+            raise LeaseLost(claim.job_id)
+        builder_statement = (
+            sa.select(SkillDesignSessionRow.thread_id)
+            .join(
+                SkillDesignOperationRow,
+                sa.and_(
+                    SkillDesignOperationRow.project_id == SkillDesignSessionRow.project_id,
+                    SkillDesignOperationRow.owner_user_id == SkillDesignSessionRow.owner_user_id,
+                    SkillDesignOperationRow.session_id == SkillDesignSessionRow.id,
+                ),
+            )
+            .where(
+                SkillDesignOperationRow.project_id == claim.scope.project_id,
+                SkillDesignOperationRow.owner_user_id == claim.scope.owner_user_id,
+                SkillDesignOperationRow.run_id == claim.run_id,
+                SkillDesignOperationRow.operation_kind == "turn",
+            )
+            .limit(1)
+        )
+        if lock_builder:
+            builder_statement = builder_statement.with_for_update(
+                of=[SkillDesignSessionRow, SkillDesignOperationRow],
+            )
+        builder_link = (await session.execute(builder_statement)).scalar_one_or_none()
+        if builder_link is None:
+            return "chat", None
+        return "skill_builder", str(builder_link)
+
+    @staticmethod
+    def _completed_skill_builder_terminal(
+        operation: SkillDesignOperationRow,
+        design: SkillDesignSessionRow,
+        *,
+        thread_id: str,
+    ) -> AgentExecutionResult | None:
+        """Recognize only an exact, already-committed Builder terminal fact.
+
+        This is the crash window after a terminal tool transaction committed
+        but before the Worker settled its Run. No model arguments participate:
+        the operation/session rows were selected through the trusted
+        project+owner+Run link and are locked by ``_runtime_kind_in_session``.
+        """
+
+        if (
+            operation.status != "completed"
+            or operation.public_error_code is not None
+            or operation.result_revision is None
+            or operation.result_revision != design.revision
+            or str(design.thread_id) != thread_id
+            or operation.terminal_kind not in {"clarification", "candidate"}
+            or not isinstance(operation.terminal_request_checksum, str)
+            or _SHA256_HEX.fullmatch(operation.terminal_request_checksum) is None
+        ):
+            return None
+        if operation.terminal_kind == "clarification":
+            payload = design.active_clarification_json
+            if (
+                design.status != "awaiting_clarification"
+                or not isinstance(payload, dict)
+                or payload.get("version") != 1
+                or payload.get("kind") != "human_input_request"
+                or payload.get("source") != "skill-builder"
+                or payload.get("clarification_type") != "skill_design"
+                or payload.get("input_mode") not in {"free_text", "single_choice"}
+                or not isinstance(payload.get("request_id"), str)
+                or not payload["request_id"]
+                or not isinstance(payload.get("question"), str)
+                or not payload["question"]
+                or not isinstance(payload.get("options"), list)
+            ):
+                return None
+            return AgentExecutionResult.succeeded()
+        if (
+            design.status != "draft_ready"
+            or not isinstance(design.draft_checksum, str)
+            or _SHA256_HEX.fullmatch(design.draft_checksum) is None
+            or design.active_clarification_json is not None
+            or design.validation_json is not None
+            or design.validated_draft_checksum is not None
+        ):
+            return None
+        try:
+            dependencies = SkillBuilderDependencySnapshot.model_validate(
+                design.authoring_dependencies_json,
+            )
+        except ValidationError:
+            return None
+        if dependencies.draft_checksum != design.draft_checksum:
+            return None
+        return AgentExecutionResult.succeeded()
+
+    @classmethod
+    async def _recovered_skill_builder_terminal_in_session(
+        cls,
+        session: AsyncSession,
+        claim: JobClaim,
+        *,
+        thread_id: str,
+    ) -> AgentExecutionResult | None:
+        if claim.run_id is None or claim.scope.owner_user_id is None:
+            raise LeaseLost(claim.job_id)
+        pair = (
+            await session.execute(
+                sa.select(SkillDesignOperationRow, SkillDesignSessionRow)
+                .join(
+                    SkillDesignSessionRow,
+                    sa.and_(
+                        SkillDesignSessionRow.project_id == SkillDesignOperationRow.project_id,
+                        SkillDesignSessionRow.owner_user_id == SkillDesignOperationRow.owner_user_id,
+                        SkillDesignSessionRow.id == SkillDesignOperationRow.session_id,
+                    ),
+                )
+                .where(
+                    SkillDesignOperationRow.project_id == claim.scope.project_id,
+                    SkillDesignOperationRow.owner_user_id == claim.scope.owner_user_id,
+                    SkillDesignOperationRow.run_id == claim.run_id,
+                    SkillDesignOperationRow.operation_kind == "turn",
+                    SkillDesignSessionRow.thread_id == uuid.UUID(thread_id),
+                )
+                .with_for_update(
+                    of=[SkillDesignOperationRow, SkillDesignSessionRow],
+                )
+            )
+        ).one_or_none()
+        if pair is None:
+            return None
+        return cls._completed_skill_builder_terminal(
+            pair[0],
+            pair[1],
+            thread_id=thread_id,
+        )
+
     async def _begin(
         self,
         claim: JobClaim,
     ) -> tuple[
         PrivateRunExecution | None,
         bool,
-        AgentExecutionResult | None,
+        _RecoveredPrivateRunTerminal | None,
         PrivateResourceScope,
     ]:
         origin_trace_id = normalize_trace_id(claim.origin_trace_id)
@@ -1751,6 +2157,11 @@ class PrivateRunJobHandler:
             raise LeaseLost(claim.job_id) from None
         async with self._factory() as session, session.begin():
             claim_scope = await self._claim_scope(session, claim)
+            runtime_kind, builder_thread_id = await self._runtime_kind_in_session(
+                session,
+                claim,
+                lock_builder=True,
+            )
             try:
                 project = await resolve_project_context_in_transaction(
                     session,
@@ -1759,8 +2170,12 @@ class PrivateRunJobHandler:
                     origin_trace_id,
                     lock=True,
                 )
-                project.require(Capability.PRIVATE_WORK_CREATE)
-                project.require(Capability.SHARED_ASSETS_EXECUTE)
+                if runtime_kind == "skill_builder":
+                    project.require(Capability.SHARED_ASSETS_READ)
+                    project.require(Capability.SHARED_ASSETS_EDIT)
+                else:
+                    project.require(Capability.PRIVATE_WORK_CREATE)
+                    project.require(Capability.SHARED_ASSETS_EXECUTE)
             except (ProjectNotFound, ProjectForbidden):
                 state = await self._runs(session).begin_execution(
                     scope=claim_scope,
@@ -1779,6 +2194,16 @@ class PrivateRunJobHandler:
                 lease_token=claim.lease_token,
                 origin_trace_id=origin_trace_id,
             )
+            thread_kind = await session.scalar(
+                sa.select(ThreadMetaRow.thread_kind).where(
+                    ThreadMetaRow.project_id == context.project_id,
+                    ThreadMetaRow.owner_user_id == str(context.user_id),
+                    ThreadMetaRow.thread_id == state.run.thread_id,
+                    ThreadMetaRow.deleted_at.is_(None),
+                )
+            )
+            if thread_kind != runtime_kind or (runtime_kind == "skill_builder" and state.run.thread_id != builder_thread_id):
+                raise TransientExecutionError("RUN_PURPOSE_INVALID")
             terminal = await self._events.get_stream_terminal(
                 session,
                 scope=context.resource_scope,
@@ -1789,9 +2214,27 @@ class PrivateRunJobHandler:
                 return (
                     None,
                     state.cancel_requested,
-                    self._terminal_result(terminal),
+                    _RecoveredPrivateRunTerminal(
+                        self._terminal_result(terminal),
+                    ),
                     context.resource_scope,
                 )
+            if runtime_kind == "skill_builder":
+                recovered_builder_terminal = await self._recovered_skill_builder_terminal_in_session(
+                    session,
+                    claim,
+                    thread_id=state.run.thread_id,
+                )
+                if recovered_builder_terminal is not None:
+                    return (
+                        None,
+                        state.cancel_requested,
+                        _RecoveredPrivateRunTerminal(
+                            recovered_builder_terminal,
+                            ensure_stream_terminal=True,
+                        ),
+                        context.resource_scope,
+                    )
             assets = await self._snapshots.list_assets_in_session(
                 session,
                 context,
@@ -1860,6 +2303,7 @@ class PrivateRunJobHandler:
                 stream_mode=stream_mode,
                 stream_subgraphs=bool(kwargs.get("stream_subgraphs", False)),
                 resume_from_checkpoint=resume_from_checkpoint,
+                runtime_kind=runtime_kind,
             ),
             state.cancel_requested,
             None,
@@ -1876,6 +2320,11 @@ class PrivateRunJobHandler:
         if status in {"cancelled", "interrupted"}:
             return AgentExecutionResult.cancelled()
         if status in {"error", "failed", "timeout"}:
+            if isinstance(terminal.data, Mapping) and terminal.data.get("error_code") == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value:
+                return AgentExecutionResult.failed(
+                    PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                    retryable=False,
+                )
             return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
         return AgentExecutionResult.failed("DURABLE_STREAM_TERMINAL_INVALID")
 
@@ -1903,7 +2352,12 @@ class PrivateRunJobHandler:
         scope: PrivateResourceScope,
         ambiguous_side_effect: bool = False,
         durable_terminal: bool = False,
+        ensure_stream_terminal: bool = False,
     ) -> JobSettlement:
+        if ensure_stream_terminal and (not durable_terminal or result.status != "succeeded"):
+            raise ValueError(
+                "stream terminal repair requires a durable successful result",
+            )
         outcome = JobOutcome(result.status, result.public_error_code)
         origin_trace_id = normalize_trace_id(claim.origin_trace_id)
         if origin_trace_id is None:
@@ -1916,6 +2370,11 @@ class PrivateRunJobHandler:
                     locked_scope = await self._claim_scope(session, claim)
                     if locked_scope.project_id != scope.project_id or locked_scope.owner_user_id != scope.owner_user_id:
                         raise LeaseLost(claim.job_id)
+                    await self._runtime_kind_in_session(
+                        session,
+                        claim,
+                        lock_builder=True,
+                    )
                     settlement = await self._runs(session).settle_execution(
                         scope=locked_scope,
                         run_id=claim.run_id or "",
@@ -1931,6 +2390,28 @@ class PrivateRunJobHandler:
                         attempt_usage=result.attempt_usage,
                     )
                     settled_run = settlement.run
+                    if settled_run.status in {
+                        "success",
+                        "error",
+                        "timeout",
+                        "interrupted",
+                    }:
+                        await self._project_skill_builder_terminal(
+                            session,
+                            claim,
+                            settled_status=settled_run.status,
+                            public_error_code=result.public_error_code,
+                        )
+                    if ensure_stream_terminal:
+                        if settled_run.status != "success":
+                            raise PrivateRunExecutionLeaseLost
+                        await self._events.ensure_settled_stream_terminal(
+                            session,
+                            scope=locked_scope,
+                            thread_id=settled_run.thread_id,
+                            run_id=settled_run.run_id,
+                            status="completed",
+                        )
                     if not settlement.run_terminal_published and settled_run.status in {
                         "success",
                         "error",
@@ -2009,9 +2490,10 @@ class PrivateRunJobHandler:
         if recovered_terminal is not None:
             return self._settlement(
                 claim,
-                recovered_terminal,
+                recovered_terminal.result,
                 scope=settlement_scope,
                 durable_terminal=True,
+                ensure_stream_terminal=(recovered_terminal.ensure_stream_terminal),
             )
         if execution is None:
             return self._settlement(
@@ -2036,10 +2518,7 @@ class PrivateRunJobHandler:
                 attempt_usage=error.attempt_usage,
             )
         except PermanentExecutionError as error:
-            result = AgentExecutionResult.failed(
-                error.public_error_code,
-                retryable=False,
-            )
+            result = self._permanent_failure(error)
         except PrivateWorkMcpQuotaExceeded as error:
             result = AgentExecutionResult.failed(error.code)
         except AmbiguousExternalSideEffect as error:

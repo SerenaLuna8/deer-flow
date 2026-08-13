@@ -6,8 +6,9 @@ description: 配置最终项目作用域的 ActWeave 应用。
 # 配置
 
 基础设施配置位于仓库根目录 `config.yaml` 和进程/工具环境变量。先复制
-`config.example.yaml`，再配置 PostgreSQL、sandbox、认证、Worker 和可选
-Scheduler。YAML 不再接受模型定义；服务启动后，由 system admin 在
+`config.example.yaml`，再配置 PostgreSQL、sandbox、认证和 Worker。
+Scheduler 进程是否启动仍由运维决定；自动化轮询、并发上限和一次性最短提前量在
+`/admin/settings/system` 的 PostgreSQL 平台配置中管理。YAML 不再接受模型定义；服务启动后，由 system admin 在
 `/admin/settings/models` 配置版本化 provider 设置和加密 Credential。
 
 ```bash

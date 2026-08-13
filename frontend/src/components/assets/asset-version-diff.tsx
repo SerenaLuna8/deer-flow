@@ -17,6 +17,15 @@ function list(items: readonly string[], separator: string): string {
   return items.length === 0 ? "—" : items.join(separator);
 }
 
+function jsonObject(value: Record<string, unknown> | undefined): string {
+  const document = value ?? {};
+  return JSON.stringify(
+    document,
+    Object.keys(document).sort((left, right) => left.localeCompare(right)),
+    2,
+  );
+}
+
 type DiffCopy = Translations["adminAssets"]["diff"];
 type StatusCopy = Translations["adminAssets"]["status"];
 
@@ -25,6 +34,7 @@ function describe(
   copy: DiffCopy,
   statuses: StatusCopy,
   separator: string,
+  includeAgentDocuments: boolean,
 ): Record<string, string> {
   const common = {
     [copy.payloadChecksum]: value(
@@ -35,10 +45,19 @@ function describe(
     return {
       ...common,
       [copy.description]: value(version.description),
-      [copy.model]: value(version.model_ref),
+      [copy.payloadSchemaVersion]: String(version.payload_schema_version),
+      [copy.model]: `${value(version.model_ref)}\n${jsonObject(version.model_settings)}`,
       [copy.toolGroups]: list(version.tool_groups, separator),
       [copy.skillVersions]: list(version.skill_version_ids, separator),
       [copy.mcpVersions]: list(version.mcp_version_ids, separator),
+      ...(includeAgentDocuments
+        ? {
+            "AGENTS.md": value(version.agents_instructions),
+            "SOUL.md": value(version.soul),
+            "IDENTITY.md": value(version.identity),
+            "USER.md": value(version.user_context),
+          }
+        : {}),
     };
   }
   if ("skill_id" in version) {
@@ -94,9 +113,18 @@ function diffRows(
   copy: DiffCopy,
   statuses: StatusCopy,
   separator: string,
+  includeAgentDocuments: boolean,
 ): DiffRow[] {
-  const before = previous ? describe(previous, copy, statuses, separator) : {};
-  const after = describe(current, copy, statuses, separator);
+  const before = previous
+    ? describe(previous, copy, statuses, separator, includeAgentDocuments)
+    : {};
+  const after = describe(
+    current,
+    copy,
+    statuses,
+    separator,
+    includeAgentDocuments,
+  );
   return Object.entries(after)
     .filter(([key, currentValue]) => before[key] !== currentValue)
     .map(([label, currentValue]) => ({
@@ -109,9 +137,11 @@ function diffRows(
 export function AssetVersionDiff({
   previous = null,
   current,
+  includeAgentDocuments = false,
 }: {
   previous?: AssetVersion | null;
   current: AssetVersion;
+  includeAgentDocuments?: boolean;
 }) {
   const { locale, t } = useI18n();
   const isMcp = "mcp_server_id" in current;
@@ -121,6 +151,7 @@ export function AssetVersionDiff({
     t.adminAssets.diff,
     t.adminAssets.status,
     locale === "zh-CN" ? "、" : ", ",
+    includeAgentDocuments,
   );
   if (rows.length === 0) {
     return (

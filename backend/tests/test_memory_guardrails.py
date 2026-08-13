@@ -1,4 +1,4 @@
-"""PR5 quality guardrails: review flagging, budget rewrite, degrade metadata."""
+"""Memory review, budget-rewrite, and degradation guardrails."""
 
 from __future__ import annotations
 

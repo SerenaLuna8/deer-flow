@@ -8,6 +8,8 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import {
   createProjectThread,
   type CreateProjectThreadInput,
@@ -45,6 +47,23 @@ export { projectAgentsStartChatPath };
 export { MAIN_PROJECT_AGENT_SLUG };
 
 export type ExecutableProjectAgent = ProjectAssetItem;
+
+export type ProjectThreadAgentSelection = {
+  agentAssetId: string;
+  agentScope: "project" | "system";
+};
+
+export function otherProjectAgents(
+  agents: readonly ProjectAssetItem[],
+  currentAgent: ProjectThreadAgentSelection | null | undefined,
+): ProjectAssetItem[] {
+  if (!currentAgent) return [...agents];
+  return agents.filter(
+    (agent) =>
+      agent.id !== currentAgent.agentAssetId ||
+      agent.scope !== currentAgent.agentScope,
+  );
+}
 
 export function configurableSystemAgents(
   catalog: ProjectAssetList | undefined,
@@ -160,7 +179,27 @@ export type ProjectDefaultAgentResolution =
       source: "main" | "project";
       agent: ExecutableProjectAgent;
     }
-  | { status: "unavailable"; reason: string };
+  | {
+      status: "unavailable";
+      reason: "unknown" | "main-unavailable" | "project-unavailable";
+    };
+
+export function projectDefaultAgentUnavailableMessage(
+  reason: Extract<
+    ProjectDefaultAgentResolution,
+    { status: "unavailable" }
+  >["reason"],
+  copy: Translations["agents"]["newChat"],
+): string {
+  switch (reason) {
+    case "unknown":
+      return copy.defaultUnknown;
+    case "main-unavailable":
+      return copy.mainUnavailable;
+    case "project-unavailable":
+      return copy.projectUnavailable;
+  }
+}
 
 export function resolveProjectDefaultAgent(
   catalog: ProjectAssetList | undefined,
@@ -169,7 +208,7 @@ export function resolveProjectDefaultAgent(
   if (!catalog || !setting) {
     return {
       status: "unavailable",
-      reason: "无法确认项目默认 Agent，请稍后重试。",
+      reason: "unknown",
     };
   }
   if (setting.agent_asset_id === null) {
@@ -178,7 +217,7 @@ export function resolveProjectDefaultAgent(
       ? { status: "ready", source: "main", agent }
       : {
           status: "unavailable",
-          reason: "Main Agent 当前不可用，请联系项目管理员。",
+          reason: "main-unavailable",
         };
   }
   const agent = catalog.project_items.find(
@@ -192,20 +231,23 @@ export function resolveProjectDefaultAgent(
     ? { status: "ready", source: "project", agent }
     : {
         status: "unavailable",
-        reason: "项目默认 Agent 当前不可用，请联系项目管理员。",
+        reason: "project-unavailable",
       };
 }
 
-export function projectThreadAgentSelection(agent: ExecutableProjectAgent) {
+export function projectThreadAgentSelection(
+  agent: ExecutableProjectAgent,
+): ProjectThreadAgentSelection {
   return {
     agentAssetId: agent.id,
     agentScope: agent.scope,
-  } satisfies Pick<CreateProjectThreadInput, "agentAssetId" | "agentScope">;
+  };
 }
 
 type CreateProjectChatBaseDependencies = {
   scope: ProjectClientScope;
   projectSlug: string;
+  threadDisplayName: string;
   createThreadId?: () => string;
   createThread?: (
     scope: ProjectClientScope,
@@ -223,6 +265,7 @@ export async function createProjectChatForAgent({
   scope,
   projectSlug,
   agent,
+  threadDisplayName,
   createThreadId = uuid,
   createThread = createProjectThread,
   invalidateThreadLists,
@@ -232,7 +275,7 @@ export async function createProjectChatForAgent({
   await createThread(scope, {
     threadId,
     ...projectThreadAgentSelection(agent),
-    displayName: "新对话",
+    displayName: threadDisplayName,
   });
   invalidateThreadLists?.();
   navigate(
@@ -244,13 +287,14 @@ export async function createProjectChatForAgent({
 export async function createProjectChatWithDefaultAgent({
   scope,
   projectSlug,
+  threadDisplayName,
   createThreadId = uuid,
   createThread = createProjectThread,
   invalidateThreadLists,
   navigate,
 }: CreateProjectChatBaseDependencies): Promise<string> {
   const threadId = createThreadId();
-  await createThread(scope, { threadId, displayName: "新对话" });
+  await createThread(scope, { threadId, displayName: threadDisplayName });
   invalidateThreadLists?.();
   navigate(
     `/projects/${encodeURIComponent(projectSlug)}/chats/${encodeURIComponent(threadId)}`,
@@ -263,12 +307,14 @@ type EnableSystemAgentAndCreateProjectChatDependencies = Omit<
   "agent"
 > & {
   agent: ProjectAssetItem;
+  systemAgentUnavailableMessage: string;
   enableBinding: (input: EnableSystemBindingInput) => Promise<unknown>;
 };
 
 export async function enableSystemAgentAndCreateProjectChat({
   enableBinding,
   agent,
+  systemAgentUnavailableMessage,
   ...createDependencies
 }: EnableSystemAgentAndCreateProjectChatDependencies): Promise<string> {
   if (
@@ -276,7 +322,7 @@ export async function enableSystemAgentAndCreateProjectChat({
     agent.status !== "active" ||
     agent.current_published_version_id === null
   ) {
-    throw new Error("该系统 Agent 暂时无法启用");
+    throw new Error(systemAgentUnavailableMessage);
   }
   await enableBinding({
     asset_id: agent.id,
@@ -292,12 +338,14 @@ export async function enableSystemAgentAndCreateProjectChat({
 }
 
 function McpBlockedAgentsNotice({ agents }: { agents: ProjectAssetItem[] }) {
+  const { t } = useI18n();
+  const copy = t.agents.selector;
   if (agents.length === 0) return null;
   return (
     <div className="rounded-xl border border-dashed p-4">
-      <p className="text-sm font-medium">MCP 依赖当前不可运行</p>
+      <p className="text-sm font-medium">{copy.mcpBlockedTitle}</p>
       <p className="text-muted-foreground mt-1 text-sm">
-        以下 Agent 引用的 MCP 版本不受支持或无法确认，已阻止开始对话。
+        {copy.mcpBlockedDescription}
       </p>
       <ul className="mt-3 space-y-1 text-sm">
         {agents.map((agent) => (
@@ -316,6 +364,10 @@ export function AgentSelectorDialog({
   blockedRuntimeAgents = [],
   canAuthorProjectAgent = false,
   agentsPath,
+  title,
+  description,
+  emptyTitle,
+  emptyDescription,
   isCreating,
   isLoading = false,
   error = null,
@@ -330,6 +382,10 @@ export function AgentSelectorDialog({
   blockedRuntimeAgents?: ProjectAssetItem[];
   canAuthorProjectAgent?: boolean;
   agentsPath?: string;
+  title?: string;
+  description?: string;
+  emptyTitle?: string;
+  emptyDescription?: string;
   isCreating: boolean;
   isLoading?: boolean;
   error?: Error | null;
@@ -337,6 +393,12 @@ export function AgentSelectorDialog({
   onSelect: (agent: ExecutableProjectAgent) => void;
   onEnableSystemAgent?: (agent: ProjectAssetItem) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.selector;
+  const resolvedTitle = title ?? copy.title;
+  const resolvedDescription = description ?? copy.description;
+  const resolvedEmptyTitle = emptyTitle ?? copy.emptyTitle;
+  const resolvedEmptyDescription = emptyDescription ?? copy.emptyDescription;
   const dialogRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -413,13 +475,13 @@ export function AgentSelectorDialog({
               id="project-agent-selector-title"
               className="text-lg font-semibold"
             >
-              选择 Agent
+              {resolvedTitle}
             </h2>
             <p
               id="project-agent-selector-description"
               className="text-muted-foreground mt-1 text-sm"
             >
-              选择一个 Agent 开始新的私有对话。
+              {resolvedDescription}
             </p>
           </div>
           <Button
@@ -429,16 +491,16 @@ export function AgentSelectorDialog({
             data-dialog-initial-focus
             onClick={() => onOpenChange(false)}
           >
-            关闭
+            {t.agents.common.close}
           </Button>
         </div>
         {isLoading ? (
           <p role="status" className="text-muted-foreground mt-6 text-sm">
-            正在加载 Agent…
+            {copy.loading}
           </p>
         ) : error ? (
           <p role="alert" className="text-destructive mt-6 text-sm">
-            无法加载 Agent，请稍后重试。
+            {copy.loadFailed}
           </p>
         ) : agents.length > 0 ? (
           <div className="mt-6 space-y-4">
@@ -454,7 +516,9 @@ export function AgentSelectorDialog({
                 >
                   <span className="truncate">{agent.display_name}</span>
                   <span className="text-muted-foreground text-xs">
-                    {agent.scope === "project" ? "项目 Agent" : "系统 Agent"}
+                    {agent.scope === "project"
+                      ? copy.projectAgent
+                      : copy.systemAgent}
                   </span>
                 </Button>
               ))}
@@ -464,14 +528,14 @@ export function AgentSelectorDialog({
         ) : (
           <div className="mt-6 space-y-5">
             <div>
-              <h3 className="font-medium">项目还没有可执行 Agent</h3>
+              <h3 className="font-medium">{resolvedEmptyTitle}</h3>
               <p className="text-muted-foreground mt-2 text-sm">
-                需要先启用一个系统 Agent，或创建并发布项目 Agent。
+                {resolvedEmptyDescription}
               </p>
             </div>
             {systemAgents.length > 0 && (
               <div className="space-y-2">
-                <p className="text-sm font-medium">可立即启用</p>
+                <p className="text-sm font-medium">{copy.enableNow}</p>
                 {systemAgents.map((agent) => (
                   <Button
                     key={agent.id}
@@ -481,10 +545,10 @@ export function AgentSelectorDialog({
                     onClick={() => onEnableSystemAgent?.(agent)}
                   >
                     <span className="truncate">
-                      启用 {agent.display_name} 并开始对话
+                      {copy.enableAndChat(agent.display_name)}
                     </span>
                     <span className="text-primary-foreground/75 text-xs">
-                      系统 Agent
+                      {copy.systemAgent}
                     </span>
                   </Button>
                 ))}
@@ -492,9 +556,9 @@ export function AgentSelectorDialog({
             )}
             {blockedSystemAgents.length > 0 && (
               <div className="rounded-xl border border-dashed p-4">
-                <p className="text-sm font-medium">需要先完成依赖配置</p>
+                <p className="text-sm font-medium">{copy.dependencyTitle}</p>
                 <p className="text-muted-foreground mt-1 text-sm">
-                  以下系统 Agent 依赖的 Skill 或 MCP 尚未全部在项目中启用。
+                  {copy.dependencyDescription}
                 </p>
                 <ul className="mt-3 space-y-1 text-sm">
                   {blockedSystemAgents.map((agent) => (
@@ -512,8 +576,8 @@ export function AgentSelectorDialog({
                   <Link href={agentsPath}>
                     {blockedSystemAgents.length > 0 ||
                     blockedRuntimeAgents.length > 0
-                      ? "前往 Agent 页面完成配置"
-                      : "创建项目 Agent"}
+                      ? copy.configure
+                      : copy.createProjectAgent}
                   </Link>
                 </Button>
               )}
@@ -522,7 +586,7 @@ export function AgentSelectorDialog({
               blockedRuntimeAgents.length === 0 &&
               !canAuthorProjectAgent && (
                 <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                  请联系项目 Admin 或 Editor 完成配置。
+                  {copy.contactEditor}
                 </p>
               )}
           </div>
@@ -535,12 +599,16 @@ export function AgentSelectorDialog({
 export function ProjectAgentSelectorDialog({
   project,
   open,
+  currentAgent,
   onOpenChange,
 }: {
   project: Project;
   open: boolean;
+  currentAgent?: ProjectThreadAgentSelection | null;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.selector;
   const router = useRouter();
   const queryClient = useQueryClient();
   const { user } = useAuth();
@@ -552,12 +620,20 @@ export function ProjectAgentSelectorDialog({
     open && Boolean(user),
   );
   const candidateAgents = useMemo(
-    () => executableProjectAgents(assets.data as ProjectAssetList | undefined),
-    [assets.data],
+    () =>
+      otherProjectAgents(
+        executableProjectAgents(assets.data as ProjectAssetList | undefined),
+        currentAgent,
+      ),
+    [assets.data, currentAgent],
   );
   const systemAgents = useMemo(
-    () => configurableSystemAgents(assets.data as ProjectAssetList | undefined),
-    [assets.data],
+    () =>
+      otherProjectAgents(
+        configurableSystemAgents(assets.data as ProjectAssetList | undefined),
+        currentAgent,
+      ),
+    [assets.data, currentAgent],
   );
   const shouldCheckDependencies = open && Boolean(user);
   const systemDependencyCheck =
@@ -692,7 +768,7 @@ export function ProjectAgentSelectorDialog({
     rawDependencyError instanceof Error
       ? rawDependencyError
       : rawDependencyError
-        ? new Error("Agent 依赖加载失败")
+        ? new Error(copy.dependencyLoadFailed)
         : null;
   const enableSystemAgent = useEnableProjectSystemBinding(
     user?.id ?? "",
@@ -712,13 +788,16 @@ export function ProjectAgentSelectorDialog({
         scope,
         projectSlug: project.slug,
         agent,
+        threadDisplayName: t.agents.newChat.threadName,
         invalidateThreadLists: () =>
           invalidateStoppedThreadCaches(queryClient, null, false, scope),
         navigate: (path) => router.push(path),
       });
       onOpenChange(false);
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "无法创建项目对话");
+      toast.error(
+        error instanceof Error ? error.message : copy.createChatFailed,
+      );
     } finally {
       setIsCreating(false);
     }
@@ -733,6 +812,8 @@ export function ProjectAgentSelectorDialog({
         scope,
         projectSlug: project.slug,
         agent,
+        threadDisplayName: t.agents.newChat.threadName,
+        systemAgentUnavailableMessage: copy.systemUnavailable,
         enableBinding: (input) => enableSystemAgent.mutateAsync(input),
         invalidateThreadLists: () =>
           invalidateStoppedThreadCaches(queryClient, null, false, scope),
@@ -740,9 +821,7 @@ export function ProjectAgentSelectorDialog({
       });
       onOpenChange(false);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "无法启用项目 Agent",
-      );
+      toast.error(error instanceof Error ? error.message : copy.enableFailed);
     } finally {
       setIsCreating(false);
     }
@@ -755,6 +834,10 @@ export function ProjectAgentSelectorDialog({
       configurableSystemAgents={readySystemAgents}
       blockedSystemAgents={blockedSystemAgents}
       blockedRuntimeAgents={blockedRuntimeAgents}
+      title={copy.alternateTitle}
+      description={copy.alternateDescription}
+      emptyTitle={copy.alternateEmptyTitle}
+      emptyDescription={copy.alternateEmptyDescription}
       canAuthorProjectAgent={project.capabilities.includes(
         "shared_assets.edit",
       )}

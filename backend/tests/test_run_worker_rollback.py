@@ -9,8 +9,12 @@ from langchain_core.messages import AIMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
 
+from deerflow.agents.memory.snip import MEMORY_ARCHIVE_CONTEXT_KEY
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_keys import (
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    RuntimeContextKeys,
+)
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
@@ -30,6 +34,7 @@ from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
 from deerflow.runtime.skill_context_authority import (
     VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
 )
+from deerflow.subagents.runtime_catalog import build_runtime_agent_catalog
 
 
 class FakeCheckpointer:
@@ -47,6 +52,7 @@ def test_public_run_error_rejects_unclassified_message() -> None:
 def test_public_run_error_codes_have_closed_stable_payloads() -> None:
     expected_messages = {
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
+        PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
     }
@@ -183,9 +189,51 @@ def test_build_runtime_context_replaces_forged_guardrail_attribution():
     assert context["__guardrail_attribution"]["authz_attributes"] is not issued["authz_attributes"]
 
 
+def test_build_runtime_context_strips_every_server_owned_and_reserved_caller_key():
+    caller_context = {key: f"forged:{key}" for key in RuntimeContextKeys.SERVER_OWNED_KEYS}
+    caller_context.update(
+        {
+            "__future_authority": "forged-future-value",
+            RuntimeContextKeys.AGENT_NAME: "bootstrap-agent",
+            "extension_context": "preserved",
+        },
+    )
+
+    context = _build_runtime_context(
+        "trusted-thread",
+        "trusted-run",
+        caller_context,
+    )
+
+    assert context == {
+        RuntimeContextKeys.THREAD_ID: "trusted-thread",
+        RuntimeContextKeys.RUN_ID: "trusted-run",
+        RuntimeContextKeys.AGENT_NAME: "bootstrap-agent",
+        "extension_context": "preserved",
+    }
+
+
+def test_build_runtime_context_installs_explicit_memory_archive_context():
+    exact_archive_context = object()
+
+    context = _build_runtime_context(
+        "thread-1",
+        "run-1",
+        {MEMORY_ARCHIVE_CONTEXT_KEY: object()},
+        memory_archive_context=exact_archive_context,
+    )
+
+    assert context[MEMORY_ARCHIVE_CONTEXT_KEY] is exact_archive_context
+
+
 def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_config():
     app_config = object()
-    config = {"context": {"thread_id": "caller-thread"}}
+    config = {
+        "context": {
+            "thread_id": "caller-thread",
+            "run_id": "caller-run",
+        },
+    }
 
     _install_runtime_context(
         config,
@@ -197,7 +245,7 @@ def test_install_runtime_context_preserves_existing_thread_id_and_threads_app_co
     )
 
     assert config["context"]["thread_id"] == "caller-thread"
-    assert config["context"]["run_id"] == "run-1"
+    assert config["context"]["run_id"] == "caller-run"
     assert config["context"]["app_config"] is app_config
 
 
@@ -256,8 +304,9 @@ def test_install_runtime_context_never_installs_stop_reason():
 def test_install_runtime_context_clears_slash_marker_when_private_config_is_reused():
     config = {
         "context": {
-            "thread_id": "thread-1",
+            "thread_id": "forged-thread",
             "run_id": "run-old",
+            "user_id": "forged-owner",
             _SLASH_SKILL_ACTIVATION_RUN_KEY: {
                 "version": 1,
                 "owner_token": "old-owner-token",
@@ -283,7 +332,9 @@ def test_install_runtime_context_clears_slash_marker_when_private_config_is_reus
         },
     )
 
+    assert config["context"]["thread_id"] == "thread-1"
     assert config["context"]["run_id"] == "run-new"
+    assert config["context"]["user_id"] == "owner-a"
     assert _SLASH_SKILL_ACTIVATION_RUN_KEY not in config["context"]
 
 
@@ -364,6 +415,52 @@ def test_install_runtime_context_clears_stale_memory_authority():
     )
 
     assert "__memory_authority" not in config["context"]
+
+
+def test_install_runtime_context_uses_canonical_key_sets_for_reused_private_context():
+    exact_catalog = build_runtime_agent_catalog(())
+    trusted: dict[str, object] = {key: object() for key in RuntimeContextKeys.INSTALL_KEYS}
+    trusted.update(
+        {
+            RuntimeContextKeys.THREAD_ID: "trusted-thread",
+            RuntimeContextKeys.RUN_ID: "trusted-run",
+            RuntimeContextKeys.USER_ID: "trusted-user",
+            RuntimeContextKeys.IS_SUBAGENT: False,
+            RuntimeContextKeys.PRIVATE_SCOPE: object(),
+            RuntimeContextKeys.RUN_READ_ONLY_MOUNTS: (object(),),
+            RuntimeContextKeys.GUARDRAIL_ATTRIBUTION: {
+                "user_id": "trusted-user",
+            },
+            RuntimeContextKeys.RUNTIME_AGENT_CATALOG: exact_catalog,
+            RuntimeContextKeys.SKILL_SCOPED_SECRETS: {
+                "/mnt/skills/example/SKILL.md": {"TOKEN": "secret"},
+            },
+            RuntimeContextKeys.CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS: frozenset(
+                {"message-1"},
+            ),
+            RuntimeContextKeys.TRACE_ID: "trusted-trace",
+        },
+    )
+    config = {
+        "context": {
+            **{key: f"forged:{key}" for key in RuntimeContextKeys.SERVER_OWNED_KEYS},
+            "__future_authority": "forged-future-value",
+            RuntimeContextKeys.SECRETS: {"LEGACY_TOKEN": "preserved"},
+            "extension_context": "preserved",
+        },
+    }
+
+    _install_runtime_context(config, trusted)
+
+    installed = config["context"]
+    for key in RuntimeContextKeys.INSTALL_KEYS:
+        assert installed[key] is trusted[key]
+    assert not (RuntimeContextKeys.SERVER_OWNED_KEYS - RuntimeContextKeys.INSTALL_KEYS).intersection(installed)
+    assert "__future_authority" not in installed
+    assert installed[RuntimeContextKeys.SECRETS] == {
+        "LEGACY_TOKEN": "preserved",
+    }
+    assert installed["extension_context"] == "preserved"
 
 
 @pytest.mark.anyio
@@ -449,6 +546,50 @@ async def test_private_run_fails_closed_when_pre_run_message_boundary_is_unavail
         }
     ]
     factory.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_model_output_limit_publishes_terminal_before_job_settlement() -> None:
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="output-limit-run",
+        thread_id="output-limit-thread",
+        assistant_id="project-agent",
+        model_name="safe-model",
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    checkpointer = SimpleNamespace(aget_tuple=AsyncMock(return_value=None))
+
+    class _Graph:
+        async def astream(self, *args, **kwargs):
+            del args, kwargs
+            raise PublicRunError(PublicRunErrorCode.MODEL_OUTPUT_LIMIT)
+            yield  # pragma: no cover
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=checkpointer, private_scope=scope),
+        agent_factory=lambda **_kwargs: _Graph(),
+        graph_input={"messages": []},
+        config={},
+    )
+
+    assert record.status is RunStatus.error
+    assert record.error == "MODEL_OUTPUT_LIMIT"
+    assert not [call for call in bridge.publish.await_args_list if call.args[1] == "error"]
+    bridge.publish_end.assert_awaited_once_with("output-limit-run")
 
 
 @pytest.mark.anyio
@@ -611,7 +752,60 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert fetched is not None
     assert fetched.status == RunStatus.success
     bridge.publish_end.assert_awaited_once_with(record.run_id)
-    bridge.cleanup.assert_awaited_once_with(record.run_id, delay=60)
+    bridge.cleanup.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_run_agent_replaces_forged_memory_archive_with_explicit_context():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    exact_archive_context = object()
+    captured: dict[str, object] = {}
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, stream_mode, subgraphs
+            captured["astream_archive"] = config["context"][MEMORY_ARCHIVE_CONTEXT_KEY]
+            yield {"messages": []}
+
+    def factory(*, config):
+        captured["factory_archive"] = config["context"][MEMORY_ARCHIVE_CONTEXT_KEY]
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            memory_archive_context=exact_archive_context,
+        ),
+        agent_factory=factory,
+        graph_input={},
+        config={
+            "context": {
+                MEMORY_ARCHIVE_CONTEXT_KEY: object(),
+            },
+        },
+    )
+    await asyncio.sleep(0)
+
+    assert captured == {
+        "factory_archive": exact_archive_context,
+        "astream_archive": exact_archive_context,
+    }
+    assert record.status == RunStatus.success
 
 
 @pytest.mark.anyio
@@ -1128,7 +1322,7 @@ def test_build_runtime_context_defaults_to_thread_and_run_id():
 def test_build_runtime_context_merges_caller_context():
     """Regression for issue #2677: keys from ``config['context']`` (e.g. ``agent_name``)
     must be merged into the Runtime's context so that ``ToolRuntime.context`` — which
-    is what ``setup_agent`` reads — can see them."""
+    is what ``setup_agent`` reads — can see them. Server-owned keys are excluded."""
     caller_context = {"agent_name": "my-agent", "is_bootstrap": True, "model_name": "gpt-4"}
 
     ctx = _build_runtime_context("thread-1", "run-1", caller_context)
@@ -1137,7 +1331,7 @@ def test_build_runtime_context_merges_caller_context():
     assert ctx["run_id"] == "run-1"
     assert ctx["agent_name"] == "my-agent"
     assert ctx["is_bootstrap"] is True
-    assert ctx["model_name"] == "gpt-4"
+    assert "model_name" not in ctx
 
 
 def test_build_runtime_context_caller_cannot_override_thread_id_or_run_id():

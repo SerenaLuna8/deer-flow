@@ -17,6 +17,11 @@ from app.automations.errors import AutomationError
 from app.automations.occurrences import AutomationOccurrenceService
 from app.automations.ownership import AutomationSchedulerOwnership
 from app.automations.reconciliation import AutomationReconciler
+from app.automations.system_policy import (
+    AutomationsPolicyPort,
+    AutomationsPolicyUnavailable,
+    SystemAutomationsPolicyReader,
+)
 from app.final_schema import FinalSchemaProbe
 from app.private_work.memory_dream_service import MemoryDreamSchedulerService
 from app.private_work.memory_seal_service import (
@@ -61,6 +66,7 @@ class SchedulerApp:
     poll_interval_seconds: float
     dream_service: MemoryDreamSchedulerService | None = None
     seal_service: MemorySealSchedulerService | None = None
+    policy_reader: AutomationsPolicyPort | None = None
 
     async def run(self, stop_event: asyncio.Event) -> None:
         if not self.enabled:
@@ -70,14 +76,23 @@ class SchedulerApp:
                 await self.service.reconcile_admitted_runs(session)
             while not stop_event.is_set():
                 now = datetime.now(UTC)
+                poll_interval_seconds = self.poll_interval_seconds
                 try:
                     async with self.session_factory() as session, session.begin():
-                        await self.service.admit_due_occurrences(
-                            session,
-                            now=now,
-                        )
+                        automations_enabled = True
+                        if self.policy_reader is not None:
+                            policy = await self.policy_reader.read_current(session)
+                            poll_interval_seconds = float(policy.poll_interval_seconds)
+                            automations_enabled = policy.enabled
+                        if automations_enabled:
+                            await self.service.admit_due_occurrences(
+                                session,
+                                now=now,
+                            )
                 except asyncio.CancelledError:
                     raise
+                except AutomationsPolicyUnavailable:
+                    logger.error("Automation scheduler policy unavailable")
                 except AutomationError as error:
                     if self.ownership.is_lost:
                         logger.error(
@@ -119,7 +134,7 @@ class SchedulerApp:
                 try:
                     await asyncio.wait_for(
                         stop_event.wait(),
-                        timeout=self.poll_interval_seconds,
+                        timeout=poll_interval_seconds,
                     )
                 except TimeoutError:
                     pass
@@ -145,8 +160,6 @@ async def run_scheduler(
         )
     except Exception:
         raise SchedulerConfigurationUnavailable() from None
-    if not config.scheduler.enabled:
-        return
     await init_engine(config.database)
     try:
         session_factory = get_session_factory()
@@ -177,15 +190,16 @@ async def run_scheduler(
                 current_policy_reader=SystemQuotaPolicyReader(),
             )
         )
+        automations_policy = SystemAutomationsPolicyReader()
         occurrences = AutomationOccurrenceService(
             session_factory,
-            max_concurrent_runs=config.scheduler.max_concurrent_runs,
+            policy_reader=automations_policy,
         )
         service = AutomationSchedulerService(
             occurrences=occurrences,
             dispatcher=AutomationDispatcher(
                 session_factory,
-                max_concurrent_runs=config.scheduler.max_concurrent_runs,
+                policy_reader=automations_policy,
                 model_catalog=SystemModelCatalogService(session_factory),
                 runtime_policy=runtime_policy_service,
                 endpoint_policy=mcp_endpoint_policy,
@@ -193,20 +207,25 @@ async def run_scheduler(
                 audit=audit_sink,
             ),
             reconciler=AutomationReconciler(session_factory),
-            max_concurrent_runs=config.scheduler.max_concurrent_runs,
+            max_concurrent_runs=3,
             ownership=ownership,
+            policy_reader=automations_policy,
         )
         await SchedulerApp(
             enabled=True,
             ownership=ownership,
             service=service,
             session_factory=session_factory,
-            poll_interval_seconds=config.scheduler.poll_interval_seconds,
-            dream_service=MemoryDreamSchedulerService(session_factory),
+            poll_interval_seconds=5,
+            dream_service=MemoryDreamSchedulerService(
+                session_factory,
+                audit=audit_sink,
+            ),
             seal_service=MemorySealSchedulerService(
                 session_factory,
                 admission=MemorySealAdmissionService(audit=audit_sink),
             ),
+            policy_reader=automations_policy,
         ).run(stop_event or asyncio.Event())
     finally:
         await close_engine()

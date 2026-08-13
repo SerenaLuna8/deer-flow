@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   MemoryDocumentWorkbench,
+  MemoryVersionDiff,
   type MemoryDocumentWorkbenchProps,
 } from "@/components/projects/private-work/memory/memory-document-workbench";
 import { I18nProvider } from "@/core/i18n/context";
@@ -124,6 +125,22 @@ function render(transform?: (value: MemoryDocumentWorkbenchProps) => void) {
 }
 
 describe("Memory document workbench", () => {
+  test("labels a truncated diff with localized review guidance", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <MemoryVersionDiff
+          unifiedDiff="@@ -1 +1 @@\n-old\n+new"
+          diffTruncated
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("文档变化已截断");
+    expect(html).toContain("这里只按完整行显示最多 64,000 个字符");
+    expect(html).toContain("请以该版本下方保存的完整文档为准");
+    expect(html).toContain("+new");
+  });
+
   test("offers current memory and archive tabs with the document frame", () => {
     const html = render();
 
@@ -229,6 +246,22 @@ describe("Memory document workbench", () => {
     expect(html).not.toMatch(
       /<button[^>]*\sdisabled=""[^>]*>(?:(?!<\/button>)[\s\S])*?(?:立即压缩文档|立即整理)/u,
     );
+  });
+
+  test("labels the advisory current-switch state without promising a Run outcome", () => {
+    const html = render((value) => {
+      value.document.data!.injectionAdvisory = {
+        basis: "current_non_continuation",
+        status: "inactive",
+        reason: "account_disabled",
+      };
+      value.document.data!.pendingCount = 3;
+    });
+
+    expect(html).toContain("当前不会向新对话注入记忆");
+    expect(html).toContain("仅反映当前设置");
+    expect(html).toContain("不代表任何既有对话的实际注入结果");
+    expect(html).toMatch(/<button[^>]*disabled/u);
   });
 
   test("surfaces versions that need review in both the banner and history", () => {

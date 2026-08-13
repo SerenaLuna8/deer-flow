@@ -14,6 +14,7 @@ from pathlib import Path
 import asyncpg
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres.aio import AsyncPostgresStore
+from psycopg import AsyncConnection, sql
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
@@ -41,6 +42,7 @@ from deerflow.persistence.bootstrap import (
     SchemaUpgradeRequired,
     bootstrap_schema,
 )
+from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
@@ -50,6 +52,129 @@ _DUPLICATE_DATABASE_SQLSTATE = "42P04"
 _SETUP_LOCK_KEY = 0x0DEE_12F1_5E7D_0004
 _BOOTSTRAP_LOCK_KEY = 0x0DEE_12F1_5E7D_0005
 _BOOTSTRAP_LOCK_POLL_SECONDS = 0.1
+_CHINESE_TEXT_PATTERN = re.compile(r"[\u3400-\u9fff]")
+_ALLOWED_LANGGRAPH_TABLES = frozenset(
+    {
+        "checkpoint_blobs",
+        "checkpoint_migrations",
+        "checkpoint_writes",
+        "checkpoints",
+        "store",
+        "store_migrations",
+    }
+)
+_EXPECTED_ROOT_TABLES = FINAL_APP_TABLES | _ALLOWED_LANGGRAPH_TABLES | {"alembic_version"}
+_ROOT_TABLE_CATALOG_SQL = """
+SELECT namespace.nspname AS schema_name, relation.relname AS table_name
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace
+  ON namespace.oid = relation.relnamespace
+WHERE namespace.nspname = current_schema()
+  AND relation.relkind IN ('r', 'p')
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_depend AS dependency
+      WHERE dependency.classid = 'pg_class'::regclass
+        AND dependency.objid = relation.oid
+        AND dependency.deptype = 'e'
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM pg_catalog.pg_inherits AS inheritance
+      WHERE inheritance.inhrelid = relation.oid
+  )
+ORDER BY relation.relname
+"""
+_LANGGRAPH_CATALOG_SQL = """
+SELECT namespace.nspname AS schema_name,
+       relation.relname AS table_name,
+       attribute.attname AS column_name
+FROM pg_catalog.pg_class AS relation
+JOIN pg_catalog.pg_namespace AS namespace
+  ON namespace.oid = relation.relnamespace
+JOIN pg_catalog.pg_attribute AS attribute
+  ON attribute.attrelid = relation.oid
+WHERE namespace.nspname = current_schema()
+  AND relation.relkind IN ('r', 'p')
+  AND relation.relname = ANY(%s)
+  AND attribute.attnum > 0
+  AND NOT attribute.attisdropped
+ORDER BY relation.relname, attribute.attnum
+"""
+
+
+@dataclass(frozen=True)
+class _PostgresTableComments:
+    table_name: str
+    table_comment: str
+    column_comments: tuple[tuple[str, str], ...]
+
+
+_LANGGRAPH_COMMENT_INVENTORY = (
+    _PostgresTableComments(
+        table_name="checkpoint_blobs",
+        table_comment="LangGraph 检查点各通道版本对应的序列化数据。",
+        column_comments=(
+            ("thread_id", "所属 LangGraph 线程标识。"),
+            ("checkpoint_ns", "检查点命名空间。"),
+            ("channel", "状态通道名称。"),
+            ("version", "通道数据版本标识。"),
+            ("type", "通道数据的序列化类型。"),
+            ("blob", "通道数据的序列化二进制内容。"),
+        ),
+    ),
+    _PostgresTableComments(
+        table_name="checkpoint_migrations",
+        table_comment="LangGraph 检查点表结构的迁移版本记录。",
+        column_comments=(("v", "已应用的检查点迁移版本号。"),),
+    ),
+    _PostgresTableComments(
+        table_name="checkpoint_writes",
+        table_comment="LangGraph 检查点任务产生的待处理通道写入。",
+        column_comments=(
+            ("thread_id", "所属 LangGraph 线程标识。"),
+            ("checkpoint_ns", "检查点命名空间。"),
+            ("checkpoint_id", "写入所属的检查点标识。"),
+            ("task_id", "产生写入的任务标识。"),
+            ("idx", "同一任务内的写入顺序编号。"),
+            ("channel", "写入目标的状态通道名称。"),
+            ("type", "写入数据的序列化类型。"),
+            ("blob", "写入数据的序列化二进制内容。"),
+            ("task_path", "任务在图执行过程中的路径，用于稳定排序。"),
+        ),
+    ),
+    _PostgresTableComments(
+        table_name="checkpoints",
+        table_comment="LangGraph 线程检查点的序列化状态和元数据。",
+        column_comments=(
+            ("thread_id", "所属 LangGraph 线程标识。"),
+            ("checkpoint_ns", "检查点命名空间。"),
+            ("checkpoint_id", "检查点标识。"),
+            ("parent_checkpoint_id", "父检查点标识；根检查点为空。"),
+            ("type", "检查点的序列化类型兼容字段。"),
+            ("checkpoint", "检查点状态的 JSON 数据。"),
+            ("metadata", "检查点附加元数据的 JSON 数据。"),
+        ),
+    ),
+    _PostgresTableComments(
+        table_name="store",
+        table_comment="LangGraph 跨线程存储的命名空间键值数据。",
+        column_comments=(
+            ("prefix", "存储项命名空间的编码前缀。"),
+            ("key", "命名空间内的存储项键。"),
+            ("value", "存储项内容的 JSON 数据。"),
+            ("created_at", "存储项创建时间。"),
+            ("updated_at", "存储项最后更新时间。"),
+            ("expires_at", "存储项到期时间；永久有效时为空。"),
+            ("ttl_minutes", "存储项的生存时长分钟数；未设置时为空。"),
+        ),
+    ),
+    _PostgresTableComments(
+        table_name="store_migrations",
+        table_comment="LangGraph 跨线程存储表结构的迁移版本记录。",
+        column_comments=(("v", "已应用的跨线程存储迁移版本号。"),),
+    ),
+)
 
 
 class PostgresSetupError(RuntimeError):
@@ -178,15 +303,92 @@ def _create_setup_engine(config: DatabaseConfig) -> AsyncEngine:
 
 
 async def _bootstrap_langgraph_schemas(database_url: str) -> None:
-    """Idempotently initialize LangGraph checkpointer and store tables."""
+    """Idempotently initialize and document the exact LangGraph table set."""
     connection_url = _asyncpg_url(database_url)
     try:
         async with AsyncPostgresSaver.from_conn_string(connection_url) as saver:
             await saver.setup()
         async with AsyncPostgresStore.from_conn_string(connection_url) as store:
             await store.setup()
+        await _comment_langgraph_schemas(connection_url)
+    except PostgresSetupError:
+        raise
     except Exception:
         raise PostgresSetupError("LangGraph PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和数据库状态") from None
+
+
+def _validated_langgraph_comment_columns() -> dict[str, tuple[str, ...]]:
+    """Validate the closed comment inventory before constructing any DDL."""
+    table_names = tuple(item.table_name for item in _LANGGRAPH_COMMENT_INVENTORY)
+    if len(table_names) != len(set(table_names)) or set(table_names) != _ALLOWED_LANGGRAPH_TABLES:
+        raise PostgresSetupError("LangGraph PostgreSQL 注释清单无效；请检查允许的表和字段清单")
+
+    expected_columns: dict[str, tuple[str, ...]] = {}
+    for item in _LANGGRAPH_COMMENT_INVENTORY:
+        validate_identifier(item.table_name, kind="table")
+        if not item.table_comment.strip() or _CHINESE_TEXT_PATTERN.search(item.table_comment) is None:
+            raise PostgresSetupError("LangGraph PostgreSQL 注释清单无效；请检查允许的表和字段清单")
+
+        column_names = tuple(column_name for column_name, _comment in item.column_comments)
+        if not column_names or len(column_names) != len(set(column_names)):
+            raise PostgresSetupError("LangGraph PostgreSQL 注释清单无效；请检查允许的表和字段清单")
+        for column_name, comment in item.column_comments:
+            validate_identifier(column_name, kind="column")
+            if not comment.strip() or _CHINESE_TEXT_PATTERN.search(comment) is None:
+                raise PostgresSetupError("LangGraph PostgreSQL 注释清单无效；请检查允许的表和字段清单")
+        expected_columns[item.table_name] = column_names
+    return expected_columns
+
+
+async def _comment_langgraph_schemas(connection_url: str) -> None:
+    """Apply table and column comments atomically after LangGraph setup."""
+    try:
+        expected_columns = _validated_langgraph_comment_columns()
+        async with await AsyncConnection.connect(connection_url) as connection:
+            async with connection.transaction():
+                async with connection.cursor() as cursor:
+                    await cursor.execute(_ROOT_TABLE_CATALOG_SQL)
+                    root_rows = await cursor.fetchall()
+                    root_schemas = {schema_name for schema_name, _table_name in root_rows}
+                    root_table_names = [table_name for _schema_name, table_name in root_rows]
+                    if len(root_schemas) != 1 or len(root_table_names) != len(set(root_table_names)) or set(root_table_names) != _EXPECTED_ROOT_TABLES:
+                        raise PostgresSetupError("LangGraph PostgreSQL schema 与允许的注释清单不一致；请检查依赖版本和数据库状态")
+
+                    schema_name = root_schemas.pop()
+                    if not isinstance(schema_name, str) or not schema_name:
+                        raise PostgresSetupError("LangGraph PostgreSQL schema 与允许的注释清单不一致；请检查依赖版本和数据库状态")
+                    await cursor.execute(
+                        _LANGGRAPH_CATALOG_SQL,
+                        (sorted(_ALLOWED_LANGGRAPH_TABLES),),
+                    )
+                    rows = await cursor.fetchall()
+                    schemas = {schema_name for schema_name, _table_name, _column_name in rows}
+                    actual_columns: dict[str, list[str]] = {}
+                    for _schema_name, table_name, column_name in rows:
+                        actual_columns.setdefault(table_name, []).append(column_name)
+
+                    if schemas != {schema_name} or {table_name: tuple(column_names) for table_name, column_names in actual_columns.items()} != expected_columns:
+                        raise PostgresSetupError("LangGraph PostgreSQL schema 与允许的注释清单不一致；请检查依赖版本和数据库状态")
+
+                    for item in _LANGGRAPH_COMMENT_INVENTORY:
+                        await cursor.execute(
+                            sql.SQL("COMMENT ON TABLE {} IS {}").format(
+                                sql.Identifier(schema_name, item.table_name),
+                                sql.Literal(item.table_comment),
+                            )
+                        )
+                        for column_name, comment in item.column_comments:
+                            await cursor.execute(
+                                sql.SQL("COMMENT ON COLUMN {}.{} IS {}").format(
+                                    sql.Identifier(schema_name, item.table_name),
+                                    sql.Identifier(column_name),
+                                    sql.Literal(comment),
+                                )
+                            )
+    except PostgresSetupError:
+        raise
+    except Exception:
+        raise PostgresSetupError("LangGraph PostgreSQL 表和字段注释写入失败；请检查 DATABASE_URL、目标 role 权限和数据库状态") from None
 
 
 def _create_bootstrap_lock_engine(database_url: str) -> AsyncEngine:
@@ -272,6 +474,12 @@ async def _bootstrap_existing(
     except SchemaSetupRequired as exc:
         primary_error = exc
         raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None
+    except PostgresSetupError as exc:
+        # Nested bootstrap stages already expose credential-safe operator
+        # guidance; retain it instead of collapsing it into an unrelated
+        # generic schema error.
+        primary_error = exc
+        raise
     except RuntimeError as exc:
         primary_error = exc
         raise PostgresSetupError("PostgreSQL schema 初始化失败；请检查 DATABASE_URL、目标 role 权限和完整 schema 快照") from None

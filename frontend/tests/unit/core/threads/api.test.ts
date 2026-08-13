@@ -3,9 +3,6 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 import { GatewayApiError } from "@/core/api/errors";
 import {
   compactThreadContext,
-  compactThreadForDream,
-  DREAM_COMPACTION_MAX_PASSES,
-  DreamThreadCompactionError,
   type ThreadCompactResponse,
 } from "@/core/threads/api";
 
@@ -41,7 +38,7 @@ afterEach(() => {
 });
 
 describe("thread compaction client", () => {
-  test("keeps ordinary compact unchanged and sends keep=0 only for Dream", async () => {
+  test("supports explicit keep=0 without a client-side Dream loop", async () => {
     const controller = new AbortController();
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -66,170 +63,6 @@ describe("thread compaction client", () => {
       keep: { type: "messages", value: 0 },
     });
     expect(fetcher.mock.calls[1]?.[1]?.signal).toBe(controller.signal);
-  });
-
-  test("drains every model-bounded Dream fragment before accepting the terminal reason", async () => {
-    const responses = [
-      compactResponse({
-        compacted: true,
-        reason: null,
-        removed_message_count: 4,
-        preserved_message_count: 5,
-        summary_updated: true,
-        checkpoint_id: "checkpoint-1",
-        total_tokens: 90,
-      }),
-      compactResponse({
-        compacted: true,
-        reason: null,
-        removed_message_count: 3,
-        preserved_message_count: 1,
-        summary_updated: true,
-        checkpoint_id: "checkpoint-2",
-        total_tokens: 45,
-      }),
-      compactResponse({ preserved_message_count: 1, total_tokens: 10 }),
-    ];
-    const fetcher = rs.fn(
-      async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        Response.json(responses.shift()),
-    );
-    const onCompacted = rs.fn();
-    rs.stubGlobal("fetch", fetcher);
-
-    const result = await compactThreadForDream(
-      THREAD_ID,
-      { apiBaseURL: API_BASE_URL },
-      onCompacted,
-    );
-
-    expect(result).toEqual({
-      compactedPasses: 2,
-      latestCheckpointId: "checkpoint-2",
-    });
-    expect(onCompacted).toHaveBeenCalledTimes(2);
-    expect(fetcher).toHaveBeenCalledTimes(3);
-    for (const [, init] of fetcher.mock.calls) {
-      expect(jsonBody(init)).toEqual({
-        force: true,
-        keep: { type: "messages", value: 0 },
-      });
-    }
-  });
-
-  test("fails closed when the server returns an unexpected stop reason", async () => {
-    const fetcher = rs.fn(async () =>
-      Response.json(compactResponse({ reason: "compaction_failed" })),
-    );
-    rs.stubGlobal("fetch", fetcher);
-
-    const promise = compactThreadForDream(THREAD_ID, {
-      apiBaseURL: API_BASE_URL,
-    });
-
-    await expect(promise).rejects.toMatchObject({
-      name: "DreamThreadCompactionError",
-      reason: "unexpected_result",
-    });
-    expect(fetcher).toHaveBeenCalledTimes(1);
-  });
-
-  test("fails closed when a successful response cannot prove checkpoint progress", async () => {
-    const fetcher = rs.fn(async () =>
-      Response.json(
-        compactResponse({
-          compacted: true,
-          reason: null,
-          summary_updated: true,
-          checkpoint_id: "checkpoint-without-removal",
-        }),
-      ),
-    );
-    const onCompacted = rs.fn();
-    rs.stubGlobal("fetch", fetcher);
-
-    const promise = compactThreadForDream(
-      THREAD_ID,
-      { apiBaseURL: API_BASE_URL },
-      onCompacted,
-    );
-
-    await expect(promise).rejects.toMatchObject({
-      name: "DreamThreadCompactionError",
-      reason: "no_progress",
-    });
-    expect(onCompacted).not.toHaveBeenCalled();
-  });
-
-  test("fails closed when a repeated checkpoint proves the drain stopped progressing", async () => {
-    const responses = [
-      compactResponse({
-        compacted: true,
-        reason: null,
-        removed_message_count: 1,
-        preserved_message_count: 2,
-        summary_updated: true,
-        checkpoint_id: "repeated-checkpoint",
-      }),
-      compactResponse({
-        compacted: true,
-        reason: null,
-        removed_message_count: 1,
-        preserved_message_count: 1,
-        summary_updated: true,
-        checkpoint_id: "repeated-checkpoint",
-      }),
-    ];
-    const fetcher = rs.fn(async () => Response.json(responses.shift()));
-    const onCompacted = rs.fn();
-    rs.stubGlobal("fetch", fetcher);
-
-    const promise = compactThreadForDream(
-      THREAD_ID,
-      { apiBaseURL: API_BASE_URL },
-      onCompacted,
-    );
-
-    await expect(promise).rejects.toBeInstanceOf(DreamThreadCompactionError);
-    await expect(promise).rejects.toMatchObject({ reason: "no_progress" });
-    expect(fetcher).toHaveBeenCalledTimes(2);
-    expect(onCompacted).toHaveBeenCalledTimes(1);
-  });
-
-  test("fails closed at the bounded pass limit instead of admitting an unbounded drain", async () => {
-    expect(DREAM_COMPACTION_MAX_PASSES).toBe(64);
-    let pass = 0;
-    const fetcher = rs.fn(async () => {
-      pass += 1;
-      if (pass > DREAM_COMPACTION_MAX_PASSES) {
-        throw new Error("Dream compaction exceeded the expected request bound");
-      }
-      return Response.json(
-        compactResponse({
-          compacted: true,
-          reason: null,
-          removed_message_count: 1,
-          preserved_message_count: 1,
-          summary_updated: true,
-          checkpoint_id: `bounded-checkpoint-${pass}`,
-        }),
-      );
-    });
-    const onCompacted = rs.fn();
-    rs.stubGlobal("fetch", fetcher);
-
-    const promise = compactThreadForDream(
-      THREAD_ID,
-      { apiBaseURL: API_BASE_URL },
-      onCompacted,
-    );
-
-    await expect(promise).rejects.toMatchObject({
-      name: "DreamThreadCompactionError",
-      reason: "pass_limit",
-    });
-    expect(fetcher).toHaveBeenCalledTimes(DREAM_COMPACTION_MAX_PASSES);
-    expect(onCompacted).toHaveBeenCalledTimes(DREAM_COMPACTION_MAX_PASSES);
   });
 
   test("preserves the Gateway error envelope for compact failures", async () => {

@@ -33,6 +33,15 @@ MODEL_PROVIDER_ENV_NAMES = frozenset(
         "VOLCENGINE_API_KEY",
     }
 )
+INSTALLATION_ONLY_ENV_NAMES = frozenset(
+    {
+        # This superuser connection is admitted only by setup/upgrade entry
+        # points. Gateway, Worker, Scheduler, and maintenance runtime commands
+        # must use the application DATABASE_URL instead.
+        "POSTGRES_ADMIN_URL",
+    }
+)
+RUNTIME_BLOCKED_ENV_NAMES = MODEL_PROVIDER_ENV_NAMES | INSTALLATION_ONLY_ENV_NAMES
 
 
 def build_runtime_environment(
@@ -40,15 +49,15 @@ def build_runtime_environment(
     *,
     base_environment: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Return the role environment without ambient model-provider keys."""
+    """Return the role environment without provider or installation credentials."""
 
     environment = dict(os.environ if base_environment is None else base_environment)
     if env_file.is_file():
         for name, value in dotenv_values(env_file).items():
-            if name not in MODEL_PROVIDER_ENV_NAMES and value is not None:
+            if name not in RUNTIME_BLOCKED_ENV_NAMES and value is not None:
                 environment.setdefault(name, value)
 
-    for name in MODEL_PROVIDER_ENV_NAMES:
+    for name in RUNTIME_BLOCKED_ENV_NAMES:
         environment.pop(name, None)
     return environment
 

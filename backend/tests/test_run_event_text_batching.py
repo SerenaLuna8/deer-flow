@@ -1,4 +1,4 @@
-"""U2 Phase 1: root text-delta micro-batching.
+"""Root text-delta micro-batching.
 
 Pins the three acceptance properties of ``_TextDeltaCoalescer``:
 
@@ -421,7 +421,7 @@ def test_reassembled_text_is_byte_identical(clock: _Clock) -> None:
 def test_bursty_replay_reduces_text_frames_by_at_least_one_order_of_magnitude(
     clock: _Clock,
 ) -> None:
-    """The deterministic replay sample pins the Phase-1 write-amplification goal."""
+    """The deterministic replay sample pins the write-amplification target."""
     inputs = [_delta(f"{index:03d}") for index in range(100)]
     coalescer = _TextDeltaCoalescer(window_seconds=_WINDOW)
     outputs: list[Any] = []

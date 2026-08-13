@@ -271,6 +271,20 @@ def _subscribe_subagent_changes(result: Any):
     return signal, signal.subscribe()
 
 
+def _execution_wait_deadline(
+    *,
+    status: Any,
+    now: float,
+    wait_budget_seconds: float,
+    current_deadline: float | None,
+) -> float | None:
+    """Start the tool-side execution safety budget exactly once at RUNNING."""
+
+    if current_deadline is None and status == SubagentStatus.RUNNING:
+        return now + wait_budget_seconds
+    return current_deadline
+
+
 async def _await_subagent_terminal(task_id: str, wait_budget_seconds: float) -> Any | None:
     """Wait until the background subagent reaches a terminal status or the deadline passes."""
     deadline = time.monotonic() + wait_budget_seconds
@@ -757,11 +771,14 @@ async def task_tool(
     # transitions; the heartbeat only bounds staleness as a safety net.
     last_status = None
     last_message_count = 0  # Track how many AI messages we've already sent
-    # Wait budget: execution timeout + 60s buffer as a safety net in case the
-    # thread-pool timeout fails to fire.
+    # The scheduler leaves queued tasks PENDING and starts the configured
+    # execution timeout only after capacity is acquired. Mirror that boundary
+    # here: queueing and execution each receive an independent safety window,
+    # so backpressure never consumes the subagent's execution wait budget.
     wait_budget_seconds = float(config.timeout_seconds + 60)
     wait_started = time.monotonic()
-    deadline = wait_started + wait_budget_seconds
+    queue_deadline = wait_started + wait_budget_seconds
+    execution_deadline: float | None = None
 
     logger.info(f"[trace={trace_id}] Started background task {task_id} (subagent={subagent_type}, timeout={config.timeout_seconds}s, wait_budget={wait_budget_seconds:.0f}s)")
 
@@ -810,6 +827,13 @@ async def task_tool(
             if result.status != last_status:
                 logger.info(f"[trace={trace_id}] Task {task_id} status: {result.status.value}")
                 last_status = result.status
+
+            execution_deadline = _execution_wait_deadline(
+                status=result.status,
+                now=time.monotonic(),
+                wait_budget_seconds=wait_budget_seconds,
+                current_deadline=execution_deadline,
+            )
 
             # Token records are cumulative. Reuse one snapshot for progress and
             # terminal events so consumers replace rather than add totals.
@@ -940,13 +964,21 @@ async def task_tool(
                     # but a fresh read also picks up new progress messages).
                     continue
 
-            remaining = deadline - time.monotonic()
-            # Wait-budget timeout as a safety net (in case thread pool timeout
-            # doesn't work). This catches edge cases where the background task
-            # gets stuck.
+            active_deadline = execution_deadline or queue_deadline
+            remaining = active_deadline - time.monotonic()
+            # This is a tool-side safety net for a wedged queue or execution.
+            # The isolated-loop coroutine enforces the configured execution
+            # timeout independently and normally reaches TIMED_OUT first.
             if remaining <= 0:
                 timeout_minutes = config.timeout_seconds // 60
-                logger.error(f"[trace={trace_id}] Task {task_id} wait budget exhausted after {time.monotonic() - wait_started:.0f}s (should have been caught by thread pool timeout)")
+                wait_phase = "execution" if execution_deadline is not None else "queue"
+                logger.error(
+                    "[trace=%s] Task %s %s wait budget exhausted after %.0fs",
+                    trace_id,
+                    task_id,
+                    wait_phase,
+                    time.monotonic() - wait_started,
+                )
                 _report_subagent_usage(runtime, result)
                 usage = _summarize_usage(getattr(result, "token_usage_records", None))
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
@@ -958,9 +990,8 @@ async def task_tool(
                         "model_name": effective_model,
                     }
                 )
-                # The task may still be running in the background. Signal cooperative
-                # cancellation and schedule deferred cleanup to remove the entry from
-                # _background_tasks once the background thread reaches a terminal state.
+                # The task may still be queued or running. Cancel its isolated-loop
+                # future and schedule deferred cleanup until it reaches terminal state.
                 request_cancel_background_task(task_id)
                 _schedule_deferred_subagent_cleanup(task_id, trace_id, wait_budget_seconds)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
@@ -978,7 +1009,7 @@ async def task_tool(
             else:
                 await asyncio.sleep(slice_seconds)
     except asyncio.CancelledError:
-        # Signal the background subagent thread to stop cooperatively.
+        # Cancel the isolated-loop execution and retain the cooperative signal.
         request_cancel_background_task(task_id)
 
         # Wait (shielded) for the subagent to reach a terminal state so the

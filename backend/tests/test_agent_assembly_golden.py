@@ -1,4 +1,4 @@
-"""U4 — exact middleware parity across every lead-agent assembly path.
+"""Exact middleware parity across every lead-agent assembly path.
 
 Middleware order is behavior: first registered is outermost, ``after_model``
 dispatches in reverse, and Clarification must stay at the tail. These tests
@@ -22,7 +22,7 @@ import deerflow.agents.lead_agent.agent as lead_agent_module
 from deerflow.agents.factory import _assemble_from_features
 from deerflow.agents.features import RuntimeFeatures
 from deerflow.agents.lead_agent.agent import build_middlewares
-from deerflow.agents.middlewares.tool_error_handling_middleware import (
+from deerflow.agents.middlewares.assembly import (
     build_lead_runtime_middlewares,
     build_subagent_runtime_middlewares,
 )
@@ -144,7 +144,9 @@ NON_PRIVATE_LEAD_GOLDEN_CHAIN = [
 PRIVATE_LEAD_GOLDEN_CHAIN = [
     *NON_PRIVATE_LEAD_GOLDEN_CHAIN[:15],
     "SkillToolPolicyMiddleware",
-    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[15:],
+    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[15:18],
+    "OutputLimitRecoveryMiddleware",
+    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[18:],
 ]
 
 
@@ -415,7 +417,7 @@ def test_sdk_gaps_are_documented_deliberate_differences() -> None:
 def test_private_lead_only_adds_exact_skill_policy_to_non_private_lead() -> None:
     private = _names(_build_private_lead_chain())
     non_private = _names(_build_non_private_lead_chain())
-    assert [name for name in private if name != "SkillToolPolicyMiddleware"] == non_private
+    assert [name for name in private if name not in {"SkillToolPolicyMiddleware", "OutputLimitRecoveryMiddleware"}] == non_private
     assert private.count("SkillToolPolicyMiddleware") == 1
 
 

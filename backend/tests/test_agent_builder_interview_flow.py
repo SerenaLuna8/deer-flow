@@ -389,7 +389,12 @@ async def test_composition_repairs_a_description_copied_from_the_user_brief() ->
 
 
 def test_candidate_blueprint_uses_the_generated_description_instead_of_the_user_brief() -> None:
-    service = AgentDesignService(lambda: None)  # type: ignore[arg-type]
+    service = AgentDesignService(  # type: ignore[arg-type]
+        lambda: None,
+        generator=AgentDesignGenerationService(
+            model_caller=_StaticCaller(_candidate_output()),
+        ),
+    )
     context = ProjectContext(
         user_id=uuid.uuid4(),
         project_id=uuid.uuid4(),
@@ -427,7 +432,12 @@ def test_candidate_blueprint_uses_the_generated_description_instead_of_the_user_
 
 
 def test_builder_generates_each_next_question_before_composition() -> None:
-    service = AgentDesignService(lambda: None)  # type: ignore[arg-type]
+    service = AgentDesignService(  # type: ignore[arg-type]
+        lambda: None,
+        generator=AgentDesignGenerationService(
+            model_caller=_StaticCaller(_candidate_output()),
+        ),
+    )
     context = ProjectContext(
         user_id=uuid.uuid4(),
         project_id=uuid.uuid4(),

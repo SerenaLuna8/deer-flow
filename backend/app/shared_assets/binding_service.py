@@ -312,6 +312,7 @@ class BindingService:
                 selection.asset_id,
                 current_version_id,
                 read=True,
+                allow_revoked=True,
             )
             if (action == "binding.upgrade" and target.version.version_number <= current.version_number) or (action == "binding.rollback" and target.version.version_number >= current.version_number):
                 raise AssetConflict(actor.request_id)

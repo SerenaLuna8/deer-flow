@@ -28,6 +28,7 @@ class PrivateThreadRecord:
     agent_asset_id: uuid.UUID
     agent_scope: str
     display_name: str | None
+    thread_kind: str
     status: str
     metadata: dict[str, Any]
     frozen_at: datetime | None
@@ -63,12 +64,21 @@ class PrivateThreadRepository:
             raise PrivateWorkConflict("unknown") from None
 
     @classmethod
-    def _active_scope(cls, scope: PrivateResourceScope, thread_id: str):
+    def _active_scope(
+        cls,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        *,
+        thread_kind: str = "chat",
+    ):
         project_id, owner_user_id = cls._coordinates(scope)
+        if thread_kind not in {"chat", "skill_builder"}:
+            raise PrivateWorkConflict("unknown")
         return (
             ThreadMetaRow.thread_id == thread_id,
             ThreadMetaRow.project_id == project_id,
             ThreadMetaRow.owner_user_id == owner_user_id,
+            ThreadMetaRow.thread_kind == thread_kind,
             ThreadMetaRow.deleted_at.is_(None),
             ThreadMetaRow.frozen_at.is_(None),
         )
@@ -82,6 +92,7 @@ class PrivateThreadRepository:
             agent_asset_id=row.agent_asset_id,
             agent_scope=row.agent_scope,
             display_name=row.display_name,
+            thread_kind=row.thread_kind,
             status=row.status,
             metadata=dict(row.metadata_json or {}),
             frozen_at=row.frozen_at,
@@ -100,8 +111,11 @@ class PrivateThreadRepository:
         agent: ThreadAgentRef,
         display_name: str | None = None,
         metadata: dict[str, Any] | None = None,
+        thread_kind: str = "chat",
     ) -> PrivateThreadRecord:
         project_id, owner_user_id = self._coordinates(scope)
+        if thread_kind not in {"chat", "skill_builder"}:
+            raise PrivateWorkConflict("unknown")
         now = datetime.now(UTC)
         row = ThreadMetaRow(
             thread_id=thread_id,
@@ -110,6 +124,7 @@ class PrivateThreadRepository:
             agent_asset_id=agent.asset_id,
             agent_scope=agent.scope,
             display_name=display_name,
+            thread_kind=thread_kind,
             status="idle",
             metadata_json=dict(metadata or {}),
             checkpoint_delete_status="not_requested",
@@ -130,8 +145,15 @@ class PrivateThreadRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         lock: bool = False,
+        thread_kind: str = "chat",
     ) -> PrivateThreadRecord | None:
-        statement = select(ThreadMetaRow).where(*self._active_scope(scope, thread_id))
+        statement = select(ThreadMetaRow).where(
+            *self._active_scope(
+                scope,
+                thread_id,
+                thread_kind=thread_kind,
+            )
+        )
         if lock:
             statement = statement.with_for_update(of=ThreadMetaRow)
         row = (await self.session.execute(statement)).scalar_one_or_none()
@@ -159,6 +181,7 @@ class PrivateThreadRepository:
             .where(
                 ThreadMetaRow.project_id == project_id,
                 ThreadMetaRow.owner_user_id == owner_user_id,
+                ThreadMetaRow.thread_kind == "chat",
                 ThreadMetaRow.deleted_at.is_(None),
                 ThreadMetaRow.frozen_at.is_(None),
             )
@@ -175,6 +198,7 @@ class PrivateThreadRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         occurred_at: datetime,
+        thread_kind: str = "chat",
     ) -> None:
         """Advance activity ordering without invalidating metadata CAS versions."""
 
@@ -183,7 +207,11 @@ class PrivateThreadRepository:
         await self.session.execute(
             update(ThreadMetaRow)
             .where(
-                *self._active_scope(scope, thread_id),
+                *self._active_scope(
+                    scope,
+                    thread_id,
+                    thread_kind=thread_kind,
+                ),
                 ThreadMetaRow.updated_at < func.now(),
             )
             .values(updated_at=occurred_at.astimezone(UTC))

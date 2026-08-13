@@ -13,6 +13,7 @@ from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.types import Command
 
+from deerflow.community.errors import CommunityToolError, community_error_json
 from deerflow.community.url_safety import resolve_host_addresses as _resolve_host_addresses
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
@@ -42,6 +43,24 @@ _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _MAX_FILENAME_COLLISION_PROBES = 1000
 _DEFAULT_BROWSERLESS_TIMEOUT_SECONDS = 30.0
 _MAX_BROWSERLESS_TIMEOUT_SECONDS = 3600.0
+
+
+def _browserless_error_json(
+    context: str,
+    *,
+    code: str,
+    message: str,
+    retryable: bool,
+) -> str:
+    return community_error_json(
+        CommunityToolError(
+            provider="browserless",
+            code=code,
+            message=message,
+            retryable=retryable,
+        ),
+        query=context,
+    )
 
 
 def _get_tool_config(tool_name: str) -> dict | None:
@@ -169,13 +188,13 @@ def _safe_capture_filename(filename: str | None, url: str, output_format: str) -
     return f"{safe_stem[:100]}.{extension}"
 
 
-def _thread_outputs_path(runtime: Runtime) -> Path | str:
+def _thread_outputs_path(runtime: Runtime) -> Path | None:
     if runtime.state is None:
-        return "Error: Thread runtime state is not available"
+        return None
     thread_data = runtime.state.get("thread_data") or {}
     outputs_path = thread_data.get("outputs_path")
     if not outputs_path:
-        return "Error: Thread outputs path is not available"
+        return None
     return Path(outputs_path)
 
 
@@ -257,13 +276,21 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch") or {}
         allow_private_addresses = _as_bool(cfg.get("allow_private_addresses"), False)
+        # Browserless is typically self-hosted inside the deployment. Its
+        # delegated render can reach the local network, so use DNS-aware URL
+        # validation rather than the remote-SaaS reference-only sanitizer.
         url_error = validate_public_http_url(
             url,
             allow_private_addresses=allow_private_addresses,
             resolver=_resolve_host_addresses,
         )
         if url_error:
-            return url_error
+            return _browserless_error_json(
+                url,
+                code="url_not_public",
+                message="Only public http(s) URLs may be fetched",
+                retryable=False,
+            )
 
         wait_for_event = ""
         wait_for_timeout_ms = 0
@@ -288,18 +315,32 @@ async def web_fetch_tool(url: str) -> str:
             reject_request_pattern=reject_request_pattern,
         )
 
-        if isinstance(result, str):
-            return result
-
         article = await asyncio.to_thread(
             _readability_extractor.extract_article,
             result.html,
         )
         return f"{article.to_markdown()[:4096]}{_target_status_warning(result)}"
 
-    except Exception as e:
-        logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}"
+    except GraphBubbleUp:
+        raise
+    except CommunityToolError as error:
+        return community_error_json(error, query=url)
+    except (FileNotFoundError, TypeError, ValueError) as error:
+        logger.error("Browserless configuration failed; provider_error_type=%s", type(error).__name__)
+        return _browserless_error_json(
+            url,
+            code="configuration_error",
+            message="Browserless is not configured correctly",
+            retryable=False,
+        )
+    except Exception as error:
+        logger.error("Browserless fetch tool failed; provider_error_type=%s", type(error).__name__)
+        return _browserless_error_json(
+            url,
+            code="provider_unavailable",
+            message="Browserless is temporarily unavailable",
+            retryable=True,
+        )
 
 
 @tool("web_capture", parse_docstring=True)
@@ -333,11 +374,27 @@ async def web_capture_tool(
 
         url_error = _validate_capture_url(url, allow_private_addresses=allow_private_addresses)
         if url_error:
-            return _tool_message(url_error, tool_call_id)
+            return _tool_message(
+                _browserless_error_json(
+                    url,
+                    code="url_not_public",
+                    message="Only public http(s) URLs may be captured",
+                    retryable=False,
+                ),
+                tool_call_id,
+            )
 
         outputs_path = _thread_outputs_path(runtime)
-        if isinstance(outputs_path, str):
-            return _tool_message(outputs_path, tool_call_id)
+        if outputs_path is None:
+            return _tool_message(
+                _browserless_error_json(
+                    url,
+                    code="configuration_error",
+                    message="Browserless output storage is not configured",
+                    retryable=False,
+                ),
+                tool_call_id,
+            )
         authority = _private_file_authority(
             runtime,
             method="write_output",
@@ -367,9 +424,6 @@ async def web_capture_tool(
             wait_for_timeout_ms=wait_for_timeout_ms,
             best_attempt=best_attempt,
         )
-        if isinstance(result, str):
-            return _tool_message(result, tool_call_id)
-
         if authority is None:
             final_name = await asyncio.to_thread(
                 _write_capture_output,
@@ -400,6 +454,27 @@ async def web_capture_tool(
 
     except GraphBubbleUp:
         raise
-    except Exception as e:
-        logger.error(f"Error in web_capture_tool: {e}")
-        return _tool_message(f"Error: {str(e)}", tool_call_id)
+    except CommunityToolError as error:
+        return _tool_message(community_error_json(error, query=url), tool_call_id)
+    except (FileNotFoundError, TypeError, ValueError) as error:
+        logger.error("Browserless capture configuration failed; provider_error_type=%s", type(error).__name__)
+        return _tool_message(
+            _browserless_error_json(
+                url,
+                code="configuration_error",
+                message="Browserless is not configured correctly",
+                retryable=False,
+            ),
+            tool_call_id,
+        )
+    except Exception as error:
+        logger.error("Browserless capture failed; provider_error_type=%s", type(error).__name__)
+        return _tool_message(
+            _browserless_error_json(
+                url,
+                code="provider_unavailable",
+                message="Browserless is temporarily unavailable",
+                retryable=True,
+            ),
+            tool_call_id,
+        )

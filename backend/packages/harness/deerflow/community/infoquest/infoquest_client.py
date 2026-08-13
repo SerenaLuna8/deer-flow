@@ -10,8 +10,49 @@ import os
 from typing import Any
 
 import requests
+from langgraph.errors import GraphBubbleUp
+
+from deerflow.community.errors import CommunityToolError
+from deerflow.community.url_safety import sanitize_public_http_reference_url
 
 logger = logging.getLogger(__name__)
+
+
+def _infoquest_http_error(status_code: int) -> CommunityToolError:
+    if status_code in {401, 403}:
+        code, retryable = "provider_authentication_failed", False
+    elif status_code == 429:
+        code, retryable = "provider_rate_limited", True
+    elif status_code >= 500:
+        code, retryable = "provider_unavailable", True
+    else:
+        code, retryable = "provider_request_failed", False
+    return CommunityToolError(
+        provider="infoquest",
+        code=code,
+        message=f"InfoQuest request failed with HTTP {status_code}",
+        retryable=retryable,
+    )
+
+
+def _raise_infoquest_failure(error: Exception) -> None:
+    if isinstance(error, CommunityToolError):
+        raise error
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        raise _infoquest_http_error(error.response.status_code) from error
+    if isinstance(error, (KeyError, TypeError, ValueError, json.JSONDecodeError)):
+        raise CommunityToolError(
+            provider="infoquest",
+            code="provider_response_invalid",
+            message="InfoQuest returned an unexpected response format",
+            retryable=True,
+        ) from error
+    raise CommunityToolError(
+        provider="infoquest",
+        code="provider_unavailable",
+        message="InfoQuest is temporarily unavailable",
+        retryable=True,
+    ) from error
 
 
 class InfoQuestClient:
@@ -44,11 +85,9 @@ class InfoQuestClient:
 
     def fetch(self, url: str, return_format: str = "html") -> str:
         if logger.isEnabledFor(logging.DEBUG):
-            url_truncated = url[:50] + "..." if len(url) > 50 else url
             logger.debug(
                 f"InfoQuest - Fetch API request initiated | "
                 f"operation=crawl url | "
-                f"url_truncated={url_truncated} | "
                 f"has_timeout_filter={self.fetch_timeout > 0} | timeout_filter={self.fetch_timeout} | "
                 f"has_fetch_time_filter={self.fetch_time > 0} | fetch_time_filter={self.fetch_time} | "
                 f"has_navigation_timeout_filter={self.fetch_navigation_timeout > 0} | navi_timeout_filter={self.fetch_navigation_timeout} | "
@@ -63,19 +102,26 @@ class InfoQuestClient:
 
         logger.debug("Sending crawl request to InfoQuest API")
         try:
-            response = requests.post("https://reader.infoquest.bytepluses.com", headers=headers, json=data)
+            response = requests.post(
+                "https://reader.infoquest.bytepluses.com",
+                headers=headers,
+                json=data,
+                timeout=30,
+            )
 
             # Check if status code is not 200
             if response.status_code != 200:
-                error_message = f"fetch API returned status {response.status_code}: {response.text}"
-                logger.debug("InfoQuest Crawler fetch API return status %d: %s for URL: %s", response.status_code, response.text, url)
-                return f"Error: {error_message}"
+                logger.error("InfoQuest fetch returned HTTP %s", response.status_code)
+                raise _infoquest_http_error(response.status_code)
 
             # Check for empty response
             if not response.text or not response.text.strip():
-                error_message = "no result found"
-                logger.debug("InfoQuest Crawler returned empty response for URL: %s", url)
-                return f"Error: {error_message}"
+                raise CommunityToolError(
+                    provider="infoquest",
+                    code="no_results",
+                    message="InfoQuest returned no content",
+                    retryable=False,
+                )
 
             # Try to parse response as JSON and extract reader_result
             try:
@@ -83,28 +129,34 @@ class InfoQuestClient:
                 # Extract reader_result if it exists
                 if "reader_result" in response_data:
                     logger.debug("Successfully extracted reader_result from JSON response")
-                    return response_data["reader_result"]
+                    content = response_data["reader_result"]
+                    if isinstance(content, str) and content.strip():
+                        return content
                 elif "content" in response_data:
                     # Fallback to content field if reader_result is not available
-                    logger.debug("reader_result missing in JSON response, falling back to content field: %s", response_data["content"])
-                    return response_data["content"]
-                else:
-                    # If neither field exists, return the original response
-                    logger.warning("Neither reader_result nor content field found in JSON response")
+                    logger.debug("reader_result missing in JSON response; using content field")
+                    content = response_data["content"]
+                    if isinstance(content, str) and content.strip():
+                        return content
+                raise CommunityToolError(
+                    provider="infoquest",
+                    code="provider_response_invalid",
+                    message="InfoQuest returned an unexpected response format",
+                    retryable=True,
+                )
             except json.JSONDecodeError:
                 # If response is not JSON, return the original text
                 logger.debug("Response is not in JSON format, returning as-is")
                 return response.text
 
-            # Print partial response for debugging
-            if logger.isEnabledFor(logging.DEBUG):
-                response_sample = response.text[:200] + ("..." if len(response.text) > 200 else "")
-                logger.debug("Successfully received response, content length: %d bytes, first 200 chars: %s", len(response.text), response_sample)
-            return response.text
-        except Exception as e:
-            error_message = f"fetch API failed: {str(e)}"
-            logger.error(error_message)
-            return f"Error: {error_message}"
+        except GraphBubbleUp:
+            raise
+        except CommunityToolError:
+            raise
+        except Exception as error:
+            logger.error("InfoQuest fetch failed; provider_error_type=%s", type(error).__name__)
+            _raise_infoquest_failure(error)
+            raise AssertionError("unreachable")
 
     @staticmethod
     def _prepare_headers() -> dict[str, str]:
@@ -114,11 +166,17 @@ class InfoQuestClient:
         }
 
         # Add API key if available
-        if os.getenv("INFOQUEST_API_KEY"):
-            headers["Authorization"] = f"Bearer {os.getenv('INFOQUEST_API_KEY')}"
+        api_key = os.getenv("INFOQUEST_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
             logger.debug("API key added to request headers")
         else:
-            logger.warning("InfoQuest API key is not set. Provide your own key for authentication.")
+            raise CommunityToolError(
+                provider="infoquest",
+                code="configuration_error",
+                message="INFOQUEST_API_KEY is not configured",
+                retryable=False,
+            )
 
         return headers
 
@@ -164,14 +222,16 @@ class InfoQuestClient:
         if site != "":
             params["site"] = site
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+        response = requests.post(
+            "https://search.infoquest.bytepluses.com",
+            headers=headers,
+            json=params,
+            timeout=30,
+        )
         response.raise_for_status()
 
-        # Print partial response for debugging
         response_json = response.json()
-        if logger.isEnabledFor(logging.DEBUG):
-            response_sample = json.dumps(response_json)[:200] + ("..." if len(json.dumps(response_json)) > 200 else "")
-            logger.debug(f"Search API request completed successfully | service=InfoQuest | status=success | response_sample={response_sample}")
+        logger.debug("Search API request completed successfully | service=InfoQuest | status=success")
 
         return response_json
 
@@ -200,9 +260,12 @@ class InfoQuestClient:
                         clean_result["desc"] = result["desc"]
                         clean_result["snippet"] = result["desc"]
                     if "url" in result:
-                        clean_result["url"] = result["url"]
-                        url = clean_result["url"]
-                        if isinstance(url, str) and url and url not in seen_urls:
+                        # Search results are references returned by remote SaaS,
+                        # not locally fetched here. Reject unsafe literals without
+                        # DNS resolution; later downloaders must fully validate.
+                        url = sanitize_public_http_reference_url(result["url"])
+                        clean_result["url"] = url
+                        if url and url not in seen_urls:
                             seen_urls.add(url)
                             clean_results.append(clean_result)
                             counts["pages"] += 1
@@ -218,12 +281,12 @@ class InfoQuestClient:
                     if "source" in obj:
                         clean_result["source"] = obj["source"]
                     title = obj.get("title")
-                    url = obj.get("url")
+                    url = sanitize_public_http_reference_url(obj.get("url"))
                     if title:
                         clean_result["title"] = title
                     if url:
                         clean_result["url"] = url
-                    if title and isinstance(url, str) and url and url not in seen_urls:
+                    if title and url and url not in seen_urls:
                         seen_urls.add(url)
                         clean_results.append(clean_result)
                         counts["news"] += 1
@@ -238,15 +301,7 @@ class InfoQuestClient:
         output_format: str = "JSON",
     ) -> str:
         if logger.isEnabledFor(logging.DEBUG):
-            query_truncated = query[:50] + "..." if len(query) > 50 else query
-            logger.debug(
-                f"InfoQuest - Search API request initiated | "
-                f"operation=search webs | "
-                f"query_truncated={query_truncated} | "
-                f"has_time_filter={self.search_time_range > 0} | time_filter={self.search_time_range} | "
-                f"has_site_filter={bool(site)} | site={site} | "
-                f"request_type=sync"
-            )
+            logger.debug(f"InfoQuest - Search API request initiated | operation=search webs | has_time_filter={self.search_time_range > 0} | time_filter={self.search_time_range} | has_site_filter={bool(site)} | request_type=sync")
 
         try:
             logger.debug("InfoQuest Web-Search - Executing search with parameters")
@@ -262,25 +317,33 @@ class InfoQuestClient:
                 logger.debug("InfoQuest Web-Search - Processing raw search results")
                 cleaned_results = self.clean_results(results["results"])
 
+                if not cleaned_results:
+                    raise CommunityToolError(
+                        provider="infoquest",
+                        code="no_results",
+                        message="No results found",
+                        retryable=False,
+                    )
                 result_json = json.dumps(cleaned_results, indent=2, ensure_ascii=False)
 
                 logger.debug(f"InfoQuest Web-Search - Search tool execution completed | mode=synchronous | results_count={len(cleaned_results)}")
                 return result_json
 
-            elif "content" in raw_results:
-                # Fallback to content field if search_result is not available
-                error_message = "web search API return wrong format"
-                logger.error("web search API return wrong format, no search_result nor content field found in JSON response, content: %s", raw_results["content"])
-                return f"Error: {error_message}"
-            else:
-                # If neither field exists, return the original response
-                logger.warning("InfoQuest Web-Search - Neither search_result nor content field found in JSON response")
-                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+            raise CommunityToolError(
+                provider="infoquest",
+                code="provider_response_invalid",
+                message="InfoQuest returned an unexpected response format",
+                retryable=True,
+            )
 
-        except Exception as e:
-            error_message = f"InfoQuest Web-Search - Search tool execution failed | mode=synchronous | error={str(e)}"
-            logger.error(error_message)
-            return f"Error: {error_message}"
+        except GraphBubbleUp:
+            raise
+        except CommunityToolError:
+            raise
+        except Exception as error:
+            logger.error("InfoQuest search failed; provider_error_type=%s", type(error).__name__)
+            _raise_infoquest_failure(error)
+            raise AssertionError("unreachable")
 
     @staticmethod
     def clean_results_with_image_search(raw_results: list[dict[str, dict[str, dict[str, Any]]]]) -> list[dict]:
@@ -300,9 +363,9 @@ class InfoQuestClient:
                 for result in images_results:
                     clean_result = {}
                     if "original" in result:
-                        clean_result["image_url"] = result["original"]
-                        url = clean_result["image_url"]
-                        if isinstance(url, str) and url and url not in seen_urls:
+                        url = sanitize_public_http_reference_url(result["original"])
+                        clean_result["image_url"] = url
+                        if url and url not in seen_urls:
                             seen_urls.add(url)
                             clean_results.append(clean_result)
                             counts["images"] += 1
@@ -339,14 +402,16 @@ class InfoQuestClient:
         elif self.image_size:
             logger.warning(f"image_size {self.image_size} is not valid, must be 'l', 'm', or 'i'")
 
-        response = requests.post("https://search.infoquest.bytepluses.com", headers=headers, json=params)
+        response = requests.post(
+            "https://search.infoquest.bytepluses.com",
+            headers=headers,
+            json=params,
+            timeout=30,
+        )
         response.raise_for_status()
 
-        # Print partial response for debugging
         response_json = response.json()
-        if logger.isEnabledFor(logging.DEBUG):
-            response_sample = json.dumps(response_json)[:200] + ("..." if len(json.dumps(response_json)) > 200 else "")
-            logger.debug(f"Image Search API request completed successfully | service=InfoQuest | status=success | response_sample={response_sample}")
+        logger.debug("Image Search API request completed successfully | service=InfoQuest | status=success")
 
         return response_json
 
@@ -357,12 +422,10 @@ class InfoQuestClient:
         output_format: str = "JSON",
     ) -> str:
         if logger.isEnabledFor(logging.DEBUG):
-            query_truncated = query[:50] + "..." if len(query) > 50 else query
             logger.debug(
                 f"InfoQuest - Image Search API request initiated | "
                 f"operation=search images | "
-                f"query_truncated={query_truncated} | "
-                f"has_site_filter={bool(site)} | site={site} | "
+                f"has_site_filter={bool(site)} | "
                 f"image_search_time_range={self.image_search_time_range if self.image_search_time_range >= 1 and self.image_search_time_range <= 365 else 'default'} | "
                 f"image_size={self.image_size} |"
                 f"request_type=sync"
@@ -380,25 +443,33 @@ class InfoQuestClient:
                 logger.debug("InfoQuest Image Search - Successfully extracted search_result from JSON response")
                 results = raw_results["search_result"]
 
-                logger.debug(f"InfoQuest Image Search - Processing raw image search results: {results}")
+                logger.debug("InfoQuest Image Search - Processing raw image search results")
                 cleaned_results = self.clean_results_with_image_search(results["results"])
 
+                if not cleaned_results:
+                    raise CommunityToolError(
+                        provider="infoquest",
+                        code="no_results",
+                        message="No images found",
+                        retryable=False,
+                    )
                 result_json = json.dumps(cleaned_results, indent=2, ensure_ascii=False)
 
                 logger.debug(f"InfoQuest Image Search - Image search tool execution completed | mode=synchronous | results_count={len(cleaned_results)}")
                 return result_json
 
-            elif "content" in raw_results:
-                # Fallback to content field if search_result is not available
-                error_message = "image search API return wrong format"
-                logger.error("image search API return wrong format, no search_result nor content field found in JSON response, content: %s", raw_results["content"])
-                return f"Error: {error_message}"
-            else:
-                # If neither field exists, return the original response
-                logger.warning("InfoQuest Image Search - Neither search_result nor content field found in JSON response")
-                return json.dumps(raw_results, indent=2, ensure_ascii=False)
+            raise CommunityToolError(
+                provider="infoquest",
+                code="provider_response_invalid",
+                message="InfoQuest returned an unexpected response format",
+                retryable=True,
+            )
 
-        except Exception as e:
-            error_message = f"InfoQuest Image Search - Image search tool execution failed | mode=synchronous | error={str(e)}"
-            logger.error(error_message)
-            return f"Error: {error_message}"
+        except GraphBubbleUp:
+            raise
+        except CommunityToolError:
+            raise
+        except Exception as error:
+            logger.error("InfoQuest image search failed; provider_error_type=%s", type(error).__name__)
+            _raise_infoquest_failure(error)
+            raise AssertionError("unreachable")

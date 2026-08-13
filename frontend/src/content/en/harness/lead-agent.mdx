@@ -94,6 +94,22 @@ The administrator marks thinking support and supplies any safe provider-specific
 thinking options on the model settings page. API keys remain encrypted
 Credential material and are not part of those settings.
 
+## Output-limit recovery
+
+A System Model's `max_tokens` limits generation for one provider call; it is
+not the cumulative limit for the whole Run. When the Lead Agent in a Private
+Run reaches that limit without producing tool intent or structured output,
+ActWeave performs at most one recovery call in the same Run. It keeps the same
+frozen model configuration, disables thinking and tools, and asks the model to
+form a concise, complete final answer from the original task and any visible
+partial answer. It does not claim to continue hidden reasoning.
+
+If the truncated response contains tool intent or structured output, or if the
+single recovery call is still truncated or has no visible answer, automatic
+recovery stops and the UI reports **Model output limit reached**. A failed turn
+with no tool activity also offers **Retry without deep thinking**. ActWeave
+does not automatically replay tool activity that may have side effects.
+
 ## Plan mode
 
 When `is_plan_mode` is set to `true` in the request configuration, the `TodoMiddleware` is activated. The agent then maintains a structured task list, marking items as `in_progress`, `completed`, or `pending` as it works through a complex task. This provides visibility into the agent's progress for the user.

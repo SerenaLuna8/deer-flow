@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create a redacted ActWeave support bundle for community troubleshooting."""
+"""Create a redacted ActWeave support bundle for private troubleshooting."""
 
 from __future__ import annotations
 
@@ -45,25 +45,37 @@ NO_FLAG_CREDENTIAL_KEY_NAMES = frozenset(
 )
 ENV_KEY_RE = re.compile(r"(?i)^env$")
 VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
-ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
-YAML_SECRET_RE = re.compile(r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$")
+ENV_SECRET_RE = re.compile(
+    r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$"
+)
+YAML_SECRET_RE = re.compile(
+    r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$"
+)
 BEARER_RE = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
-URL_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)")
-CLI_INLINE_SECRET_RE = re.compile(r"(?i)(--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*=)(\S+)")
+URL_QUERY_SECRET_RE = re.compile(
+    r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)"
+)
+CLI_INLINE_SECRET_RE = re.compile(
+    r"(?i)(--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*=)(\S+)"
+)
 INLINE_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(?<![\w.-])"
     r"((?:api[_-]?key|access[_-]?key|token|secret|password|passwd|pwd|authorization|cookie|credential|dsn)"
     r"\s*=\s*)"
     r"([^\s,;&#]+)"
 )
-SECRET_FLAG_RE = re.compile(r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*$")
+SECRET_FLAG_RE = re.compile(
+    r"(?i)^--?[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential)[\w.-]*$"
+)
 HEADER_KEY_RE = re.compile(r"(?i)header")
 POSIX_HOME_RE = re.compile(r"(?<![\w.-])(/Users|/home)/([^/\s:]+)")
 WINDOWS_HOME_RE = re.compile(r"(?i)([A-Z]:\\Users\\)([^\\\s:]+)")
 SAFE_THREAD_ID_RE = re.compile(r"^[a-zA-Z0-9._-]+$")
-DOCTOR_STATUS_RE = re.compile(r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE)
+DOCTOR_STATUS_RE = re.compile(
+    r"Status:\s*(\d+)\s+error\(s\),\s*(\d+)\s+warning\(s\)", re.IGNORECASE
+)
 ATTENTION_SIGNAL_NAMES = {
     "doctor_failed",
     "config_missing",
@@ -78,7 +90,9 @@ ATTENTION_SIGNAL_NAMES = {
 def _redact_yaml_secret_match(match: re.Match[str]) -> str:
     prefix = match.group(1)
     value = match.group(2)
-    if "authorization" in prefix.lower() and value.lstrip().lower().startswith("bearer "):
+    if "authorization" in prefix.lower() and value.lstrip().lower().startswith(
+        "bearer "
+    ):
         return prefix + BEARER_RE.sub(r"\1<redacted>", value)
     return prefix + "<redacted>"
 
@@ -103,7 +117,9 @@ def _redact_secret_flag_list(items: list[Any]) -> list[Any]:
     mask_next = False
     for item in items:
         if mask_next:
-            redacted.append("<redacted>" if isinstance(item, str) else redact_data(item))
+            redacted.append(
+                "<redacted>" if isinstance(item, str) else redact_data(item)
+            )
             mask_next = False
             continue
         if isinstance(item, str) and SECRET_FLAG_RE.fullmatch(item):
@@ -129,7 +145,10 @@ def redact_data(value: Any) -> Any:
         redacted: dict[Any, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if SECRET_KEY_RE.search(key_text) or key_text.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES:
+            if (
+                SECRET_KEY_RE.search(key_text)
+                or key_text.lower() in NO_FLAG_CREDENTIAL_KEY_NAMES
+            ):
                 redacted[key] = "<redacted>"
             elif ENV_KEY_RE.fullmatch(key_text) and isinstance(item, dict):
                 redacted[key] = {k: _redact_env_value(v) for k, v in item.items()}
@@ -248,11 +267,19 @@ def collect_git_summary(project_root: Path) -> dict[str, Any]:
         "status_short": ["git", "status", "--short", "--branch"],
         "diff_stat": ["git", "diff", "--stat"],
     }
-    return {name: _run_command(command, cwd=project_root) for name, command in commands.items()}
+    return {
+        name: _run_command(command, cwd=project_root)
+        for name, command in commands.items()
+    }
 
 
 def _validate_thread_id(thread_id: str) -> None:
-    if not thread_id or thread_id in {".", ".."} or ".." in thread_id or not SAFE_THREAD_ID_RE.fullmatch(thread_id):
+    if (
+        not thread_id
+        or thread_id in {".", ".."}
+        or ".." in thread_id
+        or not SAFE_THREAD_ID_RE.fullmatch(thread_id)
+    ):
         raise ValueError("Invalid thread_id")
 
 
@@ -262,7 +289,9 @@ def _file_manifest(root: Path, *, max_files: int = 500) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for path in sorted(item for item in root.rglob("*") if item.is_file()):
         if len(entries) >= max_files:
-            entries.append({"path": "<truncated>", "reason": f"file limit {max_files} reached"})
+            entries.append(
+                {"path": "<truncated>", "reason": f"file limit {max_files} reached"}
+            )
             break
         try:
             stat = path.stat()
@@ -289,7 +318,9 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
 
     del project_root
     _validate_thread_id(thread_id)
-    raise ValueError("Unscoped thread summaries are disabled; trusted project and owner scope are required")
+    raise ValueError(
+        "Unscoped thread summaries are disabled; trusted project and owner scope are required"
+    )
 
 
 def collect_doctor_output(project_root: Path) -> dict[str, Any]:
@@ -315,10 +346,17 @@ def _command_output(command: dict[str, Any] | None) -> str | None:
 def _environment_versions(environment: dict[str, Any]) -> dict[str, str | None]:
     closed_versions = environment.get("versions")
     if isinstance(closed_versions, dict):
-        return {str(name): value if isinstance(value, str) else None for name, value in closed_versions.items()}
+        return {
+            str(name): value if isinstance(value, str) else None
+            for name, value in closed_versions.items()
+        }
     platform_info = environment.get("platform", {})
-    python_version = platform_info.get("python") if isinstance(platform_info, dict) else None
-    versions: dict[str, str | None] = {"python": python_version if isinstance(python_version, str) else None}
+    python_version = (
+        platform_info.get("python") if isinstance(platform_info, dict) else None
+    )
+    versions: dict[str, str | None] = {
+        "python": python_version if isinstance(python_version, str) else None
+    }
     for command in environment.get("commands", []):
         if isinstance(command, dict) and isinstance(command.get("name"), str):
             versions[command["name"]] = _command_output(command)
@@ -402,10 +440,21 @@ def _config_summary(config_summary: Any) -> dict[str, Any]:
             "channels": 0,
         }
     raw_config_version = config_summary.get("config_version")
-    safe_config_version = raw_config_version if type(raw_config_version) is int and 0 <= raw_config_version <= 1_000_000 else None
+    safe_config_version = (
+        raw_config_version
+        if type(raw_config_version) is int and 0 <= raw_config_version <= 1_000_000
+        else None
+    )
     raw_error = config_summary.get("error")
-    safe_error = _CONFIG_ERROR_CODE_BY_INPUT.get(raw_error) if isinstance(raw_error, str) else None
-    if all(type(config_summary.get(field)) is int and config_summary[field] >= 0 for field in ("tools", "channels")):
+    safe_error = (
+        _CONFIG_ERROR_CODE_BY_INPUT.get(raw_error)
+        if isinstance(raw_error, str)
+        else None
+    )
+    if all(
+        type(config_summary.get(field)) is int and config_summary[field] >= 0
+        for field in ("tools", "channels")
+    ):
         return {
             "present": True,
             "config_version": safe_config_version,
@@ -419,7 +468,11 @@ def _config_summary(config_summary: Any) -> dict[str, Any]:
         "present": True,
         "config_version": safe_config_version,
         "error": safe_error,
-        "tools": (sum(1 for tool in tools if isinstance(tool, dict)) if isinstance(tools, list) else 0),
+        "tools": (
+            sum(1 for tool in tools if isinstance(tool, dict))
+            if isinstance(tools, list)
+            else 0
+        ),
         "channels": len(_enabled_mapping_keys(channels)),
     }
 
@@ -456,7 +509,11 @@ def _closed_environment_summary(
     raw_system = raw_platform.get("system")
     system = raw_system if raw_system in {"Darwin", "Linux", "Windows"} else "Other"
     raw_machine = raw_platform.get("machine")
-    machine = raw_machine.lower() if isinstance(raw_machine, str) and raw_machine.lower() in _KNOWN_MACHINES else None
+    machine = (
+        raw_machine.lower()
+        if isinstance(raw_machine, str) and raw_machine.lower() in _KNOWN_MACHINES
+        else None
+    )
     platform_summary = {
         "system": system,
         "release": _version_token(raw_platform.get("release")),
@@ -474,7 +531,11 @@ def _closed_environment_summary(
         if name not in {"node", "pnpm", "uv", "nginx", "docker"}:
             continue
         output = _command_output(command)
-        versions[name] = _version_token(output) or ("not_found" if isinstance(output, str) and "not found" in output.lower() else None)
+        versions[name] = _version_token(output) or (
+            "not_found"
+            if isinstance(output, str) and "not found" in output.lower()
+            else None
+        )
     for name in ("node", "pnpm", "uv", "nginx", "docker"):
         versions.setdefault(name, None)
     return {
@@ -487,7 +548,11 @@ def _closed_git_summary(
     git_summary: dict[str, Any],
 ) -> dict[str, Any]:
     raw_head = _git_stdout(git_summary, "head")
-    head = raw_head.lower() if isinstance(raw_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", raw_head) else None
+    head = (
+        raw_head.lower()
+        if isinstance(raw_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", raw_head)
+        else None
+    )
     return {
         # Branch/upstream names and status paths are user-controlled and can
         # contain opaque secrets; expose only the commit digest and dirty bit.
@@ -506,7 +571,11 @@ def _closed_doctor_summary(
     return {
         "included": True,
         "ok": doctor.get("ok") is True,
-        "returncode": (raw_returncode if isinstance(raw_returncode, int) and -255 <= raw_returncode <= 255 else None),
+        "returncode": (
+            raw_returncode
+            if isinstance(raw_returncode, int) and -255 <= raw_returncode <= 255
+            else None
+        ),
         "errors": errors,
         "warnings": warnings,
     }
@@ -521,7 +590,11 @@ def _dirty_worktree(status_short: str | None) -> bool:
 def _status_from_signals(signals: dict[str, bool]) -> str:
     if signals["config_missing"] or signals["config_error"]:
         return "needs_user_setup"
-    if signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if (
+        signals["node_missing"]
+        or signals["node_version_too_old"]
+        or signals["nginx_missing"]
+    ):
         return "environment_mismatch"
     if not signals["doctor_included"]:
         return "insufficient_evidence"
@@ -531,32 +604,50 @@ def _status_from_signals(signals: dict[str, bool]) -> str:
 
 
 def _active_signal_names(signals: dict[str, bool]) -> list[str]:
-    return [name for name, enabled in signals.items() if enabled and name in ATTENTION_SIGNAL_NAMES]
+    return [
+        name
+        for name, enabled in signals.items()
+        if enabled and name in ATTENTION_SIGNAL_NAMES
+    ]
 
 
 def _maintainer_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
-        steps.append("Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`.")
+        steps.append(
+            "Ask the reporter to complete local setup with `make setup`, then rerun `make doctor` and `make support-bundle`."
+        )
     if signals["node_missing"] or signals["node_version_too_old"]:
-        steps.append("Ask the reporter to install Node.js 22+ before treating this as an application bug.")
+        steps.append(
+            "Ask the reporter to install Node.js 22+ before treating this as an application bug."
+        )
     if signals["config_missing"]:
         steps.append("Do not triage runtime behavior until `config.yaml` exists.")
     if signals["config_error"]:
-        steps.append("Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`.")
+        steps.append(
+            "Ask the reporter to fix `config.yaml` syntax or regenerate it with `make setup`."
+        )
     if signals["doctor_failed"] and status == "likely_runtime_issue":
-        steps.append("Use `doctor.json` plus the reproduction steps in the issue body to identify the failing subsystem.")
+        steps.append(
+            "Use `doctor.json` plus the reproduction steps in the internal incident record to identify the failing subsystem."
+        )
     if signals["thread_summary_included"]:
-        steps.append("Use `thread-summary.json` to inspect workspace/upload/output file shape; raw file contents are intentionally absent.")
+        steps.append(
+            "Use `thread-summary.json` to inspect workspace/upload/output file shape; raw file contents are intentionally absent."
+        )
     if not steps:
-        steps.append("Use the issue reproduction steps and evidence JSON files to continue triage.")
+        steps.append(
+            "Use the incident reproduction steps and evidence JSON files to continue triage."
+        )
     return steps
 
 
 def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     steps: list[str] = []
     if status == "needs_user_setup":
-        steps.append("Run `make setup`, then rerun `make doctor` and `make support-bundle` before filing the issue if the problem changes.")
+        steps.append(
+            "Run `make setup`, then rerun `make doctor` and `make support-bundle` before creating an internal incident record if the problem changes."
+        )
     if signals["node_missing"] or signals["node_version_too_old"]:
         steps.append("Install Node.js 22+ and rerun `make doctor`.")
     if signals["config_missing"]:
@@ -564,22 +655,28 @@ def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
     if signals["config_error"]:
         steps.append("Fix `config.yaml` syntax or regenerate it with `make setup`.")
     if signals["doctor_failed"] and status == "likely_runtime_issue":
-        steps.append("Paste the generated issue summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle.")
+        steps.append(
+            "Add the generated diagnostic summary to the internal incident record. Attach the zip if a maintainer asks for the evidence bundle."
+        )
     if not steps:
-        steps.append("Paste the generated issue summary into the GitHub issue if the issue still reproduces. Attach the zip if a maintainer asks for the evidence bundle.")
+        steps.append(
+            "Add the generated diagnostic summary to an internal incident record if the problem still reproduces. Attach the zip if a maintainer asks for the evidence bundle."
+        )
     return steps
 
 
-def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> list[dict[str, str]]:
+def _evidence_files(
+    *, include_doctor: bool, include_thread_summary: bool
+) -> list[dict[str, str]]:
     files = [
         ("README.md", "Human-readable entrypoint for the support bundle."),
         (
-            "issue-summary.md",
-            "Markdown summary intended to be pasted into a GitHub issue.",
+            "diagnostic-summary.md",
+            "Markdown diagnostic summary for an internal incident record.",
         ),
         (
-            "ai-issue-draft.md",
-            "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts.",
+            "ai-incident-draft.md",
+            "Internal incident draft for AI-assisted triage with required placeholders for unknown user facts.",
         ),
         (
             "triage.json",
@@ -622,9 +719,11 @@ def build_triage_report(
         "doctor_failed": bool(doctor and not doctor.get("ok")),
         "config_missing": config.get("present") is False,
         "config_error": bool(config.get("error")),
-        "node_missing": versions.get("node") is not None and "not found" in versions["node"].lower(),
+        "node_missing": versions.get("node") is not None
+        and "not found" in versions["node"].lower(),
         "node_version_too_old": node_major is not None and node_major < 22,
-        "nginx_missing": versions.get("nginx") is not None and "not found" in versions["nginx"].lower(),
+        "nginx_missing": versions.get("nginx") is not None
+        and "not found" in versions["nginx"].lower(),
         "dirty_worktree": dirty_worktree,
         "thread_summary_included": thread_summary is not None,
         "thread_summary_found": bool(thread_summary and thread_summary.get("found")),
@@ -669,8 +768,8 @@ def _markdown_list(items: list[str]) -> str:
     return "\n".join(f"- {item}" for item in items) if items else "- None"
 
 
-def render_issue_summary(triage: dict[str, Any]) -> str:
-    """Render Markdown that users can paste into the GitHub issue body."""
+def render_diagnostic_summary(triage: dict[str, Any]) -> str:
+    """Render Markdown for a private internal incident record."""
     git = triage["git"]
     doctor = triage["doctor"]
     versions = triage["versions"]
@@ -687,13 +786,18 @@ def render_issue_summary(triage: dict[str, Any]) -> str:
         _markdown_list(triage["reporter_next_steps"]),
         "",
         "### Upload guidance",
-        "Paste this summary into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough to diagnose the issue.",
+        "Add this summary to the internal incident record. Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough to diagnose the problem.",
         "",
         "### Maintainer next steps",
         _markdown_list(triage["maintainer_next_steps"]),
         "",
         "### Evidence files in the attached zip",
-        _markdown_list([f"`{item['path']}` - {item['description']}" for item in triage["evidence_files"]]),
+        _markdown_list(
+            [
+                f"`{item['path']}` - {item['description']}"
+                for item in triage["evidence_files"]
+            ]
+        ),
         "",
         "Privacy: this bundle excludes `.env`, raw conversation messages, and user file contents.",
         "",
@@ -724,14 +828,22 @@ def _platform_details(platform_info: dict[str, Any]) -> str:
 def _draft_affected_areas(triage: dict[str, Any]) -> list[str]:
     signals = triage["signals"]
     areas: list[str] = []
-    if signals["config_missing"] or signals["config_error"] or signals["node_missing"] or signals["node_version_too_old"] or signals["nginx_missing"]:
+    if (
+        signals["config_missing"]
+        or signals["config_error"]
+        or signals["node_missing"]
+        or signals["node_version_too_old"]
+        or signals["nginx_missing"]
+    ):
         areas.append("Config / setup (make, config.yaml, env)")
     if not areas:
         areas.append("Not sure")
     return areas
 
 
-def _doctor_excerpt(doctor: dict[str, Any] | None, *, max_lines: int = 80, max_chars: int = 12000) -> str:
+def _doctor_excerpt(
+    doctor: dict[str, Any] | None, *, max_lines: int = 80, max_chars: int = 12000
+) -> str:
     output = _command_output(doctor) if doctor else None
     if not output:
         return "<REQUIRED: paste key log lines. Do not invent if unknown.>"
@@ -750,26 +862,28 @@ def _doctor_excerpt(doctor: dict[str, Any] | None, *, max_lines: int = 80, max_c
     return excerpt
 
 
-def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: dict[str, Any] | None) -> str:
-    """Render a GitHub issue body scaffold for AI-assisted reporters."""
+def render_ai_incident_draft(
+    triage: dict[str, Any], diagnostic_summary: str, doctor: dict[str, Any] | None
+) -> str:
+    """Render an internal incident scaffold for AI-assisted reporters."""
     versions = triage["versions"]
     git = triage["git"]
     platform_info = triage["platform"]
     lines = [
-        "# AI issue draft",
+        "# AI incident draft",
         "",
-        "Use this when a coding agent or AI assistant files an ActWeave bug report.",
-        "Do not file this issue until every REQUIRED placeholder is replaced.",
+        "Use this when a coding agent or AI assistant prepares an internal ActWeave bug report.",
+        "Do not submit this incident record until every REQUIRED placeholder is replaced.",
         "Do not invent if unknown; ask the reporter for missing reproduction facts instead.",
         "",
-        "## Issue title",
+        "## Incident title",
         "",
         "[bug] <REQUIRED: one-line problem summary>",
         "",
         "### Before you start",
         "",
-        "- [ ] I searched [existing issues](https://github.com/SerenaLuna8/deer-flow/issues?q=is%3Aissue) and this is not a duplicate.",
-        "- [ ] I can reproduce this on the latest `main`.",
+        "- [ ] I searched the private project's existing incident records and this is not a duplicate.",
+        "- [ ] I can reproduce this on the current approved checkout.",
         "",
         "### Problem summary",
         "",
@@ -806,7 +920,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
         "",
         "### How are you running ActWeave?",
         "",
-        "<REQUIRED: choose Local, Docker, CI, or Other>",
+        "<REQUIRED: choose Local, Docker, or Other>",
         "",
         "### Operating system",
         "",
@@ -841,7 +955,7 @@ def render_ai_issue_draft(triage: dict[str, Any], issue_summary: str, doctor: di
         "",
         "### Support bundle summary",
         "",
-        issue_summary.rstrip(),
+        diagnostic_summary.rstrip(),
         "",
         "### Additional context",
         "",
@@ -858,8 +972,8 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "",
         "## Start here",
         "",
-        "Paste `issue-summary.md` into the GitHub issue body.",
-        "If an AI assistant is filing the issue, start from `ai-issue-draft.md` and replace every REQUIRED placeholder first.",
+        "Add `diagnostic-summary.md` to the private internal incident record.",
+        "If an AI assistant is preparing the record, start from `ai-incident-draft.md` and replace every REQUIRED placeholder first.",
         "Maintainers or AI triage tools should read `triage.json` first, then inspect the evidence JSON files only as needed.",
         "",
         "## Triage Summary",
@@ -873,7 +987,7 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "",
         "## Upload guidance",
         "",
-        "Paste `issue-summary.md` into the GitHub issue. Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough to diagnose the issue.",
+        "Add `diagnostic-summary.md` to the internal incident record. Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough to diagnose the problem.",
         "",
         "## Maintainer next steps",
         "",
@@ -881,7 +995,12 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "",
         "## Files",
         "",
-        _markdown_list([f"`{item['path']}` - {item['description']}" for item in triage["evidence_files"]]),
+        _markdown_list(
+            [
+                f"`{item['path']}` - {item['description']}"
+                for item in triage["evidence_files"]
+            ]
+        ),
         "",
         "## Privacy",
         "",
@@ -895,7 +1014,12 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
 
 def _default_out_path(project_root: Path) -> Path:
     timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-    return project_root / ".deer-flow" / "support-bundles" / f"deer-flow-support-bundle-{timestamp}.zip"
+    return (
+        project_root
+        / ".deer-flow"
+        / "support-bundles"
+        / f"deer-flow-support-bundle-{timestamp}.zip"
+    )
 
 
 def _write_json(zf: zipfile.ZipFile, name: str, data: Any) -> None:
@@ -906,12 +1030,12 @@ def _write_text(zf: zipfile.ZipFile, name: str, text: str) -> None:
     zf.writestr(name, text)
 
 
-def _issue_summary_sidecar_path(out_path: Path) -> Path:
-    return out_path.with_name(f"{out_path.stem}-issue-summary.md")
+def _diagnostic_summary_sidecar_path(out_path: Path) -> Path:
+    return out_path.with_name(f"{out_path.stem}-diagnostic-summary.md")
 
 
-def _issue_draft_sidecar_path(out_path: Path) -> Path:
-    return out_path.with_name(f"{out_path.stem}-issue-draft.md")
+def _incident_draft_sidecar_path(out_path: Path) -> Path:
+    return out_path.with_name(f"{out_path.stem}-incident-draft.md")
 
 
 def create_support_bundle(
@@ -928,7 +1052,9 @@ def create_support_bundle(
     out_path = (out_path or _default_out_path(project_root)).resolve()
     if thread_id is not None:
         _validate_thread_id(thread_id)
-        raise ValueError("Unscoped --thread-id support bundles are disabled; trusted project and owner scope are required")
+        raise ValueError(
+            "Unscoped --thread-id support bundles are disabled; trusted project and owner scope are required"
+        )
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
     manifest = {
@@ -950,8 +1076,14 @@ def create_support_bundle(
     environment = _closed_environment_summary(collect_environment(project_root))
     config_summary = collect_config_summary(config_path)
     git_summary = _closed_git_summary(collect_git_summary(project_root))
-    thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
-    doctor = _closed_doctor_summary(collect_doctor_output(project_root)) if include_doctor else None
+    thread_summary = (
+        collect_thread_summary(project_root, thread_id) if thread_id else None
+    )
+    doctor = (
+        _closed_doctor_summary(collect_doctor_output(project_root))
+        if include_doctor
+        else None
+    )
     triage = build_triage_report(
         manifest=manifest,
         environment=environment,
@@ -961,12 +1093,12 @@ def create_support_bundle(
         thread_summary=thread_summary,
     )
 
-    issue_summary = render_issue_summary(triage)
-    issue_draft = render_ai_issue_draft(triage, issue_summary, doctor)
+    diagnostic_summary = render_diagnostic_summary(triage)
+    incident_draft = render_ai_incident_draft(triage, diagnostic_summary, doctor)
     with zipfile.ZipFile(out_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         _write_text(zf, "README.md", render_bundle_readme(triage))
-        _write_text(zf, "issue-summary.md", issue_summary)
-        _write_text(zf, "ai-issue-draft.md", issue_draft)
+        _write_text(zf, "diagnostic-summary.md", diagnostic_summary)
+        _write_text(zf, "ai-incident-draft.md", incident_draft)
         _write_json(zf, "triage", triage)
         _write_json(zf, "manifest", manifest)
         _write_json(zf, "environment", environment)
@@ -977,20 +1109,26 @@ def create_support_bundle(
         if doctor is not None:
             _write_json(zf, "doctor", doctor)
 
-    _issue_summary_sidecar_path(out_path).write_text(issue_summary, encoding="utf-8")
-    _issue_draft_sidecar_path(out_path).write_text(issue_draft, encoding="utf-8")
+    _diagnostic_summary_sidecar_path(out_path).write_text(
+        diagnostic_summary, encoding="utf-8"
+    )
+    _incident_draft_sidecar_path(out_path).write_text(incident_draft, encoding="utf-8")
     return out_path
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     repo_root = Path(__file__).resolve().parents[1]
-    parser.add_argument("--project-root", type=Path, default=repo_root, help="ActWeave project root")
+    parser.add_argument(
+        "--project-root", type=Path, default=repo_root, help="ActWeave project root"
+    )
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
     parser.add_argument(
         "--thread-id",
         default=None,
-        help=("Deprecated and disabled: thread manifests require trusted project and owner scope"),
+        help=(
+            "Deprecated and disabled: thread manifests require trusted project and owner scope"
+        ),
     )
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
     parser.add_argument(
@@ -1017,14 +1155,20 @@ def main(argv: list[str] | None = None) -> int:
     with zipfile.ZipFile(bundle_path) as zf:
         triage = json.loads(zf.read("triage.json").decode("utf-8"))
     print(f"Support bundle: {bundle_path}")
-    print(f"Issue summary: {_issue_summary_sidecar_path(bundle_path)}")
-    print(f"Issue draft: {_issue_draft_sidecar_path(bundle_path)}")
+    print(f"Diagnostic summary: {_diagnostic_summary_sidecar_path(bundle_path)}")
+    print(f"Incident draft: {_incident_draft_sidecar_path(bundle_path)}")
     print("Suggested next steps:")
     for step in triage["reporter_next_steps"]:
         print(f"- {step}")
-    print("If you still file an issue, paste the issue summary.")
-    print("If an AI assistant files the issue, start from the issue draft and replace every REQUIRED placeholder.")
-    print("Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough.")
+    print(
+        "If the problem still reproduces, add the diagnostic summary to the internal incident record."
+    )
+    print(
+        "If an AI assistant prepares the record, start from the incident draft and replace every REQUIRED placeholder."
+    )
+    print(
+        "Attach the zip if a maintainer asks for the evidence bundle, or if the summary alone is not enough."
+    )
     print("Maintainers or AI triage tools should read triage.json first.")
     return 0
 

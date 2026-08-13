@@ -37,8 +37,11 @@ class ProjectChannelGroupBindingRow(Base):
     provider: Mapped[str] = mapped_column(String(32), nullable=False)
     external_group_ref: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     external_group_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
-    agent_scope: Mapped[str] = mapped_column(String(16), nullable=False)
-    agent_asset_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    # Live bindings retain an exact Agent reference. A soft-deleted tombstone
+    # deliberately releases that pair while preserving its stable binding ID,
+    # guest principal, membership, and connection identity for safe rebinds.
+    agent_scope: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    agent_asset_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -80,8 +83,12 @@ class ProjectChannelGroupBindingRow(Base):
             name="ck_project_channel_group_bindings_external_ref",
         ),
         CheckConstraint(
-            "agent_scope IN ('system', 'project')",
+            "agent_scope IS NULL OR agent_scope IN ('system', 'project')",
             name="ck_project_channel_group_bindings_agent_scope",
+        ),
+        CheckConstraint(
+            "(agent_asset_id IS NULL) = (agent_scope IS NULL)",
+            name="ck_project_channel_group_bindings_agent_ref_pair",
         ),
         CheckConstraint(
             "status IN ('active', 'disabled')",
@@ -98,6 +105,10 @@ class ProjectChannelGroupBindingRow(Base):
         CheckConstraint(
             "deleted_at IS NULL OR status = 'disabled'",
             name="ck_project_channel_group_bindings_deleted_status",
+        ),
+        CheckConstraint(
+            "(deleted_at IS NULL) = (agent_asset_id IS NOT NULL)",
+            name="ck_project_channel_group_bindings_agent_lifecycle",
         ),
         UniqueConstraint(
             "project_id",

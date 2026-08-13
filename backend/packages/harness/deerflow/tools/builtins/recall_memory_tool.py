@@ -11,9 +11,11 @@ import html
 from langchain.tools import tool
 
 from deerflow.agents.memory.authority_resolution import resolve_memory_authority
+from deerflow.memory_contract import EPISODE_SEARCH_TAGS
 from deerflow.tools.types import Runtime
 
-RECALL_MEMORY_TAGS = ("permanent", "durable", "ephemeral", "correction")
+# Compatibility alias for callers that imported the tool-local vocabulary.
+RECALL_MEMORY_TAGS = EPISODE_SEARCH_TAGS
 _MAX_QUERY_CHARS = 200
 _MIN_LIMIT = 1
 _MAX_LIMIT = 10

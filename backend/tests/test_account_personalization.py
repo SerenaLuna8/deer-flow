@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -14,7 +15,12 @@ from app.gateway.routers import account_personalization
 from app.personalization.service import (
     AccountMemoryResetResult,
     AccountPersonalizationConflict,
+    AccountPersonalizationService,
+    AccountPersonalizationUnavailable,
     AccountPersonalizationView,
+)
+from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryResetSettledDream,
 )
 
 
@@ -64,12 +70,16 @@ class _PersonalizationService:
         user_id: uuid.UUID,
         *,
         expected_version: int,
+        request_id: str,
     ) -> AccountMemoryResetResult:
         self.calls.append(
             (
                 "reset_memory",
                 user_id,
-                {"expected_version": expected_version},
+                {
+                    "expected_version": expected_version,
+                    "request_id": request_id,
+                },
             )
         )
         return AccountMemoryResetResult(
@@ -79,6 +89,7 @@ class _PersonalizationService:
             documents=1,
             versions=4,
             dream_runs=5,
+            prepare_runs=1,
             snapshots=6,
             jobs_cancelled=2,
         )
@@ -185,3 +196,142 @@ async def test_account_personalization_conflict_is_stable_409(app: FastAPI) -> N
 
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "PERSONALIZATION_CONFLICT"
+
+
+class _Transaction:
+    def __init__(self, session) -> None:
+        self.session = session
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, *_args):
+        self.session.rolled_back = exc_type is not None
+        self.session.committed = exc_type is None
+        return False
+
+
+class _ServiceSession:
+    def __init__(self) -> None:
+        self.committed = False
+        self.rolled_back = False
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def begin(self):
+        return _Transaction(self)
+
+
+class _ResetRepository:
+    result = None
+
+    def __init__(self, _session) -> None:
+        pass
+
+    async def reset_memory(self, _user_id, **_kwargs):
+        assert self.result is not None
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_account_memory_reset_audits_immediate_dream_terminal_and_all_scopes() -> None:
+    user_id = uuid.uuid4()
+    project_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    session = _ServiceSession()
+    _ResetRepository.result = SimpleNamespace(
+        version=3,
+        scopes_reset=2,
+        history_entries=3,
+        documents=1,
+        versions=4,
+        dream_runs=5,
+        prepare_runs=1,
+        snapshots=6,
+        episodes=7,
+        jobs_cancelled=2,
+        affected_project_ids=(project_id,),
+        settled_dreams=(MemoryResetSettledDream(project_id=project_id, job_id=job_id),),
+    )
+    audit = SimpleNamespace(
+        memory_dream_settled=AsyncMock(),
+        memory_reset_executed=AsyncMock(),
+    )
+    service = AccountPersonalizationService(
+        lambda: session,
+        repository_builder=_ResetRepository,
+        audit=audit,
+    )
+
+    result = await service.reset_memory(
+        user_id,
+        expected_version=2,
+        request_id="1" * 32,
+    )
+
+    assert result.version == 3
+    assert session.committed and not session.rolled_back
+    audit.memory_dream_settled.assert_awaited_once_with(
+        session,
+        project_id=project_id,
+        job_id=job_id,
+        request_id="1" * 32,
+        disposition="cancelled",
+    )
+    audit.memory_reset_executed.assert_awaited_once_with(
+        session,
+        user_id=user_id,
+        request_id="1" * 32,
+        affected_project_ids=(project_id,),
+        scopes_reset=2,
+        history_entries=3,
+        documents=1,
+        versions=4,
+        dream_runs=5,
+        prepare_runs=1,
+        snapshots=6,
+        episodes=7,
+        jobs_cancelled=2,
+    )
+
+
+@pytest.mark.asyncio
+async def test_account_memory_reset_rolls_back_when_audit_fails() -> None:
+    user_id = uuid.uuid4()
+    session = _ServiceSession()
+    _ResetRepository.result = SimpleNamespace(
+        version=3,
+        scopes_reset=0,
+        history_entries=0,
+        documents=0,
+        versions=0,
+        dream_runs=0,
+        prepare_runs=0,
+        snapshots=0,
+        episodes=0,
+        jobs_cancelled=0,
+        affected_project_ids=(),
+        settled_dreams=(),
+    )
+    audit = SimpleNamespace(
+        memory_dream_settled=AsyncMock(),
+        memory_reset_executed=AsyncMock(side_effect=RuntimeError("audit unavailable")),
+    )
+    service = AccountPersonalizationService(
+        lambda: session,
+        repository_builder=_ResetRepository,
+        audit=audit,
+    )
+
+    with pytest.raises(AccountPersonalizationUnavailable):
+        await service.reset_memory(
+            user_id,
+            expected_version=2,
+            request_id="2" * 32,
+        )
+
+    assert session.rolled_back and not session.committed

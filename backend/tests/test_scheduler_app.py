@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 import pytest
 
 from app.scheduler.app import SchedulerApp
+from app.system_runtime_settings import AutomationsPolicyValue
 
 
 class _Transaction:
@@ -81,6 +82,12 @@ class _Dream:
         self.admitted.set()
 
 
+class _DisabledAutomationsPolicy:
+    async def read_current(self, session):
+        del session
+        return AutomationsPolicyValue(enabled=False, poll_interval_seconds=1)
+
+
 @pytest.mark.asyncio
 async def test_scheduler_keeps_automation_and_dream_in_separate_transactions() -> None:
     stop_event = asyncio.Event()
@@ -106,4 +113,32 @@ async def test_scheduler_keeps_automation_and_dream_in_separate_transactions() -
     assert automation.admit_sessions == [1]
     assert dream.calls == 1
     assert len(factory.sessions) == 2
+    assert ownership.verify_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduler_skips_automation_admission_when_policy_disables_polling() -> None:
+    stop_event = asyncio.Event()
+    factory = _SessionFactory()
+    automation = _Automation()
+    dream = _Dream()
+    ownership = _Ownership()
+    app = SchedulerApp(
+        enabled=True,
+        ownership=ownership,
+        service=automation,
+        session_factory=factory,
+        poll_interval_seconds=0.01,
+        dream_service=dream,
+        policy_reader=_DisabledAutomationsPolicy(),
+    )
+
+    task = asyncio.create_task(app.run(stop_event))
+    await asyncio.wait_for(dream.admitted.wait(), timeout=1)
+    stop_event.set()
+    await task
+
+    assert automation.reconcile_sessions == [0]
+    assert automation.admit_sessions == []
+    assert dream.calls == 1
     assert ownership.verify_calls == 1

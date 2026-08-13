@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 3,
   "entries": [
     {
       "source_key": "builtin:skill:academic-paper-review",
@@ -142,15 +142,6 @@
       "sha256": "15337866f334317451c18e5700a2e0a66f9469c9bbea0f61050012fcb06152c2"
     },
     {
-      "source_key": "builtin:mcp:deerflow-docs",
-      "kind": "mcp",
-      "slug": "deerflow-docs",
-      "display_name": "ActWeave Docs",
-      "version": 1,
-      "payload_path": "content/deerflow-docs-v1.mcp.json",
-      "sha256": "6be8c3d123effac0f9fac447901f9171516b57c6d40e7b5f0694254b1885fcda"
-    },
-    {
       "source_key": "builtin:agent:project-assistant",
       "kind": "agent",
       "slug": "project-assistant",
@@ -158,6 +149,15 @@
       "version": 1,
       "payload_path": "content/project-assistant-v1.agent.json",
       "sha256": "a846b076ff31718cfc4c17a9d40927b14762c724b91371cf9cf41e35f92a823f"
+    },
+    {
+      "source_key": "builtin:agent:skill-builder",
+      "kind": "agent",
+      "slug": "skill-builder",
+      "display_name": "Skill Builder",
+      "version": 1,
+      "payload_path": "content/skill-builder-v1.agent.json",
+      "sha256": "c1d8e392e1faca5e029f79b57ee0c61424fbda2750faabdfcbc491dc659207f1"
     }
   ]
 }

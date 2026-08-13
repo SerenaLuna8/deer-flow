@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
+from typing import Literal
 
-from sqlalchemy import exists, select
+from sqlalchemy import and_, exists, func, literal, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
@@ -11,7 +13,26 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
     AgentDesignSessionRow,
+    McpServerRow,
+    McpServerVersionRow,
+    ProjectSystemMcpBindingRow,
+    ProjectSystemSkillBindingRow,
+    SkillRow,
+    SkillVersionRow,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDesignAllowedAssetRecord:
+    """One exact dependency version safe to disclose to Agent Builder."""
+
+    kind: Literal["skill", "mcp"]
+    scope: Literal["project", "system"]
+    asset_id: uuid.UUID
+    version_id: uuid.UUID
+    name: str
+    slug: str
+    description: str
 
 
 class AgentDesignRepository:
@@ -141,6 +162,188 @@ class AgentDesignRepository:
         )
         return tuple((await self.session.execute(statement)).scalars())
 
+    async def list_allowed_assets(
+        self,
+        context: ProjectContext,
+        *,
+        limit: int,
+    ) -> tuple[AgentDesignAllowedAssetRecord, ...]:
+        """List exact active/published Skill and MCP versions usable by a project.
+
+        Project assets resolve through their current published pointer. System
+        assets resolve through this project's enabled exact-version binding;
+        the global catalog alone never grants Builder visibility or use.
+        """
+
+        self._require_context(context)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+
+        project_skills = (
+            select(
+                literal(0).label("kind_rank"),
+                literal(0).label("scope_rank"),
+                literal("skill").label("kind"),
+                literal("project").label("scope"),
+                SkillRow.id.label("asset_id"),
+                SkillVersionRow.id.label("version_id"),
+                SkillRow.display_name.label("name"),
+                SkillRow.slug,
+                SkillVersionRow.description,
+            )
+            .select_from(SkillRow)
+            .join(
+                SkillVersionRow,
+                and_(
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillRow.current_published_version_id == SkillVersionRow.id,
+                ),
+            )
+            .where(
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
+                SkillRow.status == "active",
+                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
+            )
+        )
+        system_skills = (
+            select(
+                literal(0).label("kind_rank"),
+                literal(1).label("scope_rank"),
+                literal("skill").label("kind"),
+                literal("system").label("scope"),
+                SkillRow.id.label("asset_id"),
+                SkillVersionRow.id.label("version_id"),
+                SkillRow.display_name.label("name"),
+                SkillRow.slug,
+                SkillVersionRow.description,
+            )
+            .select_from(ProjectSystemSkillBindingRow)
+            .join(
+                SkillRow,
+                and_(
+                    SkillRow.id == ProjectSystemSkillBindingRow.system_skill_id,
+                    SkillRow.scope == "system",
+                    SkillRow.project_id.is_(None),
+                ),
+            )
+            .join(
+                SkillVersionRow,
+                and_(
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                ),
+            )
+            .where(
+                ProjectSystemSkillBindingRow.project_id == context.project_id,
+                ProjectSystemSkillBindingRow.enabled.is_(True),
+                SkillRow.status == "active",
+                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
+            )
+        )
+        project_mcps = (
+            select(
+                literal(1).label("kind_rank"),
+                literal(0).label("scope_rank"),
+                literal("mcp").label("kind"),
+                literal("project").label("scope"),
+                McpServerRow.id.label("asset_id"),
+                McpServerVersionRow.id.label("version_id"),
+                McpServerRow.display_name.label("name"),
+                McpServerRow.slug,
+                McpServerVersionRow.description,
+            )
+            .select_from(McpServerRow)
+            .join(
+                McpServerVersionRow,
+                and_(
+                    McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                    McpServerRow.current_published_version_id == McpServerVersionRow.id,
+                ),
+            )
+            .where(
+                McpServerRow.scope == "project",
+                McpServerRow.project_id == context.project_id,
+                McpServerRow.status == "active",
+                McpServerVersionRow.workflow_status == "published",
+            )
+        )
+        system_mcps = (
+            select(
+                literal(1).label("kind_rank"),
+                literal(1).label("scope_rank"),
+                literal("mcp").label("kind"),
+                literal("system").label("scope"),
+                McpServerRow.id.label("asset_id"),
+                McpServerVersionRow.id.label("version_id"),
+                McpServerRow.display_name.label("name"),
+                McpServerRow.slug,
+                McpServerVersionRow.description,
+            )
+            .select_from(ProjectSystemMcpBindingRow)
+            .join(
+                McpServerRow,
+                and_(
+                    McpServerRow.id == ProjectSystemMcpBindingRow.system_mcp_server_id,
+                    McpServerRow.scope == "system",
+                    McpServerRow.project_id.is_(None),
+                ),
+            )
+            .join(
+                McpServerVersionRow,
+                and_(
+                    McpServerVersionRow.mcp_server_id == McpServerRow.id,
+                    McpServerVersionRow.id == ProjectSystemMcpBindingRow.mcp_server_version_id,
+                ),
+            )
+            .where(
+                ProjectSystemMcpBindingRow.project_id == context.project_id,
+                ProjectSystemMcpBindingRow.enabled.is_(True),
+                McpServerRow.status == "active",
+                McpServerVersionRow.workflow_status == "published",
+            )
+        )
+        catalog = union_all(
+            project_skills,
+            system_skills,
+            project_mcps,
+            system_mcps,
+        ).subquery("agent_design_allowed_assets")
+        statement = (
+            select(
+                catalog.c.kind,
+                catalog.c.scope,
+                catalog.c.asset_id,
+                catalog.c.version_id,
+                catalog.c.name,
+                catalog.c.slug,
+                catalog.c.description,
+            )
+            .where(self._context_exists(context))
+            .order_by(
+                catalog.c.kind_rank,
+                catalog.c.scope_rank,
+                func.lower(catalog.c.slug),
+                catalog.c.asset_id,
+                catalog.c.version_id,
+            )
+            .limit(limit)
+        )
+        return tuple(
+            AgentDesignAllowedAssetRecord(
+                kind=row.kind,
+                scope=row.scope,
+                asset_id=row.asset_id,
+                version_id=row.version_id,
+                name=row.name,
+                slug=row.slug,
+                description=row.description,
+            )
+            for row in (await self.session.execute(statement)).all()
+        )
+
     async def get_operation(
         self,
         context: ProjectContext,
@@ -176,4 +379,7 @@ class AgentDesignRepository:
         return row
 
 
-__all__ = ["AgentDesignRepository"]
+__all__ = [
+    "AgentDesignAllowedAssetRecord",
+    "AgentDesignRepository",
+]

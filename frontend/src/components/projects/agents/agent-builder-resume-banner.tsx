@@ -24,6 +24,7 @@ import {
   useCancelAgentBuilderSessionFromList,
   type AgentBuilderSessionSummary,
 } from "@/core/agent-builder";
+import { useI18n } from "@/core/i18n/hooks";
 
 import { agentBuilderErrorMessage } from "./agent-builder-start";
 import { agentBuilderSessionPath } from "./agent-builder-workspace";
@@ -37,6 +38,8 @@ export function AgentBuilderResumeBannerView({
   sessions: AgentBuilderSessionSummary[];
   onDelete: (session: AgentBuilderSessionSummary) => Promise<void>;
 }) {
+  const { locale, t } = useI18n();
+  const copy = t.agents.builder.resume;
   const [deleteTarget, setDeleteTarget] =
     useState<AgentBuilderSessionSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -60,7 +63,7 @@ export function AgentBuilderResumeBannerView({
       await onDelete(deleteTarget);
       setDeleteTarget(null);
     } catch (error) {
-      setDeleteError(agentBuilderErrorMessage(error));
+      setDeleteError(agentBuilderErrorMessage(error, t.agents.builder.errors));
     } finally {
       setDeleting(false);
     }
@@ -77,7 +80,7 @@ export function AgentBuilderResumeBannerView({
         <div className="mb-3 flex items-center gap-2">
           <Clock3Icon aria-hidden className="text-muted-foreground size-4" />
           <h2 id="agent-builder-resume-title" className="text-sm font-semibold">
-            继续设计未完成的 Agent
+            {copy.title}
           </h2>
         </div>
         <div className="grid gap-2 sm:grid-cols-2">
@@ -95,13 +98,14 @@ export function AgentBuilderResumeBannerView({
                     {session.display_name}
                   </span>
                   <span className="text-muted-foreground mt-0.5 block text-xs">
-                    上次更新{" "}
-                    {new Intl.DateTimeFormat("zh-CN", {
-                      month: "numeric",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    }).format(new Date(session.updated_at))}
+                    {copy.lastUpdated(
+                      new Intl.DateTimeFormat(locale, {
+                        month: "numeric",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      }).format(new Date(session.updated_at)),
+                    )}
                   </span>
                 </span>
                 <ArrowRightIcon aria-hidden className="size-4 shrink-0" />
@@ -111,7 +115,7 @@ export function AgentBuilderResumeBannerView({
                   type="button"
                   size="icon"
                   variant="ghost"
-                  aria-label={`删除未完成的 Agent：${session.display_name}`}
+                  aria-label={copy.deleteAria(session.display_name)}
                   onClick={() => {
                     setDeleteError(null);
                     setDeleteTarget(session);
@@ -131,10 +135,9 @@ export function AgentBuilderResumeBannerView({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除未完成的 Agent？</DialogTitle>
+            <DialogTitle>{copy.deleteTitle}</DialogTitle>
             <DialogDescription>
-              将删除“{deleteTarget?.display_name}”的设计草稿，之后无法继续。
-              已经创建的 Agent 不受影响。
+              {copy.deleteDescription(deleteTarget?.display_name ?? "")}
             </DialogDescription>
           </DialogHeader>
           {deleteError ? (
@@ -149,7 +152,7 @@ export function AgentBuilderResumeBannerView({
               disabled={deleting}
               onClick={closeDeleteDialog}
             >
-              取消
+              {t.agents.common.cancel}
             </Button>
             <Button
               type="button"
@@ -160,7 +163,7 @@ export function AgentBuilderResumeBannerView({
               {deleting ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : null}
-              {deleting ? "正在删除…" : "确认删除"}
+              {deleting ? copy.deleting : copy.confirmDelete}
             </Button>
           </DialogFooter>
         </DialogContent>

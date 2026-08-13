@@ -86,15 +86,17 @@ export function ProjectSettingsShell({
                 className={cn(
                   "focus-visible:ring-ring flex items-start gap-3 rounded-xl px-3 py-3 transition-colors focus-visible:ring-2 focus-visible:outline-none",
                   active
-                    ? "bg-foreground text-background"
-                    : "hover:bg-accent text-foreground",
+                    ? "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300"
+                    : "text-foreground hover:bg-blue-50 dark:hover:bg-blue-500/15",
                 )}
               >
                 <Icon
                   aria-hidden
                   className={cn(
                     "mt-0.5 size-4 shrink-0",
-                    active ? "text-background" : "text-muted-foreground",
+                    active
+                      ? "text-blue-600 dark:text-blue-300"
+                      : "text-muted-foreground",
                   )}
                 />
                 <span className="min-w-0">
@@ -102,7 +104,9 @@ export function ProjectSettingsShell({
                   <span
                     className={cn(
                       "mt-0.5 block text-xs leading-5",
-                      active ? "text-background/70" : "text-muted-foreground",
+                      active
+                        ? "text-blue-600/75 dark:text-blue-300/75"
+                        : "text-muted-foreground",
                     )}
                   >
                     {description}

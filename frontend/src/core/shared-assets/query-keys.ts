@@ -81,6 +81,27 @@ export function projectDefaultAgentKey(accountId: string, projectId: string) {
   ] as const;
 }
 
+export function projectAgentRuntimeAssessmentsRoot(
+  accountId: string,
+  projectId: string,
+) {
+  return [
+    ...projectAssetKey(accountId, projectId, "agents"),
+    "runtime-assessments",
+  ] as const;
+}
+
+export function projectAgentRuntimeAssessmentsKey(
+  accountId: string,
+  projectId: string,
+  agentIds: readonly string[],
+) {
+  return [
+    ...projectAgentRuntimeAssessmentsRoot(accountId, projectId),
+    ...agentIds.map((agentId) => assetIdSchema.parse(agentId)),
+  ] as const;
+}
+
 export function projectAssetMutationKey(
   accountId: string,
   projectId: string,

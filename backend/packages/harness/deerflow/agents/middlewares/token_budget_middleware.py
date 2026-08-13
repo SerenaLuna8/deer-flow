@@ -33,11 +33,16 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, override
+from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import (
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+    PrivateStateAttr,
+)
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.runtime import Runtime
 
@@ -50,6 +55,11 @@ _BUDGET_WARNING_MSG = (
     "[TOKEN BUDGET WARNING] You have used {used:,} of your {budget:,} {reason} token budget ({percent:.0f}%). Wrap up your current work and produce a final answer. Avoid starting new tool calls unless absolutely necessary."
 )
 _BUDGET_EXCEEDED_MSG = "[TOKEN BUDGET EXCEEDED] The {reason} token usage ({used:,}) has exceeded the safety limit ({budget:,}). Producing final answer with results collected so far."
+OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY = "output_limit_budget_hard_stop"
+
+
+class TokenBudgetState(AgentState):
+    output_limit_budget_hard_stop: NotRequired[Annotated[dict[str, str] | None, PrivateStateAttr]]
 
 
 @dataclass
@@ -59,8 +69,10 @@ class TokenUsage:
     total: int = 0
 
 
-class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
+class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
     """Enforce per-run token budget limits."""
+
+    state_schema = TokenBudgetState
 
     def __init__(self, config: TokenBudgetConfig) -> None:
         super().__init__()
@@ -100,6 +112,12 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
         """
         with self._lock:
             return self._stop_reason.pop(run_id, None)
+
+    def is_hard_stopped(self, run_id: str | None) -> bool:
+        """Read the current hard-stop fact without consuming executor state."""
+
+        with self._lock:
+            return self._stop_reason.get(run_id) == "token_capped"
 
     @staticmethod
     def _get_run_id(runtime: Runtime) -> str:
@@ -252,7 +270,10 @@ class TokenBudgetMiddleware(AgentMiddleware[AgentState]):
                 # ``consume_stop_reason``.
                 self._stop_reason[run_id] = "token_capped"
                 stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
-                return self._build_hard_stop_update(last_msg, stop_text)
+                return {
+                    **self._build_hard_stop_update(last_msg, stop_text),
+                    OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY: {"run_id": run_id},
+                }
 
             if highest_fraction >= self._config.warn_threshold and not self._warned.get(run_id, False):
                 self._warned[run_id] = True

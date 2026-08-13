@@ -56,6 +56,19 @@ afterEach(() => {
 });
 
 describe("project Memory document client", () => {
+  test("keeps an old backend response valid when advisory data is absent", () => {
+    expect(
+      memoryDocumentSchema.safeParse({
+        content: "# About me",
+        version: 1,
+        updatedAt: TIMESTAMP,
+        pendingCount: 0,
+        dreamRunning: false,
+        injectionStatus: "ok",
+      }).success,
+    ).toBe(true);
+  });
+
   test("reads the current document without client-selected authority fields", async () => {
     const controller = new AbortController();
     const fetcher = rs.fn(
@@ -67,6 +80,11 @@ describe("project Memory document client", () => {
           pendingCount: 4,
           dreamRunning: false,
           injectionStatus: "ok",
+          injectionAdvisory: {
+            basis: "current_non_continuation",
+            status: "eligible",
+            reason: "within_budget",
+          },
         }),
     );
     rs.stubGlobal("fetch", fetcher);
@@ -75,14 +93,15 @@ describe("project Memory document client", () => {
 
     expect(result.pendingCount).toBe(4);
     expect(result.injectionStatus).toBe("ok");
+    expect(result.injectionAdvisory?.status).toBe("eligible");
     const [input, init] = fetcher.mock.calls[0]!;
     const url = new URL(requestURL(input), "http://local.test");
     expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory`);
-    expect(url.search).toBe("");
+    expect(url.searchParams.get("injectionContract")).toBe("advisory_v1");
     expect(init?.signal).toBe(controller.signal);
   });
 
-  test("passes only the current thread when Dream is admitted", async () => {
+  test("admits only a body-less Dream without legacy thread authority", async () => {
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
         Response.json(
@@ -93,7 +112,7 @@ describe("project Memory document client", () => {
     rs.stubGlobal("document", { cookie: "csrf_token=memory-token" });
     rs.stubGlobal("fetch", fetcher);
 
-    const result = await dreamProjectMemory(access, { threadId: "thread-1" });
+    const result = await dreamProjectMemory(access);
 
     expect(result.disposition).toBe("queued");
     const [input, init] = fetcher.mock.calls[0]!;
@@ -101,7 +120,7 @@ describe("project Memory document client", () => {
     expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory/dream`);
     expect(url.search).toBe("");
     expect(init?.method).toBe("POST");
-    expect(jsonBody(init)).toEqual({ threadId: "thread-1" });
+    expect(jsonBody(init)).toEqual({});
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("memory-token");
   });
 
@@ -163,6 +182,7 @@ describe("project Memory document client", () => {
       ...version,
       content: "# About me\n\nPrefers concise plans.",
       unifiedDiff: "@@ -1 +1 @@\n-old\n+new",
+      diffTruncated: false,
     };
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
@@ -177,16 +197,27 @@ describe("project Memory document client", () => {
     });
 
     expect(loaded.unifiedDiff).toContain("+new");
+    expect(loaded.diffTruncated).toBe(false);
     expect(restored.version).toBe(3);
     const [readInput, readInit] = fetcher.mock.calls[0]!;
     const [restoreInput, restoreInit] = fetcher.mock.calls[1]!;
     expect(new URL(requestURL(readInput), "http://local.test").pathname).toBe(
       `/api/projects/${PROJECT_ID}/memory/versions/3`,
     );
+    expect(
+      new URL(requestURL(readInput), "http://local.test").searchParams.get(
+        "responseContract",
+      ),
+    ).toBe("preview_v1");
     expect(readInit?.method).toBeUndefined();
     expect(
       new URL(requestURL(restoreInput), "http://local.test").pathname,
     ).toBe(`/api/projects/${PROJECT_ID}/memory/versions/3/restore`);
+    expect(
+      new URL(requestURL(restoreInput), "http://local.test").searchParams.get(
+        "responseContract",
+      ),
+    ).toBe("preview_v1");
     expect(restoreInit?.method).toBe("POST");
     expect(jsonBody(restoreInit)).toEqual({ expectedCurrentVersion: 4 });
   });
@@ -210,6 +241,21 @@ describe("project Memory document client", () => {
         updatedAt: TIMESTAMP,
         pendingCount: 0,
         dreamRunning: false,
+        injectionStatus: "ok",
+        injectionAdvisory: {
+          basis: "current_non_continuation",
+          status: "invalid",
+          reason: "digest_drift",
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryDocumentSchema.safeParse({
+        content: "ok",
+        version: 1,
+        updatedAt: TIMESTAMP,
+        pendingCount: 0,
+        dreamRunning: false,
         injectionStatus: "partial",
       }).success,
     ).toBe(false);
@@ -218,6 +264,56 @@ describe("project Memory document client", () => {
         ...version,
         content: "ok",
         unifiedDiff: "x".repeat(64_001),
+        diffTruncated: false,
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryVersionDetailSchema.safeParse({
+        ...version,
+        content: "ok",
+        unifiedDiff: "x".repeat(64_000),
+        diffTruncated: true,
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryVersionDetailSchema.safeParse({
+        ...version,
+        content: "ok",
+        unifiedDiff: "short diff",
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryDocumentSchema.safeParse({
+        content: "😀".repeat(16_000),
+        version: 1,
+        updatedAt: TIMESTAMP,
+        pendingCount: 0,
+        dreamRunning: false,
+        injectionStatus: "ok",
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryDocumentSchema.safeParse({
+        content: "😀".repeat(16_001),
+        version: 1,
+        updatedAt: TIMESTAMP,
+        pendingCount: 0,
+        dreamRunning: false,
+        injectionStatus: "ok",
+      }).success,
+    ).toBe(false);
+    expect(
+      memoryVersionDetailSchema.safeParse({
+        ...version,
+        content: "ok",
+        unifiedDiff: "😀".repeat(64_000),
+      }).success,
+    ).toBe(true);
+    expect(
+      memoryVersionDetailSchema.safeParse({
+        ...version,
+        content: "ok",
+        unifiedDiff: "😀".repeat(64_001),
       }).success,
     ).toBe(false);
     expect(
@@ -294,7 +390,7 @@ describe("project Memory document client", () => {
 
     await expect(getProjectMemoryVersion(access, 0)).rejects.toThrow();
     await expect(
-      dreamProjectMemory(access, { threadId: "x".repeat(65) }),
+      dreamProjectMemory(access, { threadId: "thread-1" }),
     ).rejects.toThrow();
     await expect(
       listProjectMemoryVersions(access, { limit: 101, offset: 0 }),
@@ -314,7 +410,7 @@ describe("project Memory document client", () => {
     };
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        Response.json({ items: [episode] }),
+        Response.json({ items: [episode], nextCursor: null }),
     );
     rs.stubGlobal("fetch", fetcher);
 
@@ -323,7 +419,6 @@ describe("project Memory document client", () => {
       {
         q: "deployment",
         tags: ["durable", "permanent"],
-        before: TIMESTAMP,
         limit: 20,
       },
       controller.signal,
@@ -335,7 +430,8 @@ describe("project Memory document client", () => {
     expect(url.pathname).toBe(`/api/projects/${PROJECT_ID}/memory/episodes`);
     expect(url.searchParams.get("q")).toBe("deployment");
     expect(url.searchParams.getAll("tags")).toEqual(["durable", "permanent"]);
-    expect(url.searchParams.get("before")).toBe(TIMESTAMP);
+    expect(url.searchParams.get("cursor")).toBeNull();
+    expect(url.searchParams.get("pagination")).toBe("keyset_v1");
     expect(url.searchParams.get("limit")).toBe("20");
     expect(init?.signal).toBe(controller.signal);
     expect(
@@ -358,7 +454,7 @@ describe("project Memory document client", () => {
   test("rejects out-of-contract archive inputs and responses", async () => {
     const fetcher = rs.fn(
       async (_input: RequestInfo | URL, _init?: RequestInit) =>
-        Response.json({ items: [] }),
+        Response.json({ items: [], nextCursor: null }),
     );
     rs.stubGlobal("fetch", fetcher);
 
@@ -373,6 +469,13 @@ describe("project Memory document client", () => {
     ).rejects.toThrow();
     await expect(
       listProjectMemoryEpisodes(access, { limit: 51 }),
+    ).rejects.toThrow();
+    await expect(
+      listProjectMemoryEpisodes(access, {
+        q: "deployment",
+        cursor: "opaque-cursor",
+        limit: 20,
+      }),
     ).rejects.toThrow();
     expect(fetcher).not.toHaveBeenCalled();
 

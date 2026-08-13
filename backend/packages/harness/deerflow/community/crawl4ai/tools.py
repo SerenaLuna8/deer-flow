@@ -1,7 +1,9 @@
 import logging
 
 from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
 
+from deerflow.community.errors import CommunityToolError, community_error_json, no_results_json
 from deerflow.community.url_safety import validate_public_http_url
 from deerflow.config import get_app_config
 
@@ -100,18 +102,54 @@ async def web_fetch_tool(url: str) -> str:
     try:
         cfg = _get_tool_config("web_fetch")  # read config once; pass the values down
         allow_private_addresses = _coerce_bool(cfg.get("allow_private_addresses") if cfg is not None else None, False)
+        # Crawl4AI is commonly self-hosted inside the deployment, so this is a
+        # delegated local fetch and requires DNS-aware SSRF validation.
         url_error = validate_public_http_url(url, allow_private_addresses=allow_private_addresses)
         if url_error:
-            return url_error
+            return community_error_json(
+                CommunityToolError(
+                    provider="crawl4ai",
+                    code="url_not_public",
+                    message="Only public http(s) URLs may be fetched",
+                    retryable=False,
+                ),
+                query=url,
+            )
         filter_mode = _coerce_filter(cfg.get("filter") if cfg is not None else None)
         client = _build_client(cfg)
         markdown = await client.fetch_markdown(url, filter_mode=filter_mode)
 
-        if markdown.startswith("Error:"):
-            return markdown
-
+        if not markdown.strip():
+            return no_results_json(
+                provider="crawl4ai",
+                query=url,
+                message="No content found",
+            )
         return markdown[:4096]
 
-    except Exception as e:
-        logger.error(f"Error in web_fetch_tool: {e}")
-        return f"Error: {str(e)}"
+    except GraphBubbleUp:
+        raise
+    except CommunityToolError as error:
+        return community_error_json(error, query=url)
+    except (FileNotFoundError, TypeError, ValueError) as error:
+        logger.error("Crawl4AI configuration failed; provider_error_type=%s", type(error).__name__)
+        return community_error_json(
+            CommunityToolError(
+                provider="crawl4ai",
+                code="configuration_error",
+                message="Crawl4AI is not configured correctly",
+                retryable=False,
+            ),
+            query=url,
+        )
+    except Exception as error:
+        logger.error("Crawl4AI tool failed; provider_error_type=%s", type(error).__name__)
+        return community_error_json(
+            CommunityToolError(
+                provider="crawl4ai",
+                code="provider_unavailable",
+                message="Crawl4AI is temporarily unavailable",
+                retryable=True,
+            ),
+            query=url,
+        )

@@ -16,6 +16,7 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.final_schema_digest import M7_CANONICAL_SCHEMA_DIGEST
 
 FINAL_APP_TABLES = frozenset(Base.metadata.tables)
+COMMENTED_ROOT_TABLES = FINAL_APP_TABLES | {"alembic_version"}
 LANGGRAPH_TABLES = frozenset(
     {
         "checkpoint_blobs",
@@ -64,6 +65,7 @@ REQUIRED_FUNCTIONS = frozenset(
         "enforce_stream_terminal_invariant",
         "ensure_run_events_month_partition",
         "ensure_system_binding_published_version",
+        "enforce_system_skill_version_revocation",
         "prevent_bound_published_version_downgrade",
         "prevent_memory_document_sections_mutation",
         "prevent_published_version_child_mutation",
@@ -101,32 +103,53 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=83,
-        digest="8cb3f55937d847107e1fc5ff63723b8677553cf415704bdbcef1c2546b936182",
+        count=84,
+        digest="ecb90025be6b347c48da90c87fd51ea974a1f213f8b1766f589a6369379766c7",
     ),
     "columns": CatalogInvariant(
-        count=1005,
-        digest="34440c7de2049d5c8dc918a7d37f28b9d6dbe347789997ca6ec66a6828d4b590",
+        count=1030,
+        digest="246ffe739435eff956c7f4337ae8cfb9f49e88faf7e39e6a670a367b1720644f",
+    ),
+    "table_comments": CatalogInvariant(
+        count=85,
+        digest="6862ef91cc007c76af51b93988096424b2fce9d4e95da50c2bb6021a1beecb5f",
+    ),
+    "column_comments": CatalogInvariant(
+        count=1031,
+        digest="e73eca67df9f92a562edfba918bc802b078750ede9c76b251ce12e232f38e8ab",
     ),
     "sequences": CatalogInvariant(
         count=2,
         digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=724,
-        digest="b314324e9c33104bb94e979459ce711e747f7b9a104f705fef957e321c06a4f2",
+        count=753,
+        digest="681c93ae20561973c6088e3584cc923ba662d62898596a7c69dd9a58c5cf7275",
     ),
     "indexes": CatalogInvariant(
-        count=284,
-        digest="ae895f7b29365c9978c3b54ba904bd67bcd8fc9b64f58eec5f6975e8b0e7aace",
+        count=290,
+        digest="01563bf3997bd02ae415bfacc2746a4a44581d8e9f76c1b6b70e3971ff0872e5",
     ),
     "functions": CatalogInvariant(
-        count=20,
-        digest="4fe2de99b635074c5cd85b66e4eaab45339a49f9db4423863adda23fd97210ea",
+        count=21,
+        digest="8ceff26ea07e6587f4c96e8619e2f25995d5f624fefe884f74fc040c847277d5",
     ),
     "triggers": CatalogInvariant(
-        count=86,
-        digest="e8bd02aac4c6beff2dbce3648fac0807db23164fbb94cc2854ee9ff437794731",
+        count=88,
+        digest="25f62ad0015251d0182bf1ca44476294a28ce8c17230219a9bd0e060129e1e99",
+    ),
+}
+
+# LangGraph owns these tables and creates them after the application snapshot,
+# so their comment signature is verified separately from the static catalog.
+LANGGRAPH_COMMENT_SIGNATURE: dict[str, CatalogInvariant] = {
+    "table_comments": CatalogInvariant(
+        count=6,
+        digest="0b4ff5f97c99f81e24deb8153b448cfffff31e714ed5653206c5f2cef0e526c3",
+    ),
+    "column_comments": CatalogInvariant(
+        count=31,
+        digest="703ea631289a62bf4ab94e0629eee646098d03528df0ed2a2e5e3e890e65a2c9",
     ),
 }
 
@@ -172,6 +195,26 @@ _CATALOG_QUERIES = {
         LEFT JOIN pg_collation coll ON coll.oid=a.attcollation
         WHERE n.nspname=current_schema()
           AND c.relname = ANY(CAST(:app_tables AS text[]))
+          AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY c.relname, a.attnum
+    """,
+    "table_comments": """
+        SELECT c.relname,
+               COALESCE(obj_description(c.oid, 'pg_class'), '')
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=current_schema()
+          AND c.relname = ANY(CAST(:comment_tables AS text[]))
+        ORDER BY c.relname
+    """,
+    "column_comments": """
+        SELECT c.relname, a.attnum, a.attname,
+               COALESCE(col_description(c.oid, a.attnum), '')
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid=a.attrelid
+        JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname=current_schema()
+          AND c.relname = ANY(CAST(:comment_tables AS text[]))
           AND a.attnum > 0 AND NOT a.attisdropped
         ORDER BY c.relname, a.attnum
     """,
@@ -268,6 +311,7 @@ async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, Ca
 
     parameters = {
         "app_tables": sorted(FINAL_APP_TABLES),
+        "comment_tables": sorted(COMMENTED_ROOT_TABLES),
         "app_sequences": sorted(name for name, _owner in FINAL_APP_SEQUENCES),
         "required_functions": sorted(REQUIRED_FUNCTIONS),
     }
@@ -283,7 +327,61 @@ async def verify_m7_catalog(connection: AsyncConnection) -> bool:
     """Return whether all current catalog invariants match exactly."""
 
     signature = await read_m7_catalog_signature(connection)
-    return signature == FINAL_M7_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection)
+    return signature == FINAL_M7_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection) and await _langgraph_comments_are_valid(connection)
+
+
+async def _langgraph_comments_are_valid(connection: AsyncConnection) -> bool:
+    """Require comments whenever the optional third-party schema is present."""
+
+    table_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT relation.relname,
+                          obj_description(relation.oid, 'pg_class')
+                     FROM pg_class relation
+                     JOIN pg_namespace namespace
+                       ON namespace.oid=relation.relnamespace
+                    WHERE namespace.nspname=current_schema()
+                      AND relation.relkind IN ('r', 'p')
+                      AND relation.relname=ANY(CAST(:tables AS text[]))
+                    ORDER BY relation.relname"""
+            ),
+            {"tables": sorted(LANGGRAPH_TABLES)},
+        )
+    )
+    if not table_rows:
+        return True
+    table_signature = CatalogInvariant(
+        count=len(table_rows),
+        digest=_rows_digest(tuple(tuple(row) for row in table_rows)),
+    )
+    if table_signature != LANGGRAPH_COMMENT_SIGNATURE["table_comments"]:
+        return False
+
+    column_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT relation.relname, attribute.attname,
+                          col_description(relation.oid, attribute.attnum)
+                     FROM pg_class relation
+                     JOIN pg_namespace namespace
+                       ON namespace.oid=relation.relnamespace
+                     JOIN pg_attribute attribute
+                       ON attribute.attrelid=relation.oid
+                    WHERE namespace.nspname=current_schema()
+                      AND relation.relname=ANY(CAST(:tables AS text[]))
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                    ORDER BY relation.relname, attribute.attnum"""
+            ),
+            {"tables": sorted(LANGGRAPH_TABLES)},
+        )
+    )
+    column_signature = CatalogInvariant(
+        count=len(column_rows),
+        digest=_rows_digest(tuple(tuple(row) for row in column_rows)),
+    )
+    return column_signature == LANGGRAPH_COMMENT_SIGNATURE["column_comments"]
 
 
 _RUN_EVENT_PARTITION_NAME = re.compile(r"run_events_p(?P<month>[0-9]{6})\Z")
@@ -363,6 +461,60 @@ async def _run_event_partition_catalog_is_valid(connection: AsyncConnection) -> 
             return False
         if start != datetime.strptime(name_match.group("month"), "%Y%m").replace(tzinfo=UTC) or end != _next_utc_month(start):
             return False
+
+    parent_table_comment = await connection.scalar(text("SELECT obj_description('run_events'::regclass, 'pg_class')"))
+    parent_column_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT attribute.attname,
+                          col_description(attribute.attrelid, attribute.attnum)
+                     FROM pg_attribute attribute
+                    WHERE attribute.attrelid='run_events'::regclass
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                    ORDER BY attribute.attnum"""
+            )
+        )
+    )
+    if not isinstance(parent_table_comment, str) or not parent_table_comment.strip():
+        return False
+    if not parent_column_rows or any(not isinstance(comment, str) or not comment.strip() for _column_name, comment in parent_column_rows):
+        return False
+    child_comment_rows = tuple(
+        await connection.execute(
+            text(
+                """SELECT child.relname,
+                          obj_description(child.oid, 'pg_class'),
+                          attribute.attname,
+                          col_description(child.oid, attribute.attnum)
+                     FROM pg_inherits inheritance
+                     JOIN pg_class parent ON parent.oid=inheritance.inhparent
+                     JOIN pg_class child ON child.oid=inheritance.inhrelid
+                     JOIN pg_namespace namespace ON namespace.oid=child.relnamespace
+                     JOIN pg_attribute attribute ON attribute.attrelid=child.oid
+                    WHERE parent.oid='run_events'::regclass
+                      AND namespace.nspname=current_schema()
+                      AND attribute.attnum > 0
+                      AND NOT attribute.attisdropped
+                    ORDER BY child.relname, attribute.attnum"""
+            )
+        )
+    )
+    child_comments: dict[str, tuple[str, list[tuple[str, str]]]] = {}
+    for child_value, table_comment, column_value, column_comment in child_comment_rows:
+        if not isinstance(table_comment, str) or not isinstance(column_comment, str):
+            return False
+        child_name = str(child_value)
+        existing_table_comment, columns = child_comments.setdefault(
+            child_name,
+            (table_comment, []),
+        )
+        if existing_table_comment != table_comment:
+            return False
+        columns.append((str(column_value), column_comment))
+    expected_columns = tuple((str(column_name), str(comment)) for column_name, comment in parent_column_rows)
+    if set(child_comments) != child_names or any(table_comment != parent_table_comment or tuple(columns) != expected_columns for table_comment, columns in child_comments.values()):
+        return False
 
     trigger_rows = tuple(
         await connection.execute(
@@ -661,11 +813,13 @@ def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
 __all__ = [
     "CatalogInvariant",
     "ALEMBIC_INDEXES",
+    "COMMENTED_ROOT_TABLES",
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
     "FINAL_M7_CATALOG_SIGNATURE",
     "M7_CANONICAL_SCHEMA_DIGEST",
     "LANGGRAPH_INDEXES",
+    "LANGGRAPH_COMMENT_SIGNATURE",
     "LANGGRAPH_ROOT_OBJECTS",
     "LANGGRAPH_SEQUENCES",
     "LANGGRAPH_TABLES",

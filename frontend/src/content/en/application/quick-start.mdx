@@ -26,11 +26,11 @@ make check
 
 <Steps>
 
-### Clone and install
+### Open the private checkout and install
+
+Obtain the source through the private project's approved internal distribution channel, enter the repository root, and run:
 
 ```bash
-git clone https://github.com/SerenaLuna8/deer-flow.git
-cd deer-flow
 make install
 ```
 
@@ -74,7 +74,7 @@ After the first platform administrator signs in, create a System Credential
 under **Admin → Assets → Credentials**, then configure and activate the default
 model under **Admin → System Settings → Models**.
 - Worker with no public port
-- Scheduler with no public port only when `scheduler.enabled=true`
+- Scheduler with no public port (polling is controlled by platform `automations.enabled`)
 
 ### Stop
 

@@ -144,7 +144,6 @@ export function ProjectCredentialCatalogView({
   onMigrate,
   onRevoke,
   onDelete,
-  renderDetails,
 }: {
   data: ProjectCredentialList;
   pending?: boolean;
@@ -153,7 +152,6 @@ export function ProjectCredentialCatalogView({
   onMigrate?: (credential: ProjectCredentialItem) => void;
   onRevoke?: (credential: ProjectCredentialItem) => void;
   onDelete?: (credential: ProjectCredentialItem) => void;
-  renderDetails?: (credential: ProjectCredentialItem) => React.ReactNode;
 }) {
   const { locale, t } = useI18n();
   const [source, setSource] = useState<"system" | "project">(() =>
@@ -320,7 +318,6 @@ export function ProjectCredentialCatalogView({
                         </div>
                       </div>
                     )}
-                    {renderDetails?.(credential)}
                   </CardContent>
                 </Card>
               ))}
@@ -515,42 +512,6 @@ function useSecureProjectCredentialWrite(accountId: string, projectId: string) {
   };
 }
 
-function CredentialHistory({
-  accountId,
-  projectId,
-  credential,
-}: {
-  accountId: string;
-  projectId: string;
-  credential: ProjectCredentialItem;
-}) {
-  const { t } = useI18n();
-  const history = useProjectAssetVersions(
-    accountId,
-    projectId,
-    "credentials",
-    credential.id,
-  );
-  return (
-    <div className="border-border/70 border-t pt-4">
-      <h3 className="mb-3 text-sm font-semibold">
-        {t.adminAssets.common.versionHistory}
-      </h3>
-      {history.isLoading ? (
-        <Skeleton className="h-16 w-full" />
-      ) : history.error ? (
-        <ErrorNotice error={history.error} />
-      ) : (
-        <AssetVersionHistory
-          kind="credentials"
-          scope="project"
-          versions={history.data?.data ?? []}
-        />
-      )}
-    </div>
-  );
-}
-
 export function ProjectCredentialsWorkspace({
   accountId,
   projectId,
@@ -628,15 +589,6 @@ export function ProjectCredentialsWorkspace({
             createCredentialDeleteSnapshot(credential, Date.now()),
           );
         }}
-        renderDetails={(credential) =>
-          projectCredentialShowsHistory(credential) ? (
-            <CredentialHistory
-              accountId={accountId}
-              projectId={projectId}
-              credential={credential}
-            />
-          ) : null
-        }
       />
       <CredentialSecretDialog
         mode="create"

@@ -2,7 +2,7 @@
 
 import { useQueryClient } from "@tanstack/react-query";
 import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   CreateAssetDialog,
@@ -40,6 +40,7 @@ import {
   projectCredentialCanDelete,
   projectCredentialShowsHistory,
 } from "@/components/projects/assets/project-assets-page";
+import { SystemAssetSection } from "@/components/projects/assets/system-asset-section";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -72,6 +73,8 @@ import {
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
 import { cn } from "@/lib/utils";
+
+import { AdminProjectSystemBindingDialog } from "./admin-project-system-binding-dialog";
 
 type MutableKind = Exclude<AssetListKind, "credentials">;
 type VersionedKind = Exclude<MutableKind, "agents">;
@@ -497,6 +500,17 @@ function AdminProjectAssetDirectory({
   );
 }
 
+export function adminProjectSystemSkillItems(
+  data: ProjectAssetList,
+  kind: MutableKind,
+): ProjectAssetItem[] {
+  return kind === "skills"
+    ? data.system_items.filter(
+        (item) => item.scope === "system" && item.project_id === null,
+      )
+    : [];
+}
+
 function AdminProjectCredentialDirectory({
   actions,
   data,
@@ -648,6 +662,7 @@ function MutableAdminProjectAssets({
   const [selectedProjectAssetId, setSelectedProjectAssetId] = useState<
     string | null
   >(null);
+  const [bindingAssetId, setBindingAssetId] = useState<string | null>(null);
   const selectedProjectAssetTriggerRef = useRef<HTMLButtonElement>(null);
   const selectedProjectAssetDetailRef = useAdminProjectDetailFocus(
     selectedProjectAssetId,
@@ -659,6 +674,18 @@ function MutableAdminProjectAssets({
   useEffect(() => {
     if (createVersion.isSuccess) setVersionAsset(null);
   }, [createVersion.isSuccess]);
+  const bindingItem = useMemo(() => {
+    const current = query.data as ProjectAssetList | undefined;
+    if (!current || kind !== "skills" || !bindingAssetId) return null;
+    return (
+      current.system_items.find((item) => item.id === bindingAssetId) ?? null
+    );
+  }, [bindingAssetId, kind, query.data]);
+  useEffect(() => {
+    if (bindingAssetId && query.data && !bindingItem) {
+      setBindingAssetId(null);
+    }
+  }, [bindingAssetId, bindingItem, query.data]);
 
   if (query.isLoading) return <AdminProjectDirectorySkeleton />;
   if (query.error || !query.data) {
@@ -692,6 +719,12 @@ function MutableAdminProjectAssets({
         null);
   return (
     <>
+      {kind === "skills" ? (
+        <SystemAssetSection
+          items={adminProjectSystemSkillItems(data, kind)}
+          onManageBinding={(item) => setBindingAssetId(item.id)}
+        />
+      ) : null}
       <AdminProjectAssetDirectory
         kind={kind}
         data={data}
@@ -785,6 +818,19 @@ function MutableAdminProjectAssets({
           onSubmit={(input: VersionAuthoringInput) =>
             createVersion.mutate({ assetId: versionAsset.id, input })
           }
+        />
+      ) : null}
+      {kind === "skills" && bindingItem ? (
+        <AdminProjectSystemBindingDialog
+          accountId={accountId}
+          projectId={projectId}
+          kind="skills"
+          item={bindingItem}
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setBindingAssetId(null);
+          }}
+          onConflict={() => void query.refetch()}
         />
       ) : null}
     </>

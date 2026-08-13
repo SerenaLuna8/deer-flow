@@ -54,6 +54,13 @@ export function useReplaceAdminSystemSettingsSection(accountId: string) {
               request.input,
               signal,
             );
+          case "automations":
+            return replaceAdminSystemSettingsSection(
+              parsed,
+              request.section,
+              request.input,
+              signal,
+            );
           case "memory_document":
             return replaceAdminSystemSettingsSection(
               parsed,

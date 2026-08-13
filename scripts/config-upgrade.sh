@@ -125,6 +125,10 @@ MIGRATIONS = {
         'description': 'Replace exact project MCP endpoints with bounded CIDR network policy',
         'migrate_mcp_endpoint_policy': True,
     },
+    38: {
+        'description': 'Move Automation scheduler policy to PostgreSQL system settings',
+        'remove_keys': ['scheduler'],
+    },
     # Future migrations go here:
     # 2: {
     #     'description': '...',

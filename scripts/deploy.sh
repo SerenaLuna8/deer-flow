@@ -290,20 +290,6 @@ detect_sandbox_mode() {
     fi
 }
 
-detect_scheduler_enabled() {
-    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "false"; return; }
-    awk '
-        /^[[:space:]]*scheduler:[[:space:]]*$/ { in_scheduler=1; next }
-        in_scheduler && /^[^[:space:]#]/ { in_scheduler=0 }
-        in_scheduler && /^[[:space:]]*enabled:[[:space:]]*/ {
-            line=$0; sub(/^[[:space:]]*enabled:[[:space:]]*/, "", line)
-            sub(/[[:space:]]*#.*/, "", line); gsub(/["\047[:space:]]/, "", line)
-            print (tolower(line)=="true" ? "true" : "false"); exit
-        }
-        END { if (!in_scheduler) {} }
-    ' "$DEER_FLOW_CONFIG_PATH" | head -n 1 | grep -E '^(true|false)$' || echo "false"
-}
-
 # ── down ──────────────────────────────────────────────────────────────────────
 
 if [ "$CMD" = "down" ]; then
@@ -355,16 +341,9 @@ echo -e "${BLUE}Sandbox mode: $sandbox_mode${NC}"
 
 echo -e "${BLUE}Runtime: Gateway admission API + independent Worker execution${NC}"
 
-services="frontend gateway worker nginx"
-
-scheduler_enabled="$(detect_scheduler_enabled)"
-if [ "$scheduler_enabled" = "true" ]; then
-    COMPOSE_CMD+=(--profile scheduler)
-    services="$services scheduler"
-    echo -e "${BLUE}Scheduler enabled${NC}"
-else
-    echo -e "${BLUE}Scheduler disabled${NC}"
-fi
+services="frontend gateway worker nginx scheduler"
+COMPOSE_CMD+=(--profile scheduler)
+echo -e "${BLUE}Scheduler profile enabled (polling is controlled in platform settings)${NC}"
 
 if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"

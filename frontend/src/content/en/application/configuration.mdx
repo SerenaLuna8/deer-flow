@@ -7,7 +7,9 @@ description: Configure the final project-scoped ActWeave application.
 
 Infrastructure configuration lives in the repository-root `config.yaml` plus
 process/tool environment variables. Copy `config.example.yaml`, then configure
-PostgreSQL, sandbox, authentication, Worker and optional Scheduler settings.
+PostgreSQL, sandbox, authentication, and Worker settings.
+Scheduler process presence is still operator-owned; Automation polling,
+concurrency, and one-time delay live in PostgreSQL at `/admin/settings/system`.
 Model definitions are not accepted from YAML: after startup, a system
 administrator configures their versioned provider settings and encrypted
 Credentials at `/admin/settings/models`.

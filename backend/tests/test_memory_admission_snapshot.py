@@ -576,10 +576,18 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         def __init__(self, _session) -> None:
             pass
 
-        async def touch_activity(self, *, scope, thread_id, occurred_at):
+        async def touch_activity(
+            self,
+            *,
+            scope,
+            thread_id,
+            occurred_at,
+            thread_kind,
+        ):
             assert scope == context.resource_scope
             assert thread_id == run.thread_id
             assert occurred_at == run.created_at
+            assert thread_kind == "chat"
             events.append("activity")
             return True
 
@@ -679,9 +687,143 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         "policy",
         "policy_snapshot",
         "model:lead",
+        "model:title",
         "memory",
         "activity",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_admission_freezes_catalog_default_title_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    admitted: list[tuple[str, str]] = []
+    now = datetime.now(UTC)
+    context = _context()
+    thread_id = str(uuid.uuid4())
+    run = PrivateRunRecord(
+        run_id=str(uuid.uuid4()),
+        thread_id=thread_id,
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        assistant_id=None,
+        status="pending",
+        multitask_strategy="reject",
+        metadata={},
+        kwargs={},
+        origin_trace_id="a" * 32,
+        error=None,
+        model_name=None,
+        created_at=now,
+        updated_at=now,
+    )
+
+    class Session:
+        def in_transaction(self) -> bool:
+            return True
+
+        def add_all(self, values) -> None:
+            tuple(values)
+
+        async def flush(self) -> None:
+            return None
+
+    class Runs:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def create(self, **_kwargs):
+            return run
+
+        async def update_admitted_execution_profile(self, **_kwargs):
+            return True
+
+        async def get(self, **_kwargs):
+            return run
+
+    class Threads:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def touch_activity(self, **_kwargs):
+            return True
+
+    class RuntimePolicy:
+        async def lock_agent_runtime_for_admission(self, _session):
+            return _policy()
+
+        async def admit_run_snapshot(self, _session, **_kwargs):
+            return None
+
+    class Models:
+        async def admit_model_snapshot(self, _session, *, purpose, model_ref, **_kwargs):
+            admitted.append((purpose, model_ref))
+            return SimpleNamespace(
+                logical_name="catalog-default" if model_ref == "default" else model_ref,
+                provider_adapter="openai",
+                supports_thinking=False,
+                supports_reasoning_effort=False,
+                supports_vision=False,
+            )
+
+    monkeypatch.setattr(snapshot_module, "AsyncSession", Session)
+    monkeypatch.setattr(snapshot_module, "PrivateRunRepository", Runs)
+    monkeypatch.setattr(
+        snapshot_module,
+        "PrivateThreadRepository",
+        Threads,
+        raising=False,
+    )
+    repository = RunSnapshotRepository(
+        lambda: None,
+        model_catalog=Models(),
+        runtime_policy=RuntimePolicy(),
+    )
+
+    async def validate_closure(*_args, **_kwargs):
+        return [], [], {}, {}
+
+    async def admit_memory(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(
+        repository,
+        "validate_agent_closure_in_session",
+        validate_closure,
+    )
+    monkeypatch.setattr(
+        repository,
+        "_admit_memory_context_snapshot",
+        admit_memory,
+    )
+    agent = ResolvedAgentSnapshot(
+        kind=AssetKind.AGENT,
+        scope=AssetScope.PROJECT,
+        asset_id=uuid.uuid4(),
+        version_id=uuid.uuid4(),
+        checksum="b" * 64,
+        catalog_generation=1,
+        dependency_version_ids=(),
+        payload=AgentPayload(
+            description="",
+            soul="",
+            model_ref="lead-model",
+            tool_groups=(),
+            skill_version_ids=(),
+            mcp_version_ids=(),
+        ),
+    )
+
+    await repository.create_run_with_snapshot_in_session(
+        Session(),
+        context,
+        thread_id,
+        PrivateRunCreate(run_id=run.run_id),
+        agent,
+    )
+
+    assert ("lead", "lead-model") in admitted
+    assert ("title", "default") in admitted
 
 
 @pytest.mark.asyncio
@@ -881,6 +1023,7 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                 now=datetime.now(UTC),
             )
             assert reset.snapshots == 1
+            assert reset.affected_project_ids == (uuid.UUID(scope.project_id),)
 
         async with seed.factory() as session:
             assert (

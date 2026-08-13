@@ -1,4 +1,4 @@
-"""U3: project MCP Run-level session reuse.
+"""Project MCP Run-level session reuse.
 
 Acceptance pins from the upgrade plan:
 
@@ -503,7 +503,9 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     from app.private_work.run_admission import PrivateRunAdmissionService
     from app.private_work.run_repository import PrivateRunCreate
     from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+    from app.shared_assets.agent_payload_checksum import agent_payload_checksum
     from app.shared_assets.keyring import CredentialKeyring
+    from app.shared_assets.models import AgentPayload
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
 
@@ -579,6 +581,16 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     mcp_version_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     agent_version_id = uuid.uuid4()
+    agent_checksum = agent_payload_checksum(
+        AgentPayload(
+            description="",
+            soul="mcp run agent",
+            model_ref="test-model",
+            tool_groups=(),
+            skill_version_ids=(),
+            mcp_version_ids=(mcp_version_id,),
+        )
+    )
     try:
         async with seed.factory() as session, session.begin():
             await session.execute(
@@ -638,7 +650,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 {
                     "id": agent_version_id,
                     "agent_id": agent_id,
-                    "checksum": "e" * 64,
+                    "checksum": agent_checksum,
                     "owner": str(seed.owner_a.user_id),
                 },
             )

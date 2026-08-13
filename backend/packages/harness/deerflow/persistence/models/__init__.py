@@ -45,6 +45,7 @@ from deerflow.persistence.notifications import UserNotificationRow
 from deerflow.persistence.private_work import (
     MemoryDocumentRow,
     MemoryDocumentVersionRow,
+    MemoryDreamPrepareRunRow,
     MemoryDreamRunRow,
     MemoryEpisodeRow,
     MemoryHistoryEntryRow,
@@ -148,6 +149,7 @@ __all__ = [
     "McpToolDiscoveryAttemptRow",
     "MemoryDocumentRow",
     "MemoryDocumentVersionRow",
+    "MemoryDreamPrepareRunRow",
     "MemoryDreamRunRow",
     "MemoryEpisodeRow",
     "MemoryHistoryEntryRow",

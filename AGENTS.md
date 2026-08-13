@@ -1,155 +1,107 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth.
+This file is the repository-level guide for coding agents. Keep it short and
+navigational. Module-specific architecture and invariants belong to:
 
-It is the **monorepo orientation layer**: it maps the whole repo and points to the
-module guides that own the depth. Keep it navigational — runtime, authorization,
-persistence, and UI invariants belong in the module guide that owns them, not here.
-For anything inside a module, read that module's guide rather than expecting full detail here:
+- [backend/AGENTS.md](backend/AGENTS.md) — runtime, authorization, persistence,
+  configuration, assets, and backend tests.
+- [frontend/AGENTS.md](frontend/AGENTS.md) — routes, client scope, data flow,
+  UI ownership, and frontend tests.
 
-- **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
-  middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/schema initialization,
-  runtime and authorization boundaries, config system, test layout.
-- **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
-  final route model, thread/streaming data flow, cache isolation, code style, commands.
+For setup and operator-facing usage, read [README.md](README.md) and
+[Install.md](Install.md).
 
-> **Naming boundary** — these three repository `AGENTS.md` files are development-time guidance
-> for coding agents. They are never packaged, never shipped, and never read by ActWeave at
-> runtime. They are unrelated to the product feature of the same name: a project Agent's
-> `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are logical documents backed by columns
-> on the immutable Agent version row. The same distinction separates `skills/public/*/SKILL.md`
-> (packaged runtime assets) from any local coding-agent skill directory.
+> The three repository `AGENTS.md` files are development-time guidance only.
+> They are not packaged or read by ActWeave at runtime. A project Agent's
+> `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are immutable database
+> fields, not these filesystem guides. Likewise, `skills/public/*/SKILL.md`
+> contains runtime Skill assets; local coding-agent skills do not.
 
-## What is ActWeave
+## System overview
 
-ActWeave is a LangGraph-based AI super-agent system with a full-stack architecture. The
-backend runs a "super agent" with sandboxed execution, persistent memory, subagent
-delegation, and extensible tools (built-in, MCP, community), all per-thread isolated. The
-frontend is a Next.js chat UI. External IM platforms (Feishu, Slack, Telegram, Discord,
-DingTalk) bridge into the same agent through the Gateway.
+ActWeave is a project-first full-stack agent system. Nginx is the single browser
+entry, Gateway owns HTTP admission and authorization, Worker alone executes
+Agent graphs, and Scheduler only admits due Automations.
 
-## Service Topology
+| Service     |   Port | Responsibility                                              |
+| ----------- | -----: | ----------------------------------------------------------- |
+| Nginx       | `2026` | Public entry; frontend plus `/api/*` proxy                  |
+| Frontend    | `3000` | Next.js web UI                                              |
+| Gateway     | `8001` | Auth, project/admin APIs, Run admission, durable SSE replay |
+| Worker      |      — | Sole Agent-graph executor and job worker                    |
+| Scheduler   |      — | Optional Automation admission process                       |
+| Provisioner | `8002` | Optional Kubernetes Sandbox control service                 |
 
-A single `make dev` / Docker stack runs the following cooperating processes and services:
+Gateway never executes an Agent graph. Worker exposes no browser business API.
+Provisioner is a Sandbox provider, not a Kubernetes deployment target for the
+complete application.
 
-| Service         | Port   | Role                                                                 |
-| --------------- | ------ | ------------------------------------------------------------------- |
-| **Nginx**       | `2026` | Unified reverse-proxy entry point — open this in the browser        |
-| **Gateway API** | `8001` | FastAPI project/account/admin REST API                              |
-| **Frontend**    | `3000` | Next.js web interface                                               |
-| **Worker**      | —      | Required Agent-graph executor; no public port                       |
-| **Scheduler**   | —      | Optional Automation admission process; no public port               |
-| **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
+## Repository map
 
-Nginx is the single public entry: it serves the frontend and proxies `/api/*` directly to
-Gateway REST routers. Gateway owns authentication, project/admin APIs, Run admission, and
-durable SSE replay but never executes an Agent graph; Worker is the only graph executor;
-Scheduler only admits due Automations. See [backend/AGENTS.md](backend/AGENTS.md) for the
-runtime, authorization, and router detail.
+| Path                        | Owner                                                             |
+| --------------------------- | ----------------------------------------------------------------- |
+| `backend/app/`              | Gateway, Worker, Scheduler, and application domains               |
+| `backend/packages/harness/` | Agent harness, tools, sandbox, and persistence primitives         |
+| `frontend/`                 | Next.js application and browser tests                             |
+| `docker/`                   | Compose, Nginx, and optional Sandbox Provisioner                  |
+| `skills/public/`            | Sole source of packaged System Skill definitions                  |
+| `scripts/`                  | Setup, diagnostics, local runtime, and Compose deployment helpers |
+| `backend/docs/`             | Current backend architecture, API, and operations references      |
+| `config.example.yaml`       | Root runtime configuration template                               |
 
-## Repository Map
+Runtime configuration is resolved from the repository-root `config.yaml` (or an
+explicit `DEER_FLOW_CONFIG_PATH`). PostgreSQL is the authority for application
+metadata, project/private state, jobs, streams, checkpoints, audit, and governed
+asset versions. System model, runtime, authentication, Memory-template, and
+quota policies are administered in PostgreSQL, not duplicated in YAML.
 
-```
-deer-flow/
-├── Makefile                        # Root orchestration: drives the full stack (dev/start/stop, docker, setup)
-├── config.example.yaml             # Template → copy to config.yaml (gitignored) at repo root
-├── backend/                        # Python backend — see backend/AGENTS.md
-│   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint)
-│   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
-│   └── app/                        # Gateway, Worker, Scheduler + business domains (import: app.*)
-├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
-├── docker/                         # docker-compose files, nginx config, provisioner
-├── deploy/helm/                    # Kubernetes/Helm resources
-├── skills/public/                  # Sole source of packaged System Skill definitions
-├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
-└── docs/                           # Cross-cutting docs, plans, and design notes
-```
+Fresh schema installation and explicit upgrades are separate operator actions.
+The runtime never creates, upgrades, stamps, or repairs the application schema;
+see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 
-Runtime config lives at the **repo root**: copy `config.example.yaml` to `config.yaml`.
-`DATABASE_URL` is the only application persistence connection — PostgreSQL owns application
-data, checkpoints, stores, durable jobs, streams, quotas, and audit records. Model definitions,
-Agent runtime policy, Memory document templates, auth policy, project-quota defaults, and provider Credentials are
-PostgreSQL system settings managed by a system admin under `/admin/settings/*`; they are not
-`config.yaml` keys and not ambient process environment variables.
+## Command boundary
 
-[backend/AGENTS.md](backend/AGENTS.md) owns the config schema and resolution order, `.env`
-handling, and the PostgreSQL schema lifecycle — including `make setup-db` for fresh installs,
-the exact schema marker, and the explicit `make upgrade-db` migration chain for existing
-databases.
+Run whole-application commands from the repository root:
 
-## Commands: Root vs. Module
+| Command                   | Purpose                                                           |
+| ------------------------- | ----------------------------------------------------------------- |
+| `make setup`              | Interactive local setup                                           |
+| `make doctor`             | Check tools, configuration, and database readiness                |
+| `make install`            | Install backend and frontend dependencies                         |
+| `make setup-db`           | Initialize a new empty PostgreSQL target                          |
+| `make upgrade-db`         | Explicitly upgrade a known older schema after backup              |
+| `make check-db`           | Read-only schema/readiness check                                  |
+| `make upgrade-system-assets` | Apply packaged System Asset releases during maintenance        |
+| `make dev` / `make start` | Start the local full stack                                        |
+| `make stop`               | Stop local services                                               |
+| `make up` / `make down`   | Build/start or stop the Compose stack                             |
+| `make support-bundle`     | Generate a redacted diagnostic bundle and internal incident draft |
+| `make test`               | Run the backend core suite with isolated test databases           |
 
-**Root `make` targets drive the whole stack** (run from the repo root):
+Use `make help` for operator and maintenance commands. Run module commands from
+their module directories, for example `cd backend && make lint` or
+`cd frontend && pnpm check`.
 
-```bash
-make setup       # Interactive setup wizard (recommended for new users)
-make doctor      # Check configuration and system requirements
-make support-bundle  # Generate redacted troubleshooting summary, AI issue draft, and optional zip
-make config      # Generate local config files from the examples
-make check       # Check that required tools are installed
-make install     # Install backend and frontend dependencies
-make setup-db    # Explicitly create and fully initialize the PostgreSQL target database
-make upgrade-db  # Explicitly migrate an existing database to the current chain head (backup first)
-make prune-run-events ARGS="--before 2026-08-01T00:00:00Z"  # Preview global UTC-month retention; add --yes to DROP
-make rotate-credentials ARGS="--dry-run --key-id m3-next"  # Rotate credential envelopes in batches
-make check-db    # Read-only check of connection, schema marker, and required tables
-make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Start all services in production mode (local, optimized)
-make stop        # Stop all running services
-make up / down   # Build/start or stop the Compose stack (browser at localhost:2026)
-make docker-start / docker-stop / docker-logs   # Docker development environment
-```
+## Repository-wide rules
 
-Run `make help` for the full list.
-
-**Per-module commands drive a single module** (run inside that module):
-
-```bash
-# Backend (see backend/AGENTS.md for the full set)
-cd backend && make dev        # Gateway API with reload (port 8001)
-make test                     # Backend core suite; loads the development DATABASE_URL
-cd backend && make lint       # ruff check
-cd backend && make format     # ruff format
-
-# Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server with Turbopack (port 3000)
-cd frontend && pnpm check     # Lint + type check (run before committing)
-cd frontend && pnpm test      # Unit tests
-```
-
-Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
-(`pnpm`) = per-module work.**
-
-## Cross-Cutting Conventions
-
-These apply repo-wide and have no module-level equivalent. Everything module-specific —
-including the backend test contract, schema lifecycle, and asset/Credential boundaries —
-lives in the module guide that owns it.
-
-- **Documentation update policy** — keep docs in sync with code: update `README.md` for
-  user-facing changes and the relevant `AGENTS.md` for development/architecture changes in
-  the same change set. Put an invariant in the module guide that owns it; this file keeps
-  only the pointer.
-- **Test-driven development** — features and bug fixes ship with tests. Backend tests live
-  in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
-  frontend tests live in `frontend/tests/`.
-- **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
-  CI enforces `ruff format --check`, so formatting must be clean before a push.
-- **Consolidated core CI** — `.github/workflows/project-saas-release-gates.yml` runs the
-  backend core suite, the real-PostgreSQL core cases, frontend core unit tests, a small
-  deterministic Chromium E2E set, and the format and security checks in one workflow. Do not
-  add another workflow for these commands; Replay E2E, release, container, Helm chart, and
-  version checks keep their dedicated workflows. This core set protects the main paths
-  quickly — it does not certify external models, a browser matrix, or a deployment target.
-- **Release readiness is checkout-sensitive** — historical milestone evidence does not certify
-  the current worktree. Run the current focused gates, including the real PostgreSQL core
-  tests when persistence or runtime boundaries change. Docker Compose, Kubernetes/Helm,
-  browsers, model providers, and Sandbox modes each need separate target-environment
-  validation that CI does not provide.
-
-## Where to Go Next
-
-- Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
-- Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
-- Setup & install → **[Install.md](Install.md)**
-- Project overview & usage → **[README.md](README.md)**
+- Preserve unrelated user changes in a dirty worktree. Never reset, restore,
+  stage, commit, or push them without explicit authorization.
+- Update the user-facing `README.md` and the owning module guide when behavior or
+  architecture changes. Do not turn the root guide into a feature changelog.
+- Features and bug fixes require focused tests. Backend tests live under
+  `backend/tests/`; frontend tests live under `frontend/tests/`.
+- Authorization comes from authenticated identity, server-issued project
+  context, capabilities, and owner scope. Never trust IDs or authority copied
+  from request metadata, browser state, or model output.
+- Secrets must not enter source, logs, browser storage, query caches, API
+  responses, snapshots, or diagnostic bundles. Use governed Credential paths.
+- Schema changes require ORM, full-schema SQL, migration-chain, and parity-test
+  updates. Never patch or stamp a database manually.
+- Format and validate the changed module before handoff. Use
+  `cd backend && make format` and `cd frontend && pnpm check` as applicable.
+- This private repository has no hosted CI. Run the relevant local backend,
+  PostgreSQL, frontend, browser, security, container, and deployment gates for
+  the current checkout; historical results are not release evidence.
+- Report what was actually verified. A focused or offline test does not certify
+  a live database, external model, browser matrix, Sandbox provider, or target
+  deployment environment.

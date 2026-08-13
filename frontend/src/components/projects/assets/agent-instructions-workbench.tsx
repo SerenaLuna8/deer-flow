@@ -22,14 +22,26 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+} from "@/core/private-work/types";
 import {
   SharedAssetApiError,
-  invalidateProjectAssetQueries,
   useUpdateProjectAgentInstructions,
   type AssetVersion,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { SafeStreamdown } from "@/core/streamdown/components";
+
+import {
+  cacheProjectAgentAuthoringReload,
+  projectAgentAuthoringCacheEpochs,
+  reloadProjectAgentAuthoringState,
+} from "./agent-authoring-recovery";
 
 type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
 
@@ -37,22 +49,18 @@ export const AGENT_INSTRUCTION_FILES = [
   {
     name: "AGENTS.md",
     field: "agents_instructions",
-    description: "Agent 的工作方式、边界与执行规则",
   },
   {
     name: "SOUL.md",
     field: "soul",
-    description: "Agent 的人格、语气与价值取向",
   },
   {
     name: "IDENTITY.md",
     field: "identity",
-    description: "Agent 对自身角色与身份的定义",
   },
   {
     name: "USER.md",
     field: "user_context",
-    description: "Agent 需要长期遵循的用户背景与偏好",
   },
 ] as const;
 
@@ -93,7 +101,8 @@ type PendingSavedAgentVersion = {
 type AgentInstructionConflictRecovery = {
   assetId: string;
   assetVersion: number;
-  versionId: string | null;
+  generation: number;
+  status: "refreshing" | "error";
 };
 
 export function agentInstructionSaveIsPending(
@@ -108,27 +117,27 @@ export function agentInstructionSaveIsPending(
   );
 }
 
-export function agentInstructionConflictHasLatestServerState(
-  conflict: AgentInstructionConflictRecovery | null,
-  item: Pick<
-    ProjectAssetItem,
-    "id" | "version" | "current_published_version_id"
-  >,
-  version: Pick<AgentAssetVersion, "id"> | null,
-): boolean {
-  if (conflict?.assetId !== item.id || item.version <= conflict.assetVersion) {
-    return false;
-  }
-  return item.current_published_version_id
-    ? version?.id === item.current_published_version_id
-    : version?.id !== conflict.versionId;
-}
-
 function selectedInstructionFile(field: AgentInstructionField) {
   return (
     AGENT_INSTRUCTION_FILES.find((file) => file.field === field) ??
     AGENT_INSTRUCTION_FILES[0]
   );
+}
+
+function instructionFileDescription(
+  field: AgentInstructionField,
+  copy: Translations["agents"]["instructions"]["files"],
+): string {
+  switch (field) {
+    case "agents_instructions":
+      return copy.agents;
+    case "soul":
+      return copy.soul;
+    case "identity":
+      return copy.identity;
+    case "user_context":
+      return copy.user;
+  }
 }
 
 export function AgentInstructionWorkspace({
@@ -138,9 +147,11 @@ export function AgentInstructionWorkspace({
   editing,
   canEdit = true,
   pending,
+  inputDisabled = false,
   dirty,
   errorMessage,
   saveDisabledReason = null,
+  saveTarget = "draft",
   onSelect,
   onDisplayModeChange,
   onChange,
@@ -154,9 +165,11 @@ export function AgentInstructionWorkspace({
   editing: boolean;
   canEdit?: boolean;
   pending: boolean;
+  inputDisabled?: boolean;
   dirty: boolean;
   errorMessage: string | null;
   saveDisabledReason?: string | null;
+  saveTarget?: "blueprint" | "draft";
   onSelect: (field: AgentInstructionField) => void;
   onDisplayModeChange: (mode: "source" | "preview") => void;
   onChange: (field: AgentInstructionField, value: string) => void;
@@ -164,22 +177,26 @@ export function AgentInstructionWorkspace({
   onSave: () => void;
   onDiscard: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.instructions;
   const selectedFile = selectedInstructionFile(selectedField);
   const content = draft[selectedField];
 
   return (
-    <section className="space-y-4" aria-label="Agent 指令文件">
+    <section className="space-y-4" aria-label={copy.sectionAria}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
-          <h3 className="text-sm font-semibold">指令文件</h3>
+          <h3 className="text-sm font-semibold">{copy.title}</h3>
           <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            四个固定文档映射到当前 Agent 设置。保存后将用于后续运行。
+            {saveTarget === "draft"
+              ? copy.draftDescription
+              : copy.blueprintDescription}
           </p>
         </div>
         {canEdit && !editing ? (
           <Button type="button" size="sm" variant="outline" onClick={onEdit}>
             <PencilIcon aria-hidden className="size-4" />
-            编辑指令
+            {copy.edit}
           </Button>
         ) : null}
       </div>
@@ -187,7 +204,7 @@ export function AgentInstructionWorkspace({
       <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[220px_minmax(0,1fr)]">
         <div className="bg-muted/20 border-border/70 border-b p-3 md:border-r md:border-b-0">
           <p className="text-muted-foreground mb-2 px-2 text-xs font-medium">
-            固定文件
+            {copy.fixedFiles}
           </p>
           <div className="space-y-1">
             {AGENT_INSTRUCTION_FILES.map((file) => {
@@ -219,13 +236,13 @@ export function AgentInstructionWorkspace({
                 {selectedFile.name}
               </p>
               <p className="text-muted-foreground mt-1 text-xs">
-                {selectedFile.description}
+                {instructionFileDescription(selectedFile.field, copy.files)}
               </p>
             </div>
             <div
               className="bg-muted flex shrink-0 rounded-lg p-1"
               role="group"
-              aria-label="文件显示方式"
+              aria-label={copy.displayMode}
             >
               <Button
                 type="button"
@@ -236,7 +253,7 @@ export function AgentInstructionWorkspace({
                 onClick={() => onDisplayModeChange("source")}
               >
                 <Code2Icon aria-hidden className="size-3.5" />
-                源码
+                {copy.source}
               </Button>
               <Button
                 type="button"
@@ -247,7 +264,7 @@ export function AgentInstructionWorkspace({
                 onClick={() => onDisplayModeChange("preview")}
               >
                 <EyeIcon aria-hidden className="size-3.5" />
-                预览
+                {copy.preview}
               </Button>
             </div>
           </div>
@@ -257,14 +274,15 @@ export function AgentInstructionWorkspace({
               {content ? (
                 <SafeStreamdown>{content}</SafeStreamdown>
               ) : (
-                <p className="text-muted-foreground">这个文件目前为空。</p>
+                <p className="text-muted-foreground">{copy.empty}</p>
               )}
             </div>
           ) : editing ? (
             <Textarea
-              aria-label={`编辑 ${selectedFile.name}`}
+              aria-label={copy.editFile(selectedFile.name)}
               value={content}
               spellCheck={false}
+              disabled={inputDisabled || pending}
               className="min-h-[420px] resize-y rounded-none border-0 p-5 font-mono text-sm leading-6 shadow-none focus-visible:ring-0"
               onChange={(event) => onChange(selectedField, event.target.value)}
             />
@@ -285,7 +303,9 @@ export function AgentInstructionWorkspace({
       {editing ? (
         <div className="bg-background/95 sticky bottom-0 z-10 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs">
-            保存会同时更新四项 Agent 设置。
+            {saveTarget === "draft"
+              ? copy.draftSaveHint
+              : copy.blueprintSaveHint}
           </p>
           <div className="flex gap-2">
             <Button
@@ -295,7 +315,7 @@ export function AgentInstructionWorkspace({
               disabled={pending}
               onClick={onDiscard}
             >
-              放弃修改
+              {copy.discard}
             </Button>
             <Button
               type="button"
@@ -309,7 +329,7 @@ export function AgentInstructionWorkspace({
               ) : (
                 <SaveIcon aria-hidden className="size-4" />
               )}
-              {pending ? "保存中…" : "保存设置"}
+              {pending ? copy.saving : copy.save}
             </Button>
           </div>
         </div>
@@ -324,6 +344,7 @@ export function AgentInstructionsWorkbench({
   item,
   version,
   canAuthor,
+  authoringPreparationPending = false,
   editing,
   onEditingChange,
   onDirtyChange,
@@ -334,11 +355,14 @@ export function AgentInstructionsWorkbench({
   item: ProjectAssetItem;
   version: AgentAssetVersion | null;
   canAuthor: boolean;
+  authoringPreparationPending?: boolean;
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.instructions;
   const initialDraft = agentInstructionDraft(version);
   const [baseline, setBaseline] = useState<AgentInstructionDraft>(initialDraft);
   const [draft, setDraft] = useState<AgentInstructionDraft>(initialDraft);
@@ -355,10 +379,16 @@ export function AgentInstructionsWorkbench({
     `${item.id}:${item.version}:${version?.id ?? "empty"}`,
   );
   const pendingSavedVersionRef = useRef<PendingSavedAgentVersion | null>(null);
-  const conflictRecoveryRef = useRef<AgentInstructionConflictRecovery | null>(
-    null,
-  );
+  const [conflictRecovery, setConflictRecovery] =
+    useState<AgentInstructionConflictRecovery | null>(null);
+  const recoveryGenerationRef = useRef(0);
+  const recoveryAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const scopeKey = `${accountId}:${projectId}:${item.id}`;
+  const scopeKeyRef = useRef(scopeKey);
+  const authoringBaseVersionIdRef = useRef<string | null>(null);
   const queryClient = useQueryClient();
+  const privateWork = usePrivateWorkAccess();
   const update = useUpdateProjectAgentInstructions(accountId, projectId);
   const dirty = agentInstructionDraftIsDirty(baseline, draft);
   const isEditing = canAuthor && editing;
@@ -370,10 +400,8 @@ export function AgentInstructionsWorkbench({
 
   useEffect(() => {
     if (canAuthor || !editing) return;
-    setLocalError(
-      "Agent 状态或编辑权限已发生变化，本地修改仍保留在当前页面。恢复权限后可继续保存，离开前也可以先复制内容。",
-    );
-  }, [canAuthor, editing]);
+    setLocalError(copy.permissionLost);
+  }, [canAuthor, copy.permissionLost, editing]);
 
   useEffect(() => {
     if (editing || !dirty) return;
@@ -384,34 +412,7 @@ export function AgentInstructionsWorkbench({
   }, [baseline, dirty, editing, onDirtyChange]);
 
   useEffect(() => {
-    const conflictRecovery = conflictRecoveryRef.current;
-    if (conflictRecovery?.assetId === item.id) {
-      if (
-        agentInstructionConflictHasLatestServerState(
-          conflictRecovery,
-          {
-            id: item.id,
-            version: item.version,
-            current_published_version_id: item.current_published_version_id,
-          },
-          version,
-        )
-      ) {
-        const nextBaseline = agentInstructionDraft(version);
-        setBaseline(nextBaseline);
-        expectedAssetVersionRef.current = item.version;
-        appliedServerStateRef.current = serverState;
-        conflictRecoveryRef.current = null;
-        setLocalError(
-          agentInstructionDraftIsDirty(nextBaseline, draft)
-            ? "已加载最新修订并保留本地修改。请检查四项内容；再次保存会以当前本地内容覆盖远端设置。"
-            : "已加载最新修订，本地内容与远端一致，无需再次保存。",
-        );
-        return;
-      }
-    } else if (conflictRecovery) {
-      conflictRecoveryRef.current = null;
-    }
+    if (conflictRecovery) return;
 
     const pendingSavedVersion = pendingSavedVersionRef.current;
     if (pendingSavedVersion?.assetId === item.id) {
@@ -428,6 +429,14 @@ export function AgentInstructionsWorkbench({
     } else if (pendingSavedVersion) {
       pendingSavedVersionRef.current = null;
     }
+    if (
+      authoringBaseVersionIdRef.current &&
+      editing &&
+      version?.id !== authoringBaseVersionIdRef.current
+    ) {
+      return;
+    }
+    authoringBaseVersionIdRef.current = null;
     if (serverState === appliedServerStateRef.current || dirty) return;
 
     const nextDraft = agentInstructionDraft(version);
@@ -437,9 +446,10 @@ export function AgentInstructionsWorkbench({
     expectedAssetVersionRef.current = item.version;
     appliedServerStateRef.current = serverState;
   }, [
+    conflictRecovery,
     dirty,
     draft,
-    item.current_published_version_id,
+    editing,
     item.id,
     item.version,
     serverState,
@@ -456,14 +466,43 @@ export function AgentInstructionsWorkbench({
     return () => window.removeEventListener("beforeunload", warnBeforeUnload);
   }, [dirty]);
 
-  useEffect(
-    () => () => {
+  useEffect(() => {
+    mountedRef.current = true;
+    scopeKeyRef.current = scopeKey;
+    return () => {
+      mountedRef.current = false;
+      recoveryAbortRef.current?.abort();
+      recoveryAbortRef.current = null;
+      recoveryGenerationRef.current += 1;
       onDirtyChange(false);
-    },
-    [onDirtyChange],
-  );
+    };
+  }, [onDirtyChange, scopeKey]);
+
+  function recoveryIsCurrent(
+    recovery: AgentInstructionConflictRecovery,
+    controller: AbortController,
+  ): boolean {
+    return (
+      mountedRef.current &&
+      scopeKeyRef.current === scopeKey &&
+      !controller.signal.aborted &&
+      recoveryAbortRef.current === controller &&
+      isPrivateWorkAccessActive(privateWork) &&
+      recoveryGenerationRef.current === recovery.generation &&
+      recovery.assetId === item.id
+    );
+  }
+
+  function cancelRecovery() {
+    recoveryAbortRef.current?.abort();
+    recoveryAbortRef.current = null;
+    recoveryGenerationRef.current += 1;
+  }
 
   function discardChanges() {
+    cancelRecovery();
+    setConflictRecovery(null);
+    authoringBaseVersionIdRef.current = null;
     setDraft(baseline);
     setDiscardOpen(false);
     setLocalError(null);
@@ -471,7 +510,80 @@ export function AgentInstructionsWorkbench({
     onEditingChange(false);
   }
 
+  async function recoverFromConflict(
+    recovery: AgentInstructionConflictRecovery,
+    controller: AbortController,
+  ) {
+    const startedAt = projectAgentAuthoringCacheEpochs({
+      queryClient,
+      accountId,
+      projectId,
+      assetId: recovery.assetId,
+    });
+    try {
+      const reload = await runPrivateWorkAbortable(privateWork, (scopeSignal) =>
+        reloadProjectAgentAuthoringState({
+          projectId,
+          assetId: recovery.assetId,
+          attemptedAssetVersion: recovery.assetVersion,
+          signal: scopeSignal
+            ? AbortSignal.any([controller.signal, scopeSignal])
+            : controller.signal,
+        }),
+      );
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      await cacheProjectAgentAuthoringReload({
+        queryClient,
+        accountId,
+        projectId,
+        assetId: recovery.assetId,
+        reload,
+        startedAt,
+        isCurrent: () => recoveryIsCurrent(recovery, controller),
+      });
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      const nextBaseline = agentInstructionDraft(reload.version);
+      setBaseline(nextBaseline);
+      expectedAssetVersionRef.current = reload.item.version;
+      appliedServerStateRef.current = `${reload.item.id}:${reload.item.version}:${reload.version.id}`;
+      pendingSavedVersionRef.current = null;
+      authoringBaseVersionIdRef.current = reload.version.id;
+      setConflictRecovery(null);
+      setLocalError(
+        agentInstructionDraftIsDirty(nextBaseline, draft)
+          ? copy.recoveryPreserved
+          : copy.recoverySynced,
+      );
+    } catch {
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      setConflictRecovery({ ...recovery, status: "error" });
+      setLocalError(copy.recoveryFailed);
+    } finally {
+      if (recoveryAbortRef.current === controller) {
+        recoveryAbortRef.current = null;
+      }
+    }
+  }
+
+  function retryConflictRecovery() {
+    if (!conflictRecovery) return;
+    recoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    const recovery: AgentInstructionConflictRecovery = {
+      ...conflictRecovery,
+      generation: recoveryGenerationRef.current + 1,
+      status: "refreshing",
+    };
+    recoveryAbortRef.current = controller;
+    recoveryGenerationRef.current = recovery.generation;
+    setConflictRecovery(recovery);
+    setLocalError(copy.recoveryReloading);
+    void recoverFromConflict(recovery, controller);
+  }
+
   async function saveInstructions() {
+    const saveScopeKey = scopeKey;
+    const saveGeneration = recoveryGenerationRef.current;
     setLocalError(null);
     try {
       const result = await update.mutateAsync({
@@ -481,9 +593,17 @@ export function AgentInstructionsWorkbench({
           expected_asset_version: expectedAssetVersionRef.current,
         },
       });
+      if (
+        !mountedRef.current ||
+        scopeKeyRef.current !== saveScopeKey ||
+        !isPrivateWorkAccessActive(privateWork) ||
+        recoveryGenerationRef.current !== saveGeneration
+      ) {
+        return;
+      }
       const nextVersion = result.data;
       if (!("agent_id" in nextVersion)) {
-        setLocalError("服务返回了无效的 Agent 设置。请重试。");
+        setLocalError(copy.invalidResponse);
         return;
       }
       const nextDraft = agentInstructionDraft(nextVersion);
@@ -493,7 +613,8 @@ export function AgentInstructionsWorkbench({
         versionId: nextVersion.id,
         assetVersion: savedAssetVersion,
       };
-      conflictRecoveryRef.current = null;
+      setConflictRecovery(null);
+      authoringBaseVersionIdRef.current = null;
       expectedAssetVersionRef.current = savedAssetVersion;
       setBaseline(nextDraft);
       setDraft(nextDraft);
@@ -502,25 +623,32 @@ export function AgentInstructionsWorkbench({
       onVersionCreated(nextVersion.id);
     } catch (error) {
       if (
+        !mountedRef.current ||
+        scopeKeyRef.current !== saveScopeKey ||
+        !isPrivateWorkAccessActive(privateWork) ||
+        recoveryGenerationRef.current !== saveGeneration
+      ) {
+        return;
+      }
+      if (
         error instanceof SharedAssetApiError &&
         error.code === "ASSET_CONFLICT"
       ) {
-        conflictRecoveryRef.current = {
+        recoveryAbortRef.current?.abort();
+        const controller = new AbortController();
+        const recovery: AgentInstructionConflictRecovery = {
           assetId: item.id,
           assetVersion: expectedAssetVersionRef.current,
-          versionId: version?.id ?? null,
+          generation: recoveryGenerationRef.current + 1,
+          status: "refreshing",
         };
-        setLocalError(
-          "Agent 已在其他窗口发生变化。本地内容仍然保留，正在加载最新修订…",
-        );
-        void invalidateProjectAssetQueries(
-          queryClient,
-          accountId,
-          projectId,
-          "agents",
-        ).catch(() => undefined);
+        recoveryAbortRef.current = controller;
+        recoveryGenerationRef.current = recovery.generation;
+        setConflictRecovery(recovery);
+        setLocalError(`${copy.conflictDetected} ${copy.recoveryReloading}`);
+        void recoverFromConflict(recovery, controller);
       } else {
-        setLocalError(adminAssetErrorMessage(error));
+        setLocalError(adminAssetErrorMessage(error, t.adminAssets.errors));
       }
     }
   }
@@ -533,9 +661,22 @@ export function AgentInstructionsWorkbench({
         displayMode={displayMode}
         editing={isEditing}
         canEdit={canAuthor}
-        pending={update.isPending}
+        inputDisabled={
+          update.isPending ||
+          authoringPreparationPending ||
+          conflictRecovery !== null ||
+          !canAuthor
+        }
+        pending={update.isPending || authoringPreparationPending}
         dirty={dirty}
         errorMessage={localError}
+        saveDisabledReason={
+          conflictRecovery
+            ? conflictRecovery.status === "error"
+              ? copy.reloadRequired
+              : copy.recoveryReloading
+            : null
+        }
         onSelect={(field) => {
           setSelectedField(field);
           setDisplayMode("source");
@@ -554,13 +695,22 @@ export function AgentInstructionsWorkbench({
         onDiscard={() => (dirty ? setDiscardOpen(true) : discardChanges())}
       />
 
+      {conflictRecovery?.status === "error" ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={retryConflictRecovery}
+        >
+          {copy.reload}
+        </Button>
+      ) : null}
+
       <Dialog open={discardOpen} onOpenChange={setDiscardOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃未保存修改？</DialogTitle>
-            <DialogDescription>
-              四个指令文件会恢复为当前保存的内容，此操作无法撤销。
-            </DialogDescription>
+            <DialogTitle>{copy.discardTitle}</DialogTitle>
+            <DialogDescription>{copy.discardDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -568,14 +718,14 @@ export function AgentInstructionsWorkbench({
               variant="outline"
               onClick={() => setDiscardOpen(false)}
             >
-              继续编辑
+              {copy.continueEditing}
             </Button>
             <Button
               type="button"
               variant="destructive"
               onClick={discardChanges}
             >
-              放弃修改
+              {copy.discard}
             </Button>
           </DialogFooter>
         </DialogContent>

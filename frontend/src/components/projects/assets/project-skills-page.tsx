@@ -21,8 +21,10 @@ function ProjectSkillBuilderLead({ project }: { project: Project }) {
     project.id,
     Boolean(user && canCreate),
   );
-  return canCreate ? (
+  return user && canCreate ? (
     <SkillBuilderResumeBanner
+      accountId={user.id}
+      projectId={project.id}
       projectSlug={project.slug}
       sessions={sessions.data ?? []}
     />
@@ -41,6 +43,7 @@ export function ProjectSkillsPage({
       kind="skills"
       title="Skill"
       initialSelectedAssetId={selectedAssetId}
+      selectionQueryParam="skill_id"
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />
       )}

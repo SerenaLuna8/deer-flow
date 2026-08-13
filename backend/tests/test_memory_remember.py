@@ -27,6 +27,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from deerflow.agents.memory.authority_resolution import resolve_memory_authority
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.error_codes import MemoryAuthorityUnavailable
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
     DREAM_HISTORY_BATCH_SIZE,
@@ -681,7 +682,7 @@ async def test_authority_propose_fails_closed_when_revalidation_breaks(
         explode,
     )
 
-    with pytest.raises(AuthorizationRevoked):
+    with pytest.raises(MemoryAuthorityUnavailable):
         await authority.propose_entry(
             kind="durable",
             content="fact",

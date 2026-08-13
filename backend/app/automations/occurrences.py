@@ -22,6 +22,11 @@ from app.automations.errors import (
 )
 from app.automations.models import AutomationRunView
 from app.automations.settlement import settle_created_terminal_occurrence
+from app.automations.system_policy import (
+    AutomationsPolicyPort,
+    AutomationsPolicyUnavailable,
+    current_automations_policy,
+)
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
@@ -33,6 +38,7 @@ from app.private_work.errors import (
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.projects.capabilities import Capability
+from app.system_runtime_settings import AutomationsPolicyValue
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.scheduled_task_runs import (
     ACTIVE_OCCURRENCE_STATUSES,
@@ -99,13 +105,28 @@ class AutomationOccurrenceService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
-        max_concurrent_runs: int,
+        max_concurrent_runs: int = 3,
+        policy_reader: AutomationsPolicyPort | None = None,
     ) -> None:
         if type(max_concurrent_runs) is not int or max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be positive")
         self._session_factory = session_factory
-        self._max_concurrent_runs = max_concurrent_runs
+        self._fallback_policy = AutomationsPolicyValue(
+            max_concurrent_runs=max_concurrent_runs,
+        )
+        self._policy_reader = policy_reader
         self._revalidator = PrivateWorkRevalidator()
+
+    async def _max_concurrent_runs(self, session: AsyncSession) -> int:
+        try:
+            policy = await current_automations_policy(
+                session,
+                self._policy_reader,
+                fallback=self._fallback_policy,
+            )
+        except AutomationsPolicyUnavailable as error:
+            raise AutomationUnavailable("scheduler") from error
+        return policy.max_concurrent_runs
 
     async def due_definitions(
         self,
@@ -247,7 +268,8 @@ class AutomationOccurrenceService:
             async with self._session_factory() as session, session.begin():
                 await self._acquire_admission_lock(session)
                 active_count = await self._active_count(session)
-                budget = max(0, self._max_concurrent_runs - active_count)
+                max_concurrent_runs = await self._max_concurrent_runs(session)
+                budget = max(0, max_concurrent_runs - active_count)
                 candidates = (
                     await session.execute(
                         sa.select(ScheduledTaskRow, ProjectMembershipRow.version)
@@ -383,7 +405,7 @@ class AutomationOccurrenceService:
 
                 if await occurrences.has_active(context.resource_scope, task.id):
                     raise AutomationActiveRun(context.request_id)
-                if await self._active_count(session) >= self._max_concurrent_runs:
+                if await self._active_count(session) >= await self._max_concurrent_runs(session):
                     raise AutomationConcurrencyLimit(context.request_id)
 
                 occurrence = await occurrences.create(

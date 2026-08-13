@@ -1,4 +1,4 @@
-"""U2 Phase 3: monthly ``run_events`` partitions and global invariants."""
+"""Monthly ``run_events`` partitions and global invariants."""
 
 from __future__ import annotations
 
@@ -997,7 +997,7 @@ async def test_v7_to_v8_matches_fresh_catalog_and_preserves_rows(
         upgraded_engine = create_async_engine(upgraded_url, poolclass=NullPool)
         try:
             async with upgraded_engine.connect() as connection:
-                assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "full_schema_v9"
+                assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "full_schema_v17"
                 migrated_rows = tuple(
                     tuple(row)
                     for row in await connection.execute(

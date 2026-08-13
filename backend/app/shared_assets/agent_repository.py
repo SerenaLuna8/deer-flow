@@ -12,6 +12,15 @@ from sqlalchemy.orm import aliased
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
+from app.shared_assets.internal_assets import (
+    BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+)
+from deerflow.persistence.channel_connections.group_challenge_model import (
+    ProjectChannelGroupBindingChallengeRow,
+)
+from deerflow.persistence.channel_connections.group_model import (
+    ProjectChannelGroupBindingRow,
+)
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import (
     ProjectDefaultAgentRow,
@@ -50,6 +59,10 @@ class AgentVersionRecord:
 def _request_id(context: object) -> str:
     request_id = getattr(context, "request_id", None)
     return request_id if isinstance(request_id, str) else "unknown"
+
+
+def _is_internal_skill_builder_agent(row: AgentRow) -> bool:
+    return row.source_key == BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY
 
 
 class AgentRepository:
@@ -261,6 +274,31 @@ class AgentRepository:
         if asset.scope != "project" or asset.project_id != context.project_id:
             raise AssetNotFound(context.request_id)
         version_ids = tuple((await self.session.execute(select(AgentVersionRow.id).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number).with_for_update(of=AgentVersionRow))).scalars().all())
+
+        # ``AgentService.delete`` has already locked the Project and Agent at
+        # this point. Challenge completion uses the same Project -> Agent ->
+        # challenge order, so deletion never waits for a challenge while its
+        # completer waits for this Agent.
+        #
+        # Consumed or expired challenges no longer grant runtime authority and
+        # carry no retained identity mapping. PostgreSQL ``now()`` is
+        # transaction-stable, making cleanup and the complementary pending
+        # predicate below one database-authoritative time decision. Channel
+        # Binding tombstones remain retained after soft deletion: physically
+        # removing one here would cascade its external-principal mappings and
+        # could mint a duplicate guest identity on a later rebind. Tombstones
+        # release their Agent pair, so only live binding rows block deletion.
+        await self.session.execute(
+            delete(ProjectChannelGroupBindingChallengeRow).where(
+                ProjectChannelGroupBindingChallengeRow.project_id == context.project_id,
+                ProjectChannelGroupBindingChallengeRow.agent_asset_id == asset.id,
+                ProjectChannelGroupBindingChallengeRow.agent_scope == "project",
+                or_(
+                    ProjectChannelGroupBindingChallengeRow.consumed_at.is_not(None),
+                    ProjectChannelGroupBindingChallengeRow.expires_at <= func.now(),
+                ),
+            )
+        )
         retained_reference_exists = bool(
             await self.session.scalar(
                 select(
@@ -280,6 +318,19 @@ class AgentRepository:
                             RunAssetVersionRow.asset_kind == "agent",
                             RunAssetVersionRow.asset_scope == "project",
                             RunAssetVersionRow.asset_id == asset.id,
+                        ),
+                        exists().where(
+                            ProjectChannelGroupBindingRow.project_id == context.project_id,
+                            ProjectChannelGroupBindingRow.agent_asset_id == asset.id,
+                            ProjectChannelGroupBindingRow.agent_scope == "project",
+                            ProjectChannelGroupBindingRow.deleted_at.is_(None),
+                        ),
+                        exists().where(
+                            ProjectChannelGroupBindingChallengeRow.project_id == context.project_id,
+                            ProjectChannelGroupBindingChallengeRow.agent_asset_id == asset.id,
+                            ProjectChannelGroupBindingChallengeRow.agent_scope == "project",
+                            ProjectChannelGroupBindingChallengeRow.consumed_at.is_(None),
+                            ProjectChannelGroupBindingChallengeRow.expires_at > func.now(),
                         ),
                     )
                 )
@@ -731,26 +782,46 @@ class AgentRepository:
         system_statement = select(AgentRow).where(
             AgentRow.scope == "system",
             AgentRow.project_id.is_(None),
+            or_(
+                AgentRow.source_key.is_(None),
+                AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+            ),
             self._project_context_exists(context),
         )
         project_rows = (await self.session.execute(project_statement)).scalars().all()
         system_rows = (await self.session.execute(system_statement)).scalars().all()
-        return tuple(sorted((*project_rows, *system_rows), key=lambda row: (row.created_at, row.id)))
+        # Keep a defensive in-process filter as well. It protects the catalog
+        # boundary when a test double, proxy, or future query rewrite does not
+        # enforce the SQL predicate exactly as intended.
+        public_system_rows = tuple(row for row in system_rows if not _is_internal_skill_builder_agent(row))
+        return tuple(
+            sorted(
+                (*project_rows, *public_system_rows),
+                key=lambda row: (row.created_at, row.id),
+            )
+        )
 
     async def list_system_visible(
         self,
         context: SystemAssetGovernanceContext | SystemAssetReadContext,
     ) -> tuple[AgentRow, ...]:
         self._require_system_catalog_reader(context)
-        statement = (
-            select(AgentRow)
-            .where(
-                AgentRow.scope == "system",
-                AgentRow.project_id.is_(None),
-            )
-            .order_by(AgentRow.created_at, AgentRow.id)
+        statement = select(AgentRow).where(
+            AgentRow.scope == "system",
+            AgentRow.project_id.is_(None),
         )
-        return tuple((await self.session.execute(statement)).scalars().all())
+        if isinstance(context, SystemAssetReadContext):
+            statement = statement.where(
+                or_(
+                    AgentRow.source_key.is_(None),
+                    AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                )
+            )
+        statement = statement.order_by(AgentRow.created_at, AgentRow.id)
+        rows = tuple((await self.session.execute(statement)).scalars().all())
+        if isinstance(context, SystemAssetReadContext):
+            return tuple(row for row in rows if not _is_internal_skill_builder_agent(row))
+        return rows
 
     async def list_override_visible(
         self,
@@ -798,6 +869,10 @@ class AgentRepository:
                     and_(
                         AgentRow.scope == "system",
                         AgentRow.project_id.is_(None),
+                        or_(
+                            AgentRow.source_key.is_(None),
+                            AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                        ),
                     ),
                 ),
                 self._project_context_exists(context),
@@ -931,6 +1006,7 @@ class AgentRepository:
             .where(
                 SkillVersionRow.id.in_(version_ids),
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
                 SkillRow.status == "active",
@@ -978,6 +1054,7 @@ class AgentRepository:
                     SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
                     SkillVersionRow.skill_id == SkillRow.id,
                     SkillVersionRow.workflow_status == "published",
+                    SkillVersionRow.revoked_at.is_(None),
                 ),
             )
             .where(
@@ -1109,6 +1186,7 @@ class AgentRepository:
             .where(
                 SkillVersionRow.id.in_(version_ids),
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
                 SkillRow.status == "active",
@@ -1150,6 +1228,7 @@ class AgentRepository:
             .where(
                 SkillVersionRow.id.in_(version_ids),
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
                 SkillRow.status == "active",

@@ -18,6 +18,7 @@ _JOB_CAPABILITIES = frozenset(
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
+        "memory_dream_prepare",
         "memory_seal",
     }
 )

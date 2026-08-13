@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -32,16 +33,18 @@ from app.worker.service import (
     LeaseLost,
 )
 from deerflow.agents.memory.dream import (
-    DREAM_PROMPT_VERSION,
     DreamHistoryInput,
-    MemoryDocumentInvalid,
     MemoryDreamError,
     MemoryDreamInput,
     MemoryDreamResult,
     MemoryDreamRunner,
-    validate_memory_document,
 )
 from deerflow.config.app_config import AppConfig
+from deerflow.memory_contract import (
+    DREAM_PROMPT_VERSION,
+    MemoryDocumentInvalid,
+    validate_memory_document,
+)
 from deerflow.models import create_chat_model, model_supports_temperature
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -49,6 +52,10 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentConflict,
     MemoryDocumentRepository,
     MemoryDocumentScope,
+    MemoryDreamLeaseConflict,
+    MemoryDreamReleaseResult,
+    MemoryDreamSettlementInvariant,
+    MemoryDreamStaleConflict,
     MemoryDreamWork,
     compute_dream_history_digest,
     memory_document_deletion_ratio,
@@ -56,6 +63,15 @@ from deerflow.persistence.private_work.memory_document_repository import (
 )
 
 _MEMORY_DREAM_REQUEST_ID = "memory-dream-worker"
+logger = logging.getLogger(__name__)
+
+
+class _DreamSettlementTransient(RuntimeError):
+    """Content-free transient signal handled after its transaction rolls back."""
+
+    def __init__(self, public_error_code: str) -> None:
+        self.public_error_code = public_error_code
+        super().__init__("Dream settlement is temporarily unavailable")
 
 
 def _deletion_ratio_bucket(ratio: float) -> str:
@@ -135,7 +151,13 @@ class MemoryDreamJobHandler:
             or retry_max_seconds < retry_initial_seconds
         ):
             raise ValueError("Dream Worker configuration is invalid")
-        if audit is not None and not callable(getattr(audit, "memory_dream_review_flagged", None)):
+        if audit is not None and not all(
+            callable(getattr(audit, method, None))
+            for method in (
+                "memory_dream_review_flagged",
+                "memory_dream_settled",
+            )
+        ):
             raise ValueError("Dream Worker audit port is invalid")
         self._sessions = session_factory
         self._app_config = app_config
@@ -375,67 +397,133 @@ class MemoryDreamJobHandler:
         episode_retention_days: int,
     ) -> JobSettlement:
         async def commit() -> None:
-            async with self._sessions() as session, session.begin():
-                allowed = await self._scope_validator(
-                    session,
-                    claim,
-                    lock=True,
-                )
-                try:
-                    current, policy_revision = await self._runtime_policy_materializer.materialize_current_with_revision_in_session(
-                        session,
-                        RuntimePolicySection.AGENT_RUNTIME,
-                        for_update=True,
-                    )
-                except Exception:
-                    current = None
-                    policy_revision = None
-                try:
-                    current_model = (
-                        await self._model_repository_builder(session).resolve_active_model(
-                            current.memory.model_name,
-                            load_envelope=False,
+            retry_error_code: str | None = None
+            retryable = True
+            cancelled = False
+            try:
+                async with self._sessions() as session, session.begin():
+                    try:
+                        allowed = await self._scope_validator(
+                            session,
+                            claim,
+                            lock=True,
                         )
-                        if isinstance(current, AgentRuntimePolicyValue) and current.memory.enabled
-                        else None
-                    )
-                except Exception:
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
+                    repository = self._repository(session)
+                    if not allowed:
+                        try:
+                            result = await repository.release_dream(
+                                self._scope(claim),
+                                job_id=claim.job_id,
+                                lease_token=claim.lease_token,
+                                now=datetime.now(UTC),
+                                cancelled=True,
+                            )
+                        except MemoryDreamLeaseConflict:
+                            raise LeaseLost(claim.job_id) from None
+                        except MemoryDocumentConflict:
+                            raise
+                        except Exception:
+                            raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
+                        result = self._require_release_result(result)
+                        await self._audit_release_result(
+                            session,
+                            claim,
+                            result,
+                            public_error_code="MEMORY_DREAM_CANCELLED",
+                        )
+                        return
+
+                    try:
+                        current, policy_revision = await self._runtime_policy_materializer.materialize_current_with_revision_in_session(
+                            session,
+                            RuntimePolicySection.AGENT_RUNTIME,
+                            for_update=True,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        raise _DreamSettlementTransient("MEMORY_DREAM_POLICY_UNAVAILABLE") from None
+                    if not isinstance(current, AgentRuntimePolicyValue):
+                        raise _DreamSettlementTransient("MEMORY_DREAM_POLICY_UNAVAILABLE")
+
                     current_model = None
-                try:
-                    preference = await self._personalization_repository_builder(session).read_memory(work.owner_user_id, for_update=True)
-                except AccountPersonalizationNotFound:
-                    preference = None
-                current_model_matches = (
-                    current_model is not None and current_model.model.id == work.model_config_id and current_model.version.id == work.model_version_id and current_model.version.payload_checksum == work.model_payload_checksum
-                )
-                still_valid = (
-                    allowed
-                    and preference is not None
-                    and preference.memory_enabled
-                    and preference.version == work.preference_version
-                    and isinstance(current, AgentRuntimePolicyValue)
-                    and current.memory.enabled
-                    and policy_revision == work.policy_revision
-                    and current.memory.max_injection_tokens == max_tokens
-                    and current_model_matches
-                )
-                repository = self._repository(session)
-                if not still_valid:
-                    await repository.release_dream(
-                        self._scope(claim),
-                        job_id=claim.job_id,
-                        lease_token=claim.lease_token,
-                        now=datetime.now(UTC),
-                        cancelled=True,
+                    if current.memory.enabled:
+                        try:
+                            current_model = await self._model_repository_builder(session).resolve_active_model(
+                                current.memory.model_name,
+                                load_envelope=False,
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            raise _DreamSettlementTransient("MEMORY_DREAM_MODEL_UNAVAILABLE") from None
+
+                    try:
+                        preference = await self._personalization_repository_builder(session).read_memory(
+                            work.owner_user_id,
+                            for_update=True,
+                        )
+                    except AccountPersonalizationNotFound:
+                        preference = None
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
+
+                    try:
+                        current_model_matches = (
+                            current_model is not None and current_model.model.id == work.model_config_id and current_model.version.id == work.model_version_id and current_model.version.payload_checksum == work.model_payload_checksum
+                        )
+                    except Exception:
+                        raise _DreamSettlementTransient("MEMORY_DREAM_MODEL_UNAVAILABLE") from None
+
+                    still_valid = (
+                        preference is not None
+                        and preference.memory_enabled
+                        and preference.version == work.preference_version
+                        and current.memory.enabled
+                        and policy_revision == work.policy_revision
+                        and current.memory.max_injection_tokens == max_tokens
+                        and current_model_matches
                     )
-                    return
-                validate_memory_document(
-                    content,
-                    max_tokens,
-                    sections=work.sections,
-                )
-                try:
-                    async with session.begin_nested():
+                    if not still_valid:
+                        try:
+                            result = await repository.release_dream(
+                                self._scope(claim),
+                                job_id=claim.job_id,
+                                lease_token=claim.lease_token,
+                                now=datetime.now(UTC),
+                                cancelled=True,
+                            )
+                        except MemoryDreamLeaseConflict:
+                            raise LeaseLost(claim.job_id) from None
+                        except MemoryDocumentConflict:
+                            raise
+                        except Exception:
+                            raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
+                        result = self._require_release_result(result)
+                        await self._audit_release_result(
+                            session,
+                            claim,
+                            result,
+                            public_error_code="MEMORY_DREAM_CANCELLED",
+                        )
+                        return
+
+                    try:
+                        validate_memory_document(
+                            content,
+                            max_tokens,
+                            sections=work.sections,
+                        )
+                    except (MemoryDocumentInvalid, TypeError, ValueError):
+                        raise _DreamSettlementTransient("MEMORY_DREAM_OUTPUT_INVALID") from None
+
+                    try:
                         record = await repository.finalize_dream(
                             self._scope(claim),
                             job_id=claim.job_id,
@@ -448,32 +536,213 @@ class MemoryDreamJobHandler:
                             now=datetime.now(UTC),
                             episode_retention_days=episode_retention_days,
                         )
-                        if record.needs_review and self._audit is not None:
-                            ratio = memory_document_deletion_ratio(
-                                work.base_content,
-                                content,
-                            )
-                            await self._audit.memory_dream_review_flagged(
+                    except MemoryDreamLeaseConflict:
+                        raise LeaseLost(claim.job_id) from None
+                    except MemoryDreamStaleConflict:
+                        raise
+                    except MemoryDreamSettlementInvariant:
+                        raise
+                    except MemoryDocumentConflict:
+                        raise MemoryDreamSettlementInvariant(
+                            "Dream settlement conflict was not classified",
+                        ) from None
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
+
+                    if self._audit is not None:
+                        try:
+                            await self._audit.memory_dream_settled(
                                 session,
                                 project_id=work.project_id,
                                 job_id=claim.job_id,
                                 request_id=_MEMORY_DREAM_REQUEST_ID,
+                                disposition="published",
                                 version=record.version,
-                                deletion_ratio_bucket=_deletion_ratio_bucket(ratio or 0.0),
                             )
-                except MemoryDocumentConflict:
-                    await repository.release_dream(
-                        self._scope(claim),
-                        job_id=claim.job_id,
-                        lease_token=claim.lease_token,
-                        now=datetime.now(UTC),
-                        cancelled=False,
-                        public_error_code="MEMORY_DREAM_COMMIT_CONFLICT",
-                        retry_initial_seconds=self._retry_initial_seconds,
-                        retry_max_seconds=self._retry_max_seconds,
-                    )
+                            if record.needs_review:
+                                ratio = memory_document_deletion_ratio(
+                                    work.base_content,
+                                    content,
+                                )
+                                await self._audit.memory_dream_review_flagged(
+                                    session,
+                                    project_id=work.project_id,
+                                    job_id=claim.job_id,
+                                    request_id=_MEMORY_DREAM_REQUEST_ID,
+                                    version=record.version,
+                                    deletion_ratio_bucket=_deletion_ratio_bucket(
+                                        ratio or 0.0,
+                                    ),
+                                )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception:
+                            raise _DreamSettlementTransient("MEMORY_DREAM_AUDIT_UNAVAILABLE") from None
+            except asyncio.CancelledError:
+                raise
+            except _DreamSettlementTransient as error:
+                retry_error_code = error.public_error_code
+            except MemoryDreamStaleConflict:
+                retry_error_code = "MEMORY_DREAM_STALE"
+                cancelled = True
+                retryable = False
+            except MemoryDreamSettlementInvariant:
+                retry_error_code = "MEMORY_DREAM_SETTLEMENT_INVARIANT"
+                retryable = False
+            except LeaseLost:
+                raise
+            except MemoryDocumentConflict:
+                retry_error_code = "MEMORY_DREAM_SETTLEMENT_INVARIANT"
+                retryable = False
+            except Exception:
+                # Includes transaction start/commit failures. The subsequent
+                # release uses a fresh session only after this context has
+                # completed its rollback/close path.
+                retry_error_code = "MEMORY_DREAM_SETTLEMENT_UNAVAILABLE"
+
+            if retry_error_code is not None:
+                logger.warning(
+                    "Memory Dream settlement rolled back; entering retry/dead: public_error_code=%s",
+                    retry_error_code,
+                )
+                await self._commit_release(
+                    claim,
+                    cancelled=cancelled,
+                    public_error_code=retry_error_code,
+                    retryable=retryable,
+                )
 
         return JobSettlement(JobOutcome.succeeded(), commit)
+
+    @staticmethod
+    def _require_release_result(value: object) -> MemoryDreamReleaseResult:
+        if type(value) is not MemoryDreamReleaseResult:
+            raise MemoryDreamSettlementInvariant(
+                "Dream release returned an invalid result",
+            )
+        return value
+
+    async def _audit_release_result(
+        self,
+        session: AsyncSession,
+        claim: JobClaim,
+        result: MemoryDreamReleaseResult,
+        *,
+        public_error_code: str,
+    ) -> None:
+        """Audit only durable terminal releases in their owning transaction."""
+
+        if self._audit is None or result.disposition in {
+            "already_published",
+            "retry_wait",
+        }:
+            return
+        if result.disposition == "cancelled":
+            metadata = {
+                "disposition": "cancelled",
+                "version": None,
+                "public_error_code": None,
+            }
+        elif result.disposition == "dead":
+            metadata = {
+                "disposition": "dead",
+                "version": None,
+                "public_error_code": public_error_code,
+            }
+        else:
+            raise MemoryDreamSettlementInvariant(
+                "Dream release returned an invalid terminal result",
+            )
+        try:
+            await self._audit.memory_dream_settled(
+                session,
+                project_id=claim.scope.project_id,
+                job_id=claim.job_id,
+                request_id=_MEMORY_DREAM_REQUEST_ID,
+                **metadata,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise _DreamSettlementTransient(
+                "MEMORY_DREAM_AUDIT_UNAVAILABLE",
+            ) from None
+
+    async def _commit_release_once(
+        self,
+        claim: JobClaim,
+        *,
+        cancelled: bool,
+        public_error_code: str,
+        retryable: bool,
+    ) -> MemoryDreamReleaseResult:
+        async with self._sessions() as session, session.begin():
+            try:
+                allowed = await self._scope_validator(
+                    session,
+                    claim,
+                    lock=True,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                raise _DreamSettlementTransient(
+                    "MEMORY_DREAM_SETTLEMENT_UNAVAILABLE",
+                ) from None
+            try:
+                result = await self._repository(session).release_dream(
+                    self._scope(claim),
+                    job_id=claim.job_id,
+                    lease_token=claim.lease_token,
+                    now=datetime.now(UTC),
+                    cancelled=cancelled or not allowed,
+                    public_error_code=public_error_code,
+                    retryable=retryable,
+                    retry_initial_seconds=self._retry_initial_seconds,
+                    retry_max_seconds=self._retry_max_seconds,
+                )
+            except MemoryDreamLeaseConflict:
+                raise LeaseLost(claim.job_id) from None
+            result = self._require_release_result(result)
+            await self._audit_release_result(
+                session,
+                claim,
+                result,
+                public_error_code=public_error_code,
+            )
+            return result
+
+    async def _commit_release(
+        self,
+        claim: JobClaim,
+        *,
+        cancelled: bool,
+        public_error_code: str,
+        retryable: bool,
+    ) -> MemoryDreamReleaseResult:
+        try:
+            return await self._commit_release_once(
+                claim,
+                cancelled=cancelled,
+                public_error_code=public_error_code,
+                retryable=retryable,
+            )
+        except MemoryDreamSettlementInvariant:
+            if not retryable:
+                raise
+            # The first release transaction has rolled back.  A fresh,
+            # non-retryable release makes an impossible settlement state
+            # terminal instead of misreporting lease loss or waiting for lease
+            # expiry.  If the invariant repeats, preserve it for operators.
+            logger.error("Memory Dream release invariant; forcing dead settlement")
+            return await self._commit_release_once(
+                claim,
+                cancelled=False,
+                public_error_code="MEMORY_DREAM_SETTLEMENT_INVARIANT",
+                retryable=False,
+            )
 
     def _release_settlement(
         self,
@@ -484,21 +753,12 @@ class MemoryDreamJobHandler:
         retryable: bool = True,
     ) -> JobSettlement:
         async def commit() -> None:
-            async with self._sessions() as session, session.begin():
-                try:
-                    await self._repository(session).release_dream(
-                        self._scope(claim),
-                        job_id=claim.job_id,
-                        lease_token=claim.lease_token,
-                        now=datetime.now(UTC),
-                        cancelled=cancelled,
-                        public_error_code=public_error_code,
-                        retryable=retryable,
-                        retry_initial_seconds=self._retry_initial_seconds,
-                        retry_max_seconds=self._retry_max_seconds,
-                    )
-                except MemoryDocumentConflict:
-                    raise LeaseLost(claim.job_id) from None
+            await self._commit_release(
+                claim,
+                cancelled=cancelled,
+                public_error_code=public_error_code,
+                retryable=retryable,
+            )
 
         outcome = JobOutcome.cancelled() if cancelled else JobOutcome.failed(public_error_code)
         return JobSettlement(outcome, commit)

@@ -33,6 +33,10 @@ Agents are created and managed from the entered project's **Agents** page. Platf
 
 The slug is derived from the display name and must be unique within its asset scope. Published versions and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill and MCP versions referenced by that Agent version. Omitting a dependency does not inherit every project asset.
 
+Creating an Agent produces a suspended asset and Draft v1. Authors with `shared_assets.edit` may create new drafts by editing instructions or capability bindings, or by restoring a historical version; none of those actions changes the running version. A project publisher with `shared_assets.manage_bindings` must explicitly publish a selected draft and may then activate the Agent. Publishing and activation are separate CAS-protected operations.
+
+The project API accepts only a complete definition at `POST /api/projects/{project_id}/agents`: `slug`, `display_name`, `description`, `agents_instructions`, `soul`, `identity`, `user_context`, `model_ref`, `model_settings`, `tool_groups`, `skill_version_ids`, and `mcp_version_ids`. The response contains both the suspended Agent asset and Draft v1; a name-only shell is rejected. Publish a reviewed draft with `POST /api/projects/{project_id}/agents/{agent_id}/versions/{version_id}/publish` and the current `expected_asset_version`. The project-admin override API follows the same definition and author/publisher contract.
+
 ### Restricting agent capabilities
 
 To restrict a custom agent to specific skills:

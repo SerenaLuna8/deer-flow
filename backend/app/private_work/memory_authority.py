@@ -4,32 +4,41 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NoReturn
 
 import sqlalchemy as sa
 
-from app.personalization.repository import AccountPersonalizationRepository
+from app.personalization.repository import (
+    AccountPersonalizationNotFound,
+    AccountPersonalizationRepository,
+)
 from app.private_work.authorization import PrivateRunAuthorizationService
 from app.private_work.context import (
     PrivateWorkContext,
     require_issued_private_work_context,
 )
-from app.private_work.run_repository import PrivateRunRepository
+from app.private_work.run_repository import (
+    PrivateRunExecutionLeaseLost,
+    PrivateRunRepository,
+)
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.context import (
     ProjectContext,
     resolve_project_context_in_transaction,
 )
-from deerflow.agents.memory.dream import (
+from app.projects.errors import ProjectForbidden, ProjectNotFound
+from deerflow.config.memory_config import MemoryConfig
+from deerflow.error_codes import MemoryAuthorityUnavailable
+from deerflow.memory_contract import (
     validate_memory_document,
     validate_memory_document_sections,
 )
-from deerflow.config.memory_config import MemoryConfig
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.private_work.memory_document_model import (
     RunMemoryContextSnapshotRow,
@@ -47,6 +56,38 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 
 DEFAULT_PRIVATE_MEMORY_NAMESPACE = "default"
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+logger = logging.getLogger(__name__)
+
+_AUTHORIZATION_FAILURES = (
+    AccountPersonalizationNotFound,
+    PrivateRunExecutionLeaseLost,
+    ProjectForbidden,
+    ProjectNotFound,
+)
+_AUTHORITY_OPERATIONS = frozenset({"load_snapshot", "propose_entry", "search_episodes"})
+
+
+def _raise_authority_unavailable(
+    operation: str,
+    error: Exception,
+) -> NoReturn:
+    """Fail the Run with a content-free operational observation."""
+
+    safe_operation = operation if operation in _AUTHORITY_OPERATIONS else "unknown"
+    logger.error(
+        "Memory authority operation failed: operation=%s disposition=fail_closed failure_type=%s",
+        safe_operation,
+        type(error).__name__,
+    )
+    # ``raise ... from None`` suppresses display of the active exception but
+    # Python still stores it in ``__context__``.  Clear that hidden chain too,
+    # so a later tracer cannot recover SQL parameters or private identifiers.
+    try:
+        raise MemoryAuthorityUnavailable from None
+    except MemoryAuthorityUnavailable as signal:
+        signal.__cause__ = None
+        signal.__context__ = None
+        raise
 
 
 def _recall_result_bucket(count: int) -> str:
@@ -267,8 +308,12 @@ class PrivateRunMemoryAuthority:
             raise
         except AuthorizationRevoked:
             raise
-        except Exception:
+        except _AUTHORIZATION_FAILURES:
             raise AuthorizationRevoked from None
+        except MemoryAuthorityUnavailable:
+            raise
+        except Exception as error:
+            _raise_authority_unavailable("load_snapshot", error)
 
     async def search_episodes(
         self,
@@ -335,8 +380,12 @@ class PrivateRunMemoryAuthority:
             raise
         except AuthorizationRevoked:
             raise
-        except Exception:
+        except _AUTHORIZATION_FAILURES:
             raise AuthorizationRevoked from None
+        except MemoryAuthorityUnavailable:
+            raise
+        except Exception as error:
+            _raise_authority_unavailable("search_episodes", error)
 
     async def propose_entry(
         self,
@@ -390,8 +439,12 @@ class PrivateRunMemoryAuthority:
             raise
         except AuthorizationRevoked:
             raise
-        except Exception:
+        except _AUTHORIZATION_FAILURES:
             raise AuthorizationRevoked from None
+        except MemoryAuthorityUnavailable:
+            raise
+        except Exception as error:
+            _raise_authority_unavailable("propose_entry", error)
 
 
 __all__ = [

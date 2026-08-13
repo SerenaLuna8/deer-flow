@@ -29,6 +29,7 @@ from deerflow.persistence.private_work.memory_document_model import (
     RunMemoryContextSnapshotRow,
 )
 from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryDocumentConflict,
     MemoryDocumentRepository,
     MemoryDocumentScope,
     memory_document_digest,
@@ -321,6 +322,18 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
             assert tuple(document_a.sections) == sections_a
             assert document_a.sections_policy_version_id == policy_a_version_id
             assert document_a.content == render_empty_memory_document(sections_a)
+            with pytest.raises(MemoryDocumentConflict):
+                await MemoryDocumentRepository(
+                    session,
+                    jobs=_jobs(session),
+                ).restore_version(
+                    scope_a,
+                    target_version=1,
+                    expected_current_version=0,
+                    expected_sections=sections_a,
+                    max_tokens=8_000,
+                    now=now,
+                )
 
         async with seed.factory() as session, session.begin():
             policy_b_version_id = await _replace_memory_document_policy(
@@ -423,6 +436,7 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
             )
             assert document_a is not None and document_b is not None
             document_a.version = 1
+            document_a.dream_cursor = 99
             document_b.version = 1
             session.add(
                 MemoryDocumentVersionRow(
@@ -444,6 +458,15 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
                     created_at=now + timedelta(seconds=5),
                 )
             )
+            with pytest.raises(MemoryDocumentConflict):
+                await repository.restore_version(
+                    scope_a,
+                    target_version=1,
+                    expected_current_version=0,
+                    expected_sections=sections_a,
+                    max_tokens=8_000,
+                    now=now + timedelta(seconds=5),
+                )
 
         restored_a = await PrivateMemoryDocumentService(seed.factory).restore(
             seed.owner_a,
@@ -461,6 +484,7 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
             assert document_a is not None
             assert tuple(document_a.sections) == sections_a
             assert document_a.sections_policy_version_id == policy_a_version_id
+            assert document_a.dream_cursor == 99
 
         thread_a = str(uuid.uuid4())
         thread_b = str(uuid.uuid4())

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -23,6 +24,7 @@ _TERMINAL_STATUSES = frozenset(
         "timeout",
     }
 )
+_TERMINAL_ERROR_CODES = frozenset({"MODEL_OUTPUT_LIMIT"})
 
 
 def _is_valid_stream_event(event: object) -> bool:
@@ -107,12 +109,30 @@ class StreamFrame:
             raise ValueError("stream end events are reserved for terminal frames")
         if self.terminal and self.event != "end":
             raise ValueError("terminal stream frame event must be 'end'")
+        if self.terminal:
+            if not isinstance(self.data, Mapping):
+                raise ValueError("terminal stream frame data is invalid")
+            if set(self.data) - {"status", "error_code"}:
+                raise ValueError("terminal stream frame data is invalid")
+            if self.data.get("status") not in _TERMINAL_STATUSES:
+                raise ValueError("terminal stream status is invalid")
+            error_code = self.data.get("error_code")
+            if error_code is not None and error_code not in _TERMINAL_ERROR_CODES:
+                raise ValueError("terminal stream error code is invalid")
 
     @classmethod
-    def end(cls, *, status: str) -> StreamFrame:
+    def end(
+        cls,
+        *,
+        status: str,
+        error_code: str | None = None,
+    ) -> StreamFrame:
         if status not in _TERMINAL_STATUSES:
             raise ValueError("terminal stream status is invalid")
-        return cls(event="end", data={"status": status}, terminal=True)
+        data = {"status": status}
+        if error_code is not None:
+            data["error_code"] = error_code
+        return cls(event="end", data=data, terminal=True)
 
 
 @dataclass(frozen=True, slots=True)

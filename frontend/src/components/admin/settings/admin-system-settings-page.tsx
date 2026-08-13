@@ -5,6 +5,7 @@ import {
   ArrowUpIcon,
   BotIcon,
   BrainIcon,
+  CalendarClockIcon,
   CheckCircle2Icon,
   ChevronDownIcon,
   DatabaseIcon,
@@ -44,6 +45,7 @@ import {
   AdminSystemSettingsApiError,
   agentRuntimeSettingsValueSchema,
   authSettingsValueSchema,
+  automationsSettingsValueSchema,
   memoryDocumentSettingsValueSchema,
   quotaSettingsValueSchema,
   useAdminSystemSettings,
@@ -51,6 +53,7 @@ import {
   validateAgentRuntimeModelReferences,
   type AgentRuntimeSettingsValue,
   type AuthSettingsValue,
+  type AutomationsSettingsValue,
   type MemoryDocumentSettingsValue,
   type QuotaSettingsValue,
   type SystemSettingsCatalog,
@@ -103,6 +106,39 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     hintZh: "开启后，访客可以创建本地账号；管理员初始化和 OIDC 不受影响。",
     hintEn:
       "When enabled, visitors can create local accounts. Administrator setup and OIDC are unchanged.",
+  },
+  "automations.enabled": {
+    zh: "启用自动轮询",
+    en: "Enable scheduled polling",
+    hintZh:
+      "关闭后 Scheduler 不再自动准入到期的自动化，项目内手动触发仍然可用。",
+    hintEn:
+      "When off, the Scheduler stops admitting due Automations. Manual project triggers still work.",
+  },
+  "automations.poll_interval_seconds": {
+    zh: "轮询间隔",
+    en: "Poll interval",
+    unit: "秒",
+    hintZh: "Scheduler 检查到期自动化的间隔，范围 1–300 秒。",
+    hintEn:
+      "How often the Scheduler looks for due Automations (1–300 seconds).",
+  },
+  "automations.max_concurrent_runs": {
+    zh: "全局并发自动化上限",
+    en: "Global concurrent Automation limit",
+    unit: "个",
+    hintZh:
+      "计划触发和手动触发共用的进行中自动化上限，范围 1–32。收紧后不影响已准入的运行。",
+    hintEn:
+      "Shared cap for scheduled and manual in-flight Automations (1–32). Tightening does not interrupt already admitted work.",
+  },
+  "automations.min_once_delay_seconds": {
+    zh: "一次性计划最短提前量",
+    en: "Minimum one-time delay",
+    unit: "秒",
+    hintZh: "一次性计划必须晚于当前时间的最短秒数，范围 0–86400。",
+    hintEn:
+      "Minimum seconds into the future accepted for one-time schedules (0–86400).",
   },
   "quotas.default_member_limit": {
     zh: "默认项目成员上限",
@@ -210,6 +246,9 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
   "agent_runtime.title.model_name": {
     zh: "标题生成模型",
     en: "Title model",
+    hintZh: "留空则使用系统默认模型。模型调用失败时回退到本地标题。",
+    hintEn:
+      "Leave empty to use the system default model. Falls back to a local title if the model call fails.",
   },
   "agent_runtime.suggestions.enabled": {
     zh: "显示后续问题建议",
@@ -700,6 +739,18 @@ function NullableNumberField({
   );
 }
 
+export function formatSystemDefaultModelOption(
+  fallbackLabel: string,
+  defaultModelDisplayName: string | undefined,
+  locale: Locale = "en-US",
+): string {
+  if (!defaultModelDisplayName) return fallbackLabel;
+  if (locale === "zh-CN") {
+    return `${fallbackLabel}（${defaultModelDisplayName}）`;
+  }
+  return `${fallbackLabel} (${defaultModelDisplayName})`;
+}
+
 function ModelField({
   activeModels,
   disabled = false,
@@ -715,7 +766,9 @@ function ModelField({
   onChange: (value: string | null) => void;
   value: string | null;
 }) {
-  const labels = useI18n().t.adminSystemSettings.fields;
+  const { locale, t } = useI18n();
+  const labels = t.adminSystemSettings.fields;
+  const defaultModel = activeModels.find((model) => model.is_default);
   const available =
     value === null || activeModels.some((model) => model.name === value);
   return (
@@ -732,7 +785,13 @@ function ModelField({
         onChange={(event) => onChange(event.target.value || null)}
         className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
       >
-        <option value="">{labels.defaultModel}</option>
+        <option value="">
+          {formatSystemDefaultModelOption(
+            labels.defaultModel,
+            defaultModel?.display_name,
+            locale,
+          )}
+        </option>
         {!available && value ? (
           <option value={value} disabled>
             {value} — {labels.unavailableModel}
@@ -1326,12 +1385,20 @@ function agentRuntimeGroups(locale: Locale) {
 type AgentRuntimeGroupValue = ReturnType<
   typeof agentRuntimeGroups
 >[number]["value"];
-type SettingsDestination = "auth" | "quotas" | AgentRuntimeGroupValue;
+type SettingsDestination =
+  | "auth"
+  | "automations"
+  | "quotas"
+  | AgentRuntimeGroupValue;
 
 function isAgentRuntimeGroup(
   destination: SettingsDestination,
 ): destination is AgentRuntimeGroupValue {
-  return destination !== "auth" && destination !== "quotas";
+  return (
+    destination !== "auth" &&
+    destination !== "automations" &&
+    destination !== "quotas"
+  );
 }
 
 function AgentRuntimeEditor({
@@ -1772,6 +1839,51 @@ function AuthEditor({
   );
 }
 
+function AutomationsEditor({
+  onChange,
+  value,
+}: {
+  onChange: (value: AutomationsSettingsValue) => void;
+  value: AutomationsSettingsValue;
+}) {
+  return (
+    <div className="grid gap-3">
+      <BooleanField
+        name="automations.enabled"
+        checked={value.enabled}
+        onChange={(enabled) => onChange({ ...value, enabled })}
+      />
+      <NumberField
+        name="automations.poll_interval_seconds"
+        value={value.poll_interval_seconds}
+        min={1}
+        max={300}
+        onChange={(poll_interval_seconds) =>
+          onChange({ ...value, poll_interval_seconds })
+        }
+      />
+      <NumberField
+        name="automations.max_concurrent_runs"
+        value={value.max_concurrent_runs}
+        min={1}
+        max={32}
+        onChange={(max_concurrent_runs) =>
+          onChange({ ...value, max_concurrent_runs })
+        }
+      />
+      <NumberField
+        name="automations.min_once_delay_seconds"
+        value={value.min_once_delay_seconds}
+        min={0}
+        max={86_400}
+        onChange={(min_once_delay_seconds) =>
+          onChange({ ...value, min_once_delay_seconds })
+        }
+      />
+    </div>
+  );
+}
+
 function QuotasEditor({
   onChange,
   value,
@@ -2121,6 +2233,11 @@ export function AdminSystemSettingsStateView({
       icon: UserPlusIcon,
     },
     {
+      value: "automations",
+      label: locale === "zh-CN" ? "自动化调度" : "Automation scheduling",
+      icon: CalendarClockIcon,
+    },
+    {
       value: "quotas",
       label: locale === "zh-CN" ? "项目默认配额" : "Project quota defaults",
       icon: UsersIcon,
@@ -2271,9 +2388,9 @@ export function AdminSystemSettingsStateView({
                       data-settings-destination={destination.value}
                       aria-current={selected ? "page" : undefined}
                       className={cn(
-                        "text-muted-foreground hover:bg-background/70 hover:text-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                        "text-muted-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-blue-50 dark:hover:bg-blue-500/15",
                         selected &&
-                          "bg-background text-foreground shadow-sm ring-1 ring-black/5",
+                          "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300",
                       )}
                       onClick={() => setActiveDestination(destination.value)}
                     >
@@ -2303,9 +2420,9 @@ export function AdminSystemSettingsStateView({
                         data-settings-destination={destination.value}
                         aria-current={selected ? "page" : undefined}
                         className={cn(
-                          "text-muted-foreground hover:bg-background/70 hover:text-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                          "text-muted-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-blue-50 dark:hover:bg-blue-500/15",
                           selected &&
-                            "bg-background text-foreground shadow-sm ring-1 ring-black/5",
+                            "bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-300",
                         )}
                         onClick={() => setActiveDestination(destination.value)}
                       >
@@ -2340,6 +2457,31 @@ export function AdminSystemSettingsStateView({
                 onSave={onSave}
                 renderEditor={(value, setValue) => (
                   <AuthEditor value={value} onChange={setValue} />
+                )}
+              />
+            </div>
+            <div hidden={activeSection !== "automations"}>
+              <EditableSection
+                key={`automations-${state.data.sections.automations.revision}`}
+                section="automations"
+                title={labels.sections.automations.title}
+                description={labels.sections.automations.description}
+                value={state.data.sections.automations.value}
+                revision={state.data.sections.automations.revision}
+                effectiveRevision={
+                  state.data.sections.automations.effective_revision
+                }
+                effectScope={state.data.sections.automations.effect_scope}
+                updatedAt={state.data.sections.automations.updated_at}
+                schema={automationsSettingsValueSchema}
+                pending={pendingSection === "automations"}
+                error={sectionErrors.automations}
+                lastResult={lastResults.automations}
+                activeModels={activeModels}
+                modelsStatus={modelsStatus}
+                onSave={onSave}
+                renderEditor={(value, setValue) => (
+                  <AutomationsEditor value={value} onChange={setValue} />
                 )}
               />
             </div>
@@ -2493,6 +2635,15 @@ function AuthorizedAdminSystemSettingsPage({
             input: {
               expected_revision: expectedRevision,
               value: authSettingsValueSchema.parse(value),
+            },
+          });
+          break;
+        case "automations":
+          result = await replaceSection.mutateAsync({
+            section,
+            input: {
+              expected_revision: expectedRevision,
+              value: automationsSettingsValueSchema.parse(value),
             },
           });
           break;

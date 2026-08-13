@@ -13,9 +13,10 @@ from app.personalization.repository import (
     AccountPersonalizationNotFound,
     AccountPersonalizationRepository,
 )
-from app.projects.capabilities import Capability
+from app.projects.capabilities import Capability, capabilities_for
 from app.projects.context import resolve_project_context_in_transaction
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.projects.models import ProjectRole
 from app.system_runtime_settings.materializer import SystemRuntimePolicyMaterializer
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
@@ -24,13 +25,15 @@ from app.system_runtime_settings.models import (
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
 from app.system_settings.repository import SystemModelRepository
-from deerflow.agents.memory.dream import (
+from deerflow.memory_contract import (
     DREAM_PROMPT_VERSION,
     estimate_memory_tokens,
     render_empty_memory_document,
 )
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryBudgetRewriteScanCursor,
+    MemoryBudgetRewriteScopePage,
     MemoryDocumentRepository,
     MemoryDocumentScope,
     MemoryDreamAdmissionRecord,
@@ -39,6 +42,8 @@ from deerflow.persistence.private_work.memory_document_repository import (
 )
 
 _SCHEDULER_REQUEST_ID = "memory-dream-scheduler"
+_BUDGET_REWRITE_DISCOVERY_PAGE_SIZE = 100
+_PRIVATE_WORK_CREATE_ROLES = tuple(role.value for role in ProjectRole if Capability.PRIVATE_WORK_CREATE in capabilities_for(role))
 logger = logging.getLogger(__name__)
 
 
@@ -235,24 +240,27 @@ class MemoryDreamAdmissionService:
             limit=max_jobs,
         )
 
-    async def list_budget_rewrite_scopes(
+    async def list_budget_rewrite_scope_page(
         self,
         session: AsyncSession,
         *,
-        max_jobs: int = 100,
-    ) -> tuple[MemoryDocumentScope, ...]:
-        if type(max_jobs) is not int or not 1 <= max_jobs <= 100:
+        cursor: MemoryBudgetRewriteScanCursor | None = None,
+        page_size: int = _BUDGET_REWRITE_DISCOVERY_PAGE_SIZE,
+    ) -> MemoryBudgetRewriteScopePage:
+        if type(page_size) is not int or not 1 <= page_size <= 100:
             raise ValueError("Dream Scheduler batch is invalid")
         policy_state = await self._platform_policy(
             session,
             for_update=False,
         )
         if policy_state is None:
-            return ()
+            return MemoryBudgetRewriteScopePage(scopes=(), next_cursor=None)
         policy, _policy_revision = policy_state
-        return await self._repository(session).list_budget_rewrite_scopes(
+        return await self._repository(session).list_budget_rewrite_scope_page(
             budget_tokens=policy.memory.max_injection_tokens,
-            limit=max_jobs,
+            admissible_roles=_PRIVATE_WORK_CREATE_ROLES,
+            cursor=cursor,
+            limit=page_size,
         )
 
     async def admit_scheduled_scope(
@@ -305,12 +313,16 @@ class MemoryDreamSchedulerService:
         *,
         admission: MemoryDreamAdmissionService | None = None,
         max_jobs_per_poll: int = 100,
+        audit=None,
     ) -> None:
         if not callable(session_factory) or type(max_jobs_per_poll) is not int or not 1 <= max_jobs_per_poll <= 100:
             raise ValueError("Dream Scheduler configuration is invalid")
+        if audit is not None and not callable(getattr(audit, "memory_dream_admitted", None)):
+            raise ValueError("Dream Scheduler audit port is invalid")
         self._sessions = session_factory
         self._admission = admission or MemoryDreamAdmissionService()
         self._max_jobs_per_poll = max_jobs_per_poll
+        self._audit = audit
 
     async def admit_due(
         self,
@@ -323,41 +335,84 @@ class MemoryDreamSchedulerService:
                 now=now,
                 max_jobs=self._max_jobs_per_poll,
             )
-        async with self._sessions() as session, session.begin():
-            budget_scopes = await self._admission.list_budget_rewrite_scopes(
-                session,
-                max_jobs=self._max_jobs_per_poll,
-            )
         seen = set(scopes)
-        candidates = [(scope, True) for scope in scopes]
-        candidates.extend((scope, False) for scope in budget_scopes if scope not in seen)
-
         admitted = 0
-        for scope, require_due in candidates:
-            try:
-                async with self._sessions() as session, session.begin():
-                    result = await self._admission.admit_scheduled_scope(
-                        session,
-                        scope,
-                        now=now,
-                        require_due=require_due,
-                    )
-            except (
-                AccountPersonalizationNotFound,
-                ProjectForbidden,
-                ProjectNotFound,
-                ValueError,
-            ):
-                continue
-            except Exception as error:  # noqa: BLE001 - isolate owner scopes
-                logger.error(
-                    "Memory Dream admission failed: error_type=%s",
-                    type(error).__name__,
-                )
-                continue
-            if result.disposition == "queued":
+        for scope in scopes:
+            if await self._admit_scope(scope, now=now, require_due=True):
                 admitted += 1
+                if admitted == self._max_jobs_per_poll:
+                    return admitted
+
+        cursor: MemoryBudgetRewriteScanCursor | None = None
+        while admitted < self._max_jobs_per_poll:
+            async with self._sessions() as session, session.begin():
+                # Discovery width is independent of the remaining success
+                # budget: rejected candidates must not shrink scan progress.
+                page = await self._admission.list_budget_rewrite_scope_page(
+                    session,
+                    cursor=cursor,
+                    page_size=_BUDGET_REWRITE_DISCOVERY_PAGE_SIZE,
+                )
+            for scope in page.scopes:
+                if scope in seen:
+                    continue
+                seen.add(scope)
+                if await self._admit_scope(
+                    scope,
+                    now=now,
+                    require_due=False,
+                ):
+                    admitted += 1
+                    if admitted == self._max_jobs_per_poll:
+                        return admitted
+            if page.next_cursor is None:
+                break
+            if page.next_cursor == cursor:
+                raise RuntimeError("Budget rewrite discovery cursor did not advance")
+            cursor = page.next_cursor
         return admitted
+
+    async def _admit_scope(
+        self,
+        scope: MemoryDocumentScope,
+        *,
+        now: datetime,
+        require_due: bool,
+    ) -> bool:
+        try:
+            async with self._sessions() as session, session.begin():
+                result = await self._admission.admit_scheduled_scope(
+                    session,
+                    scope,
+                    now=now,
+                    require_due=require_due,
+                )
+                if result.disposition == "queued" and self._audit is not None:
+                    if result.job_id is None:
+                        raise RuntimeError("Dream admission returned no Job")
+                    await self._audit.memory_dream_admitted(
+                        session,
+                        project_id=scope.project_id,
+                        job_id=result.job_id,
+                        request_id=_SCHEDULER_REQUEST_ID,
+                        origin="scheduled",
+                        trigger=("budget_rewrite" if result.admission_kind == "budget_rewrite" else "auto_dream"),
+                        history_count=result.history_count,
+                    )
+        except (
+            AccountPersonalizationNotFound,
+            ProjectForbidden,
+            ProjectNotFound,
+            ValueError,
+        ):
+            return False
+        except Exception as error:  # noqa: BLE001 - isolate owner scopes
+            logger.error(
+                "Memory Dream admission failed: error_type=%s",
+                type(error).__name__,
+            )
+            return False
+        return result.disposition == "queued"
 
 
 __all__ = [

@@ -59,6 +59,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "memory_document_versions",
     "memory_documents",
     "memory_dream_runs",
+    "memory_dream_prepare_runs",
     "memory_episodes",
     "memory_history_entries",
     "mcp_server_versions",

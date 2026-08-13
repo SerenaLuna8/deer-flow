@@ -8,7 +8,7 @@ import pytest
 from deerflow.persistence.base import Base
 from scripts import check_postgres
 
-CURRENT_SCHEMA_MARKER = "full_schema_v9"
+CURRENT_SCHEMA_MARKER = "full_schema_v17"
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:

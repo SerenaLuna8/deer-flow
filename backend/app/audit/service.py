@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.audit.models import (
     AUDIT_ACTION_CONTRACTS,
     AUDIT_METADATA_MODELS,
+    AssetAuditMetadata,
     AuditAction,
     AuditActor,
     AuditAuthorityRejected,
@@ -44,6 +45,32 @@ from deerflow.persistence.audit.sql import AuditRepository
 from deerflow.persistence.user.model import UserRow
 
 _PUBLIC_ERROR = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_LEGACY_ASSET_KINDS = frozenset({"agent", "skill", "mcp"})
+
+
+def _metadata_for_read(
+    action: AuditAction,
+    metadata: object,
+) -> dict[str, object]:
+    metadata_model = AUDIT_METADATA_MODELS[action]
+    try:
+        return metadata_model.model_validate(metadata).model_dump(
+            mode="json",
+            exclude_none=True,
+        )
+    except ValidationError:
+        # Asset audit rows written before operation fidelity was introduced
+        # contain exactly this single field. This fallback is deliberately
+        # confined to the read projection: append() still validates against
+        # the current strict model, and no historical operation is inferred.
+        if metadata_model is not AssetAuditMetadata:
+            raise
+        if type(metadata) is not dict or set(metadata) != {"asset_kind"}:
+            raise
+        asset_kind = metadata.get("asset_kind")
+        if type(asset_kind) is not str or asset_kind not in _LEGACY_ASSET_KINDS:
+            raise
+        return {"asset_kind": asset_kind}
 
 
 class AuditService:
@@ -461,7 +488,7 @@ class AuditService:
     def _record(row: AuditLogRow) -> AuditRecord:
         try:
             action = AuditAction(row.action)
-            metadata = AUDIT_METADATA_MODELS[action].model_validate(row.metadata_json).model_dump(mode="json", exclude_none=True)
+            metadata = _metadata_for_read(action, row.metadata_json)
             return AuditRecord(
                 id=row.id,
                 occurred_at=row.occurred_at,

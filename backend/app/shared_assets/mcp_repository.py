@@ -464,6 +464,7 @@ class McpRepository:
                     select(McpServerRow).where(
                         McpServerRow.scope == "system",
                         McpServerRow.project_id.is_(None),
+                        McpServerRow.status == "active",
                         self._project_context_exists(context),
                     )
                 )
@@ -494,7 +495,15 @@ class McpRepository:
         context: SystemAssetGovernanceContext | SystemAssetReadContext,
     ) -> tuple[McpServerRow, ...]:
         self._require_system_catalog_reader(context)
-        statement = select(McpServerRow).where(McpServerRow.scope == "system", McpServerRow.project_id.is_(None)).order_by(McpServerRow.created_at, McpServerRow.id)
+        statement = (
+            select(McpServerRow)
+            .where(
+                McpServerRow.scope == "system",
+                McpServerRow.project_id.is_(None),
+                McpServerRow.status == "active",
+            )
+            .order_by(McpServerRow.created_at, McpServerRow.id)
+        )
         return tuple((await self.session.execute(statement)).scalars().all())
 
     async def next_version_number(self, asset: McpServerRow) -> int:

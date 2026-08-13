@@ -390,7 +390,7 @@ async def test_postgres_memory_document_policy_bootstrap_cas_lock_and_audit(
         ]
 
         async with factory() as session:
-            assert await session.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 4
+            assert await session.scalar(text("SELECT count(*) FROM system_runtime_policies")) == 5
             assert (
                 await session.scalar(
                     text(

@@ -24,13 +24,21 @@ import {
   skillBuilderSessionsInvalidation,
   skillBuilderSessionsKey,
 } from "./query-keys";
+import { isSkillBuilderRunAdmission } from "./types";
 import type {
   CancelSkillBuilderSessionInput,
   CommitSkillBuilderSessionInput,
   CreateSkillBuilderSessionInput,
   SkillBuilderSession,
+  SkillBuilderSessionSummary,
+  SkillBuilderTurnInput,
   ValidateSkillBuilderSessionInput,
 } from "./types";
+
+export type CancelSkillBuilderSessionFromListInput =
+  CancelSkillBuilderSessionInput & {
+    session_id: string;
+  };
 
 function useSkillBuilderMutationRunner(accountId: string, projectId: string) {
   const access = usePrivateWorkAccess();
@@ -66,7 +74,9 @@ function useSkillBuilderMutationRunner(accountId: string, projectId: string) {
 export function skillBuilderPollingInterval(
   session: SkillBuilderSession | undefined,
 ) {
-  return session?.status === "generating" || session?.status === "committing"
+  return session?.activeRun ||
+    session?.status === "generating" ||
+    session?.status === "committing"
     ? 1_000
     : false;
 }
@@ -167,13 +177,28 @@ export function useSubmitSkillBuilderTurn(
   projectId: string,
   sessionId: string,
 ) {
-  return useSessionMutation(
-    accountId,
-    projectId,
-    sessionId,
-    "submit-turn",
-    submitSkillBuilderTurn,
-  );
+  const queryClient = useQueryClient();
+  const { runMutation } = useSkillBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: skillBuilderMutationKey(accountId, projectId, "submit-turn"),
+    mutationFn: (input: SkillBuilderTurnInput) =>
+      runMutation((signal) =>
+        submitSkillBuilderTurn(projectId, sessionId, input, signal),
+      ),
+    onSuccess: (response) => {
+      const key = skillBuilderSessionKey(accountId, projectId, sessionId);
+      if (isSkillBuilderRunAdmission(response)) {
+        queryClient.setQueryData<SkillBuilderSession>(key, (current) =>
+          current ? { ...current, activeRun: response } : current,
+        );
+      } else {
+        queryClient.setQueryData(key, response.data);
+      }
+      void queryClient.invalidateQueries(
+        skillBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+  });
 }
 
 export function useValidateSkillBuilderSession(
@@ -196,6 +221,42 @@ export function useCancelSkillBuilderSession(
     CancelSkillBuilderSessionInput,
     Awaited<ReturnType<typeof cancelSkillBuilderSession>>
   >(accountId, projectId, sessionId, "cancel", cancelSkillBuilderSession);
+}
+
+export function useCancelSkillBuilderSessionFromList(
+  accountId: string,
+  projectId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useSkillBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: skillBuilderMutationKey(
+      accountId,
+      projectId,
+      "cancel-session-from-list",
+    ),
+    mutationFn: ({
+      session_id: sessionId,
+      ...input
+    }: CancelSkillBuilderSessionFromListInput) =>
+      runMutation((signal) =>
+        cancelSkillBuilderSession(projectId, sessionId, input, signal),
+      ),
+    onSuccess: (response, input) => {
+      queryClient.setQueryData(
+        skillBuilderSessionKey(accountId, projectId, input.session_id),
+        response.data,
+      );
+      queryClient.setQueryData<SkillBuilderSessionSummary[]>(
+        skillBuilderSessionsKey(accountId, projectId),
+        (current) =>
+          current?.filter((session) => session.id !== input.session_id),
+      );
+      void queryClient.invalidateQueries(
+        skillBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+  });
 }
 
 export function useCommitSkillBuilderSession(

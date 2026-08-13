@@ -38,6 +38,7 @@ class AccountMemoryResetResult:
     documents: int
     versions: int
     dream_runs: int
+    prepare_runs: int
     snapshots: int
     jobs_cancelled: int
 
@@ -48,11 +49,15 @@ class AccountPersonalizationService:
         session_factory: Callable[[], AsyncSession],
         *,
         repository_builder=AccountPersonalizationRepository,
+        audit=None,
     ) -> None:
         if not callable(session_factory) or not callable(repository_builder):
             raise ValueError("Account personalization configuration is invalid")
+        if audit is not None and (not callable(getattr(audit, "memory_dream_settled", None)) or not callable(getattr(audit, "memory_reset_executed", None))):
+            raise ValueError("Account personalization audit configuration is invalid")
         self._sessions = session_factory
         self._repository_builder = repository_builder
+        self._audit = audit
 
     @staticmethod
     async def _platform_available(session: AsyncSession) -> bool:
@@ -109,7 +114,10 @@ class AccountPersonalizationService:
         user_id: uuid.UUID,
         *,
         expected_version: int,
+        request_id: str,
     ) -> AccountMemoryResetResult:
+        if type(request_id) is not str or not request_id:
+            raise ValueError("Account Memory reset request id is invalid")
         try:
             async with self._sessions() as session, session.begin():
                 result = await self._repository_builder(session).reset_memory(
@@ -117,6 +125,30 @@ class AccountPersonalizationService:
                     expected_version=expected_version,
                     now=datetime.now(UTC),
                 )
+                if self._audit is not None:
+                    for settled in result.settled_dreams:
+                        await self._audit.memory_dream_settled(
+                            session,
+                            project_id=settled.project_id,
+                            job_id=settled.job_id,
+                            request_id=request_id,
+                            disposition="cancelled",
+                        )
+                    await self._audit.memory_reset_executed(
+                        session,
+                        user_id=user_id,
+                        request_id=request_id,
+                        affected_project_ids=result.affected_project_ids,
+                        scopes_reset=result.scopes_reset,
+                        history_entries=result.history_entries,
+                        documents=result.documents,
+                        versions=result.versions,
+                        dream_runs=result.dream_runs,
+                        prepare_runs=result.prepare_runs,
+                        snapshots=result.snapshots,
+                        episodes=result.episodes,
+                        jobs_cancelled=result.jobs_cancelled,
+                    )
                 return AccountMemoryResetResult(
                     version=result.version,
                     scopes_reset=result.scopes_reset,
@@ -124,6 +156,7 @@ class AccountPersonalizationService:
                     documents=result.documents,
                     versions=result.versions,
                     dream_runs=result.dream_runs,
+                    prepare_runs=result.prepare_runs,
                     snapshots=result.snapshots,
                     jobs_cancelled=result.jobs_cancelled,
                 )

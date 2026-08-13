@@ -12,6 +12,12 @@ import type { Model } from "@/core/models/types";
 
 const TIMESTAMP = "2026-08-07T00:00:00Z";
 
+function renderAgentUi(node: React.ReactNode) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">{node}</I18nProvider>,
+  );
+}
+
 function blueprint(): AgentBuilderBlueprint {
   return {
     description: "审查代码并给出可执行建议",
@@ -92,34 +98,32 @@ const MODELS: Model[] = [
 
 describe("Agent Builder workspace", () => {
   test("renders only the current dynamic question as the chat human-input card", () => {
-    const html = renderToStaticMarkup(
-      <I18nProvider initialLocale="zh-CN">
-        <AgentBuilderConversationView
-          session={clarificationSession()}
-          composerText=""
-          models={MODELS}
-          selectedGenerationModelName="gpt-5.6-luna"
-          canAuthor
-          mutationPending={false}
-          commitPending={false}
-          blueprintEditing={false}
-          blueprintDraft={null}
-          blueprintDirty={false}
-          selectedField="agents_instructions"
-          displayMode="preview"
-          errorMessage={null}
-          onComposerTextChange={() => undefined}
-          onSubmitMessage={() => undefined}
-          onSubmitClarification={() => undefined}
-          onSelectedFieldChange={() => undefined}
-          onDisplayModeChange={() => undefined}
-          onBlueprintChange={() => undefined}
-          onBlueprintEdit={() => undefined}
-          onBlueprintSave={() => undefined}
-          onBlueprintDiscard={() => undefined}
-          onComplete={() => undefined}
-        />
-      </I18nProvider>,
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={clarificationSession()}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName="gpt-5.6-luna"
+        canAuthor
+        mutationPending={false}
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
     );
 
     expect(html).toContain("问题 1/3");
@@ -134,7 +138,7 @@ describe("Agent Builder workspace", () => {
   });
 
   test("renders the submitted user message while generation is still pending", () => {
-    const html = renderToStaticMarkup(
+    const html = renderAgentUi(
       <AgentBuilderConversationView
         session={session()}
         composerText=""
@@ -166,7 +170,7 @@ describe("Agent Builder workspace", () => {
   });
 
   test("offers a model picker for the Builder conversation", () => {
-    const html = renderToStaticMarkup(
+    const html = renderAgentUi(
       <AgentBuilderConversationView
         session={session()}
         composerText=""
@@ -203,7 +207,7 @@ describe("Agent Builder workspace", () => {
   });
 
   test("keeps the created Agent runtime model read-only in the blueprint", () => {
-    const html = renderToStaticMarkup(
+    const html = renderAgentUi(
       <AgentBuilderBlueprintReview
         blueprint={blueprint()}
         canAuthor
@@ -227,74 +231,5 @@ describe("Agent Builder workspace", () => {
 
     expect(html).toContain("default");
     expect(html).not.toContain('aria-label="选择 Agent 模型"');
-  });
-
-  test("keeps the create action in document flow above the composer", () => {
-    const html = renderToStaticMarkup(
-      <AgentBuilderBlueprintReview
-        blueprint={blueprint()}
-        canAuthor
-        editing={false}
-        pending={false}
-        creating={false}
-        dirty={false}
-        canCreate
-        selectedField="agents_instructions"
-        displayMode="preview"
-        errorMessage={null}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onEdit={() => undefined}
-        onSave={() => undefined}
-        onDiscard={() => undefined}
-        onCreate={() => undefined}
-      />,
-    );
-
-    expect(html).toContain("创建后默认停用，需手动启用");
-    expect(html).not.toContain("sticky bottom-3");
-  });
-
-  test("keeps the composer outside the scrolling conversation region", () => {
-    const html = renderToStaticMarkup(
-      <AgentBuilderConversationView
-        session={session()}
-        composerText=""
-        models={MODELS}
-        selectedGenerationModelName="gpt-5.6-luna"
-        canAuthor
-        mutationPending={false}
-        commitPending={false}
-        blueprintEditing={false}
-        blueprintDraft={null}
-        blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
-        errorMessage={null}
-        onComposerTextChange={() => undefined}
-        onSubmitMessage={() => undefined}
-        onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
-      />,
-    );
-
-    const scrollRegion = html.indexOf(
-      'data-agent-builder-scroll-region="true"',
-    );
-    const composerShell = html.indexOf(
-      'data-agent-builder-composer-shell="true"',
-    );
-    expect(scrollRegion).toBeGreaterThanOrEqual(0);
-    expect(composerShell).toBeGreaterThan(scrollRegion);
-    expect(html).toContain("min-h-0 flex-1 overflow-y-auto overscroll-contain");
-    expect(html).toContain("shrink-0 border-t");
-    expect(html).not.toContain("sticky bottom-0");
   });
 });

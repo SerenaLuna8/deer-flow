@@ -1,12 +1,16 @@
-"""Tool error handling middleware and shared runtime middleware builders."""
+"""Tool exception handling and compatibility exports for assembly builders."""
 
 import logging
-from collections.abc import Awaitable, Callable, Sequence
-from typing import TYPE_CHECKING, override
+from collections.abc import Awaitable, Callable
+from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
+from langchain.agents.middleware.types import (
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+)
 from langchain_core.messages import ToolMessage
 from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
@@ -22,7 +26,9 @@ from deerflow.agents.middlewares.tool_result_meta import (
     stamp_exception_meta,
 )
 from deerflow.config.app_config import AppConfig
-from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
+from deerflow.config.summarization_config import (
+    DEFAULT_SKILL_FILE_READ_TOOL_NAMES,
+)
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
 from deerflow.sandbox.sandbox import (
@@ -35,14 +41,50 @@ from deerflow.subagents.status_contract import (
 )
 from deerflow.tools.mcp_metadata import is_private_mcp_tool
 
-if TYPE_CHECKING:
-    from deerflow.tools.builtins.tool_search import DeferredToolSetup
-
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
 _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
+_TRUSTED_READ_ONLY_TOOL_MARKER = object()
+_TRUSTED_IDEMPOTENT_TOOL_MARKER = object()
+
+
+def mark_trusted_read_only_tool(tool: object) -> object:
+    """Mark one code-created tool as safe for the read-only lease boundary.
+
+    The marker lives on the registered Python callable and is compared by
+    object identity.  It cannot be supplied through model tool arguments or a
+    serialized tool definition.  Application-owned runtimes use this narrow
+    hook for fixed read-only tools whose objects are created per Run, where a
+    module-level identity check is therefore not possible.
+    """
+
+    for attribute in ("coroutine", "func"):
+        implementation = getattr(tool, attribute, None)
+        if callable(implementation):
+            setattr(
+                implementation,
+                "__deerflow_trusted_read_only_tool__",
+                _TRUSTED_READ_ONLY_TOOL_MARKER,
+            )
+            return tool
+    raise TypeError("trusted read-only tools require a registered callable")
+
+
+def mark_trusted_idempotent_tool(tool: object) -> object:
+    """Mark an app-owned tool whose durable mutation is Run-idempotent."""
+
+    for attribute in ("coroutine", "func"):
+        implementation = getattr(tool, attribute, None)
+        if callable(implementation):
+            setattr(
+                implementation,
+                "__deerflow_trusted_idempotent_tool__",
+                _TRUSTED_IDEMPOTENT_TOOL_MARKER,
+            )
+            return tool
+    raise TypeError("trusted idempotent tools require a registered callable")
 
 
 def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
@@ -53,10 +95,38 @@ def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
     )
 
     tool = getattr(request, "tool", None)
-    return tool is list_uploaded_files_tool
+    if tool is list_uploaded_files_tool:
+        return True
+    return any(
+        getattr(
+            getattr(tool, attribute, None),
+            "__deerflow_trusted_read_only_tool__",
+            None,
+        )
+        is _TRUSTED_READ_ONLY_TOOL_MARKER
+        for attribute in ("coroutine", "func")
+    )
 
 
-def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error: str) -> ToolMessage:
+def _is_trusted_idempotent_tool(request: ToolCallRequest) -> bool:
+    tool = getattr(request, "tool", None)
+    return any(
+        getattr(
+            getattr(tool, attribute, None),
+            "__deerflow_trusted_idempotent_tool__",
+            None,
+        )
+        is _TRUSTED_IDEMPOTENT_TOOL_MARKER
+        for attribute in ("coroutine", "func")
+    )
+
+
+def _stamp_task_exception_status(
+    message: ToolMessage,
+    *,
+    tool_name: str,
+    error: str,
+) -> ToolMessage:
     """Stamp failed metadata on task exception wrappers produced here."""
     if tool_name != _TASK_TOOL_NAME:
         return message
@@ -83,7 +153,11 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
             self._skills_root = app_config.skills.container_path
 
-    def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
+    def _build_error_message(
+        self,
+        request: ToolCallRequest,
+        exc: Exception,
+    ) -> ToolMessage:
         del exc
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
         tool_call_id = str(request.tool_call.get("id") or _MISSING_TOOL_CALL_ID)
@@ -128,7 +202,11 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         path = _tool_call_path(request.tool_call)
         if path is None:
             return message
-        entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
+        entry = build_skill_entry_metadata_from_read(
+            path,
+            content,
+            skills_root=self._skills_root,
+        )
         if entry is None:
             return message
         existing = dict(message.additional_kwargs or {})
@@ -136,12 +214,20 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         message.additional_kwargs = existing
         return message
 
-    def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+    def _maybe_stamp(
+        self,
+        result: ToolMessage | Command,
+        request: ToolCallRequest,
+    ) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
         if not isinstance(result, ToolMessage):
             return result
         tool_name = str(request.tool_call.get("name") or "")
-        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
+        return self._stamp_skill_read_metadata(
+            result,
+            request,
+            tool_name=tool_name,
+        )
 
     @staticmethod
     def _runtime_context(request: object) -> object | None:
@@ -190,13 +276,22 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     async def awrap_tool_call(
         self,
         request: ToolCallRequest,
-        handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
+        handler: Callable[
+            [ToolCallRequest],
+            Awaitable[ToolMessage | Command],
+        ],
     ) -> ToolMessage | Command:
         try:
             runtime_context = self._runtime_context(request)
+            if _is_trusted_read_only_tool(request):
+                authorization_method = "before_read_only_tool_call"
+            elif _is_trusted_idempotent_tool(request):
+                authorization_method = "before_idempotent_tool_call"
+            else:
+                authorization_method = "before_tool_call"
             await check_authorization_boundary(
                 runtime_context,
-                ("before_read_only_tool_call" if _is_trusted_read_only_tool(request) else "before_tool_call"),
+                authorization_method,
             )
             if is_private_mcp_tool(getattr(request, "tool", None)):
                 await check_authorization_boundary(
@@ -218,343 +313,24 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         return normalize_tool_result(self._maybe_stamp(result, request))
 
 
-def build_sandbox_infrastructure(
-    *,
-    lazy_init: bool = True,
-    include_uploads: bool = True,
-) -> list[AgentMiddleware]:
-    """Thread-scoped sandbox base shared by the lead, subagent, and SDK chains.
+# Compatibility only: production assembly imports the canonical module below.
+# Importing ``assembly`` directly remains safe because it imports this concrete
+# class lazily from inside ``build_runtime_middlewares`` rather than at module load.
+from deerflow.agents.middlewares.assembly import (  # noqa: E402
+    assemble_agent_middlewares,
+    build_lead_runtime_middlewares,
+    build_runtime_middlewares,
+    build_sandbox_infrastructure,
+    build_subagent_runtime_middlewares,
+)
 
-    Order is behavior: ThreadData must precede Sandbox so ``thread_id`` exists
-    before sandbox setup, and Uploads sits between them because it reads the
-    thread identity and feeds workspace files the sandbox mounts. Every
-    assembly path takes this trio from here so the ordering cannot fork.
-    """
-    from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
-    from deerflow.sandbox.middleware import SandboxMiddleware
-
-    middlewares: list[AgentMiddleware] = [ThreadDataMiddleware(lazy_init=lazy_init)]
-    if include_uploads:
-        from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
-
-        middlewares.append(UploadsMiddleware())
-    middlewares.append(SandboxMiddleware(lazy_init=lazy_init))
-    return middlewares
-
-
-def assemble_agent_middlewares(
-    *,
-    runtime: Sequence[AgentMiddleware],
-    before_summarization: Sequence[AgentMiddleware] = (),
-    summarization: AgentMiddleware | None = None,
-    planning: AgentMiddleware | None = None,
-    token_usage: AgentMiddleware | None = None,
-    title: AgentMiddleware | None = None,
-    after_title: Sequence[AgentMiddleware] = (),
-    vision: AgentMiddleware | None = None,
-    routing: Sequence[AgentMiddleware] = (),
-    system_message: AgentMiddleware | None = None,
-    subagent: AgentMiddleware | None = None,
-    loop_detection: AgentMiddleware | None = None,
-    token_budget: AgentMiddleware | None = None,
-    custom: Sequence[AgentMiddleware] = (),
-    safety: AgentMiddleware | None = None,
-    clarification: AgentMiddleware,
-) -> list[AgentMiddleware]:
-    """Compose the lead/SDK middleware phases in one canonical order.
-
-    Callers own feature resolution; this builder owns sequence. The SDK keeps
-    its documented omissions by passing empty phases, while production lead
-    assembly supplies its private-context and hardening phases. Keeping the
-    final append here makes ``ClarificationMiddleware`` a structural tail
-    invariant rather than a convention duplicated by each caller.
-    """
-
-    middlewares = [*runtime, *before_summarization]
-    for middleware in (
-        summarization,
-        planning,
-        token_usage,
-        title,
-    ):
-        if middleware is not None:
-            middlewares.append(middleware)
-    middlewares.extend(after_title)
-    if vision is not None:
-        middlewares.append(vision)
-    middlewares.extend(routing)
-    for middleware in (
-        system_message,
-        subagent,
-        loop_detection,
-        token_budget,
-    ):
-        if middleware is not None:
-            middlewares.append(middleware)
-    middlewares.extend(custom)
-    if safety is not None:
-        middlewares.append(safety)
-    middlewares.append(clarification)
-    return middlewares
-
-
-def build_runtime_middlewares(
-    *,
-    app_config: AppConfig | None,
-    include_uploads: bool,
-    include_dangling_tool_call_patch: bool,
-    include_security_wrappers: bool = True,
-    sandbox: bool | AgentMiddleware = True,
-    guardrail_middleware: AgentMiddleware | None = None,
-    lazy_init: bool = True,
-) -> list[AgentMiddleware]:
-    """Build the shared runtime spine for lead, subagent, and SDK paths.
-
-    ``include_security_wrappers=False`` is the SDK profile: it retains the
-    sandbox/dangling/error spine and an explicitly supplied custom guardrail,
-    but omits private-Run wrappers that require a materialized ``AppConfig``.
-    """
-
-    if include_security_wrappers and app_config is None:
-        raise ValueError("Security runtime middlewares require AppConfig")
-
-    # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
-    # InputSanitizationMiddleware is first so it becomes the outermost
-    # wrapper — sanitised messages are what every inner middleware sees.
-    # ToolResultSanitizationMiddleware mirrors that guardrail for the other
-    # untrusted-content entry point: remote tool results (web_fetch /
-    # web_search) get the same framework/injection-tag neutralization. It sits
-    # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
-    # the raw tool output first; the budget wrapper then truncates the already
-    # neutralized text.
-    outer_wrappers: list[AgentMiddleware] = []
-    if include_security_wrappers:
-        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
-        from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
-        from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
-
-        assert app_config is not None
-        outer_wrappers.extend(
-            [
-                InputSanitizationMiddleware(),
-                ToolOutputBudgetMiddleware.from_app_config(app_config),
-                ToolResultSanitizationMiddleware(),
-            ]
-        )
-
-    # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
-    if sandbox is False:
-        thread_hooks: list[AgentMiddleware] = []
-    elif isinstance(sandbox, AgentMiddleware):
-        thread_hooks = [sandbox]
-    elif sandbox is True:
-        thread_hooks = build_sandbox_infrastructure(
-            lazy_init=lazy_init,
-            include_uploads=include_uploads,
-        )
-    else:
-        raise TypeError("sandbox must be a boolean or AgentMiddleware instance")
-
-    # Layer 3 — post-processing append-only middlewares.
-    tail: list[AgentMiddleware] = []
-    if include_dangling_tool_call_patch:
-        from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
-
-        tail.append(DanglingToolCallMiddleware())
-    if include_security_wrappers:
-        from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
-
-        assert app_config is not None
-        tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
-
-    # Build the optional operator Guardrail now, but register it only after the
-    # private authorization middleware below. The first registered middleware
-    # is outermost, so ToolErrorHandlingMiddleware must execute its
-    # database-backed boundary before an external provider can inspect tool
-    # names or arguments.
-    if include_security_wrappers and guardrail_middleware is None:
-        import inspect
-
-        from deerflow.guardrails.middleware import GuardrailMiddleware
-        from deerflow.reflection import resolve_variable
-
-        assert app_config is not None
-        guardrails_config = app_config.guardrails
-        if guardrails_config.enabled and guardrails_config.provider:
-            provider_cls = resolve_variable(guardrails_config.provider.use)
-            provider_kwargs = dict(guardrails_config.provider.config) if guardrails_config.provider.config else {}
-            # Pass framework hint if the provider accepts it (e.g. for config discovery).
-            # Built-in providers like AllowlistProvider don't need it, so only inject
-            # when the constructor accepts 'framework' or '**kwargs'.
-            if "framework" not in provider_kwargs:
-                try:
-                    sig = inspect.signature(provider_cls.__init__)
-                    if "framework" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
-                        provider_kwargs["framework"] = "deerflow"
-                except (ValueError, TypeError):
-                    pass
-            provider = provider_cls(**provider_kwargs)
-            guardrail_middleware = GuardrailMiddleware(
-                provider,
-                fail_closed=guardrails_config.fail_closed,
-                passport=guardrails_config.passport,
-            )
-
-    if include_security_wrappers:
-        from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
-
-        tail.append(SandboxAuditMiddleware())
-
-    # ReadBeforeWriteMiddleware is the outermost write gate: it blocks writes to files
-    # the model hasn't read in their current version.  It must sit outside ToolProgress
-    # and ToolErrorHandling so that a blocked write returns immediately without consuming
-    # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
-    # ToolMessage itself so downstream callers receive a well-formed result.
-    if include_security_wrappers and app_config is not None and app_config.read_before_write.enabled:
-        from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
-
-        tail.append(ReadBeforeWriteMiddleware())
-
-    # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
-    # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
-    # on every result before ToolProgressMiddleware reads it in _update_state_from_result.
-    # Framework rule: first in list = outermost (types.py: "compose with first in list as outermost layer").
-    _ToolProgressMiddleware = None
-    if include_security_wrappers and app_config is not None and app_config.tool_progress.enabled:
-        from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware as _ToolProgressMiddleware
-
-        tail.append(_ToolProgressMiddleware.from_config(app_config.tool_progress))
-
-    if guardrail_middleware is not None:
-        tail.append(guardrail_middleware)
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
-
-    middlewares = [*outer_wrappers, *thread_hooks, *tail]
-
-    # Guard: ToolProgressMiddleware (outer) must appear before ToolErrorHandlingMiddleware (inner)
-    # so that its wrap_tool_call chain encloses the stamping step.  Fail loudly at build time
-    # rather than silently no-oping at runtime if a future insertion reverses the order.
-    # Uses isinstance (not type().__name__) so subclasses and renames are covered.
-    if _ToolProgressMiddleware is not None:
-        _progress_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, _ToolProgressMiddleware)), None)
-        _error_idx = next((i for i, m in enumerate(middlewares) if isinstance(m, ToolErrorHandlingMiddleware)), None)
-        if _progress_idx is not None and _error_idx is not None and _progress_idx > _error_idx:
-            raise RuntimeError(f"ToolProgressMiddleware must be outer (index {_progress_idx}) of ToolErrorHandlingMiddleware (index {_error_idx}) — check middleware append order")
-
-    if guardrail_middleware is not None:
-        _error_idx = next(
-            (i for i, middleware in enumerate(middlewares) if isinstance(middleware, ToolErrorHandlingMiddleware)),
-            None,
-        )
-        _guardrail_idx = middlewares.index(guardrail_middleware)
-        if _error_idx is not None and _guardrail_idx > _error_idx:
-            raise RuntimeError("GuardrailMiddleware must be outer of ToolErrorHandlingMiddleware so a denial happens before the side-effect fence")
-
-    return middlewares
-
-
-def build_lead_runtime_middlewares(*, app_config: AppConfig, lazy_init: bool = True) -> list[AgentMiddleware]:
-    """Middlewares shared by lead agent runtime before lead-only middlewares."""
-    return build_runtime_middlewares(
-        app_config=app_config,
-        include_uploads=True,
-        include_dangling_tool_call_patch=True,
-        lazy_init=lazy_init,
-    )
-
-
-def build_subagent_runtime_middlewares(
-    *,
-    app_config: AppConfig | None = None,
-    model_name: str | None = None,
-    lazy_init: bool = True,
-    deferred_setup: "DeferredToolSetup | None" = None,
-    mcp_routing_middleware: AgentMiddleware | None = None,
-    agent_name: str | None = None,
-) -> list[AgentMiddleware]:
-    """Middlewares shared by subagent runtime before subagent-only middlewares."""
-    if app_config is None:
-        from deerflow.config import get_app_config
-
-        app_config = get_app_config()
-
-    middlewares = build_runtime_middlewares(
-        app_config=app_config,
-        include_uploads=False,
-        include_dangling_tool_call_patch=True,
-        lazy_init=lazy_init,
-    )
-
-    if model_name is None and app_config.models:
-        model_name = app_config.models[0].name
-
-    model_config = app_config.get_model_config(model_name) if model_name else None
-    from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
-
-    middlewares.append(ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)))
-
-    if mcp_routing_middleware is not None:
-        middlewares.append(mcp_routing_middleware)
-
-    # Hide deferred (MCP) tool schemas from the subagent's model binding until
-    # tool_search promotes them. This is the same wiring the lead agent gets. The deferred
-    # set + catalog hash come from the build-time setup (assembled after
-    # tool-policy filtering); promotion is read from graph state. Empty/None
-    # setup (deferral disabled or no MCP tool survived) is a pure no-op.
-    if deferred_setup is not None and deferred_setup.deferred_names:
-        from deerflow.agents.middlewares.deferred_tool_filter_middleware import DeferredToolFilterMiddleware
-
-        middlewares.append(DeferredToolFilterMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
-        from deerflow.agents.middlewares.mcp_routing_middleware import assert_mcp_routing_before_deferred_filter
-
-        assert_mcp_routing_before_deferred_filter(middlewares)
-
-    # LoopDetectionMiddleware — subagents inherit none of the lead's runaway
-    # guards today (see #3875): with no loop detection a degenerate subagent tool
-    # loop runs unchecked until ``max_turns``, re-sending a growing context each
-    # turn (the reported 4.4M-token burn). Mirror the lead chain so the loop is
-    # detected and broken. Subagents disallow ``task``, so only the tool-loop
-    # heuristic can fire here — no recursive-delegation path to false-positive on.
-    # Registered before SafetyFinishReasonMiddleware (earlier in the list).
-    # LangChain dispatches after_model hooks in REVERSE registration order, so
-    # SafetyFinishReasonMiddleware (appended below) executes first and strips
-    # safety-terminated tool_calls; LoopDetectionMiddleware then accounts on the
-    # cleaned message. This is the placement SafetyFinishReasonMiddleware's
-    # docstring requires ("register after LoopDetection") and mirrors the lead
-    # chain (``lead_agent/agent.py``). Phase 1 of #3875; a deterministic
-    # turn/token budget with lead-visible stop reason is Phase 2.
-    loop_detection_config = app_config.loop_detection
-    if loop_detection_config.enabled:
-        from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
-
-        middlewares.append(LoopDetectionMiddleware.from_config(loop_detection_config))
-
-    # TokenBudgetMiddleware — subagents inherit none of the lead's cost backstops
-    # today (#3875 Phase 2): a degenerate subagent can burn pathological token
-    # volume (the reported 4.4M run) before max_turns/timeout engage. Mirror the
-    # lead chain so the per-run budget hard-stop engages. ``subagents.token_budget``
-    # is enabled by default; per-agent override via
-    # ``subagents.agents.<name>.token_budget``. The hard-stop does not raise —
-    # it strips tool_calls so the run completes with a final answer — and the
-    # executor reads ``consume_stop_reason`` to mark the completed result
-    # ``token_capped`` for the lead. State is keyed by run_id and each task run
-    # builds a fresh middleware instance (see ``executor._create_agent``), so
-    # parallel subagents cannot cross-contaminate even though they share the
-    # parent thread_id/run_id in context.
-    token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
-    if token_budget_config.enabled:
-        from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
-
-        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
-
-    # Same provider safety-termination guard the lead agent uses — subagents
-    # are equally exposed to truncated tool_calls returned with
-    # finish_reason=content_filter (and friends), and the bad call would then
-    # propagate back to the lead agent via the task tool result.
-    safety_config = app_config.safety_finish_reason
-    if safety_config.enabled:
-        from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
-
-        middlewares.append(SafetyFinishReasonMiddleware.from_config(safety_config))
-
-    return middlewares
+__all__ = [
+    "ToolErrorHandlingMiddleware",
+    "assemble_agent_middlewares",
+    "build_lead_runtime_middlewares",
+    "build_runtime_middlewares",
+    "build_sandbox_infrastructure",
+    "build_subagent_runtime_middlewares",
+    "mark_trusted_read_only_tool",
+    "mark_trusted_idempotent_tool",
+]

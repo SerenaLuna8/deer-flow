@@ -56,6 +56,11 @@ unset "STEPFUN_API_KEY"
 unset "VLLM_API_KEY"
 unset "VOLCENGINE_API_KEY"
 
+# POSTGRES_ADMIN_URL is an installation/upgrade-only superuser credential.
+# Runtime roles use DATABASE_URL and must never inherit the management URL from
+# either the parent shell or the repository .env loaded above.
+unset "POSTGRES_ADMIN_URL"
+
 _pick_python() {
     local candidate
     for candidate in python3 python py; do
@@ -434,14 +439,6 @@ else
     echo "⏩ Skipping dependency install (--skip-install)"
 fi
 
-SCHEDULER_ENABLED="$(
-    cd backend && PYTHONPATH=. uv run python -c \
-        "from deerflow.config import get_app_config; print('true' if get_app_config().scheduler.enabled else 'false')"
-)" || {
-    echo "✗ Unable to resolve scheduler.enabled from ActWeave config."
-    exit 1
-}
-
 # ── Banner ───────────────────────────────────────────────────────────────────
 
 echo ""
@@ -454,9 +451,7 @@ echo ""
 echo "  Services:"
 echo "    Gateway     → localhost:8001  (admission/query/SSE)"
 echo "    Worker      → background      (Agent graph execution)"
-if [ "$SCHEDULER_ENABLED" = "true" ]; then
-    echo "    Scheduler   → background      (Automation polling)"
-fi
+echo "    Scheduler   → background      (Automation polling)"
 echo "    Frontend    → localhost:3000  (Next.js)"
 echo "    Nginx       → localhost:2026  (reverse proxy)"
 echo ""
@@ -575,13 +570,11 @@ run_process "Worker" \
     "cd backend && exec env PYTHONPATH=. uv run python -m app.worker.app > '$LOG_ROOT/worker.log' 2>&1" \
     "$LOG_ROOT/worker.log"
 
-# 3. Optional independent Scheduler. The application config property is
-# scheduler.enabled; disabled mode is legal and intentionally starts no owner.
-if [ "$SCHEDULER_ENABLED" = "true" ]; then
-    run_process "Scheduler" \
-        "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > '$LOG_ROOT/scheduler.log' 2>&1" \
-        "$LOG_ROOT/scheduler.log"
-fi
+# 3. Independent Scheduler. Platform automations.enabled controls polling;
+# the process still owns Memory Dream/Seal admission.
+run_process "Scheduler" \
+    "cd backend && exec env PYTHONPATH=. uv run python -m app.scheduler.app > '$LOG_ROOT/scheduler.log' 2>&1" \
+    "$LOG_ROOT/scheduler.log"
 
 # 4. Frontend
 run_service "Frontend" \

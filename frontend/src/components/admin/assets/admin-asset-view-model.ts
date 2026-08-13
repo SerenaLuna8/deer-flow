@@ -59,6 +59,8 @@ export function adminCredentialTypeLabel(
       return copy.token;
     case "mcp_auth":
       return copy.mcpAuth;
+    case "skill_auth":
+      return copy.skillAuth;
     case "oauth":
       return copy.oauth;
     case "database":

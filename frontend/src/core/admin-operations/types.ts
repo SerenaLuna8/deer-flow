@@ -152,6 +152,7 @@ export const ADMIN_JOB_TYPES = [
   "retention_purge",
   "mcp_discovery",
   "memory_dream",
+  "memory_dream_prepare",
   "memory_seal",
 ] as const;
 

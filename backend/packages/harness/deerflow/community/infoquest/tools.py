@@ -1,37 +1,73 @@
-from langchain.tools import tool
+import logging
 
+from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
+
+from deerflow.community.errors import CommunityToolError, community_error_json
+from deerflow.community.url_safety import sanitize_public_http_reference_url
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
 
 from .infoquest_client import InfoQuestClient
 
 readability_extractor = ReadabilityExtractor()
+logger = logging.getLogger(__name__)
+
+
+def _infoquest_error(context: str, error: Exception) -> str:
+    if isinstance(error, CommunityToolError):
+        return community_error_json(error, query=context)
+    logger.error("InfoQuest tool failed; provider_error_type=%s", type(error).__name__)
+    if isinstance(error, (FileNotFoundError, TypeError, ValueError)):
+        code, message, retryable = (
+            "configuration_error",
+            "InfoQuest is not configured correctly",
+            False,
+        )
+    else:
+        code, message, retryable = (
+            "provider_unavailable",
+            "InfoQuest is temporarily unavailable",
+            True,
+        )
+    return community_error_json(
+        CommunityToolError(
+            provider="infoquest",
+            code=code,
+            message=message,
+            retryable=retryable,
+        ),
+        query=context,
+    )
 
 
 def _get_infoquest_client() -> InfoQuestClient:
     search_config = get_app_config().get_tool_config("web_search")
     search_time_range = -1
-    if search_config is not None and "search_time_range" in search_config.model_extra:
-        search_time_range = search_config.model_extra.get("search_time_range")
+    search_extra = (search_config.model_extra or {}) if search_config is not None else {}
+    if "search_time_range" in search_extra:
+        search_time_range = search_extra.get("search_time_range")
 
     fetch_config = get_app_config().get_tool_config("web_fetch")
     fetch_time = -1
-    if fetch_config is not None and "fetch_time" in fetch_config.model_extra:
-        fetch_time = fetch_config.model_extra.get("fetch_time")
+    fetch_extra = (fetch_config.model_extra or {}) if fetch_config is not None else {}
+    if "fetch_time" in fetch_extra:
+        fetch_time = fetch_extra.get("fetch_time")
     fetch_timeout = -1
-    if fetch_config is not None and "timeout" in fetch_config.model_extra:
-        fetch_timeout = fetch_config.model_extra.get("timeout")
+    if "timeout" in fetch_extra:
+        fetch_timeout = fetch_extra.get("timeout")
     navigation_timeout = -1
-    if fetch_config is not None and "navigation_timeout" in fetch_config.model_extra:
-        navigation_timeout = fetch_config.model_extra.get("navigation_timeout")
+    if "navigation_timeout" in fetch_extra:
+        navigation_timeout = fetch_extra.get("navigation_timeout")
 
     image_search_config = get_app_config().get_tool_config("image_search")
     image_search_time_range = -1
-    if image_search_config is not None and "image_search_time_range" in image_search_config.model_extra:
-        image_search_time_range = image_search_config.model_extra.get("image_search_time_range")
+    image_extra = (image_search_config.model_extra or {}) if image_search_config is not None else {}
+    if "image_search_time_range" in image_extra:
+        image_search_time_range = image_extra.get("image_search_time_range")
     image_size = "i"
-    if image_search_config is not None and "image_size" in image_search_config.model_extra:
-        image_size = image_search_config.model_extra.get("image_size")
+    if "image_size" in image_extra:
+        image_size = image_extra.get("image_size")
 
     return InfoQuestClient(
         search_time_range=search_time_range,
@@ -51,8 +87,13 @@ def web_search_tool(query: str) -> str:
         query: The query to search for.
     """
 
-    client = _get_infoquest_client()
-    return client.web_search(query)
+    try:
+        client = _get_infoquest_client()
+        return client.web_search(query)
+    except GraphBubbleUp:
+        raise
+    except Exception as error:
+        return _infoquest_error(query, error)
 
 
 @tool("web_fetch", parse_docstring=True)
@@ -66,12 +107,28 @@ def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    client = _get_infoquest_client()
-    result = client.fetch(url)
-    if result.startswith("Error: "):
-        return result
-    article = readability_extractor.extract_article(result)
-    return article.to_markdown()[:4096]
+    # InfoQuest performs the target fetch in remote SaaS. Reject unsafe literal
+    # references without local DNS; a local downloader must instead perform
+    # DNS-aware validation and validate every redirect.
+    if not sanitize_public_http_reference_url(url):
+        return community_error_json(
+            CommunityToolError(
+                provider="infoquest",
+                code="url_not_public",
+                message="Only public http(s) URLs may be fetched",
+                retryable=False,
+            ),
+            query=url,
+        )
+    try:
+        client = _get_infoquest_client()
+        result = client.fetch(url)
+        article = readability_extractor.extract_article(result)
+        return article.to_markdown()[:4096]
+    except GraphBubbleUp:
+        raise
+    except Exception as error:
+        return _infoquest_error(url, error)
 
 
 @tool("image_search", parse_docstring=True)
@@ -89,5 +146,10 @@ def image_search_tool(query: str) -> str:
     Args:
         query: The query to search for images.
     """
-    client = _get_infoquest_client()
-    return client.image_search(query)
+    try:
+        client = _get_infoquest_client()
+        return client.image_search(query)
+    except GraphBubbleUp:
+        raise
+    except Exception as error:
+        return _infoquest_error(query, error)

@@ -7,6 +7,15 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.errors import (
+    CommunityToolError,
+    community_error_json,
+    no_results_json,
+)
+from deerflow.community.url_safety import (
+    is_url_value_present,
+    sanitize_public_http_reference_url,
+)
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -42,9 +51,14 @@ def _search_images(
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
+    except ImportError as exc:
+        logger.error("DuckDuckGo image search dependency is unavailable")
+        raise CommunityToolError(
+            provider="duckduckgo",
+            code="dependency_unavailable",
+            message="DuckDuckGo image search is unavailable in this installation",
+            retryable=False,
+        ) from exc
 
     ddgs = DDGS(timeout=30)
 
@@ -69,9 +83,17 @@ def _search_images(
         results = ddgs.images(query, **kwargs)
         return list(results) if results else []
 
-    except Exception as e:
-        logger.error(f"Failed to search images: {e}")
-        return []
+    except Exception as exc:
+        logger.error(
+            "DuckDuckGo image search failed; provider_error_type=%s",
+            type(exc).__name__,
+        )
+        raise CommunityToolError(
+            provider="duckduckgo",
+            code="provider_unavailable",
+            message="DuckDuckGo image search is temporarily unavailable",
+            retryable=True,
+        ) from exc
 
 
 @tool("image_search", parse_docstring=True)
@@ -105,25 +127,51 @@ def image_search_tool(
     if config is not None and "max_results" in config.model_extra:
         max_results = config.model_extra.get("max_results", max_results)
 
-    results = _search_images(
-        query=query,
-        max_results=max_results,
-        size=size,
-        type_image=type_image,
-        layout=layout,
-    )
+    try:
+        results = _search_images(
+            query=query,
+            max_results=max_results,
+            size=size,
+            type_image=type_image,
+            layout=layout,
+        )
+    except CommunityToolError as error:
+        return community_error_json(error, query=query)
 
     if not results:
-        return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="duckduckgo",
+            query=query,
+            message="No images found",
+        )
 
-    normalized_results = [
-        {
-            "title": r.get("title", ""),
-            "image_url": r.get("thumbnail", ""),
-            "thumbnail_url": r.get("thumbnail", ""),
-        }
-        for r in results
-    ]
+    normalized_results = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        raw_image = result.get("image")
+        raw_thumbnail = result.get("thumbnail")
+        safe_image = sanitize_public_http_reference_url(raw_image)
+        safe_thumbnail = sanitize_public_http_reference_url(raw_thumbnail)
+        image_url = safe_image or (safe_thumbnail if not is_url_value_present(raw_image) else "")
+        thumbnail_url = safe_thumbnail or (safe_image if not is_url_value_present(raw_thumbnail) else "")
+        if not image_url and not thumbnail_url:
+            continue
+        normalized_results.append(
+            {
+                "title": result.get("title", ""),
+                "image_url": image_url,
+                "thumbnail_url": thumbnail_url,
+            }
+        )
+
+    if not normalized_results:
+        return no_results_json(
+            provider="duckduckgo",
+            query=query,
+            message="No safe image URLs found",
+            code="no_safe_results",
+        )
 
     output = {
         "query": query,

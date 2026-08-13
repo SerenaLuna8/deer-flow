@@ -8,9 +8,17 @@ from datetime import datetime
 from enum import StrEnum
 from threading import Lock
 from types import MappingProxyType
-from typing import Literal, Protocol, TypeGuard
+from typing import Literal, Protocol, Self, TypeGuard
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    StrictStr,
+    model_validator,
+)
 
 
 class AuditError(Exception):
@@ -77,8 +85,12 @@ class AuditAction(StrEnum):
     MEMORY_RECALL_EXECUTED = "memory.recall.executed"
     MEMORY_SEAL_ADMITTED = "memory.seal.admitted"
     MEMORY_SEAL_SETTLED = "memory.seal.settled"
+    MEMORY_DREAM_ADMITTED = "memory.dream.admitted"
+    MEMORY_DREAM_SETTLED = "memory.dream.settled"
     MEMORY_INJECTION_SKIPPED = "memory.injection.skipped"
     MEMORY_DREAM_REVIEW_FLAGGED = "memory.dream.review_flagged"
+    MEMORY_RESTORE_EXECUTED = "memory.restore.executed"
+    MEMORY_RESET_EXECUTED = "memory.reset.executed"
     JOB_DEAD = "job.dead"
     JOB_REQUEUED = "job.requeued"
     PURGE_COMPLETED = "purge.completed"
@@ -98,6 +110,7 @@ class AuditTargetKind(StrEnum):
     PURGE = "purge"
     AUDIT = "audit"
     SYSTEM_SETTING = "system_setting"
+    ACCOUNT = "account"
 
 
 class AuditOutcome(StrEnum):
@@ -354,6 +367,44 @@ _ACTION_CONTRACTS[AuditAction.MEMORY_SEAL_SETTLED] = _contract(
     "process",
     processes=(AuditProcess.WORKER,),
 )
+_ACTION_CONTRACTS[AuditAction.MEMORY_DREAM_ADMITTED] = AuditActionContract(
+    target_kind=AuditTargetKind.JOB,
+    variants=(
+        _variant(
+            AuditScope.PROJECT,
+            "user",
+            metadata_equals=(("origin", "manual"),),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.SCHEDULER,),
+            metadata_equals=(("origin", "scheduled"),),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.WORKER,),
+            metadata_equals=(("origin", "prepared"),),
+        ),
+    ),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_DREAM_SETTLED] = AuditActionContract(
+    target_kind=AuditTargetKind.JOB,
+    variants=(
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.WORKER,),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.GATEWAY,),
+            metadata_equals=(("disposition", "cancelled"),),
+        ),
+    ),
+)
 _ACTION_CONTRACTS[AuditAction.MEMORY_REMEMBER] = _contract(
     AuditTargetKind.RUN,
     AuditScope.PROJECT,
@@ -377,6 +428,27 @@ _ACTION_CONTRACTS[AuditAction.MEMORY_DREAM_REVIEW_FLAGGED] = _contract(
     AuditScope.PROJECT,
     "process",
     processes=(AuditProcess.WORKER,),
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_RESTORE_EXECUTED] = _contract(
+    AuditTargetKind.PROJECT,
+    AuditScope.PROJECT,
+    "user",
+    authority_matches_project=True,
+)
+_ACTION_CONTRACTS[AuditAction.MEMORY_RESET_EXECUTED] = AuditActionContract(
+    target_kind=AuditTargetKind.ACCOUNT,
+    variants=(
+        _variant(
+            AuditScope.PLATFORM,
+            "user",
+            metadata_equals=(("scope", "account"),),
+        ),
+        _variant(
+            AuditScope.PROJECT,
+            "user",
+            metadata_equals=(("scope", "project"),),
+        ),
+    ),
 )
 _ACTION_CONTRACTS[AuditAction.JOB_DEAD] = _contract(
     AuditTargetKind.JOB,
@@ -719,6 +791,77 @@ class RoleChangedAuditMetadata(_AuditMetadata):
 
 class AssetAuditMetadata(_AuditMetadata):
     asset_kind: Literal["agent", "skill", "mcp"]
+    operation: Literal[
+        "agent.create",
+        "agent.version.create",
+        "agent.instructions.update",
+        "agent.capability_bindings.update",
+        "agent.version.restore",
+        "agent.publish",
+        "agent.delete",
+        "agent.activate",
+        "agent.suspend",
+        "agent.default.set",
+        "agent.default.clear",
+        "skill.create",
+        "skill.version.create",
+        "skill.publish",
+        "skill.version.revoke",
+        "skill.delete",
+        "skill.activate",
+        "skill.credential_bindings.configure",
+        "skill.suspend",
+        "mcp.create",
+        "mcp.version.create",
+        "mcp.submit_approval",
+        "mcp.approve",
+        "mcp.credential_grants.configure",
+        "mcp.publish",
+        "mcp.archive",
+        "mcp.suspend",
+        "mcp.activate",
+        "mcp.delete",
+        "credential.create",
+        "credential.replace",
+        "credential.revoke",
+        "credential.delete",
+        "credential.grants.migrate",
+        "binding.enable",
+        "binding.upgrade",
+        "binding.rollback",
+        "binding.sync_current",
+        "binding.disable",
+    ]
+    version_number: StrictInt | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def validate_asset_operation(self) -> Self:
+        operation_domain = self.operation.partition(".")[0]
+        if operation_domain in {"agent", "skill", "mcp"} and operation_domain != self.asset_kind:
+            raise ValueError("asset audit operation does not match the asset kind")
+        if operation_domain == "credential" and self.asset_kind != "mcp":
+            raise ValueError("Credential audit operations must target an MCP asset")
+
+        versioned_agent_operations = {
+            "agent.version.create",
+            "agent.instructions.update",
+            "agent.capability_bindings.update",
+            "agent.version.restore",
+            "agent.publish",
+            "agent.activate",
+        }
+        versioned_skill_operations = {"skill.version.revoke"}
+        if operation_domain == "agent":
+            expects_version = self.operation in versioned_agent_operations
+            if expects_version != (self.version_number is not None):
+                raise ValueError("Agent audit version coordinates are inconsistent")
+        elif operation_domain == "skill":
+            expects_version = self.operation in versioned_skill_operations
+            if expects_version != (self.version_number is not None):
+                raise ValueError("Skill audit version coordinates are inconsistent")
+        elif self.version_number is not None:
+            raise ValueError("asset audit version number is not supported for this operation")
+        return self
 
 
 class AutomationAuditMetadata(_AuditMetadata):
@@ -783,6 +926,93 @@ class MemorySealSettledAuditMetadata(_AuditMetadata):
     disposition: Literal["sealed", "noop"]
 
 
+class MemoryDreamAdmittedAuditMetadata(_AuditMetadata):
+    origin: Literal["manual", "scheduled", "prepared"]
+    trigger: Literal["auto_dream", "manual_dream", "budget_rewrite"]
+    history_count: StrictInt = Field(ge=0, le=20)
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> Self:
+        origin_matches = (
+            (self.origin == "manual" and self.trigger in {"manual_dream", "budget_rewrite"})
+            or (self.origin == "scheduled" and self.trigger in {"auto_dream", "budget_rewrite"})
+            or (self.origin == "prepared" and self.trigger in {"manual_dream", "budget_rewrite"})
+        )
+        history_matches = (self.trigger == "budget_rewrite" and self.history_count == 0) or (self.trigger != "budget_rewrite" and self.history_count >= 1)
+        if not origin_matches or not history_matches:
+            raise ValueError("Memory Dream admission metadata is inconsistent")
+        return self
+
+
+class MemoryDreamSettledAuditMetadata(_AuditMetadata):
+    disposition: Literal["published", "cancelled", "dead"]
+    version: StrictInt | None = Field(default=None, ge=1)
+    public_error_code: StrictStr | None = Field(
+        default=None,
+        pattern=r"^[A-Z][A-Z0-9_]{0,63}$",
+    )
+
+    @model_validator(mode="after")
+    def validate_lifecycle(self) -> Self:
+        valid = (
+            (self.disposition == "published" and self.version is not None and self.public_error_code is None)
+            or (self.disposition == "cancelled" and self.version is None and self.public_error_code is None)
+            or (self.disposition == "dead" and self.version is None and self.public_error_code is not None)
+        )
+        if not valid:
+            raise ValueError("Memory Dream settlement metadata is inconsistent")
+        return self
+
+
+class MemoryRestoreAuditMetadata(_AuditMetadata):
+    source_version: StrictInt = Field(ge=1)
+    previous_version: StrictInt = Field(ge=1)
+    published_version: StrictInt = Field(ge=2)
+    changed: StrictBool
+
+    @model_validator(mode="after")
+    def validate_version(self) -> Self:
+        if self.published_version != self.previous_version + 1:
+            raise ValueError("Memory restore versions are inconsistent")
+        return self
+
+
+class MemoryResetAuditMetadata(_AuditMetadata):
+    scope: Literal["account", "project"]
+    projects_affected: StrictInt | None = Field(default=None, ge=0)
+    scopes_reset: StrictInt | None = Field(default=None, ge=0)
+    history_entries: StrictInt | None = Field(default=None, ge=0)
+    documents: StrictInt | None = Field(default=None, ge=0)
+    versions: StrictInt | None = Field(default=None, ge=0)
+    dream_runs: StrictInt | None = Field(default=None, ge=0)
+    prepare_runs: StrictInt | None = Field(default=None, ge=0)
+    snapshots: StrictInt | None = Field(default=None, ge=0)
+    episodes: StrictInt | None = Field(default=None, ge=0)
+    jobs_cancelled: StrictInt | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> Self:
+        counts = (
+            self.projects_affected,
+            self.scopes_reset,
+            self.history_entries,
+            self.documents,
+            self.versions,
+            self.dream_runs,
+            self.prepare_runs,
+            self.snapshots,
+            self.episodes,
+            self.jobs_cancelled,
+        )
+        if self.scope == "account":
+            valid = all(value is not None for value in counts)
+        else:
+            valid = all(value is None for value in counts)
+        if not valid:
+            raise ValueError("Memory reset metadata is inconsistent")
+        return self
+
+
 class MemoryInjectionSkippedAuditMetadata(_AuditMetadata):
     # The only degradation reason today; storage corruption stays fail-closed
     # and never reaches this event.
@@ -810,6 +1040,7 @@ class JobAuditMetadata(_AuditMetadata):
         "retention_purge",
         "mcp_discovery",
         "memory_dream",
+        "memory_dream_prepare",
         "memory_seal",
     ]
     public_error_code: StrictStr | None = Field(default=None, pattern=r"^[A-Z][A-Z0-9_]{0,63}$")
@@ -827,7 +1058,7 @@ class CorrectionAuditMetadata(_AuditMetadata):
 
 
 class SystemSettingAuditMetadata(_AuditMetadata):
-    section: Literal["agent_runtime", "auth", "memory_document", "quotas"]
+    section: Literal["agent_runtime", "auth", "automations", "memory_document", "quotas"]
     revision: StrictInt = Field(ge=2)
     schema_version: StrictInt = Field(ge=1)
     payload_checksum: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
@@ -878,8 +1109,12 @@ _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_REMEMBER] = MemoryRememberAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_RECALL_EXECUTED] = MemoryRecallExecutedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_SEAL_SETTLED] = MemorySealSettledAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_DREAM_ADMITTED] = MemoryDreamAdmittedAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_DREAM_SETTLED] = MemoryDreamSettledAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_INJECTION_SKIPPED] = MemoryInjectionSkippedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_DREAM_REVIEW_FLAGGED] = MemoryDreamReviewFlaggedAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_RESTORE_EXECUTED] = MemoryRestoreAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.MEMORY_RESET_EXECUTED] = MemoryResetAuditMetadata
 for _action in (AuditAction.JOB_DEAD, AuditAction.JOB_REQUEUED):
     _AUDIT_METADATA_MODELS[_action] = JobAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.PURGE_COMPLETED] = PurgeAuditMetadata

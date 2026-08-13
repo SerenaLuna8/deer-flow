@@ -4,6 +4,7 @@ import { createProjectPrivateClient } from "@/core/api/api-client";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
+  buildOutputLimitRetryProfile,
   collectRunExecutionProfiles,
   RUN_EXECUTION_PROFILE_CONTEXT_KEY,
   withRunExecutionProfileContext,
@@ -15,6 +16,22 @@ import {
 
 afterEach(() => {
   rs.unstubAllGlobals();
+});
+
+test("disables thinking for every output-limit recovery replay", () => {
+  for (const reasoningEffort of ["high", "medium", "low", null] as const) {
+    expect(
+      buildOutputLimitRetryProfile({
+        model_name: "deepseek-v4-pro",
+        thinking_enabled: true,
+        reasoning_effort: reasoningEffort,
+      }),
+    ).toEqual({
+      model_name: "deepseek-v4-pro",
+      thinking_enabled: false,
+      reasoning_effort: "none",
+    });
+  }
 });
 
 test("moves execution choices behind the reserved SDK adapter key", () => {

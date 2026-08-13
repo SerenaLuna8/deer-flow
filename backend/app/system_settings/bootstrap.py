@@ -171,7 +171,7 @@ def _deepseek_model_command(
                 "base_url": "https://api.deepseek.com",
                 "request_timeout": 600.0,
                 "max_retries": 2,
-                "max_tokens": 16384,
+                "max_tokens": 51_200,
                 "temperature": 0.7,
                 "reasoning_effort": "high",
                 "when_thinking_enabled": {

@@ -27,11 +27,26 @@ JobType = Literal[
     "retention_purge",
     "mcp_discovery",
     "memory_dream",
+    "memory_dream_prepare",
     "memory_seal",
 ]
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+_DETERMINISTIC_NONRETRYABLE_ERROR_CODES = frozenset({"MODEL_OUTPUT_LIMIT"})
+
+
+def _dead_error_code_for_failure(
+    *,
+    retry_safety: RetrySafety,
+    public_error_code: str,
+    retryable: bool,
+) -> str:
+    """Preserve only reviewed deterministic codes after an earlier side effect."""
+
+    if retry_safety != "safe" and not (not retryable and public_error_code in _DETERMINISTIC_NONRETRYABLE_ERROR_CODES):
+        return "SIDE_EFFECT_STATE_UNKNOWN"
+    return public_error_code
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +88,7 @@ class EnqueueJob:
             "retention_purge",
             "mcp_discovery",
             "memory_dream",
+            "memory_dream_prepare",
             "memory_seal",
         }:
             raise ValueError("unsupported job type")
@@ -100,11 +116,11 @@ class EnqueueJob:
             raise ValueError(
                 "mcp_discovery requires project owner authority without Run or occurrence",
             )
-        elif self.job_type == "memory_dream":
+        elif self.job_type in {"memory_dream", "memory_dream_prepare"}:
             if self.scope.owner_user_id is None or self.run_id is not None or self.occurrence_id is not None:
-                raise ValueError("memory_dream requires owner authority without Run or occurrence")
+                raise ValueError(f"{self.job_type} requires owner authority without Run or occurrence")
             if not self.namespace or len(self.namespace) > 255:
-                raise ValueError("memory_dream requires a bounded namespace")
+                raise ValueError(f"{self.job_type} requires a bounded namespace")
         elif self.job_type == "memory_seal":
             # For seal jobs the namespace column carries the Thread id — the
             # coordinate the Worker drains — instead of a Memory namespace.
@@ -112,7 +128,7 @@ class EnqueueJob:
                 raise ValueError("memory_seal requires owner authority without Run or occurrence")
             if not self.namespace or len(self.namespace) > 255:
                 raise ValueError("memory_seal requires a bounded thread coordinate")
-        if self.job_type not in {"memory_dream", "memory_seal"} and self.namespace is not None:
+        if self.job_type not in {"memory_dream", "memory_dream_prepare", "memory_seal"} and self.namespace is not None:
             raise ValueError(f"{self.job_type} does not accept a memory namespace")
         normalized_trace_id = normalize_trace_id(self.origin_trace_id)
         if self.job_type in {"private_run", "automation_run"}:
@@ -424,6 +440,64 @@ class JobRepository:
             coordinates.owner_user_id,
         )
 
+    async def _lock_memory_prepare_before_job(
+        self,
+        *,
+        job_id: uuid.UUID,
+        project_id: uuid.UUID,
+        owner_user_id: str | None,
+    ) -> None:
+        """Complete the Memory preparation lock prefix before claiming its Job.
+
+        ``claim_next`` may itself terminalize an expired/cancel-requested Job.
+        For a durable Dream preparation that transition also updates its run
+        row, so the claimant must own Thread -> preparation before Job.  Local
+        imports keep the generic jobs module free of an import cycle.
+        """
+
+        if owner_user_id is None:
+            return
+        from deerflow.persistence.private_work.memory_document_model import (
+            MemoryDreamPrepareRunRow,
+        )
+        from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+        coordinates = (
+            await self.session.execute(
+                sa.select(
+                    MemoryDreamPrepareRunRow.thread_id,
+                    MemoryDreamPrepareRunRow.namespace,
+                ).where(
+                    MemoryDreamPrepareRunRow.job_id == job_id,
+                    MemoryDreamPrepareRunRow.project_id == project_id,
+                    MemoryDreamPrepareRunRow.owner_user_id == owner_user_id,
+                )
+            )
+        ).one_or_none()
+        if coordinates is None:
+            # Account reset may have removed the private row while leaving a
+            # leased Job for cooperative Worker cancellation.
+            return
+        await self.session.execute(
+            sa.select(ThreadMetaRow.thread_id)
+            .where(
+                ThreadMetaRow.project_id == project_id,
+                ThreadMetaRow.owner_user_id == owner_user_id,
+                ThreadMetaRow.thread_id == coordinates.thread_id,
+            )
+            .with_for_update(of=ThreadMetaRow)
+        )
+        await self.session.execute(
+            sa.select(MemoryDreamPrepareRunRow.job_id)
+            .where(
+                MemoryDreamPrepareRunRow.job_id == job_id,
+                MemoryDreamPrepareRunRow.project_id == project_id,
+                MemoryDreamPrepareRunRow.owner_user_id == owner_user_id,
+                MemoryDreamPrepareRunRow.namespace == coordinates.namespace,
+            )
+            .with_for_update(of=MemoryDreamPrepareRunRow)
+        )
+
     async def enqueue(self, request: EnqueueJob) -> uuid.UUID:
         job_id, _created = await self._enqueue(request)
         return job_id
@@ -567,6 +641,7 @@ class JobRepository:
                 "retention_purge",
                 "mcp_discovery",
                 "memory_dream",
+                "memory_dream_prepare",
                 "memory_seal",
             }
         )
@@ -589,6 +664,7 @@ class JobRepository:
                     JobRow.id,
                     JobRow.project_id,
                     JobRow.owner_user_id,
+                    JobRow.job_type,
                 )
                 .where(
                     JobRow.job_type.in_(job_types),
@@ -616,6 +692,12 @@ class JobRepository:
                 ):
                     await savepoint.rollback()
                     return None
+                if candidate.job_type == "memory_dream_prepare":
+                    await self._lock_memory_prepare_before_job(
+                        job_id=candidate.id,
+                        project_id=candidate.project_id,
+                        owner_user_id=candidate.owner_user_id,
+                    )
                 row = (
                     await self.session.execute(
                         sa.select(JobRow)
@@ -1015,7 +1097,11 @@ class JobRepository:
                 run_terminal_published=False,
             )
 
-        dead_error_code = "SIDE_EFFECT_STATE_UNKNOWN" if row.retry_safety != "safe" else public_error_code
+        dead_error_code = _dead_error_code_for_failure(
+            retry_safety=row.retry_safety,
+            public_error_code=public_error_code,
+            retryable=retryable,
+        )
         owner_ref = self._owner_ref(row.owner_user_id)
         await self._finish_current_attempt(
             row,

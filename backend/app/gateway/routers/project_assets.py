@@ -24,23 +24,33 @@ from fastapi import (
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.gateway.deps import get_current_user_from_request
+from app.gateway.deps import get_config, get_current_user_from_request
+from app.private_work.agent_runtime_assessment import (
+    MAX_AGENT_RUNTIME_ASSESSMENTS,
+    AgentRuntimeAssessmentService,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context
-from app.projects.errors import ProjectDatabaseUnavailable, ProjectForbidden, ProjectNotFound
+from app.projects.errors import (
+    ProjectDatabaseUnavailable,
+    ProjectForbidden,
+    ProjectNotFound,
+)
 from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     AgentCapabilityBindings,
     AgentInstructions,
     AgentModelSettings,
+    AgentPayload,
     AgentService,
     AssetConflict,
     AssetForbidden,
     AssetKind,
     AssetNotFound,
+    AssetRunQuotaExceeded,
     AssetScope,
     AssetSelection,
     AssetStorageQuotaExceeded,
@@ -64,6 +74,10 @@ from app.shared_assets import (
     SkillService,
     WorkflowStatus,
 )
+from app.shared_assets.agent_catalog import (
+    AgentCatalogValidator,
+    StaticToolGroupCatalog,
+)
 from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
 from app.shared_assets.skill_archive import MAX_SKILL_ARCHIVE_UPLOAD_BYTES
 from app.shared_assets.skill_service import (
@@ -73,6 +87,7 @@ from app.shared_assets.skill_service import (
 from app.system_settings.credential_migration import (
     SystemModelCredentialMigrationAdapter,
 )
+from deerflow.config.app_config import AppConfig
 from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
 from deerflow.mcp_endpoint_policy import validate_remote_mcp_endpoint_syntax
 from deerflow.persistence.engine import get_session_factory
@@ -209,6 +224,21 @@ class CreateAssetRequest(_StrictModel):
     display_name: str
 
 
+class AgentCreateRequest(_StrictModel):
+    slug: str
+    display_name: str
+    description: str
+    agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
+    model_ref: str = Field(min_length=1, max_length=255)
+    model_settings: AgentModelSettings
+    tool_groups: list[str]
+    skill_version_ids: list[uuid.UUID]
+    mcp_version_ids: list[uuid.UUID]
+
+
 class ExpectedAssetVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
@@ -270,6 +300,56 @@ class AgentCapabilityBindingsRequest(_StrictModel):
     skill_version_ids: list[uuid.UUID]
     mcp_version_ids: list[uuid.UUID]
     expected_asset_version: int = Field(ge=1)
+
+
+class AgentRuntimeAssessmentsRequest(_StrictModel):
+    agent_ids: tuple[uuid.UUID, ...] = Field(
+        min_length=1,
+        max_length=MAX_AGENT_RUNTIME_ASSESSMENTS,
+    )
+
+    @model_validator(mode="after")
+    def validate_unique_agent_ids(self) -> AgentRuntimeAssessmentsRequest:
+        if len(set(self.agent_ids)) != len(self.agent_ids):
+            raise ValueError("Agent runtime assessment IDs must be unique")
+        return self
+
+
+class AgentRuntimeAssessmentItemResponse(_StrictModel):
+    agent_asset_id: uuid.UUID
+    selected_version_id: uuid.UUID | None
+    status: Literal["ready", "blocked"]
+    reason_code: (
+        Literal[
+            "agent_unavailable",
+            "runtime_dependency_unavailable",
+            "model_unavailable",
+        ]
+        | None
+    )
+
+    @model_validator(mode="after")
+    def validate_runtime_assessment(self) -> AgentRuntimeAssessmentItemResponse:
+        if self.status == "ready":
+            if self.selected_version_id is None or self.reason_code is not None:
+                raise ValueError("ready Agent runtime assessment is invalid")
+        elif self.reason_code == "agent_unavailable":
+            if self.selected_version_id is not None:
+                raise ValueError("unavailable Agent runtime assessment is invalid")
+        elif self.reason_code in {
+            "runtime_dependency_unavailable",
+            "model_unavailable",
+        }:
+            if self.selected_version_id is None:
+                raise ValueError("blocked Agent runtime assessment is invalid")
+        else:
+            raise ValueError("blocked Agent runtime assessment reason is invalid")
+        return self
+
+
+class AgentRuntimeAssessmentsResponse(_StrictModel):
+    items: list[AgentRuntimeAssessmentItemResponse]
+    request_id: str
 
 
 MAX_SKILL_BASE64_FILE_CHARS = 4 * ((MAX_SKILL_ARCHIVE_BYTES + 2) // 3)
@@ -494,6 +574,11 @@ class SkillVersionItemResponse(_StrictModel):
     file_views: list[SkillFileResponse]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
+    revoked_at: datetime | None
+    revoked_by_user_id: str | None
+    revocation_reason_code: Literal["security", "policy", "integrity"] | None
+    governance_status: Literal["active", "revoked"]
+    binding_eligible: bool
     created_by_user_id: str
     created_at: datetime
 
@@ -578,6 +663,12 @@ class CredentialGrantMigrationResponse(_StrictModel):
 
 class AgentVersionResponse(_StrictModel):
     data: AgentVersionItemResponse
+    request_id: str
+
+
+class AgentCreateResponse(_StrictModel):
+    item: AssetItemResponse
+    version: AgentVersionItemResponse
     request_id: str
 
 
@@ -700,6 +791,7 @@ ASSET_ERRORS = (
     AssetValidationFailed,
     AssetStorageUnavailable,
     AssetStorageQuotaExceeded,
+    AssetRunQuotaExceeded,
 )
 
 
@@ -710,6 +802,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         AssetConflict: 409,
         AssetValidationFailed: 422,
         AssetStorageQuotaExceeded: 429,
+        AssetRunQuotaExceeded: 429,
         AssetStorageUnavailable: 503,
     }
     status_code = known.get(type(exc))
@@ -722,7 +815,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
             "message": exc.public_message,
             "request_id": request_id or exc.request_id,
         },
-        headers={"Retry-After": "1"} if type(exc) is AssetStorageQuotaExceeded else None,
+        headers={"Retry-After": "1"} if type(exc) in {AssetStorageQuotaExceeded, AssetRunQuotaExceeded} else None,
     ) from None
 
 
@@ -792,8 +885,40 @@ def _governance_sink(request: Request):
     return value
 
 
-def get_agent_service(request: Request) -> AgentService:
-    return AgentService(_factory(), governance_sink=_governance_sink(request))
+def _agent_tool_group_catalog(config: AppConfig) -> StaticToolGroupCatalog:
+    return StaticToolGroupCatalog(
+        (
+            *(group.name for group in config.tool_groups),
+            *(tool.group for tool in config.tools),
+            "task",
+        )
+    )
+
+
+def get_agent_service(
+    request: Request,
+    config: AppConfig = Depends(get_config),
+) -> AgentService:
+    return AgentService(
+        _factory(),
+        governance_sink=_governance_sink(request),
+        catalog_validator=AgentCatalogValidator(
+            _agent_tool_group_catalog(config),
+        ),
+    )
+
+
+def get_agent_runtime_assessment_service(
+    request: Request,
+) -> AgentRuntimeAssessmentService:
+    endpoint_policy = getattr(request.app.state, "mcp_endpoint_policy", None)
+    if not isinstance(endpoint_policy, NetworkMcpEndpointPolicy):
+        request_id = get_current_trace_id() or generate_trace_id()
+        raise_asset_domain(AssetStorageUnavailable(request_id))
+    return AgentRuntimeAssessmentService(
+        _factory(),
+        endpoint_policy=endpoint_policy,
+    )
 
 
 def get_skill_service(request: Request) -> SkillService:
@@ -1200,8 +1325,31 @@ def register_asset_routes(
     include_shared_asset_mutations: bool = True,
     include_project_asset_delete: bool = False,
 ) -> None:
-    async def create_agent(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _asset_call(actor, lambda: service.create_asset(actor, CreateAgent(body.slug, body.display_name)))
+    async def create_agent(body: AgentCreateRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
+        try:
+            result = await service.create_project(
+                actor,
+                CreateAgent(body.slug, body.display_name),
+                AgentPayload(
+                    description=body.description,
+                    agents_instructions=body.agents_instructions,
+                    soul=body.soul,
+                    identity=body.identity,
+                    user_context=body.user_context,
+                    model_ref=body.model_ref,
+                    model_settings=body.model_settings,
+                    tool_groups=tuple(body.tool_groups),
+                    skill_version_ids=tuple(body.skill_version_ids),
+                    mcp_version_ids=tuple(body.mcp_version_ids),
+                ),
+            )
+            return AgentCreateResponse(
+                item=_asset_item(result.asset),
+                version=AgentVersionItemResponse.model_validate(_response_data(result.version)),
+                request_id=actor.request_id,
+            )
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
 
     async def get_agent(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _asset_call(actor, lambda: service.get(actor, asset_id))
@@ -1254,6 +1402,24 @@ def register_asset_routes(
         return await _version_call(
             actor,
             lambda: service.restore_version(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=body.expected_asset_version,
+            ),
+            AgentVersionResponse,
+        )
+
+    async def publish_agent_version(
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        body: ExpectedAssetVersionRequest,
+        actor=Depends(actor_dependency),
+        service=Depends(get_agent_service),
+    ):
+        return await _version_call(
+            actor,
+            lambda: service.publish(
                 actor,
                 asset_id,
                 version_id,
@@ -1426,10 +1592,11 @@ def register_asset_routes(
         ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
     )
     shared_asset_write_routes = (
-        ("/agents", create_agent, ["POST"], AssetMutationResponse, 201),
+        ("/agents", create_agent, ["POST"], AgentCreateResponse, 201),
         ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentVersionResponse, 200),
         ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentVersionResponse, 200),
         ("/agents/{asset_id}/versions/{version_id}/restore", restore_agent_version, ["POST"], AgentVersionResponse, 200),
+        ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent_version, ["POST"], AgentVersionResponse, 200),
         ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),
@@ -1654,6 +1821,34 @@ async def list_project_agents(
     binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
     return await _list_assets(context, AssetKind.AGENT, service, binding_service)
+
+
+@project_router.post(
+    "/agents/runtime-assessments",
+    response_model=AgentRuntimeAssessmentsResponse,
+)
+async def assess_project_agent_runtime(
+    body: AgentRuntimeAssessmentsRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        AgentRuntimeAssessmentService,
+        Depends(get_agent_runtime_assessment_service),
+    ],
+):
+    try:
+        items = await service.assess(context, body.agent_ids)
+        return AgentRuntimeAssessmentsResponse(
+            items=[
+                AgentRuntimeAssessmentItemResponse.model_validate(
+                    item,
+                    from_attributes=True,
+                )
+                for item in items
+            ],
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @project_router.get(

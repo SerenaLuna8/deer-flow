@@ -142,7 +142,7 @@ services:
       retries: 6
       start_period: 15s
 
-  # ── Automation Scheduler (opt-in profile; scheduler.enabled must agree) ───
+  # ── Automation Scheduler (opt-in profile; polling is platform-settings owned) ───
   scheduler:
     <<: *backend-service
     container_name: deer-flow-scheduler

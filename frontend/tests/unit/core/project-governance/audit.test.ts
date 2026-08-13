@@ -1,5 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
 
+import { describeAuditItem } from "@/components/projects/governance/project-audit-view-model";
 import { adminAuditItemSchema } from "@/core/admin-operations/types";
 import { auditItemSchema } from "@/core/project-governance/audit";
 
@@ -69,5 +70,74 @@ describe("project audit contract", () => {
         },
       }).success,
     ).toBe(false);
+  });
+
+  test("accepts closed Memory lifecycle events and rejects content", () => {
+    const admitted = {
+      ...recallAuditItem,
+      actor: "scheduler",
+      action: "memory.dream.admitted",
+      target_kind: "job",
+      metadata: {
+        origin: "scheduled",
+        trigger: "auto_dream",
+        history_count: 4,
+      },
+    } as const;
+    const settled = {
+      ...recallAuditItem,
+      action: "memory.dream.settled",
+      target_kind: "job",
+      metadata: { disposition: "published", version: 6 },
+    } as const;
+    const restored = {
+      ...recallAuditItem,
+      actor: "user",
+      action: "memory.restore.executed",
+      target_kind: "project",
+      metadata: {
+        source_version: 2,
+        previous_version: 5,
+        published_version: 6,
+        changed: true,
+      },
+    } as const;
+    const reset = {
+      ...recallAuditItem,
+      actor: "user",
+      action: "memory.reset.executed",
+      target_kind: "account",
+      metadata: { scope: "project" },
+    } as const;
+
+    for (const event of [admitted, settled, restored, reset]) {
+      expect(auditItemSchema.safeParse(event).success).toBe(true);
+    }
+    expect(
+      auditItemSchema.safeParse({
+        ...admitted,
+        metadata: { ...admitted.metadata, content: "private Memory" },
+      }).success,
+    ).toBe(false);
+    expect(
+      auditItemSchema.safeParse({
+        ...settled,
+        metadata: {
+          disposition: "published",
+          version: 6,
+          public_error_code: "MEMORY_DREAM_FAILED",
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      auditItemSchema.safeParse({
+        ...restored,
+        metadata: { ...restored.metadata, published_version: 7 },
+      }).success,
+    ).toBe(false);
+
+    const presentation = describeAuditItem(reset, "zh-CN");
+    expect(presentation.action).toBe("已重置账户记忆");
+    expect(presentation.target).toBe("账户");
   });
 });

@@ -17,6 +17,8 @@ from app.audit.models import (
 )
 from app.audit.service import AuditService
 from deerflow.persistence.projects.model import ProjectMembershipRow
+from deerflow.persistence.shared_assets.agent_model import AgentVersionRow
+from deerflow.persistence.shared_assets.skill_model import SkillVersionRow
 from deerflow.persistence.user.model import UserRow
 
 _ACTIONS: dict[str, AuditAction] = {
@@ -34,6 +36,7 @@ _ACTIONS: dict[str, AuditAction] = {
     "skill.create": AuditAction.ASSET_CREATED,
     "skill.version.create": AuditAction.ASSET_UPDATED,
     "skill.publish": AuditAction.ASSET_PUBLISHED,
+    "skill.version.revoke": AuditAction.ASSET_DEPRECATED,
     "skill.delete": AuditAction.ASSET_DELETED,
     "skill.activate": AuditAction.ASSET_UPDATED,
     "skill.credential_bindings.configure": AuditAction.ASSET_UPDATED,
@@ -60,6 +63,18 @@ _ACTIONS: dict[str, AuditAction] = {
     "binding.disable": AuditAction.ASSET_UNBOUND,
 }
 
+_VERSIONED_AGENT_OPERATIONS = frozenset(
+    {
+        "agent.version.create",
+        "agent.instructions.update",
+        "agent.capability_bindings.update",
+        "agent.version.restore",
+        "agent.publish",
+        "agent.activate",
+    }
+)
+_VERSIONED_SKILL_OPERATIONS = frozenset({"skill.version.revoke"})
+
 
 class DurableSharedAssetGovernanceEventSink:
     """M3-compatible adapter into the formal append-only M6 audit ledger."""
@@ -81,11 +96,7 @@ class DurableSharedAssetGovernanceEventSink:
         request_id: str,
         asset_kind: str | None = None,
     ) -> None:
-        del version_id
-        selected_action = _ACTIONS.get(action)
-        selected_kind = asset_kind or action.partition(".")[0]
-        if selected_action is None or selected_kind not in {"agent", "skill", "mcp"}:
-            raise TypeError("shared asset audit event is invalid")
+        selected_action, selected_kind = self._select_event(action, asset_kind)
         system_role = await session.scalar(
             select(UserRow.system_role).where(
                 UserRow.id == str(actor),
@@ -93,6 +104,13 @@ class DurableSharedAssetGovernanceEventSink:
         )
         if system_role != "system_admin":
             raise AuditAuthorityRejected()
+        version_number = await self._safe_version_number(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
         context = resolve_system_audit_context(
             SimpleNamespace(
                 id=uuid.UUID(str(actor)),
@@ -108,6 +126,8 @@ class DurableSharedAssetGovernanceEventSink:
             action=selected_action,
             request_id=request_id,
             asset_kind=selected_kind,
+            operation=action,
+            version_number=version_number,
         )
 
     async def append_project(
@@ -122,11 +142,7 @@ class DurableSharedAssetGovernanceEventSink:
         request_id: str,
         asset_kind: str | None = None,
     ) -> None:
-        del version_id
-        selected_action = _ACTIONS.get(action)
-        selected_kind = asset_kind or action.partition(".")[0]
-        if selected_action is None or selected_kind not in {"agent", "skill", "mcp"}:
-            raise TypeError("shared asset audit event is invalid")
+        selected_action, selected_kind = self._select_event(action, asset_kind)
         membership_id = await session.scalar(
             select(ProjectMembershipRow.id).where(
                 ProjectMembershipRow.project_id == project_id,
@@ -136,6 +152,13 @@ class DurableSharedAssetGovernanceEventSink:
         )
         if membership_id is None:
             raise AuditAuthorityRejected()
+        version_number = await self._safe_version_number(
+            session,
+            asset_id=asset_id,
+            version_id=version_id,
+            operation=action,
+            asset_kind=selected_kind,
+        )
         await self._append(
             session,
             actor=AuditActor.user(uuid.UUID(str(actor))),
@@ -144,7 +167,58 @@ class DurableSharedAssetGovernanceEventSink:
             action=selected_action,
             request_id=request_id,
             asset_kind=selected_kind,
+            operation=action,
+            version_number=version_number,
         )
+
+    @staticmethod
+    def _select_event(
+        operation: str,
+        asset_kind: str | None,
+    ) -> tuple[AuditAction, str]:
+        selected_action = _ACTIONS.get(operation)
+        operation_domain = operation.partition(".")[0]
+        selected_kind = asset_kind or operation_domain
+        kind_mismatch = operation_domain in {"agent", "skill", "mcp"} and selected_kind != operation_domain
+        if selected_action is None or selected_kind not in {"agent", "skill", "mcp"} or kind_mismatch:
+            raise TypeError("shared asset audit event is invalid")
+        return selected_action, selected_kind
+
+    @staticmethod
+    async def _safe_version_number(
+        session: AsyncSession,
+        *,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID | None,
+        operation: str,
+        asset_kind: str,
+    ) -> int | None:
+        if asset_kind == "agent" and operation.startswith("agent."):
+            expects_version = operation in _VERSIONED_AGENT_OPERATIONS
+            if expects_version != (version_id is not None):
+                raise AuditAuthorityRejected()
+            if version_id is None:
+                return None
+            version_number = await session.scalar(
+                select(AgentVersionRow.version_number).where(
+                    AgentVersionRow.agent_id == asset_id,
+                    AgentVersionRow.id == version_id,
+                )
+            )
+        elif asset_kind == "skill" and operation in _VERSIONED_SKILL_OPERATIONS:
+            if version_id is None:
+                raise AuditAuthorityRejected()
+            version_number = await session.scalar(
+                select(SkillVersionRow.version_number).where(
+                    SkillVersionRow.skill_id == asset_id,
+                    SkillVersionRow.id == version_id,
+                )
+            )
+        else:
+            return None
+        if type(version_number) is not int or version_number < 1:
+            raise AuditAuthorityRejected()
+        return version_number
 
     async def _append(
         self,
@@ -156,7 +230,15 @@ class DurableSharedAssetGovernanceEventSink:
         action: AuditAction,
         request_id: str,
         asset_kind: str,
+        operation: str,
+        version_number: int | None,
     ) -> None:
+        metadata: dict[str, object] = {
+            "asset_kind": asset_kind,
+            "operation": operation,
+        }
+        if version_number is not None:
+            metadata["version_number"] = version_number
         await self._service.append(
             session,
             actor,
@@ -167,7 +249,7 @@ class DurableSharedAssetGovernanceEventSink:
                 None if project_id is None else uuid.UUID(str(project_id)),
             ),
             AuditOutcome.SUCCESS,
-            {"asset_kind": asset_kind},
+            metadata,
             request_id=request_id,
         )
 

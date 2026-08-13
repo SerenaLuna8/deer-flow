@@ -5,7 +5,7 @@ description: Project-scoped long-term Memory built from SNIP archives and Dream.
 
 # Memory
 
-Project Memory is one private, versioned Markdown document for each authenticated owner in a project. PostgreSQL stores the current document, pending history entries, Dream runs, immutable document versions, and the exact document snapshot frozen for each admitted Run. The server derives project, owner, and the fixed internal namespace from the authenticated request; the browser cannot select another scope.
+Project Memory is one private, versioned Markdown document for each authenticated owner in a project. PostgreSQL stores the current document, pending history entries, archived episodes, Dream runs, immutable document versions, and the exact document snapshot frozen for each admitted Run. The server derives project, owner, and the fixed internal namespace from the authenticated request; the browser cannot select another scope.
 
 Thread summaries remain separate. They compact one Thread's model context and are preserved when long-term Memory is reset.
 
@@ -21,33 +21,45 @@ historical versions, or cancel in-flight Dreams.
 
 ## SNIP and pending history
 
-When a Thread is compacted, SNIP makes one bounded model call over complete older turns. Its validated tagged output becomes both the Thread's `summary_text` and a pending private history entry. An exact `(nothing)` still updates the Thread summary but creates no long-term entry. The checkpoint receipt and database transaction use an idempotent handshake so a retry cannot archive the same compaction twice.
+When a Thread is compacted, SNIP makes one bounded model call over complete older turns. Continuity prose updates the Thread's `summary_text`; a separate, validated tagged block becomes private pending history. An exact `(nothing)` creates no long-term entry. The checkpoint receipt and database transaction use an idempotent handshake so a retry cannot archive the same compaction twice.
 
-Use `/compact` to run only this Thread-local compaction. The full visible chat remains available.
+Use `/compact` to run only this Thread-local compaction. The full visible chat remains available. The Memory page shows the total pending count and the first 50 pending entries in the order the next Dream will consume them. Entries retain whether they came from automatic SNIP compaction or an explicit `remember` tool call.
 
-## Dream
+## Dream and budget compression
 
 Dream periodically organizes at most the oldest 20 pending entries into the current document. The isolated Dream session receives only the current document, the bounded pending batch, and in-memory read/replace tools. It has no shared Agent, files, shell, web, MCP, Skill, or Subagent access.
 
-Document replacement, a new immutable version, a real unified diff, cursor advancement, pending-entry tombstones, and Job success settle atomically. If model, tool, validation, timeout, or database work fails, the document and pending entries remain unchanged for a safe retry.
+Document replacement, a new immutable version, a real unified diff, cursor advancement, episode creation, pending-entry tombstones, and Job success settle atomically. If model, tool, validation, timeout, or database work fails, the document and pending entries remain unchanged for a safe retry.
 
-`/Dream` first compacts the current Thread and then admits one manual Dream batch. The Memory page's **Organize now** action admits the same job without changing chat messages.
+`/Dream` admits a durable background preparation Job. The Worker drains complete turns from the current Thread, reports its discrete phase and completed archive-pass count, and then atomically admits one manual Dream batch. The composer can recover this status after a refresh and can request cooperative cancellation. The Memory page's **Organize now** action still admits a body-less Dream without changing chat messages.
 
-## Recall
+The former `POST /memory/dream` request shape containing `threadId` now fails closed with `422`; it never falls back to synchronous Gateway or browser compaction. This private single-stack release does not preserve old browser bundles across that boundary, so tabs loaded before the upgrade must be refreshed before using `/Dream`.
 
-Run admission reads the current bounded document and its section contract once, then freezes both in a single Run snapshot. Worker model boundaries reuse only that snapshot; first recall performs no model call, vector lookup, or ranking query. A Dream finishing during a Run, or an administrator changing the section template, cannot change that Run's Memory.
+If the current document exceeds the platform's injection budget, a new Run continues without this Memory snapshot. The document is not silently truncated. The page uses the opt-in `injectionAdvisory` as current evidence for an ordinary new Run; it shares platform-switch, account-preference, document-integrity, section-structure, and budget checks with admission. The old two-state `injectionStatus` remains only as a rolling-compatibility projection. The advisory does not reserve future state or prove what any earlier Run injected. A continuation Run does not read the current document or switches: it inherits the source Run's frozen snapshot or no-snapshot result, then reapplies the current budget and integrity checks to an inherited snapshot. The Scheduler or **Compress document now** can admit a zero-history `budget_rewrite` Dream. Its saved version is labeled **Budget compression**, and later Runs resume injection only after the document fits the current budget.
 
-When enabled, the complete frozen document is injected as a hidden, low-authority Human message marked as private data rather than an instruction. Turning Memory off skips injection at the next model boundary. Reset removes long-term documents, history, versions, Dream records, and Run Memory snapshots while preserving chats and Thread summaries.
+## Episode archive and recall
 
-## Project Memory page
+When Dream consumes pending history, the original tagged entries are copied into the episode archive in the same settlement transaction. The **Archive** tab can:
 
-The project page shows only:
+- browse retained episodes newest first and load more with an opaque cursor;
+- search up to 200 characters, returning at most 50 results with direct text matches ranked before similarity matches;
+- filter by the closed tags `permanent`, `durable`, `ephemeral`, and `correction`; selecting multiple tags matches any selected tag;
+- distinguish automatic SNIP entries from explicit `remember` entries.
 
-- the current long-term document, version, update time, and pending count;
-- **Organize now** and an active-Dream state;
-- Dream and restore history with the processed count and real diff;
-- each saved document version and an explicit restore confirmation.
+The current `episode_retention_days` policy bounds archive browsing and search. `0` keeps episodes without a time cutoff; otherwise only entries inside the configured `30..3650` day window are visible. Physical pruning is performed separately from reads, so the retention window is a visibility contract rather than an exact deletion-time guarantee. Agent recall uses the retention value frozen for that Run, so immediately after a policy change its results can temporarily differ from the project page.
 
-Restore writes the selected historical content as a new version. It never rewinds the history cursor or deletes later records. `/dream-log [version]` opens this history, and `/dream-restore <version>` asks for confirmation before calling the restore API. None of these commands is sent to the normal Agent chat flow.
+Run admission reads the current bounded document and its section contract once, then freezes both in a single Run snapshot. Worker model boundaries reuse only that snapshot; initial document injection performs no model call, vector lookup, or ranking query. A Dream finishing during a Run, or an administrator changing the section template, cannot change that Run's document snapshot.
 
-Runs without a trusted project-private scope cannot read, inject, organize, restore, or reset Memory.
+The `recall_memory` tool searches retained episodes inside the same project/owner scope. It supports the same closed tags and deterministic exact-then-similarity ranking; it does not search another owner's archive.
+
+When enabled, the complete frozen document is injected as a hidden, low-authority Human message marked as private data rather than an instruction. Turning Memory off skips injection at the next model boundary. Reset removes long-term documents, pending history, archived episodes, versions, Dream records, and Run Memory snapshots while preserving chats and Thread summaries.
+
+## Versions, review flags, and diffs
+
+Every Dream or restore creates an immutable version summary. `needsReview` is a conservative review flag for a Dream that removed a large share of existing content without correction evidence. It does not block publication or automatically restore anything. The page highlights the latest flagged version and marks flagged rows so you can inspect the saved document and its diff.
+
+The database keeps the complete unified diff. Version-detail responses expose a line-safe preview of at most 64,000 characters plus `diffTruncated`. When the preview is truncated, the page says so explicitly and shows the complete saved document below; use that document, not the preview alone, for a full review.
+
+Restore writes the selected historical content as a new version using an expected-current-version check. It never rewinds the history cursor or deletes later records. `/dream-log [version]` opens this history, and `/dream-restore <version>` asks for confirmation before calling the restore API. None of these commands is sent to the normal Agent chat flow.
+
+Runs without a trusted project-private scope cannot read, inject, organize, restore, reset, browse, or search Memory.

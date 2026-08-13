@@ -11,7 +11,7 @@ import {
   StarIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
@@ -36,7 +36,13 @@ import {
   useAgentBuilderSessions,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+} from "@/core/private-work/types";
 import type { Capability, Project } from "@/core/projects/types";
 import {
   useChangeProjectAssetStatus,
@@ -48,6 +54,12 @@ import {
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
 
+import {
+  cacheProjectAgentAuthoringReload,
+  projectAgentAuthoringCacheEpochs,
+  reloadProjectAgentAuthoringState,
+  type AgentAssetVersion as AuthoringAgentVersion,
+} from "./agent-authoring-recovery";
 import { AgentCapabilityWorkbench } from "./agent-capability-workbench";
 import { AgentInstructionsWorkbench } from "./agent-instructions-workbench";
 import { ProjectAssetPageShell } from "./project-asset-page-shell";
@@ -81,8 +93,26 @@ function AgentDetailWorkbench({
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.catalog;
+  const queryClient = useQueryClient();
+  const privateWork = usePrivateWorkAccess();
   const [instructionDirty, setInstructionDirty] = useState(false);
   const [capabilityDirty, setCapabilityDirty] = useState(false);
+  const [authoringSnapshot, setAuthoringSnapshot] = useState<{
+    item: ProjectAssetItem;
+    version: AuthoringAgentVersion;
+  } | null>(null);
+  const [authoringPreparationPending, setAuthoringPreparationPending] =
+    useState(false);
+  const [authoringPreparationError, setAuthoringPreparationError] = useState<
+    string | null
+  >(null);
+  const preparationAbortRef = useRef<AbortController | null>(null);
+  const preparationGenerationRef = useRef(0);
+  const mountedRef = useRef(false);
+  const scopeKey = `${accountId}:${projectId}:${item.id}`;
+  const scopeKeyRef = useRef(scopeKey);
   const handleInstructionDirty = useCallback(
     (dirty: boolean) => setInstructionDirty(dirty),
     [],
@@ -96,6 +126,17 @@ function AgentDetailWorkbench({
     onDirtyChange(instructionDirty || capabilityDirty);
   }, [capabilityDirty, instructionDirty, onDirtyChange]);
 
+  useEffect(() => {
+    mountedRef.current = true;
+    scopeKeyRef.current = scopeKey;
+    return () => {
+      mountedRef.current = false;
+      preparationAbortRef.current?.abort();
+      preparationAbortRef.current = null;
+      preparationGenerationRef.current += 1;
+    };
+  }, [scopeKey]);
+
   useEffect(
     () => () => {
       onDirtyChange(false);
@@ -103,27 +144,159 @@ function AgentDetailWorkbench({
     [onDirtyChange],
   );
 
+  const prepareAuthoring = useCallback(
+    async (includeDependencyCatalogs = false): Promise<boolean> => {
+      preparationAbortRef.current?.abort();
+      const controller = new AbortController();
+      const generation = preparationGenerationRef.current + 1;
+      preparationAbortRef.current = controller;
+      preparationGenerationRef.current = generation;
+      setAuthoringPreparationPending(true);
+      setAuthoringPreparationError(null);
+      const startedAt = projectAgentAuthoringCacheEpochs({
+        queryClient,
+        accountId,
+        projectId,
+        assetId: item.id,
+      });
+      try {
+        const reload = await runPrivateWorkAbortable(
+          privateWork,
+          (scopeSignal) =>
+            reloadProjectAgentAuthoringState({
+              projectId,
+              assetId: item.id,
+              minimumAssetVersion: item.version,
+              includeDependencyCatalogs,
+              signal: scopeSignal
+                ? AbortSignal.any([controller.signal, scopeSignal])
+                : controller.signal,
+            }),
+        );
+        if (
+          !mountedRef.current ||
+          scopeKeyRef.current !== scopeKey ||
+          !isPrivateWorkAccessActive(privateWork) ||
+          controller.signal.aborted ||
+          preparationAbortRef.current !== controller ||
+          preparationGenerationRef.current !== generation
+        ) {
+          return false;
+        }
+        await cacheProjectAgentAuthoringReload({
+          queryClient,
+          accountId,
+          projectId,
+          assetId: item.id,
+          reload,
+          startedAt,
+          isCurrent: () =>
+            mountedRef.current &&
+            scopeKeyRef.current === scopeKey &&
+            isPrivateWorkAccessActive(privateWork) &&
+            !controller.signal.aborted &&
+            preparationAbortRef.current === controller &&
+            preparationGenerationRef.current === generation,
+        });
+        if (
+          !mountedRef.current ||
+          scopeKeyRef.current !== scopeKey ||
+          !isPrivateWorkAccessActive(privateWork) ||
+          controller.signal.aborted ||
+          preparationAbortRef.current !== controller ||
+          preparationGenerationRef.current !== generation
+        ) {
+          return false;
+        }
+        setAuthoringSnapshot({
+          item: reload.item,
+          version: reload.version,
+        });
+        return true;
+      } catch {
+        if (
+          mountedRef.current &&
+          scopeKeyRef.current === scopeKey &&
+          isPrivateWorkAccessActive(privateWork) &&
+          !controller.signal.aborted &&
+          preparationAbortRef.current === controller &&
+          preparationGenerationRef.current === generation
+        ) {
+          setAuthoringPreparationError(copy.authoringLoadFailed);
+        }
+        return false;
+      } finally {
+        if (preparationAbortRef.current === controller) {
+          preparationAbortRef.current = null;
+          if (mountedRef.current && scopeKeyRef.current === scopeKey) {
+            setAuthoringPreparationPending(false);
+          }
+        }
+      }
+    },
+    [
+      accountId,
+      item.id,
+      item.version,
+      privateWork,
+      projectId,
+      queryClient,
+      scopeKey,
+      copy.authoringLoadFailed,
+    ],
+  );
+
+  const handleInstructionEditingChange = useCallback(
+    (nextEditing: boolean) => {
+      if (!nextEditing) {
+        onEditingChange(false);
+        return;
+      }
+      void prepareAuthoring(false).then((ready) => {
+        if (ready) onEditingChange(true);
+      });
+    },
+    [onEditingChange, prepareAuthoring],
+  );
+
+  const authoringVersion = authoringSnapshot?.version ?? version;
+  const authoringItem = authoringSnapshot?.item ?? item;
+  const preparationStatus = authoringPreparationPending ? (
+    <p role="status" className="text-muted-foreground text-sm">
+      {copy.authoringLoading}
+    </p>
+  ) : authoringPreparationError ? (
+    <p role="alert" className="text-destructive text-sm">
+      {authoringPreparationError}
+    </p>
+  ) : null;
+
   if (item.scope !== "project") {
     return (
-      <AgentInstructionsWorkbench
-        accountId={accountId}
-        projectId={projectId}
-        item={item}
-        version={version}
-        canAuthor={canAuthor}
-        editing={editing}
-        onEditingChange={onEditingChange}
-        onDirtyChange={handleInstructionDirty}
-        onVersionCreated={onVersionCreated}
-      />
+      <div className="space-y-3">
+        {preparationStatus}
+        <AgentInstructionsWorkbench
+          accountId={accountId}
+          projectId={projectId}
+          item={authoringItem}
+          version={authoringVersion}
+          canAuthor={canAuthor}
+          authoringPreparationPending={authoringPreparationPending}
+          editing={editing}
+          onEditingChange={handleInstructionEditingChange}
+          onDirtyChange={handleInstructionDirty}
+          onVersionCreated={onVersionCreated}
+        />
+      </div>
     );
   }
 
   return (
     <Tabs defaultValue="instructions" className="gap-5">
-      <TabsList aria-label="Agent 详情配置">
-        <TabsTrigger value="instructions">Agent 设定</TabsTrigger>
-        <TabsTrigger value="capabilities">工具绑定</TabsTrigger>
+      {preparationStatus}
+      <TabsList aria-label={copy.detailTabsAria}>
+        <TabsTrigger value="instructions">{copy.instructionsTab}</TabsTrigger>
+        <TabsTrigger value="capabilities">{copy.capabilitiesTab}</TabsTrigger>
       </TabsList>
       <TabsContent
         value="instructions"
@@ -133,11 +306,12 @@ function AgentDetailWorkbench({
         <AgentInstructionsWorkbench
           accountId={accountId}
           projectId={projectId}
-          item={item}
-          version={version}
+          item={authoringItem}
+          version={authoringVersion}
           canAuthor={canAuthor}
+          authoringPreparationPending={authoringPreparationPending}
           editing={editing}
-          onEditingChange={onEditingChange}
+          onEditingChange={handleInstructionEditingChange}
           onDirtyChange={handleInstructionDirty}
           onVersionCreated={onVersionCreated}
         />
@@ -150,9 +324,11 @@ function AgentDetailWorkbench({
         <AgentCapabilityWorkbench
           accountId={accountId}
           projectId={projectId}
-          item={item}
-          version={version}
+          item={authoringItem}
+          version={authoringVersion}
           canAuthor={canAuthor}
+          authoringPreparationPending={authoringPreparationPending}
+          onBeginEditing={() => prepareAuthoring(true)}
           onDirtyChange={handleCapabilityDirty}
           onVersionCreated={onVersionCreated}
         />
@@ -184,16 +360,18 @@ export function ProjectAgentViewToggle({
   value: ProjectAgentViewMode;
   onChange: (value: ProjectAgentViewMode) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.catalog;
   return (
     <div
       role="group"
-      aria-label="Agent 展示方式"
+      aria-label={copy.viewModeAria}
       className="border-border bg-background inline-flex h-10 overflow-hidden rounded-lg border p-0.5"
     >
       {(
         [
-          ["cards", "卡片", LayoutGridIcon],
-          ["list", "列表", ListIcon],
+          ["cards", copy.cards, LayoutGridIcon],
+          ["list", copy.list, ListIcon],
         ] as const
       ).map(([mode, label, Icon]) => {
         const selected = value === mode;
@@ -227,22 +405,23 @@ export type ProjectAgentChatAvailability = {
 export function projectAgentChatAvailability(
   item: ProjectAssetItem,
   projectCapabilities: readonly Capability[],
+  copy: Translations["agents"]["catalog"],
   mcpDependencyReason: string | null = null,
 ): ProjectAgentChatAvailability {
   if (
     !projectCapabilities.includes("private_work.create") ||
     !projectCapabilities.includes("shared_assets.execute")
   ) {
-    return { enabled: false, reason: "当前账号没有创建 Agent 对话的权限" };
+    return { enabled: false, reason: copy.chatForbidden };
   }
   if (item.status !== "active") {
-    return { enabled: false, reason: "该 Agent 当前不可用" };
+    return { enabled: false, reason: copy.unavailable };
   }
   if (!item.capabilities.includes("shared_assets.execute")) {
-    return { enabled: false, reason: "当前账号没有执行该 Agent 的权限" };
+    return { enabled: false, reason: copy.executeForbidden };
   }
   if (!item.current_published_version_id) {
-    return { enabled: false, reason: "请先完成 Agent 配置并发布" };
+    return { enabled: false, reason: copy.publishRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
@@ -265,22 +444,23 @@ export function projectAgentCanActivate(
 export function projectAgentDefaultAvailability(
   item: ProjectAssetItem,
   projectCapabilities: readonly Capability[],
+  copy: Translations["agents"]["catalog"],
   mcpDependencyReason: string | null = null,
 ): ProjectAgentChatAvailability {
   if (
     !projectCapabilities.includes("shared_assets.manage_bindings") ||
     !item.capabilities.includes("shared_assets.manage_bindings")
   ) {
-    return { enabled: false, reason: "仅项目管理员可以修改默认 Agent" };
+    return { enabled: false, reason: copy.defaultAdminOnly };
   }
   if (item.scope !== "project" || item.status !== "active") {
-    return { enabled: false, reason: "该 Agent 当前不可设为默认" };
+    return { enabled: false, reason: copy.defaultUnavailable };
   }
   if (!item.capabilities.includes("shared_assets.execute")) {
-    return { enabled: false, reason: "当前账号没有执行该 Agent 的权限" };
+    return { enabled: false, reason: copy.executeForbidden };
   }
   if (!item.current_published_version_id) {
-    return { enabled: false, reason: "请先完成 Agent 配置并发布" };
+    return { enabled: false, reason: copy.publishRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
@@ -291,21 +471,22 @@ export function projectAgentDefaultAvailability(
 function projectMainDefaultAvailability(
   item: ProjectAssetItem,
   projectCapabilities: readonly Capability[],
+  copy: Translations["agents"]["catalog"],
 ): ProjectAgentChatAvailability {
   if (!isMainProjectAgent(item)) {
-    return { enabled: false, reason: "该系统 Agent 不能设为项目默认" };
+    return { enabled: false, reason: copy.systemDefaultUnavailable };
   }
   if (!projectCapabilities.includes("shared_assets.manage_bindings")) {
-    return { enabled: false, reason: "仅项目管理员可以修改默认 Agent" };
+    return { enabled: false, reason: copy.defaultAdminOnly };
   }
   if (item.status !== "active") {
-    return { enabled: false, reason: "Main Agent 当前不可用" };
+    return { enabled: false, reason: copy.mainUnavailable };
   }
   if (!item.capabilities.includes("shared_assets.execute")) {
-    return { enabled: false, reason: "当前账号没有执行 Main Agent 的权限" };
+    return { enabled: false, reason: copy.mainExecuteForbidden };
   }
   if (!item.current_published_version_id) {
-    return { enabled: false, reason: "Main Agent 当前没有可用版本" };
+    return { enabled: false, reason: copy.mainVersionUnavailable };
   }
   return { enabled: true, reason: null };
 }
@@ -347,12 +528,12 @@ function ProjectAgentCollectionView({
   onSetDefault?: (item: ProjectAssetItem) => void;
   onSetMainDefault?: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.catalog;
   if (items.length === 0) {
     return (
       <p className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm">
-        {source === "system"
-          ? "暂无可用于当前项目的系统 Agent。"
-          : "暂无项目自建的 Agent。"}
+        {source === "system" ? copy.emptySystem : copy.emptyProject}
       </p>
     );
   }
@@ -371,6 +552,7 @@ function ProjectAgentCollectionView({
         const availability = projectAgentChatAvailability(
           item,
           projectCapabilities,
+          copy,
           mcpDependencyReasons.get(item.id) ?? null,
         );
         const creating = creatingChatForAgentId === item.id;
@@ -383,10 +565,11 @@ function ProjectAgentCollectionView({
           defaultAgentId !== undefined &&
           (main ? defaultAgentId === null : defaultAgentId === item.id);
         const defaultAvailability = main
-          ? projectMainDefaultAvailability(item, projectCapabilities)
+          ? projectMainDefaultAvailability(item, projectCapabilities, copy)
           : projectAgentDefaultAvailability(
               item,
               projectCapabilities,
+              copy,
               mcpDependencyReasons.get(item.id) ?? null,
             );
         const canOfferMainDefault =
@@ -404,11 +587,11 @@ function ProjectAgentCollectionView({
         const settingThisDefault =
           settingDefaultAgentTarget === (main ? "main" : item.id);
         const defaultActionReason = defaultAgentError
-          ? "无法加载项目默认 Agent，请稍后重试"
+          ? copy.defaultLoadFailed
           : defaultAgentLoading
-            ? "正在加载项目默认 Agent"
+            ? copy.defaultLoading
             : defaultAgentId === undefined
-              ? "无法确认项目默认 Agent，请稍后重试"
+              ? copy.defaultUnknown
               : defaultAvailability.reason;
         const description = item.description?.trim();
         const defaultButton = canSetDefault ? (
@@ -426,8 +609,11 @@ function ProjectAgentCollectionView({
             }
             aria-label={
               defaultActionReason
-                ? `将 ${item.display_name} 设为默认，${defaultActionReason}`
-                : `将 ${item.display_name} 设为默认`
+                ? copy.setDefaultBlockedAria(
+                    item.display_name,
+                    defaultActionReason,
+                  )
+                : copy.setDefaultAria(item.display_name)
             }
             title={defaultActionReason ?? undefined}
             onClick={() => (main ? onSetMainDefault?.() : onSetDefault?.(item))}
@@ -437,7 +623,7 @@ function ProjectAgentCollectionView({
             ) : (
               <StarIcon aria-hidden className="size-4" />
             )}
-            {settingThisDefault ? "设置中…" : "设为默认"}
+            {settingThisDefault ? copy.settingDefault : copy.setDefault}
           </Button>
         ) : null;
         const activateButton = canActivate ? (
@@ -447,7 +633,7 @@ function ProjectAgentCollectionView({
             size={viewMode === "list" ? "sm" : "default"}
             className={cn(viewMode === "cards" && "min-h-10 w-full")}
             disabled={activating}
-            aria-label={`启用 ${item.display_name}`}
+            aria-label={copy.activateAria(item.display_name)}
             onClick={() => onActivate?.(item)}
           >
             {activating ? (
@@ -455,7 +641,7 @@ function ProjectAgentCollectionView({
             ) : (
               <PowerIcon aria-hidden className="size-4" />
             )}
-            {activating ? "启用中…" : "启用"}
+            {activating ? copy.activating : copy.activate}
           </Button>
         ) : null;
         const chatButton = (
@@ -466,28 +652,28 @@ function ProjectAgentCollectionView({
             disabled={!availability.enabled || creating}
             aria-label={
               availability.reason
-                ? `与 ${item.display_name} 对话，${availability.reason}`
-                : `与 ${item.display_name} 对话`
+                ? copy.chatBlockedAria(item.display_name, availability.reason)
+                : copy.chatAria(item.display_name)
             }
             title={availability.reason ?? undefined}
             onClick={() => onStartChat(item)}
           >
             <MessageSquareIcon aria-hidden className="size-4" />
-            {creating ? "正在创建…" : "对话"}
+            {creating ? copy.creatingChat : copy.chat}
           </Button>
         );
         const statusBadges = (
           <>
-            {main ? <Badge variant="secondary">系统内置</Badge> : null}
+            {main ? <Badge variant="secondary">{copy.builtIn}</Badge> : null}
             {isDefault ? (
               <Badge variant="secondary">
-                <StarIcon aria-hidden /> 当前默认
+                <StarIcon aria-hidden /> {copy.currentDefault}
               </Badge>
             ) : null}
             {item.status !== "active" ? (
               <AssetStatusBadge
                 status={item.status}
-                label={item.status === "suspended" ? "已停用" : undefined}
+                label={item.status === "suspended" ? copy.suspended : undefined}
               />
             ) : null}
           </>
@@ -508,7 +694,7 @@ function ProjectAgentCollectionView({
               <button
                 type="button"
                 aria-haspopup="dialog"
-                aria-label={`查看 ${item.display_name} 详情`}
+                aria-label={copy.viewDetails(item.display_name)}
                 className="focus-visible:ring-ring flex min-w-0 flex-1 items-center gap-4 px-5 py-4 text-left focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
                 onClick={() => onSelect(item)}
               >
@@ -526,8 +712,8 @@ function ProjectAgentCollectionView({
                     {description && description.length > 0
                       ? description
                       : main
-                        ? "系统内置的通用 Agent，适用于大多数对话与协作场景。"
-                        : "暂无简介，可进入详情完善 Agent 设置。"}
+                        ? copy.mainDescription
+                        : copy.noDescription}
                   </span>
                 </span>
               </button>
@@ -554,7 +740,7 @@ function ProjectAgentCollectionView({
             <button
               type="button"
               aria-haspopup="dialog"
-              aria-label={`查看 ${item.display_name} 详情`}
+              aria-label={copy.viewDetails(item.display_name)}
               className="focus-visible:ring-ring flex min-h-0 flex-col text-left focus-visible:ring-2 focus-visible:outline-none focus-visible:ring-inset"
               onClick={() => onSelect(item)}
             >
@@ -574,8 +760,8 @@ function ProjectAgentCollectionView({
                   {description && description.length > 0
                     ? description
                     : main
-                      ? "系统内置的通用 Agent，适用于大多数对话与协作场景。"
-                      : "暂无简介，可进入详情完善 Agent 设置。"}
+                      ? copy.mainDescription
+                      : copy.noDescription}
                 </span>
               </CardContent>
             </button>
@@ -635,6 +821,8 @@ export function ProjectAgentCatalogView({
   onSetDefault?: (item: ProjectAssetItem) => void;
   onSetMainDefault?: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.catalog;
   const orderedSystemItems = [...systemItems].sort((left, right) => {
     const leftMain = isMainProjectAgent(left);
     const rightMain = isMainProjectAgent(right);
@@ -666,12 +854,12 @@ export function ProjectAgentCatalogView({
     <div className="space-y-8">
       {mcpDependencyError ? (
         <p role="alert" className="text-destructive text-sm">
-          无法验证 Agent 的 MCP 依赖，请稍后重试。
+          {copy.mcpValidationFailed}
         </p>
       ) : null}
       {defaultAgentError ? (
         <p role="alert" className="text-destructive text-sm">
-          无法加载项目默认 Agent，请稍后重试。
+          {copy.defaultLoadFailed}
         </p>
       ) : null}
 
@@ -685,14 +873,14 @@ export function ProjectAgentCatalogView({
               id="system-agent-section-title"
               className="text-lg font-semibold"
             >
-              系统 Agent
+              {copy.systemSection}
             </h2>
             <Badge variant="secondary" className="tabular-nums">
               {orderedSystemItems.length}
             </Badge>
           </div>
           <p className="text-muted-foreground mt-1 text-sm">
-            由系统提供，可直接用于项目协作
+            {copy.systemDescription}
           </p>
         </div>
         <ProjectAgentCollectionView
@@ -712,14 +900,14 @@ export function ProjectAgentCatalogView({
               id="project-agent-section-title"
               className="text-lg font-semibold"
             >
-              项目 Agent
+              {copy.projectSection}
             </h2>
             <Badge variant="secondary" className="tabular-nums">
               {orderedProjectItems.length}
             </Badge>
           </div>
           <p className="text-muted-foreground mt-1 text-sm">
-            由当前项目创建和管理
+            {copy.projectDescription}
           </p>
         </div>
         <ProjectAgentCollectionView
@@ -745,6 +933,8 @@ function ProjectAgentCatalog({
   selectedAssetId: string | null;
   onSelect: (item: ProjectAssetItem) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.catalog;
   const router = useRouter();
   const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
@@ -791,6 +981,7 @@ function ProjectAgentCatalog({
     const availability = projectAgentChatAvailability(
       agent,
       project.capabilities,
+      copy,
       mcpDependencyReasons.get(agent.id) ?? null,
     );
     if (!availability.enabled || creatingChatForAgentId) return;
@@ -801,6 +992,7 @@ function ProjectAgentCatalog({
         scope: privateWork.scope,
         projectSlug: project.slug,
         agent,
+        threadDisplayName: t.agents.newChat.threadName,
         invalidateThreadLists: () =>
           invalidateStoppedThreadCaches(
             queryClient,
@@ -811,7 +1003,9 @@ function ProjectAgentCatalog({
         navigate: (path) => router.push(path),
       });
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "无法创建项目对话");
+      toast.error(
+        error instanceof Error ? error.message : copy.createChatFailed,
+      );
     } finally {
       setCreatingChatForAgentId(null);
     }
@@ -831,8 +1025,9 @@ function ProjectAgentCatalog({
         input: { expected_asset_version: agent.version },
       },
       {
-        onSuccess: () => toast.success(`${agent.display_name} 已启用`),
-        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+        onSuccess: () => toast.success(copy.activated(agent.display_name)),
+        onError: (error) =>
+          toast.error(adminAssetErrorMessage(error, t.adminAssets.errors)),
       },
     );
   }
@@ -841,6 +1036,7 @@ function ProjectAgentCatalog({
     const availability = projectAgentDefaultAvailability(
       agent,
       project.capabilities,
+      copy,
       mcpDependencyReasons.get(agent.id) ?? null,
     );
     if (
@@ -857,9 +1053,9 @@ function ProjectAgentCatalog({
         expected_revision: defaultAgent.data.revision,
       },
       {
-        onSuccess: () =>
-          toast.success(`已将 ${agent.display_name} 设为项目默认 Agent`),
-        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+        onSuccess: () => toast.success(copy.defaultSet(agent.display_name)),
+        onError: (error) =>
+          toast.error(adminAssetErrorMessage(error, t.adminAssets.errors)),
       },
     );
   }
@@ -868,7 +1064,7 @@ function ProjectAgentCatalog({
     const mainAgent = systemItems.find(isMainProjectAgent);
     if (
       !mainAgent ||
-      !projectMainDefaultAvailability(mainAgent, project.capabilities)
+      !projectMainDefaultAvailability(mainAgent, project.capabilities, copy)
         .enabled ||
       !defaultAgent.data ||
       defaultAgent.error ||
@@ -882,8 +1078,9 @@ function ProjectAgentCatalog({
         expected_revision: defaultAgent.data.revision,
       },
       {
-        onSuccess: () => toast.success("已将 Main 设为项目默认 Agent"),
-        onError: (error) => toast.error(adminAssetErrorMessage(error)),
+        onSuccess: () => toast.success(copy.mainDefaultSet),
+        onError: (error) =>
+          toast.error(adminAssetErrorMessage(error, t.adminAssets.errors)),
       },
     );
   }
@@ -968,17 +1165,19 @@ export function ProjectAgentsPage({
   startChatIntentId?: string | null;
   selectedAssetId?: string | null;
 }) {
+  const { t } = useI18n();
   const [viewMode, setViewMode] = useState<ProjectAgentViewMode>("cards");
 
   return (
     <ProjectAssetPageShell
       kind="agents"
-      title="Agent"
+      title={t.agents.catalog.title}
       layout="agent-cards"
       headerActions={
         <ProjectAgentViewToggle value={viewMode} onChange={setViewMode} />
       }
       initialSelectedAssetId={selectedAssetId}
+      selectionQueryParam="agent_id"
       renderLead={({ project, data }) => (
         <ProjectAgentBuilderLead
           project={project}

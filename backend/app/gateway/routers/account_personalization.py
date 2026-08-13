@@ -18,6 +18,7 @@ from app.personalization.service import (
     AccountPersonalizationView,
 )
 from deerflow.persistence.engine import get_session_factory
+from deerflow.trace_context import generate_trace_id, get_current_trace_id
 
 router = APIRouter(
     prefix="/api/v1/account/personalization",
@@ -60,7 +61,10 @@ class ResetAccountMemoryResponse(_StrictModel):
 def _service(request: Request):
     service = getattr(request.app.state, "account_personalization_service", None)
     if service is None:
-        service = AccountPersonalizationService(get_session_factory())
+        service = AccountPersonalizationService(
+            get_session_factory(),
+            audit=getattr(request.app.state, "operational_audit_sink", None),
+        )
         request.app.state.account_personalization_service = service
     return service
 
@@ -156,6 +160,7 @@ async def reset_account_memory(
         result: AccountMemoryResetResult = await _service(request).reset_memory(
             _user_id(user),
             expected_version=body.expected_version,
+            request_id=get_current_trace_id() or generate_trace_id(),
         )
         return ResetAccountMemoryResponse.model_validate(result, from_attributes=True)
     except Exception as error:

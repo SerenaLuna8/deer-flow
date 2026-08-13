@@ -7,7 +7,6 @@ export const env = createEnv({
    * isn't built with invalid env vars.
    */
   server: {
-    GITHUB_OAUTH_TOKEN: z.string().optional(),
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
@@ -34,7 +33,6 @@ export const env = createEnv({
 
     NEXT_PUBLIC_BACKEND_BASE_URL: process.env.NEXT_PUBLIC_BACKEND_BASE_URL,
     NEXT_PUBLIC_BUILD_MODE: process.env.NEXT_PUBLIC_BUILD_MODE,
-    GITHUB_OAUTH_TOKEN: process.env.GITHUB_OAUTH_TOKEN,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially

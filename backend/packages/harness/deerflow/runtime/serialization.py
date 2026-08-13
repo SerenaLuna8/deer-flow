@@ -14,6 +14,12 @@ import math
 from typing import Any
 
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
+from deerflow.agents.middlewares.output_limit_recovery_middleware import (
+    OUTPUT_LIMIT_RECOVERY_STATE_KEY,
+)
+from deerflow.agents.middlewares.token_budget_middleware import (
+    OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
+)
 
 _MAX_PUBLIC_VIEWED_IMAGE_BYTES = 20 * 1024 * 1024
 _MAX_PUBLIC_SERIALIZATION_DEPTH = 128
@@ -23,7 +29,13 @@ _MAX_PUBLIC_SERIALIZATION_STRING_CHARS = 1_000_000
 _MAX_PUBLIC_SERIALIZATION_TOTAL_STRING_CHARS = 4_000_000
 _MAX_PUBLIC_SERIALIZATION_KEY_CHARS = 1_024
 _BUDGET_EXHAUSTED = object()
-_INTERNAL_STATE_KEYS = frozenset({MEMORY_ARCHIVE_RECEIPT_KEY})
+_INTERNAL_STATE_KEYS = frozenset(
+    {
+        MEMORY_ARCHIVE_RECEIPT_KEY,
+        OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
+        OUTPUT_LIMIT_RECOVERY_STATE_KEY,
+    }
+)
 _PUBLIC_VIEWED_IMAGE_MIME_TYPES = frozenset(
     {
         "image/gif",

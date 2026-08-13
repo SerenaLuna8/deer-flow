@@ -36,6 +36,12 @@ upgrade-db:
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 
+upgrade-system-assets:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/upgrade_system_assets.py $(ARGS)
+
+prepare-run-event-partitions:
+	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/prepare_run_event_partitions.py
+
 prune-run-events:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/prune_run_event_partitions.py $(ARGS)
 

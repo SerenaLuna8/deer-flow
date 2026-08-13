@@ -11,6 +11,7 @@ import {
   skillBuilderSessionListResponseSchema,
   skillBuilderSessionResponseSchema,
   skillBuilderTurnInputSchema,
+  skillBuilderTurnResponseSchema,
   validateSkillBuilderSessionInputSchema,
   type CancelSkillBuilderSessionInput,
   type CommitSkillBuilderSessionInput,
@@ -52,6 +53,8 @@ export class SkillBuilderApiError extends Error {
     readonly status: number,
     readonly code: SkillBuilderApiErrorCode,
     message: string,
+    /** Stable Gateway error code (e.g. SKILL_BUILDER_MODEL_UNAVAILABLE). */
+    readonly serverCode: string | null = null,
   ) {
     super(message);
     this.name = "SkillBuilderApiError";
@@ -132,6 +135,7 @@ async function request<TSchema extends z.ZodType>(
       response.status,
       safeCode(response.status),
       message,
+      typeof detail === "object" && detail !== null ? detail.code : null,
     );
   }
 
@@ -190,7 +194,7 @@ export function submitSkillBuilderTurn(
   const body = skillBuilderTurnInputSchema.parse(input);
   return request(
     `${sessionURL(projectId, sessionId)}/turns`,
-    skillBuilderSessionResponseSchema,
+    skillBuilderTurnResponseSchema,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -3,6 +3,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { createContext, useContext, useEffect, useMemo, useRef } from "react";
 
+import { useProjectMemoryCacheHintListener } from "./memory-freshness";
 import {
   createPrivateWorkScopeRegistry,
   transitionPrivateWorkScope,
@@ -89,6 +90,7 @@ export function ProjectPrivateWorkProvider({
     [accountId, projectId],
   );
   const access = useMemo(() => registry.acquire(scope), [registry, scope]);
+  useProjectMemoryCacheHintListener(scope);
 
   useEffect(() => {
     deferredRelease.retain(scope);

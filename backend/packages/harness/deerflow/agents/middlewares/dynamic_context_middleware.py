@@ -320,6 +320,20 @@ class DynamicContextMiddleware(AgentMiddleware):
         return self._inject_date(state)
 
     @override
+    def before_model(self, state, runtime: Runtime) -> dict | None:
+        """Reject private Memory authority on the unsupported sync path.
+
+        Loading a private Run snapshot is deliberately asynchronous because it
+        revalidates live authority in PostgreSQL. Silently continuing on a
+        synchronous graph would omit Memory injection and leave any prior
+        hidden reminder unreconciled, so fail before the model call instead.
+        """
+
+        if self._authority(runtime) is not None:
+            raise RuntimeError("Private Memory authority requires async execution")
+        return self._reconcile_memory(state, None)
+
+    @override
     async def abefore_model(self, state, runtime: Runtime) -> dict | None:
         authority = self._authority(runtime)
         if authority is None:

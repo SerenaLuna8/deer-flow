@@ -1,6 +1,6 @@
 ---
 title: Deployment Guide
-description: ActWeave boundaries for local, Docker Compose, and Kubernetes/Helm deployments.
+description: ActWeave boundaries for local and Docker Compose deployments.
 ---
 
 import { Callout } from "nextra/components";
@@ -10,7 +10,7 @@ import { Callout } from "nextra/components";
 The ActWeave topology consists of Nginx, Frontend, Gateway, Worker, an optional Scheduler, and an optional Provisioner. PostgreSQL is the only application persistence database and is not provisioned by the ActWeave Compose stack.
 
 <Callout type="warning">
-  The repository provides launch resources, but Docker Compose, Kubernetes/Helm, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
+  The repository provides local and Docker Compose launch resources, but Docker Compose, browsers, model providers, and Sandbox modes require separate capacity, security, and failure validation in the target environment. This page is not production certification.
 </Callout>
 
 ## Prepare the deployment
@@ -65,12 +65,6 @@ Before deployment, verify at least the following:
 - Worker readiness, Scheduler ownership, durable stream reconnect, and project isolation pass in the target environment.
 - `backend/.deer-flow` contains local runtime files/Sandbox projections only; it is not the authority for project business data or the asset catalog.
 
-## Kubernetes/Helm
-
-The chart lives under `deploy/helm/deer-flow/`. Provisioner manages Pod lifecycle only for the configured Sandbox provider; it does not own project authentication, Run admission, or Agent graph execution.
-
-For Kubernetes, configure namespaces, images, Services, Ingress/TLS, Secrets, network policy, and Sandbox volumes for the target cluster. Do not expose Gateway or Provisioner directly to the internet.
-
 ## Sandbox selection
 
 | Mode | Boundary |
@@ -78,6 +72,8 @@ For Kubernetes, configure namespaces, images, Services, Ingress/TLS, Secrets, ne
 | `LocalSandboxProvider` | Commands execute in the host environment; trusted local tasks only |
 | Container/AIO provider | Container isolation; validate Docker socket, network, and mount permissions |
 | Provisioner/Kubernetes | A separate service creates Sandbox Pods; requires cluster-level security validation |
+
+Provisioner/Kubernetes is a Sandbox provider only; this repository does not provide a Kubernetes/Helm deployment target for the complete ActWeave stack.
 
 Sandbox isolation does not replace project authorization, least-privilege Credentials, or network egress control.
 

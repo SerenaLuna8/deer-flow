@@ -11,7 +11,7 @@ import uuid
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal, TypeVar
 
@@ -323,6 +323,11 @@ class SkillVersionView:
     file_views: tuple[SkillFileView, ...]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
+    revoked_at: datetime | None
+    revoked_by_user_id: str | None
+    revocation_reason_code: str | None
+    governance_status: Literal["active", "revoked"]
+    binding_eligible: bool
     created_by_user_id: str
     created_at: datetime
 
@@ -601,6 +606,8 @@ def _preflight_skill_frontmatter(
 def _analyze_skill_files(
     files: tuple[SkillArchiveFile, ...],
     request_id: str,
+    *,
+    run_static_scan: bool = True,
 ) -> SkillArchivePreview:
     try:
         with tempfile.TemporaryDirectory(prefix="deerflow-skill-preview-") as temp_dir:
@@ -647,13 +654,16 @@ def _analyze_skill_files(
             except (TypeError, ValueError, RecursionError):
                 raise AssetValidationFailed(request_id) from None
 
-            scan_result = enforce_static_scan_result(
-                root,
-                skill_name=parsed.name,
-            )
-            if scan_result["scanner_errors"]:
-                raise AssetValidationFailed(request_id)
-            findings = scan_result["findings"]
+            if run_static_scan:
+                scan_result = enforce_static_scan_result(
+                    root,
+                    skill_name=parsed.name,
+                )
+                if scan_result["scanner_errors"]:
+                    raise AssetValidationFailed(request_id)
+                findings = scan_result["findings"]
+            else:
+                findings = []
     except AssetValidationFailed:
         raise
     except (OSError, RecursionError, UnicodeError, yaml.YAMLError, StaticScanBlockedError, StaticScannerError, ValueError):
@@ -1327,6 +1337,62 @@ class SkillService:
 
         return await self._execute(actor, operation)
 
+    async def revoke_version(
+        self,
+        actor: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+        *,
+        expected_asset_version: int,
+        reason_code: Literal["security", "policy", "integrity"] = "security",
+    ) -> SkillVersionView:
+        """Irreversibly revoke one published System Skill release.
+
+        Revocation is orthogonal to the immutable publication workflow.  The
+        published bytes and current pointer remain intact for history and
+        forensics, while binding and runtime boundaries reject the version.
+        """
+
+        self._require_global_governance_actor(actor)
+        if not isinstance(asset_id, uuid.UUID) or not isinstance(version_id, uuid.UUID):
+            raise AssetValidationFailed(actor.request_id)
+        if reason_code not in {"security", "policy", "integrity"}:
+            raise AssetValidationFailed(actor.request_id)
+
+        async def operation(repository: SkillRepository) -> SkillVersionView:
+            asset = await repository.get_system_asset(
+                actor,
+                asset_id,
+                for_update=True,
+            )
+            self._require_expected_version(actor, asset, expected_asset_version)
+            record = await repository.get_system_version(
+                actor,
+                asset_id,
+                version_id,
+                for_update=True,
+            )
+            row = record.row
+            if row.workflow_status != WorkflowStatus.PUBLISHED.value or row.revoked_at is not None or row.revoked_by_user_id is not None or row.revocation_reason_code is not None:
+                raise AssetConflict(actor.request_id)
+            row.revoked_at = datetime.now(UTC)
+            row.revoked_by_user_id = str(actor.user_id)
+            row.revocation_reason_code = reason_code
+            await repository.session.flush()
+            return self._version_view(record)
+
+        return await self._execute(
+            actor,
+            operation,
+            governance=lambda session, result: self._record_governance(
+                session,
+                actor,
+                asset_id,
+                result.id,
+                "skill.version.revoke",
+            ),
+        )
+
     async def load_version_files(
         self,
         actor: _Actor,
@@ -1827,6 +1893,11 @@ class SkillService:
         raise AssetForbidden(getattr(actor, "request_id", "unknown"))
 
     @staticmethod
+    def _require_global_governance_actor(actor: object) -> None:
+        if not isinstance(actor, SystemAssetGovernanceContext) or actor.project_id is not None:
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+
+    @staticmethod
     def _require_expected_version(actor: _Actor, asset: SkillRow, expected: int) -> None:
         if not isinstance(expected, int) or isinstance(expected, bool) or asset.version != expected:
             raise AssetConflict(actor.request_id)
@@ -1954,6 +2025,11 @@ class SkillService:
             file_views=file_views,
             supersedes_version_id=row.supersedes_version_id,
             payload_checksum=row.payload_checksum,
+            revoked_at=row.revoked_at,
+            revoked_by_user_id=row.revoked_by_user_id,
+            revocation_reason_code=row.revocation_reason_code,
+            governance_status="revoked" if row.revoked_at is not None else "active",
+            binding_eligible=(row.workflow_status == WorkflowStatus.PUBLISHED.value and row.revoked_at is None),
             created_by_user_id=row.created_by_user_id,
             created_at=row.created_at,
         )

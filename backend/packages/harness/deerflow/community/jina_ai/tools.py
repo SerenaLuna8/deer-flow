@@ -1,12 +1,17 @@
 import asyncio
+import logging
 
 from langchain.tools import tool
+from langgraph.errors import GraphBubbleUp
 
+from deerflow.community.errors import CommunityToolError, community_error_json
 from deerflow.community.jina_ai.jina_client import JinaClient
+from deerflow.community.url_safety import sanitize_public_http_reference_url
 from deerflow.config import get_app_config
 from deerflow.utils.readability import ReadabilityExtractor
 
 readability_extractor = ReadabilityExtractor()
+logger = logging.getLogger(__name__)
 
 
 def _coerce_bool(value: object, default: bool) -> bool:
@@ -52,17 +57,62 @@ async def web_fetch_tool(url: str) -> str:
     Args:
         url: The URL to fetch the contents of.
     """
-    jina_client = JinaClient()
-    timeout = 10
-    proxy = None
-    trust_env = True
-    config = get_app_config().get_tool_config("web_fetch")
-    if config is not None:
-        timeout = _coerce_timeout(config.model_extra.get("timeout"), timeout)
-        proxy = _coerce_proxy(config.model_extra.get("proxy"))
-        trust_env = _coerce_bool(config.model_extra.get("trust_env"), trust_env)
-    html_content = await jina_client.crawl(url, return_format="html", timeout=timeout, proxy=proxy, trust_env=trust_env)
-    if isinstance(html_content, str) and html_content.startswith("Error:"):
-        return html_content
-    article = await asyncio.to_thread(readability_extractor.extract_article, html_content)
-    return article.to_markdown()[:4096]
+    # Jina performs the target fetch in its remote SaaS. Reject unsafe literal
+    # references without local DNS; a local downloader would instead require
+    # validate_public_http_url and redirect revalidation.
+    if not sanitize_public_http_reference_url(url):
+        return community_error_json(
+            CommunityToolError(
+                provider="jina",
+                code="url_not_public",
+                message="Only public http(s) URLs may be fetched",
+                retryable=False,
+            ),
+            query=url,
+        )
+
+    try:
+        jina_client = JinaClient()
+        timeout = 10
+        proxy = None
+        trust_env = True
+        config = get_app_config().get_tool_config("web_fetch")
+        if config is not None:
+            timeout = _coerce_timeout(config.model_extra.get("timeout"), timeout)
+            proxy = _coerce_proxy(config.model_extra.get("proxy"))
+            trust_env = _coerce_bool(config.model_extra.get("trust_env"), trust_env)
+        html_content = await jina_client.crawl(
+            url,
+            return_format="html",
+            timeout=timeout,
+            proxy=proxy,
+            trust_env=trust_env,
+        )
+        article = await asyncio.to_thread(readability_extractor.extract_article, html_content)
+        return article.to_markdown()[:4096]
+    except GraphBubbleUp:
+        raise
+    except CommunityToolError as error:
+        return community_error_json(error, query=url)
+    except (FileNotFoundError, TypeError, ValueError) as error:
+        logger.error("Jina configuration failed; provider_error_type=%s", type(error).__name__)
+        return community_error_json(
+            CommunityToolError(
+                provider="jina",
+                code="configuration_error",
+                message="Jina is not configured correctly",
+                retryable=False,
+            ),
+            query=url,
+        )
+    except Exception as error:
+        logger.error("Jina tool failed; provider_error_type=%s", type(error).__name__)
+        return community_error_json(
+            CommunityToolError(
+                provider="jina",
+                code="provider_response_invalid",
+                message="Jina returned unusable content",
+                retryable=True,
+            ),
+            query=url,
+        )

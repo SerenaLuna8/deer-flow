@@ -17,6 +17,7 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.models import SkillArchiveFile
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
     SkillDesignDraftFileRow,
     SkillDesignOperationRow,
@@ -36,6 +37,15 @@ class PinnedSkillCreator:
     version_id: uuid.UUID
     payload_checksum: str
     skill_md_content: str
+
+
+@dataclass(frozen=True, slots=True)
+class LinkedSkillDesignRun:
+    run_id: str
+    thread_id: str
+    job_id: uuid.UUID | None
+    status: str
+    error: str | None
 
 
 def _metadata_checksum(files: tuple[SkillVersionFileRow, ...]) -> str:
@@ -264,6 +274,102 @@ class SkillDesignRepository:
         await self.session.flush()
         return row
 
+    async def latest_linked_run(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        *,
+        lock: bool = False,
+    ) -> LinkedSkillDesignRun | None:
+        self._require_context(context)
+        statement = (
+            select(RunRow)
+            .join(
+                SkillDesignOperationRow,
+                (SkillDesignOperationRow.project_id == RunRow.project_id) & (SkillDesignOperationRow.owner_user_id == RunRow.owner_user_id) & (SkillDesignOperationRow.run_id == RunRow.run_id),
+            )
+            .where(
+                SkillDesignOperationRow.project_id == context.project_id,
+                SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                SkillDesignOperationRow.session_id == session_id,
+                SkillDesignOperationRow.operation_kind == "turn",
+                self._context_exists(context),
+            )
+            .order_by(
+                SkillDesignOperationRow.created_at.desc(),
+                SkillDesignOperationRow.id.desc(),
+            )
+            .limit(1)
+        )
+        if lock:
+            statement = statement.with_for_update(of=RunRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
+        return LinkedSkillDesignRun(
+            run_id=row.run_id,
+            thread_id=row.thread_id,
+            job_id=row.job_id,
+            status=row.status,
+            error=row.error,
+        )
+
+    async def operation_by_run(
+        self,
+        context: ProjectContext,
+        run_id: str,
+        *,
+        for_update: bool = False,
+    ) -> SkillDesignOperationRow | None:
+        self._require_context(context)
+        if not isinstance(run_id, str) or not run_id:
+            raise AssetValidationFailed(context.request_id)
+        if for_update:
+            await self.lock_context(context)
+        statement = select(SkillDesignOperationRow).where(
+            SkillDesignOperationRow.project_id == context.project_id,
+            SkillDesignOperationRow.owner_user_id == str(context.user_id),
+            SkillDesignOperationRow.run_id == run_id,
+            SkillDesignOperationRow.operation_kind == "turn",
+            self._context_exists(context),
+        )
+        if for_update:
+            statement = statement.with_for_update(of=SkillDesignOperationRow)
+        return (await self.session.execute(statement)).scalar_one_or_none()
+
+    async def linked_run_for_operation(
+        self,
+        context: ProjectContext,
+        operation: SkillDesignOperationRow,
+        *,
+        lock: bool = False,
+    ) -> LinkedSkillDesignRun | None:
+        """Resolve the exact Run linked to one already-scoped operation."""
+
+        self._require_context(context)
+        if operation.project_id != context.project_id or operation.owner_user_id != str(context.user_id) or operation.operation_kind != "turn":
+            raise AssetForbidden(context.request_id)
+        if operation.run_id is None:
+            return None
+        statement = select(RunRow).where(
+            RunRow.project_id == context.project_id,
+            RunRow.owner_user_id == str(context.user_id),
+            RunRow.run_id == operation.run_id,
+            self._context_exists(context),
+        )
+        if lock:
+            statement = statement.with_for_update(of=RunRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetValidationFailed(context.request_id)
+        return LinkedSkillDesignRun(
+            run_id=row.run_id,
+            thread_id=row.thread_id,
+            job_id=row.job_id,
+            status=row.status,
+            error=row.error,
+        )
+
     async def load_draft_files(
         self,
         context: ProjectContext,
@@ -390,6 +496,7 @@ class SkillDesignRepository:
                 func.lower(SkillRow.slug) == _SKILL_CREATOR_SLUG,
                 SkillVersionRow.skill_id == SkillRow.id,
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
             )
         )
         record = (await self.session.execute(statement)).one_or_none()
@@ -427,6 +534,7 @@ class SkillDesignRepository:
                 SkillVersionRow.id == row.skill_creator_version_id,
                 SkillVersionRow.skill_id == row.skill_creator_skill_id,
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
                 SkillVersionRow.payload_checksum == row.skill_creator_payload_checksum,
             )
         )

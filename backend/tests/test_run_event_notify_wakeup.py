@@ -1,4 +1,4 @@
-"""LISTEN/NOTIFY wakeup for durable private SSE consumers (U2 Phase 2).
+"""LISTEN/NOTIFY wakeup for durable private SSE consumers.
 
 NOTIFY is only an alarm clock: the writer queues ``pg_notify('run_events',
 run_id)`` inside the appending transaction, one Gateway listener connection
@@ -411,8 +411,8 @@ async def test_idle_consumer_wakes_on_notify_instead_of_polling(
     service = SimpleNamespace(
         get=AsyncMock(
             side_effect=(
-                SimpleNamespace(status="running"),
-                SimpleNamespace(status="success"),
+                SimpleNamespace(status="running", error=None),
+                SimpleNamespace(status="success", error=None),
             ),
         ),
     )
@@ -470,7 +470,7 @@ async def test_healthy_listener_parks_an_idle_stream_without_repeated_db_reads(
         ensure_settled_terminal=AsyncMock(),
     )
     service = SimpleNamespace(
-        get=AsyncMock(return_value=SimpleNamespace(status="running")),
+        get=AsyncMock(return_value=SimpleNamespace(status="running", error=None)),
     )
     consumer = asyncio.create_task(
         _collect_consumer(
@@ -609,8 +609,8 @@ async def test_degraded_listener_falls_back_to_the_poll_cadence(
     service = SimpleNamespace(
         get=AsyncMock(
             side_effect=(
-                SimpleNamespace(status="running"),
-                SimpleNamespace(status="success"),
+                SimpleNamespace(status="running", error=None),
+                SimpleNamespace(status="success", error=None),
             ),
         ),
     )

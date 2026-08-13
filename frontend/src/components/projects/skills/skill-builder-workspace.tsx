@@ -3,12 +3,10 @@
 import {
   ArrowLeftIcon,
   Loader2Icon,
-  MessageSquareIcon,
   MoreHorizontalIcon,
   SendIcon,
   SparklesIcon,
   Trash2Icon,
-  WorkflowIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -34,16 +32,22 @@ import { Textarea } from "@/components/ui/textarea";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { HumanInputResponse } from "@/core/messages/human-input";
+import { useModels } from "@/core/models/hooks";
+import type { Model } from "@/core/models/types";
 import {
   SkillBuilderApiError,
+  SKILL_BUILDER_MAX_ATTACHMENT_BYTES,
   SKILL_BUILDER_MAX_FILE_BYTES,
   SKILL_BUILDER_MAX_MESSAGE_CHARS,
   SKILL_BUILDER_MAX_TOTAL_BYTES,
   createSkillBuilderIdempotencyRegistry,
+  isSkillBuilderRunAdmission,
   reconcileSkillBuilderFileSelection,
   skillBuilderCanAuthor,
   skillBuilderCanCommit,
   skillBuilderComposerDisabled,
+  skillBuilderMergeAttachment,
+  skillBuilderRunPresentation,
   skillBuilderSemanticSignature,
   skillBuilderValidationCurrent,
   useCancelSkillBuilderSession,
@@ -51,18 +55,40 @@ import {
   useSkillBuilderSession,
   useSubmitSkillBuilderTurn,
   useValidateSkillBuilderSession,
+  type SkillBuilderAttachment,
   type SkillBuilderFile,
   type SkillBuilderIdempotencyChannel,
+  type SkillBuilderReasoningEffort,
+  type SkillBuilderRunPresentation,
+  type SkillBuilderRunPresentationStatus,
+  type SkillBuilderRunStreamProjection,
   type SkillBuilderSession,
 } from "@/core/skill-builder";
 import { SafeStreamdown } from "@/core/streamdown/components";
+import { resolveAgentMode, type AgentMode } from "@/core/threads/agent-mode";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
 import { useCurrentProject } from "../project-context";
 
 import { SkillBuilderCandidateWorkbench } from "./skill-builder-candidate-workbench";
+import {
+  SkillBuilderComposerAttachments,
+  SkillBuilderComposerControls,
+} from "./skill-builder-composer-controls";
+import { SkillBuilderFilesTrigger } from "./skill-builder-files-trigger";
+import {
+  SkillBuilderRunActivity,
+  skillBuilderRunIsActive,
+} from "./skill-builder-run-activity";
 import { skillBuilderErrorMessage } from "./skill-builder-start";
+
+const SKILL_BUILDER_EFFORT_BY_MODE = {
+  flash: "none",
+  thinking: "low",
+  pro: "medium",
+  ultra: "high",
+} as const satisfies Record<AgentMode, SkillBuilderReasoningEffort>;
 
 export function skillBuilderWorkspaceErrorMessage(
   error: unknown,
@@ -165,9 +191,19 @@ export function SkillBuilderConversationView({
   dirty,
   pending,
   errorMessage,
+  attachments = [],
+  models = [],
+  executionModel,
+  thinkingMode = "flash",
+  runProjection = null,
+  runPresentation = null,
   onComposerTextChange,
   onSubmitMessage,
   onSubmitClarification,
+  onAddAttachmentFiles,
+  onRemoveAttachment,
+  onSelectModel,
+  onSelectThinkingMode,
 }: {
   session: SkillBuilderSession;
   composerText: string;
@@ -176,17 +212,38 @@ export function SkillBuilderConversationView({
   dirty: boolean;
   pending: boolean;
   errorMessage: string | null;
+  attachments?: SkillBuilderAttachment[];
+  models?: Model[];
+  executionModel?: Model;
+  thinkingMode?: AgentMode;
+  runProjection?: SkillBuilderRunStreamProjection | null;
+  runPresentation?: SkillBuilderRunPresentation | null;
   onComposerTextChange: (value: string) => void;
   onSubmitMessage: () => void;
   onSubmitClarification: (
     response: HumanInputResponse,
   ) => boolean | void | Promise<boolean | void>;
+  onAddAttachmentFiles?: (files: File[]) => void;
+  onRemoveAttachment?: (name: string) => void;
+  onSelectModel?: (name: string) => void;
+  onSelectThinkingMode?: (mode: AgentMode) => void;
 }) {
   const composerDisabled =
     skillBuilderComposerDisabled(session, pending, dirty) || !canAuthor;
-  const clarificationOpen = Boolean(session.active_clarification);
+  const projectedMessageIds = new Set(
+    session.messages.map((message) => message.id),
+  );
+  const projectedMessages =
+    runProjection?.messages.filter(
+      (message) => !projectedMessageIds.has(message.id),
+    ) ?? [];
+  const activeClarification =
+    runProjection?.clarification ?? session.active_clarification;
+  const clarificationOpen = Boolean(activeClarification);
   const generating =
     Boolean(pendingUserMessage) ||
+    Boolean(session.activeRun) ||
+    Boolean(runProjection && skillBuilderRunIsActive(runProjection.status)) ||
     session.status === "generating" ||
     session.status === "committing";
 
@@ -197,7 +254,7 @@ export function SkillBuilderConversationView({
 
   return (
     <div className="flex min-h-full flex-col">
-      <div className="flex-1 space-y-6 p-4 sm:p-5">
+      <div className="mx-auto w-full max-w-(--chat-content-width) flex-1 space-y-6 p-4 sm:p-5">
         <SkillBuilderProgress session={session} />
 
         {!canAuthor ? (
@@ -210,7 +267,7 @@ export function SkillBuilderConversationView({
           </p>
         ) : null}
 
-        {session.messages.length === 0 ? (
+        {session.messages.length === 0 && projectedMessages.length === 0 ? (
           <div className="flex justify-end">
             <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
               新 Skill 的名称是{" "}
@@ -228,16 +285,39 @@ export function SkillBuilderConversationView({
           />
         ))}
 
+        {projectedMessages.map((message) => (
+          <SkillBuilderMessageBubble
+            key={message.id}
+            role={message.role}
+            content={message.content}
+          />
+        ))}
+
         {pendingUserMessage ? (
           <SkillBuilderMessageBubble role="user" content={pendingUserMessage} />
         ) : null}
 
-        {session.active_clarification ? (
+        <SkillBuilderRunActivity
+          activeRun={session.activeRun}
+          projection={runProjection}
+          presentation={runPresentation}
+          failureCode={session.error_code}
+        />
+
+        {activeClarification ? (
           <section className="border-border/70 rounded-2xl border px-4">
             <HumanInputCard
-              key={session.active_clarification.request_id}
-              request={session.active_clarification}
-              disabled={!canAuthor || dirty}
+              key={activeClarification.request_id}
+              request={activeClarification}
+              disabled={
+                !canAuthor ||
+                dirty ||
+                Boolean(session.activeRun) ||
+                Boolean(
+                  runProjection &&
+                  skillBuilderRunIsActive(runProjection.status),
+                )
+              }
               pending={pending}
               onSubmit={(response) => onSubmitClarification(response)}
             />
@@ -252,17 +332,19 @@ export function SkillBuilderConversationView({
             <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
             {session.status === "committing"
               ? "正在创建 Skill…"
-              : "skill-creator 正在生成候选文件…"}
+              : "Builder Agent 正在处理…"}
           </p>
         ) : null}
 
         {session.status === "failed" && session.error_message ? (
-          <p
-            role="alert"
-            className="border-destructive/30 bg-destructive/5 text-destructive rounded-xl border p-4 text-sm"
-          >
-            {session.error_message}
-          </p>
+          session.error_code === "MODEL_OUTPUT_LIMIT" ? null : (
+            <p
+              role="alert"
+              className="border-destructive/30 bg-destructive/5 text-destructive rounded-xl border p-4 text-sm"
+            >
+              {session.error_message}
+            </p>
+          )
         ) : null}
 
         {errorMessage ? (
@@ -274,9 +356,14 @@ export function SkillBuilderConversationView({
 
       {canAuthor ? (
         <form
-          className="bg-background/95 border-border/70 sticky bottom-0 m-3 mt-8 rounded-2xl border p-2 shadow-lg backdrop-blur"
+          className="bg-background/95 border-border/70 sticky bottom-0 mx-auto mt-8 mb-3 w-[calc(100%-1.5rem)] max-w-(--chat-content-width) rounded-2xl border p-2 shadow-lg backdrop-blur"
           onSubmit={submit}
         >
+          <SkillBuilderComposerAttachments
+            attachments={attachments}
+            disabled={pending}
+            onRemove={(name) => onRemoveAttachment?.(name)}
+          />
           <Textarea
             aria-label="描述想要的 Skill"
             value={composerText}
@@ -306,11 +393,21 @@ export function SkillBuilderConversationView({
               }
             }}
           />
-          <div className="flex justify-end p-1">
+          <div className="flex items-center justify-between gap-2 p-1">
+            <SkillBuilderComposerControls
+              attachDisabled={composerDisabled}
+              pickersDisabled={pending}
+              models={models}
+              selectedModel={executionModel}
+              thinkingMode={thinkingMode}
+              onPickFiles={(files) => onAddAttachmentFiles?.(files)}
+              onSelectModel={(name) => onSelectModel?.(name)}
+              onSelectThinkingMode={(mode) => onSelectThinkingMode?.(mode)}
+            />
             <Button
               type="submit"
               size="icon"
-              className="size-10 rounded-xl"
+              className="size-10 shrink-0 rounded-xl"
               aria-label="发送"
               disabled={composerDisabled || composerText.trim().length === 0}
             >
@@ -329,14 +426,9 @@ export function SkillBuilderConversationView({
 
 function SkillBuilderLoading() {
   return (
-    <div className="grid min-h-0 flex-1 lg:grid-cols-2">
-      <div className="space-y-4 p-5">
-        <Skeleton className="ml-auto h-16 w-2/3 rounded-2xl" />
-        <Skeleton className="h-28 w-full rounded-2xl" />
-      </div>
-      <div className="border-border/70 hidden border-l p-5 lg:block">
-        <Skeleton className="h-full min-h-96 w-full rounded-2xl" />
-      </div>
+    <div className="mx-auto min-h-0 w-full max-w-(--chat-content-width) flex-1 space-y-4 p-5">
+      <Skeleton className="ml-auto h-16 w-2/3 rounded-2xl" />
+      <Skeleton className="h-28 w-full rounded-2xl" />
     </div>
   );
 }
@@ -365,6 +457,21 @@ type SkillBuilderPendingLeave = {
   viaHistory: boolean;
 };
 
+type SkillBuilderAdmittedUserMessage = {
+  runId: string;
+  message: string;
+  expectedRevision: number;
+};
+
+type SkillBuilderTrackedRun = {
+  sessionId: string;
+  runId: string;
+  terminalStatus?: Exclude<
+    SkillBuilderRunPresentationStatus,
+    "pending" | "running"
+  >;
+};
+
 export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const { user } = useAuth();
   const project = useCurrentProject();
@@ -384,14 +491,28 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const commit = useCommitSkillBuilderSession(accountId, project.id, sessionId);
   const cancel = useCancelSkillBuilderSession(accountId, project.id, sessionId);
   const [composerText, setComposerText] = useState("");
+  const [admittedUserMessage, setAdmittedUserMessage] =
+    useState<SkillBuilderAdmittedUserMessage | null>(null);
+  const [trackedRun, setTrackedRun] = useState<SkillBuilderTrackedRun | null>(
+    null,
+  );
+  const [composerAttachments, setComposerAttachments] = useState<
+    SkillBuilderAttachment[]
+  >([]);
+  const [selectedModelName, setSelectedModelName] = useState<string | null>(
+    null,
+  );
+  const [requestedThinkingMode, setRequestedThinkingMode] =
+    useState<AgentMode | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [displayMode, setDisplayMode] = useState<"source" | "preview">(
     "source",
   );
-  const [mobilePanel, setMobilePanel] = useState<"conversation" | "files">(
-    "conversation",
-  );
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
+  const [mobileSurface, setMobileSurface] = useState<
+    "conversation" | "workbench"
+  >("conversation");
   const [acknowledgedValidationToken, setAcknowledgedValidationToken] =
     useState<string | null>(null);
   const [draftBaselineChecksum, setDraftBaselineChecksum] = useState<
@@ -403,17 +524,47 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     useState<SkillBuilderPendingLeave | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [idempotency] = useState(() => createSkillBuilderIdempotencyRegistry());
+  const observedFilesSessionRef = useRef<string | null>(null);
   const previousFilesRef = useRef<SkillBuilderFile[]>([]);
   const previousChecksumRef = useRef<string | null>(null);
   const allowLeaveRef = useRef(false);
   const session = sessionQuery.data;
-  const pendingUserMessage =
+  const trackedRunId =
+    trackedRun?.sessionId === sessionId ? trackedRun.runId : null;
+  const runPresentation =
+    trackedRun?.sessionId === sessionId && trackedRun.terminalStatus
+      ? {
+          runId: trackedRun.runId,
+          status: trackedRun.terminalStatus,
+        }
+      : session
+        ? skillBuilderRunPresentation(session, trackedRunId)
+        : null;
+  const optimisticUserMessage =
     submitTurn.isPending &&
     submitTurn.variables?.input.kind === "message" &&
     session?.revision === submitTurn.variables.expected_revision
       ? submitTurn.variables.input.message
       : null;
+  const pendingUserMessage =
+    optimisticUserMessage ??
+    (admittedUserMessage &&
+    session?.activeRun?.runId === admittedUserMessage.runId &&
+    session.revision === admittedUserMessage.expectedRevision
+      ? admittedUserMessage.message
+      : null);
   const canAuthor = skillBuilderCanAuthor(project.capabilities);
+  const modelsQuery = useModels({ enabled: Boolean(user) && canAuthor });
+  const executionModels = modelsQuery.models;
+  const executionModel =
+    executionModels.find((model) => model.name === selectedModelName) ??
+    executionModels.find((model) => model.is_default) ??
+    executionModels[0];
+  const thinkingMode = resolveAgentMode(
+    requestedThinkingMode ?? "flash",
+    executionModel?.supports_thinking ?? false,
+    executionModel?.supports_reasoning_effort ?? false,
+  );
   const changes = useMemo(
     () => (session ? skillBuilderDraftChanges(session.files, drafts) : []),
     [drafts, session],
@@ -438,7 +589,10 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     draftBaselineChecksum !== session?.draft_checksum,
   );
   const builderReadOnly =
-    mutationPending || !fileEditingAllowed || draftBaselineStale;
+    mutationPending ||
+    Boolean(session?.activeRun) ||
+    !fileEditingAllowed ||
+    draftBaselineStale;
   const validationCurrent = session
     ? skillBuilderValidationCurrent(session)
     : false;
@@ -459,10 +613,18 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     !dirty &&
     !builderReadOnly,
   );
-
   useEffect(() => {
     if (!session) return;
-    const previousFiles = previousFilesRef.current;
+    const sameSession = observedFilesSessionRef.current === session.id;
+    const previousFiles = sameSession ? previousFilesRef.current : [];
+    if (sameSession && previousFiles.length === 0 && session.files.length > 0) {
+      setWorkbenchOpen(true);
+    }
+    if (!sameSession) {
+      observedFilesSessionRef.current = session.id;
+      setWorkbenchOpen(false);
+      setMobileSurface("conversation");
+    }
     setSelectedPath((current) =>
       reconcileSkillBuilderFileSelection(current, previousFiles, session.files),
     );
@@ -472,6 +634,47 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       setAcknowledgedValidationToken(null);
     }
   }, [session]);
+
+  useEffect(() => {
+    const activeRun = session?.activeRun;
+    if (!activeRun) return;
+    setTrackedRun((current) =>
+      current?.sessionId === sessionId && current.runId === activeRun.runId
+        ? current
+        : { sessionId, runId: activeRun.runId },
+    );
+  }, [session?.activeRun, sessionId]);
+
+  useEffect(() => {
+    if (
+      !session ||
+      session.activeRun ||
+      trackedRun?.sessionId !== sessionId ||
+      trackedRun.terminalStatus
+    ) {
+      return;
+    }
+    const settled = skillBuilderRunPresentation(session, trackedRun.runId);
+    if (
+      !settled ||
+      settled.status === "pending" ||
+      settled.status === "running"
+    ) {
+      return;
+    }
+    setTrackedRun({ ...trackedRun, terminalStatus: settled.status });
+  }, [session, sessionId, trackedRun]);
+
+  useEffect(() => {
+    if (
+      !admittedUserMessage ||
+      (session?.activeRun?.runId === admittedUserMessage.runId &&
+        session.revision === admittedUserMessage.expectedRevision)
+    ) {
+      return;
+    }
+    setAdmittedUserMessage(null);
+  }, [admittedUserMessage, session?.activeRun?.runId, session?.revision]);
 
   useEffect(() => {
     if (!dirty) setDraftBaselineChecksum(null);
@@ -546,6 +749,57 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     cancel.reset();
   }
 
+  function composerExecutionOptions(): {
+    model_name?: string;
+    reasoning_effort?: SkillBuilderReasoningEffort;
+  } {
+    const options: {
+      model_name?: string;
+      reasoning_effort?: SkillBuilderReasoningEffort;
+    } = {};
+    if (
+      selectedModelName &&
+      executionModels.some((model) => model.name === selectedModelName)
+    ) {
+      options.model_name = selectedModelName;
+    }
+    const effort = SKILL_BUILDER_EFFORT_BY_MODE[thinkingMode];
+    if (effort !== "none") {
+      options.reasoning_effort = effort;
+    }
+    return options;
+  }
+
+  async function addAttachmentFiles(files: File[]) {
+    let next = composerAttachments;
+    for (const file of files) {
+      if (file.size > SKILL_BUILDER_MAX_ATTACHMENT_BYTES) {
+        setLocalError("单个附件不能超过 256 KB。");
+        return;
+      }
+      let content: string;
+      try {
+        content = new TextDecoder("utf-8", { fatal: true }).decode(
+          await file.arrayBuffer(),
+        );
+      } catch {
+        setLocalError(`「${file.name}」不是 UTF-8 文本文件。`);
+        return;
+      }
+      const merged = skillBuilderMergeAttachment(next, {
+        name: file.name,
+        content,
+      });
+      if (!merged.ok) {
+        setLocalError(merged.error);
+        return;
+      }
+      next = merged.attachments;
+    }
+    setComposerAttachments(next);
+    setLocalError(null);
+  }
+
   function refreshAfterConflict(
     channel: SkillBuilderIdempotencyChannel,
     signature: string,
@@ -583,26 +837,51 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       return;
     }
     resetErrors();
+    const executionOptions = composerExecutionOptions();
+    const attachments =
+      composerAttachments.length > 0 ? composerAttachments : undefined;
     const signature = skillBuilderSemanticSignature({
       kind: "message",
       message,
       expected_revision: session.revision,
+      ...executionOptions,
+      attachments,
     });
     const command = idempotency.acquire("message-turn", signature, (key) => ({
-      input: { kind: "message" as const, message },
+      input: {
+        kind: "message" as const,
+        message,
+        ...executionOptions,
+        ...(attachments ? { attachments } : {}),
+      },
       expected_revision: session.revision,
       idempotency_key: key,
     }));
     setComposerText("");
     submitTurn.mutate(command, {
       onSuccess: (response) => {
-        if (response.data.status === "failed") {
+        if (isSkillBuilderRunAdmission(response)) {
+          setTrackedRun({ sessionId, runId: response.runId });
+          setAdmittedUserMessage({
+            runId: response.runId,
+            message,
+            expectedRevision: session.revision,
+          });
+        } else {
+          setAdmittedUserMessage(null);
+        }
+        if (
+          !isSkillBuilderRunAdmission(response) &&
+          response.data.status === "failed"
+        ) {
           setComposerText((current) => current || message);
           return;
         }
         idempotency.complete("message-turn", signature);
+        setComposerAttachments([]);
       },
       onError: (error) => {
+        setAdmittedUserMessage(null);
         setComposerText((current) => current || message);
         refreshAfterConflict("message-turn", signature, error);
       },
@@ -614,23 +893,34 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   ): Promise<boolean> {
     if (!session || !canAuthor || mutationPending || dirty) return false;
     resetErrors();
+    const executionOptions = composerExecutionOptions();
     const signature = skillBuilderSemanticSignature({
       kind: "clarification",
       response,
       expected_revision: session.revision,
+      ...executionOptions,
     });
     const command = idempotency.acquire(
       "clarification-turn",
       signature,
       (key) => ({
-        input: { kind: "clarification" as const, response },
+        input: {
+          kind: "clarification" as const,
+          response,
+          ...executionOptions,
+        },
         expected_revision: session.revision,
         idempotency_key: key,
       }),
     );
     try {
       const result = await submitTurn.mutateAsync(command);
-      if (result.data.status === "failed") return false;
+      if (
+        !isSkillBuilderRunAdmission(result) &&
+        result.data.status === "failed"
+      ) {
+        return false;
+      }
       idempotency.complete("clarification-turn", signature);
       return true;
     } catch (error) {
@@ -668,6 +958,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     }));
     submitTurn.mutate(command, {
       onSuccess: (response) => {
+        if (isSkillBuilderRunAdmission(response)) return;
         if (response.data.status === "failed") return;
         idempotency.complete("draft-turn", signature);
         setDrafts({});
@@ -801,13 +1092,20 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <p className="text-muted-foreground truncate text-xs">
               {dirty
                 ? "有未保存修改"
-                : session?.status === "generating"
-                  ? "正在生成候选文件"
+                : session?.activeRun || session?.status === "generating"
+                  ? "Builder Agent 正在执行"
                   : validationCurrent
                     ? "已检查，可创建"
                     : "已自动保存，可稍后继续"}
             </p>
           </div>
+          <SkillBuilderFilesTrigger
+            fileCount={session?.files.length ?? 0}
+            onOpen={() => {
+              setWorkbenchOpen(true);
+              setMobileSurface("workbench");
+            }}
+          />
           {canAuthor ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -835,39 +1133,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           ) : null}
         </header>
 
-        <div
-          className="border-border/70 grid shrink-0 grid-cols-2 border-b lg:hidden"
-          role="tablist"
-          aria-label="Skill Builder 工作区"
-        >
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mobilePanel === "conversation"}
-            className={cn(
-              "flex min-h-11 items-center justify-center gap-2 text-sm",
-              mobilePanel === "conversation" && "bg-muted font-medium",
-            )}
-            onClick={() => setMobilePanel("conversation")}
-          >
-            <MessageSquareIcon aria-hidden className="size-4" />
-            对话
-          </button>
-          <button
-            type="button"
-            role="tab"
-            aria-selected={mobilePanel === "files"}
-            className={cn(
-              "flex min-h-11 items-center justify-center gap-2 text-sm",
-              mobilePanel === "files" && "bg-muted font-medium",
-            )}
-            onClick={() => setMobilePanel("files")}
-          >
-            <WorkflowIcon aria-hidden className="size-4" />
-            文件与检查
-          </button>
-        </div>
-
         {sessionQuery.isLoading ? (
           <SkillBuilderLoading />
         ) : sessionQuery.error || !session ? (
@@ -888,12 +1153,18 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             </Button>
           </div>
         ) : (
-          <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(20rem,0.9fr)_minmax(28rem,1.1fr)]">
+          <div
+            className={cn(
+              "grid min-h-0 flex-1",
+              workbenchOpen &&
+                "lg:grid-cols-[minmax(20rem,0.9fr)_minmax(28rem,1.1fr)]",
+            )}
+          >
             <section
               aria-label="Skill 创建对话"
               className={cn(
                 "min-h-0 overflow-y-auto overscroll-contain",
-                mobilePanel !== "conversation" && "hidden lg:block",
+                mobileSurface === "workbench" && "hidden lg:block",
               )}
             >
               <SkillBuilderConversationView
@@ -903,87 +1174,104 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 canAuthor={canAuthor}
                 dirty={dirty}
                 pending={mutationPending}
-                errorMessage={
-                  mobilePanel === "conversation" ? requestError : null
-                }
+                errorMessage={requestError}
+                attachments={composerAttachments}
+                models={executionModels}
+                executionModel={executionModel}
+                thinkingMode={thinkingMode}
+                runPresentation={runPresentation}
                 onComposerTextChange={(value) => {
                   setComposerText(value);
                   if (requestError) resetErrors();
                 }}
                 onSubmitMessage={sendMessage}
                 onSubmitClarification={submitClarification}
-              />
-            </section>
-            <section
-              aria-label="Skill 候选文件"
-              className={cn(
-                "border-border/70 min-h-0 border-l",
-                mobilePanel !== "files" && "hidden lg:block",
-              )}
-            >
-              <SkillBuilderCandidateWorkbench
-                files={session.files}
-                selectedPath={selectedPath}
-                draftContent={draftContent}
-                displayMode={displayMode}
-                canAuthor={canAuthor}
-                readOnly={Boolean(builderReadOnly)}
-                dirty={dirty}
-                dirtyPaths={dirtyPaths}
-                pending={mutationPending}
-                validation={
-                  validationCurrent && !dirty ? session.validation : null
-                }
-                canValidate={canValidate}
-                canCommit={skillBuilderCanCommit(session) && !dirty}
-                acknowledgeWarnings={acknowledgeWarnings}
-                baselineStale={draftBaselineStale}
-                errorMessage={mobilePanel === "files" ? requestError : null}
-                onSelectPath={(path) => {
-                  setSelectedPath(path);
-                  setDisplayMode("source");
-                  setLocalError(null);
-                }}
-                onDraftContentChange={(content) => {
-                  if (!selectedFile) return;
-                  if (
-                    new TextEncoder().encode(content).byteLength >
-                    SKILL_BUILDER_MAX_FILE_BYTES
-                  ) {
-                    setLocalError("单个候选文件不能超过 512 KiB。");
-                    return;
-                  }
-                  if (!dirty && content !== selectedFile.content) {
-                    setDraftBaselineChecksum(session.draft_checksum);
-                  }
-                  setDrafts((current) => {
-                    const next = { ...current };
-                    if (content === selectedFile.content) {
-                      delete next[selectedFile.path];
-                    } else {
-                      next[selectedFile.path] = content;
-                    }
-                    return next;
-                  });
-                  if (requestError) resetErrors();
-                }}
-                onDisplayModeChange={setDisplayMode}
-                onSave={saveDraft}
-                onDiscard={() => {
-                  setDrafts({});
-                  setDraftBaselineChecksum(null);
-                  resetErrors();
-                }}
-                onValidate={runValidation}
-                onAcknowledgeWarningsChange={(value) => {
-                  setAcknowledgedValidationToken(
-                    value ? validationToken : null,
+                onAddAttachmentFiles={(files) => void addAttachmentFiles(files)}
+                onRemoveAttachment={(name) => {
+                  setComposerAttachments((current) =>
+                    current.filter((item) => item.name !== name),
                   );
-                  if (requestError) resetErrors();
                 }}
-                onCommit={() => setCommitOpen(true)}
+                onSelectModel={(name) => setSelectedModelName(name)}
+                onSelectThinkingMode={(mode) => setRequestedThinkingMode(mode)}
               />
             </section>
+            {workbenchOpen ? (
+              <section
+                aria-label="Skill 工作台"
+                className={cn(
+                  "border-border/70 min-h-0 lg:border-l",
+                  mobileSurface === "conversation" && "hidden lg:block",
+                )}
+              >
+                <SkillBuilderCandidateWorkbench
+                  files={session.files}
+                  selectedPath={selectedPath}
+                  draftContent={draftContent}
+                  displayMode={displayMode}
+                  canAuthor={canAuthor}
+                  readOnly={Boolean(builderReadOnly)}
+                  dirty={dirty}
+                  dirtyPaths={dirtyPaths}
+                  pending={mutationPending}
+                  validation={
+                    validationCurrent && !dirty ? session.validation : null
+                  }
+                  canValidate={canValidate}
+                  canCommit={skillBuilderCanCommit(session) && !dirty}
+                  acknowledgeWarnings={acknowledgeWarnings}
+                  baselineStale={draftBaselineStale}
+                  errorMessage={requestError}
+                  onSelectPath={(path) => {
+                    setSelectedPath(path);
+                    setDisplayMode("source");
+                    setLocalError(null);
+                  }}
+                  onDraftContentChange={(content) => {
+                    if (!selectedFile) return;
+                    if (
+                      new TextEncoder().encode(content).byteLength >
+                      SKILL_BUILDER_MAX_FILE_BYTES
+                    ) {
+                      setLocalError("单个候选文件不能超过 512 KiB。");
+                      return;
+                    }
+                    if (!dirty && content !== selectedFile.content) {
+                      setDraftBaselineChecksum(session.draft_checksum);
+                    }
+                    setDrafts((current) => {
+                      const next = { ...current };
+                      if (content === selectedFile.content) {
+                        delete next[selectedFile.path];
+                      } else {
+                        next[selectedFile.path] = content;
+                      }
+                      return next;
+                    });
+                    if (requestError) resetErrors();
+                  }}
+                  onDisplayModeChange={setDisplayMode}
+                  onSave={saveDraft}
+                  onDiscard={() => {
+                    setDrafts({});
+                    setDraftBaselineChecksum(null);
+                    resetErrors();
+                  }}
+                  onValidate={runValidation}
+                  onAcknowledgeWarningsChange={(value) => {
+                    setAcknowledgedValidationToken(
+                      value ? validationToken : null,
+                    );
+                    if (requestError) resetErrors();
+                  }}
+                  onCommit={() => setCommitOpen(true)}
+                  onClose={() => {
+                    setWorkbenchOpen(false);
+                    setMobileSurface("conversation");
+                  }}
+                />
+              </section>
+            ) : null}
           </div>
         )}
       </main>

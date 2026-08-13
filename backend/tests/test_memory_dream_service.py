@@ -7,9 +7,14 @@ from types import SimpleNamespace
 import pytest
 
 import app.private_work.memory_dream_service as service_module
+import app.private_work.memory_service as memory_service_module
 from app.personalization.repository import AccountMemoryPreference
 from app.private_work.context import PrivateWorkContext
-from app.private_work.errors import PrivateWorkNotFound, PrivateWorkUnavailable
+from app.private_work.errors import (
+    PrivateWorkConflict,
+    PrivateWorkInvalid,
+    PrivateWorkUnavailable,
+)
 from app.private_work.memory_dream_service import (
     MemoryDreamAdmissionService,
     MemoryDreamSchedulerService,
@@ -29,10 +34,12 @@ from deerflow.agents.memory.dream import (
     EMPTY_MEMORY_DOCUMENT,
 )
 from deerflow.persistence.private_work.memory_document_repository import (
+    MemoryBudgetRewriteScanCursor,
+    MemoryBudgetRewriteScopePage,
     MemoryDocumentScope,
     MemoryDreamAdmissionRecord,
+    MemoryEpisodeCursorInvalid,
 )
-from deerflow.runtime.context_compaction import ThreadCompactionResult
 
 NOW = datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC)
 SECTIONS_POLICY_VERSION_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
@@ -182,6 +189,162 @@ def _service(repository: _Repository) -> MemoryDreamAdmissionService:
         personalization_repository_builder=lambda _session: _Personalization(),
         job_repository_builder=lambda _session: object(),
     )
+
+
+@pytest.mark.asyncio
+async def test_memory_read_advisory_includes_the_current_account_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            events.append("project")
+
+    class Repository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def read_state(self, _scope_value):
+            events.append("document")
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    # Admission short-circuits at the disabled account switch,
+                    # so the advisory must not inspect the current document.
+                    content_digest="b" * 64,
+                    sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                    active_dream_job_id=None,
+                    updated_at=NOW,
+                ),
+                pending_count=0,
+            )
+
+    class Personalization:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def read_memory(self, _owner, *, for_update=False):
+            assert for_update is False
+            events.append("preference")
+            return AccountMemoryPreference(memory_enabled=False, version=8)
+
+    async def materialize(_session, _section):
+        events.append("policy")
+        return _runtime()[0]
+
+    monkeypatch.setattr(
+        memory_service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_in_session",
+        staticmethod(materialize),
+    )
+    state, advisory = await PrivateMemoryDocumentService(
+        lambda: _Session(),
+        repository_builder=Repository,
+        revalidator=Revalidator(),
+        personalization_repository_builder=Personalization,
+    ).get_with_injection_advisory(_context())
+
+    assert state.document.version == 1
+    assert (advisory.status, advisory.reason) == (
+        "inactive",
+        "account_disabled",
+    )
+    assert advisory.legacy_status == "ok"
+    assert events == ["project", "policy", "preference", "document"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_memory_read_keeps_its_budget_only_failure_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
+    class Repository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def read_state(self, _scope_value):
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    content_digest="corrupt legacy digest",
+                    sections=("corrupt legacy sections",),
+                ),
+                pending_count=0,
+            )
+
+    class PersonalizationMustNotBeRead:
+        def __init__(self, _session) -> None:
+            raise AssertionError("legacy GET must not read account preference")
+
+    async def materialize(_session, _section):
+        return _runtime()[0]
+
+    monkeypatch.setattr(
+        memory_service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_in_session",
+        staticmethod(materialize),
+    )
+    _state, legacy_status = await PrivateMemoryDocumentService(
+        lambda: _Session(),
+        repository_builder=Repository,
+        revalidator=Revalidator(),
+        personalization_repository_builder=PersonalizationMustNotBeRead,
+    ).get(_context())
+
+    assert legacy_status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_opt_in_memory_advisory_fails_closed_on_enabled_document_damage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
+    class Repository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def read_state(self, _scope_value):
+            return SimpleNamespace(
+                document=SimpleNamespace(
+                    version=1,
+                    content=EMPTY_MEMORY_DOCUMENT,
+                    content_digest="b" * 64,
+                    sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+                ),
+                pending_count=0,
+            )
+
+    async def materialize(_session, _section):
+        return _runtime()[0]
+
+    class Personalization:
+        async def read_memory(self, _owner, *, for_update=False):
+            assert for_update is False
+            return AccountMemoryPreference(memory_enabled=True, version=8)
+
+    monkeypatch.setattr(
+        memory_service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_in_session",
+        staticmethod(materialize),
+    )
+    service = PrivateMemoryDocumentService(
+        lambda: _Session(),
+        repository_builder=Repository,
+        revalidator=Revalidator(),
+        personalization_repository_builder=lambda _session: Personalization(),
+    )
+
+    with pytest.raises(PrivateWorkConflict):
+        await service.get_with_injection_advisory(_context())
 
 
 @pytest.mark.asyncio
@@ -429,9 +592,9 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
             events.append(("due", self.session.identity))
             return scopes
 
-        async def list_budget_rewrite_scopes(self, **_kwargs):
+        async def list_budget_rewrite_scope_page(self, **_kwargs):
             events.append(("budget", self.session.identity))
-            return ()
+            return MemoryBudgetRewriteScopePage(scopes=(), next_cursor=None)
 
         async def read_state(self, _scope_value, **_kwargs):
             return SimpleNamespace(
@@ -511,20 +674,20 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
     assert events == [
         ("policy", 0, False),
         ("due", 0),
-        ("policy", 1, False),
-        ("budget", 1),
+        ("project", 1),
+        ("policy", 1, True),
+        ("model", 1),
+        ("due_scope", 1),
+        ("preference", 1),
+        ("document", 1),
         ("project", 2),
         ("policy", 2, True),
         ("model", 2),
         ("due_scope", 2),
         ("preference", 2),
         ("document", 2),
-        ("project", 3),
-        ("policy", 3, True),
-        ("model", 3),
-        ("due_scope", 3),
-        ("preference", 3),
-        ("document", 3),
+        ("policy", 3, False),
+        ("budget", 3),
     ]
 
 
@@ -543,8 +706,8 @@ async def test_scheduler_rechecks_due_with_the_locked_current_interval(
             intervals.append(kwargs["interval_minutes"])
             return (scope,)
 
-        async def list_budget_rewrite_scopes(self, **_kwargs):
-            return ()
+        async def list_budget_rewrite_scope_page(self, **_kwargs):
+            return MemoryBudgetRewriteScopePage(scopes=(), next_cursor=None)
 
         async def is_scope_due(self, _scope_value, **kwargs):
             intervals.append(kwargs["interval_minutes"])
@@ -638,13 +801,18 @@ async def test_restore_locks_policy_before_user_memory_and_document(
 
         async def read_version(self, _scope_value, _version):
             events.append("version")
-            return SimpleNamespace(content=EMPTY_MEMORY_DOCUMENT)
+            return SimpleNamespace(
+                content=EMPTY_MEMORY_DOCUMENT,
+                content_digest="b" * 64,
+            )
 
         async def read_state(self, _scope_value, *, for_update=False):
             assert for_update is True
             events.append("document")
             return SimpleNamespace(
                 document=SimpleNamespace(
+                    version=1,
+                    content_digest="a" * 64,
                     sections=DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
                     sections_policy_version_id=SECTIONS_POLICY_VERSION_ID,
                 )
@@ -653,6 +821,19 @@ async def test_restore_locks_policy_before_user_memory_and_document(
         async def restore_version(self, *_args, **_kwargs):
             events.append("restore")
             return SimpleNamespace(version=2)
+
+    class Audit:
+        async def memory_dream_admitted(self, *_args, **_kwargs):
+            raise AssertionError("restore must not audit Dream admission")
+
+        async def memory_restore_executed(self, _session, _context, **kwargs):
+            events.append("audit")
+            assert kwargs == {
+                "source_version": 1,
+                "previous_version": 1,
+                "published_version": 2,
+                "changed": True,
+            }
 
     async def materialize(_session, _section, *, for_update=False):
         assert for_update is True
@@ -669,6 +850,7 @@ async def test_restore_locks_policy_before_user_memory_and_document(
         repository_builder=Repository,
         revalidator=Revalidator(),
         personalization_repository_builder=Personalization,
+        audit=Audit(),
     )
 
     result = await service.restore(
@@ -685,7 +867,47 @@ async def test_restore_locks_policy_before_user_memory_and_document(
         "document",
         "version",
         "restore",
+        "audit",
     ]
+
+
+@pytest.mark.asyncio
+async def test_episode_browse_maps_invalid_opaque_cursor_to_private_invalid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
+    class Repository:
+        def __init__(self, _session) -> None:
+            pass
+
+        async def list_episodes(self, *_args, **_kwargs):
+            raise MemoryEpisodeCursorInvalid("invalid")
+
+    async def materialize(_session, _section):
+        return _runtime()[0]
+
+    monkeypatch.setattr(
+        memory_service_module.SystemRuntimePolicyMaterializer,
+        "materialize_current_in_session",
+        staticmethod(materialize),
+    )
+    service = PrivateMemoryDocumentService(
+        lambda: _Session(),
+        repository_builder=Repository,
+        revalidator=Revalidator(),
+    )
+
+    with pytest.raises(PrivateWorkInvalid):
+        await service.list_episodes(
+            _context(),
+            q=None,
+            tags=(),
+            cursor="invalid-cursor",
+            limit=20,
+        )
 
 
 @pytest.mark.asyncio
@@ -700,10 +922,10 @@ async def test_scheduler_wrapper_preserves_the_configured_poll_bound() -> None:
             self.sessions.append(session)
             return (_scope(),)
 
-        async def list_budget_rewrite_scopes(self, session, **kwargs):
-            assert kwargs == {"max_jobs": 9}
+        async def list_budget_rewrite_scope_page(self, session, **kwargs):
+            assert kwargs == {"cursor": None, "page_size": 100}
             self.sessions.append(session)
-            return ()
+            return MemoryBudgetRewriteScopePage(scopes=(), next_cursor=None)
 
         async def admit_scheduled_scope(self, session, scope, **kwargs):
             self.sessions.append(session)
@@ -723,226 +945,237 @@ async def test_scheduler_wrapper_preserves_the_configured_poll_bound() -> None:
         sessions.append(session)
         return session
 
+    audit = _DreamLifecycleAudit()
     scheduler = MemoryDreamSchedulerService(
         factory,
         admission=admission,
         max_jobs_per_poll=9,
+        audit=audit,
     )
 
     assert await scheduler.admit_due(now=NOW) == 1
     assert admission.kwargs == (sessions[0], {"now": NOW, "max_jobs": 9})
     assert admission.sessions == sessions
     assert len(sessions) == 3
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["origin"] == "scheduled"
+    assert audit.calls[0]["trigger"] == "auto_dream"
 
 
-class _DreamBarrier:
+@pytest.mark.asyncio
+async def test_budget_scheduler_pages_past_more_than_one_hundred_unadmittable_scopes() -> None:
+    unadmittable = tuple(_scope(index) for index in range(1, 102))
+    queued_scope = _scope(102)
+    first_cursor = MemoryBudgetRewriteScanCursor(
+        updated_at=NOW,
+        project_id=unadmittable[99].project_id,
+        owner_user_id=unadmittable[99].owner_user_id,
+        namespace=unadmittable[99].namespace,
+    )
+
+    class Admission:
+        def __init__(self) -> None:
+            self.page_cursors: list[MemoryBudgetRewriteScanCursor | None] = []
+            self.attempted: list[MemoryDocumentScope] = []
+
+        async def list_due_scopes(self, session, **kwargs):
+            assert session.in_transaction()
+            assert kwargs == {"now": NOW, "max_jobs": 1}
+            return ()
+
+        async def list_budget_rewrite_scope_page(self, session, **kwargs):
+            assert session.in_transaction()
+            assert kwargs["page_size"] == 100
+            cursor = kwargs["cursor"]
+            self.page_cursors.append(cursor)
+            if cursor is None:
+                return MemoryBudgetRewriteScopePage(
+                    scopes=unadmittable[:100],
+                    next_cursor=first_cursor,
+                )
+            assert cursor == first_cursor
+            return MemoryBudgetRewriteScopePage(
+                scopes=(*unadmittable[100:], queued_scope),
+                next_cursor=None,
+            )
+
+        async def admit_scheduled_scope(self, session, scope, **kwargs):
+            assert session.in_transaction()
+            assert kwargs == {"now": NOW, "require_due": False}
+            self.attempted.append(scope)
+            if scope != queued_scope:
+                return MemoryDreamAdmissionRecord(
+                    disposition="nothing_pending",
+                    job_id=None,
+                    history_count=0,
+                )
+            return MemoryDreamAdmissionRecord(
+                disposition="queued",
+                job_id=uuid.uuid4(),
+                history_count=0,
+                admission_kind="budget_rewrite",
+            )
+
+    admission = Admission()
+    sessions: list[_Session] = []
+
+    def factory() -> _Session:
+        session = _Session()
+        sessions.append(session)
+        return session
+
+    audit = _DreamLifecycleAudit()
+    scheduler = MemoryDreamSchedulerService(
+        factory,
+        admission=admission,
+        max_jobs_per_poll=1,
+        audit=audit,
+    )
+
+    assert await scheduler.admit_due(now=NOW) == 1
+    assert admission.page_cursors == [None, first_cursor]
+    assert admission.attempted == [*unadmittable, queued_scope]
+    # One due-discovery transaction, two bounded budget-discovery
+    # transactions, then one independent transaction per attempted scope.
+    assert len(sessions) == 1 + 2 + len(admission.attempted)
+    assert all(not session.in_transaction() for session in sessions)
+    assert len(audit.calls) == 1
+    assert audit.calls[0]["origin"] == "scheduled"
+    assert audit.calls[0]["trigger"] == "budget_rewrite"
+    assert audit.calls[0]["history_count"] == 0
+
+
+def test_dream_lifecycle_services_reject_partial_audit_ports() -> None:
+    with pytest.raises(ValueError, match="Memory document audit port is invalid"):
+        PrivateMemoryDocumentService(
+            lambda: _Session(),
+            audit=object(),
+        )
+    with pytest.raises(ValueError, match="Dream Scheduler audit port is invalid"):
+        MemoryDreamSchedulerService(
+            lambda: _Session(),
+            audit=object(),
+        )
+
+
+class _DreamAdmission:
     def __init__(
         self,
         session: _Session,
         *,
-        compactions: list[ThreadCompactionResult],
-        ready: list[bool],
-        compact_error: Exception | None = None,
+        result: MemoryDreamAdmissionRecord | None = None,
     ) -> None:
         self.session = session
-        self.compactions = list(compactions)
-        self.ready = list(ready)
-        self.compact_error = compact_error
-        self.events: list[tuple[str, object]] = []
-
-    async def compact(self, context, thread_id, **kwargs):
-        assert self.session.in_transaction() is False
-        self.events.append(("compact", (context, thread_id, kwargs)))
-        if self.compact_error is not None:
-            raise self.compact_error
-        return self.compactions.pop(0)
-
-    async def lock_and_verify_dream_archive_ready(
-        self,
-        session,
-        context,
-        thread_id,
-        **kwargs,
-    ):
-        assert session is self.session
-        assert session.in_transaction() is True
-        self.events.append(("seal", (context, thread_id, kwargs)))
-        return self.ready.pop(0)
-
-
-class _DreamAdmission:
-    def __init__(self, session: _Session) -> None:
-        self.session = session
         self.calls: list[tuple[object, object, dict[str, object]]] = []
-
-    async def admit(self, session, scope, **kwargs):
-        assert session is self.session
-        assert session.in_transaction() is True
-        self.calls.append((session, scope, kwargs))
-        return MemoryDreamAdmissionRecord(
+        self.result = result or MemoryDreamAdmissionRecord(
             disposition="queued",
             job_id=uuid.uuid4(),
             history_count=3,
         )
 
-
-def _compacted(checkpoint_id: str) -> ThreadCompactionResult:
-    return ThreadCompactionResult(
-        thread_id="thread-7",
-        compacted=True,
-        removed_message_count=2,
-        preserved_message_count=1,
-        summary_updated=True,
-        checkpoint_id=checkpoint_id,
-    )
+    async def admit(self, session, scope, **kwargs):
+        assert session is self.session
+        assert session.in_transaction() is True
+        self.calls.append((session, scope, kwargs))
+        return self.result
 
 
-def _exhausted() -> ThreadCompactionResult:
-    return ThreadCompactionResult(
-        thread_id="thread-7",
-        compacted=False,
-        reason="not_enough_messages",
-    )
+class _DreamLifecycleAudit:
+    def __init__(self, *, error: Exception | None = None) -> None:
+        self.error = error
+        self.calls: list[dict[str, object]] = []
+
+    async def memory_dream_admitted(self, session, **kwargs):
+        assert session.in_transaction() is True
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+
+    async def memory_restore_executed(self, *_args, **_kwargs):
+        raise AssertionError("Dream admission must not audit restore")
 
 
 @pytest.mark.asyncio
-async def test_manual_thread_dream_drains_outside_transactions_then_admits_behind_seal() -> None:
+async def test_manual_dream_audits_only_queued_admission_in_same_transaction() -> None:
     session = _Session()
-    barrier = _DreamBarrier(
-        session,
-        compactions=[_compacted("checkpoint-1"), _compacted("checkpoint-2"), _exhausted()],
-        ready=[True],
-    )
     admission = _DreamAdmission(session)
+    audit = _DreamLifecycleAudit()
+
+    class Revalidator:
+        async def require(self, validated_session, *_args, **kwargs):
+            assert validated_session is session
+            assert validated_session.in_transaction() is True
+            assert kwargs["lock"] is True
+
+    context = _context()
     service = PrivateMemoryDocumentService(
         lambda: session,
+        revalidator=Revalidator(),
         dream_admission=admission,
-        dream_archive_barrier=barrier,
+        audit=audit,
     )
-    config = object()
 
-    result = await service.dream(
-        _context(),
-        thread_id="thread-7",
-        app_config=config,  # type: ignore[arg-type]
-    )
+    result = await service.dream(context)
 
     assert result.disposition == "queued"
-    assert [event[0] for event in barrier.events] == [
-        "compact",
-        "compact",
-        "compact",
-        "seal",
+    assert audit.calls == [
+        {
+            "project_id": context.project_id,
+            "job_id": result.job_id,
+            "request_id": context.request_id,
+            "origin": "manual",
+            "trigger": "manual_dream",
+            "history_count": 3,
+            "context": context,
+        }
     ]
-    assert all(
-        event[1][2]["keep"] == ("messages", 0)  # type: ignore[index]
-        for event in barrier.events
-        if event[0] == "compact"
-    )
-    assert len(admission.calls) == 1
-    assert admission.calls[0][2]["trigger"] == "manual_dream"
-
-
-@pytest.mark.asyncio
-async def test_manual_thread_dream_retries_a_raced_seal_without_fixed_drain_limit() -> None:
-    session = _Session()
-    barrier = _DreamBarrier(
-        session,
-        compactions=[_exhausted(), _compacted("checkpoint-race"), _exhausted()],
-        ready=[False, True],
-    )
-    admission = _DreamAdmission(session)
-    service = PrivateMemoryDocumentService(
-        lambda: session,
-        dream_admission=admission,
-        dream_archive_barrier=barrier,
-    )
-
-    result = await service.dream(
-        _context(),
-        thread_id="thread-7",
-        app_config=object(),  # type: ignore[arg-type]
-    )
-
-    assert result.disposition == "queued"
-    assert [event[0] for event in barrier.events] == [
-        "compact",
-        "seal",
-        "compact",
-        "compact",
-        "seal",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_manual_thread_dream_fails_closed_before_admission() -> None:
-    session = _Session()
-    barrier = _DreamBarrier(
-        session,
-        compactions=[
-            ThreadCompactionResult(
-                thread_id="thread-7",
-                compacted=False,
-                reason="compaction_failed",
-            )
-        ],
-        ready=[],
-    )
-    admission = _DreamAdmission(session)
-    service = PrivateMemoryDocumentService(
-        lambda: session,
-        dream_admission=admission,
-        dream_archive_barrier=barrier,
-    )
-
-    with pytest.raises(PrivateWorkUnavailable):
-        await service.dream(
-            _context(),
-            thread_id="thread-7",
-            app_config=object(),  # type: ignore[arg-type]
-        )
-
-    assert admission.calls == []
     assert session.in_transaction() is False
 
 
 @pytest.mark.asyncio
-async def test_manual_thread_dream_requires_server_archive_barrier() -> None:
+async def test_manual_dream_does_not_audit_nonqueued_admission() -> None:
     session = _Session()
-    service = PrivateMemoryDocumentService(
-        lambda: session,
-        dream_admission=_DreamAdmission(session),
+    audit = _DreamLifecycleAudit()
+    admission = _DreamAdmission(
+        session,
+        result=MemoryDreamAdmissionRecord(
+            disposition="nothing_pending",
+            job_id=None,
+            history_count=0,
+        ),
     )
 
-    with pytest.raises(PrivateWorkUnavailable):
-        await service.dream(
-            _context(),
-            thread_id="thread-7",
-            app_config=object(),  # type: ignore[arg-type]
-        )
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
+    result = await PrivateMemoryDocumentService(
+        lambda: session,
+        revalidator=Revalidator(),
+        dream_admission=admission,
+        audit=audit,
+    ).dream(_context())
+
+    assert result.disposition == "nothing_pending"
+    assert audit.calls == []
 
 
 @pytest.mark.asyncio
-async def test_manual_thread_dream_preserves_scoped_not_found() -> None:
+async def test_manual_dream_audit_failure_rolls_back_admission_transaction() -> None:
     session = _Session()
-    barrier = _DreamBarrier(
-        session,
-        compactions=[],
-        ready=[],
-        compact_error=PrivateWorkNotFound("memory-dream-service"),
-    )
-    admission = _DreamAdmission(session)
+
+    class Revalidator:
+        async def require(self, *_args, **_kwargs):
+            return None
+
     service = PrivateMemoryDocumentService(
         lambda: session,
-        dream_admission=admission,
-        dream_archive_barrier=barrier,
+        revalidator=Revalidator(),
+        dream_admission=_DreamAdmission(session),
+        audit=_DreamLifecycleAudit(error=RuntimeError("audit unavailable")),
     )
 
-    with pytest.raises(PrivateWorkNotFound):
-        await service.dream(
-            _context(),
-            thread_id="missing-thread",
-            app_config=object(),  # type: ignore[arg-type]
-        )
+    with pytest.raises(PrivateWorkUnavailable):
+        await service.dream(_context())
 
-    assert admission.calls == []
+    assert session.in_transaction() is False

@@ -32,18 +32,6 @@ def test_public_paths(path: str):
     "path",
     [
         "/api/models",
-        "/api/mcp/config",
-        "/api/mcp/cache/reset",
-        "/api/memory",
-        "/api/skills",
-        "/api/threads/123",
-        "/api/threads/123/uploads",
-        "/api/agents",
-        "/api/channels",
-        "/api/channels/providers",
-        "/api/channels/slack/connect",
-        "/api/runs/stream",
-        "/api/threads/123/runs",
         "/api/v1/auth/me",
         "/api/v1/auth/change-password",
     ],
@@ -146,20 +134,16 @@ def _make_app():
             "context_user_id": get_effective_user_id(),
         }
 
-    @app.put("/api/mcp/config")
-    async def mcp_put():
+    @app.put("/api/protected")
+    async def protected_put():
         return {"ok": True}
 
-    @app.post("/api/mcp/cache/reset")
-    async def mcp_cache_reset():
+    @app.delete("/api/protected")
+    async def protected_delete():
         return {"ok": True}
 
-    @app.delete("/api/threads/abc")
-    async def thread_delete():
-        return {"ok": True}
-
-    @app.patch("/api/threads/abc")
-    async def thread_patch():
+    @app.patch("/api/protected")
+    async def protected_patch():
         return {"ok": True}
 
     @app.post("/api/threads/abc/runs/stream")
@@ -364,11 +348,6 @@ def test_protected_post_no_cookie_returns_401(client):
     assert res.status_code == 401
 
 
-def test_mcp_cache_reset_post_no_cookie_returns_401(client):
-    res = client.post("/api/mcp/cache/reset")
-    assert res.status_code == 401
-
-
 def test_protected_post_with_internal_auth_header_passes():
     from app.gateway.internal_auth import create_internal_auth_headers
 
@@ -387,31 +366,31 @@ def test_protected_post_with_internal_auth_header_passes():
 
 
 def test_protected_put_no_cookie(client):
-    res = client.put("/api/mcp/config")
+    res = client.put("/api/protected")
     assert res.status_code == 401
 
 
 def test_protected_delete_no_cookie(client):
-    res = client.delete("/api/threads/abc")
+    res = client.delete("/api/protected")
     assert res.status_code == 401
 
 
 def test_protected_patch_no_cookie(client):
-    res = client.patch("/api/threads/abc")
+    res = client.patch("/api/protected")
     assert res.status_code == 401
 
 
 def test_put_with_junk_cookie_rejected(client):
     """Junk cookie on PUT → 401 (strict JWT validation in middleware)."""
     client.cookies.set("access_token", "tok")
-    res = client.put("/api/mcp/config")
+    res = client.put("/api/protected")
     assert res.status_code == 401
 
 
 def test_delete_with_junk_cookie_rejected(client):
     """Junk cookie on DELETE → 401 (strict JWT validation in middleware)."""
     client.cookies.set("access_token", "tok")
-    res = client.delete("/api/threads/abc")
+    res = client.delete("/api/protected")
     assert res.status_code == 401
 
 

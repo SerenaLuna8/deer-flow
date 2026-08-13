@@ -1,13 +1,12 @@
-"""U5 — upstream behavior contracts ActWeave's middleware chain depends on.
+"""Upstream behavior contracts ActWeave's middleware chain depends on.
 
 About thirty middlewares assume specific LangChain/LangGraph *behavior*, not
 just signatures: ``after_model`` dispatches in reverse registration order,
 ``wrap_model_call``/``wrap_tool_call`` compose first-registered-outermost,
 ``create_agent`` accepts the exact production parameter shape, and
 ``checkpoint_patches.py`` overrides two precise upstream internals. None of
-these are covered by upstream semver promises, so this module is the canary:
-run it first after any ``langchain*``/``langgraph*`` bump (see
-``docs/langgraph-upgrade-playbook.zh-CN.md``).
+these are covered by upstream semver promises, so this module is the canary and
+must run first after any ``langchain*``/``langgraph*`` bump.
 """
 
 from __future__ import annotations
@@ -535,7 +534,14 @@ def test_remove_all_messages_sentinel_still_resets_history() -> None:
 # Version fence — declared bounds and installed versions must agree
 # ---------------------------------------------------------------------------
 
-_BOUNDED_PACKAGES = ("langchain", "langchain-core", "langgraph")
+_BOUNDED_PACKAGES = (
+    "langchain",
+    "langchain-core",
+    "langchain-anthropic",
+    "langchain-deepseek",
+    "langchain-openai",
+    "langgraph",
+)
 
 
 def _declared_requirements() -> dict[str, Requirement]:
@@ -566,3 +572,15 @@ def test_installed_upstream_versions_satisfy_the_declared_bounds() -> None:
     for package in _BOUNDED_PACKAGES:
         installed = Version(importlib.metadata.version(package))
         assert declared[package].specifier.contains(str(installed), prereleases=True), f"{package} {installed} violates declared bound {declared[package].specifier}"
+
+
+def test_langchain_openai_private_symbols_used_by_providers_are_importable() -> None:
+    """Provider adapters rely on these private hooks and must fail in the canary."""
+
+    from langchain_openai.chat_models.base import (
+        _convert_delta_to_message_chunk,
+        _create_usage_metadata,
+    )
+
+    assert callable(_convert_delta_to_message_chunk)
+    assert callable(_create_usage_metadata)

@@ -140,13 +140,14 @@ class PostgresStreamBridge(StreamBridge):
         run_id: str,
         *,
         status: str,
+        error_code: str | None = None,
         lease: StreamLeaseProof | None = None,
     ) -> StoredStreamFrame:
         return await self.publish_frame(
             scope,
             thread_id,
             run_id,
-            StreamFrame.end(status=status),
+            StreamFrame.end(status=status, error_code=error_code),
             lease=lease,
         )
 
@@ -157,6 +158,7 @@ class PostgresStreamBridge(StreamBridge):
         run_id: str,
         *,
         status: str,
+        error_code: str | None = None,
     ) -> StoredStreamFrame:
         """Repair a missing terminal frame from settled database authority."""
 
@@ -167,6 +169,7 @@ class PostgresStreamBridge(StreamBridge):
                 thread_id=thread_id,
                 run_id=run_id,
                 status=status,
+                error_code=error_code,
             )
         await self._notify(stored)
         return stored

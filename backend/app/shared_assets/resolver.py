@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum_matches
 from app.shared_assets.binding_repository import BindingRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.credential_closure import (
@@ -34,6 +35,9 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+)
+from app.shared_assets.internal_assets import (
+    BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
@@ -109,6 +113,7 @@ _BINDING_TYPES = {
 }
 
 BUILTIN_MAIN_AGENT_SOURCE_KEY = "builtin:agent:project-assistant"
+BUILTIN_SKILL_CREATOR_SOURCE_KEY = "builtin:skill:skill-creator"
 
 
 def _freeze(value: object) -> object:
@@ -349,6 +354,182 @@ class ProjectAssetResolver:
         except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(context.request_id) from None
 
+    async def resolve_internal_skill_builder_closure_in_session(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> ResolvedRunAssetClosure:
+        """Resolve the one server-owned Skill Builder execution closure.
+
+        This is deliberately separate from the public project resolver: the
+        packaged Builder Agent is an implementation detail and never becomes
+        generally executable merely because a caller knows its UUID.
+        """
+
+        if (
+            not isinstance(session, AsyncSession)
+            or not session.in_transaction()
+            or type(context) is not ProjectContext
+            or Capability.SHARED_ASSETS_EDIT not in context.capabilities
+            or Capability.SHARED_ASSETS_READ not in context.capabilities
+        ):
+            raise AssetForbidden(getattr(context, "request_id", "unknown"))
+        try:
+            record = await self._internal_system_record(
+                session,
+                context,
+                kind=AssetKind.AGENT,
+                source_key=BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+            )
+            version = record.version
+            if not isinstance(version, AgentVersionRow):
+                raise AssetResolutionUnavailable(context.request_id)
+            skill_ids = tuple(
+                (
+                    await session.execute(
+                        select(AgentVersionSkillRefRow.skill_version_id)
+                        .where(
+                            AgentVersionSkillRefRow.agent_version_id == version.id,
+                        )
+                        .order_by(AgentVersionSkillRefRow.sort_order)
+                        .with_for_update(read=True, of=AgentVersionSkillRefRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            mcp_ids = tuple(
+                (
+                    await session.execute(
+                        select(AgentVersionMcpRefRow.mcp_server_version_id)
+                        .where(
+                            AgentVersionMcpRefRow.agent_version_id == version.id,
+                        )
+                        .order_by(AgentVersionMcpRefRow.sort_order)
+                        .with_for_update(read=True, of=AgentVersionMcpRefRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if mcp_ids or len(skill_ids) != 1:
+                raise AssetResolutionUnavailable(context.request_id)
+            # The packaged creator is an implementation dependency of the
+            # internal Builder Agent.  Resolve its exact immutable reference
+            # by canonical source key; requiring a project System binding here
+            # would make a fresh project unable to run the server-owned Agent.
+            skill_record = await self._internal_system_record(
+                session,
+                context,
+                kind=AssetKind.SKILL,
+                source_key=BUILTIN_SKILL_CREATOR_SOURCE_KEY,
+                version_id=skill_ids[0],
+            )
+            lead = await self._agent_snapshot(
+                session,
+                context,
+                record,
+                0,
+                exact_dependency_records=((skill_record,), ()),
+            )
+            skill = await self._skill_snapshot(
+                session,
+                context,
+                skill_record,
+                0,
+            )
+            return await self._finalize_run_closure(
+                session,
+                lead=lead,
+                delegated_agents=(),
+                skills=(skill,),
+                mcps=(),
+                main_skill_version_ids=(skill.version_id,),
+                main_mcp_version_ids=(),
+            )
+        except (AssetForbidden, AssetValidationFailed, AssetResolutionUnavailable):
+            raise
+        except (DBAPIError, SATimeoutError):
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def resolve_internal_skill_builder_snapshot_in_session(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        selection: AssetSelection,
+    ) -> ResolvedAssetSnapshot:
+        """Re-materialize only exact assets admitted for a Builder Run."""
+
+        if not isinstance(session, AsyncSession) or not session.in_transaction() or type(context) is not ProjectContext or Capability.SHARED_ASSETS_EDIT not in context.capabilities or selection.version_id is None:
+            raise AssetForbidden(getattr(context, "request_id", "unknown"))
+        source_key = {
+            AssetKind.AGENT: BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+            AssetKind.SKILL: BUILTIN_SKILL_CREATOR_SOURCE_KEY,
+        }.get(selection.kind)
+        if source_key is None:
+            raise AssetResolutionUnavailable(context.request_id)
+        record = await self._internal_system_record(
+            session,
+            context,
+            kind=selection.kind,
+            source_key=source_key,
+            asset_id=selection.asset_id,
+            version_id=selection.version_id,
+        )
+        snapshot = await self._snapshot(
+            session,
+            context,
+            selection.kind,
+            record,
+            0,
+        )
+        generation = await CatalogStateRepository(session).read_generation()
+        return replace(snapshot, catalog_generation=generation)
+
+    @staticmethod
+    async def _internal_system_record(
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        kind: AssetKind,
+        source_key: str,
+        asset_id: uuid.UUID | None = None,
+        version_id: uuid.UUID | None = None,
+    ) -> _ResolvedRecord:
+        if kind not in {AssetKind.AGENT, AssetKind.SKILL}:
+            raise AssetResolutionUnavailable(context.request_id)
+        asset_type, version_type, parent_column = _ASSET_TYPES[kind]
+        statement = (
+            select(asset_type, version_type)
+            .join(
+                version_type,
+                getattr(version_type, parent_column) == asset_type.id,
+            )
+            .where(
+                asset_type.scope == AssetScope.SYSTEM.value,
+                asset_type.project_id.is_(None),
+                asset_type.source_key == source_key,
+                asset_type.status == "active",
+                version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
+            )
+            .with_for_update(read=True, of=[asset_type, version_type])
+        )
+        if asset_id is None and version_id is None:
+            statement = statement.where(
+                version_type.id == asset_type.current_published_version_id,
+            )
+        elif asset_id is not None:
+            statement = statement.where(asset_type.id == asset_id)
+        if version_id is not None:
+            statement = statement.where(version_type.id == version_id)
+        row = (await session.execute(statement)).one_or_none()
+        if row is None:
+            raise AssetResolutionUnavailable(context.request_id)
+        asset, version = row
+        if kind is AssetKind.SKILL and version.revoked_at is not None:
+            raise AssetResolutionUnavailable(context.request_id)
+        return _ResolvedRecord(AssetScope.SYSTEM, asset, version)
+
     async def resolve_run_asset_snapshot_in_session(
         self,
         session: AsyncSession,
@@ -476,7 +657,9 @@ class ProjectAssetResolver:
             raise AssetResolutionUnavailable(context.request_id) from None
         if target.asset.status != "active" or target.version.workflow_status != WorkflowStatus.PUBLISHED.value:
             raise AssetResolutionUnavailable(context.request_id)
-        return _ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version)
+        record = _ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version)
+        self._assert_public_agent_record(record, context.request_id)
+        return record
 
     @staticmethod
     def _is_canonical_main_record(record: _ResolvedRecord) -> bool:
@@ -576,6 +759,9 @@ class ProjectAssetResolver:
             *(_ResolvedRecord(AssetScope.PROJECT, asset, version) for asset, version in project_rows),
             *(_ResolvedRecord(AssetScope.SYSTEM, asset, version) for asset, version in system_rows),
         ]
+        if kind is AssetKind.AGENT:
+            for record in records:
+                self._assert_public_agent_record(record, context.request_id)
         records.sort(
             key=lambda record: (
                 uuid.UUID(str(record.asset.id)).int,
@@ -800,7 +986,17 @@ class ProjectAssetResolver:
         except SharedAssetError:
             raise AssetResolutionUnavailable(context.request_id) from None
         self._assert_asset_state(target.asset, target.version, context.request_id)
-        return _ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version)
+        record = _ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version)
+        self._assert_public_agent_record(record, context.request_id)
+        return record
+
+    @staticmethod
+    def _assert_public_agent_record(
+        record: _ResolvedRecord,
+        request_id: str,
+    ) -> None:
+        if record.scope is AssetScope.SYSTEM and isinstance(record.asset, AgentRow) and record.asset.source_key == BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY:
+            raise AssetResolutionUnavailable(request_id)
 
     @staticmethod
     async def _lock_version(
@@ -907,7 +1103,39 @@ class ProjectAssetResolver:
             model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
         except ValidationError:
             raise AssetResolutionUnavailable(context.request_id) from None
-        if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty):
+        if (
+            version.payload_schema_version not in (1, 2, 3)
+            or (version.payload_schema_version in (1, 2) and not model_settings.is_empty)
+            or (
+                version.payload_schema_version == 1
+                and any(
+                    (
+                        version.agents_instructions,
+                        version.identity,
+                        version.user_context,
+                    )
+                )
+            )
+            or not isinstance(version.tool_groups, list)
+        ):
+            raise AssetResolutionUnavailable(context.request_id)
+        payload = AgentPayload(
+            description=version.description,
+            payload_schema_version=version.payload_schema_version,
+            agents_instructions=version.agents_instructions,
+            soul=version.soul,
+            identity=version.identity,
+            user_context=version.user_context,
+            model_ref=version.model_ref,
+            model_settings=model_settings,
+            tool_groups=tuple(version.tool_groups),
+            skill_version_ids=skill_ids,
+            mcp_version_ids=mcp_ids,
+        )
+        if not agent_payload_checksum_matches(
+            payload,
+            version.payload_checksum,
+        ):
             raise AssetResolutionUnavailable(context.request_id)
         return ResolvedAgentSnapshot(
             kind=AssetKind.AGENT,
@@ -917,19 +1145,7 @@ class ProjectAssetResolver:
             checksum=version.payload_checksum,
             catalog_generation=generation,
             dependency_version_ids=dependencies,
-            payload=AgentPayload(
-                description=version.description,
-                payload_schema_version=version.payload_schema_version,
-                agents_instructions=version.agents_instructions,
-                soul=version.soul,
-                identity=version.identity,
-                user_context=version.user_context,
-                model_ref=version.model_ref,
-                model_settings=model_settings,
-                tool_groups=tuple(version.tool_groups),
-                skill_version_ids=skill_ids,
-                mcp_version_ids=mcp_ids,
-            ),
+            payload=payload,
         )
 
     async def _agent_snapshot_with_dependencies(
@@ -994,6 +1210,8 @@ class ProjectAssetResolver:
     ) -> ResolvedSkillSnapshot:
         version = record.version
         if not isinstance(version, SkillVersionRow):
+            raise AssetResolutionUnavailable(context.request_id)
+        if record.scope is AssetScope.SYSTEM and version.revoked_at is not None:
             raise AssetResolutionUnavailable(context.request_id)
         rows = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version.id).order_by(SkillVersionFileRow.path).with_for_update(read=True, of=SkillVersionFileRow))).scalars().all())
         skill_record = SkillVersionRecord(version, rows)

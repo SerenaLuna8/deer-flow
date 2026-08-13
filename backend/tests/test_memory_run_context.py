@@ -162,3 +162,17 @@ def test_memory_marker_is_never_applied_to_an_ordinary_user_message() -> None:
     )
 
     assert not is_dynamic_context_reminder(ordinary)
+
+
+def test_sync_model_path_rejects_private_memory_authority() -> None:
+    authority = _Authority(_Snapshot())
+    middleware = DynamicContextMiddleware()
+    runtime = SimpleNamespace(context={"__memory_authority": authority})
+
+    with pytest.raises(
+        RuntimeError,
+        match="Private Memory authority requires async execution",
+    ):
+        middleware.before_model({"messages": []}, runtime)
+
+    assert authority.calls == 0

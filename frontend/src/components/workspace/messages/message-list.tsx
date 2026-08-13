@@ -25,7 +25,11 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
-import { extractWriteArtifactSelections } from "@/core/artifacts/preview";
+import {
+  advanceWriteArtifactAutoOpenState,
+  createWriteArtifactAutoOpenState,
+  extractWriteArtifactSelections,
+} from "@/core/artifacts/preview";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   deriveHumanInputThreadState,
@@ -378,36 +382,21 @@ export function MessageList({
     () => extractWriteArtifactSelections(messages),
     [messages],
   );
-  const autoOpenInitializedRef = useRef(false);
-  const autoOpenThreadIdRef = useRef(threadId);
-  const runHasBeenLoadingRef = useRef(false);
-  const seenWriteArtifactsRef = useRef<Set<string>>(new Set());
+  const artifactAutoOpenStateRef = useRef(
+    createWriteArtifactAutoOpenState(threadId),
+  );
   useEffect(() => {
-    const switchedThread = autoOpenThreadIdRef.current !== threadId;
-    if (!autoOpenInitializedRef.current || switchedThread) {
-      autoOpenInitializedRef.current = true;
-      autoOpenThreadIdRef.current = threadId;
-      seenWriteArtifactsRef.current = new Set(
-        writeArtifactSelections.map((selection) => selection.key),
-      );
-      runHasBeenLoadingRef.current = thread.isLoading;
-      return;
-    }
-
-    const runCanAutoOpen = thread.isLoading || runHasBeenLoadingRef.current;
-    if (thread.isLoading) {
-      runHasBeenLoadingRef.current = true;
-    }
-    const unseenSelections = writeArtifactSelections.filter(
-      (selection) => !seenWriteArtifactsRef.current.has(selection.key),
-    );
-    for (const selection of unseenSelections) {
-      seenWriteArtifactsRef.current.add(selection.key);
-    }
-    const latestSelection = unseenSelections.at(-1);
+    const result = advanceWriteArtifactAutoOpenState({
+      state: artifactAutoOpenStateRef.current,
+      threadId,
+      selections: writeArtifactSelections,
+      historyIsLoading: thread.isThreadLoading || isHistoryLoading === true,
+      runIsLoading: thread.isLoading,
+    });
+    artifactAutoOpenStateRef.current = result.state;
+    const latestSelection = result.selection;
     if (
       !sidecarSurface &&
-      runCanAutoOpen &&
       artifactsEnabled &&
       autoOpenArtifacts &&
       autoSelectArtifacts &&
@@ -417,9 +406,6 @@ export function MessageList({
       selectArtifact(latestSelection.url, true);
       setArtifactsOpen(true);
     }
-    if (!thread.isLoading) {
-      runHasBeenLoadingRef.current = false;
-    }
   }, [
     artifactsEnabled,
     autoOpenArtifacts,
@@ -428,7 +414,9 @@ export function MessageList({
     selectArtifact,
     setArtifactsOpen,
     sidecarSurface,
+    isHistoryLoading,
     thread.isLoading,
+    thread.isThreadLoading,
     threadId,
     writeArtifactSelections,
   ]);

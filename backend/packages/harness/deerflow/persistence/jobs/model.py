@@ -117,7 +117,7 @@ class JobRow(Base):
             ondelete="RESTRICT",
         ),
         CheckConstraint(
-            "job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_dream', 'memory_seal')",
+            "job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_dream', 'memory_dream_prepare', 'memory_seal')",
             name="ck_jobs_type",
         ),
         CheckConstraint(
@@ -133,6 +133,8 @@ class JobRow(Base):
             "OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
             "OR (job_type = 'memory_dream' AND owner_user_id IS NOT NULL "
             "AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
+            "OR (job_type = 'memory_dream_prepare' AND owner_user_id IS NOT NULL "
+            "AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) "
             "OR (job_type = 'memory_seal' AND owner_user_id IS NOT NULL "
             "AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)",
             name="ck_jobs_authority_shape",
@@ -140,7 +142,7 @@ class JobRow(Base):
         # ``namespace`` is the memory work coordinate: the Memory namespace for
         # memory_dream and the Thread id for memory_seal.
         CheckConstraint(
-            "(job_type IN ('memory_dream', 'memory_seal')) = (namespace IS NOT NULL)",
+            "(job_type IN ('memory_dream', 'memory_dream_prepare', 'memory_seal')) = (namespace IS NOT NULL)",
             name="ck_jobs_memory_namespace",
         ),
         Index(

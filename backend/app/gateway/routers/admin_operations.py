@@ -215,12 +215,30 @@ async def current_reliability_readiness(
     if service is None:
         try:
             config = await asyncio.to_thread(get_app_config)
-            scheduler_enabled = config.scheduler.enabled
             worker_fresh_for_seconds = config.worker.heartbeat_seconds * 3
         except FileNotFoundError:
             # Small embedded/test apps may intentionally omit a config file.
-            scheduler_enabled = False
             worker_fresh_for_seconds = 60
+        try:
+            from app.system_runtime_settings import (
+                AutomationsPolicyValue,
+                RuntimePolicySection,
+            )
+            from app.system_runtime_settings.materializer import (
+                SystemRuntimePolicyMaterializer,
+            )
+
+            policy = await SystemRuntimePolicyMaterializer.materialize_current_in_session(
+                session,
+                RuntimePolicySection.AUTOMATIONS,
+            )
+            if type(policy) is not AutomationsPolicyValue:
+                raise TypeError
+            scheduler_enabled = policy.enabled
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            scheduler_enabled = False
         process = await read_process_readiness(
             session,
             role="gateway",

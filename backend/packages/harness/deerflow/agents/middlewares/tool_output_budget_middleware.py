@@ -36,6 +36,43 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_INLINE_ONLY_TOOL_OUTPUT_MARKER = object()
+
+
+def mark_inline_only_tool_output(tool: object) -> object:
+    """Mark one code-created tool result as ineligible for file externalization.
+
+    Application-owned runtimes without any file capability use this for tools
+    whose bounded results may be truncated inline but must never introduce a
+    file authority or persistence side channel. The identity marker lives on
+    the registered callable and cannot be supplied through model arguments.
+    """
+
+    for attribute in ("coroutine", "func"):
+        implementation = getattr(tool, attribute, None)
+        if callable(implementation):
+            setattr(
+                implementation,
+                "__deerflow_inline_only_tool_output__",
+                _INLINE_ONLY_TOOL_OUTPUT_MARKER,
+            )
+            return tool
+    raise TypeError("inline-only output tools require a registered callable")
+
+
+def _is_inline_only_tool_output(request: ToolCallRequest) -> bool:
+    tool = getattr(request, "tool", None)
+    return any(
+        getattr(
+            getattr(tool, attribute, None),
+            "__deerflow_inline_only_tool_output__",
+            None,
+        )
+        is _INLINE_ONLY_TOOL_OUTPUT_MARKER
+        for attribute in ("coroutine", "func")
+    )
+
+
 # Virtual outputs root inside the sandbox. Host-mounted sandboxes map this to
 # the thread outputs dir on the host; for non-mounted (remote) sandboxes the
 # same path is written directly into the sandbox filesystem so the model's
@@ -458,6 +495,17 @@ def _budget_content(
     return None
 
 
+def _inline_only_config(config: ToolOutputConfig) -> ToolOutputConfig:
+    """Disable persistence while preserving the deployment's inline ceiling."""
+
+    return config.model_copy(
+        update={
+            "externalize_min_chars": 0,
+            "tool_overrides": {},
+        }
+    )
+
+
 async def _budget_private_content(
     content: str,
     *,
@@ -774,7 +822,8 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
     ) -> ToolMessage | Command:
         runtime_context = _runtime_context(request)
         authority = None
-        if self._config.enabled:
+        inline_only = _is_inline_only_tool_output(request)
+        if self._config.enabled and not inline_only:
             # Resolve the server-owned authority before a private tool can
             # perform any side effect. Discovering a missing authority only
             # after the handler returned would be too late to fail closed.
@@ -785,12 +834,13 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         result = await handler(request)
         if not self._config.enabled:
             return result
-        if not _needs_budget(result, self._config):
+        effective_config = _inline_only_config(self._config) if inline_only else self._config
+        if not _needs_budget(result, effective_config):
             return result
         if authority is not None:
             return await _patch_result_with_authority(
                 result,
-                self._config,
+                effective_config,
                 authority,
             )
         outputs_path = _resolve_outputs_path(request)
@@ -799,7 +849,13 @@ class ToolOutputBudgetMiddleware(AgentMiddleware[AgentState]):
         # loop. The actual sandbox I/O (mkdir/write/test) happens inside
         # _patch_result, which is offloaded to a worker thread below.
         sandbox = _resolve_sandbox(request)
-        return await asyncio.to_thread(_patch_result, result, self._config, outputs_path, sandbox)
+        return await asyncio.to_thread(
+            _patch_result,
+            result,
+            effective_config,
+            outputs_path,
+            sandbox,
+        )
 
     # -- model call hooks (historical message truncation) ------------------
 

@@ -236,7 +236,9 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
         ensure_settled_terminal=AsyncMock(return_value=terminal),
     )
     service = SimpleNamespace(
-        get=AsyncMock(return_value=SimpleNamespace(status="success")),
+        get=AsyncMock(
+            return_value=SimpleNamespace(status="success", error=None),
+        ),
     )
     context = SimpleNamespace(request_id="page", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
@@ -271,6 +273,60 @@ async def test_durable_consumer_drains_next_page_before_terminal_fallback() -> N
         thread_id,
         run_id,
         status="completed",
+        error_code=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_consumer_preserves_model_output_limit_terminal_code() -> None:
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    terminal = StoredStreamFrame(
+        id="1",
+        thread_id=thread_id,
+        run_id=run_id,
+        event="end",
+        data={"status": "error", "error_code": "MODEL_OUTPUT_LIMIT"},
+        terminal=True,
+    )
+    bridge = SimpleNamespace(
+        read_after=AsyncMock(return_value=()),
+        ensure_settled_terminal=AsyncMock(return_value=terminal),
+    )
+    service = SimpleNamespace(
+        get=AsyncMock(
+            return_value=SimpleNamespace(
+                status="error",
+                error="MODEL_OUTPUT_LIMIT",
+            ),
+        ),
+    )
+    context = SimpleNamespace(request_id="output-limit", resource_scope=object())
+    request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+
+    chunks = [
+        chunk
+        async for chunk in private_work_router._durable_private_sse_consumer(
+            bridge=bridge,
+            service=service,
+            context=context,
+            thread_id=thread_id,
+            run_id=run_id,
+            request=request,
+            cursor=0,
+            initial_frames=(),
+            cancel_on_disconnect=False,
+        )
+    ]
+
+    assert len(chunks) == 1
+    assert '"error_code":"MODEL_OUTPUT_LIMIT"' in chunks[0]
+    bridge.ensure_settled_terminal.assert_awaited_once_with(
+        context.resource_scope,
+        thread_id,
+        run_id,
+        status="error",
+        error_code="MODEL_OUTPUT_LIMIT",
     )
 
 
@@ -304,8 +360,8 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
     service = SimpleNamespace(
         get=AsyncMock(
             side_effect=(
-                SimpleNamespace(status="running"),
-                SimpleNamespace(status="interrupted"),
+                SimpleNamespace(status="running", error=None),
+                SimpleNamespace(status="interrupted", error=None),
             ),
         ),
     )
@@ -337,6 +393,7 @@ async def test_durable_consumer_waits_for_settlement_and_corrects_terminal(
         thread_id,
         run_id,
         status="interrupted",
+        error_code=None,
     )
 
 
@@ -361,7 +418,9 @@ async def test_durable_consumer_does_not_reemit_terminal_at_or_before_cursor(
         ensure_settled_terminal=AsyncMock(return_value=terminal),
     )
     service = SimpleNamespace(
-        get=AsyncMock(return_value=SimpleNamespace(status="success")),
+        get=AsyncMock(
+            return_value=SimpleNamespace(status="success", error=None),
+        ),
     )
     context = SimpleNamespace(request_id="terminal-cursor", resource_scope=object())
     request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
@@ -387,6 +446,7 @@ async def test_durable_consumer_does_not_reemit_terminal_at_or_before_cursor(
         thread_id,
         run_id,
         status="completed",
+        error_code=None,
     )
 
 

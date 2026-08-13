@@ -10,40 +10,45 @@ import {
   AgentBuilderApiError,
   agentBuilderCanAuthor,
   agentBuilderSemanticSignature,
-  agentBuilderSlugError,
+  agentBuilderSlugErrorCode,
   createAgentBuilderIdempotencyRegistry,
   normalizeAgentBuilderSlug,
   useCreateAgentBuilderSession,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 
 import { useCurrentProject } from "../project-context";
 
 import { agentBuilderSessionPath } from "./agent-builder-workspace";
 
-export function agentBuilderErrorMessage(error: unknown): string {
+export function agentBuilderErrorMessage(
+  error: unknown,
+  copy: Translations["agents"]["builder"]["errors"],
+): string {
   if (!(error instanceof AgentBuilderApiError)) {
-    return "Agent 设计服务暂时不可用，请稍后重试。";
+    return copy.unavailable;
   }
   if (error.code === "AGENT_BUILDER_CONFLICT") {
-    return "当前项目中已存在同名 Agent，请换一个名字。";
+    return copy.conflict;
   }
   if (error.code === "AGENT_BUILDER_FORBIDDEN") {
-    return "当前账号没有创建 Agent 的权限。";
+    return copy.forbidden;
   }
   if (error.code === "AGENT_BUILDER_NOT_FOUND") {
-    return "这个 Agent 设计会话不存在或已结束。";
+    return copy.notFound;
   }
   if (error.code === "AGENT_BUILDER_VALIDATION_FAILED") {
-    return "提交内容不符合要求，请检查后重试。";
+    return copy.validationFailed;
   }
   if (error.code === "AGENT_BUILDER_RESPONSE_INVALID") {
-    return "模型生成结果格式异常，请重试本次操作。";
+    return copy.invalidResponse;
   }
   if (error.code === "AGENT_BUILDER_NETWORK_ERROR") {
-    return "无法连接 Agent 设计服务，请检查网络后重试。";
+    return copy.network;
   }
-  return error.message || "Agent 设计服务暂时不可用，请稍后重试。";
+  return error.message || copy.unavailable;
 }
 
 export function AgentBuilderStartView({
@@ -61,6 +66,9 @@ export function AgentBuilderStartView({
   onNameChange: (value: string) => void;
   onSubmit: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.builder.start;
+
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     onSubmit();
@@ -73,16 +81,15 @@ export function AgentBuilderStartView({
           <BotIcon aria-hidden className="size-7" />
         </span>
         <h1 className="mt-5 text-2xl font-semibold tracking-tight">
-          给新 Agent 起个名字
+          {copy.title}
         </h1>
         <p className="text-muted-foreground mx-auto mt-2 max-w-md text-sm leading-6">
-          仅支持字母、数字和连字符，输入内容会自动转为小写（例如
-          code-reviewer）。
+          {copy.hint}
         </p>
 
         <form className="mt-8 space-y-3 text-left" onSubmit={submit}>
           <label className="sr-only" htmlFor="agent-builder-name">
-            Agent 名称
+            {copy.nameLabel}
           </label>
           <Input
             id="agent-builder-name"
@@ -100,7 +107,7 @@ export function AgentBuilderStartView({
                   : undefined
             }
             className="h-12 rounded-xl px-4 text-base"
-            placeholder="例如 code-reviewer"
+            placeholder={copy.placeholder}
             disabled={pending}
             onChange={(event) => onNameChange(event.target.value)}
           />
@@ -109,10 +116,7 @@ export function AgentBuilderStartView({
               id="agent-builder-name-preview"
               className="text-muted-foreground px-1 text-xs"
             >
-              将保存为{" "}
-              <span className="text-foreground font-mono">
-                {normalizedName}
-              </span>
+              {copy.savedAs(normalizedName)}
             </p>
           ) : null}
           {errorMessage ? (
@@ -132,7 +136,7 @@ export function AgentBuilderStartView({
             {pending ? (
               <Loader2Icon aria-hidden className="size-4 animate-spin" />
             ) : null}
-            {pending ? "正在创建…" : "继续"}
+            {pending ? copy.creating : copy.continue}
           </Button>
         </form>
       </section>
@@ -141,6 +145,7 @@ export function AgentBuilderStartView({
 }
 
 export function AgentBuilderStart() {
+  const { t } = useI18n();
   const { user } = useAuth();
   const project = useCurrentProject();
   const router = useRouter();
@@ -148,14 +153,24 @@ export function AgentBuilderStart() {
   const [submitted, setSubmitted] = useState(false);
   const [idempotency] = useState(() => createAgentBuilderIdempotencyRegistry());
   const normalizedName = useMemo(() => normalizeAgentBuilderSlug(name), [name]);
+  const localErrorCode =
+    submitted || name.length > 0
+      ? agentBuilderSlugErrorCode(normalizedName)
+      : null;
   const localError =
-    submitted || name.length > 0 ? agentBuilderSlugError(normalizedName) : null;
+    localErrorCode === "too-short"
+      ? t.agents.builder.start.nameTooShort
+      : localErrorCode === "too-long"
+        ? t.agents.builder.start.nameTooLong
+        : localErrorCode === "invalid"
+          ? t.agents.builder.start.nameInvalid
+          : null;
   const create = useCreateAgentBuilderSession(user?.id ?? "", project.id);
   const allowed = agentBuilderCanAuthor(project.capabilities);
 
   function submit() {
     setSubmitted(true);
-    if (!user || !allowed || agentBuilderSlugError(normalizedName)) return;
+    if (!user || !allowed || agentBuilderSlugErrorCode(normalizedName)) return;
     const signature = agentBuilderSemanticSignature({
       slug: normalizedName,
       display_name: normalizedName,
@@ -181,9 +196,11 @@ export function AgentBuilderStart() {
       normalizedName={normalizedName}
       errorMessage={
         !allowed
-          ? "当前账号没有创建 Agent 的权限。"
+          ? t.agents.builder.start.forbidden
           : (localError ??
-            (create.error ? agentBuilderErrorMessage(create.error) : null))
+            (create.error
+              ? agentBuilderErrorMessage(create.error, t.agents.builder.errors)
+              : null))
       }
       pending={create.isPending}
       onNameChange={(value) => {

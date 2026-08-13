@@ -13,8 +13,15 @@ from app.automations.dispatcher import (
 from app.automations.errors import (
     AutomationConcurrencyLimit,
     AutomationError,
+    AutomationUnavailable,
 )
 from app.automations.ownership import AutomationSchedulerOwnership
+from app.automations.system_policy import (
+    AutomationsPolicyPort,
+    AutomationsPolicyUnavailable,
+    current_automations_policy,
+)
+from app.system_runtime_settings import AutomationsPolicyValue
 
 logger = logging.getLogger(__name__)
 
@@ -33,13 +40,17 @@ class AutomationSchedulerService:
         max_concurrent_runs: int,
         ownership: AutomationSchedulerOwnership | None = None,
         clock: Callable[[], datetime] | None = None,
+        policy_reader: AutomationsPolicyPort | None = None,
     ) -> None:
         if type(max_concurrent_runs) is not int or max_concurrent_runs < 1:
             raise ValueError("max_concurrent_runs must be positive")
         self._occurrences = occurrences
         self._dispatcher = dispatcher
         self._reconciler = reconciler
-        self._max_concurrent_runs = max_concurrent_runs
+        self._fallback_policy = AutomationsPolicyValue(
+            max_concurrent_runs=max_concurrent_runs,
+        )
+        self._policy_reader = policy_reader
         self._ownership = ownership
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -62,13 +73,22 @@ class AutomationSchedulerService:
 
         cursor = None
         admitted: list[AutomationOccurrence] = []
+        try:
+            policy = await current_automations_policy(
+                session,
+                self._policy_reader,
+                fallback=self._fallback_policy,
+            )
+        except AutomationsPolicyUnavailable as error:
+            raise AutomationUnavailable("scheduler") from error
+        max_concurrent_runs = policy.max_concurrent_runs
         while True:
             if self._ownership is not None:
                 await self._ownership.verify()
             definitions = await self._occurrences.due_definitions_in_session(
                 session,
                 now=now,
-                limit=self._max_concurrent_runs,
+                limit=max_concurrent_runs,
                 after=cursor,
             )
             if not definitions:
@@ -96,7 +116,7 @@ class AutomationSchedulerService:
                     )
                 else:
                     admitted.append(result)
-            if len(definitions) < self._max_concurrent_runs:
+            if len(definitions) < max_concurrent_runs:
                 return tuple(admitted)
 
 

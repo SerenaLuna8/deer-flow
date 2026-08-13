@@ -231,12 +231,18 @@ function ProjectBrand() {
     <Link
       href="/workspace"
       aria-label="ActWeave 工作空间"
-      className="focus-visible:ring-ring inline-flex items-baseline gap-2 rounded-md focus-visible:ring-2 focus-visible:outline-none"
+      className="focus-visible:ring-ring inline-flex min-w-0 items-center gap-2 rounded-md focus-visible:ring-2 focus-visible:outline-none"
     >
-      <span className="text-primary font-serif text-xl leading-none">
+      <span
+        data-slot="project-brand-logo"
+        aria-hidden
+        className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-blue-50 dark:bg-blue-500/15"
+      >
+        <span className="size-5 bg-blue-600 mask-[url(/images/deer.svg)] mask-contain mask-center mask-no-repeat dark:bg-blue-300" />
+      </span>
+      <span className="text-primary truncate font-serif text-xl leading-none">
         ActWeave
       </span>
-      <span className="text-muted-foreground text-xs">项目空间</span>
     </Link>
   );
 }
@@ -342,15 +348,17 @@ function ProjectNavigationLinksContent({
           "focus-visible:ring-ring relative flex items-center rounded-lg text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full focus-visible:ring-2 focus-visible:outline-none",
           iconOnly ? "size-10 justify-center" : "gap-3 px-3 py-2",
           active
-            ? "bg-sidebar-accent text-sidebar-accent-foreground before:bg-selection"
-            : "hover:bg-sidebar-accent hover:text-sidebar-accent-foreground before:bg-transparent",
+            ? "bg-blue-50 text-blue-600 before:bg-blue-600 dark:bg-blue-500/15 dark:text-blue-300 dark:before:bg-blue-300"
+            : "text-muted-foreground before:bg-transparent hover:bg-blue-50 dark:hover:bg-blue-500/15",
         )}
       >
         <Icon
           aria-hidden
           className={cn(
             "size-4",
-            active ? "text-foreground" : "text-muted-foreground",
+            active
+              ? "text-blue-600 dark:text-blue-300"
+              : "text-muted-foreground",
           )}
         />
         {!iconOnly && visibleLabel}

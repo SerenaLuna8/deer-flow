@@ -60,6 +60,7 @@ _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
         "RABBITMQ_URL",
         "POSTGRES_URL",
         "POSTGRESQL_URL",
+        "POSTGRES_ADMIN_URL",
         "MYSQL_URL",
         "CLICKHOUSE_URL",
         "CONNECTION_STRING",

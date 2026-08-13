@@ -40,10 +40,11 @@ pnpm exec playwright test \
 The Playwright configuration requires a disposable PostgreSQL target. It must
 never point at the ordinary application or business database.
 
-## CI and limits
+## Manual gate and limits
 
-`.github/workflows/replay-e2e.yml` runs this one scenario when either side of
-the front/back contract changes and uploads the render artifacts.
+Run this scenario explicitly whenever either side of the front/back contract
+changes. Preserve the Playwright report or render artifacts with the private
+project's release evidence when they are needed for review.
 
 - It does not validate live model providers, external MCP services, Sandbox
   modes, browsers other than the configured Chromium, or deployment topology.

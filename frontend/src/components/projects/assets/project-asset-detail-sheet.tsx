@@ -13,6 +13,7 @@ import {
   versionWorkflowActions,
 } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
+import { AssetVersionDiff } from "@/components/assets/asset-version-diff";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -51,12 +52,14 @@ import {
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
+import { agentAuthoringBaseVersion } from "./agent-authoring-recovery";
 import {
   projectAssetCanCreateVersion,
   projectAssetCanDelete,
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
   projectAgentDeleteErrorMessage,
+  projectAgentVersionCanPublish,
   projectMcpDeleteErrorMessage,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
@@ -112,6 +115,23 @@ export function projectAssetDetailPreferredVersionId(
     versions[0]?.id ??
     ""
   );
+}
+
+export function projectAgentPreviousVersion(
+  versions: readonly AssetVersion[],
+  selectedVersion: AssetVersion | null,
+): AssetVersion | null {
+  if (!selectedVersion || !("agent_id" in selectedVersion)) {
+    return null;
+  }
+  const previous =
+    versions.find(
+      (version) =>
+        "agent_id" in version &&
+        version.agent_id === selectedVersion.agent_id &&
+        version.version_number === selectedVersion.version_number - 1,
+    ) ?? null;
+  return previous && "agent_id" in previous ? previous : null;
 }
 
 export function projectMcpEditableConfigurationEnabled(
@@ -268,7 +288,7 @@ export function effectiveAssetVersion(
   );
 }
 type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
-type VersionStatus = ReturnType<typeof workflowStatus>;
+type VersionStatus = ReturnType<typeof projectAssetVersionDisplayStatus>;
 
 export type ProjectSkillDeleteSnapshot = Readonly<{
   assetId: string;
@@ -375,7 +395,7 @@ function isMcpVersion(version: AssetVersion): version is McpVersion {
   return "mcp_server_id" in version;
 }
 
-function workflowStatus(
+export function projectAssetVersionDisplayStatus(
   version: AssetVersion,
 ):
   | "draft"
@@ -385,6 +405,12 @@ function workflowStatus(
   | "active"
   | "retired"
   | "revoked" {
+  if (
+    "governance_status" in version &&
+    version.governance_status === "revoked"
+  ) {
+    return "revoked";
+  }
   return "workflow_status" in version
     ? version.workflow_status
     : version.status;
@@ -578,6 +604,29 @@ export function ProjectSkillDetailActions({
   );
 }
 
+export function ProjectSystemSkillBindingAction({
+  visible,
+  disabled,
+  onManage,
+}: {
+  visible: boolean;
+  disabled: boolean;
+  onManage: () => void;
+}) {
+  if (!visible) return null;
+  return (
+    <Button
+      type="button"
+      variant="outline"
+      disabled={disabled}
+      title="在详情中管理项目使用的 System Skill 版本"
+      onClick={onManage}
+    >
+      管理项目版本
+    </Button>
+  );
+}
+
 export function ProjectMcpDangerZone({
   actionPending,
   canDelete,
@@ -628,10 +677,13 @@ export function ProjectAssetDetailSheet({
   kind,
   item,
   open,
+  canManageSystemSkillBinding = false,
   requestedVersionId,
   onOpenChange,
   onCreateVersion,
   onDeleted,
+  onDirtyChange,
+  onManageSystemSkillBinding,
   onVersionCreated,
   onRequestedVersionHandled,
   renderAssetEditor,
@@ -643,6 +695,7 @@ export function ProjectAssetDetailSheet({
   kind: MutableAssetKind;
   item: ProjectAssetItem;
   open: boolean;
+  canManageSystemSkillBinding?: boolean;
   requestedVersionId: string | null;
   onOpenChange: (open: boolean) => void;
   onCreateVersion: (
@@ -651,6 +704,8 @@ export function ProjectAssetDetailSheet({
     editableMcpConfiguration?: ProjectMcpEditableConfigurationResponse,
   ) => void;
   onDeleted: (assetId: string) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onManageSystemSkillBinding?: () => void;
   onVersionCreated: (assetId: string, versionId: string) => void;
   onRequestedVersionHandled: (assetId: string, versionId: string) => void;
   renderAssetEditor?: (
@@ -676,11 +731,7 @@ export function ProjectAssetDetailSheet({
   const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
   const revisionCopy = projectAssetDetailRevisionCopy(kind);
   const discardCopy = projectAssetDiscardCopy(kind);
-  const publish = usePublishProjectAssetVersion(
-    accountId,
-    projectId,
-    kind === "agents" ? null : kind,
-  );
+  const publish = usePublishProjectAssetVersion(accountId, projectId, kind);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
   const deleteSkill = useDeleteProjectSkill(accountId, projectId);
   const deleteAgent = useDeleteProjectAgent(accountId, projectId);
@@ -710,6 +761,13 @@ export function ProjectAssetDetailSheet({
   const [discardAction, setDiscardAction] = useState<
     { type: "close" } | { type: "version"; versionId: string } | null
   >(null);
+  const updateVersionDirty = useCallback(
+    (dirty: boolean) => {
+      setVersionDirty(dirty);
+      onDirtyChange?.(dirty);
+    },
+    [onDirtyChange],
+  );
 
   const versions = useMemo(() => history.data?.data ?? [], [history.data]);
   const mcpConfiguration =
@@ -726,6 +784,10 @@ export function ProjectAssetDetailSheet({
       : (versions.find((version) => version.id === selectedVersionId) ?? null);
   const selectedAgentVersion =
     selectedVersion && "agent_id" in selectedVersion ? selectedVersion : null;
+  const previousAgentVersion = projectAgentPreviousVersion(
+    versions,
+    selectedVersion,
+  );
   const editBaseVersion = projectAssetEditBaseVersion(
     kind,
     selectedVersion,
@@ -755,6 +817,16 @@ export function ProjectAssetDetailSheet({
     currentPublished,
     versions[0],
   );
+  const editorVersion =
+    kind === "agents"
+      ? agentAuthoringBaseVersion(
+          versions.filter(
+            (version): version is Extract<AssetVersion, { agent_id: string }> =>
+              "agent_id" in version,
+          ),
+          item.current_published_version_id,
+        )
+      : effectiveVersion;
 
   useEffect(() => {
     if (!open || versions.length === 0) return;
@@ -807,14 +879,21 @@ export function ProjectAssetDetailSheet({
   useEffect(() => {
     if (open) return;
     setSelectedVersionId("");
-    setVersionDirty(false);
+    updateVersionDirty(false);
     setVersionEditing(false);
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
     setMcpDeleteSnapshot(null);
     setAgentRestoreTarget(null);
     setDiscardAction(null);
-  }, [open]);
+  }, [open, updateVersionDirty]);
+
+  useEffect(
+    () => () => {
+      onDirtyChange?.(false);
+    },
+    [onDirtyChange],
+  );
 
   useEffect(() => {
     if (kind !== "agents") setVersionEditing(false);
@@ -822,6 +901,13 @@ export function ProjectAssetDetailSheet({
 
   const canAuthor =
     item.scope === "project" && projectAssetCanAuthor(item, kind);
+  const canPublishSelectedAgentVersion =
+    kind === "agents" &&
+    projectAgentVersionCanPublish(
+      item,
+      projectCapabilities,
+      selectedAgentVersion,
+    );
   const lifecycleActions =
     item.scope === "project"
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
@@ -838,7 +924,6 @@ export function ProjectAssetDetailSheet({
       : null;
   const versionActions = useMemo(() => {
     if (
-      kind === "agents" ||
       item.scope !== "project" ||
       !selectedVersion ||
       !("workflow_status" in selectedVersion)
@@ -870,12 +955,12 @@ export function ProjectAssetDetailSheet({
 
   const handleWorkbenchVersionCreated = useCallback(
     (versionId: string) => {
-      setVersionDirty(false);
+      updateVersionDirty(false);
       setVersionEditing(false);
       onVersionCreated(item.id, versionId);
       void history.refetch();
     },
-    [history, item.id, onVersionCreated],
+    [history, item.id, onVersionCreated, updateVersionDirty],
   );
 
   function publishSelectedVersion(version: AssetVersion) {
@@ -922,7 +1007,7 @@ export function ProjectAssetDetailSheet({
   function confirmDiscardNavigation() {
     const action = discardAction;
     setDiscardAction(null);
-    setVersionDirty(false);
+    updateVersionDirty(false);
     setVersionEditing(false);
     if (action?.type === "close") {
       onOpenChange(false);
@@ -1014,6 +1099,7 @@ export function ProjectAssetDetailSheet({
     <>
       <Sheet open={open} onOpenChange={requestOpenChange}>
         <SheetContent
+          closeLabel="关闭详情"
           className={`w-full gap-0 p-0 ${kind === "skills" || kind === "agents" ? "sm:max-w-[1080px]" : kind === "mcp-servers" ? "sm:max-w-[900px]" : "sm:max-w-[640px]"}`}
         >
           <ProjectAssetDetailHeader
@@ -1090,6 +1176,15 @@ export function ProjectAssetDetailSheet({
               ) : null}
 
               <div className="flex flex-wrap items-center gap-2">
+                <ProjectSystemSkillBindingAction
+                  visible={
+                    kind === "skills" &&
+                    item.scope === "system" &&
+                    canManageSystemSkillBinding
+                  }
+                  disabled={!onManageSystemSkillBinding}
+                  onManage={() => onManageSystemSkillBinding?.()}
+                />
                 {projectAssetCanCreateVersion(kind, canAuthor) && (
                   <Button
                     type="button"
@@ -1220,14 +1315,14 @@ export function ProjectAssetDetailSheet({
                   </div>
                 ) : (
                   <div className="border-border/70 border-t pt-5">
-                    {renderAssetEditor(effectiveVersion, {
+                    {renderAssetEditor(editorVersion, {
                       accountId,
                       projectId,
                       item,
                       canAuthor: canAuthor && !versionSelectionPending,
                       editing: versionEditing,
                       onEditingChange: setVersionEditing,
-                      onDirtyChange: setVersionDirty,
+                      onDirtyChange: updateVersionDirty,
                       onVersionCreated: handleWorkbenchVersionCreated,
                     })}
                   </div>
@@ -1256,7 +1351,11 @@ export function ProjectAssetDetailSheet({
                             {versions.map((version) => (
                               <option key={version.id} value={version.id}>
                                 {revisionCopy.label(version.version_number)} ·{" "}
-                                {VERSION_STATUS_LABEL[workflowStatus(version)]}
+                                {
+                                  VERSION_STATUS_LABEL[
+                                    projectAssetVersionDisplayStatus(version)
+                                  ]
+                                }
                               </option>
                             ))}
                           </select>
@@ -1303,7 +1402,9 @@ export function ProjectAssetDetailSheet({
                             {revisionCopy.label(selectedVersion.version_number)}
                           </span>
                           <AssetStatusBadge
-                            status={workflowStatus(selectedVersion)}
+                            status={projectAssetVersionDisplayStatus(
+                              selectedVersion,
+                            )}
                           />
                           <time className="text-muted-foreground ml-auto text-xs">
                             {new Date(
@@ -1351,7 +1452,9 @@ export function ProjectAssetDetailSheet({
                         versionActions.length > 0 && (
                           <div className="flex flex-wrap gap-2">
                             {versionActions.includes("publish") &&
-                              canAuthor && (
+                              (kind === "agents"
+                                ? canPublishSelectedAgentVersion
+                                : canAuthor) && (
                                 <Button
                                   type="button"
                                   size="sm"
@@ -1403,11 +1506,26 @@ export function ProjectAssetDetailSheet({
                             canAuthor: canAuthor && !versionSelectionPending,
                             editing: versionEditing,
                             onEditingChange: setVersionEditing,
-                            onDirtyChange: setVersionDirty,
+                            onDirtyChange: updateVersionDirty,
                             onVersionCreated: handleWorkbenchVersionCreated,
                           },
                         )}
                       </div>
+
+                      {selectedAgentVersion && previousAgentVersion ? (
+                        <details className="border-border/70 rounded-xl border px-4 py-3">
+                          <summary className="cursor-pointer text-sm font-medium">
+                            与前一版本比较
+                          </summary>
+                          <div className="mt-3 max-h-[32rem] overflow-auto">
+                            <AssetVersionDiff
+                              previous={previousAgentVersion}
+                              current={selectedAgentVersion}
+                              includeAgentDocuments
+                            />
+                          </div>
+                        </details>
+                      ) : null}
 
                       <details className="border-border/70 rounded-xl border px-4 py-3">
                         <summary className="cursor-pointer text-sm font-medium">
@@ -1527,7 +1645,7 @@ export function ProjectAssetDetailSheet({
             <DialogTitle>恢复这个 Agent 版本？</DialogTitle>
             <DialogDescription>
               将复制版本 {agentRestoreTarget?.version_number ?? "-"}
-              的全部设定与工具绑定，并发布为新的最新版本。现有版本记录不会被覆盖或删除。
+              的全部设定与工具绑定，并创建一个新草稿。管理员发布前不会影响当前运行版本；现有版本记录不会被覆盖或删除。
             </DialogDescription>
           </DialogHeader>
           {restoreAgentVersion.error ? (
@@ -1550,7 +1668,7 @@ export function ProjectAssetDetailSheet({
               disabled={restoreAgentVersion.isPending}
               onClick={() => void confirmAgentVersionRestore()}
             >
-              {restoreAgentVersion.isPending ? "恢复中…" : "确认并发布新版本"}
+              {restoreAgentVersion.isPending ? "恢复中…" : "确认创建新草稿"}
             </Button>
           </DialogFooter>
         </DialogContent>

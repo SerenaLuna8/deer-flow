@@ -5,8 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import re
-import unicodedata
 from dataclasses import dataclass
 from importlib import resources
 from typing import Protocol
@@ -14,36 +12,29 @@ from typing import Protocol
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 
-MAX_MEMORY_DOCUMENT_CHARS = 16_000
+from deerflow.memory_contract.document import (
+    DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
+    EMPTY_MEMORY_DOCUMENT,
+    MAX_MEMORY_DOCUMENT_CHARS,
+    MEMORY_DOCUMENT_SECTIONS,
+    MemoryDocumentInvalid,
+    MemoryDocumentOverBudget,
+    estimate_memory_tokens,
+    render_empty_memory_document,
+    target_memory_character_limit,
+    target_memory_token_limit,
+    validate_memory_document,
+    validate_memory_document_sections,
+    validate_memory_document_structure,
+)
+from deerflow.memory_contract.dream import DREAM_PROMPT_VERSION
+
 MAX_DREAM_HISTORY_ITEMS = 20
 MAX_DREAM_HISTORY_CHARS = 1_000
-DREAM_PROMPT_VERSION = "dream-prompt-v4"
 DEFAULT_DREAM_TIMEOUT_SECONDS = 120.0
 DEFAULT_DREAM_MAX_ROUNDS = 8
 
-DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES = (
-    "用户偏好与协作方式",
-    "项目背景",
-    "长期约束与架构决策",
-    "当前仍有效的目标",
-)
-MEMORY_DOCUMENT_SECTIONS = tuple(f"# {title}" for title in DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES)
-EMPTY_MEMORY_DOCUMENT = "\n\n".join(MEMORY_DOCUMENT_SECTIONS)
-MAX_MEMORY_DOCUMENT_SECTIONS = 8
-MIN_MEMORY_DOCUMENT_SECTIONS = 2
-MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS = 80
 _DREAM_SECTIONS_PLACEHOLDER = "{{MEMORY_DOCUMENT_SECTIONS}}"
-
-_CJK_RANGES = (
-    ("\u3400", "\u4dbf"),
-    ("\u4e00", "\u9fff"),
-    ("\u3040", "\u30ff"),
-    ("\uac00", "\ud7a3"),
-)
-_FORBIDDEN_HISTORY_MARKER = re.compile(
-    r"\[H:\d+\]|\[(?:skip|correction|permanent|durable|ephemeral)\]",
-    re.IGNORECASE,
-)
 
 
 def _load_prompt_template() -> str:
@@ -56,43 +47,6 @@ if DREAM_PROMPT_TEMPLATE.count(_DREAM_SECTIONS_PLACEHOLDER) != 1:
 logger = logging.getLogger(__name__)
 
 
-class MemoryDocumentInvalid(ValueError):
-    """The complete Dream document does not satisfy the fixed contract."""
-
-
-class MemoryDocumentOverBudget(MemoryDocumentInvalid):
-    """The complete Dream document exceeds its frozen token budget."""
-
-    def __init__(
-        self,
-        *,
-        estimated_tokens: int,
-        limit_tokens: int,
-        target_tokens: int,
-        actual_characters: int,
-        target_characters: int,
-    ) -> None:
-        self.estimated_tokens = estimated_tokens
-        self.limit_tokens = limit_tokens
-        self.target_tokens = target_tokens
-        self.actual_characters = actual_characters
-        self.target_characters = target_characters
-        self.overage_tokens = estimated_tokens - limit_tokens
-        self.reduction_tokens = estimated_tokens - target_tokens
-        self.reduction_characters = actual_characters - target_characters
-        character_guidance = f" Document chars {actual_characters}, target-character-limit {target_characters}"
-        if self.reduction_characters > 0:
-            character_guidance += f"; remove at least {self.reduction_characters} characters before retrying"
-        super().__init__(
-            "Memory document exceeds the token budget "
-            f"(estimated {estimated_tokens}, limit {limit_tokens}, "
-            f"overage {self.overage_tokens}). Target <= {target_tokens} estimated "
-            "tokens (90% of limit); remove at least "
-            f"{self.reduction_tokens} estimated tokens before retrying."
-            f"{character_guidance}"
-        )
-
-
 class MemoryDreamError(RuntimeError):
     """Stable Dream execution failure."""
 
@@ -101,38 +55,8 @@ class MemoryDreamError(RuntimeError):
         super().__init__(code)
 
 
-def validate_memory_document_sections(sections: object) -> tuple[str, ...]:
-    """Validate one immutable ordered list of plain section titles."""
-
-    if not isinstance(sections, (tuple, list)) or not MIN_MEMORY_DOCUMENT_SECTIONS <= len(sections) <= MAX_MEMORY_DOCUMENT_SECTIONS:
-        raise MemoryDocumentInvalid("Memory document sections are invalid")
-    validated: list[str] = []
-    for title in sections:
-        if (
-            not isinstance(title, str)
-            or title != title.strip()
-            or not title
-            or len(title) > MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS
-            or title.startswith("#")
-            or len(title.splitlines()) != 1
-            or any((category := unicodedata.category(character)).startswith("C") or category in {"Zl", "Zp"} for character in title)
-            or _FORBIDDEN_HISTORY_MARKER.search(title) is not None
-        ):
-            raise MemoryDocumentInvalid("Memory document sections are invalid")
-        validated.append(title)
-    if len(validated) != len(set(validated)):
-        raise MemoryDocumentInvalid("Memory document sections are invalid")
-    return tuple(validated)
-
-
 def _render_section_headings(sections: object, *, separator: str) -> str:
     return separator.join(f"# {title}" for title in validate_memory_document_sections(sections))
-
-
-def render_empty_memory_document(sections: object) -> str:
-    """Render the empty complete document for one frozen section contract."""
-
-    return _render_section_headings(sections, separator="\n\n")
 
 
 def render_dream_prompt(sections: object) -> str:
@@ -147,65 +71,12 @@ def render_dream_prompt(sections: object) -> str:
 DREAM_PROMPT = render_dream_prompt(DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES)
 
 
-def estimate_memory_tokens(content: str) -> int:
-    """Return a deterministic, offline and conservative token estimate."""
-
-    if not isinstance(content, str):
-        raise TypeError("Memory document must be text")
-    cjk = sum(1 for character in content if any(start <= character <= end for start, end in _CJK_RANGES))
-    non_cjk = len(content) - cjk
-    return cjk + ((non_cjk + 3) // 4)
-
-
-def _validate_memory_document_structure(
-    content: str,
-    *,
-    sections: object = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
-) -> str:
-    if not isinstance(content, str):
-        raise MemoryDocumentInvalid("Memory document must be text")
-    if not content or len(content) > MAX_MEMORY_DOCUMENT_CHARS:
-        raise MemoryDocumentInvalid("Memory document exceeds the character contract")
-    headings = tuple(f"# {title}" for title in validate_memory_document_sections(sections))
-    top_level = tuple(line for line in content.splitlines() if line.startswith("# "))
-    if top_level != headings:
-        raise MemoryDocumentInvalid("Memory document sections are invalid")
-    if _FORBIDDEN_HISTORY_MARKER.search(content) is not None:
-        raise MemoryDocumentInvalid("Memory document contains a history marker")
-    return content
-
-
-def validate_memory_document(
-    content: str,
-    max_tokens: int,
-    *,
-    sections: object = DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
-) -> str:
-    """Validate a complete Memory document without normalizing or truncating it."""
-
-    if type(max_tokens) is not int or max_tokens < 1:
-        raise ValueError("Memory token budget must be positive")
-    _validate_memory_document_structure(content, sections=sections)
-    estimated_tokens = estimate_memory_tokens(content)
-    if estimated_tokens > max_tokens:
-        target_tokens = _target_token_limit(max_tokens)
-        target_characters = _target_character_limit(max_tokens)
-        raise MemoryDocumentOverBudget(
-            estimated_tokens=estimated_tokens,
-            limit_tokens=max_tokens,
-            target_tokens=target_tokens,
-            actual_characters=len(content),
-            target_characters=target_characters,
-        )
-    return content
-
-
 def _target_token_limit(max_tokens: int) -> int:
-    return (max_tokens * 9) // 10
+    return target_memory_token_limit(max_tokens)
 
 
 def _target_character_limit(max_tokens: int) -> int:
-    return min(MAX_MEMORY_DOCUMENT_CHARS, _target_token_limit(max_tokens))
+    return target_memory_character_limit(max_tokens)
 
 
 def _revision_instruction(
@@ -286,7 +157,10 @@ class MemoryDreamInput:
             raise ValueError("Memory token budget must be positive")
         validated_sections = validate_memory_document_sections(self.sections)
         object.__setattr__(self, "sections", validated_sections)
-        _validate_memory_document_structure(self.document, sections=validated_sections)
+        validate_memory_document_structure(
+            self.document,
+            sections=validated_sections,
+        )
 
 
 @dataclass(frozen=True, slots=True)

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
 from app.personalization.repository import AccountMemoryPreference
+from app.system_runtime_settings.errors import SystemRuntimePolicyUnavailable
 from app.system_runtime_settings.models import AgentRuntimePolicyValue, MemoryPolicy
 from app.worker.memory_dream import MemoryDreamJobHandler
-from app.worker.service import JobSettlement
+from app.worker.service import JobSettlement, LeaseLost
 from deerflow.agents.memory.dream import (
     DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
     DREAM_PROMPT_VERSION,
@@ -18,33 +20,50 @@ from deerflow.agents.memory.dream import (
     MemoryDreamError,
     MemoryDreamResult,
     render_empty_memory_document,
+    validate_memory_document,
 )
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamHistoryRecord,
+    MemoryDreamLeaseConflict,
+    MemoryDreamReleaseResult,
+    MemoryDreamSettlementInvariant,
+    MemoryDreamStaleConflict,
     MemoryDreamWork,
     compute_dream_history_digest,
+    memory_document_diff_preview,
     memory_document_digest,
     memory_document_unified_diff,
 )
 
 
 class _Transaction:
-    def __init__(self, factory: _SessionFactory) -> None:
-        self.factory = factory
+    def __init__(self, session: _Session) -> None:
+        self.session = session
+        self.rollback_callbacks: list[Callable[[], None]] = []
 
     async def __aenter__(self):
-        self.factory.active += 1
+        self.session.factory.active += 1
+        self.session.transactions.append(self)
         return self
 
-    async def __aexit__(self, *_args):
-        self.factory.active -= 1
+    async def __aexit__(self, exc_type, *_args):
+        transaction = self.session.transactions.pop()
+        assert transaction is self
+        self.session.factory.transaction_exits.append(exc_type)
+        if exc_type is not None:
+            for callback in reversed(self.rollback_callbacks):
+                callback()
+        elif self.session.transactions:
+            self.session.transactions[-1].rollback_callbacks.extend(self.rollback_callbacks)
+        self.session.factory.active -= 1
         return False
 
 
 class _Session:
     def __init__(self, factory: _SessionFactory) -> None:
         self.factory = factory
+        self.transactions: list[_Transaction] = []
 
     async def __aenter__(self):
         return self
@@ -53,16 +72,21 @@ class _Session:
         return False
 
     def begin(self) -> _Transaction:
-        return _Transaction(self.factory)
+        return _Transaction(self)
 
     def begin_nested(self) -> _Transaction:
-        return _Transaction(self.factory)
+        return _Transaction(self)
+
+    def on_rollback(self, callback: Callable[[], None]) -> None:
+        assert self.transactions
+        self.transactions[-1].rollback_callbacks.append(callback)
 
 
 class _SessionFactory:
     def __init__(self) -> None:
         self.active = 0
         self.opened = 0
+        self.transaction_exits: list[type[BaseException] | None] = []
 
     def __call__(self) -> _Session:
         self.opened += 1
@@ -102,11 +126,15 @@ class _CurrentModelRepository:
         work: MemoryDreamWork,
         *,
         version_id: uuid.UUID | None = None,
+        error: Exception | None = None,
     ) -> None:
         self.work = work
         self.version_id = version_id or work.model_version_id
+        self.error = error
 
     async def resolve_active_model(self, model_ref, *, load_envelope: bool):
+        if self.error is not None:
+            raise self.error
         assert model_ref == "dream-model"
         assert load_envelope is False
         return SimpleNamespace(
@@ -124,9 +152,11 @@ class _PolicyMaterializer:
         policy: AgentRuntimePolicyValue,
         *,
         current_revision: int = 17,
+        current_error: Exception | None = None,
     ) -> None:
         self.policy = policy
         self.current_revision = current_revision
+        self.current_error = current_error
         self.revisions: list[int] = []
 
     async def materialize_revision(self, _section, revision: int):
@@ -138,6 +168,8 @@ class _PolicyMaterializer:
         *_args,
         **_kwargs,
     ):
+        if self.current_error is not None:
+            raise self.current_error
         return self.policy, self.current_revision
 
 
@@ -146,22 +178,62 @@ class _RepositoryState:
         self.work = work
         self.finalized: list[dict[str, object]] = []
         self.released: list[dict[str, object]] = []
+        self.needs_review = False
+        self.finalize_error: Exception | None = None
+        self.release_error: Exception | None = None
+        self.release_result: MemoryDreamReleaseResult | None = None
 
 
 class _Repository:
-    def __init__(self, state: _RepositoryState) -> None:
+    def __init__(self, state: _RepositoryState, *, session: _Session) -> None:
         self.state = state
+        self.session = session
 
     async def load_dream_work(self, _scope, _job_id):
         return self.state.work
 
     async def finalize_dream(self, _scope, **kwargs):
+        if self.state.finalize_error is not None:
+            raise self.state.finalize_error
         self.state.finalized.append(kwargs)
-        return SimpleNamespace(version=1, needs_review=False)
+        self.session.on_rollback(lambda: self.state.finalized.remove(kwargs))
+        return SimpleNamespace(
+            version=1,
+            needs_review=self.state.needs_review,
+        )
 
     async def release_dream(self, _scope, **kwargs):
+        if self.state.release_error is not None:
+            raise self.state.release_error
         self.state.released.append(kwargs)
-        return True
+        self.session.on_rollback(lambda: self.state.released.remove(kwargs))
+        if self.state.release_result is not None:
+            return self.state.release_result
+        disposition = "cancelled" if kwargs["cancelled"] else ("retry_wait" if kwargs.get("retryable", True) else "dead")
+        return MemoryDreamReleaseResult(disposition=disposition)
+
+
+class _Audit:
+    def __init__(
+        self,
+        *,
+        error: Exception | None = None,
+        settled_error: Exception | None = None,
+    ) -> None:
+        self.error = error
+        self.settled_error = settled_error
+        self.calls: list[dict[str, object]] = []
+        self.settled_calls: list[dict[str, object]] = []
+
+    async def memory_dream_review_flagged(self, _session, **kwargs) -> None:
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+
+    async def memory_dream_settled(self, _session, **kwargs) -> None:
+        self.settled_calls.append(kwargs)
+        if self.settled_error is not None:
+            raise self.settled_error
 
 
 class _Runner:
@@ -250,6 +322,9 @@ def _handler(
     preference: AccountMemoryPreference | None = None,
     current_policy_revision: int = 17,
     current_model_version_id: uuid.UUID | None = None,
+    current_policy_error: Exception | None = None,
+    current_model_error: Exception | None = None,
+    audit: _Audit | None = None,
 ):
     policy = AgentRuntimePolicyValue(
         memory=MemoryPolicy(
@@ -268,16 +343,22 @@ def _handler(
             runtime_policy_materializer=_PolicyMaterializer(
                 policy,
                 current_revision=current_policy_revision,
+                current_error=current_policy_error,
             ),
             runner_factory=lambda _model: runner,
-            repository_builder=lambda _session, **_kwargs: _Repository(state),
+            repository_builder=lambda session, **_kwargs: _Repository(
+                state,
+                session=session,
+            ),
             job_repository_builder=lambda _session: object(),
             model_repository_builder=lambda _session: _CurrentModelRepository(
                 state.work,
                 version_id=current_model_version_id,
+                error=current_model_error,
             ),
             scope_validator=lambda *_args, **_kwargs: _async_true(),
             personalization_repository_builder=lambda _session: _Personalization(preference or AccountMemoryPreference(True, 6)),
+            audit=audit,
         ),
         materializer,
     )
@@ -323,6 +404,121 @@ async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() ->
     assert state.finalized[0]["expected_sections"] == DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
     assert runner.inputs[0].sections == DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES
     assert not state.released
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_audits_published_version_in_finalize_transaction() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    audit = _Audit()
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        audit=audit,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+    await settlement.commit()
+
+    assert audit.settled_calls == [
+        {
+            "project_id": state.work.project_id,
+            "job_id": _claim().job_id,
+            "request_id": "memory-dream-worker",
+            "disposition": "published",
+            "version": 1,
+        }
+    ]
+    assert len(state.finalized) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("cancelled", "retryable", "expected_disposition"),
+    (
+        (True, True, "cancelled"),
+        (False, True, None),
+        (False, False, "dead"),
+    ),
+)
+async def test_dream_worker_audits_only_terminal_typed_release_results(
+    cancelled: bool,
+    retryable: bool,
+    expected_disposition: str | None,
+) -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    audit = _Audit()
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        audit=audit,
+    )
+    settlement = handler._release_settlement(
+        _claim(),
+        cancelled=cancelled,
+        public_error_code="MEMORY_DREAM_TEST_FAILED",
+        retryable=retryable,
+    )
+
+    await settlement.commit()
+
+    if expected_disposition is None:
+        assert audit.settled_calls == []
+        assert state.released[0]["retryable"] is True
+    else:
+        assert len(audit.settled_calls) == 1
+        audited = audit.settled_calls[0]
+        assert audited["disposition"] == expected_disposition
+        assert audited["version"] is None
+        assert audited["public_error_code"] == (None if expected_disposition == "cancelled" else "MEMORY_DREAM_TEST_FAILED")
+
+
+@pytest.mark.asyncio
+async def test_dream_worker_does_not_duplicate_already_published_audit() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.release_result = MemoryDreamReleaseResult(
+        disposition="already_published",
+    )
+    audit = _Audit()
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        audit=audit,
+    )
+
+    await handler._release_settlement(
+        _claim(),
+        cancelled=False,
+    ).commit()
+
+    assert audit.settled_calls == []
 
 
 @pytest.mark.asyncio
@@ -505,6 +701,338 @@ async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> N
 
 
 @pytest.mark.asyncio
+async def test_success_commit_policy_unavailable_rolls_back_then_retries() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        current_policy_error=SystemRuntimePolicyUnavailable(),
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_POLICY_UNAVAILABLE"
+    assert factory.opened == 3
+    assert factory.transaction_exits[0] is None
+    assert factory.transaction_exits[1] is not None
+    assert factory.transaction_exits[2] is None
+
+
+@pytest.mark.asyncio
+async def test_success_commit_model_lookup_failure_rolls_back_then_retries() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        current_model_error=RuntimeError("model catalog unavailable"),
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_MODEL_UNAVAILABLE"
+    assert factory.opened == 3
+    assert factory.transaction_exits[1] is not None
+    assert factory.transaction_exits[2] is None
+
+
+@pytest.mark.asyncio
+async def test_success_commit_audit_failure_rolls_back_version_then_retries() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.needs_review = True
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    audit = _Audit(error=RuntimeError("audit storage unavailable"))
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        audit=audit,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(audit.calls) == 1
+    assert len(audit.settled_calls) == 1
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_AUDIT_UNAVAILABLE"
+    assert factory.opened == 3
+    assert factory.transaction_exits[1] is not None
+    assert factory.transaction_exits[2] is None
+
+
+@pytest.mark.asyncio
+async def test_published_lifecycle_audit_failure_rolls_back_then_retries() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    audit = _Audit(
+        settled_error=RuntimeError("audit storage unavailable"),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+        audit=audit,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(audit.settled_calls) == 1
+    assert len(state.released) == 1
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_AUDIT_UNAVAILABLE"
+    assert state.released[0]["retryable"] is True
+
+
+@pytest.mark.asyncio
+async def test_success_commit_invariant_conflict_rolls_back_then_dies() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.finalize_error = MemoryDreamSettlementInvariant(
+        "settlement contract is impossible",
+    )
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_SETTLEMENT_INVARIANT"
+    assert state.released[0]["retryable"] is False
+    assert factory.opened == 3
+
+
+@pytest.mark.asyncio
+async def test_success_commit_stale_conflict_rolls_back_then_cancels() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.finalize_error = MemoryDreamStaleConflict("frozen document changed")
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    await settlement.commit()
+
+    assert not state.finalized
+    assert len(state.released) == 1
+    assert state.released[0]["cancelled"] is True
+    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_STALE"
+    assert state.released[0]["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_success_commit_lease_conflict_does_not_retry() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.finalize_error = MemoryDreamLeaseConflict("lease changed")
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+    assert isinstance(settlement, JobSettlement)
+
+    with pytest.raises(LeaseLost):
+        await settlement.commit()
+
+    assert not state.finalized
+    assert not state.released
+    assert factory.opened == 2
+
+
+@pytest.mark.asyncio
+async def test_release_settlement_maps_only_lease_conflict_to_lease_lost() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    state.release_error = MemoryDreamLeaseConflict("lease changed")
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+    settlement = handler._release_settlement(
+        _claim(),
+        cancelled=False,
+    )
+
+    with pytest.raises(LeaseLost):
+        await settlement.commit()
+
+
+@pytest.mark.asyncio
+async def test_release_settlement_preserves_invariant_conflict() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    conflict = MemoryDreamSettlementInvariant("terminal state invalid")
+    state.release_error = conflict
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+    settlement = handler._release_settlement(
+        _claim(),
+        cancelled=False,
+    )
+
+    with pytest.raises(MemoryDreamSettlementInvariant):
+        await settlement.commit()
+    # The first invariant rolls back, then one fresh non-retryable release is
+    # attempted.  A repeated invariant is preserved for operators.
+    assert factory.opened == 2
+
+
+@pytest.mark.asyncio
+async def test_release_settlement_locks_scope_before_memory_release() -> None:
+    events: list[str] = []
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+
+    async def scope_validator(*_args, **kwargs):
+        assert kwargs["lock"] is True
+        events.append("scope")
+        return True
+
+    class Repository(_Repository):
+        async def release_dream(self, scope, **kwargs):
+            events.append("release")
+            return await super().release_dream(scope, **kwargs)
+
+    handler = MemoryDreamJobHandler(
+        factory,
+        app_config=None,
+        runner_factory=lambda _model: object(),
+        repository_builder=lambda session, **_kwargs: Repository(
+            state,
+            session=session,
+        ),
+        job_repository_builder=lambda _session: object(),
+        scope_validator=scope_validator,
+    )
+
+    settlement = handler._release_settlement(
+        _claim(),
+        cancelled=False,
+    )
+    await settlement.commit()
+
+    assert events == ["scope", "release"]
+
+
+def test_dream_worker_rejects_partial_audit_port() -> None:
+    class ReviewOnlyAudit:
+        async def memory_dream_review_flagged(self, *_args, **_kwargs):
+            return None
+
+    with pytest.raises(ValueError, match="Dream Worker audit port is invalid"):
+        MemoryDreamJobHandler(
+            _SessionFactory(),
+            app_config=None,
+            runner_factory=lambda _model: object(),
+            audit=ReviewOnlyAudit(),
+        )
+
+
+@pytest.mark.asyncio
 async def test_success_settlement_uses_global_memory_lock_order() -> None:
     events: list[str] = []
     factory = _SessionFactory()
@@ -558,7 +1086,10 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
         app_config=None,
         runner_factory=lambda _model: object(),
         runtime_policy_materializer=PolicyMaterializer(policy),
-        repository_builder=lambda _session, **_kwargs: Repository(state),
+        repository_builder=lambda session, **_kwargs: Repository(
+            state,
+            session=session,
+        ),
         job_repository_builder=lambda _session: object(),
         model_repository_builder=lambda _session: Models(work),
         scope_validator=scope_validator,
@@ -663,3 +1194,53 @@ def test_server_diff_is_empty_for_no_change_and_real_for_replacement() -> None:
     assert "--- memory-before.md" in diff
     assert "+++ memory-after.md" in diff
     assert "+- ActWeave" in diff
+
+
+def test_memory_document_diff_preview_is_line_safe_and_bounded() -> None:
+    oversized = "--- memory-before.md\n+++ memory-after.md\n" + ("+" + "x" * 100 + "\n") * 700
+
+    preview, truncated = memory_document_diff_preview(oversized)
+
+    assert truncated is True
+    assert len(preview) <= 64_000
+    assert preview.endswith("\n")
+    assert oversized.startswith(preview)
+    assert memory_document_diff_preview("@@ -1 +1 @@\n-old\n+new\n") == (
+        "@@ -1 +1 @@\n-old\n+new\n",
+        False,
+    )
+
+
+def test_memory_document_diff_preview_uses_versioned_unicode_length() -> None:
+    astral_diff = "😀\n" * 22_000
+
+    preview, truncated = memory_document_diff_preview(astral_diff)
+    legacy_preview, legacy_truncated = memory_document_diff_preview(
+        astral_diff,
+        legacy_utf16=True,
+    )
+
+    assert len(astral_diff) == 44_000
+    assert len(astral_diff.encode("utf-16-le")) // 2 == 66_000
+    assert (preview, truncated) == (astral_diff, False)
+    assert legacy_truncated is True
+    assert len(legacy_preview.encode("utf-16-le")) // 2 <= 64_000
+    assert legacy_preview.endswith("\n")
+
+
+def test_valid_memory_documents_can_generate_a_diff_over_public_limit() -> None:
+    sections = ("A", "B")
+    empty = render_empty_memory_document(sections)
+    padding = "\n" * (15_995 - len(empty))
+    before = padding + empty
+    after = empty.replace("# B", padding + "# B")
+
+    validate_memory_document(before, 8_000, sections=sections)
+    validate_memory_document(after, 8_000, sections=sections)
+    unified_diff = memory_document_unified_diff(before, after)
+    preview, truncated = memory_document_diff_preview(unified_diff)
+
+    assert len(before) == len(after) == 15_995
+    assert len(unified_diff) > 64_000
+    assert truncated is True
+    assert len(preview) <= 64_000

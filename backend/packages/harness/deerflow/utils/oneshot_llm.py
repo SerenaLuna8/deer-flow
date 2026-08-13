@@ -38,6 +38,8 @@ async def run_oneshot_llm(
     run_name: str,
     app_config: AppConfig,
     model_name: str | None = None,
+    thinking_enabled: bool = False,
+    reasoning_effort: str | None = None,
     thread_id: str | None = None,
     attach_tracing: bool = True,
     model_overrides: Mapping[str, object] | None = None,
@@ -50,6 +52,9 @@ async def run_oneshot_llm(
         run_name: LangChain ``run_name`` and Langfuse ``assistant_id`` for the call.
         app_config: Application config used to build the model.
         model_name: Optional model override; ``None`` uses the default model.
+        thinking_enabled: Enable the model's extended-thinking mode when supported.
+        reasoning_effort: Optional explicit reasoning effort; the shared model
+            factory drops it when the selected model does not support it.
         thread_id: Optional thread id, forwarded to Langfuse for tracing only.
         attach_tracing: Attach configured tracing callbacks to the model. Sensitive
             auxiliary calls can disable this so prompt bodies are not exported to
@@ -60,12 +65,16 @@ async def run_oneshot_llm(
     Returns:
         The extracted plain-text content of the model response (uncleaned).
     """
+    factory_kwargs: dict = {}
+    if reasoning_effort is not None:
+        factory_kwargs["reasoning_effort"] = reasoning_effort
     model = create_chat_model(
         name=model_name,
-        thinking_enabled=False,
+        thinking_enabled=thinking_enabled,
         app_config=app_config,
         attach_tracing=attach_tracing,
         model_overrides=model_overrides,
+        **factory_kwargs,
     )
     invoke_config: dict = {"run_name": run_name}
     if attach_tracing:

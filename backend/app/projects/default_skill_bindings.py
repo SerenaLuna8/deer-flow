@@ -38,6 +38,7 @@ async def seed_new_project_system_skill_bindings(
             SkillRow.current_published_version_id.is_not(None),
             SkillVersionRow.skill_id == SkillRow.id,
             SkillVersionRow.workflow_status == "published",
+            SkillVersionRow.revoked_at.is_(None),
         )
         .order_by(SkillRow.id)
         .with_for_update(read=True, of=[SkillRow, SkillVersionRow])

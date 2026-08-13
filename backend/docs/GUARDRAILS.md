@@ -302,7 +302,7 @@ class ContextAwareGuardrailProvider:
     async def aevaluate(self, request):
         # ``_decide`` is in-memory policy work; the audit write is blocking
         # file I/O, so offload it off the event loop with ``asyncio.to_thread``
-        # (ActWeave enforces a blocking-IO gate in CI). If your policy
+        # (ActWeave's local static gate checks blocking I/O). If your policy
         # evaluation itself does blocking I/O — external policy service, file
         # read per call — move that behind ``asyncio.to_thread`` too, or
         # implement a native async evaluator and await it here.

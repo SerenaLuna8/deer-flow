@@ -1,4 +1,4 @@
-"""U1 迁移链契约：链 pinning、基线冻结、full_schema 与 基线+链 的 catalog 等价。
+"""迁移链契约：链 pinning、基线冻结、full_schema 与 基线+链 的 catalog 等价。
 
 CI 等价契约（D1）：空库新装走 ``full_schema.sql``，存量库升级走 冻结基线快照 +
 ``alembic upgrade head``；两条路径产出的 catalog signature 必须完全相等，谁漂移
@@ -168,7 +168,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_schema(engine)
-        _pretend_head_is(monkeypatch, "full_schema_v9_drill")
+        _pretend_head_is(monkeypatch, "full_schema_v16_drill")
 
         async with engine.connect() as connection:
             assert await classify_database(connection) == "behind"
@@ -176,7 +176,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
         with pytest.raises(SchemaUpgradeRequired) as validate_error:
             await validate_schema(engine)
         assert "make upgrade-db" in str(validate_error.value)
-        assert "full_schema_v9" in str(validate_error.value)
+        assert "full_schema_v16" in str(validate_error.value)
 
         # Setup never migrates a behind database (D3).
         with pytest.raises(SchemaUpgradeRequired):
@@ -206,6 +206,61 @@ async def test_upgrade_runner_is_a_noop_on_a_current_database(
     assert result.applied is False
     assert result.from_revision == CURRENT_SCHEMA_REVISION
     assert result.to_revision == CURRENT_SCHEMA_REVISION
+
+
+@pytest.mark.asyncio
+async def test_v16_upgrades_the_legacy_v15_direct_dependency_constraint(
+    postgres_database_url: str,
+) -> None:
+    """The released v16 repairs the historical direct v15 constraint spelling."""
+
+    engine = create_async_engine(postgres_database_url, poolclass=NullPool)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(text("ALTER TABLE skill_design_sessions DROP CONSTRAINT ck_skill_design_sessions_authoring_dependencies"))
+            await connection.execute(
+                text(
+                    "ALTER TABLE skill_design_sessions ADD CONSTRAINT "
+                    "ck_skill_design_sessions_authoring_dependencies CHECK ("
+                    "authoring_dependencies_json IS NULL OR ("
+                    "jsonb_typeof(authoring_dependencies_json) = 'object' AND "
+                    "authoring_dependencies_json ->> 'version' = '1' AND "
+                    "(authoring_dependencies_json ->> 'draft_checksum') "
+                    "~ '^[0-9a-f]{64}$' AND "
+                    "jsonb_typeof(authoring_dependencies_json -> 'requirements') "
+                    "= 'array' AND "
+                    "jsonb_array_length(authoring_dependencies_json -> 'requirements') "
+                    "<= 64))"
+                )
+            )
+            await connection.execute(text("UPDATE alembic_version SET version_num = 'full_schema_v15'"))
+
+        async with engine.connect() as connection:
+            definition = str(await connection.scalar(text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'skill_design_sessions'::regclass AND conname = 'ck_skill_design_sessions_authoring_dependencies'")))
+            assert "CASE" not in definition
+            assert await classify_database(connection) == "behind"
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    assert result.applied is True
+    assert result.from_revision == "full_schema_v15"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION == "full_schema_v17"
+
+    upgraded_engine = create_async_engine(
+        postgres_database_url,
+        poolclass=NullPool,
+    )
+    try:
+        async with upgraded_engine.connect() as connection:
+            definition = str(await connection.scalar(text("SELECT pg_get_constraintdef(oid) FROM pg_constraint WHERE conrelid = 'skill_design_sessions'::regclass AND conname = 'ck_skill_design_sessions_authoring_dependencies'")))
+            assert "CASE" in definition
+            assert "jsonb_array_length" in definition
+            assert await classify_database(connection) == "current"
+            assert await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+    finally:
+        await upgraded_engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -241,7 +296,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     finally:
         await engine.dispose()
 
-    fake_head = "full_schema_v9_drill"
+    fake_head = "full_schema_v16_drill"
     _pretend_head_is(monkeypatch, fake_head)
 
     applied_urls: list[str] = []
@@ -255,7 +310,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     result = await upgrade_postgres(postgres_database_url, assume_yes=True)
     assert applied_urls == [postgres_database_url]
     assert result.applied is True
-    assert result.from_revision == "full_schema_v9"
+    assert result.from_revision == "full_schema_v17"
     assert result.to_revision == fake_head
 
     _, signature = await _catalog_signature(postgres_database_url)
@@ -273,7 +328,7 @@ async def test_upgrade_runner_fails_closed_when_the_migrated_catalog_does_not_ve
     finally:
         await engine.dispose()
 
-    _pretend_head_is(monkeypatch, "full_schema_v9_drill")
+    _pretend_head_is(monkeypatch, "full_schema_v16_drill")
     # A migration that "succeeds" without producing the head catalog must fail
     # the post-upgrade verification and instruct the operator to restore.
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", lambda url: None)

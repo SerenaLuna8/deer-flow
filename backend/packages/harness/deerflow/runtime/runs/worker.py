@@ -35,15 +35,13 @@ from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS
 from deerflow.error_codes import (
+    ROLLBACK_FAILED_ERROR_CODE,
     RUN_EXECUTION_FAILED_ERROR_CODE,
+    MemoryAuthorityUnavailable,
     PublicRunError,
     PublicRunErrorCode,
 )
 from deerflow.file_authority import RunFileAuthority
-from deerflow.guardrails.provider import (
-    GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
-    copy_guardrail_attribution,
-)
 from deerflow.runtime.checkpoint_mode import (
     CheckpointModeMismatchError,
     aensure_checkpoint_mode_compatible,
@@ -56,7 +54,8 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
+from deerflow.runtime.context_carrier import RuntimeContextCarrier
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.runtime.events.stream_base import StreamBridge
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -77,23 +76,15 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
-from deerflow.runtime.secret_context import _SLASH_SKILL_ACTIVATION_RUN_KEY
 from deerflow.runtime.serialization import serialize
-from deerflow.runtime.skill_context_authority import (
-    LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
-    VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
-)
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
 from deerflow.sandbox.sandbox import (
     AUTHORIZATION_REVOKED_REASON,
     AuthorizationRevoked,
 )
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbox_provider
-from deerflow.subagents.runtime_catalog import (
-    RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
-    trusted_runtime_agent_catalog,
-)
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
+from deerflow.trace_context import get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import (
@@ -107,14 +98,15 @@ from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
+from .private_file_lifecycle import PrivateFileLifecycle, await_despite_cancellation
 from .schemas import RunStatus
 
 logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
-_PRIVATE_CLEANUP_MAX_ATTEMPTS = 3
 _PRIVATE_OUTPUT_NOT_PRESENTED_ERROR = "Run produced output files but did not present a current-run output"
+_ROLLBACK_SUCCEEDED_ERROR = "Rolled back by user"
 # Keep this streaming policy separate from middleware write-authorization sets.
 _LARGE_FILE_TOOL_NAMES = frozenset({"str_replace", "write_file"})
 _LARGE_FILE_TOOL_BATCH_SIZE = 32
@@ -457,29 +449,6 @@ async def _iter_with_text_delta_deadline(source: Any, coalescer: _TextDeltaCoale
             await close()
 
 
-def _private_output_delivery_satisfied(finalization_result: object | None) -> bool:
-    """Require one trusted current-run artifact when this turn produced outputs."""
-
-    changes = getattr(finalization_result, "workspace_changes", None)
-    if not isinstance(changes, Mapping):
-        return True
-    produced_outputs = {path for state in ("created", "modified") for path in changes.get(state, ()) if isinstance(path, str) and path.startswith("outputs/")}
-    if not produced_outputs:
-        return True
-
-    presented_outputs: set[str] = set()
-    artifacts = getattr(finalization_result, "artifacts", ())
-    if isinstance(artifacts, (list, tuple)):
-        for artifact in artifacts:
-            metadata = getattr(artifact, "metadata", None)
-            if not isinstance(metadata, Mapping):
-                continue
-            logical_path = metadata.get("logical_path")
-            if isinstance(logical_path, str):
-                presented_outputs.add(logical_path)
-    return not produced_outputs.isdisjoint(presented_outputs)
-
-
 def _repository_trace_user_id(record: RunRecord) -> str:
     """Resolve trace attribution without consulting runtime storage identity."""
     repository_user = get_current_user()
@@ -504,55 +473,34 @@ def _build_runtime_context(
     guardrail_attribution: Mapping[str, object] | None = None,
     run_read_only_mounts: tuple[object, ...] = (),
     runtime_owner_user_id: str | None = None,
+    memory_archive_context: object | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
-    Always includes ``thread_id`` and ``run_id``. Additional keys from the caller's
-    ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue #2677)
-    are merged in but never override ``thread_id``/``run_id``. The resolved
-    ``AppConfig`` is added by the worker so tools can consume it without ambient
-    global lookups.
+    Always includes ``thread_id`` and ``run_id``. Caller extension keys from
+    ``config['context']`` (e.g. ``agent_name`` for the bootstrap flow — issue
+    #2677) are merged, while reserved and server-owned keys are discarded. The
+    resolved ``AppConfig`` is added by the worker so tools can consume it
+    without ambient global lookups.
 
     langgraph 1.1+ surfaces this as ``runtime.context`` via the parent runtime stored
     under ``config['configurable']['__pregel_runtime']`` — see
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
-    runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
-    if isinstance(caller_context, dict):
-        for key, value in caller_context.items():
-            if key in {
-                CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
-                _SLASH_SKILL_ACTIVATION_RUN_KEY,
-                VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
-                LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
-                "__memory_authority",
-                "memory_authority",
-                GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
-                RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
-                "stop_reason",
-            }:
-                continue
-            runtime_ctx.setdefault(key, value)
-    if app_config is not None:
-        runtime_ctx["app_config"] = app_config
-    if private_scope is not None:
-        runtime_ctx["private_scope"] = private_scope
-    if authorization_checker is not None:
-        runtime_ctx["__authorization_checker"] = authorization_checker
-    if authorization_boundary is not None:
-        runtime_ctx["__authorization_boundary"] = authorization_boundary
-    if file_authority is not None:
-        runtime_ctx["__file_authority"] = file_authority
-    if memory_authority is not None:
-        runtime_ctx["__memory_authority"] = memory_authority
-    copied_attribution = copy_guardrail_attribution(guardrail_attribution)
-    if copied_attribution is not None:
-        runtime_ctx[GUARDRAIL_ATTRIBUTION_CONTEXT_KEY] = copied_attribution
-    if run_read_only_mounts:
-        runtime_ctx["__run_read_only_mounts"] = run_read_only_mounts
-    if runtime_owner_user_id is not None:
-        runtime_ctx["user_id"] = runtime_owner_user_id
-    return runtime_ctx
+    return RuntimeContextCarrier(
+        thread_id=thread_id,
+        run_id=run_id,
+        app_config=app_config,
+        user_id=runtime_owner_user_id,
+        private_scope=private_scope,
+        authorization_checker=authorization_checker,
+        authorization_boundary=authorization_boundary,
+        file_authority=file_authority,
+        memory_authority=memory_authority,
+        guardrail_attribution=guardrail_attribution,
+        run_read_only_mounts=run_read_only_mounts or None,
+        memory_archive_context=memory_archive_context,
+    ).build(caller_context)
 
 
 class PrivateAgentRuntime(Protocol):
@@ -594,6 +542,7 @@ class RunContext:
     authorization_boundary: object | None = field(default=None)
     file_authority: RunFileAuthority | None = field(default=None)
     memory_authority: object | None = field(default=None)
+    memory_archive_context: object | None = field(default=None)
     guardrail_attribution: Mapping[str, object] | None = field(default=None)
     private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
 
@@ -622,67 +571,45 @@ def _checkpoint_runtime_settings(
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
-        # Both are Worker-owned ephemeral values. Never retain a client value
-        # or a stale value from a reused config object.
-        existing_context.pop(CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY, None)
-        existing_context.pop(_SLASH_SKILL_ACTIVATION_RUN_KEY, None)
-        existing_context.pop(VERIFIED_SKILL_SOURCE_CONTEXT_KEY, None)
-        existing_context.pop(LEAD_MODEL_CALL_SEQ_CONTEXT_KEY, None)
-        existing_context.pop("__memory_authority", None)
-        existing_context.pop("memory_authority", None)
-        existing_context.pop(GUARDRAIL_ATTRIBUTION_CONTEXT_KEY, None)
-        existing_context.pop(RUNTIME_AGENT_CATALOG_CONTEXT_KEY, None)
-        existing_context.pop("stop_reason", None)
-        if "private_scope" in runtime_context or "__run_read_only_mounts" in runtime_context:
-            existing_context["thread_id"] = runtime_context["thread_id"]
-            existing_context["run_id"] = runtime_context["run_id"]
-            if "user_id" in runtime_context:
-                existing_context["user_id"] = runtime_context["user_id"]
-        else:
-            existing_context.setdefault("thread_id", runtime_context["thread_id"])
-            existing_context.setdefault("run_id", runtime_context["run_id"])
-        if DEERFLOW_TRACE_METADATA_KEY in runtime_context:
-            existing_context.setdefault(DEERFLOW_TRACE_METADATA_KEY, runtime_context[DEERFLOW_TRACE_METADATA_KEY])
-        if "app_config" in runtime_context:
-            existing_context["app_config"] = runtime_context["app_config"]
-        for key in (
-            "model_name",
-            "private_scope",
-            "__authorization_checker",
-            "__authorization_boundary",
-            "__file_authority",
-            "__memory_authority",
-            GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
-            "__run_read_only_mounts",
-            "__agent_prompt_bundle",
-            "__runtime_skills",
-            "__runtime_mcp_tools",
-            "__skill_scoped_secrets",
-            "__skill_secret_provider",
-            CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
-        ):
-            if key in runtime_context:
-                existing_context[key] = runtime_context[key]
-        runtime_agent_catalog = trusted_runtime_agent_catalog(runtime_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY))
-        if runtime_agent_catalog is not None:
-            existing_context[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
-        return
+        installed_context = existing_context
+    else:
+        installed_context = {}
 
-    installed_context = {
-        key: value
-        for key, value in runtime_context.items()
-        if key
-        not in {
-            "stop_reason",
-            _SLASH_SKILL_ACTIVATION_RUN_KEY,
-            VERIFIED_SKILL_SOURCE_CONTEXT_KEY,
-            LEAD_MODEL_CALL_SEQ_CONTEXT_KEY,
-            RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
-        }
+    private_context = RuntimeContextKeys.PRIVATE_SCOPE in runtime_context or RuntimeContextKeys.RUN_READ_ONLY_MOUNTS in runtime_context
+    public_identity_keys = {
+        RuntimeContextKeys.THREAD_ID,
+        RuntimeContextKeys.RUN_ID,
     }
-    runtime_agent_catalog = trusted_runtime_agent_catalog(runtime_context.get(RUNTIME_AGENT_CATALOG_CONTEXT_KEY))
+    for key in tuple(installed_context):
+        if not isinstance(key, str):
+            installed_context.pop(key, None)
+            continue
+        if key.startswith(RuntimeContextKeys.RESERVED_PREFIX) or (key in RuntimeContextKeys.SERVER_OWNED_KEYS and (private_context or key not in public_identity_keys)):
+            installed_context.pop(key, None)
+
+    for key in public_identity_keys:
+        if key not in runtime_context:
+            continue
+        if private_context:
+            installed_context[key] = runtime_context[key]
+        else:
+            installed_context.setdefault(key, runtime_context[key])
+
+    for key in (
+        RuntimeContextKeys.INSTALL_KEYS
+        - public_identity_keys
+        - {
+            RuntimeContextKeys.RUNTIME_AGENT_CATALOG,
+        }
+    ):
+        if key in runtime_context:
+            installed_context[key] = runtime_context[key]
+
+    runtime_agent_catalog = trusted_runtime_agent_catalog(
+        runtime_context.get(RuntimeContextKeys.RUNTIME_AGENT_CATALOG),
+    )
     if runtime_agent_catalog is not None:
-        installed_context[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
+        installed_context[RuntimeContextKeys.RUNTIME_AGENT_CATALOG] = runtime_agent_catalog
     config["context"] = installed_context
 
 
@@ -861,108 +788,33 @@ async def run_agent(
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
-    private_files_restored = False
-    private_files_finalized = False
-    private_files_failed = False
-    private_cleanup_cancellation_pending = False
-    private_finalization_result: object | None = None
+    private_files = PrivateFileLifecycle(
+        run_id=run_id,
+        authority=ctx.file_authority,
+        set_finalizing=run_manager.set_finalizing,
+    )
+    rollback_cancellation_pending = False
+    defer_terminal_settlement = False
+    terminal_published = False
 
-    async def _abort_private_files() -> None:
-        """Durably fail private finalization before publishing a terminal run."""
-
-        nonlocal private_files_failed, private_cleanup_cancellation_pending
-        authority = ctx.file_authority
-        if authority is None or private_files_finalized or private_files_failed:
-            return
-        task = asyncio.create_task(authority.mark_failed())
-        cancellation_pending = False
-        try:
-            while True:
-                try:
-                    await asyncio.shield(task)
-                    break
-                except asyncio.CancelledError:
-                    if task.cancelled():
-                        raise
-                    cancellation_pending = True
-            task.result()
-        except Exception:
-            logger.warning(
-                "Private file finalization failure marker failed for run %s",
-                run_id,
-                exc_info=True,
-            )
-        finally:
-            private_files_failed = True
-            private_cleanup_cancellation_pending |= cancellation_pending
-
-    async def _finalize_private_files() -> None:
-        nonlocal private_files_finalized, private_finalization_result
-        authority = ctx.file_authority
-        if authority is None or not private_files_restored or private_files_finalized:
-            return
-        await run_manager.set_finalizing(run_id, True)
-        task = asyncio.create_task(authority.finalize())
-        cancellation_pending = False
-        try:
-            while True:
-                try:
-                    await asyncio.shield(task)
-                    break
-                except asyncio.CancelledError:
-                    if task.cancelled():
-                        raise
-                    cancellation_pending = True
-                    continue
-        except BaseException:
-            await _abort_private_files()
-            raise
-        private_finalization_result = task.result()
-        private_files_finalized = True
-        if cancellation_pending:
-            raise asyncio.CancelledError
-
-    async def _join_private_cleanup(
-        operation: Callable[[], Awaitable[Any]],
-        *,
-        failure_message: str,
-    ) -> bool:
-        """Join and retry one private cleanup despite repeated cancellation."""
-
-        nonlocal private_cleanup_cancellation_pending
-        cancellation_pending = False
-        try:
-            for attempt in range(1, _PRIVATE_CLEANUP_MAX_ATTEMPTS + 1):
-                task = asyncio.create_task(operation())
-                try:
-                    while True:
-                        try:
-                            await asyncio.shield(task)
-                            break
-                        except asyncio.CancelledError:
-                            if task.cancelled():
-                                logger.warning(
-                                    "%s (attempt %d/%d)",
-                                    failure_message,
-                                    attempt,
-                                    _PRIVATE_CLEANUP_MAX_ATTEMPTS,
-                                )
-                                break
-                            cancellation_pending = True
-                    if task.cancelled():
-                        continue
-                    task.result()
-                    return True
-                except Exception:
-                    logger.warning(
-                        "%s (attempt %d/%d)",
-                        failure_message,
-                        attempt,
-                        _PRIVATE_CLEANUP_MAX_ATTEMPTS,
-                    )
-            return False
-        finally:
-            private_cleanup_cancellation_pending |= cancellation_pending
+    async def _settle_requested_rollback() -> bool:
+        return await _settle_rollback(
+            run_manager=run_manager,
+            run_id=run_id,
+            rollback=partial(
+                _rollback_to_pre_run_checkpoint,
+                accessor=accessor,
+                checkpointer=checkpointer,
+                thread_id=thread_id,
+                run_id=run_id,
+                rollback_point=rollback_point,
+                snapshot_capture_failed=snapshot_capture_failed,
+                snapshot_frequency=checkpoint_snapshot_frequency,
+                pre_run_checkpoint_id=pre_run_checkpoint_id,
+                pre_run_snapshot=legacy_pre_run_snapshot,
+                allow_thread_delete=not private_message_boundary_required,
+            ),
+        )
 
     # Track whether "events" was requested but skipped
     if "events" in requested_modes:
@@ -972,8 +824,7 @@ async def run_agent(
         )
 
     try:
-        if ctx.file_authority is not None:
-            await run_manager.set_finalizing(run_id, True)
+        await private_files.enter_finalizing()
         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
 
         # Initialize RunJournal + write human_message event.
@@ -1093,14 +944,9 @@ async def run_agent(
                         exc_info=True,
                     )
 
-        if ctx.file_authority is not None:
-            restore = getattr(ctx.file_authority, "restore", None)
-            if not callable(restore):
-                raise RuntimeError("Private file authority is unavailable")
-            await restore()
-            private_files_restored = True
+        await private_files.restore()
 
-        if event_store is not None and ctx.file_authority is None:
+        if event_store is not None and not private_files.enabled:
             workspace_changes_user_id = private_owner_user_id or get_effective_user_id()
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
@@ -1136,7 +982,7 @@ async def run_agent(
             private_scope=ctx.private_scope,
             authorization_checker=ctx.authorization_checker,
             authorization_boundary=ctx.authorization_boundary,
-            file_authority=ctx.file_authority,
+            file_authority=private_files.authority,
             memory_authority=ctx.memory_authority,
             guardrail_attribution=ctx.guardrail_attribution,
             run_read_only_mounts=(
@@ -1147,45 +993,65 @@ async def run_agent(
                         host_path=str(ctx.private_agent_runtime.skill_root),
                     ),
                 )
-                if (ctx.file_authority is None and ctx.private_agent_runtime is not None and ctx.app_config is not None)
+                if (not private_files.enabled and ctx.private_agent_runtime is not None and ctx.app_config is not None)
                 else ()
             ),
             runtime_owner_user_id=private_owner_user_id,
+            memory_archive_context=ctx.memory_archive_context,
         )
+        runtime_model_name = None
+        prompt_bundle = None
+        runtime_skills = None
+        runtime_mcp_tools = None
+        runtime_agent_catalog = None
+        skill_secret_provider = None
         if ctx.private_agent_runtime is not None:
             # Context is merged after configurable by the Agent factory. Keep
             # both channels pinned to the same persisted private-Run model.
-            runtime_ctx["model_name"] = record.model_name
+            runtime_model_name = record.model_name
             prompt_bundle = getattr(ctx.private_agent_runtime, "prompt_bundle", None)
-            if prompt_bundle is not None:
-                runtime_ctx["__agent_prompt_bundle"] = prompt_bundle
-            runtime_ctx["__runtime_skills"] = tuple(getattr(ctx.private_agent_runtime, "skills", ()))
-            runtime_ctx["__runtime_mcp_tools"] = tuple(getattr(ctx.private_agent_runtime, "mcp_tools", ()))
+            runtime_skills = tuple(
+                getattr(ctx.private_agent_runtime, "skills", ()),
+            )
+            runtime_mcp_tools = tuple(
+                getattr(ctx.private_agent_runtime, "mcp_tools", ()),
+            )
             runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(ctx.private_agent_runtime, "agent_catalog", None))
-            if runtime_agent_catalog is not None:
-                runtime_ctx[RUNTIME_AGENT_CATALOG_CONTEXT_KEY] = runtime_agent_catalog
-            skill_secret_provider = getattr(
+            raw_skill_secret_provider = getattr(
                 ctx.private_agent_runtime,
                 "materialize_skill_scoped_secrets",
                 None,
             )
             skill_container_path = getattr(ctx.app_config.skills, "container_path", None) if ctx.app_config is not None else None
-            if callable(skill_secret_provider) and isinstance(skill_container_path, str):
-                runtime_ctx["__skill_secret_provider"] = partial(
-                    skill_secret_provider,
+            if callable(raw_skill_secret_provider) and isinstance(skill_container_path, str):
+                skill_secret_provider = partial(
+                    raw_skill_secret_provider,
                     skill_container_path,
                 )
-        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         incoming_metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
-        deerflow_trace_id = normalize_trace_id(incoming_metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
-        if deerflow_trace_id:
-            runtime_ctx[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+        deerflow_trace_id = (
+            normalize_trace_id(
+                incoming_metadata.get(RuntimeContextKeys.TRACE_ID),
+            )
+            or get_current_trace_id()
+        )
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
         # suppressed tool calls). Double-underscore prefix marks it as a
         # runtime-internal channel; user code must not depend on the key name.
-        if journal is not None:
-            runtime_ctx["__run_journal"] = journal
+        RuntimeContextCarrier(
+            model_name=runtime_model_name,
+            agent_prompt_bundle=prompt_bundle,
+            runtime_skills=runtime_skills,
+            runtime_mcp_tools=runtime_mcp_tools,
+            runtime_agent_catalog=runtime_agent_catalog,
+            skill_secret_provider=skill_secret_provider,
+            current_run_pre_existing_message_ids=frozenset(
+                pre_existing_message_ids,
+            ),
+            trace_id=deerflow_trace_id,
+            run_journal=journal,
+        ).install_into(runtime_ctx)
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
         configurable = config.setdefault("configurable", {})
@@ -1195,9 +1061,12 @@ async def run_agent(
             # the Run.  Reassert that authoritative value at the Worker boundary
             # so absent or forged caller config cannot influence the private
             # runtime factory.  ``None`` remains a fail-closed value.
-            configurable["model_name"] = record.model_name
+            configurable[RuntimeContextKeys.MODEL_NAME] = record.model_name
 
-        run_mounts = runtime_ctx.get("__run_read_only_mounts", ())
+        run_mounts = runtime_ctx.get(
+            RuntimeContextKeys.RUN_READ_ONLY_MOUNTS,
+            (),
+        )
         if run_mounts:
             run_mount_provider = get_sandbox_provider()
             run_mount_user_id = private_owner_user_id or get_effective_user_id()
@@ -1319,7 +1188,11 @@ async def run_agent(
                 materialized_values = {"messages": resumed_messages}
                 pre_existing_message_ids = _collect_private_pre_existing_message_ids(materialized_values) if private_message_boundary_required else _collect_pre_existing_message_ids(materialized_values)
 
-        runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
+        RuntimeContextCarrier(
+            current_run_pre_existing_message_ids=frozenset(
+                pre_existing_message_ids,
+            ),
+        ).install_into(runtime_ctx)
         _install_runtime_context(config, runtime_ctx)
         # Linearization removes checkpoint selectors and the trusted message
         # boundary is installed after graph construction. Stream with a fresh
@@ -1548,29 +1421,13 @@ async def run_agent(
             await run_manager.set_finalizing(run_id, True)
             action = record.abort_action
             if action == "rollback":
-                await _abort_private_files()
-                await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
-                try:
-                    await _rollback_to_pre_run_checkpoint(
-                        accessor=accessor,
-                        checkpointer=checkpointer,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        rollback_point=rollback_point,
-                        snapshot_capture_failed=snapshot_capture_failed,
-                        snapshot_frequency=checkpoint_snapshot_frequency,
-                        pre_run_checkpoint_id=pre_run_checkpoint_id,
-                        pre_run_snapshot=legacy_pre_run_snapshot,
-                        allow_thread_delete=not private_message_boundary_required,
-                    )
-                    logger.info("Run %s rolled back to pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
-                except Exception:
-                    logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+                await private_files.mark_failed()
+                rollback_cancellation_pending |= await _settle_requested_rollback()
             else:
                 if action != "authorization_revoked":
-                    await _finalize_private_files()
+                    await private_files.finalize()
                 else:
-                    await _abort_private_files()
+                    await private_files.mark_failed()
                 await run_manager.set_status(
                     run_id,
                     RunStatus.interrupted,
@@ -1581,11 +1438,11 @@ async def run_agent(
             if error_msg is None and journal is not None:
                 error_msg = journal.llm_error_fallback_message
             error_msg = error_msg or "LLM provider failed after retries"
-            await _abort_private_files()
+            await private_files.mark_failed()
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
-            await _finalize_private_files()
-            if _private_output_delivery_satisfied(private_finalization_result):
+            await private_files.finalize()
+            if private_files.output_delivery_satisfied():
                 await run_manager.set_status(run_id, RunStatus.success)
             else:
                 await run_manager.set_status(
@@ -1598,42 +1455,26 @@ async def run_agent(
         await run_manager.set_finalizing(run_id, True)
         action = record.abort_action
         if action == "rollback":
-            await _abort_private_files()
-            await run_manager.set_status(run_id, RunStatus.error, error="Rolled back by user")
-            try:
-                await _rollback_to_pre_run_checkpoint(
-                    accessor=accessor,
-                    checkpointer=checkpointer,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    rollback_point=rollback_point,
-                    snapshot_capture_failed=snapshot_capture_failed,
-                    snapshot_frequency=checkpoint_snapshot_frequency,
-                    pre_run_checkpoint_id=pre_run_checkpoint_id,
-                    pre_run_snapshot=legacy_pre_run_snapshot,
-                    allow_thread_delete=not private_message_boundary_required,
-                )
-                logger.info("Run %s was cancelled and rolled back", run_id)
-            except Exception:
-                logger.warning("Run %s cancellation rollback failed", run_id, exc_info=True)
+            await private_files.mark_failed()
+            rollback_cancellation_pending |= await _settle_requested_rollback()
         else:
             if action != "authorization_revoked":
-                await _finalize_private_files()
+                await private_files.finalize()
             else:
-                await _abort_private_files()
+                await private_files.mark_failed()
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
                 error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
             )
             logger.info("Run %s was cancelled", run_id)
-        if ctx.file_authority is not None:
+        if private_files.enabled:
             raise
 
     except AuthorizationRevoked:
         record.abort_action = "authorization_revoked"
         record.abort_event.set()
-        await _abort_private_files()
+        await private_files.mark_failed()
         await run_manager.set_status(
             run_id,
             RunStatus.interrupted,
@@ -1654,20 +1495,40 @@ async def run_agent(
             run_id,
             exc.code.value,
         )
-        await _abort_private_files()
-        await run_manager.set_status(
-            run_id,
-            RunStatus.error,
-            error=exc.public_message,
-        )
-        await bridge.publish(
-            run_id,
-            "error",
-            {
-                "message": exc.public_message,
-                "name": exc.code.value,
-            },
-        )
+        await private_files.mark_failed()
+        if exc.code is PublicRunErrorCode.MODEL_OUTPUT_LIMIT:
+            # Publish the typed terminal immediately after the in-memory Run
+            # classification. The durable stream terminal is takeover
+            # authority even if this Worker exits before Job settlement.
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=exc.code.value,
+            )
+            await bridge.publish_end(run_id)
+            terminal_published = True
+        else:
+            await run_manager.set_status(
+                run_id,
+                RunStatus.error,
+                error=exc.public_message,
+            )
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": exc.public_message,
+                    "name": exc.code.value,
+                },
+            )
+
+    except MemoryAuthorityUnavailable:
+        # The durable private executor owns retry/dead settlement. Preserve
+        # this fatal signal through runtime cleanup instead of publishing a
+        # provisional terminal or misclassifying it as revoked authority.
+        defer_terminal_settlement = True
+        await private_files.mark_failed()
+        raise
 
     except Exception as exc:
         logger.error(
@@ -1675,7 +1536,7 @@ async def run_agent(
             run_id,
             type(exc).__name__,
         )
-        await _abort_private_files()
+        await private_files.mark_failed()
         await run_manager.set_status(
             run_id,
             RunStatus.error,
@@ -1697,9 +1558,10 @@ async def run_agent(
             if subagent_events is not None:
                 await subagent_events.flush()
 
-            if event_store is not None and ctx.file_authority is not None:
-                changes = getattr(private_finalization_result, "workspace_changes", None)
-                result = trusted_workspace_change_result(changes)
+            if event_store is not None and private_files.enabled:
+                result = trusted_workspace_change_result(
+                    private_files.workspace_changes,
+                )
                 if result is not None:
                     payload = result.to_dict()
                     summary = result.summary
@@ -1754,34 +1616,17 @@ async def run_agent(
             cleanup_succeeded = True
             if ctx.private_agent_runtime is not None:
                 cleanup_succeeded = (
-                    await _join_private_cleanup(
+                    await private_files.join_cleanup(
                         ctx.private_agent_runtime.aclose,
                         failure_message=f"Private runtime cleanup failed for run {run_id}",
                     )
                     and cleanup_succeeded
                 )
 
-            if ctx.file_authority is not None:
-                release = getattr(ctx.file_authority, "release", None)
-                if not callable(release):
-                    release = getattr(ctx.file_authority, "close", None)
-                if callable(release):
-                    cleanup_succeeded = (
-                        await _join_private_cleanup(
-                            release,
-                            failure_message=f"Private file authority cleanup failed for run {run_id}",
-                        )
-                        and cleanup_succeeded
-                    )
-                else:
-                    cleanup_succeeded = False
-                    logger.warning(
-                        "Private file authority cleanup failed for run %s: release unavailable",
-                        run_id,
-                    )
+            cleanup_succeeded = await private_files.release() and cleanup_succeeded
 
             if not cleanup_succeeded and record.status is RunStatus.success:
-                await _join_private_cleanup(
+                await private_files.join_cleanup(
                     lambda: run_manager.set_status(
                         run_id,
                         RunStatus.error,
@@ -1791,8 +1636,8 @@ async def run_agent(
                 )
 
             if record.finalizing and cleanup_succeeded:
-                if ctx.file_authority is not None:
-                    await _join_private_cleanup(
+                if private_files.enabled:
+                    await private_files.join_cleanup(
                         lambda: run_manager.set_finalizing(run_id, False),
                         failure_message=f"Failed to clear finalizing state for run {run_id}",
                     )
@@ -1834,14 +1679,14 @@ async def run_agent(
                     thread_id,
                 )
 
-        if thread_store is not None:
+        if thread_store is not None and not defer_terminal_settlement:
             try:
                 final_status = "idle" if record.status == RunStatus.success else record.status.value
                 await thread_store.update_status(thread_id, final_status)
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 
-        if ctx.on_run_completed is not None:
+        if ctx.on_run_completed is not None and not defer_terminal_settlement:
             try:
                 await ctx.on_run_completed(record)
             except Exception:
@@ -1861,9 +1706,9 @@ async def run_agent(
                     exc_info=True,
                 )
 
-        await bridge.publish_end(run_id)
-        asyncio.create_task(bridge.cleanup(run_id, delay=60))
-        if private_cleanup_cancellation_pending:
+        if not defer_terminal_settlement and not terminal_published:
+            await bridge.publish_end(run_id)
+        if private_files.cancellation_pending or rollback_cancellation_pending:
             raise asyncio.CancelledError
 
 
@@ -2368,6 +2213,41 @@ class RollbackPoint:
     messages: tuple[Any, ...]
     metadata: dict[str, Any]
     pending_writes: tuple[tuple[str, str, Any], ...]
+
+
+async def _settle_rollback(
+    *,
+    run_manager: RunManager,
+    run_id: str,
+    rollback: Callable[[], Awaitable[bool]],
+) -> bool:
+    """Finish rollback before recording its single authoritative terminal."""
+
+    outcome = await await_despite_cancellation(rollback())
+    cancellation_pending = outcome.cancellation_pending
+    try:
+        restored = outcome.result() is True
+    except asyncio.CancelledError:
+        restored = False
+        logger.warning("Rollback operation was cancelled for run %s", run_id)
+    except Exception:
+        restored = False
+        logger.warning("Failed to rollback checkpoint for run %s", run_id, exc_info=True)
+
+    terminal_error = _ROLLBACK_SUCCEEDED_ERROR if restored else ROLLBACK_FAILED_ERROR_CODE
+    status_outcome = await await_despite_cancellation(
+        run_manager.set_status(
+            run_id,
+            RunStatus.error,
+            error=terminal_error,
+        ),
+    )
+    cancellation_pending |= status_outcome.cancellation_pending
+    status_outcome.result()
+
+    if restored:
+        logger.info("Run %s rolled back to its pre-run checkpoint", run_id)
+    return cancellation_pending
 
 
 async def _capture_rollback_point(

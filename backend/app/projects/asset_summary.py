@@ -83,6 +83,7 @@ def project_asset_summary_columns(
                 SkillVersionRow.skill_id == SkillRow.id,
                 SkillVersionRow.id == SkillRow.current_published_version_id,
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
             ),
         )
         .where(
@@ -110,6 +111,7 @@ def project_asset_summary_columns(
                 SkillVersionRow.skill_id == SkillRow.id,
                 SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
                 SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
             ),
         )
         .where(

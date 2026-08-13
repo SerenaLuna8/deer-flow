@@ -13,12 +13,21 @@ giving structured results, authenticated quota, and a documented SLA.
 import json
 import logging
 import os
-from ipaddress import IPv4Address, IPv6Address, ip_address, ip_network
-from urllib.parse import urlparse
 
 import httpx
 from langchain.tools import tool
 
+from deerflow.community.errors import (
+    CommunityToolError,
+    community_error_json,
+    no_results_json,
+)
+from deerflow.community.url_safety import (
+    is_url_value_present as _is_url_present,
+)
+from deerflow.community.url_safety import (
+    sanitize_public_http_reference_url as _safe_public_url,
+)
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -30,8 +39,6 @@ _DEFAULT_MAX_RESULTS = 5
 _BRAVE_WEB_MAX_COUNT = 20
 # Brave Image Search supports larger batches than web search.
 _BRAVE_IMAGE_MAX_COUNT = 200
-# NAT64 well-known prefix (RFC 6052): IPv6 literals embedding an IPv4 address.
-_NAT64_PREFIX = ip_network("64:ff9b::/96")
 _api_key_warned: set[str] = set()
 
 
@@ -80,121 +87,47 @@ def _missing_key_error(query: str, tool_name: str) -> str:
             "Brave Search API key is not set for '%s'. Set BRAVE_SEARCH_API_KEY in your environment or provide api_key in config.yaml. Sign up at https://brave.com/search/api/",
             tool_name,
         )
-    return json.dumps(
-        {"error": "BRAVE_SEARCH_API_KEY is not configured", "query": query},
-        ensure_ascii=False,
+    return community_error_json(
+        CommunityToolError(
+            provider="brave",
+            code="configuration_error",
+            message="BRAVE_SEARCH_API_KEY is not configured",
+            retryable=False,
+        ),
+        query=query,
     )
 
 
 def _unexpected_format_error(query: str, *, service_name: str = "Brave Search") -> str:
-    return json.dumps(
-        {"error": f"{service_name} returned an unexpected response format", "query": query},
-        ensure_ascii=False,
+    return community_error_json(
+        CommunityToolError(
+            provider="brave",
+            code="provider_response_invalid",
+            message=f"{service_name} returned an unexpected response format",
+            retryable=True,
+        ),
+        query=query,
     )
 
 
-def _decode_ipv4(host: str) -> IPv4Address | None:
-    """Decode obfuscated IPv4 literals that ``ip_address`` rejects.
-
-    Mirrors the permissive ``inet_aton`` parsing many HTTP clients use, so that
-    integer (``2130706433``), hex (``0x7f000001``) and octal (``0177.0.0.1``)
-    encodings of an address are recognized.
-    """
-    parts = host.split(".")
-    if not 1 <= len(parts) <= 4:
-        return None
-
-    values: list[int] = []
-    for part in parts:
-        if not part:
-            return None
-        try:
-            if part.startswith(("0x", "0X")):
-                values.append(int(part, 16))
-            elif part.startswith("0") and len(part) > 1:
-                values.append(int(part, 8))
-            else:
-                values.append(int(part, 10))
-        except ValueError:
-            return None
-
-    *leading, last = values
-    for value in leading:
-        if not 0 <= value <= 0xFF:
-            return None
-    max_last = (1 << (8 * (4 - len(leading)))) - 1
-    if not 0 <= last <= max_last:
-        return None
-
-    result = 0
-    for value in leading:
-        result = (result << 8) | value
-    result = (result << (8 * (4 - len(leading)))) | last
-    return IPv4Address(result)
-
-
-def _is_url_present(value: object) -> bool:
-    return isinstance(value, str) and bool(value.strip())
-
-
-def _embedded_ipv4(ip: IPv6Address) -> IPv4Address | None:
-    """Extract an IPv4 address embedded in an IPv6 literal, if any.
-
-    Covers IPv4-mapped (``::ffff:a.b.c.d``), 6to4 (``2002::/16``), NAT64
-    (``64:ff9b::/96``), and IPv4-compatible (``::a.b.c.d``) forms. These all
-    smuggle a v4 destination through the IPv6 path, where ``is_global`` on the
-    v6 literal alone would otherwise report a loopback/private target as safe.
-    """
-    if ip.ipv4_mapped is not None:
-        return ip.ipv4_mapped
-    if ip.sixtofour is not None:
-        return ip.sixtofour
-    if ip in _NAT64_PREFIX:
-        return IPv4Address(int(ip) & 0xFFFFFFFF)
-    # IPv4-compatible ``::a.b.c.d`` (high 96 bits zero, excluding ::/:: 1).
-    packed = int(ip)
-    if packed >> 32 == 0 and packed > 1:
-        return IPv4Address(packed & 0xFFFFFFFF)
-    return None
-
-
-def _safe_public_url(value: object) -> str:
-    """Return ``value`` only if it is a safe, public http(s) URL, else "".
-
-    This is a best-effort SSRF guard that rejects non-http(s) schemes,
-    ``localhost``, and private/non-global IP literals (including obfuscated
-    decimal/hex/octal encodings and IPv6 literals embedding a non-global IPv4).
-    It only inspects the URL string and cannot catch public hostnames that
-    resolve to internal IPs; any consumer that actually downloads these URLs
-    must re-validate the resolved IP at fetch time.
-    """
-    if not isinstance(value, str):
-        return ""
-    url = value.strip()
-    try:
-        parsed = urlparse(url)
-    except ValueError:
-        return ""
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc or not parsed.hostname:
-        return ""
-
-    host = parsed.hostname.lower().rstrip(".")
-    if not host:
-        return ""
-    if host == "localhost" or host.endswith(".localhost"):
-        return ""
-
-    try:
-        ip = ip_address(host)
-    except ValueError:
-        ip = _decode_ipv4(host)
-        if ip is None:
-            return url
-    if isinstance(ip, IPv6Address):
-        embedded = _embedded_ipv4(ip)
-        if embedded is not None and not embedded.is_global:
-            return ""
-    return url if ip.is_global else ""
+def _brave_http_error(query: str, *, service_name: str, status_code: int) -> str:
+    if status_code in {401, 403}:
+        code, retryable = "provider_authentication_failed", False
+    elif status_code == 429:
+        code, retryable = "provider_rate_limited", True
+    elif status_code >= 500:
+        code, retryable = "provider_unavailable", True
+    else:
+        code, retryable = "provider_request_failed", False
+    return community_error_json(
+        CommunityToolError(
+            provider="brave",
+            code=code,
+            message=f"{service_name} API request failed with HTTP {status_code}",
+            retryable=retryable,
+        ),
+        query=query,
+    )
 
 
 def _brave_get(
@@ -219,14 +152,31 @@ def _brave_get(
             return None, _unexpected_format_error(query, service_name=service_name)
         return data, None
     except httpx.HTTPStatusError as e:
-        logger.error("%s API returned HTTP %s: %s", service_name, e.response.status_code, e.response.text)
-        return None, json.dumps(
-            {"error": f"{service_name} API error: HTTP {e.response.status_code}", "query": query},
-            ensure_ascii=False,
+        logger.error(
+            "%s API returned HTTP %s",
+            service_name,
+            e.response.status_code,
         )
-    except Exception as e:
-        logger.error("%s request failed: %s: %s", service_name, type(e).__name__, e)
-        return None, json.dumps({"error": str(e), "query": query}, ensure_ascii=False)
+        return None, _brave_http_error(
+            query,
+            service_name=service_name,
+            status_code=e.response.status_code,
+        )
+    except Exception as exc:
+        logger.error(
+            "%s request failed; provider_error_type=%s",
+            service_name,
+            type(exc).__name__,
+        )
+        return None, community_error_json(
+            CommunityToolError(
+                provider="brave",
+                code="provider_unavailable",
+                message=f"{service_name} is temporarily unavailable",
+                retryable=True,
+            ),
+            query=query,
+        )
 
 
 @tool("web_search", parse_docstring=True)
@@ -256,7 +206,11 @@ def web_search_tool(query: str, max_results: int = 5) -> str:
 
     web_results = (data.get("web") or {}).get("results", [])
     if not web_results:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="brave",
+            query=query,
+            message="No results found",
+        )
 
     normalized_results = [
         {
@@ -318,7 +272,11 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
         logger.error("Brave Image Search returned unexpected 'results' payload type: %s", type(images).__name__)
         return _unexpected_format_error(query, service_name="Brave Image Search")
     if not images:
-        return json.dumps({"error": "No images found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="brave",
+            query=query,
+            message="No images found",
+        )
 
     normalized_results = []
     for item in images:
@@ -371,7 +329,12 @@ def image_search_tool(query: str, max_results: int = 5) -> str:
             break
 
     if not normalized_results:
-        return json.dumps({"error": "No safe image URLs found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="brave",
+            query=query,
+            message="No safe image URLs found",
+            code="no_safe_results",
+        )
 
     output = {
         "query": query,

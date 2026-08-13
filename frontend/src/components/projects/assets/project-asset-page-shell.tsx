@@ -10,6 +10,7 @@ import {
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -26,6 +27,14 @@ import {
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,6 +57,7 @@ import {
   useImportProjectSkillArchive,
   useProjectAssets,
   useSyncCurrentProjectSystemMcpBinding,
+  assetIdSchema,
   type AssetKind,
   type AssetListKind,
   type AssetVersion,
@@ -74,6 +84,7 @@ import {
   ProjectSkillImportDialog,
   projectSkillImportErrorMessage,
 } from "./project-skill-import-dialog";
+import { SystemBindingDialog } from "./system-binding-dialog";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetSourceFilter = "system" | "project";
@@ -167,6 +178,81 @@ export function filterProjectAssetItems(
   );
 }
 
+export function projectAssetSelectionHref(
+  pathname: string,
+  currentSearch: string,
+  queryParam: string,
+  assetId: string | null,
+): string {
+  const params = new URLSearchParams(currentSearch);
+  if (assetId) {
+    params.set(queryParam, assetId);
+  } else {
+    params.delete(queryParam);
+  }
+  const search = params.toString();
+  return search ? `${pathname}?${search}` : pathname;
+}
+
+export function projectAssetSelectionFromSearch(
+  currentSearch: string,
+  queryParam: string,
+): string | null {
+  const values = new URLSearchParams(currentSearch).getAll(queryParam);
+  if (values.length !== 1) return null;
+  const parsed = assetIdSchema.safeParse(values[0]);
+  return parsed.success ? parsed.data : null;
+}
+
+export function projectAssetSelectionDecision(
+  currentAssetId: string | null,
+  nextAssetId: string | null,
+  dirty: boolean,
+): "unchanged" | "apply" | "confirm-discard" {
+  if (currentAssetId === nextAssetId) return "unchanged";
+  return dirty ? "confirm-discard" : "apply";
+}
+
+export function ProjectAgentDirectorySearch({
+  searchQuery,
+  visibleCount,
+  sourceCount,
+  onSearchQueryChange,
+}: {
+  searchQuery: string;
+  visibleCount: number;
+  sourceCount: number;
+  onSearchQueryChange: (value: string) => void;
+}) {
+  const filterActive = searchQuery.trim() !== "";
+  return (
+    <div className="mb-4 flex flex-col gap-3 border-b pb-4 sm:flex-row sm:items-center">
+      <label className="relative min-w-0 flex-1">
+        <span className="sr-only">搜索 Agent</span>
+        <SearchIcon
+          aria-hidden
+          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
+        />
+        <Input
+          type="search"
+          value={searchQuery}
+          onChange={(event) => onSearchQueryChange(event.target.value)}
+          placeholder="搜索名称或 slug"
+          className="h-9 bg-transparent pl-9"
+        />
+      </label>
+      {filterActive ? (
+        <p
+          role="status"
+          className="text-muted-foreground shrink-0 text-xs tabular-nums"
+        >
+          显示 {visibleCount} / {sourceCount} 项
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
 export function defaultProjectAssetSource(
   data: Pick<ProjectAssetList, "system_items" | "project_items">,
 ): ProjectAssetSourceFilter {
@@ -236,6 +322,18 @@ export function systemBindingToggleState(
     disabled: !canManage || (!checked && targetVersionId === null),
     targetVersionId,
   };
+}
+
+export function projectSystemSkillBindingCanManage(
+  item: ProjectAssetItem,
+  projectCanManageBindings: boolean,
+): boolean {
+  return (
+    projectCanManageBindings &&
+    item.scope === "system" &&
+    item.capabilities.includes("shared_assets.manage_bindings") &&
+    (item.status === "active" || item.binding?.enabled === true)
+  );
 }
 
 export function systemMcpBindingNeedsUpdate(item: ProjectAssetItem): boolean {
@@ -494,6 +592,7 @@ function AssetList({
             <button
               type="button"
               aria-haspopup="dialog"
+              aria-expanded={selected}
               aria-label={`查看 ${item.display_name} 详情`}
               className={`focus-visible:ring-ring flex min-w-0 flex-1 items-center text-left focus-visible:ring-2 focus-visible:outline-none ${
                 kind === "skills"
@@ -503,21 +602,23 @@ function AssetList({
               onClick={() => onSelect(item)}
             >
               {kind === "skills" ? (
-                <span className="min-w-0 flex-1">
-                  <span className="flex min-w-0 items-center gap-2">
-                    <span className="truncate text-base font-semibold">
-                      {item.display_name}
+                <>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-base font-semibold">
+                        {item.display_name}
+                      </span>
+                      {kind !== "skills" && item.status !== "active" ? (
+                        <AssetStatusBadge status={item.status} />
+                      ) : null}
                     </span>
-                    {kind !== "skills" && item.status !== "active" ? (
-                      <AssetStatusBadge status={item.status} />
-                    ) : null}
+                    <span className="text-muted-foreground mt-2 line-clamp-3 block text-sm leading-6">
+                      {description && description.length > 0
+                        ? description
+                        : "暂无技能描述。"}
+                    </span>
                   </span>
-                  <span className="text-muted-foreground mt-2 line-clamp-3 block text-sm leading-6">
-                    {description && description.length > 0
-                      ? description
-                      : "暂无技能描述。"}
-                  </span>
-                </span>
+                </>
               ) : (
                 <>
                   <span className="bg-muted flex size-9 shrink-0 items-center justify-center rounded-lg">
@@ -567,7 +668,7 @@ function AssetList({
               <div
                 className={
                   kind === "skills"
-                    ? "flex min-w-20 shrink-0 items-center justify-center px-5 py-5"
+                    ? "flex w-20 shrink-0 items-center justify-center px-4 py-5"
                     : "border-border/70 flex min-w-28 shrink-0 items-center justify-end gap-2 border-l px-3 sm:min-w-36 sm:px-4"
                 }
               >
@@ -705,6 +806,18 @@ export function ProjectAssetListView({
   );
 }
 
+type ProjectAssetSelectionIntent = {
+  assetId: string | null;
+  href: string | null;
+  history: "push" | "replace";
+  routeAlreadyChanged: boolean;
+};
+
+type PendingProjectAssetSelection = {
+  intent: ProjectAssetSelectionIntent;
+  restoreHref: string | null;
+};
+
 function ProjectAssetCatalog({
   accountId,
   project,
@@ -712,6 +825,7 @@ function ProjectAssetCatalog({
   layout,
   createOpen,
   initialSelectedAssetId,
+  selectionQueryParam,
   onCreateOpenChange,
   renderList,
   renderAssetEditor,
@@ -724,6 +838,7 @@ function ProjectAssetCatalog({
   layout: ProjectAssetPageLayout;
   createOpen: boolean;
   initialSelectedAssetId: string | null;
+  selectionQueryParam?: string;
   onCreateOpenChange: (open: boolean) => void;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderAssetEditor?: (
@@ -740,6 +855,8 @@ function ProjectAssetCatalog({
   }) => ReactNode;
 }) {
   const { t } = useI18n();
+  const pathname = usePathname();
+  const router = useRouter();
   const query = useProjectAssets(accountId, project.id, kind);
   const createVersion = useCreateProjectAssetVersion(
     accountId,
@@ -774,6 +891,7 @@ function ProjectAssetCatalog({
     assetId: string;
     checked: boolean;
   } | null>(null);
+  const [bindingAssetId, setBindingAssetId] = useState<string | null>(null);
   const [projectStatusIntent, setProjectStatusIntent] = useState<{
     assetId: string;
     checked: boolean;
@@ -800,6 +918,190 @@ function ProjectAssetCatalog({
     pending: boolean;
     error: unknown;
   } | null>(null);
+  const [detailDirty, setDetailDirty] = useState(false);
+  const [pendingSelection, setPendingSelection] =
+    useState<PendingProjectAssetSelection | null>(null);
+  const selectedAssetIdRef = useRef(selectedAssetId);
+  const detailDirtyRef = useRef(detailDirty);
+  const pendingSelectionRef = useRef(pendingSelection);
+  // A popstate has already changed both the visible URL and Next's history
+  // state before React can ask about discarding. Keep the last accepted pair
+  // so the capture-phase listener can restore them as one unit.
+  const currentSelectionHrefRef = useRef<string | null>(null);
+  const currentSelectionHistoryStateRef = useRef<unknown>(undefined);
+  const routeSyncTargetRef = useRef<{ assetId: string | null } | null>(null);
+  const initialSelectedAssetIdRef = useRef(initialSelectedAssetId);
+  selectedAssetIdRef.current = selectedAssetId;
+  detailDirtyRef.current = detailDirty;
+  pendingSelectionRef.current = pendingSelection;
+  initialSelectedAssetIdRef.current = initialSelectedAssetId;
+
+  const handleDetailDirtyChange = useCallback((dirty: boolean) => {
+    detailDirtyRef.current = dirty;
+    setDetailDirty(dirty);
+  }, []);
+
+  const applyAssetSelection = useCallback(
+    (intent: ProjectAssetSelectionIntent) => {
+      pendingSelectionRef.current = null;
+      setPendingSelection(null);
+      detailDirtyRef.current = false;
+      setDetailDirty(false);
+      selectedAssetIdRef.current = intent.assetId;
+      setSelectedAssetId(intent.assetId);
+      if (!selectionQueryParam || !intent.href) return;
+
+      currentSelectionHrefRef.current = intent.href;
+      routeSyncTargetRef.current =
+        initialSelectedAssetIdRef.current === intent.assetId
+          ? null
+          : { assetId: intent.assetId };
+      if (intent.history === "push") {
+        router.push(intent.href, { scroll: false });
+      } else {
+        router.replace(intent.href, { scroll: false });
+      }
+    },
+    [router, selectionQueryParam],
+  );
+
+  const requestAssetSelection = useCallback(
+    (intent: ProjectAssetSelectionIntent) => {
+      const currentAssetId = selectedAssetIdRef.current;
+      const decision = projectAssetSelectionDecision(
+        currentAssetId,
+        intent.assetId,
+        detailDirtyRef.current,
+      );
+      if (decision === "unchanged") {
+        if (intent.routeAlreadyChanged && intent.href) {
+          currentSelectionHrefRef.current = intent.href;
+          currentSelectionHistoryStateRef.current = window.history.state;
+        }
+        return;
+      }
+      if (decision === "apply") {
+        applyAssetSelection(intent);
+        return;
+      }
+      if (pendingSelectionRef.current) return;
+
+      const restoreHref = currentSelectionHrefRef.current;
+      const pending = { intent, restoreHref };
+      pendingSelectionRef.current = pending;
+      setPendingSelection(pending);
+      if (intent.routeAlreadyChanged && restoreHref) {
+        window.history.replaceState(
+          currentSelectionHistoryStateRef.current === undefined
+            ? window.history.state
+            : currentSelectionHistoryStateRef.current,
+          "",
+          restoreHref,
+        );
+      }
+    },
+    [applyAssetSelection],
+  );
+
+  const cancelPendingSelection = useCallback(() => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) return;
+    pendingSelectionRef.current = null;
+    setPendingSelection(null);
+    if (pending.intent.routeAlreadyChanged && pending.restoreHref) {
+      currentSelectionHrefRef.current = pending.restoreHref;
+      routeSyncTargetRef.current =
+        initialSelectedAssetIdRef.current === selectedAssetIdRef.current
+          ? null
+          : { assetId: selectedAssetIdRef.current };
+      router.replace(pending.restoreHref, { scroll: false });
+    }
+  }, [router]);
+
+  const confirmPendingSelection = useCallback(() => {
+    const pending = pendingSelectionRef.current;
+    if (!pending) return;
+    applyAssetSelection(pending.intent);
+  }, [applyAssetSelection]);
+
+  useEffect(() => {
+    if (!selectionQueryParam || currentSelectionHrefRef.current) return;
+    currentSelectionHrefRef.current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    currentSelectionHistoryStateRef.current = window.history.state;
+  }, [pathname, selectionQueryParam]);
+
+  useEffect(() => {
+    if (!selectionQueryParam) return;
+    const routeSyncTarget = routeSyncTargetRef.current;
+    if (routeSyncTarget) {
+      if (routeSyncTarget.assetId === initialSelectedAssetId) {
+        routeSyncTargetRef.current = null;
+        currentSelectionHrefRef.current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        currentSelectionHistoryStateRef.current = window.history.state;
+      }
+      return;
+    }
+    if (pendingSelectionRef.current) return;
+    if (initialSelectedAssetId === selectedAssetIdRef.current) {
+      if (selectionQueryParam) {
+        currentSelectionHrefRef.current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+        currentSelectionHistoryStateRef.current = window.history.state;
+      }
+      return;
+    }
+
+    const href = selectionQueryParam
+      ? `${window.location.pathname}${window.location.search}${window.location.hash}`
+      : null;
+    requestAssetSelection({
+      assetId: initialSelectedAssetId,
+      href,
+      history: "replace",
+      routeAlreadyChanged: Boolean(selectionQueryParam),
+    });
+  }, [
+    initialSelectedAssetId,
+    requestAssetSelection,
+    selectedAssetId,
+    selectionQueryParam,
+  ]);
+
+  useEffect(() => {
+    if (!selectionQueryParam) return;
+    const syncSelectionFromHistory = () => {
+      requestAssetSelection({
+        assetId: projectAssetSelectionFromSearch(
+          window.location.search,
+          selectionQueryParam,
+        ),
+        href: `${window.location.pathname}${window.location.search}${window.location.hash}`,
+        history: "replace",
+        routeAlreadyChanged: true,
+      });
+    };
+    window.addEventListener("popstate", syncSelectionFromHistory, true);
+    return () =>
+      window.removeEventListener("popstate", syncSelectionFromHistory, true);
+  }, [requestAssetSelection, selectionQueryParam]);
+
+  const navigateToAsset = useCallback(
+    (assetId: string | null, history: "push" | "replace") => {
+      requestAssetSelection({
+        assetId,
+        href: selectionQueryParam
+          ? projectAssetSelectionHref(
+              pathname,
+              window.location.search,
+              selectionQueryParam,
+              assetId,
+            )
+          : null,
+        history,
+        routeAlreadyChanged: false,
+      });
+    },
+    [pathname, requestAssetSelection, selectionQueryParam],
+  );
 
   const handleRequestedVersionHandled = useCallback(
     (assetId: string, versionId: string) => {
@@ -915,6 +1217,10 @@ function ProjectAssetCatalog({
       ) ?? null
     );
   }, [data, selectedAssetId]);
+  const systemSkillBindingItem = useMemo(() => {
+    if (kind !== "skills" || !data || !bindingAssetId) return null;
+    return data.system_items.find((item) => item.id === bindingAssetId) ?? null;
+  }, [bindingAssetId, data, kind]);
 
   useEffect(() => {
     const readySelection = importedSkillSelectionReady(
@@ -922,7 +1228,6 @@ function ProjectAssetCatalog({
       importedSkillSelection,
     );
     if (!readySelection) return;
-    setSelectedAssetId(readySelection.assetId);
     setCreatedVersions((current) =>
       rememberRequestedVersion(
         current,
@@ -931,7 +1236,8 @@ function ProjectAssetCatalog({
       ),
     );
     setImportedSkillSelection(null);
-  }, [data, importedSkillSelection]);
+    navigateToAsset(readySelection.assetId, "push");
+  }, [data, importedSkillSelection, navigateToAsset]);
 
   useEffect(() => {
     const readySelection = configuredMcpSelectionReady(
@@ -951,8 +1257,16 @@ function ProjectAssetCatalog({
   }, [configuredMcpSelection, data]);
 
   useEffect(() => {
-    if (selectedAssetId && data && !selectedItem) setSelectedAssetId(null);
-  }, [data, selectedAssetId, selectedItem]);
+    if (selectedAssetId && data && !selectedItem) {
+      navigateToAsset(null, "replace");
+    }
+  }, [data, navigateToAsset, selectedAssetId, selectedItem]);
+
+  useEffect(() => {
+    if (bindingAssetId && data && !systemSkillBindingItem) {
+      setBindingAssetId(null);
+    }
+  }, [bindingAssetId, data, systemSkillBindingItem]);
 
   function runSystemBindingAction(
     item: ProjectAssetItem,
@@ -995,6 +1309,17 @@ function ProjectAssetCatalog({
   }
 
   function toggleSystemBinding(item: ProjectAssetItem, checked: boolean) {
+    if (kind === "skills" && checked && item.binding?.enabled !== true) {
+      if (
+        projectSystemSkillBindingCanManage(
+          item,
+          project.capabilities.includes("shared_assets.manage_bindings"),
+        )
+      ) {
+        setBindingAssetId(item.id);
+      }
+      return;
+    }
     runSystemBindingAction(item, checked);
   }
 
@@ -1093,6 +1418,9 @@ function ProjectAssetCatalog({
   const projectStatusErrorAssetId = changeStatus.error
     ? changeStatus.variables?.assetId
     : null;
+  const agentVisibleCount =
+    filteredData.system_items.length + filteredData.project_items.length;
+  const agentSourceCount = data.system_items.length + data.project_items.length;
 
   return (
     <>
@@ -1109,14 +1437,31 @@ function ProjectAssetCatalog({
       ) : null}
 
       {layout === "agent-cards" && renderList ? (
-        renderList({
-          project,
-          data: filteredData,
-          items: filteredData.project_items,
-          source: "project",
-          selectedAssetId,
-          onSelect: (item) => setSelectedAssetId(item.id),
-        })
+        <>
+          <ProjectAgentDirectorySearch
+            searchQuery={searchQuery}
+            visibleCount={agentVisibleCount}
+            sourceCount={agentSourceCount}
+            onSearchQueryChange={setSearchQuery}
+          />
+          {filterActive && agentVisibleCount === 0 ? (
+            <p
+              role="status"
+              className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm"
+            >
+              没有找到匹配的 Agent，请调整搜索词。
+            </p>
+          ) : (
+            renderList({
+              project,
+              data: filteredData,
+              items: filteredData.project_items,
+              source: "project",
+              selectedAssetId,
+              onSelect: (item) => navigateToAsset(item.id, "push"),
+            })
+          )}
+        </>
       ) : (
         <Tabs
           value={sourceFilter}
@@ -1242,7 +1587,7 @@ function ProjectAssetCatalog({
                     items,
                     source: value,
                     selectedAssetId,
-                    onSelect: (item) => setSelectedAssetId(item.id),
+                    onSelect: (item) => navigateToAsset(item.id, "push"),
                   })
                 ) : (
                   <ProjectAssetListView
@@ -1250,7 +1595,7 @@ function ProjectAssetCatalog({
                     data={filteredData}
                     source={value}
                     selectedAssetId={selectedAssetId}
-                    onSelect={(item) => setSelectedAssetId(item.id)}
+                    onSelect={(item) => navigateToAsset(item.id, "push")}
                     onToggleSystemBinding={toggleSystemBinding}
                     onSyncSystemMcpBinding={syncSystemMcpBinding}
                     onToggleProjectAssetStatus={toggleProjectAssetStatus}
@@ -1270,19 +1615,24 @@ function ProjectAssetCatalog({
 
       {selectedItem && (
         <ProjectAssetDetailSheet
+          key={`${kind}:${selectedItem.id}`}
           accountId={accountId}
           projectId={project.id}
           projectCapabilities={project.capabilities}
           kind={kind}
           item={selectedItem}
           open
+          canManageSystemSkillBinding={projectSystemSkillBindingCanManage(
+            selectedItem,
+            project.capabilities.includes("shared_assets.manage_bindings"),
+          )}
           requestedVersionId={createdVersions[selectedItem.id] ?? null}
-          onOpenChange={(next) => !next && setSelectedAssetId(null)}
+          onOpenChange={(next) => !next && navigateToAsset(null, "replace")}
           onCreateVersion={openVersionDialog}
           onDeleted={(assetId) => {
-            setSelectedAssetId((current) =>
-              current === assetId ? null : current,
-            );
+            if (selectedAssetId === assetId) {
+              navigateToAsset(null, "replace");
+            }
             setCreatedVersions((current) => {
               if (!(assetId in current)) return current;
               const next = { ...current };
@@ -1290,12 +1640,64 @@ function ProjectAssetCatalog({
               return next;
             });
           }}
+          onDirtyChange={handleDetailDirtyChange}
+          onManageSystemSkillBinding={() => setBindingAssetId(selectedItem.id)}
           onVersionCreated={rememberVersion}
           onRequestedVersionHandled={handleRequestedVersionHandled}
           renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
         />
       )}
+
+      <Dialog
+        open={pendingSelection !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) cancelPendingSelection();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              放弃当前 {KIND_META[kind].singular} 的未保存修改？
+            </DialogTitle>
+            <DialogDescription>
+              {pendingSelection?.intent.assetId
+                ? `确认后将切换到另一个 ${KIND_META[kind].singular}，当前修改不会保存。`
+                : "确认后将关闭详情，当前修改不会保存。"}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={cancelPendingSelection}
+            >
+              继续编辑
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={confirmPendingSelection}
+            >
+              放弃修改并继续
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {kind === "skills" && systemSkillBindingItem ? (
+        <SystemBindingDialog
+          accountId={accountId}
+          projectId={project.id}
+          kind="skills"
+          item={systemSkillBindingItem}
+          open
+          onOpenChange={(nextOpen) => {
+            if (!nextOpen) setBindingAssetId(null);
+          }}
+          onConflict={() => void query.refetch()}
+        />
+      ) : null}
 
       {kind === "mcp-servers" ? (
         <ProjectMcpCreateDialog
@@ -1391,6 +1793,7 @@ export function ProjectAssetPageShell({
   layout = "default",
   headerActions,
   initialSelectedAssetId = null,
+  selectionQueryParam,
   renderList,
   renderAssetEditor,
   renderVersion,
@@ -1401,6 +1804,7 @@ export function ProjectAssetPageShell({
   layout?: ProjectAssetPageLayout;
   headerActions?: ReactNode;
   initialSelectedAssetId?: string | null;
+  selectionQueryParam?: string;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderAssetEditor?: (
     effectiveVersion: AssetVersion | null,
@@ -1455,6 +1859,7 @@ export function ProjectAssetPageShell({
         layout={layout}
         createOpen={createOpen}
         initialSelectedAssetId={initialSelectedAssetId}
+        selectionQueryParam={selectionQueryParam}
         onCreateOpenChange={setCreateOpen}
         renderList={renderList}
         renderAssetEditor={renderAssetEditor}

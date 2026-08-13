@@ -8,6 +8,7 @@ export const adminSystemSettingsAccountIdSchema = z.union([
 export const systemSettingsSectionNameSchema = z.enum([
   "agent_runtime",
   "auth",
+  "automations",
   "memory_document",
   "quotas",
 ]);
@@ -327,6 +328,17 @@ export const quotaSettingsValueSchema = boundedJson(
     .strict(),
 );
 
+export const automationsSettingsValueSchema = boundedJson(
+  z
+    .object({
+      enabled: z.boolean(),
+      poll_interval_seconds: boundedInteger(1, 300),
+      max_concurrent_runs: boundedInteger(1, 32),
+      min_once_delay_seconds: boundedInteger(0, 86_400),
+    })
+    .strict(),
+);
+
 const memoryDocumentTitleSchema = z
   .string()
   .refine((value) => !/[\p{C}\p{Zl}\p{Zp}]/u.test(value), {
@@ -410,6 +422,14 @@ const quotasSectionSchema = z
     effect_scope: z.literal("next_authoritative_check"),
   })
   .strict();
+const automationsSectionSchema = z
+  .object({
+    section: z.literal("automations"),
+    ...sectionMetadataFields,
+    value: automationsSettingsValueSchema,
+    effect_scope: z.literal("new_requests"),
+  })
+  .strict();
 
 export const systemSettingsCatalogSchema = z
   .object({
@@ -418,6 +438,7 @@ export const systemSettingsCatalogSchema = z
       .object({
         agent_runtime: agentRuntimeSectionSchema,
         auth: authSectionSchema,
+        automations: automationsSectionSchema,
         memory_document: memoryDocumentSectionSchema,
         quotas: quotasSectionSchema,
       })
@@ -438,7 +459,12 @@ const mutationBaseFields = {
 } as const;
 
 function mutationResponseSchema<
-  Section extends "agent_runtime" | "auth" | "memory_document" | "quotas",
+  Section extends
+    | "agent_runtime"
+    | "auth"
+    | "automations"
+    | "memory_document"
+    | "quotas",
   Value extends z.ZodTypeAny,
   Effect extends
     | "new_requests_and_runs"
@@ -471,6 +497,11 @@ export const systemSettingsMutationResponseSchema = z.discriminatedUnion(
       "new_requests_and_runs",
     ),
     mutationResponseSchema("auth", authSettingsValueSchema, "new_requests"),
+    mutationResponseSchema(
+      "automations",
+      automationsSettingsValueSchema,
+      "new_requests",
+    ),
     mutationResponseSchema(
       "memory_document",
       memoryDocumentSettingsValueSchema,
@@ -508,6 +539,12 @@ export const replaceQuotaSettingsInputSchema = z
     value: quotaSettingsValueSchema,
   })
   .strict();
+export const replaceAutomationsSettingsInputSchema = z
+  .object({
+    expected_revision: z.number().int().positive(),
+    value: automationsSettingsValueSchema,
+  })
+  .strict();
 
 export type AgentRuntimeSettingsValue = z.infer<
   typeof agentRuntimeSettingsValueSchema
@@ -517,6 +554,9 @@ export type MemoryDocumentSettingsValue = z.infer<
   typeof memoryDocumentSettingsValueSchema
 >;
 export type QuotaSettingsValue = z.infer<typeof quotaSettingsValueSchema>;
+export type AutomationsSettingsValue = z.infer<
+  typeof automationsSettingsValueSchema
+>;
 export type SystemSettingsCatalog = z.infer<typeof systemSettingsCatalogSchema>;
 export type SystemSettingsMutationResponse = z.infer<
   typeof systemSettingsMutationResponseSchema
@@ -539,10 +579,14 @@ export type ReplaceMemoryDocumentSettingsInput = z.infer<
 export type ReplaceQuotaSettingsInput = z.infer<
   typeof replaceQuotaSettingsInputSchema
 >;
+export type ReplaceAutomationsSettingsInput = z.infer<
+  typeof replaceAutomationsSettingsInputSchema
+>;
 
 export type SystemSettingsSectionValueMap = {
   agent_runtime: AgentRuntimeSettingsValue;
   auth: AuthSettingsValue;
+  automations: AutomationsSettingsValue;
   memory_document: MemoryDocumentSettingsValue;
   quotas: QuotaSettingsValue;
 };

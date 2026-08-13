@@ -3,6 +3,7 @@
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
     MemoryDocumentVersionRow,
+    MemoryDreamPrepareRunRow,
     MemoryDreamRunRow,
     MemoryEpisodeRow,
     MemoryHistoryEntryRow,
@@ -20,6 +21,14 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryHistoryActivation,
     MemoryHistoryActivationResult,
     MemoryResetCounts,
+    MemoryResetSettledDream,
+)
+from deerflow.persistence.private_work.memory_dream_prepare_repository import (
+    MemoryDreamPrepareAdmission,
+    MemoryDreamPrepareConflict,
+    MemoryDreamPrepareNotFound,
+    MemoryDreamPrepareRecord,
+    MemoryDreamPrepareRepository,
 )
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
@@ -41,12 +50,19 @@ __all__ = [
     "MemoryDocumentState",
     "MemoryDocumentVersionRow",
     "MemoryDocumentVersionRecord",
+    "MemoryDreamPrepareRunRow",
+    "MemoryDreamPrepareAdmission",
+    "MemoryDreamPrepareConflict",
+    "MemoryDreamPrepareNotFound",
+    "MemoryDreamPrepareRecord",
+    "MemoryDreamPrepareRepository",
     "MemoryDreamRunRow",
     "MemoryEpisodeRow",
     "MemoryHistoryEntryRow",
     "MemoryHistoryActivation",
     "MemoryHistoryActivationResult",
     "MemoryResetCounts",
+    "MemoryResetSettledDream",
     "PrivateArtifactRow",
     "PrivateFileChunkRow",
     "PrivateFileRow",

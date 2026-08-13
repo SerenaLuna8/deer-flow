@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 
 import type { AgentBuilderProgressItem } from "@/core/agent-builder";
+import { useI18n } from "@/core/i18n/hooks";
 
 export function AgentBuilderProgress({
   items,
@@ -16,11 +17,13 @@ export function AgentBuilderProgress({
   generating: boolean;
   documentsReady?: boolean;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.builder.progress;
   const documents = ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"];
 
   return (
     <section
-      aria-label="设计步骤"
+      aria-label={copy.stepsAria}
       className="border-border/70 bg-muted/20 rounded-2xl border p-4"
     >
       <div className="flex items-center gap-2 text-sm font-medium">
@@ -29,11 +32,11 @@ export function AgentBuilderProgress({
         ) : (
           <CheckCircle2Icon aria-hidden className="size-4" />
         )}
-        <span>{generating ? "正在设计 Agent…" : "设计步骤"}</span>
+        <span>{generating ? copy.designing : copy.steps}</span>
       </div>
       <div
         className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4"
-        aria-label="四项 Agent 设置进度"
+        aria-label={copy.settingsProgressAria}
       >
         {documents.map((name) => (
           <div

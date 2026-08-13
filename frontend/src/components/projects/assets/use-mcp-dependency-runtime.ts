@@ -4,9 +4,13 @@ import { useQueries } from "@tanstack/react-query";
 import { useMemo } from "react";
 
 import {
+  assessProjectAgentRuntime,
   listProjectAssetVersions,
+  projectAgentRuntimeAssessmentsKey,
   projectAssetVersionsKey,
   useProjectAssets,
+  MAX_AGENT_RUNTIME_ASSESSMENTS,
+  type AgentRuntimeAssessmentReasonCode,
   type ProjectAssetItem,
   type ProjectAssetList,
   type VersionHistoryResponse,
@@ -22,6 +26,16 @@ export type AgentMcpDependencyAssessment = {
 };
 
 export const MAIN_PROJECT_AGENT_SLUG = "project-assistant";
+
+const AGENT_RUNTIME_BLOCK_REASONS: Record<
+  AgentRuntimeAssessmentReasonCode,
+  string
+> = {
+  agent_unavailable: "Agent 当前发布版本或项目绑定不可用，请刷新后重试。",
+  runtime_dependency_unavailable:
+    "Agent 的 Skill、MCP 或凭据依赖当前不可用，请完成配置后重试。",
+  model_unavailable: "Agent 配置的模型当前不可用，请联系管理员。",
+};
 
 export function isMainProjectAgent(
   agent: Pick<ProjectAssetItem, "scope" | "slug">,
@@ -158,68 +172,73 @@ export function useAgentMcpDependencyRuntime({
   isLoading: boolean;
   error: unknown;
 } {
-  const shouldLoad = enabled && agents.length > 0;
-  const histories = useQueries({
-    queries: agents.map((agent) => ({
-      queryKey: projectAssetVersionsKey(
-        accountId,
-        projectId,
-        "agents",
-        agent.id,
-      ),
+  const agentIds = useMemo(
+    () => [...new Set(agents.map((agent) => agent.id))].sort(),
+    [agents],
+  );
+  const batches = useMemo(() => {
+    const items: string[][] = [];
+    for (
+      let start = 0;
+      start < agentIds.length;
+      start += MAX_AGENT_RUNTIME_ASSESSMENTS
+    ) {
+      items.push(agentIds.slice(start, start + MAX_AGENT_RUNTIME_ASSESSMENTS));
+    }
+    return items;
+  }, [agentIds]);
+  const shouldLoad = enabled && batches.length > 0;
+  const runtime = useQueries({
+    queries: batches.map((batch) => ({
+      queryKey: projectAgentRuntimeAssessmentsKey(accountId, projectId, batch),
       queryFn: ({ signal }: { signal: AbortSignal }) =>
-        listProjectAssetVersions(projectId, "agents", agent.id, signal),
-      enabled: shouldLoad && !isMainProjectAgent(agent),
+        assessProjectAgentRuntime(projectId, batch, signal),
+      enabled: shouldLoad,
+      staleTime: 0,
     })),
   });
-  const requiredVersionIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const [index, agent] of agents.entries()) {
-      if (isMainProjectAgent(agent)) continue;
-      const history = histories[index]?.data;
-      if (!history) continue;
-      const version = selectedAgentVersion(agent, history);
-      if (!version || !("agent_id" in version)) continue;
-      for (const id of version.mcp_version_ids) ids.add(id);
-    }
-    return [...ids];
-  }, [agents, histories]);
-  const runtime = useMcpDependencyRuntime({
-    accountId,
-    projectId,
-    requiredVersionIds,
-    enabled: shouldLoad,
-  });
-  const historyError =
-    histories.find((history) => history.error)?.error ?? null;
-  const error = historyError ?? runtime.error;
-  const isLoading =
-    shouldLoad &&
-    (histories.some((history) => history.isLoading) || runtime.isLoading);
-  const assessments = agents.map((agent, index) => {
-    if (isMainProjectAgent(agent)) {
-      return {
-        status: "ready",
-        reason: null,
-      } satisfies AgentMcpDependencyAssessment;
-    }
+  const error = runtime.find((query) => query.error)?.error ?? null;
+  const isLoading = shouldLoad && runtime.some((query) => query.isLoading);
+  const byAgentId = useMemo(
+    () =>
+      new Map(
+        runtime.flatMap((query) =>
+          (query.data?.items ?? []).map(
+            (assessment) => [assessment.agent_asset_id, assessment] as const,
+          ),
+        ),
+      ),
+    [runtime],
+  );
+  const assessments = agents.map((agent) => {
     if (!shouldLoad || isLoading) {
       return {
         status: "loading",
-        reason: "正在验证 Agent 的 MCP 依赖，请稍候。",
+        reason: "正在验证 Agent 的运行依赖，请稍候。",
       } satisfies AgentMcpDependencyAssessment;
     }
     if (error) {
       return {
         status: "blocked",
-        reason: "无法验证 Agent 的 MCP 依赖，请稍后重试。",
+        reason: "无法验证 Agent 的运行依赖，请稍后重试。",
       } satisfies AgentMcpDependencyAssessment;
     }
-    return agentMcpDependencyAssessment(
-      agent,
-      histories[index]?.data,
-      runtime.versions,
-    );
+    const assessment = byAgentId.get(agent.id);
+    if (!assessment) {
+      return {
+        status: "blocked",
+        reason: "无法确认 Agent 的运行依赖，请刷新后重试。",
+      } satisfies AgentMcpDependencyAssessment;
+    }
+    return assessment.status === "ready"
+      ? ({
+          status: "ready",
+          reason: null,
+        } satisfies AgentMcpDependencyAssessment)
+      : ({
+          status: "blocked",
+          reason: AGENT_RUNTIME_BLOCK_REASONS[assessment.reason_code],
+        } satisfies AgentMcpDependencyAssessment);
   });
 
   return { assessments, isLoading, error };

@@ -223,22 +223,23 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
         preserving already-valid transcripts unchanged.
         """
         tool_messages_by_id: dict[str, deque[ToolMessage]] = defaultdict(deque)
-        for msg in messages:
+        tool_calls_by_message_index: dict[int, list[dict]] = {}
+        tool_call_ids: set[str] = set()
+        for index, msg in enumerate(messages):
             if isinstance(msg, ToolMessage):
                 tool_messages_by_id[msg.tool_call_id].append(msg)
-
-        tool_call_ids: set[str] = set()
-        for msg in messages:
             if getattr(msg, "type", None) != "ai":
                 continue
-            for tc in self._message_tool_calls(msg):
+            normalized_tool_calls = self._message_tool_calls(msg)
+            tool_calls_by_message_index[index] = normalized_tool_calls
+            for tc in normalized_tool_calls:
                 tc_id = tc.get("id")
                 if tc_id:
                     tool_call_ids.add(tc_id)
 
         patched: list = []
         patch_count = 0
-        for msg in messages:
+        for index, msg in enumerate(messages):
             if isinstance(msg, ToolMessage) and msg.tool_call_id in tool_call_ids:
                 continue
 
@@ -249,7 +250,7 @@ class DanglingToolCallMiddleware(AgentMiddleware[AgentState]):
 
             # Intentionally inspect the original message so empty names can be
             # classified before the sanitized message replaces them.
-            for tc in self._message_tool_calls(msg):
+            for tc in tool_calls_by_message_index[index]:
                 tc_id = tc.get("id")
                 if not tc_id:
                     continue

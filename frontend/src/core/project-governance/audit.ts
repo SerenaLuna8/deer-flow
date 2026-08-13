@@ -55,8 +55,12 @@ export const auditActionSchema = z.enum([
   "memory.recall.executed",
   "memory.seal.admitted",
   "memory.seal.settled",
+  "memory.dream.admitted",
+  "memory.dream.settled",
   "memory.injection.skipped",
   "memory.dream.review_flagged",
+  "memory.restore.executed",
+  "memory.reset.executed",
   "job.dead",
   "job.requeued",
   "purge.completed",
@@ -72,9 +76,92 @@ const roleMetadataSchema = z.object({ role: roleSchema }).strict();
 const roleChangedMetadataSchema = z
   .object({ previous_role: roleSchema, role: roleSchema })
   .strict();
-const assetMetadataSchema = z
+const assetOperationSchema = z.enum([
+  "agent.create",
+  "agent.version.create",
+  "agent.instructions.update",
+  "agent.capability_bindings.update",
+  "agent.version.restore",
+  "agent.publish",
+  "agent.delete",
+  "agent.activate",
+  "agent.suspend",
+  "agent.default.set",
+  "agent.default.clear",
+  "skill.create",
+  "skill.version.create",
+  "skill.publish",
+  "skill.version.revoke",
+  "skill.delete",
+  "skill.activate",
+  "skill.credential_bindings.configure",
+  "skill.suspend",
+  "mcp.create",
+  "mcp.version.create",
+  "mcp.submit_approval",
+  "mcp.approve",
+  "mcp.credential_grants.configure",
+  "mcp.publish",
+  "mcp.archive",
+  "mcp.suspend",
+  "mcp.activate",
+  "mcp.delete",
+  "credential.create",
+  "credential.replace",
+  "credential.revoke",
+  "credential.delete",
+  "credential.grants.migrate",
+  "binding.enable",
+  "binding.upgrade",
+  "binding.rollback",
+  "binding.sync_current",
+  "binding.disable",
+]);
+const versionedAgentOperations = new Set([
+  "agent.version.create",
+  "agent.instructions.update",
+  "agent.capability_bindings.update",
+  "agent.version.restore",
+  "agent.publish",
+  "agent.activate",
+]);
+const versionedSkillOperations = new Set(["skill.version.revoke"]);
+const currentAssetMetadataSchema = z
+  .object({
+    asset_kind: z.enum(["agent", "skill", "mcp"]),
+    operation: assetOperationSchema,
+    version_number: z.number().int().positive().optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const [operationDomain = ""] = value.operation.split(".", 1);
+    const kindMatches =
+      !["agent", "skill", "mcp"].includes(operationDomain) ||
+      operationDomain === value.asset_kind;
+    const credentialMatches =
+      operationDomain !== "credential" || value.asset_kind === "mcp";
+    const versionMatches =
+      operationDomain === "agent"
+        ? versionedAgentOperations.has(value.operation) ===
+          (value.version_number !== undefined)
+        : operationDomain === "skill"
+          ? versionedSkillOperations.has(value.operation) ===
+            (value.version_number !== undefined)
+          : value.version_number === undefined;
+    if (!kindMatches || !credentialMatches || !versionMatches) {
+      context.addIssue({
+        code: "custom",
+        message: "Asset audit metadata is inconsistent",
+      });
+    }
+  });
+const legacyAssetMetadataSchema = z
   .object({ asset_kind: z.enum(["agent", "skill", "mcp"]) })
   .strict();
+const assetMetadataSchema = z.union([
+  currentAssetMetadataSchema,
+  legacyAssetMetadataSchema,
+]);
 const automationMetadataSchema = z
   .object({ trigger_kind: z.enum(["manual", "scheduled"]).optional() })
   .strict();
@@ -134,6 +221,102 @@ const memorySealSettledMetadataSchema = z
     disposition: z.enum(["sealed", "noop"]),
   })
   .strict();
+const memoryDreamAdmittedMetadataSchema = z
+  .object({
+    origin: z.enum(["manual", "scheduled", "prepared"]),
+    trigger: z.enum(["auto_dream", "manual_dream", "budget_rewrite"]),
+    history_count: z.number().int().min(0).max(20),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const originMatches =
+      (value.origin === "manual" &&
+        ["manual_dream", "budget_rewrite"].includes(value.trigger)) ||
+      (value.origin === "scheduled" &&
+        ["auto_dream", "budget_rewrite"].includes(value.trigger)) ||
+      (value.origin === "prepared" &&
+        ["manual_dream", "budget_rewrite"].includes(value.trigger));
+    const historyMatches =
+      value.trigger === "budget_rewrite"
+        ? value.history_count === 0
+        : value.history_count >= 1;
+    if (!originMatches || !historyMatches) {
+      context.addIssue({
+        code: "custom",
+        message: "Memory Dream admission metadata is inconsistent",
+      });
+    }
+  });
+const memoryDreamSettledMetadataSchema = z
+  .object({
+    disposition: z.enum(["published", "cancelled", "dead"]),
+    version: z.number().int().min(1).optional(),
+    public_error_code: publicErrorCodeSchema.optional(),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const valid =
+      (value.disposition === "published" &&
+        value.version !== undefined &&
+        value.public_error_code === undefined) ||
+      (value.disposition === "cancelled" &&
+        value.version === undefined &&
+        value.public_error_code === undefined) ||
+      (value.disposition === "dead" &&
+        value.version === undefined &&
+        value.public_error_code !== undefined);
+    if (!valid) {
+      context.addIssue({
+        code: "custom",
+        message: "Memory Dream settlement metadata is inconsistent",
+      });
+    }
+  });
+const memoryRestoreMetadataSchema = z
+  .object({
+    source_version: z.number().int().min(1),
+    previous_version: z.number().int().min(1),
+    published_version: z.number().int().min(2),
+    changed: z.boolean(),
+  })
+  .strict()
+  .refine(
+    (value) => value.published_version === value.previous_version + 1,
+    "Memory restore versions are inconsistent",
+  );
+const memoryResetCountFields = {
+  projects_affected: z.number().int().nonnegative().optional(),
+  scopes_reset: z.number().int().nonnegative().optional(),
+  history_entries: z.number().int().nonnegative().optional(),
+  documents: z.number().int().nonnegative().optional(),
+  versions: z.number().int().nonnegative().optional(),
+  dream_runs: z.number().int().nonnegative().optional(),
+  prepare_runs: z.number().int().nonnegative().optional(),
+  snapshots: z.number().int().nonnegative().optional(),
+  episodes: z.number().int().nonnegative().optional(),
+  jobs_cancelled: z.number().int().nonnegative().optional(),
+};
+const memoryResetMetadataSchema = z
+  .object({
+    scope: z.enum(["account", "project"]),
+    ...memoryResetCountFields,
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const counts = Object.keys(memoryResetCountFields).map(
+      (key) => value[key as keyof typeof memoryResetCountFields],
+    );
+    const valid =
+      value.scope === "account"
+        ? counts.every((entry) => entry !== undefined)
+        : counts.every((entry) => entry === undefined);
+    if (!valid) {
+      context.addIssue({
+        code: "custom",
+        message: "Memory reset metadata is inconsistent",
+      });
+    }
+  });
 const memoryInjectionSkippedMetadataSchema = z
   .object({
     reason: z.enum(["over_budget"]),
@@ -160,6 +343,7 @@ const jobMetadataSchema = z
       "retention_purge",
       "mcp_discovery",
       "memory_dream",
+      "memory_dream_prepare",
       "memory_seal",
     ]),
     public_error_code: publicErrorCodeSchema.nullable().optional(),
@@ -169,7 +353,7 @@ const jobMetadataSchema = z
   .strict();
 const purgeMetadataSchema = z
   .object({
-    resource_kind: z.enum(["project", "account", "file"]),
+    resource_kind: z.enum(["project", "account", "file", "former_owner"]),
     purged_count: z.number().int().nonnegative(),
   })
   .strict();
@@ -178,13 +362,20 @@ const correctionMetadataSchema = z
   .strict();
 const systemSettingMetadataSchema = z
   .object({
-    section: z.enum(["agent_runtime", "auth", "quotas"]),
+    section: z.enum([
+      "agent_runtime",
+      "auth",
+      "automations",
+      "memory_document",
+      "quotas",
+    ]),
     revision: z.number().int().min(2),
     schema_version: z.number().int().min(1),
     payload_checksum: z.string().regex(/^[0-9a-f]{64}$/u),
     effect_scope: z.enum([
       "new_requests_and_runs",
       "new_requests",
+      "new_memory_documents",
       "next_authoritative_check",
     ]),
   })
@@ -230,8 +421,12 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "memory.recall.executed": memoryRecallExecutedMetadataSchema,
   "memory.seal.admitted": emptyMetadataSchema,
   "memory.seal.settled": memorySealSettledMetadataSchema,
+  "memory.dream.admitted": memoryDreamAdmittedMetadataSchema,
+  "memory.dream.settled": memoryDreamSettledMetadataSchema,
   "memory.injection.skipped": memoryInjectionSkippedMetadataSchema,
   "memory.dream.review_flagged": memoryDreamReviewFlaggedMetadataSchema,
+  "memory.restore.executed": memoryRestoreMetadataSchema,
+  "memory.reset.executed": memoryResetMetadataSchema,
   "job.dead": jobMetadataSchema,
   "job.requeued": jobMetadataSchema,
   "purge.completed": purgeMetadataSchema,
@@ -265,6 +460,7 @@ export const auditItemSchema = z
       "purge",
       "audit",
       "system_setting",
+      "account",
     ]),
     outcome: z.enum(["success", "rejected", "failed"]),
     public_error_code: z

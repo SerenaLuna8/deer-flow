@@ -50,10 +50,10 @@ import {
 } from "@/components/workspace/model-selector-popover";
 import {
   AgentBuilderApiError,
-  agentBuilderBlueprintValidationError,
   agentBuilderCanAuthor,
   agentBuilderCanComplete,
   agentBuilderComposerDisabled,
+  agentBuilderSemanticallyEqual,
   agentBuilderSemanticSignature,
   createAgentBuilderIdempotencyRegistry,
   useAgentBuilderSession,
@@ -64,6 +64,8 @@ import {
   type AgentBuilderSession,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { HumanInputResponse } from "@/core/messages/human-input";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
@@ -73,7 +75,10 @@ import { isIMEComposing } from "@/lib/ime";
 import { useMcpDependencyRuntime } from "../assets/use-mcp-dependency-runtime";
 import { useCurrentProject } from "../project-context";
 
-import { AgentBuilderBlueprintReview } from "./agent-builder-blueprint-review";
+import {
+  AgentBuilderBlueprintReview,
+  agentBuilderBlueprintValidationMessage,
+} from "./agent-builder-blueprint-review";
 import { AgentBuilderProgress } from "./agent-builder-progress";
 import { agentBuilderErrorMessage } from "./agent-builder-start";
 
@@ -86,6 +91,7 @@ export function agentBuilderSessionPath(
 
 export function agentBuilderWorkspaceErrorMessage(
   error: unknown,
+  copy: Translations["agents"]["builder"]["errors"],
   commitUncertain = false,
 ): string {
   if (
@@ -97,22 +103,22 @@ export function agentBuilderWorkspaceErrorMessage(
       "AGENT_BUILDER_UNAVAILABLE",
     ].includes(error.code)
   ) {
-    return "创建结果暂时无法确认。请勿重复创建，先返回列表检查同名 Agent；若未出现再重试。";
+    return copy.commitUncertain;
   }
   if (
     error instanceof AgentBuilderApiError &&
     error.code === "AGENT_BUILDER_CONFLICT"
   ) {
-    return "设计内容已发生变化，请刷新到最新状态后再继续。";
+    return copy.stale;
   }
-  return agentBuilderErrorMessage(error);
+  return agentBuilderErrorMessage(error, copy);
 }
 
 function sameBlueprint(
   left: AgentBuilderBlueprint | null,
   right: AgentBuilderBlueprint | null,
 ) {
-  return JSON.stringify(left) === JSON.stringify(right);
+  return agentBuilderSemanticallyEqual(left, right);
 }
 
 export async function submitAgentBuilderClarificationMutation(
@@ -234,6 +240,8 @@ export function AgentBuilderConversationView({
   onBlueprintDiscard: () => void;
   onComplete: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.builder.conversation;
   const localDraftLocked = blueprintEditing || blueprintDirty;
   const selectedGenerationModel = models.find(
     (model) => model.name === selectedGenerationModelName,
@@ -277,16 +285,14 @@ export function AgentBuilderConversationView({
                 role="alert"
                 className="border-border/70 bg-muted/20 text-muted-foreground rounded-xl border px-4 py-3 text-sm"
               >
-                当前账号没有继续设计 Agent 的权限。你仍可查看已保存的会话内容。
+                {copy.permissionReadOnly}
               </p>
             ) : null}
 
             {session.messages.length === 0 ? (
               <div className="flex justify-end">
                 <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
-                  新 Agent 的名称是{" "}
-                  <span className="font-semibold">{session.display_name}</span>
-                  。请通过下面的对话描述它的用途、行为方式和协作边界。
+                  {copy.newAgentIntro(session.display_name)}
                 </p>
               </div>
             ) : null}
@@ -313,8 +319,8 @@ export function AgentBuilderConversationView({
               >
                 <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
                 {session.status === "committing"
-                  ? "正在创建 Agent…"
-                  : "正在设计 Agent…"}
+                  ? copy.creatingAgent
+                  : copy.designingAgent}
               </p>
             ) : null}
 
@@ -382,17 +388,17 @@ export function AgentBuilderConversationView({
           >
             <div aria-disabled={composerDisabled}>
               <Textarea
-                aria-label="描述想要的 Agent"
+                aria-label={copy.composerAria}
                 value={composerText}
                 disabled={composerDisabled}
                 placeholder={
                   localDraftLocked
-                    ? "请先保存或放弃上方修改"
+                    ? copy.saveLocalChangesFirst
                     : clarificationOpen
-                      ? "等待你回答上方问题"
+                      ? copy.answerQuestionFirst
                       : generating
-                        ? "正在生成 Agent 设计稿…"
-                        : "描述你想要的 Agent，我来帮你通过对话创建。"
+                        ? copy.generatingBlueprint
+                        : copy.composerPlaceholder
                 }
                 className="min-h-24 resize-none rounded-xl border-0 px-3 py-3 text-sm shadow-none focus-visible:ring-0"
                 onChange={(event) => onComposerTextChange(event.target.value)}
@@ -411,12 +417,12 @@ export function AgentBuilderConversationView({
               />
               {modelsLoading ? (
                 <p role="status" className="text-muted-foreground px-3 text-xs">
-                  正在加载对话模型…
+                  {copy.loadingModels}
                 </p>
               ) : modelsError ? (
                 <div className="flex items-center gap-2 px-3">
                   <p role="alert" className="text-destructive text-xs">
-                    对话模型加载失败。
+                    {copy.modelLoadFailed}
                   </p>
                   <Button
                     type="button"
@@ -425,12 +431,12 @@ export function AgentBuilderConversationView({
                     className="h-7 px-2 text-xs"
                     onClick={onModelsRetry}
                   >
-                    重试
+                    {t.agents.common.retry}
                   </Button>
                 </div>
               ) : models.length === 0 ? (
                 <p role="alert" className="text-destructive px-3 text-xs">
-                  当前没有可用的对话模型。
+                  {copy.noModels}
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2 p-1">
@@ -441,19 +447,17 @@ export function AgentBuilderConversationView({
                       size="sm"
                       variant="ghost"
                       className="max-w-56 min-w-0 justify-start"
-                      aria-label="选择创建 Agent 的对话模型"
+                      aria-label={copy.selectModelAria}
                       disabled={modelSelectorDisabled}
                     >
                       <ModelSelectorName className="text-xs font-normal">
                         {selectedGenerationModel?.display_name ??
-                          "选择对话模型"}
+                          copy.selectModel}
                       </ModelSelectorName>
                     </Button>
                   </ModelSelectorTrigger>
                   <ModelSelectorContent>
-                    <ModelSelectorLabel>
-                      用于创建 Agent 的对话模型
-                    </ModelSelectorLabel>
+                    <ModelSelectorLabel>{copy.modelLabel}</ModelSelectorLabel>
                     <ModelSelectorList>
                       {models.map((model) => (
                         <ModelSelectorItem
@@ -466,7 +470,9 @@ export function AgentBuilderConversationView({
                             </ModelSelectorName>
                             <span className="text-muted-foreground truncate text-xs">
                               {model.name}
-                              {model.is_default ? " · 默认" : ""}
+                              {model.is_default
+                                ? ` · ${t.agents.common.defaultSuffix}`
+                                : ""}
                             </span>
                           </div>
                           {model.name === selectedGenerationModelName ? (
@@ -483,7 +489,7 @@ export function AgentBuilderConversationView({
                   type="submit"
                   size="icon"
                   className="size-11 rounded-xl"
-                  aria-label="发送"
+                  aria-label={t.agents.common.send}
                   disabled={
                     composerDisabled || composerText.trim().length === 0
                   }
@@ -514,6 +520,7 @@ function AgentBuilderLoading() {
 }
 
 export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
+  const { t } = useI18n();
   const { user } = useAuth();
   const project = useCurrentProject();
   const router = useRouter();
@@ -740,7 +747,10 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     ) {
       return;
     }
-    const blueprintError = agentBuilderBlueprintValidationError(blueprintDraft);
+    const blueprintError = agentBuilderBlueprintValidationMessage(
+      blueprintDraft,
+      t.agents.builder.blueprint.validation,
+    );
     if (blueprintError) {
       setLocalError(blueprintError);
       return;
@@ -832,11 +842,21 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const requestError =
     localError ??
     (submitTurn.error
-      ? agentBuilderWorkspaceErrorMessage(submitTurn.error)
+      ? agentBuilderWorkspaceErrorMessage(
+          submitTurn.error,
+          t.agents.builder.errors,
+        )
       : commit.error
-        ? agentBuilderWorkspaceErrorMessage(commit.error, true)
+        ? agentBuilderWorkspaceErrorMessage(
+            commit.error,
+            t.agents.builder.errors,
+            true,
+          )
         : cancel.error
-          ? agentBuilderWorkspaceErrorMessage(cancel.error)
+          ? agentBuilderWorkspaceErrorMessage(
+              cancel.error,
+              t.agents.builder.errors,
+            )
           : null);
 
   if (!user) return null;
@@ -848,17 +868,18 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
           <Button asChild type="button" size="icon" variant="ghost">
             <Link
               href={`/projects/${encodeURIComponent(project.slug)}/agents`}
-              aria-label="稍后继续，返回 Agent 列表"
+              aria-label={t.agents.builder.conversation.backToAgents}
             >
               <ArrowLeftIcon aria-hidden className="size-4" />
             </Link>
           </Button>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold">
-              {session?.display_name ?? "设计 Agent"}
+              {session?.display_name ??
+                t.agents.builder.conversation.designAgent}
             </p>
             <p className="text-muted-foreground truncate text-xs">
-              自动保存，可稍后继续
+              {t.agents.builder.conversation.autosave}
             </p>
           </div>
           {canAuthor ? (
@@ -868,7 +889,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   type="button"
                   size="icon"
                   variant="ghost"
-                  aria-label="更多操作"
+                  aria-label={t.agents.builder.conversation.more}
                   disabled={!session || mutationPending}
                 >
                   <MoreHorizontalIcon aria-hidden className="size-4" />
@@ -880,7 +901,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   onSelect={() => setCancelOpen(true)}
                 >
                   <Trash2Icon aria-hidden className="size-4" />
-                  放弃本次设计
+                  {t.agents.builder.conversation.abandon}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -889,7 +910,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
 
         <section
           className="min-h-0 flex-1 overflow-hidden"
-          aria-label="Agent 设计对话"
+          aria-label={t.agents.builder.conversation.conversationAria}
         >
           {sessionQuery.isLoading ? (
             <AgentBuilderLoading />
@@ -897,8 +918,11 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <div className="mx-auto max-w-xl px-4 py-16 text-center">
               <p role="alert" className="text-destructive text-sm">
                 {sessionQuery.error
-                  ? agentBuilderErrorMessage(sessionQuery.error)
-                  : "Agent 设计会话暂时不可用。"}
+                  ? agentBuilderErrorMessage(
+                      sessionQuery.error,
+                      t.agents.builder.errors,
+                    )
+                  : t.agents.builder.conversation.sessionUnavailable}
               </p>
               <Button
                 type="button"
@@ -907,7 +931,9 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 disabled={sessionQuery.isFetching}
                 onClick={() => void sessionQuery.refetch()}
               >
-                {sessionQuery.isFetching ? "重试中…" : "重试"}
+                {sessionQuery.isFetching
+                  ? t.agents.common.retrying
+                  : t.agents.common.retry}
               </Button>
             </div>
           ) : (
@@ -957,10 +983,11 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃本次 Agent 设计？</DialogTitle>
+            <DialogTitle>
+              {t.agents.builder.conversation.abandonTitle}
+            </DialogTitle>
             <DialogDescription>
-              这个设计会话将结束，且不再显示在未完成列表中。已创建的 Agent
-              不受影响。
+              {t.agents.builder.conversation.abandonDescription}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -970,7 +997,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               disabled={cancel.isPending}
               onClick={() => setCancelOpen(false)}
             >
-              继续设计
+              {t.agents.builder.conversation.continueDesign}
             </Button>
             <Button
               type="button"
@@ -981,7 +1008,9 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               {cancel.isPending ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : null}
-              {cancel.isPending ? "正在放弃…" : "确认放弃"}
+              {cancel.isPending
+                ? t.agents.builder.conversation.abandoning
+                : t.agents.builder.conversation.confirmAbandon}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -993,9 +1022,11 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃未保存修改？</DialogTitle>
+            <DialogTitle>
+              {t.agents.builder.conversation.discardTitle}
+            </DialogTitle>
             <DialogDescription>
-              Agent 设计会话会继续保留，但本次对四项设置的本地修改不会保存。
+              {t.agents.builder.conversation.discardDescription}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1004,7 +1035,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               variant="outline"
               onClick={() => setPendingLeaveHref(null)}
             >
-              继续编辑
+              {t.agents.builder.conversation.continueEditing}
             </Button>
             <Button
               type="button"
@@ -1022,7 +1053,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 }
               }}
             >
-              放弃修改并离开
+              {t.agents.builder.conversation.discardAndLeave}
             </Button>
           </DialogFooter>
         </DialogContent>

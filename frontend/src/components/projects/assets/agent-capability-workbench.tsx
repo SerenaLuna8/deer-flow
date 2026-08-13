@@ -1,5 +1,6 @@
 "use client";
 
+import { useQueryClient } from "@tanstack/react-query";
 import { Loader2Icon, SearchIcon, WrenchIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -7,6 +8,13 @@ import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-vi
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import {
+  isPrivateWorkAccessActive,
+  runPrivateWorkAbortable,
+} from "@/core/private-work/types";
 import {
   SharedAssetApiError,
   useProjectAssets,
@@ -16,7 +24,14 @@ import {
   type ProjectAssetList,
 } from "@/core/shared-assets";
 
+import {
+  cacheProjectAgentAuthoringReload,
+  projectAgentAuthoringCacheEpochs,
+  reloadProjectAgentAuthoringState,
+} from "./agent-authoring-recovery";
 import { useMcpDependencyRuntime } from "./use-mcp-dependency-runtime";
+
+export { agentAuthoringBaseVersion } from "./agent-authoring-recovery";
 
 type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
 type DependencyKind = "skill" | "mcp";
@@ -24,46 +39,117 @@ type DependencyKind = "skill" | "mcp";
 export type AgentDependencyOption = {
   kind: DependencyKind;
   assetId: string;
-  versionId: string;
+  versionId: string | null;
   scope: "system" | "project";
   name: string;
   slug: string;
+  disabled: boolean;
+  reason: string | null;
+  remediation: string | null;
 };
+
+type CapabilityCopy = Translations["agents"]["capabilities"];
+
+function inactiveReason(
+  status: ProjectAssetItem["status"],
+  copy: CapabilityCopy,
+): string | null {
+  if (status === "active") return null;
+  return status === "archived" ? copy.reasons.archived : copy.reasons.inactive;
+}
+
+function joinExplanations(
+  values: readonly (string | null)[],
+  separator: string,
+): string | null {
+  const unique = [
+    ...new Set(values.filter((value): value is string => !!value)),
+  ];
+  return unique.length > 0 ? unique.join(separator) : null;
+}
 
 export function agentDependencyOptions(
   kind: DependencyKind,
   catalog: ProjectAssetList,
+  copy: CapabilityCopy,
 ): AgentDependencyOption[] {
-  const systemOptions = catalog.system_items.flatMap((item) =>
-    item.status === "active" && item.binding?.enabled
-      ? [
-          {
-            kind,
-            assetId: item.id,
-            versionId: item.binding.version_id,
-            scope: "system" as const,
-            name: item.display_name,
-            slug: item.slug,
-          },
-        ]
-      : [],
-  );
-  const projectOptions = catalog.project_items.flatMap((item) =>
-    item.status === "active" && item.current_published_version_id
-      ? [
-          {
-            kind,
-            assetId: item.id,
-            versionId: item.current_published_version_id,
-            scope: "project" as const,
-            name: item.display_name,
-            slug: item.slug,
-          },
-        ]
-      : [],
-  );
+  const systemOptions = catalog.system_items.map((item) => {
+    const versionId =
+      item.binding?.version_id ?? item.current_published_version_id;
+    const statusReason = inactiveReason(item.status, copy);
+    const bindingReason = item.binding?.enabled
+      ? null
+      : item.binding
+        ? copy.reasons.bindingDisabled
+        : copy.reasons.bindingMissing;
+    const versionReason = versionId ? null : copy.reasons.noPublishedVersion;
+    const reason = joinExplanations(
+      [statusReason, bindingReason, versionReason],
+      copy.explanationSeparator,
+    );
+    return {
+      kind,
+      assetId: item.id,
+      versionId,
+      scope: "system" as const,
+      name: item.display_name,
+      slug: item.slug,
+      disabled: reason !== null,
+      reason,
+      remediation: joinExplanations(
+        [
+          statusReason ? copy.remediation.restoreSystemAsset : null,
+          bindingReason ? copy.remediation.enableSystemBinding : null,
+          versionReason ? copy.remediation.publishVersion : null,
+        ],
+        copy.explanationSeparator,
+      ),
+    };
+  });
+  const projectOptions = catalog.project_items.map((item) => {
+    const statusReason = inactiveReason(item.status, copy);
+    const versionReason = item.current_published_version_id
+      ? null
+      : copy.reasons.noPublishedVersion;
+    const reason = joinExplanations(
+      [statusReason, versionReason],
+      copy.explanationSeparator,
+    );
+    return {
+      kind,
+      assetId: item.id,
+      versionId: item.current_published_version_id,
+      scope: "project" as const,
+      name: item.display_name,
+      slug: item.slug,
+      disabled: reason !== null,
+      reason,
+      remediation: joinExplanations(
+        [
+          statusReason ? copy.remediation.activateProjectAsset : null,
+          versionReason ? copy.remediation.publishVersion : null,
+        ],
+        copy.explanationSeparator,
+      ),
+    };
+  });
   return [...systemOptions, ...projectOptions];
 }
+
+export function agentDependencyOptionCanToggle(
+  option: AgentDependencyOption,
+  selected: boolean,
+  editing: boolean,
+): boolean {
+  return editing && option.versionId !== null && (!option.disabled || selected);
+}
+
+export type AgentCapabilityConflictRecovery = {
+  assetId: string;
+  assetVersion: number;
+  generation: number;
+  status: "refreshing" | "error";
+};
 
 function sameIds(left: readonly string[], right: readonly string[]): boolean {
   return (
@@ -78,7 +164,7 @@ function toggleId(values: readonly string[], value: string): string[] {
     : [...values, value];
 }
 
-function DependencySection({
+export function AgentDependencySection({
   title,
   emptyLabel,
   options,
@@ -95,6 +181,8 @@ function DependencySection({
   query: string;
   onToggle: (versionId: string) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.capabilities;
   const normalizedQuery = query.trim().toLocaleLowerCase();
   const visible = options.filter((option) => {
     if (!normalizedQuery) return true;
@@ -102,14 +190,18 @@ function DependencySection({
       value.toLocaleLowerCase().includes(normalizedQuery),
     );
   });
-  const knownIds = new Set(options.map((option) => option.versionId));
+  const knownIds = new Set(
+    options.flatMap((option) =>
+      option.versionId === null ? [] : [option.versionId],
+    ),
+  );
   const unresolvedIds = selectedIds.filter((id) => !knownIds.has(id));
 
   return (
     <section className="space-y-3" aria-label={title}>
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">{title}</h3>
-        <Badge variant="secondary">已绑定 {selectedIds.length}</Badge>
+        <Badge variant="secondary">{copy.boundCount(selectedIds.length)}</Badge>
       </div>
       {visible.length === 0 && unresolvedIds.length === 0 ? (
         <p className="text-muted-foreground rounded-xl border border-dashed p-4 text-sm">
@@ -118,29 +210,60 @@ function DependencySection({
       ) : (
         <div className="border-border/70 max-h-72 overflow-y-auto rounded-xl border">
           {visible.map((option) => {
-            const checked = selectedIds.includes(option.versionId);
+            const checked =
+              option.versionId !== null &&
+              selectedIds.includes(option.versionId);
+            const canToggle = agentDependencyOptionCanToggle(
+              option,
+              checked,
+              editing,
+            );
             return (
               <label
-                key={option.versionId}
-                className="hover:bg-muted/40 flex cursor-pointer items-start gap-3 border-b px-4 py-3 last:border-b-0"
+                key={`${option.scope}:${option.assetId}`}
+                aria-disabled={!canToggle}
+                className={`flex items-start gap-3 border-b px-4 py-3 last:border-b-0 ${
+                  canToggle
+                    ? "hover:bg-muted/40 cursor-pointer"
+                    : "cursor-not-allowed opacity-70"
+                }`}
               >
                 <input
                   type="checkbox"
                   className="accent-foreground mt-1 size-4 shrink-0"
                   checked={checked}
-                  disabled={!editing}
-                  onChange={() => onToggle(option.versionId)}
+                  disabled={!canToggle}
+                  onChange={() => {
+                    if (option.versionId) onToggle(option.versionId);
+                  }}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-medium">{option.name}</span>
                     <Badge variant="outline">
-                      {option.scope === "system" ? "系统" : "项目"}
+                      {option.scope === "system"
+                        ? t.agents.common.system
+                        : t.agents.common.project}
                     </Badge>
                   </span>
                   <span className="text-muted-foreground mt-1 block font-mono text-xs">
                     {option.slug}
                   </span>
+                  {option.reason ? (
+                    <span className="text-warning-foreground mt-2 block text-xs">
+                      {copy.unavailablePrefix(option.reason)}
+                    </span>
+                  ) : null}
+                  {option.remediation ? (
+                    <span className="text-muted-foreground mt-1 block text-xs">
+                      {copy.remediationPrefix(option.remediation)}
+                    </span>
+                  ) : null}
+                  {checked && option.disabled ? (
+                    <span className="text-muted-foreground mt-1 block text-xs">
+                      {copy.historicalDisabled}
+                    </span>
+                  ) : null}
                 </span>
               </label>
             );
@@ -158,12 +281,14 @@ function DependencySection({
                 onChange={() => onToggle(versionId)}
               />
               <span className="min-w-0 flex-1">
-                <span className="text-sm font-medium">历史绑定版本</span>
+                <span className="text-sm font-medium">
+                  {copy.historicalVersion}
+                </span>
                 <span className="text-muted-foreground mt-1 block font-mono text-xs break-all">
                   {versionId}
                 </span>
                 <span className="text-muted-foreground mt-1 block text-xs">
-                  当前目录未提供该精确版本；可以保留或取消绑定。
+                  {copy.historicalVersionDescription}
                 </span>
               </span>
             </label>
@@ -180,6 +305,8 @@ export function AgentCapabilityWorkbench({
   item,
   version,
   canAuthor,
+  authoringPreparationPending = false,
+  onBeginEditing,
   onDirtyChange,
   onVersionCreated,
 }: {
@@ -188,11 +315,17 @@ export function AgentCapabilityWorkbench({
   item: ProjectAssetItem;
   version: AgentAssetVersion | null;
   canAuthor: boolean;
+  authoringPreparationPending?: boolean;
+  onBeginEditing: () => Promise<boolean>;
   onDirtyChange: (dirty: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.capabilities;
   const skills = useProjectAssets(accountId, projectId, "skills");
   const mcps = useProjectAssets(accountId, projectId, "mcp-servers");
+  const queryClient = useQueryClient();
+  const privateWork = usePrivateWorkAccess();
   const update = useUpdateProjectAgentCapabilityBindings(accountId, projectId);
   const initialSkills = version?.skill_version_ids ?? [];
   const initialMcps = version?.mcp_version_ids ?? [];
@@ -203,6 +336,13 @@ export function AgentCapabilityWorkbench({
   const [editing, setEditing] = useState(false);
   const [query, setQuery] = useState("");
   const [localError, setLocalError] = useState<string | null>(null);
+  const [conflictRecovery, setConflictRecovery] =
+    useState<AgentCapabilityConflictRecovery | null>(null);
+  const recoveryGenerationRef = useRef(0);
+  const recoveryAbortRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+  const scopeKey = `${accountId}:${projectId}:${item.id}`;
+  const scopeKeyRef = useRef(scopeKey);
   const savedVersionIdRef = useRef<string | null>(null);
   const expectedAssetVersionRef = useRef(item.version);
   const dirty =
@@ -210,16 +350,16 @@ export function AgentCapabilityWorkbench({
   const skillOptions = useMemo(
     () =>
       skills.data
-        ? agentDependencyOptions("skill", skills.data as ProjectAssetList)
+        ? agentDependencyOptions("skill", skills.data as ProjectAssetList, copy)
         : [],
-    [skills.data],
+    [copy, skills.data],
   );
   const mcpOptions = useMemo(
     () =>
       mcps.data
-        ? agentDependencyOptions("mcp", mcps.data as ProjectAssetList)
+        ? agentDependencyOptions("mcp", mcps.data as ProjectAssetList, copy)
         : [],
-    [mcps.data],
+    [copy, mcps.data],
   );
   const mcpRuntime = useMcpDependencyRuntime({
     accountId,
@@ -234,20 +374,51 @@ export function AgentCapabilityWorkbench({
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
 
-  useEffect(
-    () => () => {
-      onDirtyChange(false);
-    },
-    [onDirtyChange],
-  );
+  useEffect(() => {
+    if (canAuthor || !editing) return;
+    setLocalError(copy.permissionLost);
+  }, [canAuthor, copy.permissionLost, editing]);
 
   useEffect(() => {
-    if (dirty || update.isPending) return;
+    mountedRef.current = true;
+    scopeKeyRef.current = scopeKey;
+    return () => {
+      mountedRef.current = false;
+      recoveryAbortRef.current?.abort();
+      recoveryAbortRef.current = null;
+      recoveryGenerationRef.current += 1;
+      onDirtyChange(false);
+    };
+  }, [onDirtyChange, scopeKey]);
+
+  function recoveryIsCurrent(
+    recovery: AgentCapabilityConflictRecovery,
+    controller: AbortController,
+  ): boolean {
+    return (
+      mountedRef.current &&
+      scopeKeyRef.current === scopeKey &&
+      !controller.signal.aborted &&
+      recoveryAbortRef.current === controller &&
+      isPrivateWorkAccessActive(privateWork) &&
+      recoveryGenerationRef.current === recovery.generation &&
+      recovery.assetId === item.id
+    );
+  }
+
+  function cancelRecovery() {
+    recoveryAbortRef.current?.abort();
+    recoveryAbortRef.current = null;
+    recoveryGenerationRef.current += 1;
+  }
+
+  useEffect(() => {
+    if (conflictRecovery || dirty || update.isPending) return;
     if (
       savedVersionIdRef.current &&
       version?.id !== savedVersionIdRef.current
     ) {
-      return;
+      if (item.version <= expectedAssetVersionRef.current) return;
     }
     savedVersionIdRef.current = null;
     const nextSkills = version?.skill_version_ids ?? [];
@@ -257,16 +428,93 @@ export function AgentCapabilityWorkbench({
     setDraftSkills(nextSkills);
     setDraftMcps(nextMcps);
     expectedAssetVersionRef.current = item.version;
-  }, [dirty, item.version, update.isPending, version]);
+  }, [conflictRecovery, dirty, item.version, update.isPending, version]);
 
   function discard() {
+    cancelRecovery();
+    setConflictRecovery(null);
+    savedVersionIdRef.current = null;
     setDraftSkills(baselineSkills);
     setDraftMcps(baselineMcps);
     setEditing(false);
     setLocalError(null);
   }
 
+  async function recoverFromConflict(
+    recovery: AgentCapabilityConflictRecovery,
+    controller: AbortController,
+  ) {
+    const startedAt = projectAgentAuthoringCacheEpochs({
+      queryClient,
+      accountId,
+      projectId,
+      assetId: recovery.assetId,
+    });
+    try {
+      const reload = await runPrivateWorkAbortable(privateWork, (scopeSignal) =>
+        reloadProjectAgentAuthoringState({
+          projectId,
+          assetId: recovery.assetId,
+          attemptedAssetVersion: recovery.assetVersion,
+          includeDependencyCatalogs: true,
+          signal: scopeSignal
+            ? AbortSignal.any([controller.signal, scopeSignal])
+            : controller.signal,
+        }),
+      );
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      await cacheProjectAgentAuthoringReload({
+        queryClient,
+        accountId,
+        projectId,
+        assetId: recovery.assetId,
+        reload,
+        startedAt,
+        isCurrent: () => recoveryIsCurrent(recovery, controller),
+      });
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      const nextSkills = reload.version.skill_version_ids;
+      const nextMcps = reload.version.mcp_version_ids;
+      setBaselineSkills(nextSkills);
+      setBaselineMcps(nextMcps);
+      expectedAssetVersionRef.current = reload.item.version;
+      savedVersionIdRef.current = reload.version.id;
+      setConflictRecovery(null);
+      setLocalError(
+        sameIds(nextSkills, draftSkills) && sameIds(nextMcps, draftMcps)
+          ? copy.recoverySynced
+          : copy.recoveryPreserved,
+      );
+    } catch {
+      if (!recoveryIsCurrent(recovery, controller)) return;
+      setConflictRecovery({ ...recovery, status: "error" });
+      setLocalError(copy.recoveryFailed);
+    } finally {
+      if (recoveryAbortRef.current === controller) {
+        recoveryAbortRef.current = null;
+      }
+    }
+  }
+
+  function retryConflictRecovery() {
+    if (!conflictRecovery) return;
+    recoveryAbortRef.current?.abort();
+    const controller = new AbortController();
+    const recovery: AgentCapabilityConflictRecovery = {
+      ...conflictRecovery,
+      generation: recoveryGenerationRef.current + 1,
+      status: "refreshing",
+    };
+    recoveryAbortRef.current = controller;
+    recoveryGenerationRef.current = recovery.generation;
+    setConflictRecovery(recovery);
+    setLocalError(copy.recoveryReloading);
+    void recoverFromConflict(recovery, controller);
+  }
+
   async function save() {
+    const saveScopeKey = scopeKey;
+    const saveGeneration = recoveryGenerationRef.current;
     setLocalError(null);
     try {
       const result = await update.mutateAsync({
@@ -277,6 +525,14 @@ export function AgentCapabilityWorkbench({
           expected_asset_version: expectedAssetVersionRef.current,
         },
       });
+      if (
+        !mountedRef.current ||
+        scopeKeyRef.current !== saveScopeKey ||
+        !isPrivateWorkAccessActive(privateWork) ||
+        recoveryGenerationRef.current !== saveGeneration
+      ) {
+        return;
+      }
       const nextVersion = result.data;
       setBaselineSkills(nextVersion.skill_version_ids);
       setBaselineMcps(nextVersion.mcp_version_ids);
@@ -284,31 +540,58 @@ export function AgentCapabilityWorkbench({
       setDraftMcps(nextVersion.mcp_version_ids);
       expectedAssetVersionRef.current += 1;
       savedVersionIdRef.current = nextVersion.id;
+      setConflictRecovery(null);
       setEditing(false);
       onVersionCreated(nextVersion.id);
     } catch (error) {
       if (
+        !mountedRef.current ||
+        scopeKeyRef.current !== saveScopeKey ||
+        !isPrivateWorkAccessActive(privateWork) ||
+        recoveryGenerationRef.current !== saveGeneration
+      ) {
+        return;
+      }
+      if (
         error instanceof SharedAssetApiError &&
         error.code === "ASSET_CONFLICT"
       ) {
-        setLocalError(
-          "Agent 已在其他窗口发生变化。当前选择仍保留，请刷新详情后重新保存。",
-        );
+        recoveryAbortRef.current?.abort();
+        const controller = new AbortController();
+        const recovery: AgentCapabilityConflictRecovery = {
+          assetId: item.id,
+          assetVersion: expectedAssetVersionRef.current,
+          generation: recoveryGenerationRef.current + 1,
+          status: "refreshing",
+        };
+        recoveryAbortRef.current = controller;
+        recoveryGenerationRef.current = recovery.generation;
+        setConflictRecovery(recovery);
+        setLocalError(`${copy.conflictDetected} ${copy.recoveryReloading}`);
+        void recoverFromConflict(recovery, controller);
       } else {
-        setLocalError(adminAssetErrorMessage(error));
+        setLocalError(adminAssetErrorMessage(error, t.adminAssets.errors));
       }
     }
   }
 
-  const saveBlockedReason = catalogLoading
-    ? "正在加载项目能力目录"
-    : catalogError
-      ? "项目能力目录加载失败"
-      : mcpRuntime.isLoading
-        ? "正在验证 MCP 绑定"
-        : mcpRuntime.error
-          ? "MCP 绑定验证失败"
-          : mcpRuntime.blockReason;
+  const saveBlockedReason = conflictRecovery
+    ? conflictRecovery.status === "error"
+      ? copy.reloadRequired
+      : copy.recoveryReloading
+    : !canAuthor
+      ? copy.permissionBlocked
+      : authoringPreparationPending
+        ? copy.preparingDraft
+        : catalogLoading
+          ? copy.catalogLoading
+          : catalogError
+            ? copy.catalogLoadFailed
+            : mcpRuntime.isLoading
+              ? copy.validatingMcp
+              : mcpRuntime.error
+                ? copy.mcpValidationFailed
+                : mcpRuntime.blockReason;
 
   return (
     <section className="space-y-5" aria-labelledby="agent-capability-title">
@@ -319,11 +602,10 @@ export function AgentCapabilityWorkbench({
             className="flex items-center gap-2 text-base font-semibold"
           >
             <WrenchIcon aria-hidden className="size-4" />
-            工具绑定
+            {copy.title}
           </h2>
           <p className="text-muted-foreground mt-1 text-sm leading-6">
-            增删当前项目可用的 Skill 与 MCP。保存后发布新的 Agent
-            版本，旧版本保持不变。
+            {copy.description}
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
@@ -335,7 +617,7 @@ export function AgentCapabilityWorkbench({
                 disabled={update.isPending}
                 onClick={discard}
               >
-                取消
+                {t.agents.common.cancel}
               </Button>
               <Button
                 type="button"
@@ -348,7 +630,7 @@ export function AgentCapabilityWorkbench({
                 {update.isPending ? (
                   <Loader2Icon aria-hidden className="size-4 animate-spin" />
                 ) : null}
-                {update.isPending ? "发布中…" : "保存并发布新版本"}
+                {update.isPending ? copy.saving : copy.saveDraft}
               </Button>
             </>
           ) : canAuthor ? (
@@ -357,21 +639,23 @@ export function AgentCapabilityWorkbench({
               disabled={!version || catalogLoading || Boolean(catalogError)}
               onClick={() => {
                 setLocalError(null);
-                setEditing(true);
+                void onBeginEditing().then((ready) => {
+                  if (ready) setEditing(true);
+                });
               }}
             >
-              编辑绑定
+              {copy.edit}
             </Button>
           ) : null}
         </div>
       </div>
 
       <div className="bg-muted/30 flex flex-wrap items-center gap-2 rounded-xl px-4 py-3 text-sm">
-        <span className="text-muted-foreground">内置工具组</span>
+        <span className="text-muted-foreground">{copy.builtinGroups}</span>
         <span className="font-medium">
-          {version?.tool_groups.length ?? 0} 个
+          {t.agents.common.count(version?.tool_groups.length ?? 0)}
         </span>
-        <span className="text-muted-foreground">本次保持不变</span>
+        <span className="text-muted-foreground">{copy.unchanged}</span>
       </div>
 
       {editing ? (
@@ -383,8 +667,11 @@ export function AgentCapabilityWorkbench({
           <Input
             value={query}
             className="pl-9"
-            placeholder="搜索 Skill 或 MCP"
-            aria-label="搜索 Agent 能力"
+            placeholder={copy.searchPlaceholder}
+            aria-label={copy.searchAria}
+            disabled={
+              update.isPending || authoringPreparationPending || !canAuthor
+            }
             onChange={(event) => setQuery(event.target.value)}
           />
         </div>
@@ -392,31 +679,43 @@ export function AgentCapabilityWorkbench({
 
       {catalogLoading ? (
         <p role="status" className="text-muted-foreground text-sm">
-          正在加载项目能力目录…
+          {copy.catalogLoadingStatus}
         </p>
       ) : catalogError ? (
         <p role="alert" className="text-destructive text-sm">
-          项目能力目录加载失败，请稍后重试。
+          {copy.catalogLoadFailedStatus}
         </p>
       ) : (
         <div className="grid gap-5 lg:grid-cols-2">
-          <DependencySection
+          <AgentDependencySection
             title="Skill"
-            emptyLabel="当前项目暂无可绑定的 Skill。"
+            emptyLabel={copy.emptySkills}
             options={skillOptions}
             selectedIds={draftSkills}
-            editing={editing}
+            editing={
+              editing &&
+              canAuthor &&
+              !update.isPending &&
+              !conflictRecovery &&
+              !authoringPreparationPending
+            }
             query={query}
             onToggle={(versionId) =>
               setDraftSkills((current) => toggleId(current, versionId))
             }
           />
-          <DependencySection
+          <AgentDependencySection
             title="MCP"
-            emptyLabel="当前项目暂无可绑定的 MCP。"
+            emptyLabel={copy.emptyMcps}
             options={mcpOptions}
             selectedIds={draftMcps}
-            editing={editing}
+            editing={
+              editing &&
+              canAuthor &&
+              !update.isPending &&
+              !conflictRecovery &&
+              !authoringPreparationPending
+            }
             query={query}
             onToggle={(versionId) =>
               setDraftMcps((current) => toggleId(current, versionId))
@@ -431,9 +730,21 @@ export function AgentCapabilityWorkbench({
         </p>
       ) : null}
       {localError ? (
-        <p role="alert" className="text-destructive text-sm">
-          {localError}
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <p role="alert" className="text-destructive text-sm">
+            {localError}
+          </p>
+          {conflictRecovery?.status === "error" ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={retryConflictRecovery}
+            >
+              {copy.reload}
+            </Button>
+          ) : null}
+        </div>
       ) : null}
     </section>
   );

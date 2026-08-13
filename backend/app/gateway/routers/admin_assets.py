@@ -4,6 +4,7 @@ import uuid
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Request
+from pydantic import Field, StrictInt
 
 from app.gateway.deps import get_current_user_from_request, require_admin_user
 from app.gateway.routers.project_assets import (
@@ -22,6 +23,7 @@ from app.gateway.routers.project_assets import (
     ScopedAssetListResponse,
     ScopedCredentialListResponse,
     ScopedSkillAssetListResponse,
+    SkillVersionResponse,
     SystemBindingRequest,
     SystemMcpCredentialGrantRequest,
     _asset_item,
@@ -70,6 +72,11 @@ class CredentialRotationStatusResponse(_StrictModel):
     current: int
     pending: int
     status: Literal["current", "pending"]
+
+
+class SystemSkillVersionRevocationRequest(_StrictModel):
+    expected_asset_version: StrictInt = Field(ge=1)
+    reason_code: Literal["security", "policy", "integrity"]
 
 
 async def _admin_actor(
@@ -221,6 +228,30 @@ async def list_system_skills(
     service: Annotated[SkillService, Depends(get_skill_service)],
 ):
     return await _list_assets(actor, service)
+
+
+@admin_router.post(
+    "/skills/{asset_id}/versions/{version_id}/revoke",
+    response_model=SkillVersionResponse,
+)
+async def revoke_system_skill_version(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    body: SystemSkillVersionRevocationRequest,
+    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    return await _version_call(
+        actor,
+        lambda: service.revoke_version(
+            actor,
+            asset_id,
+            version_id,
+            expected_asset_version=body.expected_asset_version,
+            reason_code=body.reason_code,
+        ),
+        SkillVersionResponse,
+    )
 
 
 @admin_router.get("/mcp-servers", response_model=AdminAssetListResponse)

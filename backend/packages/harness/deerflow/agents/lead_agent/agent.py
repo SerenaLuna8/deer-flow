@@ -26,9 +26,14 @@ from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
+from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
+from deerflow.agents.middlewares.assembly import (
+    assemble_agent_middlewares,
+    build_lead_runtime_middlewares,
+)
 from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.safety_finish_reason_middleware import SafetyFinishReasonMiddleware
@@ -37,10 +42,6 @@ from deerflow.agents.middlewares.summarization_middleware import DeerFlowSummari
 from deerflow.agents.middlewares.title_middleware import TitleMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import (
-    assemble_agent_middlewares,
-    build_lead_runtime_middlewares,
-)
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 from deerflow.agents.thread_state import (
     get_thread_state_schema,
@@ -290,6 +291,7 @@ def build_middlewares(
     runtime_skills_container_path: str | None = None,
     resolved_subagent_enabled: bool | None = None,
     resolved_max_concurrent_subagents: int | None = None,
+    output_limit_recovery_model: BaseChatModel | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -453,6 +455,17 @@ def build_middlewares(
 
         token_budget_middleware = TokenBudgetMiddleware.from_config(token_budget_config)
 
+    output_limit_recovery_middleware = None
+    if output_limit_recovery_model is not None:
+        from deerflow.agents.middlewares.output_limit_recovery_middleware import (
+            OutputLimitRecoveryMiddleware,
+        )
+
+        output_limit_recovery_middleware = OutputLimitRecoveryMiddleware(
+            recovery_model=output_limit_recovery_model,
+            budget_hard_stopped=(token_budget_middleware.is_hard_stopped if token_budget_middleware is not None else None),
+        )
+
     # SafetyFinishReasonMiddleware — suppress tool execution when the provider
     # safety-terminated the response. Registered after custom middlewares so
     # that LangChain's reverse-order after_model dispatch runs Safety first;
@@ -466,6 +479,7 @@ def build_middlewares(
         before_summarization=tuple(before_summarization),
         summarization=summarization_middleware,
         planning=todo_list_middleware,
+        output_limit_recovery=output_limit_recovery_middleware,
         token_usage=token_usage_middleware,
         title=title_middleware,
         vision=vision_middleware,
@@ -776,8 +790,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     }
     if agent_model_overrides:
         create_model_kwargs["model_overrides"] = agent_model_overrides
+    lead_model = create_chat_model(**create_model_kwargs)
+    output_limit_recovery_model = None
+    if private_runtime is not None:
+        recovery_model_kwargs = {
+            **create_model_kwargs,
+            "thinking_enabled": False,
+            "reasoning_effort": None,
+        }
+        output_limit_recovery_model = create_chat_model(**recovery_model_kwargs)
     return create_agent(
-        model=create_chat_model(**create_model_kwargs),
+        model=lead_model,
         tools=final_tools,
         middleware=normalize_middleware_state_schemas(
             build_middlewares(
@@ -795,6 +818,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
                 runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
                 resolved_subagent_enabled=subagent_enabled,
                 resolved_max_concurrent_subagents=max_concurrent_subagents,
+                output_limit_recovery_model=output_limit_recovery_model,
             ),
             mode,
             snapshot_frequency,

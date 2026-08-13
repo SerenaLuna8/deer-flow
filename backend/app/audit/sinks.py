@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,6 +34,9 @@ from deerflow.persistence.jobs.sql import (
     DeadJobRequeuedEvent,
     JobTerminalEvent,
     consume_issued_dead_job_requeued_event,
+)
+from deerflow.persistence.private_work.memory_document_model import (
+    MemoryDreamPrepareRunRow,
 )
 from deerflow.persistence.private_work.memory_document_repository import (
     REMEMBER_RUN_LIMIT,
@@ -765,6 +770,264 @@ class OperationalAuditSink:
             request_id=request_id,
             job_id=_uuid(job_id),
         )
+
+    async def memory_dream_admitted(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        job_id: uuid.UUID,
+        request_id: str,
+        origin: str,
+        trigger: str,
+        history_count: int,
+        context: PrivateWorkContext | None = None,
+        parent_prepare_job_id: uuid.UUID | None = None,
+        prepare_lease_token: str | None = None,
+        now: datetime | None = None,
+    ) -> None:
+        project_uuid = _uuid(project_id)
+        normalized_job_id = _uuid(job_id)
+        if origin == "manual":
+            self._require_process(AuditProcess.GATEWAY)
+            if context is None or not is_issued_private_work_context(context) or _uuid(context.project_id) != project_uuid or context.request_id != request_id:
+                raise AuditAuthorityRejected()
+            actor = AuditActor.user(_uuid(context.user_id))
+        elif origin == "scheduled":
+            self._require_process(AuditProcess.SCHEDULER)
+            if context is not None:
+                raise AuditAuthorityRejected()
+            actor = AuditActor.trusted_process(self._process_context)
+        elif origin == "prepared":
+            self._require_process(AuditProcess.WORKER)
+            if context is not None or parent_prepare_job_id is None or prepare_lease_token is None or now is None:
+                raise AuditAuthorityRejected()
+            parent_uuid = _uuid(parent_prepare_job_id)
+            lease_token_hash = hashlib.sha256(prepare_lease_token.encode("utf-8")).hexdigest()
+            parent = await session.scalar(
+                select(MemoryDreamPrepareRunRow)
+                .where(
+                    MemoryDreamPrepareRunRow.job_id == parent_uuid,
+                    MemoryDreamPrepareRunRow.project_id == project_uuid,
+                    MemoryDreamPrepareRunRow.dream_job_id == normalized_job_id,
+                )
+                .with_for_update(of=MemoryDreamPrepareRunRow)
+            )
+            if parent is None:
+                raise AuditAuthorityRejected()
+            # The Worker settlement already owns Project -> Membership ->
+            # Thread.  Keep the remaining authority locks explicit and ordered:
+            # preparation first, then its exact leased parent Job, then child.
+            parent_status = await session.scalar(
+                select(JobRow.status)
+                .where(
+                    JobRow.id == parent_uuid,
+                    JobRow.job_type == "memory_dream_prepare",
+                    JobRow.project_id == project_uuid,
+                    JobRow.owner_user_id == parent.owner_user_id,
+                    JobRow.namespace == parent.namespace,
+                    JobRow.status.in_(("leased", "running")),
+                    JobRow.lease_token_hash == lease_token_hash,
+                    JobRow.lease_expires_at > now,
+                )
+                .with_for_update(of=JobRow)
+            )
+            if parent_status not in {"leased", "running"}:
+                raise AuditAuthorityRejected()
+            child_status = await session.scalar(
+                select(JobRow.status)
+                .where(
+                    JobRow.id == normalized_job_id,
+                    JobRow.project_id == project_uuid,
+                    JobRow.owner_user_id == parent.owner_user_id,
+                    JobRow.namespace == parent.namespace,
+                    JobRow.job_type == "memory_dream",
+                    JobRow.status == "queued",
+                )
+                .with_for_update(of=JobRow)
+            )
+            if child_status != "queued":
+                raise AuditAuthorityRejected()
+            if await AuditRepository(session).job_action_limit_reached(
+                project_id=project_uuid,
+                job_id=normalized_job_id,
+                action=AuditAction.MEMORY_DREAM_ADMITTED.value,
+                limit=1,
+            ):
+                raise AuditAuthorityRejected()
+            actor = AuditActor.trusted_process(self._process_context)
+        else:
+            raise TypeError("Memory Dream audit origin is invalid")
+        await self._service.append(
+            session,
+            actor,
+            AuditAction.MEMORY_DREAM_ADMITTED,
+            AuditTarget(
+                AuditTargetKind.JOB,
+                normalized_job_id,
+                project_uuid,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "origin": origin,
+                "trigger": trigger,
+                "history_count": history_count,
+            },
+            request_id=request_id,
+            job_id=normalized_job_id,
+        )
+
+    async def memory_dream_settled(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID | str,
+        job_id: uuid.UUID,
+        request_id: str,
+        disposition: str,
+        version: int | None = None,
+        public_error_code: str | None = None,
+    ) -> bool:
+        self._require_process(AuditProcess.WORKER, AuditProcess.GATEWAY)
+        if self._process is AuditProcess.GATEWAY and disposition != "cancelled":
+            raise AuditAuthorityRejected()
+        project_uuid = _uuid(project_id)
+        normalized_job_id = _uuid(job_id)
+        expected_status = {
+            "published": "succeeded",
+            "cancelled": "cancelled",
+            "dead": "dead",
+        }.get(disposition)
+        if expected_status is None:
+            raise TypeError("Memory Dream settlement disposition is invalid")
+
+        # Settlement already owns Project -> Membership -> Memory resources ->
+        # Job. Re-lock the exact Job here so the count+append guard is durable
+        # across Worker retries and the Gateway reset path, not process-local.
+        locked_status = await session.scalar(
+            select(JobRow.status)
+            .where(
+                JobRow.id == normalized_job_id,
+                JobRow.project_id == project_uuid,
+                JobRow.job_type == "memory_dream",
+            )
+            .with_for_update(of=JobRow)
+        )
+        if locked_status != expected_status:
+            raise AuditAuthorityRejected()
+        if await AuditRepository(session).job_action_limit_reached(
+            project_id=project_uuid,
+            job_id=normalized_job_id,
+            action=AuditAction.MEMORY_DREAM_SETTLED.value,
+            limit=1,
+        ):
+            return False
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            AuditAction.MEMORY_DREAM_SETTLED,
+            AuditTarget(
+                AuditTargetKind.JOB,
+                normalized_job_id,
+                project_uuid,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "disposition": disposition,
+                "version": version,
+                "public_error_code": public_error_code,
+            },
+            public_error_code=public_error_code,
+            request_id=request_id,
+            job_id=normalized_job_id,
+        )
+        return True
+
+    async def memory_restore_executed(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        source_version: int,
+        previous_version: int,
+        published_version: int,
+        changed: bool,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        if not is_issued_private_work_context(context):
+            raise AuditAuthorityRejected()
+        project_id = _uuid(context.project_id)
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            AuditAction.MEMORY_RESTORE_EXECUTED,
+            AuditTarget(
+                AuditTargetKind.PROJECT,
+                project_id,
+                project_id,
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "source_version": source_version,
+                "previous_version": previous_version,
+                "published_version": published_version,
+                "changed": changed,
+            },
+            request_id=context.request_id,
+        )
+
+    async def memory_reset_executed(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID,
+        request_id: str,
+        affected_project_ids: tuple[uuid.UUID, ...],
+        scopes_reset: int,
+        history_entries: int,
+        documents: int,
+        versions: int,
+        dream_runs: int,
+        prepare_runs: int,
+        snapshots: int,
+        episodes: int,
+        jobs_cancelled: int,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        account_id = _uuid(user_id)
+        projects = tuple(sorted({_uuid(value) for value in affected_project_ids}, key=str))
+        actor = AuditActor.user(account_id)
+        await self._service.append(
+            session,
+            actor,
+            AuditAction.MEMORY_RESET_EXECUTED,
+            AuditTarget(AuditTargetKind.ACCOUNT, account_id, None),
+            AuditOutcome.SUCCESS,
+            {
+                "scope": "account",
+                "projects_affected": len(projects),
+                "scopes_reset": scopes_reset,
+                "history_entries": history_entries,
+                "documents": documents,
+                "versions": versions,
+                "dream_runs": dream_runs,
+                "prepare_runs": prepare_runs,
+                "snapshots": snapshots,
+                "episodes": episodes,
+                "jobs_cancelled": jobs_cancelled,
+            },
+            request_id=request_id,
+        )
+        for project_id in projects:
+            await self._service.append(
+                session,
+                actor,
+                AuditAction.MEMORY_RESET_EXECUTED,
+                AuditTarget(AuditTargetKind.ACCOUNT, account_id, project_id),
+                AuditOutcome.SUCCESS,
+                {"scope": "project"},
+                request_id=request_id,
+            )
 
     async def memory_seal_admitted(
         self,

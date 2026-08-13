@@ -30,6 +30,15 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
   defaultSection?: SettingsSectionId;
 };
 
+export function settingsNavigationItemClassName(active: boolean): string {
+  return cn(
+    "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full",
+    active
+      ? "bg-blue-50 text-blue-600 before:bg-blue-600 dark:bg-blue-500/15 dark:text-blue-300 dark:before:bg-blue-300"
+      : "text-muted-foreground hover:bg-blue-50 before:bg-transparent dark:hover:bg-blue-500/15",
+  );
+}
+
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
@@ -72,13 +81,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
                   <li key={id}>
                     <button
                       type="button"
+                      aria-current={active ? "page" : undefined}
                       onClick={() => setActiveSection(id)}
-                      className={cn(
-                        "relative flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors before:pointer-events-none before:absolute before:inset-y-2 before:left-0 before:w-0.5 before:rounded-full",
-                        active
-                          ? "bg-selection-subtle text-foreground before:bg-selection"
-                          : "text-muted-foreground hover:bg-muted hover:text-foreground before:bg-transparent",
-                      )}
+                      className={settingsNavigationItemClassName(active)}
                     >
                       <Icon className="size-4" />
                       <span>{label}</span>

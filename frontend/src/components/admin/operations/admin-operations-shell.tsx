@@ -254,15 +254,17 @@ export function AdminOperationsNavigation({
                     ? "size-10 justify-center p-0 before:inset-y-2 before:left-1 before:w-0.5"
                     : "gap-2.5 px-3 py-2 before:inset-y-2 before:left-0 before:w-0.5",
                   active
-                    ? "bg-sidebar-accent text-sidebar-accent-foreground before:bg-selection"
-                    : "text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-accent-foreground before:bg-transparent",
+                    ? "bg-blue-50 text-blue-600 before:bg-blue-600 dark:bg-blue-500/15 dark:text-blue-300 dark:before:bg-blue-300"
+                    : "text-muted-foreground before:bg-transparent hover:bg-blue-50 dark:hover:bg-blue-500/15",
                 )}
               >
                 <Icon
                   aria-hidden
                   className={cn(
                     "size-4",
-                    active ? "text-foreground" : "text-muted-foreground",
+                    active
+                      ? "text-blue-600 dark:text-blue-300"
+                      : "text-muted-foreground",
                   )}
                 />
                 <span className={compact ? "sr-only" : "truncate"}>

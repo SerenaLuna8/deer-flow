@@ -221,10 +221,7 @@ export function MessageGroup({
     return `${prefix}-${sourceId}`;
   };
 
-  const renderToolCall = (
-    step: CoTToolCallStep,
-    options?: { isLast?: boolean },
-  ) => {
+  const renderToolCall = (step: CoTToolCallStep) => {
     const debugStep =
       showTokenDebugSummaries && step.messageId
         ? debugStepByMessageId.get(step.messageId)
@@ -234,8 +231,6 @@ export function MessageGroup({
       <ToolCall
         key={getStepRenderKey(step, "tool")}
         {...step}
-        isLast={options?.isLast}
-        isLoading={isLoading}
         tokenDebugStep={
           debugStep && !debugStep.sharedAttribution ? debugStep : undefined
         }
@@ -243,10 +238,7 @@ export function MessageGroup({
     );
   };
 
-  const renderProcessToolCall = (
-    step: CoTToolCallStep,
-    options?: { isLast?: boolean },
-  ) => {
+  const renderProcessToolCall = (step: CoTToolCallStep) => {
     if (step.name === "task" && step.id && renderTaskToolCall) {
       return (
         <div key={getStepRenderKey(step, "task")} className="w-full">
@@ -254,7 +246,7 @@ export function MessageGroup({
         </div>
       );
     }
-    return renderToolCall(step, options);
+    return renderToolCall(step);
   };
 
   const renderReasoningRound = (
@@ -403,7 +395,7 @@ export function MessageGroup({
           )}
           {lastToolCallStep && (
             <FlipDisplay uniqueKey={lastToolCallStep.id ?? ""}>
-              {renderProcessToolCall(lastToolCallStep, { isLast: true })}
+              {renderProcessToolCall(lastToolCallStep)}
             </FlipDisplay>
           )}
         </ChainOfThoughtContent>
@@ -479,8 +471,6 @@ function ToolCall({
   name,
   args,
   result,
-  isLast = false,
-  isLoading = false,
   tokenDebugStep,
 }: {
   id?: string;
@@ -488,20 +478,11 @@ function ToolCall({
   name: string;
   args: Record<string, unknown>;
   result?: string | Record<string, unknown>;
-  isLast?: boolean;
-  isLoading?: boolean;
   tokenDebugStep?: TokenDebugStep;
 }) {
   const { t } = useI18n();
   const { project_slug: projectSlug } = useParams<{ project_slug?: string }>();
-  const {
-    enabled: artifactsEnabled,
-    setOpen,
-    autoOpen,
-    autoSelect,
-    selectedArtifact,
-    select,
-  } = useArtifacts();
+  const { enabled: artifactsEnabled, setOpen, select } = useArtifacts();
   const tokenLabel = tokenDebugStep
     ? formatDebugToken(tokenDebugStep, t)
     : null;
@@ -525,28 +506,6 @@ function ToolCall({
           toolCallId: id,
         })
       : null;
-  const autoOpenArtifactUrl =
-    isLoading &&
-    isLast &&
-    autoOpen &&
-    autoSelect &&
-    writeFileArtifactUrl &&
-    !result
-      ? writeFileArtifactUrl
-      : null;
-
-  useEffect(() => {
-    if (!autoOpenArtifactUrl || selectedArtifact === autoOpenArtifactUrl) {
-      return;
-    }
-
-    const timeout = window.setTimeout(() => {
-      select(autoOpenArtifactUrl, true);
-      setOpen(true);
-    }, 100);
-
-    return () => window.clearTimeout(timeout);
-  }, [autoOpenArtifactUrl, select, selectedArtifact, setOpen]);
 
   if (name === "web_search") {
     let label: React.ReactNode = t.toolCalls.searchForRelatedInfo;

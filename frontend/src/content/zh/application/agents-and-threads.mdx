@@ -42,12 +42,15 @@ ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每�
 1. 打开 ActWeave 应用并进入一个项目。
 2. 点击项目菜单中的 **Agents**（Agent 管理）。
 3. 点击 **New Agent**（新建 Agent）。
-4. 填写名称、描述和配置。
-5. 保存——Agent 立即可用，无需重启。
+4. 填写名称、说明、四项指令文档、模型、工具组，以及精确的 Skill/MCP 版本。
+5. 创建后会得到一个停用的 Agent 和 Draft v1；创建者后续编辑指令、能力绑定或恢复历史版本，也只会创建新的 Draft。
+6. 具备资产绑定管理权限的项目管理员检查并发布 Draft，然后才能启用 Agent。发布和启用是两个独立操作，均使用资产版本号进行并发保护。
 
 #### 通过 API
 
-使用带认证身份和项目 UUID 的项目资产 API；平台系统 Agent 则使用仅限 `system_admin` 的资产 API。不存在全局 workspace Agent 客户端。
+`POST /api/projects/{project_id}/agents` 接受完整的 Agent 定义，而不是只有名称的空壳：`slug`、`display_name`、`description`、`agents_instructions`、`soul`、`identity`、`user_context`、`model_ref`、`model_settings`、`tool_groups`、`skill_version_ids` 和 `mcp_version_ids` 都必须显式提交。响应同时返回停用的 Agent 资产和 Draft v1；缺少完整定义会被拒绝。
+
+创建与编辑要求 `shared_assets.edit`。发布、启用和停用要求 `shared_assets.manage_bindings`：作者负责产生 Draft，发布者负责决定哪个 Draft 进入运行面。发布使用 `POST /api/projects/{project_id}/agents/{agent_id}/versions/{version_id}/publish`，请求包含当前 `expected_asset_version`。平台管理员的项目覆盖 API 采用相同的完整定义和分权契约；不存在全局 workspace Agent 客户端。
 
 </Steps>
 
@@ -62,7 +65,7 @@ ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每�
 
 ### Agent 存储
 
-Agent 定义、版本、发布状态和项目绑定存储在 PostgreSQL 中，并通过项目资产页或系统资产管理页维护。
+Agent 定义、版本、发布状态和项目绑定存储在 PostgreSQL 中，并通过项目资产页或系统资产管理页维护。只有当前已发布版本会进入后续 Run；保存 Draft 不会改变正在运行的版本。
 
 ## 线程生命周期
 

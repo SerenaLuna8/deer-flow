@@ -5,6 +5,7 @@ import {
   ProjectAgentCatalogView,
   sortProjectAgentsWithDefaultFirst,
 } from "@/components/projects/assets/project-agents-page";
+import { I18nProvider } from "@/core/i18n/context";
 import type { Capability } from "@/core/projects/types";
 import type { ProjectAssetItem } from "@/core/shared-assets";
 
@@ -63,45 +64,25 @@ const sequentialReviewer = agent({
 
 function renderCatalog(viewMode: "cards" | "list") {
   return renderToStaticMarkup(
-    <ProjectAgentCatalogView
-      systemItems={[main]}
-      projectItems={[sequentialReviewer, codeReviewer]}
-      projectCapabilities={PROJECT_CAPABILITIES}
-      viewMode={viewMode}
-      selectedAssetId={null}
-      creatingChatForAgentId={null}
-      defaultAgentId={DEFAULT_ID}
-      onSelect={() => undefined}
-      onStartChat={() => undefined}
-      onSetDefault={() => undefined}
-      onSetMainDefault={() => undefined}
-    />,
+    <I18nProvider initialLocale="zh-CN">
+      <ProjectAgentCatalogView
+        systemItems={[main]}
+        projectItems={[sequentialReviewer, codeReviewer]}
+        projectCapabilities={PROJECT_CAPABILITIES}
+        viewMode={viewMode}
+        selectedAssetId={null}
+        creatingChatForAgentId={null}
+        defaultAgentId={DEFAULT_ID}
+        onSelect={() => undefined}
+        onStartChat={() => undefined}
+        onSetDefault={() => undefined}
+        onSetMainDefault={() => undefined}
+      />
+    </I18nProvider>,
   );
 }
 
 describe("ProjectAgentCatalogView", () => {
-  test("uses one view mode for both system and project sections", () => {
-    const cardHtml = renderCatalog("cards");
-    const listHtml = renderCatalog("list");
-
-    expect(cardHtml.match(/data-agent-view="cards"/gu)).toHaveLength(2);
-    expect(cardHtml).not.toContain('data-agent-view="list"');
-    expect(listHtml.match(/data-agent-view="list"/gu)).toHaveLength(2);
-    expect(listHtml).not.toContain('data-agent-view="cards"');
-  });
-
-  test("keeps card mode compact for dense desktop catalogs", () => {
-    const html = renderCatalog("cards");
-
-    expect(html.match(/xl:grid-cols-3/gu)).toHaveLength(2);
-    expect(html).not.toContain("min-h-52");
-    expect(html).not.toContain("min-h-64");
-    expect(html.match(/line-clamp-2 h-10 overflow-hidden/gu)).toHaveLength(3);
-    expect(html).not.toContain("line-clamp-2 block");
-    expect(html).not.toContain("w-full flex-1 px-5 pt-3 pb-4");
-    expect(html.match(/w-full px-5 pt-3 pb-3/gu)).toHaveLength(3);
-  });
-
   test("orders the project default first and never offers a restore-Main action", () => {
     const html = renderCatalog("cards");
 

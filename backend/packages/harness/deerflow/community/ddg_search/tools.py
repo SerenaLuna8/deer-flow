@@ -7,6 +7,11 @@ import logging
 
 from langchain.tools import tool
 
+from deerflow.community.errors import (
+    CommunityToolError,
+    community_error_json,
+    no_results_json,
+)
 from deerflow.config import get_app_config
 
 logger = logging.getLogger(__name__)
@@ -106,9 +111,14 @@ def _search_text(
     """
     try:
         from ddgs import DDGS
-    except ImportError:
-        logger.error("ddgs library not installed. Run: pip install ddgs")
-        return []
+    except ImportError as exc:
+        logger.error("DuckDuckGo search dependency is unavailable")
+        raise CommunityToolError(
+            provider="duckduckgo",
+            code="dependency_unavailable",
+            message="DuckDuckGo search is unavailable in this installation",
+            retryable=False,
+        ) from exc
 
     ddgs = DDGS(timeout=30)
 
@@ -125,9 +135,17 @@ def _search_text(
         )
         return list(results) if results else []
 
-    except Exception as e:
-        logger.error(f"Failed to search web: {e}")
-        return []
+    except Exception as exc:
+        logger.error(
+            "DuckDuckGo web search failed; provider_error_type=%s",
+            type(exc).__name__,
+        )
+        raise CommunityToolError(
+            provider="duckduckgo",
+            code="provider_unavailable",
+            message="DuckDuckGo search is temporarily unavailable",
+            retryable=True,
+        ) from exc
 
 
 @tool("web_search", parse_docstring=True)
@@ -153,16 +171,23 @@ def web_search_tool(
         safesearch = config.model_extra.get("safesearch", safesearch)
         backend = config.model_extra.get("backend", backend)
 
-    results = _search_text(
-        query=query,
-        max_results=max_results,
-        region=region,
-        safesearch=safesearch,
-        backend=backend,
-    )
+    try:
+        results = _search_text(
+            query=query,
+            max_results=max_results,
+            region=region,
+            safesearch=safesearch,
+            backend=backend,
+        )
+    except CommunityToolError as error:
+        return community_error_json(error, query=query)
 
     if not results:
-        return json.dumps({"error": "No results found", "query": query}, ensure_ascii=False)
+        return no_results_json(
+            provider="duckduckgo",
+            query=query,
+            message="No results found",
+        )
 
     normalized_results = [
         {

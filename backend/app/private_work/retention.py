@@ -5,12 +5,17 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import exists, select, update
+from sqlalchemy import String, cast, exists, func, select, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
 from app.automations.execution_authority import (
     AUTOMATION_AUTHORIZATION_REVOKED_ERROR_CODE,
+)
+from deerflow.persistence.channel_connections.group_model import (
+    ChannelExternalPrincipalRow,
+    ProjectChannelGroupBindingRow,
 )
 from deerflow.persistence.channel_connections.identity_lock import (
     ChannelIdentity,
@@ -276,6 +281,38 @@ class PrivateWorkRetentionService:
             .all()
         )
 
+        group_principal = exists(
+            select(1)
+            .select_from(ChannelExternalPrincipalRow)
+            .join(
+                ProjectChannelGroupBindingRow,
+                (ProjectChannelGroupBindingRow.project_id == ChannelExternalPrincipalRow.project_id) & (ProjectChannelGroupBindingRow.id == ChannelExternalPrincipalRow.group_binding_id),
+            )
+            .where(
+                ChannelExternalPrincipalRow.project_id == ChannelConnectionRow.project_id,
+                ChannelExternalPrincipalRow.principal_user_id == ChannelConnectionRow.owner_user_id,
+                ProjectChannelGroupBindingRow.channel_instance_id == ChannelConnectionRow.channel_instance_id,
+                func.replace(
+                    cast(ChannelExternalPrincipalRow.id, String),
+                    "-",
+                    "",
+                )
+                == ChannelConnectionRow.id,
+            )
+            .correlate(ChannelConnectionRow)
+        )
+        # Group-managed connections have a stricter restore boundary than
+        # ordinary private connections: only authenticated inbound processing
+        # may reactivate them after proving that the binding is live. The exact
+        # principal-derived connection ID is authoritative; the metadata key is
+        # defense in depth for legacy or partially repaired rows.
+        group_binding_metadata = func.coalesce(
+            cast(
+                ChannelConnectionRow.metadata_json,
+                JSONB,
+            ).bool_op("?")("group_binding_id"),
+            False,
+        )
         candidates = (
             await session.execute(
                 select(
@@ -288,6 +325,8 @@ class PrivateWorkRetentionService:
                     ChannelConnectionRow.project_id == project_id,
                     ChannelConnectionRow.owner_user_id.in_(owners),
                     ChannelConnectionRow.status == "frozen",
+                    ~group_binding_metadata,
+                    ~group_principal,
                 )
                 .order_by(
                     ChannelConnectionRow.provider,
@@ -328,6 +367,8 @@ class PrivateWorkRetentionService:
                             ChannelConnectionRow.owner_user_id.in_(owners),
                             ChannelConnectionRow.id.in_(tuple(winners.values())),
                             ChannelConnectionRow.status == "frozen",
+                            ~group_binding_metadata,
+                            ~group_principal,
                             ~occupied,
                         )
                         .values(

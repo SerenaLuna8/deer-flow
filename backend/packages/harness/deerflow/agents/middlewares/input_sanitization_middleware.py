@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from typing import override
+from typing import Final, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -35,6 +35,24 @@ from deerflow.agents.human_input import read_human_input_response
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
 
 logger = logging.getLogger(__name__)
+
+INPUT_SANITIZATION_FAILURE_CODE: Final = "INPUT_SANITIZATION_FAILED"
+INPUT_SANITIZATION_FAILURE_MESSAGE: Final = "Input sanitization failed; the model call was blocked"
+
+
+class InputSanitizationError(GraphBubbleUp):
+    """Stable fail-closed control flow for an internal sanitization failure.
+
+    LLM error middleware deliberately converts ordinary exceptions into model
+    fallback messages. This signal must bypass that recovery layer so an
+    unsanitized request can never reach a retry or replacement model call.
+    """
+
+    code = INPUT_SANITIZATION_FAILURE_CODE
+
+    def __init__(self) -> None:
+        super().__init__(INPUT_SANITIZATION_FAILURE_MESSAGE)
+
 
 _SUMMARY_MESSAGE_NAME = "summary"
 
@@ -353,17 +371,21 @@ class InputSanitizationMiddleware(AgentMiddleware[AgentState]):
         return request.override(messages=messages) if changed else request
 
     def _try_process(self, request: ModelRequest) -> ModelRequest:
-        """Sanitize request; fail-open on unexpected errors.
+        """Sanitize request; block the model call on unexpected errors.
 
-        GraphBubbleUp propagates; other exceptions return the original request.
+        GraphBubbleUp propagates. Other exceptions are collapsed to a stable,
+        non-sensitive error so unprocessed user input never reaches the model.
         """
         try:
             return self._process_request(request)
         except GraphBubbleUp:
             raise
-        except Exception:
-            logger.warning("security_event=input_guardrail_processing_failed disposition=fail_open")
-            return request
+        except Exception as exc:
+            logger.error(
+                "security_event=input_guardrail_processing_failed disposition=fail_closed failure_type=%s",
+                type(exc).__name__,
+            )
+            raise InputSanitizationError from None
 
     @override
     def wrap_model_call(

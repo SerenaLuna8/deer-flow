@@ -68,6 +68,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
 _EFFECT_SCOPE: Mapping[RuntimePolicySection, RuntimePolicyEffectScope] = {
     RuntimePolicySection.AGENT_RUNTIME: "new_requests_and_runs",
     RuntimePolicySection.AUTH: "new_requests",
+    RuntimePolicySection.AUTOMATIONS: "new_requests",
     RuntimePolicySection.MEMORY_DOCUMENT: "new_memory_documents",
     RuntimePolicySection.QUOTAS: "next_authoritative_check",
 }

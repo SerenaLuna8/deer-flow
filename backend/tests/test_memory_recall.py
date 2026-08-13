@@ -24,11 +24,14 @@ from deerflow.agents.memory.authority_resolution import (
     resolve_memory_authority,
 )
 from deerflow.config.memory_config import MemoryConfig
+from deerflow.error_codes import MemoryAuthorityUnavailable
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentRepository,
     MemoryDocumentScope,
+    MemoryEpisodeCursorInvalid,
     MemoryEpisodeRecord,
+    encode_memory_episode_cursor,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.tools.builtins import recall_memory_tool
@@ -176,28 +179,39 @@ async def test_repository_search_rejects_out_of_contract_reads() -> None:
 async def test_repository_list_applies_cursor_and_orders_by_recency() -> None:
     session = _Session(rows=(_episode_row(1), _episode_row(2)))
     repository = MemoryDocumentRepository(session, jobs=object())
+    boundary = MemoryEpisodeRecord(
+        id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        thread_id="thread-boundary",
+        origin="snip",
+        tagged_text="- [durable] boundary",
+        occurred_at=NOW - timedelta(days=1),
+        created_at=NOW,
+    )
 
-    records = await repository.list_episodes(
+    page = await repository.list_episodes(
         _scope(),
         tags=("permanent", "correction"),
-        before=NOW - timedelta(days=1),
+        cursor=encode_memory_episode_cursor(boundary),
         limit=20,
         retention_days=365,
         now=NOW,
     )
 
-    assert len(records) == 2
+    assert len(page.items) == 2
+    assert page.next_cursor is None
     sql = _compiled(session.executed[0])
     assert "occurred_at <" in sql
+    assert "occurred_at =" in sql
+    assert "memory_episodes.id <" in sql
     assert "LIKE '%%[permanent]%%'" in sql
     assert "LIKE '%%[correction]%%'" in sql
     assert "ORDER BY memory_episodes.occurred_at DESC, memory_episodes.id DESC" in sql
-    assert "LIMIT 20" in sql
+    assert "LIMIT 21" in sql
 
-    with pytest.raises(ValueError):
+    with pytest.raises(MemoryEpisodeCursorInvalid):
         await repository.list_episodes(
             _scope(),
-            before=datetime(2026, 1, 1),  # naive cursor
+            cursor="not-a-valid-cursor",
             limit=20,
             retention_days=365,
             now=NOW,
@@ -428,7 +442,7 @@ async def test_authority_search_fails_closed_when_revalidation_breaks(
         explode,
     )
 
-    with pytest.raises(AuthorizationRevoked):
+    with pytest.raises(MemoryAuthorityUnavailable):
         await authority.search_episodes(query="anything")
 
 

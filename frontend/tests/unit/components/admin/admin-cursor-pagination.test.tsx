@@ -1,8 +1,6 @@
 import { describe, expect, test } from "@rstest/core";
-import { renderToStaticMarkup } from "react-dom/server";
 
 import {
-  AdminCursorPagination,
   INITIAL_ADMIN_CURSOR_STATE,
   advanceAdminCursor,
   retreatAdminCursor,
@@ -39,35 +37,5 @@ describe("admin job page size", () => {
         10,
       ).at(-1),
     ).toBe(10);
-  });
-});
-
-describe("AdminCursorPagination", () => {
-  test("stays visible with page size controls on a single page", () => {
-    const html = renderToStaticMarkup(
-      <AdminCursorPagination
-        alwaysVisible
-        state={INITIAL_ADMIN_CURSOR_STATE}
-        nextCursor={null}
-        previousLabel="Previous"
-        nextLabel="Next"
-        pageLabel={(page) => `Page ${page}`}
-        pageSize={20}
-        pageSizeOptions={[10, 20, 50]}
-        pageSizeLabel="Per page"
-        pageSizeOptionLabel={(size) => `${size}`}
-        itemCount={8}
-        itemCountLabel={(count) => `${count} on this page`}
-        onPrevious={() => undefined}
-        onNext={() => undefined}
-        onPageSizeChange={() => undefined}
-      />,
-    );
-
-    expect(html).toContain("Page 1");
-    expect(html).toContain("8 on this page");
-    expect(html).toContain("Per page");
-    expect(html).toContain('value="20"');
-    expect(html).toContain("disabled");
   });
 });

@@ -10,6 +10,8 @@ from app.private_work.context import PrivateWorkContext
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.models import AgentPayload
 from deerflow.runtime.private_scope import PrivateResourceScope
 
 
@@ -63,6 +65,16 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
     }
     project_agent_id = uuid.uuid4()
     project_agent_version_id = uuid.uuid4()
+    project_agent_checksum = agent_payload_checksum(
+        AgentPayload(
+            description="",
+            soul="thread agent",
+            model_ref="test-model",
+            tool_groups=(),
+            skill_version_ids=(),
+            mcp_version_ids=(),
+        )
+    )
 
     async with engine.begin() as connection:
         await connection.execute(
@@ -136,7 +148,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
             {
                 "id": project_agent_version_id,
                 "agent_id": project_agent_id,
-                "checksum": "a" * 64,
+                "checksum": project_agent_checksum,
                 "owner": str(owner_a_id),
             },
         )

@@ -862,6 +862,7 @@ async def _durable_private_sse_consumer(
                     thread_id,
                     run_id,
                     status=_fallback_terminal_status(record.status),
+                    error_code=("MODEL_OUTPUT_LIMIT" if record.error == "MODEL_OUTPUT_LIMIT" else None),
                 )
                 terminal_cursor = int(terminal.id)
                 if terminal_cursor > cursor:

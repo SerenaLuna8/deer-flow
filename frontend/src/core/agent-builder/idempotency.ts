@@ -39,6 +39,15 @@ export function agentBuilderSemanticSignature(value: unknown): string {
   return JSON.stringify(canonicalize(value));
 }
 
+export function agentBuilderSemanticallyEqual(
+  left: unknown,
+  right: unknown,
+): boolean {
+  return (
+    agentBuilderSemanticSignature(left) === agentBuilderSemanticSignature(right)
+  );
+}
+
 export function createAgentBuilderIdempotencyRegistry(
   createKey: () => string = () => crypto.randomUUID(),
 ): AgentBuilderIdempotencyRegistry {

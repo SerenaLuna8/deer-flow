@@ -7,9 +7,12 @@ import {
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
+  isModelOutputLimitError,
+  MODEL_OUTPUT_LIMIT,
   PROJECT_STREAM_INCOMPLETE,
   projectReconnectStorage,
   projectStreamFrameForUI,
+  projectStreamFailureName,
   projectStreamCursorStorageKey,
   shouldReconnectProjectStream,
 } from "@/core/private-work/api-client";
@@ -688,6 +691,108 @@ describe("private stream reconnect", () => {
       data: { status: "completed" },
     };
     expect(projectStreamFrameForUI(completed)).toBe(completed);
+  });
+
+  test("preserves only the stable model output-limit name until the durable terminal", () => {
+    const diagnostic = {
+      id: "8",
+      event: "error",
+      data: {
+        name: MODEL_OUTPUT_LIMIT,
+        message: "safe public detail",
+      },
+    };
+
+    expect(projectStreamFailureName(diagnostic)).toBe(MODEL_OUTPUT_LIMIT);
+    expect(
+      projectStreamFrameForUI({
+        id: "9",
+        event: "end",
+        data: { status: "error", error_code: MODEL_OUTPUT_LIMIT },
+      }),
+    ).toEqual({
+      id: "9",
+      event: "error",
+      data: {
+        error: MODEL_OUTPUT_LIMIT,
+        message: MODEL_OUTPUT_LIMIT,
+      },
+    });
+    expect(
+      projectStreamFrameForUI(
+        { id: "10", event: "end", data: { status: "error" } },
+        projectStreamFailureName(diagnostic),
+      ),
+    ).toEqual({
+      id: "10",
+      event: "error",
+      data: {
+        error: MODEL_OUTPUT_LIMIT,
+        message: MODEL_OUTPUT_LIMIT,
+      },
+    });
+    expect(
+      projectStreamFailureName({
+        event: "error",
+        data: { name: "UNKNOWN_NEW_BACKEND_ERROR" },
+      }),
+    ).toBeNull();
+    expect(isModelOutputLimitError({ name: MODEL_OUTPUT_LIMIT })).toBe(true);
+    expect(isModelOutputLimitError(new Error(MODEL_OUTPUT_LIMIT))).toBe(true);
+    expect(isModelOutputLimitError({ name: "other" })).toBe(false);
+  });
+
+  test("carries a live output-limit diagnostic through its durable terminal", async () => {
+    const storage = makeSessionStorage();
+    const fetcher = rs.fn(async (input: string | URL) => {
+      const url = input.toString();
+      if (url.endsWith("/runs/run-output-limit")) {
+        return new Response(JSON.stringify({ status: "error" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(
+        [
+          "event: metadata",
+          'data: {"run_id":"run-output-limit","thread_id":"thread-1"}',
+          "id: 1",
+          "",
+          "event: error",
+          `data: {"name":"${MODEL_OUTPUT_LIMIT}","message":"output limit"}`,
+          "id: 2",
+          "",
+          "event: end",
+          'data: {"status":"error"}',
+          "id: 3",
+          "",
+          "",
+        ].join("\n"),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+    });
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    rs.stubGlobal("fetch", fetcher);
+
+    const frames: unknown[] = [];
+    for await (const frame of getProjectAPIClient(SCOPE).runs.joinStream(
+      "thread-1",
+      "run-output-limit",
+    )) {
+      frames.push(frame);
+    }
+
+    expect(frames.at(-1)).toEqual({
+      id: "3",
+      event: "error",
+      data: {
+        error: MODEL_OUTPUT_LIMIT,
+        message: MODEL_OUTPUT_LIMIT,
+      },
+    });
   });
 
   test("persists the confirmed cursor, dedupes replay, and stops after terminal", async () => {

@@ -1,1344 +1,345 @@
-# AGENTS.md
+# Backend AGENTS.md
 
-This is the source of truth for backend work. The repository-level
-[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide owns the final M7 backend
-runtime, persistence, authorization, and test boundaries.
+This is the source of truth for backend changes. The repository-level
+[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide keeps only
+backend architecture, security boundaries, common change paths, and tests.
+Detailed operator and feature behavior belongs in [docs/](docs/README.md),
+code, and focused tests rather than in this file.
 
-## Final service topology
+## Runtime topology
 
-- **Gateway** (`app.gateway`, port 8001) owns authentication, account/project/admin REST
-  APIs, project-private Run admission and queries, durable SSE replay, and signed inbound
-  channel/webhook adapters. It does not execute Agent graphs.
-- **Worker** (`app.worker`) is the only process that claims executable jobs and invokes
-  `RunAgentPrivateExecutor`/`run_agent()`. It owns graph execution, lease heartbeats,
-  project/owner revalidation, checkpoint access, durable stream publication, and terminal
-  settlement.
-- **Scheduler** (`app.scheduler`) is an independent optional process. It holds and verifies
-  one PostgreSQL session advisory lock, scans due project Automations, and atomically admits
-  occurrence, Run, snapshot, and job rows. It never imports or invokes graph execution.
-- **Nginx** forwards `/api/*` directly to Gateway. The frontend is served separately on port
-  3000 and the combined public entry is port 2026.
-- **Provisioner** is optional and only participates when the configured sandbox provider
-  requires it.
+- **Gateway** (`app.gateway`, port `8001`) owns authentication, project/admin
+  APIs, Run admission, scoped reads, durable SSE replay, and inbound adapters.
+  It never executes Agent graphs.
+- **Worker** (`app.worker`) is the only process that claims executable Jobs and
+  invokes `RunAgentPrivateExecutor` / `run_agent()`. It owns leases, graph
+  execution, stream publication, and terminal settlement.
+- **Scheduler** (`app.scheduler`) is optional. It owns one PostgreSQL advisory
+  lock, discovers due Automations, and admits occurrence/Run/Job rows. It never
+  imports or invokes graph execution.
+- **Provisioner** is optional and participates only for the configured
+  Kubernetes Sandbox provider.
 
-Gateway, Worker, and Scheduler use one final PostgreSQL schema and the same retained audit
-keyring. Process readiness reports public component state only; it never reports PIDs, lock
-keys, database URLs, credentials, private resource IDs, or content.
+Gateway, Worker, and Scheduler share the same PostgreSQL schema and governed
+configuration. Public readiness must expose component state only—never PIDs,
+lock keys, credentials, URLs with secrets, private identifiers, or content.
 
-## Commands
+## Commands and layout
 
-Run full-stack commands from the repository root:
+Run full-stack commands from the repository root. Run backend-only commands
+from `backend/`:
 
 ```bash
-make check
 make install
-make config
-make setup-db
-make check-db
-make doctor
-make dev
-make start
-make stop
-make support-bundle
-```
-
-The new-install order is:
-
-```bash
-# DATABASE_URL names a new empty target; POSTGRES_ADMIN_URL names its maintenance DB.
-make setup-db
-make check-db
-make start
-```
-
-Run backend-only commands from `backend/`:
-
-```bash
 make gateway
 make worker
 make scheduler
 make test
 make lint
 make format
+make setup-db
+make upgrade-db
 make check-db
+make upgrade-system-assets
+make prepare-run-event-partitions
+make detect-blocking-io
 ```
-
-`scheduler.enabled=false` leaves project Automation APIs and manual triggers available but
-does not acquire the Scheduler ownership lock or start polling.
-
-## PostgreSQL full-schema initialization
-
-`full_schema.sql` is the only complete application-schema source for fresh installs. The exact
-current marker is `full_schema_v9`, the head of the incremental migration chain under
-`backend/migrations/`; the v5 snapshot remains the frozen chain root. Every database installed
-through `make setup-db` is natively stamped at the current head, and an existing database whose
-marker is a known ancestor revision upgrades only through explicit
-`make upgrade-db` (backup first; no downgrade). Fresh installs never run the chain, and the
-runtime never migrates. `KNOWN_CHAIN_REVISIONS` in `deerflow/persistence/bootstrap.py` orders
-the chain; `tests/test_schema_migration_parity.py` enforces that a frozen-baseline-plus-chain
-database is catalog-identical to a fresh `full_schema.sql` install.
-
-`full_schema_v8` stores `run_events` in UTC-month RANGE partitions. The narrow
-`run_event_invariants` ledger preserves global event-id, per-Thread/private sequence, and
-single-terminal invariants across children. The singleton `run_event_partition_state` row owns a
-monotonic UTC-month `retained_from` watermark: target-month creation and raw/ORM writes older than
-that watermark fail closed, so an operational DROP cannot be undone by a later insert. `make
-prune-run-events ARGS="--before YYYY-MM-01T00:00:00Z"` is the production operator entry: it reads
-the normal `DATABASE_URL`, defaults to a read-only preview, requires an exact non-future UTC month
-boundary, and only calls the guarded DROP helper when `--yes` is present. Existing
-children use a lock-free creation fast path; a missing target month is created only after a parent
-lock and a second watermark check. The explicit global-cutoff DROP helper rejects future cutoffs,
-advances the watermark atomically, and leaves current/next-month children available. Project,
-account, and owner privacy retention still deletes only exact-scope rows through the parent. Catalog
-readiness requires one or more well-formed monthly children, intact enabled trigger clones, and one
-valid state row; it deliberately does not depend on wall-clock current/next names, so natural month
-rollover cannot turn an otherwise healthy database into schema drift.
-
-`make setup-db` requires an explicit administrator URL and application URL. It creates the named
-empty target if needed, executes the complete packaged SQL, records the marker, seeds the packaged
-system asset catalog, initializes the LangGraph checkpointer/store schema, bootstraps the
-default project, and seeds DeepSeek V4 Flash and DeepSeek V4 Pro as active PostgreSQL models that
-share one encrypted Credential version plus GPT 5.6 Luna with a separate encrypted OpenCode
-Credential. Flash remains the default. The backend Make
-target loads the root `.env` when it exists, with explicit process
-environment taking precedence; explicit environment also works without that file.
-`DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`, and a valid Credential keyring are preflighted and
-encrypted before database creation; missing or invalid material fails without creating the target.
-Credential, envelope, all model versions, and default pointer are then written in one transaction
-under a distinct non-login bootstrap principal that has no project membership. A complete existing model catalog
-is validated and preserved rather than overwritten. The application role must be an ordinary
-non-superuser.
-
-An existing legacy DeerFlow database is never upgraded in place by setup. A legacy or unknown
-marker, unversioned nonempty schema, or catalog drift fails closed without DDL or repair.
-Operators must provision a new empty target and run `make setup-db`. The one sanctioned
-exception is a database stamped at a known ancestor revision on the migration chain: it
-classifies as behind and upgrades only through explicit `make upgrade-db`, which takes an
-advisory lock, runs `alembic upgrade head`, and then re-verifies the full catalog signature
-against a fresh install before reporting success.
-
-`make check-db` is read-only and three-state: `ready` (current head), `upgrade_required`
-(known ancestor marker, with actionable `make upgrade-db` guidance), or fail-closed states
-(uninitialized/recreate-required/unavailable). It reports the schema marker, required
-application and LangGraph relations, and whether setup or operator intervention is required
-without printing credentials or full connection URLs. Manual stamping, automatic repair,
-automatic deletion, and destructive reset are unsupported.
-
-### Backend core tests
-
-The backend suite is intentionally small and protects the main client, authentication,
-Gateway/Worker stream, sandbox/path, Credential/MCP, Human Input, and PostgreSQL paths.
-Run the complete set with the development `DATABASE_URL` from the root `.env` or an explicit
-environment override:
-
-```bash
-make test
-```
-
-The test runner uses that URL only as the development PostgreSQL connection source, derives the
-maintenance connection, and creates/drops random `deerflow_test_*` databases. It never runs test
-DDL against the named development database. The URL's role must have create/drop/terminate
-authority for those isolated databases and must never be a production URL. Missing `DATABASE_URL`
-fails before pytest collection; the complete core suite must report zero skips. Focused
-non-database tests may still be run directly with `uv run pytest`.
-
-## Repository layout
 
 ```text
 backend/
 ├── app/
-│   ├── gateway/              # project/account/admin API composition
-│   ├── worker/               # Worker process and job handlers
-│   ├── scheduler/            # Scheduler ownership and polling
-│   ├── projects/             # ProjectContext and project governance
-│   ├── private_work/         # project+owner Thread/Run/file/artifact/Memory services
-│   ├── shared_assets/        # Agent/Skill/MCP/Credential catalog and bootstrap
-│   ├── automations/          # project Automation domain
-│   ├── jobs/                 # durable job application ports
-│   ├── quotas/               # transactional project quota enforcement
-│   ├── audit/                # typed append-only audit
-│   └── channels/             # final project-bound inbound adapters
+│   ├── gateway/              # HTTP composition and server-issued contexts
+│   ├── worker/               # graph and durable Job execution
+│   ├── scheduler/            # Automation polling and admission
+│   ├── projects/             # project governance and ProjectContext
+│   ├── private_work/         # owner-private Thread/Run/file/Memory services
+│   ├── shared_assets/        # Agent/Skill/MCP/Credential governance
+│   ├── automations/          # Automation definitions and occurrences
+│   ├── channels/             # inbound/outbound channel adapters
+│   ├── quotas/               # transactional quota enforcement
+│   └── audit/                # typed append-only audit events
 ├── packages/harness/deerflow/
 │   ├── agents/               # LangGraph graph and middleware
-│   ├── assets/               # app-independent catalog protocol
-│   ├── persistence/          # ORM, repositories, baseline, bootstrap
-│   ├── runtime/              # graph execution primitives
-│   ├── sandbox/              # sandbox providers and file/shell tools
-│   ├── mcp/                  # admitted MCP tool materialization
-│   ├── skills/               # immutable admitted Skill parsing/loading
+│   ├── persistence/          # ORM, repositories, schema, bootstrap
+│   ├── runtime/              # execution, streams, checkpoints, Jobs
+│   ├── sandbox/              # Sandbox providers and file/shell tools
+│   ├── skills/               # Skill parsing, scan, review, materialization
+│   ├── mcp/                  # admitted MCP discovery and calls
 │   └── subagents/            # delegated Agent execution
-├── migrations/               # Alembic chain for existing databases (root = release baseline)
-├── scripts/                  # setup/check/upgrade/operator CLIs
-└── tests/                    # unit, PostgreSQL, and process gates
+├── migrations/               # explicit Alembic chain for existing databases
+├── scripts/                  # database and operator CLIs
+└── tests/                    # unit, PostgreSQL, process, and contract gates
 ```
 
-The dependency direction is `app.* -> deerflow.*`. Harness code must never import
-`app.*`. Blocking-I/O detection is the separate `make detect-blocking-io` static gate.
-
-## Task recipes
-
-Where to start for the most common changes. Each recipe lists the files to touch and the
-mistake that recipe exists to prevent; the invariant sections below remain authoritative for
-what the change is then allowed to do.
-
-### Add an Agent tool
-
-A config-driven tool is a `@tool` callable plus a YAML entry. A framework builtin is a
-hardcoded constant instead.
-
-1. Implement the callable (`deerflow.sandbox.tools`, `deerflow.community.*`, or a new module).
-2. Config-driven: add a `tools:` entry to `config.example.yaml` with `name`, `group`, and
-   `use: module.path:variable_name`. `get_available_tools()` in `deerflow/tools/tools.py`
-   resolves `use` through `resolve_variable(cfg.use, BaseTool)`.
-3. Builtin instead: create `deerflow/tools/builtins/<name>_tool.py`, export it from
-   `builtins/__init__.py`, and add it to `BUILTIN_TOOLS` or `SUBAGENT_TOOLS` in
-   `deerflow/tools/tools.py`.
-4. Read per-tool options inside the tool via `get_app_config().get_tool_config("<name>")`.
-
-The config `name` must equal the tool object's `.name`; a mismatch gives the model one name
-and the runtime router another. A tool is invisible unless the Agent version's `tool_groups`
-contains its `group` — the top-level `tool_groups:` list in YAML is declarative and is not
-validated at runtime, so a typo there fails silently while a typo in a tool's `group` removes
-the tool. Error handling, output budget, result sanitization, and loop detection apply
-automatically; a new write-style tool must additionally be added to `_GATED_WRITE_TOOLS` in
-`read_before_write_middleware.py`, a new shell-style tool to the `bash` check in
-`sandbox_audit_middleware.py`, and a new remote/network tool usually needs a
-`loop_detection.tool_freq_overrides` entry. Reference tests: `tests/test_sandbox_tools_security.py`,
-`tests/test_create_deerflow_agent.py`.
-
-### Add a middleware
-
-1. Create `deerflow/agents/middlewares/<name>_middleware.py` subclassing LangChain
-   `AgentMiddleware`; implement only the hooks you need (`before_model`, `after_model`,
-   `wrap_model_call`, `wrap_tool_call`, and their async forms).
-2. Register it in exactly one builder: `build_middlewares()` in
-   `deerflow/agents/lead_agent/agent.py` for lead-only; `_build_runtime_middlewares()` in
-   `middlewares/tool_error_handling_middleware.py` for the lead+subagent base;
-   `build_subagent_runtime_middlewares()` for subagent-only; `_assemble_from_features()` in
-   `deerflow/agents/factory.py` for the SDK.
-3. For a new state channel, set `state_schema` on the class, and merge the field into
-   `ThreadState` (`deerflow/agents/thread_state.py`) when other components read it.
-
-List position is the layering: **first in list = outermost**. `ClarificationMiddleware` must
-stay last, `ToolProgressMiddleware` and `GuardrailMiddleware` must stay outside
-`ToolErrorHandlingMiddleware`, and `McpRoutingMiddleware` must precede
-`DeferredToolFilterMiddleware`; the builders assert these. Lead and SDK chains pass through
-`normalize_middleware_state_schemas()`, which rewrites each `state_schema` for delta
-checkpoint mode — a middleware whose schema cannot be adapted breaks `delta` deployments even
-though `full` still works. Reference tests: `tests/test_create_deerflow_agent.py` (ordering),
-`tests/test_clarification_middleware.py`.
-
-### Add a Gateway router or endpoint
-
-1. Create `app/gateway/routers/<name>.py` with an `APIRouter` carrying the complete prefix
-   (`/api/projects/{project_id}/...`) and the route class for its error domain:
-   `PrivateWorkRoute` for owner-private work, `ProjectGovernanceRoute` or `GovernanceRoute`
-   for project governance, `ProjectRoute` for project CRUD.
-2. Take authority from a server-issued context — `private_work_context` from
-   `app/gateway/deps.py`, or `resolve_project_context_in_transaction()` from
-   `app/projects/context.py` — never from request fields.
-3. Check capability with `ProjectContext.require(Capability.X)` or
-   `PrivateWorkRevalidator.require(...)` for owner-scoped paths.
-4. Import the module and call `app.include_router(<name>.router)` in `app/gateway/app.py`
-   with no extra prefix.
-5. Give every request/response model `ConfigDict(extra="forbid")`, adding `strict=True` as the
-   surrounding routers do, so unknown authority or private fields are rejected rather than
-   silently accepted.
-
-Project outsiders and missing private resources collapse to 404 while a member lacking a
-capability gets 403; the Usage and Audit routers deliberately collapse both to 404, so copy
-the neighbouring router in the same family rather than mixing conventions. Reference tests:
-`tests/test_memory_dream_api.py`, `tests/test_private_work_stream_router.py`.
-
-### Add a PostgreSQL table
-
-A schema change is a full-schema change plus a migration-chain step: fresh installs execute
-the updated `full_schema.sql`, and existing databases reach the identical catalog through
-`make upgrade-db`.
-
-1. Add the ORM model under `deerflow/persistence/<domain>/` and import it from
-   `deerflow/persistence/models/__init__.py`. `FINAL_APP_TABLES` is derived from
-   `Base.metadata`, so that import is what registers the table — there is no list to edit.
-2. Add the matching `CREATE TABLE` to `deerflow/persistence/full_schema.sql`.
-3. Install the updated SQL into a disposable PostgreSQL database, then update
-   `FINAL_M7_CATALOG_SIGNATURE` (`persistence/final_schema_contract.py`) and
-   `M7_CANONICAL_SCHEMA_DIGEST` (`persistence/final_schema_digest.py`) together. There is no
-   generator script; a stale pair fails an import-time check.
-4. Add the relation to `FINAL_REQUIRED_RELATIONS` in `app/final_schema.py` when runtime
-   readiness depends on it, and any new sequence to `FINAL_APP_SEQUENCES`.
-5. Bumping the marker means updating the `alembic_version` insert at the end of
-   `full_schema.sql`, appending the new revision id to `KNOWN_CHAIN_REVISIONS` in
-   `deerflow/persistence/bootstrap.py` (`CURRENT_SCHEMA_REVISION` is derived from its tail),
-   and every test that pins the current marker.
-6. Write the matching migration script under `backend/migrations/versions/` (explicit DDL
-   only — never import ORM models), with `down_revision` pointing at the previous head.
-   `tests/test_schema_migration_parity.py` fails until the migrated catalog is identical to a
-   fresh install.
-7. Verify both paths: provision a **new empty** database and run `make setup-db` then
-   `make check-db`; upgrade an existing database with `make upgrade-db`. Never stamp, patch,
-   or hand-migrate a database.
-
-`tests/test_memory_document_contract.py` asserts that the `CREATE TABLE` set in
-`full_schema.sql` equals `Base.metadata.tables` plus `alembic_version`, so ORM/SQL drift fails
-there first.
-
-### Add a System Skill
-
-1. Create `skills/public/<name>/SKILL.md` plus any `scripts/`, `references/`, or `templates/`
-   files. These directories are the sole source of System Skill entries.
-2. Regenerate the checked-in archives and manifest from `backend/`:
-   `PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`
-   (`--check` verifies they are current).
-
-The generator replaces the complete Skill set — it removes stale Skill entries and archives
-while retaining packaged Agent and MCP entries. Runtime processes never scan `skills/public/`;
-the catalog reaches PostgreSQL only through `make setup-db`. A newly added Skill is pinned
-into newly created projects only: existing projects are never reconciled, so verify against a
-fresh project rather than an existing one.
-
-### Add a durable job type
-
-The type string is part of the schema, so this is also a table change — apply the recipe above.
-
-1. Extend the `JobType` literal in `deerflow/persistence/jobs/sql.py` and the allowed set in
-   its `EnqueueJob` validation.
-2. Update the other three contracts that must agree: `JobType` in
-   `app/reliability/operations.py`, `AdminJobResponse.job_type` in
-   `app/gateway/routers/admin_jobs.py`, and `JobAuditMetadata.job_type` in
-   `app/audit/models.py`.
-3. Extend the `ck_jobs_type` CHECK constraint in both `deerflow/persistence/jobs/model.py`
-   and `full_schema.sql`.
-4. Implement the handler in `app/worker/<name>.py` as a callable taking
-   `(claim: JobClaim, authority: JobLeaseAuthority)` and guarding `claim.job_type` on entry.
-5. Register it in the `active_handlers` dict in `app/worker/app.py` and add the type to the
-   allow-list in `app/worker/service.py`.
-6. Enqueue through `JobRepository.enqueue(EnqueueJob(...))` inside the same business
-   transaction that locks the project, validates capability, and writes the domain rows.
-
-`tests/test_memory_document_contract.py` asserts all four job-type contracts are identical, so
-a partial update fails there. Reference tests: `tests/test_worker_service.py`,
-`tests/test_memory_dream_worker.py`.
-
-## Authorization and persistence boundaries
-
-- Project authority begins with authenticated identity and a server-issued immutable
-  `ProjectContext`. Platform `system_admin` does not imply project membership.
-- Private authority derives a `PrivateWorkContext`; it cannot be constructed from request
-  fields. Every private SQL predicate and composite relationship binds
-  `project_id + owner_user_id`.
-- Request metadata/config recursively discards client-supplied owner, project, membership,
-  role, capability, snapshot, Credential grant, job, lease, and internal runtime fields.
-- Every side-effect boundary re-locks and revalidates current project, membership, role,
-  capability, Run, and job lease in the caller-owned transaction.
-- Project outsider, stale membership, wrong owner, and missing private resource collapse to
-  public 404. A current project member lacking a required capability receives 403.
-- Repositories never commit unless their contract explicitly owns the whole operation.
-  Domain services preserve the documented Project -> Membership -> resource lock order.
-- The application does not use PostgreSQL RLS. Application isolation therefore depends on
-  immutable contexts, scoped repositories, composite constraints, and non-superuser runtime
-  roles.
-
-### Authentication and browser sessions
-
-- Email is one case-insensitive account identifier. All user repository create, lookup, and
-  update paths normalize with `strip + lowercase`; ORM and `full_schema.sql` both enforce the
-  unique `lower(email)` index. This schema shipped inside the frozen v5 baseline and is
-  never installed by the runtime or by ad-hoc patching.
-- A browser access token is valid only while its signed `sid`, user `token_version`, and
-  PostgreSQL `auth_sessions` row all validate. Login persists the session before returning the
-  JWT; logout revokes the current `sid`, while password change increments the token version,
-  revokes every old session, and issues one new session.
-- `auth.local.allow_registration` gates only public local self-registration. A disabled gate
-  returns structured `403 registration_disabled` before account creation; first-admin
-  initialization and controlled OIDC provisioning remain independent. Public setup status has
-  the exact `{needs_setup, registration_enabled}` shape; only `needs_setup` may be cached, while
-  the registration policy is resolved for every response.
-- `AuthAppConfig`, `LocalAuthConfig`, `OIDCAuthConfig`, and every `OIDCProviderConfig` reject
-  unknown fields. A misspelled registration, auto-provisioning, domain, or cookie-policy key must
-  fail configuration loading rather than silently fall back to a permissive default.
-- Remember-me changes browser persistence, not authentication authority. A false choice keeps
-  access, CSRF, and the HttpOnly preference cookie session-only. A true choice persists them for
-  the configured token lifetime on HTTPS and localhost HTTP; public plain HTTP remains
-  session-only unless the operator explicitly enables
-  `auth.local.allow_insecure_persistent_cookie`.
-- Access and CSRF cookies resolve secure/lifetime policy together. Logout deletes access, CSRF,
-  and preference cookies even when durable revocation is unavailable and the endpoint must
-  return 503. Passwords, JWTs, CSRF values, and raw `sid` values must never enter browser storage,
-  public responses, logs, or traces.
-- The removed top-level `authorization:` config is a version-32 tombstone, not an enabled
-  generic provider. Project authority remains ProjectContext + capability + private owner scope
-  plus side-effect revalidation; a future provider may only add a concrete fail-closed restriction,
-  never replace or expand that authority.
-
-## System asset and Agent execution boundary
-
-`app.shared_assets.bootstrap` loads a strict packaged manifest and manifest-listed regular
-files only. It rejects unknown keys, duplicate source keys, path escape, symlinks, non-regular
-files, and digest mismatch. One transaction writes published system Agent, Skill, and MCP
-rows under the fixed non-login builtin principal. Repeated setup with the same catalog is
-idempotent; a conflict rolls back the whole seed. The seed never creates a Credential,
-project binding, membership, or secret. Separately, each newly created project atomically pins
-every currently active System Skill's current published version in an enabled project binding;
-this applies to the default project only when that project is first created. Re-running default
-project bootstrap never reconciles bindings, re-enables an administrator-disabled Skill, or
-binds a later catalog addition into an existing project. System Agent and MCP bindings remain
-explicit opt-ins.
-
-The 14 directories under `../skills/public/` are the sole source of truth for every System Skill
-entry. There are no separately maintained builtin Skill payloads. The generator replaces the
-complete packaged Skill set from those directories, adding missing entries and archives and
-removing every stale Skill entry and generated archive while retaining Agent and MCP entries.
-Archives include `SKILL.md`, scripts, references, templates, and other regular files. Regenerate the
-checked-in archives and manifest entries from `backend/` with
-`PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`; use `--check`
-to verify that they are current. Generation and bootstrap use the same bounded frontmatter,
-archive, and static-scan validation; generated destinations reject symlinks and are replaced
-atomically. Runtime processes never scan `skills/public/`, and setup does not create project
-bindings while seeding the catalog. A project-creation transaction applies the System Skill
-default bindings described above without changing the catalog bootstrap boundary.
-
-The runtime system catalog is bootstrap-only. Global `/api/admin/assets` Agent, Skill, and
-MCP definition/version routes expose governance metadata with GET only; Gateway and domain
-services reject runtime create, version authoring, publish, submit/approve, archive, and
-suspend even for a system admin. The one MCP-specific write is the dedicated
-`.../versions/{version_id}/credential-grants` route for the current published packaged MCP:
-it replaces only active System Credential grants with optimistic grant revisions and never
-changes the definition, workflow state, checksum, published pointer, or asset revision.
-System Credential lifecycle routes and project-scoped admin overrides remain independently
-mutable.
-
-Runtime processes use PostgreSQL as the only catalog authority. Gateway admission persists
-the exact secret-free Agent/Skill/MCP, MCP Credential-grant, and Skill Credential-reference
-snapshot for a Run. Worker reloads and revalidates that exact closure, decrypts Skill Credential
-fields only inside Worker memory, and materializes system Skill bytes below
-`/mnt/skills/public/<name>` and project Skill bytes below `/mnt/skills/custom/<asset_uuid>` in a
-run-owned read-only tree. Skill Credential configuration is scoped by project, Skill, and exact
-Skill version so a newly published version cannot overwrite bindings used by an older pinned
-Agent. Each activated Skill execution revalidates and decrypts its exact closure, then injects
-plaintext only into that sandbox subprocess environment; platform code does not intentionally
-serialize it into prompts, version payloads, snapshots, API responses, logs, or traces, and masks
-literal command output. This masking is an accidental-leak guard, not DLP: a Skill granted a
-Credential is trusted code and could transform, persist, or exfiltrate the value. Subagents inherit
-only the internal path-scoped reference carrier and perform the same execution-boundary validation.
-New project Skills are created in `suspended` state. Authors may create, fork, replace, and
-publish versions while suspended; activation is a separate capability-checked transition that
-requires a published version. Resolution and runtime materialization accept only active,
-published Skills. Project Skill display names are case-insensitively unique within one project;
-different projects may use the same display name.
-
-## Runtime Skill activation policy
-
-Every Skill in an admitted Agent snapshot is passive until activated. Lead-Agent
-`allowed-tools` authority has exactly two sources: an explicit user slash activation, or a
-successful `read_file` of an exact admitted `SKILL.md` observed by
-`SkillToolPolicyMiddleware` in the current private Run. The latter creates ephemeral evidence
-bound to `project_id + owner_user_id + run_id` and a middleware-local owner token. Durable
-`ThreadState.skill_context` is an observational reminder channel only; it is never tool-policy,
-Credential, secret, or execution authority. The Worker rejects caller-supplied evidence, clears
-stale evidence when a runtime config is reused, and redacts the evidence and policy decision
-from every observable serialization surface.
-
-Verified-read evidence additionally records the lead model-call ordinal at capture time and
-expires after `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12; `0`
-keeps the evidence Run-long). A fresh successful read of the same `SKILL.md` renews the window.
-Expiry only restores the pre-activation default tool set — it never widens authority — and
-autonomous secret binding sourced from that evidence ends with it. Slash activation is exempt:
-it encodes explicit user intent and stays active for the rest of the Run. Blocked-tool messages
-name the restricting Skill, the activation source, and the remaining window so the model can
-re-read the entry file or ask the user instead of retrying blindly.
-Entering or leaving an effective restriction emits exactly one content-free RunJournal middleware
-trace carrying only the activation source, admitted Skill names/version IDs, and allowed-tool count;
-unchanged restricted calls do not repeat the trace.
-
-Slash authority has priority over later successful reads. One authenticated run marker binds
-the slash to `project_id + owner_user_id + run_id + message id/hash`, so the same command reads,
-injects, and audits once per Run while secret bindings are still recomputed on every model call.
-The marker is runtime-only, rejected from caller context, cleared on config reuse, and never
-contains secret material.
-
-Active Skill policy is enforced at three independent lead-Agent boundaries:
-
-1. model-call tool schemas;
-2. tool execution before the handler runs;
-3. `tool_search` returned schemas and promoted names.
-
-The decision binds a middleware owner token, decision version, source, exact paths, exact
-admitted version IDs, and allowed names. Malformed evidence, stale decisions, unresolved exact
-paths, or unvalidated `tool_search` result shapes fail closed. `describe_skill`, `read_file`,
-and policy-filtered `tool_search` remain framework tools; Review does not add a framework tool.
-Subagent Skill loading keeps its required framework tools and escapes loaded Skill text, but
-must not be described as having the lead middleware's complete dynamic active-policy lifecycle.
-
-Autonomous Skill secret selection consumes the same authenticated successful-read evidence,
-not `ThreadState.skill_context`; explicit slash selection consumes its authenticated slash
-source. Both are resolved back to the exact admitted runtime registry. Existing command-boundary
-project/membership/Run/lease/version/checksum/Credential revalidation and one-subprocess
-plaintext injection remain authoritative.
-
-## Skill Scan and deterministic Review
-
-Project Skill authoring always runs deterministic SkillScan. Its Python analysis covers direct
-network sinks, supported HTTP client-instance data flow, uncertain `subprocess shell` arguments,
-reverse-shell call sites, and PEP 695 type-alias handling while retaining the final 100 MiB,
-16384-file, bounded-log, and Mach-O boundaries. Both archive authoring and archive preflight
-reject any member name containing `:`, including ZIP/TAR NTFS alternate-data-stream names.
-Untrusted Skill names, descriptions, paths, allowed-tool metadata, slash reminders, and
-subagent-loaded content must be escaped at their prompt or ToolMessage rendering boundary.
-
-Deterministic Review v1 lives in the app-independent
-`deerflow.skills.review` package and emits the three checked-in
-`contracts/skill_review` schemas. The app-only `PostgresSkillVersionReader` requires a
-server-issued `ProjectContext` plus exact Skill/version/checksum, reads through project-scoped
-repository authority in one transaction, revalidates immutable rows/files/checksums, and emits
-a secret-free PackageSnapshot. `PostgresSkillReviewService` analyzes and renders outside the
-transaction with `asyncio.to_thread`; harness code never imports `app.*`. Static report
-`completed_at` is supplied from the immutable version `created_at`, not the current clock, so
-repeated review of one exact version is byte-stable.
-
-Review has no Gateway API, model tool, LLM moderation step, persistence side effect, public
-`skill-reviewer` Skill, or runtime authorization effect. The changed-public-Skill check is a
-step in the existing consolidated release workflow, not a separate workflow. Its PostgreSQL
-exact-version integration test requires the real development `DATABASE_URL`; a local skip caused
-by a missing URL is not release evidence.
-
-## Skill and Agent authoring, Builder, and lifecycle
-
-Interactive project Skill creation atomically writes the suspended asset and version 1 Draft
-with one backend-generated root `SKILL.md` template in the same transaction, including quota
-reservation and both governance events. It never publishes that template, never leaves an
-asset without its initial version, and returns the final asset revision after both writes.
-Every later UI-authored version is a fork of the exact selected immutable version; there is no
-independent blank-version UI path.
-
-Conversational project Skill creation uses private owner-scoped Skill Builder sessions. Session
-creation stores only the normalized project-local name and pins the exact current published
-System `skill-creator` asset/version/checksum without requiring a project binding. Generation
-loads that immutable `SKILL.md`, calls a no-tool model, strictly validates its JSON contract,
-and permits one bounded repair attempt without echoing the invalid output. It persists only
-bounded UTF-8 candidate files plus validated clarification/messages. Candidate edits, validation, and commit
-are revision-, checksum-, and idempotency-bound. Final commit revalidates the exact draft and
-atomically creates a suspended Skill with published version 1; it never enables, binds, or adds
-the Skill to an Agent. Cancel clears candidate bytes. Hard deletion tombstones completed Builder
-references before deleting the Skill package. A clarification reply must transition the row to a
-database-valid `generating` state before any repository query that can trigger SQLAlchemy
-autoflush; `awaiting_clarification` may never be flushed with a cleared clarification payload.
-Candidate directories are implicit prefixes of canonical relative file paths rather than stored
-directory rows. `scripts/`, `references/`, `templates/`, and other safe nested paths share the
-same validation and persistence path; Builder cannot represent empty directories, binary files,
-symlinks, or executable mode bits. Validation and commit preserve every canonical path without
-flattening it into the published `skill_version_files` snapshot.
-
-Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` entries are logical UI documents
-backed by fields on the immutable Agent version; they are not filesystem assets or a separate
-version graph. Saving them against a published Agent atomically clones and publishes the current
-runtime configuration before moving the published pointer. An Agent without a published runtime
-version receives an internal Draft that later runtime-version authoring inherits. New Agent
-payloads use checksum schema v2; migrated and packaged v1 rows retain their exact legacy
-Soul-only checksum and `<soul>` content wrapper, while runtime placement is intentionally
-promoted to the same highest project-configurable tier as v2 profiles. Worker renders the
-admitted four-field bundle after
-other project-configurable instructions, making it the highest project-configurable tier, and
-places it immediately before the final platform critical reminders. Platform authorization,
-confidentiality, and isolation invariants remain authoritative wherever they appear in the
-template. Worker passes the same redacted in-memory bundle to subagents without metadata or log
-serialization.
-
-Project and admin-project Gateway APIs expose Agent revision history as read-only data and do
-not register raw Agent-version creation or publish mutations. Builder confirmation, instruction
-saving, the semantic capability-binding replacement operation, and historical-version restore
-create or advance immutable revisions through internal service operations. Restore validates the
-target published checksum and dependency closure, then copies it as the next published revision;
-it never mutates an old row or moves the pointer directly backward. A capability replacement accepts only exact
-Skill/MCP version IDs valid in the acting project's dependency closure, preserves every other
-current published payload field, publishes the replacement in the same transaction, and advances
-the Agent asset revision with optimistic concurrency. Run admission and snapshots continue to pin
-the exact published revision.
-
-Agent creation uses a dedicated project-and-owner scoped Builder session, not an ordinary
-private Thread or Run. Creating the session stores only the normalized name and does not call a
-model or create an Agent. The first user description always enters a model-generated discovery
-phase that returns exactly one brief-specific question with model-generated choices. Builder exposes
-only that current question; after its answer is saved, the next discovery call receives the original
-brief plus every prior question and answer and must generate one non-repeating next question. This
-continues for exactly three sequential interview turns, with each choice card also accepting a
-free-text alternative. Only the third answer enters composition, which may not ask another question.
-Composition also returns one concise plain-text catalog description derived from the completed
-Agent design. The initial user brief remains discovery input only: it is never reused as the
-created Agent description, and a model response that copies it verbatim receives the same bounded
-repair attempt as other invalid candidate output.
-An invalid model response receives one bounded repair attempt without echoing the rejected output;
-references to allowed capabilities that the model omitted from `capability_claims` are completed
-deterministically, while unavailable capabilities still fail closed. Each generation turn builds a
-bounded, server-authorized context and stores only validated clarification/candidate results; raw
-prompts are never attached to tracing.
-Final confirmation is one transaction that creates the project Agent as `suspended`, publishes
-complete version 1 with all four logical documents, advances the pointer, and marks the Builder
-session completed. Dependency child rows are inserted while version 1 is still Draft; only after
-the complete Skill/MCP ref set is flushed may the same transaction transition it to Published and
-advance the pointer. The public confirmation response returns only the completed session and Agent;
-the internal revision is not exposed. Project-local Agent slugs remain unique. Interrupted generation is recoverable,
-and retention removes Builder messages and blueprints with the exact project/owner private scope.
-Incomplete-session list summaries expose the current session revision so a confirmed cancel can
-use optimistic concurrency and remove only that exact private design session from the resume list.
-
-Agent lifecycle does not expose an archive mutation. Project and project-override APIs retain
-capability-checked activate/suspend transitions; project UI labels these as enable/disable. A
-project member with `shared_assets.edit` may hard-delete an unreferenced project Agent package,
-including every version and dependency-ref row. Any retained Thread, Automation, or exact Run
-snapshot reference rejects deletion with conflict; deletion never cascades into private work.
-Completed private Builder history is retained with a deleted-Agent tombstone. System Agents and
-platform override routes never expose Agent deletion. Project MCP lifecycle exposes
-activate/suspend for assets with a current Published version; activation revalidates the exact
-definition and Credential closure. A project member with `shared_assets.edit` may hard-delete an
-unreferenced project MCP package, including its versions, Credential slots, and grants, while any
-Agent-version, exact Run, or grant-snapshot reference rejects deletion with conflict. System and
-platform-override MCP assets never expose deletion. The archive mutation remains only for
-historical/admin compatibility and is not a project UI primary action. Skill activate/suspend
-remains independent. Historical Agent rows already carrying the frozen-schema
-`archived` status remain unreadable to execution; removing the API does not rewrite published
-migrations or historical data.
-
-Agent version authoring rejects a dependency set containing duplicate Skill slugs across
-system and project scope before that layout can become ambiguous. Worker materializes MCP
-secrets only after current capability, exact selected version/checksum,
-binding, slot, grant, Credential, and envelope closure are locked and revalidated. Catalog
-generation is diagnostic snapshot metadata, not a global invalidation token: an unrelated
-project mutation must not stale an exact admitted Run. Secret material never enters an API
-response, cache, checkpoint, event, repr, log, or audit metadata.
-
-## Project MCP execution, authoring, and discovery
-
-Project MCP execution is fail-closed. Project and admin-project authoring accept only
-`http`/`sse` definitions with a secret-free HTTP(S) URL whose IP literal belongs to
-`mcp_security.project_remote_allowed_networks`. Exact `localhost` is deterministically normalized
-to `127.0.0.1` before validation and persistence, so it never depends on a later resolver choice;
-IPv6 loopback callers use `[::1]` explicitly. Every other DNS hostname is rejected because a
-one-time resolution followed by a separate connection would create a DNS-rebinding/TOCTOU gap.
-The defaults cover IPv4 loopback, RFC 1918, IPv6 loopback, and IPv6 ULA; an empty list denies every
-target, while `/0` must be an explicit operator choice. CIDR membership does not restrict a target's
-port, path, or service identity. HTTP carries header/query Credential values in plaintext and is
-only suitable for a trusted isolated network; HTTPS IP literals require a matching IP SAN. With a
-forward proxy, `127.0.0.1` refers to the proxy's network namespace and the proxy must independently
-enforce the intended network boundary. Project `stdio`, `streamable_http`, OAuth,
-literal env/header values, and env/OAuth Credential targets are rejected. Project secrets may
-enter a remote MCP call only through an approved encrypted Credential header or query slot;
-query secrets are appended in Worker memory to the validated secret-free base URL for
-each discovery/tool-call client. With `mcp_security.run_session_reuse` enabled, an initialized
-project MCP session and its materialized secrets stay in Worker memory for at most the Run's
-life, keyed to the exact version/checksum/grant closure. A changed key never reuses the prior
-session; each distinct slot closes on its own idle timeout or at Run end. The configured base URL
-itself cannot contain a query/fragment
-delimiter, and runtime validation also prevents a slot from replacing an existing query parameter.
-They necessarily appear in the outbound request-target, so production egress proxies and
-upstream access logs must omit or fully redact query strings. Scoped project MCP clients suppress
-their own `httpx`/`httpcore` transport logs without disabling unrelated HTTP observability.
-Authority, proxy-authentication, content-length, and other hop-by-hop header names are forbidden. Run
-admission takes shared MCP/version locks, rejects historical project `stdio`, and revalidates
-the current definition and Credential-slot closure even when a caller omitted the endpoint
-policy (which fails closed). Worker revalidates every exact project MCP snapshot before
-discovery and every call. Worker injects a no-redirect, `trust_env=false` HTTP client, uses the
-controlled egress proxy only when configured, and applies separate operator hard timeouts to
-discovery and tool calls. `require_egress_proxy` defaults to false; deployments may enable it as
-an additional network-policy boundary.
-
-The member-facing create path is the project-only strict
-`POST /api/projects/{project_id}/mcp-servers/configured` aggregate mutation; it does not accept
-raw JSON, workflow flags, Credential values/IDs, or an expected asset revision. One service
-transaction creates the active MCP row, inserts immutable Draft revision 1, and advances the
-asset revision for both steps. A definition without Credential slots reuses the Draft-to-Published
-transition and advances the current pointer; any declared slot reuses Draft-to-Pending-Approval
-and leaves the pointer empty until a separate authorized approval binds existing project
-Credential versions. Both outcomes return the final asset plus redacted configuration and leave
-the asset at revision 3. The legacy granular asset/revision endpoints remain compatibility
-surfaces, but the project UI must not sequence them for initial creation.
-
-Project editing uses the strict configured PUT for the exact project MCP and expected asset
-revision. In one transaction it inserts the next internal Draft revision and immediately reuses
-the Published or Pending-Approval transition, so a revision-hidden UI never leaves an unreachable
-Draft. Draft submission/publication and pending approval require the stored `supersedes` pointer
-to equal the asset's locked current pointer; stale branches fail with conflict and cannot replace a
-newer current configuration. System MCP enable/update uses the project-only `sync-current` binding
-mutation. The request never accepts a version ID: after locking project and binding, the service
-locks the System MCP and its current Published revision, validates the full Credential closure,
-then creates, re-enables, or moves the exact binding with optimistic binding revision control.
-
-Publishing a project MCP without Credential slots atomically enqueues one durable
-`mcp_discovery` Job. A Credential-bearing revision stays pending without a Job; successful
-project approval atomically publishes the exact grant closure and enqueues it. The project-only
-manual discovery POST requires both edit and execute capability and either returns the active
-same-closure attempt or enqueues a new one. Gateway only admits and reads these attempts: the
-Worker revalidates the current project membership, exact version/checksum/grant closure, endpoint
-CIDR policy, and lease immediately before remote initialize/list-tools, and never invokes a tool.
-The Worker atomically settles the Job, attempt, and `project_mcp_tool_inventories` observation.
-That project/version-scoped row carries only bounded provider tool names, sanitized plain-text
-descriptions, stable public failure codes, timestamps, the version payload checksum, and a digest
-of the Credential grant closure. Gateway exposes it only through the project exact-version tools
-GET and never contacts MCP or decrypts Credential material. A changed checksum or grant closure
-makes prior tools stale; an active attempt reports testing, and a failed current attempt may retain
-a matching last success as degraded. Discovery failure does not roll back the published config.
-This inventory is display-only diagnostic state: every Run still performs fresh discovery and
-must never use it as execution authority.
-
-`mcp_security` is startup-only: update Gateway, Scheduler, and every Worker together. Historical
-immutable versions remain readable with env/header values redacted and Project remote URLs
-reduced to their HTTP(S) origin; path/query details are never replayed. Unsafe versions are never
-rewritten or silently skipped. The project-only configured GET is the narrow editing exception:
-it requires `shared_assets.edit`, returns only the latest pending revision on the current lineage
-or the exact current Published revision, revalidates that definition against the current endpoint
-policy, and may then expose its secret-free IP-literal URL path. It never returns query, fragment,
-embedded credentials, literal env/header values, or arbitrary historical paths. Gateway and
-Scheduler import the neutral
-`deerflow.mcp_definition_policy` module so policy validation cannot pull the Agent execution
-graph into either process.
-
-Packaged System MCP keeps the supported `stdio` env and remote header/OAuth Credential paths.
-For OAuth, Worker derives the access header only inside the one-shot call, bounds acquisition
-with the discovery deadline, refreshes through a local interceptor, and rejects tool metadata
-or results that echo either the admitted secret or the derived access token.
-
-## Run admission, execution, and durable streaming
-
-`RunAgentPrivateExecutor` is the only production adapter that calls `run_agent()`. The Worker
-holds the raw lease token only in memory; PostgreSQL stores its hash. Durable stream appends
-validate the exact current lease in the same transaction, use thread-monotonic sequence IDs,
-and persist one terminal outcome. Gateway only reads scoped durable frames and honors
-`Last-Event-ID` after restart.
-
-Every executable Run has a server-owned `origin_trace_id`. Client metadata, config, context, and
-request bodies may not select either `origin_trace_id` or `deerflow_trace_id`. Admission persists
-the same value on Run and Job; the composite
-`project_id + owner_user_id + run_id + origin_trace_id` foreign key and Worker-side revalidation
-must both hold before model, tool, stream, or settlement side effects. Same-`run_id` semantic
-retries retain the first admitted trace. Retention jobs carry no Run trace. Worker keeps this
-durable trace in its internal ContextVar/runtime authority regardless of logging configuration,
-while `logging.enhance.enabled=false` prevents only the external Langfuse
-`deerflow_trace_id` attribute. Public Run responses, metadata, browser caches, and audit payloads
-never expose the raw durable trace; audit stores only its domain-separated request HMAC.
-Operator log records may carry the trace only when the startup-frozen logging enhancement is
-enabled.
-
-Interactive private Runs accept model and reasoning preferences only through the strict top-level
-`execution_profile` request. Generic metadata/config/context copies of `model_name`,
-`thinking_enabled`, or `reasoning_effort` are always discarded. A `default`-bound Agent may use an
-active exact logical model selected for that Run; an exact-model Agent remains locked. Admission
-freezes the exact model version, validates thinking/reasoning capabilities without fallback, and
-stores the requested plus effective profile in server-owned Run kwargs. The Worker reasserts that
-effective profile at both runtime-config channels, while Run read/list responses expose only the
-effective logical model, thinking switch, reasoning effort, and vision capability.
-For models that expose reasoning effort, Flash means `thinking_enabled=false` plus an explicit
-`reasoning_effort=none`; it must not omit the provider field and fall back to GPT-5.6's medium
-default. Thinking, Pro, and Ultra resolve to low, medium, and high respectively.
-
-Current-message image input is derived only from file IDs intersected with server file authority
-during the Gateway admission transaction. Admission locks each authorized ready upload and freezes
-its exact ID, version, logical path, size, MIME, and SHA-256 as server-owned Run metadata; forged,
-missing, staging, and out-of-scope client claims never enter that snapshot. On every fresh Worker
-attempt, including checkpoint takeover with graph input `None`, the Worker restores the current
-project/owner/thread-scoped PostgreSQL manifest and requires every frozen attachment to match that
-exact metadata. A missing, deleted, changed, malformed, or broadened attachment set is a permanent
-fail-closed Run error and must never silently degrade into a text-only request. The persisted client
-payload is never itself file authority. When the exact admitted lead model has
-`supports_vision=true`,
-`ViewImageMiddleware` reopens those regular sandbox files before every lead model request and
-revalidates Run/project/owner/sandbox scope, size, SHA-256, extension, MIME, and file magic. It
-injects at most four unique images with a 20 MiB per-image and aggregate limit; non-image
-attachments remain ordinary files, while malformed, changed, unsupported, over-budget, or
-unauthorized image claims fail closed. The data URLs exist only on the ephemeral `ModelRequest`
-and never enter graph state, checkpoints, SSE, the Run journal, or application logs. Subagents do
-not automatically inherit current-message images. The explicit `view_image` tool remains the
-path for historical uploads and images discovered or created later in the Run.
-
-`run_events.id` and `run_events.seq` are signed PostgreSQL BIGINT values in the full schema.
-Schema revision `full_schema_v8` RANGE-partitions `run_events` by UTC month while a narrow
-non-partitioned ledger preserves global ID, Thread-sequence, and single-terminal invariants.
-Known v5/v6/v7 databases can be migrated in place only through the explicit, operator-driven
-`make upgrade-db` path after a backup; `make setup-db` still accepts only an empty target. A
-settled terminal is replayed only when its cursor is strictly greater than the request cursor;
-an exact terminal cursor returns an empty successful response rather than a duplicate
-`stream.end`.
-
-Durable stream appends additionally queue `pg_notify('run_events', run_id)` inside the writing
-transaction, so delivery rides the commit. Each Gateway process holds one dedicated LISTEN
-connection that wakes exactly that Run's parked SSE consumers; idle consumers otherwise sleep on
-a bounded event wait before re-reading. The notification is only an alarm clock: the read path,
-cursor semantics, and terminal dedup are unchanged, and a lost notification, broken listener, or
-absent listener merely degrades the affected consumers to the legacy poll cadence.
-
-The four non-SSE private-work feeds — per-Run messages, Thread messages, per-Run events, and
-Thread events — serialize every `seq` as a canonical non-negative decimal string, never a JSON
-number. Their `before_seq`/`after_seq` cursor contract uses the same decimal representation and
-is bounded by signed PostgreSQL BIGINT. The privacy-center NDJSON attachment is outside this
-Thread/task feed contract and still exports its event `seq` as a JSON number.
-
-Thread search offsets, Thread patch/delete `expected_version`, Run-list offsets, and ready-file
-offsets are likewise bounded by signed PostgreSQL BIGINT; overflow is a stable private 422 rather
-than a database error. Explicit same-scope Thread creation is intentionally non-idempotent under
-an insert race: exactly one request returns 201 and the loser receives 409, with one Thread row
-and one root checkpoint. Two renames using the same `expected_version` similarly produce one 200
-and one 409, incrementing the version once without a silent overwrite.
-
-Each project may hold one revisioned default pointer to an active, published, executable
-project-owned Agent. Project admins manage that pointer with `shared_assets.manage_bindings`;
-readers may observe it but cannot change it. Ordinary Thread creation omits both Agent fields and
-resolves the pointer inside the authoritative Gateway transaction, falling back only to the
-packaged Main Agent when the pointer is unset. Explicit Agent-card creation still supplies both
-fields and wins over the default. A configured but unavailable default fails closed, and neither
-changing the pointer nor clearing it rewrites an existing Thread or Run snapshot.
-
-Canonical packaged Main is a binding-free project orchestrator. Run admission resolves its
-effective closure from only the entered project: active/current project-owned Agent/Skill/MCP
-assets plus enabled System bindings. Other projects are never eligible. The snapshot persists one
-globally ordered lead -> delegates -> Skills -> MCPs closure; current Main Skill/MCP versions form
-the prefix and delegate-only historical versions follow. Ordinary project and System Agents never
-expand this pool and keep only the Skill/MCP versions explicitly referenced by their exact Agent
-version. Agent Builder seeds a newly generated project Agent candidate with every configured
-internal tool group (plus `task`) and every active, published System Skill/MCP version in an
-enabled binding for that project; those IDs are frozen into the candidate and do not turn the
-ordinary Agent into a dynamic Main-style pool. Explicit blueprint updates remain exact rather
-than being silently augmented. Automation admission uses the same closure path as interactive
-private Runs.
-
-Every newly admitted Run advances its active Thread's `updated_at` in that same transaction without
-incrementing the Thread metadata `version`; semantic replay returns before this touch. Thread
-search remains server-authoritative and stable by `updated_at DESC, thread_id DESC`, so the value
-represents recent Thread mutation or Run admission while preserving rename/delete CAS tokens.
-
-Run catalogs use stable newest-first `limit/offset` pages. Ready-file catalogs use stable
-`logical_path + version + id` pages and return `X-Next-Offset` only for a safe full page; that
-header is CORS-exposed. Clients must enumerate the complete catalog with an AbortSignal, strict
-public schemas, duplicate/progress checks, and a hard safety bound. Invalid responses, repeated
-full pages, or an unsafe next offset fail closed rather than truncating or looping forever.
-
-Worker stream consumers are root/namespace separated. Child graph frames keep their namespaced
-event names and bypass root fallback detection, root file-tool batching, and parent subagent
-persistence. Root `write_file` and `str_replace` argument deltas are grouped in bounded batches
-without bypassing `LeaseAuthorizedStreamBridge`. Normal root text deltas are coalesced inside a
-bounded flush window (`worker.stream.text_delta_flush_ms`, default 75ms, `0` disables) with a
-leading-edge first flush and byte-equivalent accumulation; meaningful metadata still streams
-immediately. Provider transport-only metadata such as `model_provider` must neither flush nor
-publish a pending file batch. Every pending text or file batch is flushed on identity/mode/value,
-finish, and error boundaries.
-
-Durable stream commits queue `pg_notify('run_events', run_id)` only when
-`worker.stream.run_event_notify_enabled` is true (the default), and each Gateway then owns one
-dedicated listener connection. This is a restart-required, cross-process rollback switch: false
-disables both the Worker/Gateway writer wakeup and Gateway LISTEN startup, leaving SSE correctness
-on the existing cursor read plus polling cadence. NOTIFY remains a latency-only alarm clock.
-
-Worker-side RunJournal, subagent, and workspace-change event writes use the same exact private
-scope and raw Job lease. `DbRunEventStore` revalidates project membership, Job/Run state,
-cancellation, expiry, and both lease hashes in the event-write transaction; an old Worker may
-not append internal events after lease loss.
-
-## Checkpoint, compaction, and runtime guards
-
-Checkpoint message storage is process-frozen as `database.checkpoint_channel_mode=full|delta`;
-`database.checkpoint_delta.snapshot_frequency` is frozen with it because the cadence is compiled
-into the graph. Gateway and every Worker sharing PostgreSQL must use the same pair and restart
-together. The supported migration is full to delta only; once a Thread carries the delta marker,
-a full process must fail before reading or writing it. Private state consumers bind a
-mode-matched materialization graph above `ProjectScopedCheckpointer`, preserving the exact
-project/owner/Thread authority marker and row-lock boundary. Raw `channel_values.messages` is
-never a complete-state API in delta mode. Goal, compaction, branch, regenerate, connection
-inbound, Worker resume, and rollback must use materialized snapshots; replace-style writes wrap
-reducer channels in `Overwrite`. Branch writes the exact pre-human replay base and then the
-selected state as two target checkpoints, excluding `sandbox` and `thread_data`, so later
-regeneration has a valid ancestor. Unknown middleware channels fail closed instead of being
-silently discarded.
-
-Manual compaction validates current project, membership, capabilities, Thread ownership, and
-incomplete-Run state in a short transaction before materializing the summary model or its
-Credential. A request authorization boundary revalidates the same authority immediately before
-the external summary-model call. Both transactions are closed before the model `await`; final
-checkpoint persistence still performs its own lock, revalidation, and CAS.
-
-Custom summarization prompts accept only the required `{messages}` replacement field (literal
-braces use `{{` and `}}`). Durable summary and message text is escaped before the final rendered
-prompt is token-bounded. Empty or failed model output is a no-op: it neither removes messages nor
-fires compaction hooks.
-
-Loop detection keeps the higher global frequency allowance for local file and shell workflows,
-but applies lower default frequency bounds to `web_search` and `web_fetch`. Varying remote
-queries must receive a stop warning and hard-stop before a private Run can exhaust its default
-LangGraph recursion ceiling.
-
-Hidden goal continuations advance their counter from the fresh goal state while holding the
-thread goal lock. A stale evaluator may not regress or collapse a committed attempt, and the
-stand-down write after a racing user message records only its reason rather than counting the
-same continuation twice.
-
-## Message journal, human input, and reasoning observation
-
-The durable top-level `message` journal is a lead-Agent conversation projection. Lead AI
-messages and their exact `tool_call_id` results belong there; subagent and middleware AI/tool
-callbacks are persisted as `trace` events and continue to use the dedicated bounded subagent
-event stream. Caller attribution first follows the exact callback run ID from tool start, then
-falls back to the issuing AI tool call and callback tags, so provider-local call-ID reuse cannot
-leak nested reasoning or tool output into the user conversation. Run-level message counts and
-last-answer summaries are lead-only.
-
-Public Run ingress never trusts client-selected message visibility. A structured
-`human_input_response` may become hidden only inside Run admission after the exact project,
-membership, and Thread locks are held and no active Run conflicts: the Gateway reads the
-transaction-bound materialized checkpoint, requires the latest unanswered server-issued
-`ask_clarification` request, and matches request ID, tool-call ID, response mode, option/value,
-canonical response text, and message-ID uniqueness before adding server-owned
-`hide_from_ui=true`. Forged, stale, already-answered, batched, or non-canonical messages remain
-visible. Existing-Run idempotency may ignore only that one server-owned visibility bit when every
-other request field is identical.
-
-For a streaming lead-Agent model call, `RunJournal` observes the interval from the first
-non-empty reasoning delta to the first visible answer delta. A reasoning-only tool-call step
-closes at that model call's end. The bounded millisecond value is persisted on the selected AI
-message as `additional_kwargs.reasoning_duration_ms`; it is never copied from Run latency,
-tool/subagent time, another model candidate, or an unobserved non-streaming response. Missing
-observation therefore remains missing rather than inventing a duration.
-
-## Subagent delegation
-
-Main delegates through a Worker-sealed namespaced runtime Agent catalog. Every dynamic Agent gets
-its own exact model snapshot and model settings, Prompt bundle, tool groups, Skill versions, and
-private MCP proxies; it never inherits Main's complete runtime assets and cannot recursively call
-`task`. Project-authored Agent/Skill/MCP text is followed by a final platform security and
-confidentiality reminder in the delegated Agent's single SystemMessage. Worker disables global
-MCP/ACP discovery and marshals each exact proxy call back to the owner Worker loop, so the same
-authorization, grant, Credential, endpoint, and side-effect checks run for every delegated
-invocation. Detached subagent execution preserves
-request identity, authorization, and trace ContextVars but clears the parent LangGraph
-`RunnableConfig` before entering its isolated loop, so raw child model/tool frames cannot leak
-through the lead stream writer. The parent `task` tool's bounded `task_running`/terminal custom
-events and persisted `subagent.step`/`subagent.end` rows are the authoritative subtask UI channels.
-Namespaced child custom frames remain visible on their namespaced SSE channel but must not be
-persisted again as parent Run subagent rows; only root-namespace task lifecycle events feed that
-parent event buffer.
-
-A `general-purpose` subagent without a command-execution tool rejects explicit Shell/Python
-execution requests before creating its model Agent and returns a structured failed result; it
-must never fabricate output or loop through wrapper files as a substitute for execution.
-
-Subagent batch concurrency is canonically clamped to `1..4` in configuration, prompt rendering,
-and `SubagentLimitMiddleware`; the per-Run total remains independently bounded to `1..50` and
-private ledgers count the exact project, owner, Run, and provider occurrence. A child
-`deerflow_error_fallback` marker fails only that task; only a root-namespace marker may decide the
-parent Run terminal state. Terminal ToolMessage metadata and task lifecycle events may expose only
-the effective model name and the validated cumulative `input_tokens`, `output_tokens`, and
-`total_tokens` snapshot. The executor publishes a thread-safe collector snapshot after each
-streamed graph chunk so polling can report usage before terminal completion. Subagent event-store
-batch failures are re-buffered in original order and must retain the server-issued private scope;
-`CancelledError` must re-buffer the in-flight batch before cancellation is re-raised.
-
-## Project Memory runtime
-
-PostgreSQL is the only project Memory authority. Every row remains bound to
-`project_id + owner_user_id + namespace`; the harness must not derive these coordinates from
-model arguments, request payloads, ambient user state, or a replaceable Memory backend.
-
-The `full_schema_v9` head contains exactly six Memory tables: `memory_history_entries`,
-`memory_documents`, `memory_dream_runs`, `memory_document_versions`, `memory_episodes`, and
-`run_memory_context_snapshots`. The only Memory Job types are `memory_dream` and `memory_seal`.
-There is no legacy Source/Extractor/Candidate/Fact pipeline, v1/v2 mode, vector ranking, or
-runtime compatibility fallback.
-
-Memory document section titles are database-only platform policy under the independent
-`memory_document` section; the top-level YAML key is a fail-closed tombstone. A system-admin update
-has effect scope `new_memory_documents`: first creation locks the exact current policy version and
-freezes its 2..8 plain titles plus composite policy provenance on `memory_documents`. Existing
-documents never follow a later platform edit. Database triggers reject any later change to those
-frozen document fields. Run admission copies the document titles into
-`run_memory_context_snapshots`, whose own trigger rejects section updates while retaining the
-existing Run-owned delete lifecycle; continuation therefore never reads the latest global policy.
-
-Automatic Thread compaction, `/compact`, and the `/Dream` preflight all use the same fixed SNIP
-prompt and at most two summarization-model calls per compaction attempt: an invalid output permits
-exactly one repair retry with the same input plus a fixed format-reinforcement block, never echoing
-the invalid output; a second invalid output fails that compaction attempt as before. A valid output
-has two ordered segments: one `<continuity>` block of free-prose task continuity bounded to 2,000
-characters, then tagged fact lines bounded to 1,000 characters (or the single line `(nothing)`);
-either segment being invalid triggers the same single repair retry. The continuity segment becomes
-the Thread `summary_text`; only the tagged segment enters the checkpoint-carried archive receipt and
-`memory_history_entries`, so the memory pipeline input is byte-identical to the single-segment
-contract. For the packaged dual-segment prompt, a declared output cap below 4,096 tokens is raised
-to 4,096; an explicitly configured custom prompt keeps both its single-segment contract and its
-configured model cap. Only a durable checkpoint `aput` may
-activate the receipt into one `memory_history_entries` row; `aget` and the next direct `aput` repair
-the current checkpoint tuple idempotently after a post-checkpoint database failure. Never scan
-checkpoint history to repair receipts, and never copy a receipt into a branch. Disabled account or
-platform Memory still permits short-term Thread compaction but produces no durable history. The
-automatic path derives the source checkpoint from LangGraph `runtime.execution_info.checkpoint_id`;
-an explicit archive context must match it exactly, and the legacy configurable value is only a
-fallback when runtime execution information is unavailable.
-
-Tool-origin history has a separate database-enforced authority shape: checkpoint/model fields are
-null, `source_run_id` is present, and `snip_prompt_version` is exactly `remember-tool-v1`. SNIP
-history retains its nonempty prompt-version contract and exact checkpoint/model authority.
-
-The chat `/Dream` command repeatedly compacts with `keep=("messages", 0)` until every completed
-turn has reached checkpoint/history, then calls the same Dream admission used by the Memory page.
-This is a server-owned barrier, not a client convention: model compaction runs outside a database
-transaction, then Gateway locks the authorized Thread head, repairs its current receipt, rejects an
-active Run, and verifies no complete turn remains in the same short transaction that admits Dream.
-A raced head is drained again, with three bounded seal attempts. SNIP, progress, or storage failure
-must fail closed before admission. Scheduler and manual admission lock the
-exact scope, freeze the current account preference, policy revision, active model version, prompt,
-document base version, and strictly oldest 20 pending history rows, and allow only one active Dream
-per scope. A normal Dream consumes 1..20 history rows; the single exception is the server-decided
-`budget_rewrite` trigger, admitted only when the published document exceeds the current
-`max_injection_tokens` and the backlog is empty — it freezes zero history under a fixed sentinel
-digest and asks the model only to rewrite the document into budget. Requests carry no trigger
-input. The Worker runs one ephemeral no-ambient-tool Dream executor with only in-memory read and
-replace-draft tools. It holds no database lock while waiting for the model. Final document, server
-unified diff, immutable version, cursor advance, consumed-history tombstones, Dream row, attempt,
-and Job terminal state settle atomically. Retryable failure keeps the same active batch; exhausted
-or cancelled work restores its unchanged history to pending. Policy/preference/model drift at
-settlement cancels the frozen work without publishing a version. Settlement stamps
-`needs_review` on the published version when the base document had at least 8 content lines, over
-40% of them vanished as pure deletions, and the consumed batch carried no `[correction]` entry;
-the same transaction records a content-free `memory.dream.review_flagged` audit event (version and
-deletion-ratio decile only). The marker never blocks publication or restore.
-
-Dream settlement copies each consumed history row into `memory_episodes` in the same
-transaction that erases its `tagged_text`, reusing the history row id so a retried settlement
-stays idempotent. Episodes are scope-bound archive rows referencing only project, owner, and
-membership — never Jobs, Threads, or documents — so they survive those deletions. The same
-settlement prunes episodes older than the effective retention window (`0` keeps them forever).
-Account reset, retention purge, and the privacy export cover the table like the history backlog.
-Account reset and project/owner retention purge request cancellation for active `memory_dream` and
-`memory_seal` Jobs in the exact affected scope before removing Memory payload; immutable Job rows
-remain as bounded governance shells.
-
-The Dream prompt forbids creating or updating an account-global profile, promoting project facts
-into one, and transferring memory from another project or namespace. Server-side scoping remains the
-authority; that rule is the prompt-level layer of the same boundary and must survive prompt edits.
-Changing the prompt text requires bumping `DREAM_PROMPT_VERSION`, because the Worker rejects frozen
-Dream work whose `prompt_version` no longer equals the current constant. That permanent drift is
-cancelled without retry before model materialization; it is not a transient execution failure.
-
-Every Memory transaction uses the same global lock order: Project, Membership, Thread, and admitted
-assets first; then the current agent-runtime policy and, only for first document creation, the
-current memory-document policy; then active model/version/Credential; then the account Memory
-preference; and finally Memory document, history, Dream, and Job rows. Scheduler due-scope
-discovery takes no row locks, and each discovered scope is revalidated and admitted in its own short
-transaction; it never holds current policy/model locks across a batch.
-
-Idle sealing is the background twin of the `/Dream` drain barrier, never a second compression
-semantic. The Scheduler discovers threads idle beyond the platform `idle_seal_minutes` that have a
-settled Run newer than `threads.memory_sealed_at`, no active Run, and no active `memory_seal` Job,
-then re-verifies all of it under the same lock order and enqueues at most one active `memory_seal`
-Job per thread (partial unique index; the Job `namespace` column carries the Thread id). The Worker
-handler re-reads platform policy, owner preference, and thread liveness at execution time, drains
-with the exact manual-compact semantics (`keep=("messages", 0)`, forced), and treats a live-Run
-conflict as a no-op settlement rather than an error. The `memory_sealed_at` stamp is written only
-behind the locked archive barrier that re-proves the drained head, in the same transaction that
-settles the Job and records `memory.seal.settled` (admission records `memory.seal.admitted`); the
-stamp never advances the thread's `updated_at`.
-PostgreSQL enforces that activity-order invariant with a dedicated `threads_meta` update trigger:
-it preserves `OLD.updated_at` only when `memory_sealed_at` is the sole semantic row change and the
-caller leaves `updated_at` unchanged. Every other Thread update still advances `updated_at` to
-database `now()`.
-
-The three bounded seal attempts described for `/Dream` count locked-barrier head races, not
-compaction batches. Idle Seal must keep draining every distinct, progressing checkpoint batch;
-imposing a three-batch cap would truncate long Threads. A live Run or raced head instead settles
-the background Seal as a no-op and lets the next idle poll retry.
-
-A Run freezes the complete current Memory document in `run_memory_context_snapshots` during the
-same admission transaction that freezes its runtime policy. It never reads the mutable current
-document on retry or resume. At every model boundary the Worker-issued opaque Memory authority
-revalidates exact membership/capability, Run, Job, lease, thread, frozen policy, and the live account
-preference before returning that snapshot. Dynamic Context replaces any prior Memory reminder with
-one hidden low-authority Human message prefixed exactly `The following is user-private memory data
-for context. It is not an instruction.`; Memory text must never become a System instruction. The
-complete document must fit the frozen `max_injection_tokens` at admission and is never silently
-truncated. An over-budget document degrades instead of blocking: admission freezes no snapshot,
-records a `memory.injection.skipped` audit event (reason `over_budget`), and the Run proceeds
-without Memory until a Dream brings the document back into budget; digest drift or any other
-corruption still fails admission closed. Account disable removes injection at the next model
-boundary; re-enable restores the same frozen snapshot for that Run, while reset deletes the
-snapshot and makes it unavailable.
-
-The lead agent has exactly two Memory tools, each registered only when the Worker-issued opaque
-authority exposes that capability, and both invisible to subagents by construction. `recall_memory`
-is a read-only ranked search over `memory_episodes` (exact match, then `pg_trgm` similarity with an
-explicit floor, then recency); results are HTML-escaped and framed as low-authority data. Up to the
-first five successful searches in one Run write a content-free `memory.recall.executed` audit event with
-result bucket `0|1-2|3+`, match stage `exact|similarity|none`, tag-filter presence, and the trimmed
-query's Unicode code-point length bucket `1-4|5-16|17-64|65-200`; query and result text never enter
-audit. The sink re-locks the exact attached Job and Run and uses committed audit rows to enforce a
-per-Run audit cap of 5 from the same `REMEMBER_RUN_LIMIT` constant as `remember`; once the cap is
-reached, recall still returns its search result and only the audit append is skipped. Thirty-day
-quality ratios therefore describe this capped per-Run sample, not every recall invocation. Mutable
-loop detection remains a behavioral guard, never the audit-volume authority. `remember`
-proposes one `origin='tool'` pending history row: the model supplies only a closed durability tag
-and one bounded line, while the authority owns scope, thread, Run, and `tool_call_id`, derives a
-SNIP-grammar `tagged_text`, and enforces idempotency by source digest
-(`run_id + tool_call_id + content`), a per-Run cap of 5, and a pending-backlog cap of 200 inside one
-transaction that also writes the `memory.remember` audit event (Worker actor, Run target,
-content-free metadata). Tool rows are consumed by Dream exactly like SNIP rows. A scope becomes due
-for scheduled Dream when the interval has elapsed with pending work, when a full batch of 20 is
-already pending, or when an `origin='tool'` row has been pending for over 10 minutes.
-
-Account personalization is stored on `users.memory_enabled` with `users.preferences_version` as
-the CAS token. `GET/PATCH /api/v1/account/personalization` and
-`POST /api/v1/account/personalization/memory/reset` never accept owner/project coordinates. Reset
-enumerates retained memberships server-side and removes owner-private history, episodes,
-documents, Dream runs/versions, active Memory jobs, and Run Memory snapshots without deleting
-Threads, Runs, messages, files, or `summary_text`.
-
-Gateway exposes only the final document API:
-
-- `GET /api/projects/{project_id}/memory` — includes the derived, never-stored `injection_status`
-  (`ok` or `skipped_over_budget`) computed from the current document and current budget;
-- `POST /api/projects/{project_id}/memory/dream`;
-- `GET /api/projects/{project_id}/memory/versions` and `.../versions/{version}` — version rows
-  expose `needs_review` and may carry the `budget_rewrite` trigger;
-- `POST /api/projects/{project_id}/memory/versions/{version}/restore` with current-version CAS;
-- `GET /api/projects/{project_id}/memory/pending` — bounded read of the not-yet-consumed backlog in
-  Dream consumption order;
-- `GET /api/projects/{project_id}/memory/episodes` — archive browse/search (`q`/`tags`/`before`).
-
-The platform `agent_runtime.memory` contract has exactly `enabled`, `model_name`,
-`dream_interval_minutes` (`15..1440`, default `120`), `max_injection_tokens`,
-`idle_seal_minutes` (`0` or `30..10080`, default `1440`; `0` disables idle sealing), and
-`episode_retention_days` (`0` or `30..3650`, default `365`; `0` keeps episodes forever). Keep the
-admin UI, runtime materializer, bootstrap JSON, and documentation strict to these six fields.
-
-## Project APIs
-
-All private and governance APIs are project-scoped:
-
-- `/api/projects/{project_id}/private-work` for Threads, Runs, durable SSE, feedback,
-  uploads/files, artifacts, token usage, and input polish;
-- `/api/projects/{project_id}/memory` for project-owner Memory;
-- `/api/projects/{project_id}/connections` for project-bound providers and connections;
-- `/api/projects/{project_id}/channel-group-bindings` for Admin-managed project group bindings;
-- `/api/projects/{project_id}/automations` for definitions, manual admission, history, and
-  readiness;
-- `/api/projects/{project_id}/agents`, `skills`, `mcp-servers`, and `credentials` for visible
-  project/system assets and project bindings;
-- `/api/projects/{project_id}/usage`,
-  `/api/projects/{project_id}/usage/token-series`, and
-  `/api/projects/{project_id}/audit` for project governance;
-- `/api/admin/assets` and `/api/admin/operations` for authenticated system administration.
-
-System-admin operations expose bounded readiness and governance metadata only. They never
-return prompts, messages, Memory, file/artifact bodies, Run output, credentials, storage
-locators, or raw errors. The Credential rotation status GET resolves eligibility with the same
-rules as the rotation CLI and returns only the eligible/current/pending aggregate and its
-status; it never returns key IDs, nonces, ciphertext, or storage locators.
-
-The system-admin Job catalog searches projects through a bounded, case-insensitive
-`project_query` matched against public project display names and slugs. Its response carries both
-human project fields for the catalog and `project_id` for exact recovery coordinates; the legacy
-exact UUID filter remains API-only and must not become the primary operator workflow.
-
-Project input polish requires both `private_work.create` and `shared_assets.execute`, locks the
-Thread, and validates the exact Agent/Credential closure before the auxiliary model call.
-Project follow-up suggestions read only the authoritative scoped checkpoint and Agent snapshot;
-their stable `model_ref` (including `default`) must be resolved through the
-PostgreSQL model catalog to an exact active logical model version before the auxiliary model
-call.
-Channel inbound must resolve one connected PostgreSQL row carrying exact
-account/project/owner/connection authority before it can create a private Thread, Run, or job.
-Provider delivery identity is carried separately from authority. Its durable delivery row stores
-only a SHA-256 digest; the raw identifier remains transient in adapter/message processing and
-must not be persisted in delivery metadata. Admission locks the exact connection, conversation,
-and Thread, checks the scoped delivery before the active-Run conflict, and binds a new delivery
-to its Run in the same Run/Job/quota/audit transaction. A duplicate delivery creates no second
-Run or outbound reply. Delivery rows have no TTL, remain across current conversation-mapping
-rotation, and are retained until their Run or channel connection is deleted by explicit retention.
-
-Project group binding is separate from personal `p2p /connect`. An Admin selects an executable
-Agent and generates one short-lived `/bind-project` command; the provider adapter consumes that
-command in the target group. The persistence/service model is provider-neutral, while the current
-UI and adapter implementation expose Feishu only. Group members need neither an ActWeave login nor
-a personal connection. Each provider sender resolves to a distinct pseudonymous `channel_guest`
-owner; `(group, topic, sender)` may reuse that owner's Thread, but two senders in the same topic
-must never share owner, Thread, Memory, files, Runs, or context. Guest principals cannot
-authenticate, are excluded from public membership/account catalogs and member-quota reconciliation,
-and remain absent from human owner-scoped web Thread catalogs. Admin group-binding APIs return only
-group name, selected Agent, status, and bounded activity time, never message bodies, private-work
-content, or raw provider identifiers.
-
-GitHub does not automatically retry failed webhook deliveries. A transient fan-out failure
-returns 503 so Recent Deliveries and recovery tooling retain an operator-visible failed event
-for manual/API redelivery. A known delivery can still be manually/API redelivered after an
-accidental 200, but it is not discoverable through the normal failed-delivery recovery set.
-
-The project Token series is a `project.usage.read` aggregate across owners in one project. It
-returns exactly 24 consecutive UTC hour buckets, assigns terminal Run counters by durable Job
-settlement time, and zero-fills missing buckets. The current-hour bucket is partial. The query
-must pin PostgreSQL bucketing to UTC and must not expose Run, Thread, owner, model, or payload
-identifiers.
-
-## Quota, audit, and retention
-
-Quota reservation/consume/release occurs in the authoritative business transaction. Platform
-defaults are 20 members, 5 GiB storage, 3 concurrent Runs, and 10,000 MCP calls per UTC day;
-project ceilings may only be tightened (never raised above platform defaults). Project members
-with `project.usage.read` observe occupancy; system admins tighten per-project ceilings through
-`GET/PATCH /api/admin/projects/{project_id}/usage[/limits]`. The membership-scoped
-`PATCH /api/projects/{project_id}/usage/limits` path remains for project Admin compatibility. Hard-limit HTTP responses use stable 429 plus
-`Retry-After: 1`. Already admitted work is not interrupted by a later policy tightening.
-Every immutable project Skill version reserves the sum of all stored version-file bytes in
-`storage_bytes`; system Skill versions are excluded. The reservation rolls back with failed
-authoring, reconciliation sums ready private files plus every project `SkillVersionFileRow`,
-and either project-Skill package deletion or project retention releases each exact Skill-version
-reservation before physical deletion. Project Skill deletion is unavailable for system assets
-and fails closed while an immutable Agent dependency or admitted Run snapshot still references
-the package.
-Private Run file finalization is separate from the ten-file upload batch contract. It scans at
-most 2,000 regular workspace/output files within a 10,000-entry traversal boundary; directories
-do not consume the file count. Per-file and 100 MiB total byte limits apply only to files created
-or changed by the current Run, not to the restored cumulative Thread workspace.
-After finalization, a Run that created or modified `outputs/*` succeeds only when at least one
-of those exact current-Run paths has a server-verified artifact from `present_files`. Presenting
-only an older output is insufficient. Finalized files remain ready when this delivery verdict
-fails; this rule does not add main's Gateway-owned RunStore receipt chain.
-The lead-Agent prompt and `write_file` tool schema treat a file explicitly requested by the user
-(including source code, scripts, configuration, and documents) as a final deliverable: write or
-copy it to `outputs/*` and call `present_files` before the final response. Workspace-only files
-remain valid temporary/intermediate files and are not implicitly published.
-Gateway authoring and the explicit project-Skill import CLI use the same `AppConfig.quotas`
-defaults. Archive-creation requests have a scoped 160 MiB wire limit at both the ASGI receive
-boundary and each Nginx entry point, before JSON/Pydantic or multipart route processing.
-Direct version authoring retains its JSON/base64 contract; project creation also accepts one
-multipart `.zip`, `.skill` (ZIP), `.tar`, `.tar.gz`, or `.tgz` package, strips one common wrapper
-directory, and atomically creates the suspended asset plus its first published version. Decoded
-archives remain limited to 100 MiB and 16384 regular files; traversal and non-regular archive
-members are rejected. TAR limits cover the complete decompressed byte stream, including
-headers and PAX/GNU extended metadata, rather than only regular-file bodies.
-
-Audit uses closed action/actor/target/outcome contracts and action-specific strict metadata.
-Private target identifiers are domain-separated HMACs; raw project-owner resources, prompt,
-messages, files, Memory, Run output, exception text, URLs, and secrets are forbidden. Audit
-rows and committed usage ledger rows are append-only.
-
-Retention purge remains a project-governance operation and validates the current pending-deletion
-authority in the same transaction before physically deleting project data.
-It removes project group-binding challenges/bindings, HMAC external-principal mappings, guest
-connections/conversations, and guest-owned private data in dependency order. It may delete only
-unreferenced `channel_guest` memberships and users; human accounts and retained governance
-references remain outside that cleanup.
-
-## Configuration
-
-Configuration is read only from an explicit `DEER_FLOW_CONFIG_PATH` or the repository-root
-`config.yaml`. `database`, `worker`, `scheduler`, `channels`, sandbox, tools, logging, and
-deployment-owned prompt/path policy remain supported. Infrastructure configuration is
-restart-required. Unknown application extension fields remain allowed where their typed models
-permit them, but removed top-level keys fail validation instead of being ignored.
-
-The current example schema is `config_version: 37`. Version 37 replaces nothing: it adds the
-optional `worker.stream.run_event_notify_enabled` rollback switch (default `true`; `false`
-restores polling-only SSE wakeups) with a backward-compatible default. Version 36 added the
-optional `worker.stream.text_delta_flush_ms` micro-batching window (default 75, `0` disables) and
-`mcp_security.run_session_reuse` (default `true`) with backward-compatible defaults. Version 35
-replaced the retired exact `mcp_security.project_remote_allowed_endpoints` list with CIDR-based
-`project_remote_allowed_networks`. `make config-upgrade` preserves an old empty endpoint list as
-an empty deny-all network list, but refuses to guess a CIDR for any nonempty endpoint list. In
-addition to the top-level `models:`, `memory_document:`, and `authorization:` tombstones, YAML
-leaves now owned by the PostgreSQL `agent_runtime`, `auth`, `memory_document`, and `quotas` policy
-sections are rejected; run `make config-upgrade` to remove them from an older local file.
-Deployment-owned siblings such as `title.prompt_template`,
-`summarization.summary_prompt`, `tool_output.storage_subdir`, and non-policy `subagents` fields stay
-in YAML. Model definitions, immutable versions, the default pointer, exact Credential
-references, and Run snapshots are PostgreSQL authority. A system admin manages the catalog at
-`/admin/settings/models` and live runtime policy at `/admin/settings/system`; provider secrets are
-encrypted Credential envelopes and are decrypted
-only at the execution boundary. Runtime configuration imports never load dotenv implicitly.
-The explicit local `make setup-db` command is the sole one-time exception: it imports
-`DEEPSEEK_API_KEY` and `OPENCODE_API_KEY` from an existing root `.env` or explicit environment
-into encrypted Credentials for the seeded DeepSeek V4 Flash/Pro models and GPT 5.6 Luna before
-runtime starts. Doctor, Docker Compose, Helm, Gateway, Scheduler, and
-Worker must not broadcast provider keys as process-wide model configuration.
-Backend module role and database-operations Make targets use
-`scripts/run_runtime.py` to load non-provider root `.env` settings explicitly;
-caller-supplied values win, and ambient model-provider API keys are removed
-before the target process starts. `setup-db` remains the sole exception because
-it consumes the initial provider key exactly once and persists its encrypted
-Credential.
-
-A system model resolves its key through an exact `credential_version_id`, and the execution
-adapter deliberately accepts a `retired` version so frozen Run snapshots stay reproducible.
-Replacing a System Credential therefore never moves a model by itself — the model keeps
-decrypting the superseded envelope until it is re-pointed. `POST /credentials/{id}/migrate-grants`
-owns that re-point: in the same transaction that migrates MCP grants and Skill environment
-bindings, it mints the next immutable `system_model_config_versions` row per pinned model with the
-same provider payload against the current Credential version, advances each model pointer and
-revision, and bumps the catalog revision once. Because `system_model_config_versions` is
-append-only, the migration first recomputes the locked version's own `payload_checksum` from its
-stored columns and requires it to match before minting a new one; drift, a dropped
-`credential_env_key`, or an unwired system-model port fails the whole operation closed. System
-migration locks the catalog state and model rows *before* the Credential so it shares
-`SystemModelCatalogService`'s lock order and cannot deadlock against a concurrent model edit;
-project-scope migration skips the singleton catalog lock because only a system-scope Credential
-can back a system model.
-
-Because a silent replacement is exactly how a rotated key goes unnoticed, `POST
-/credentials/{id}/replace` returns a server-computed `pending_migration` report beside the new
-version. Its `total` is the same reference set `migrate-grants` would move — stale MCP grants,
-stale Skill environment bindings, and, for a system-scope Credential only, current model pointers
-— and `system_model_count` names the model share of that total. The count is a preview taken with
-plain reads in the replacement transaction, so it never joins the migration lock graph. Clients
-may not derive it from a version list. `pending_migration` is `null`, never a zero, when a
-system-scope replacement has no system-model port and therefore cannot count pinned models.
-
-Secret values must come from environment-backed configuration and must be separated by domain:
-Auth, Credential encryption, audit/quota HMAC, and database passwords cannot reuse material.
-
-Project-managed IM providers are not process-wide `config.yaml` credentials. Gateway stores one
-live `project_channel_instances` row per `project + provider`, pins an exact encrypted project
-Credential version through `project_channel_credential_bindings`, and acquires a fenced
-`project_channel_instance_leases` single-writer lease before starting the adapter. Messages,
-member connections, OAuth states, callbacks, and outbound replies carry the exact
-`channel_instance_id`; provider name alone is never sufficient for a project-managed instance.
-The nullable instance ID on historical connection/state rows is reserved only for the explicit
-deployment-config compatibility path. Admin updates and Secret rotation use the imperative
-project channel API, while members retain separate owner-scoped connect/disconnect authority.
-`channel_connections.*` is reserved for nullable-instance deployment compatibility and must not
-gate listing, readiness, or member binding for an exact database-backed project instance.
-Project group bindings persist only domain-separated HMAC references for group and sender IDs.
-Guest conversation, topic, and provider response-alias rows use the bound group's retained HMAC
-generation as well; raw provider coordinates remain transient for delivery only. Concurrent first
-messages derive one deterministic private Thread ID and converge through database uniqueness rather
-than holding a second advisory-lock connection, so `pool_size=1,max_overflow=0` remains supported.
-Disabling or deleting a binding freezes every derived guest principal and connection; inbound
-admission must fail closed until an enabled binding resolves exact project, instance, Agent, and
-guest-owner authority. Personal `p2p /connect` behavior remains unchanged.
-
-## Testing and code quality
-
-Backend changes use strict TDD:
-
-1. Add a focused failing test under `tests/`.
-2. Run it and confirm the expected failure.
-3. Implement the smallest final-path change.
-4. Rerun focused and affected tests.
-5. Before completion run the full relevant release gates.
-
-Common commands:
+The dependency direction is `app.* -> deerflow.*`; harness code must never
+import `app.*`.
+
+## Non-negotiable boundaries
+
+### Authorization and transactions
+
+- Authority starts from authenticated identity plus a server-issued immutable
+  `ProjectContext`. `system_admin` is not project membership.
+- Owner-private work uses a server-issued `PrivateWorkContext`. Every private
+  query and composite relation binds `project_id + owner_user_id`.
+- Never accept project, owner, membership, capability, Run snapshot, Credential
+  grant, Job, lease, or internal runtime authority from request metadata,
+  model/tool arguments, or ambient globals.
+- Revalidate project, membership, capability, resource state, and Job/Run lease
+  inside the transaction that performs each side effect.
+- Project outsiders, wrong owners, stale membership, and missing private
+  resources collapse to `404`; a current member lacking a capability receives
+  `403`, except where an existing route family deliberately hides both.
+- Repositories do not commit unless they explicitly own the complete operation.
+  Preserve the established Project -> Membership -> resource lock order.
+- PostgreSQL RLS is not used. Isolation therefore depends on immutable contexts,
+  scoped repositories, composite constraints, and a non-superuser app role.
+- Public request/response models reject unknown authority fields. Copy the error
+  and strictness convention of the neighboring route family.
+
+### Authentication and secrets
+
+- Account email is normalized with `strip + lowercase` on every path and is
+  protected by the database's case-insensitive unique index.
+- Browser tokens remain valid only while signature, session ID, token version,
+  and the durable auth-session row all validate. Logout and password change
+  revoke durable authority, not just browser state.
+- Passwords, JWTs, CSRF values, raw session IDs, API keys, Credential plaintext,
+  nonces, ciphertext, storage locators, and full connection URLs never enter
+  logs, traces, public responses, snapshots, audit metadata, or browser caches.
+- Credential plaintext is decrypted only at the Worker execution boundary and
+  injected into the exact authorized subprocess or remote call. Output masking
+  is accidental-leak protection, not DLP; Credential-bearing Skills are trusted
+  code.
+
+### PostgreSQL schema and persistence
+
+`deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
+the current marker is `full_schema_v17`. Fresh setup runs that schema directly and
+stamps the chain head. Runtime processes never create, migrate, stamp, repair, or
+downgrade an application database.
+
+- `make setup-db` accepts a new empty target only and initializes application,
+  LangGraph, system-asset, and default-project state.
+- Every initialized application/Alembic table and column has a checked-in
+  Chinese comment. LangGraph comments are applied after its third-party setup,
+  and each physical `run_events` partition copies the parent comments. Run
+  `uv run python scripts/generate_schema_comments.py --check` after schema edits.
+- `make upgrade-db` is the sole path for a database at a known ancestor marker;
+  back up first. It runs the migration chain and verifies parity with a fresh
+  install.
+- `make check-db` is read-only and reports ready, upgrade-required, or a
+  fail-closed recreate/unavailable state without exposing credentials.
+- `make upgrade-system-assets` is an explicit maintenance-window action for a
+  current schema. It preserves immutable history and existing project pins,
+  and may be rerun idempotently after checking an uncertain outcome.
+- `make prepare-run-event-partitions` is an explicit, idempotent operator action
+  for UTC months N through N+2. Schedule it outside application runtime; it
+  refuses non-current schemas and bounds DDL lock waiting.
+- Unknown markers, an unversioned nonempty schema, and catalog drift are never
+  repaired in place.
+- A schema change updates the ORM registration, `full_schema.sql`, catalog
+  signature/digest, required relations, chain marker, migration script, and
+  parity tests together.
+- Application metadata and durable state live in PostgreSQL. File/artifact bytes
+  may live in configured storage, but access, identity, version, and scope remain
+  database-authoritative.
+
+### Jobs, Runs, streams, and checkpoints
+
+- Gateway admits executable work; Worker executes it. Business state, Job,
+  quota reservation, snapshot, and audit rows must be committed atomically at
+  admission.
+- Worker stores raw lease tokens only in memory. Every append, tool side effect,
+  and terminal settlement validates the exact current lease in its transaction.
+- Run admission freezes an exact, secret-free Agent/model/Skill/MCP/Credential
+  reference closure. Retry and resume use that closure rather than current
+  catalog pointers.
+- Durable events are committed before notification. PostgreSQL `NOTIFY` is only
+  a wake-up hint; correctness comes from scoped reads, monotonic cursors, and one
+  durable terminal outcome.
+- Public event and message sequence values remain canonical signed-BIGINT decimal
+  strings at browser boundaries; never coerce them to JavaScript numbers.
+- Checkpoint mode is process-frozen. All Gateway and Worker processes sharing a
+  database must use the same full/delta settings and restart together. Consumers
+  materialize state through the scoped checkpointer; raw delta channels are not
+  a complete-state API.
+- Current-message files and images are admitted from server file authority.
+  Worker retry revalidates the frozen metadata; missing or changed attachments
+  fail closed rather than degrading silently.
+
+### Assets, Skills, MCP, and Agents
+
+- `skills/public/*` is the sole source for packaged System Skills. Regenerate the
+  manifest/archives with
+  `PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`
+  and use `--check` for verification.
+- Packaged System Agent/Skill/MCP definitions are bootstrap-only and immutable at
+  runtime. Global admin definition routes are read-only; the narrow packaged MCP
+  Credential-grant route changes grants, not the definition.
+- A packaged Skill's catalog scan snapshot is release-time immutable metadata.
+  Bootstrap scans the latest release and legacy releases without snapshots;
+  historical snapshotted releases keep their authenticated result. Retrospective
+  denial uses the explicit, irreversible System Skill version-revocation path,
+  never reinterpretation during bootstrap. Revocation preserves published bytes,
+  history, the current pointer, asset release revision, and existing project pins;
+  new bindings, Run admission, retry/resume materialization, and Worker file writes
+  reject the revoked release. Existing pins must be explicitly moved to an eligible
+  release or disabled; an already materialized running graph is not force-aborted.
+- Project Agent/Skill/MCP versions are immutable. Agent creation is one atomic
+  complete package (`suspended` plus draft v1); author edits and restores create
+  a new draft without moving the live pointer, while a binding manager explicitly
+  publishes the selected draft and controls activation. No flow mutates history
+  or moves a pointer backward to an old row.
+- A newly admitted Run pins exact versions and checksums. Unrelated catalog
+  changes do not invalidate it, while revoked membership, capability, binding,
+  Credential, or lease fails at the applicable execution boundary.
+- A project Skill is passive until explicit slash activation or verified reading
+  of its admitted `SKILL.md`. Active policy restricts model schemas, execution,
+  and `tool_search`; stale or malformed evidence fails closed.
+- Project MCP authoring accepts only supported remote HTTP/SSE definitions under
+  the configured CIDR policy. Secrets use encrypted header/query Credential
+  slots. Worker disables redirects and ambient proxy trust, revalidates the
+  target and closure for discovery/calls, and treats inventory as diagnostic—not
+  execution authority.
+- System MCP may retain packaged stdio, header, and OAuth capabilities; do not
+  copy that broader trust model into project-authored MCP.
+- Project Agent logical `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are
+  immutable version fields, not files in this repository.
+- Agent payload checksums are recomputed at resolution and Worker materialization.
+  Legacy schema v1 fields outside its historical digest must remain empty.
+
+### Memory, audit, quota, and retention
+
+- PostgreSQL is the only project Memory authority. Every document, history row,
+  episode, Dream, and Run snapshot remains bound to project, owner, and namespace.
+- Compaction creates continuity plus tagged Memory input; only durable checkpoint
+  persistence activates the corresponding history receipt. Dream and idle seal
+  reuse the same scoped admission and settlement boundaries.
+- Model work runs outside database transactions. Admission freezes its inputs;
+  settlement re-locks and rejects stale policy, model, preference, document, Job,
+  or lease state before publishing results.
+- Memory is injected as low-authority user-private context, never as a System
+  instruction. Disabled or over-budget Memory must not widen authority.
+- Quota reserve/consume/release belongs in the authoritative business
+  transaction. Tightening a limit does not interrupt already admitted work.
+- Audit has closed action/actor/target/outcome contracts. Private identifiers are
+  domain-separated HMACs; content, errors, secrets, and storage locations are
+  forbidden. Audit and committed usage ledgers are append-only.
+- Retention deletes exact project/owner dependencies in documented order; it
+  never broadens scope or cascades through retained governance references.
+
+### Configuration
+
+Configuration is read only from explicit `DEER_FLOW_CONFIG_PATH` or the
+repository-root `config.yaml`. Infrastructure settings are restart-required.
+Model definitions, runtime/auth/Memory/quota/Automation policy, and provider Credentials are
+PostgreSQL authority and must not be reintroduced as YAML or ambient-key
+fallbacks.
+
+The example declares `config_version: 38`. Version 38 replaces the YAML `scheduler:`
+section with PostgreSQL automations policy. Removed top-level
+policy keys remain fail-closed tombstones; use `make config-upgrade` rather than
+manually guessing a migration.
+
+`make setup-db` is the only command allowed to consume initial provider keys and
+persist encrypted Credential versions. Normal Gateway, Worker, Scheduler,
+doctor, and Compose startup must not broadcast provider keys as process-wide
+model configuration.
+
+## Common change paths
+
+### Gateway endpoint or domain service
+
+1. Add strict request/response models and a route in the owning router family.
+2. Resolve authority through server dependencies or transaction-bound project
+   context; never reconstruct it from fields.
+3. Put locking, revalidation, writes, quota, audit, and Job admission in the
+   owning domain transaction.
+4. Register the router once in `app/gateway/app.py`.
+5. Add focused tests for success, outsider/wrong-owner, missing capability,
+   stale revision, and rollback behavior.
+
+### PostgreSQL table or durable Job type
+
+1. Add/import the ORM model so `Base.metadata` registers it.
+2. Update `full_schema.sql` and all database constraints.
+3. Add an explicit migration with the previous head as `down_revision`.
+4. Update schema marker, catalog signature/digest, readiness relations, and the
+   closed Job/audit/API type contracts that apply.
+5. Prove fresh-install and migration parity with disposable PostgreSQL targets.
+   Never stamp or hand-patch a development database as evidence.
+
+### Agent tool or middleware
+
+- Config-driven tools need a callable plus an exact `tools:` entry whose name and
+  group match runtime registration. Builtins are registered in the owning tool
+  registry. New write, shell, or network tools must join the applicable read-
+  before-write, audit, guardrail, and loop-detection policies.
+- Register middleware in exactly one lead/base/subagent/SDK builder. List order
+  is nesting order; preserve the assertions around clarification, progress,
+  guardrail, error handling, MCP routing, and deferred filtering.
+- A new state channel needs an explicit schema and delta-compatible
+  materialization behavior.
+
+### System Skill or project asset flow
+
+- Validate all archive paths, sizes, file types, frontmatter, and static scan
+  results before persistence or publication.
+- Keep packaged System assets separate from project-authored assets and bindings.
+- Authoring services use optimistic revisions and one transaction; failed flows
+  must not leave an asset without its initial version or publish a partial
+  dependency closure.
+- Run deterministic review for each changed public Skill:
+  `uv run python -m deerflow.skills.review.cli ../skills/public/<slug> --format text --fail-on error --fail-on-incomplete`.
+
+## Guarded operational limits
+
+The focused constants test keeps these values synchronized with code. If a
+source constant changes, update this section and the owning detailed document.
+
+- Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
+- SkillScan rejects unsafe archives while retaining the final 100 MiB and the
+  16384-file, bounded-log contract.
+- Project Skill archives remain limited to 100 MiB and 16384 regular files; the
+  archive-create routes have a scoped 160 MiB wire limit.
+- Current-message vision injects at most four unique images with a 20 MiB per-image limit.
+- Verified Skill reads remain active for `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12).
+- SNIP free-prose task continuity bounded to 2,000 characters and tagged fact lines bounded to 1,000 characters; the packaged prompt raises a declared output cap below 4,096 tokens.
+- `worker.stream.text_delta_flush_ms`, default 75ms, controls text coalescing.
+  `worker.stream.run_event_notify_enabled` is true (the default).
+- `mcp_security.run_session_reuse` (default `true`) reuses an exact-closure MCP
+  session only within one Run.
+- Memory `dream_interval_minutes` (`15..1440`, default `120`),
+  `idle_seal_minutes` (`0` or `30..10080`, default `1440`), and
+  `episode_retention_days` (`0` or `30..3650`, default `365`) remain governed
+  system settings.
+- Dream selects the strictly oldest 20 pending history rows. A scope is due when a full batch of 20 is already pending or a tool row has been pending for over 10 minutes.
+- Recall audit has a per-Run audit cap of 5; `remember` has a per-Run cap of 5
+  and a pending-backlog cap of 200.
+- Review flags consider a document with at least 8 content lines when over 40% of them vanished without correction evidence.
+- Platform quota defaults are 20 members, 5 GiB storage, 3 concurrent Runs, and 10,000 MCP calls per UTC day; project limits may only tighten them.
+
+## Tests and code quality
+
+Backend changes follow strict TDD: add a focused failing test, observe the
+expected failure, implement the final-path change, rerun focused/affected tests,
+then run the relevant local gates.
 
 ```bash
 uv run pytest tests/test_<feature>.py -q
 make test
 uvx ruff format --check .
 uvx ruff check .
+make detect-blocking-io
 ```
 
-Production async paths must offload synchronous filesystem/subprocess work and await
-cancellation-settled cleanup. `make detect-blocking-io` remains a static review aid. Test doubles
-belong under `tests/support/`; do not add a production persistence or execution fallback to make
-a test easier.
+`make test` requires a non-production development `DATABASE_URL`, derives a
+maintenance connection, and creates/drops random `deerflow_test_*` databases.
+It must never run test DDL in the named development database and must complete
+the core suite with zero skips. Focused offline tests do not certify PostgreSQL,
+network providers, or live target environments.
 
-Python is 3.12+, Ruff uses double quotes and a 240-character line limit, and all public/domain
-interfaces should use precise types. Keep public errors stable and free of SQL, connection,
-credential, private resource, and exception detail.
-
-Historical pass counts do not certify the current checkout. The complete current core suite is
-`make test` from the repository root; it loads the development `DATABASE_URL`, while its database
-cases use owned random `deerflow_test_*` databases and must finish with zero skips.
-
-Numeric limits quoted in this guide are gated by `tests/test_agents_md_constants.py`, which pins
-each documented value to the constant that defines it. Changing such a constant fails that test
-until this guide is updated, and rewording a guarded sentence fails it until the matching pattern
-is updated too. A number that has no single authoritative definition does not belong in the guard.
+Python is 3.12+. Keep async production paths free of blocking filesystem or
+subprocess work, settle cancellation, use precise types, and keep public errors
+stable and free of SQL, credentials, private identifiers, and raw exceptions.

@@ -1,4 +1,4 @@
-"""Verified-read Skill activation TTL (U7).
+"""Verified-read Skill activation TTL.
 
 Evidence entries capture the lead model-call ordinal; the tool policy and the
 secret-binding boundary consume the same evidence and expire together. Expiry

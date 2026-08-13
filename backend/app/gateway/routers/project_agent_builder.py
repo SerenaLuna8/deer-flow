@@ -18,6 +18,10 @@ from app.gateway.routers.project_assets import (
     raise_asset_domain,
 )
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_catalog import (
+    AgentCatalogValidator,
+    StaticToolGroupCatalog,
+)
 from app.shared_assets.agent_design_service import (
     AgentDesignBlueprint,
     AgentDesignBlueprintTurn,
@@ -253,6 +257,12 @@ def _all_internal_tool_groups(config: AppConfig) -> tuple[str, ...]:
     )
 
 
+def _agent_catalog_validator(config: AppConfig) -> AgentCatalogValidator:
+    return AgentCatalogValidator(
+        StaticToolGroupCatalog(_all_internal_tool_groups(config)),
+    )
+
+
 def get_agent_design_service(request: Request) -> AgentDesignService:
     """Resolve the app-owned persistence, audit, and generation dependencies."""
 
@@ -267,16 +277,17 @@ def get_agent_design_service(request: Request) -> AgentDesignService:
     if governance_sink is None:
         raise_asset_domain(AssetStorageUnavailable(_request_id()))
     generator = getattr(request.app.state, "agent_design_generation_service", None)
+    config = get_config()
     service = AgentDesignService(
         session_factory,
         generator=generator,
         agent_service=AgentService(
             session_factory,
             governance_sink=governance_sink,
+            catalog_validator=_agent_catalog_validator(config),
         ),
         default_tool_groups_provider=lambda: _all_internal_tool_groups(get_config()),
     )
-    request.app.state.agent_design_service = service
     return service
 
 

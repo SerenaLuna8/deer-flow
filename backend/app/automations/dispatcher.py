@@ -41,6 +41,11 @@ from app.automations.settlement import (
     settle_created_terminal_occurrence,
     settle_terminal_occurrence,
 )
+from app.automations.system_policy import (
+    AutomationsPolicyPort,
+    AutomationsPolicyUnavailable,
+    current_automations_policy,
+)
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import (
     PrivateWorkAssetStale,
@@ -91,6 +96,7 @@ from app.shared_assets.models import (
     ResolvedRunAssetClosure,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.system_runtime_settings import AutomationsPolicyValue
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,
@@ -318,6 +324,7 @@ class AutomationDispatcher:
         clock: Callable[[], datetime] | None = None,
         retry_delay: timedelta = timedelta(seconds=30),
         max_concurrent_runs: int = 3,
+        policy_reader: AutomationsPolicyPort | None = None,
         model_ref_resolver: ModelRefResolver | None = None,
         model_catalog: RunModelSnapshotAdmissionPort | None = None,
         runtime_policy: RunRuntimePolicyAdmissionPort | None = None,
@@ -334,7 +341,10 @@ class AutomationDispatcher:
         self._launch_private_run = launch_private_run
         self._clock = clock or (lambda: datetime.now(UTC))
         self._retry_delay = retry_delay
-        self._max_concurrent_runs = max_concurrent_runs
+        self._fallback_policy = AutomationsPolicyValue(
+            max_concurrent_runs=max_concurrent_runs,
+        )
+        self._policy_reader = policy_reader
         self._quota = quota or _NoopAutomationQuota()
         self._audit = audit or _NoopAutomationAudit()
         self._revalidator = PrivateWorkRevalidator()
@@ -347,6 +357,21 @@ class AutomationDispatcher:
             endpoint_policy=endpoint_policy,
             audit=(audit if callable(getattr(audit, "memory_injection_skipped", None)) else None),
         )
+
+    async def _max_concurrent_runs(
+        self,
+        session: AsyncSession,
+        request_id: str,
+    ) -> int:
+        try:
+            policy = await current_automations_policy(
+                session,
+                self._policy_reader,
+                fallback=self._fallback_policy,
+            )
+        except AutomationsPolicyUnavailable as error:
+            raise AutomationUnavailable(request_id) from error
+        return policy.max_concurrent_runs
 
     @staticmethod
     def _occurrence_id(
@@ -613,7 +638,10 @@ class AutomationDispatcher:
                     )
                     or 0
                 )
-                if active_count >= self._max_concurrent_runs:
+                if active_count >= await self._max_concurrent_runs(
+                    session,
+                    context.request_id,
+                ):
                     raise AutomationConcurrencyLimit(context.request_id)
 
                 occurrence = await occurrences.create(

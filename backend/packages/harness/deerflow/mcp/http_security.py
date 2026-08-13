@@ -6,7 +6,9 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
+from threading import RLock
 from typing import Any
+from weakref import WeakKeyDictionary, WeakSet
 
 import httpx
 
@@ -41,25 +43,90 @@ class _ProjectMcpHttpLogFilter(logging.Filter):
 
 _PROJECT_MCP_HTTP_LOG_FILTER = _ProjectMcpHttpLogFilter()
 
+# Logging's manager owns Logger/PlaceHolder lifetimes. These caches must not
+# extend them: applications and tests may install short-lived transports and
+# handlers. Root handlers are intentionally read directly on every sensitive
+# request, while known transport loggers are tracked weakly so a handler added
+# after startup is covered before the next request.
+_PROJECT_MCP_HTTP_FILTER_LOCK = RLock()
+_KNOWN_TRANSPORT_LOGGERS: WeakSet[logging.Logger] = WeakSet()
+_KNOWN_TRANSPORT_PLACEHOLDERS: WeakKeyDictionary[object, str] = WeakKeyDictionary()
+_KNOWN_TRANSPORT_PLACEHOLDER_COUNT = 0
+_LOGGER_REGISTRY_SIZE = -1
+
+
+def _ensure_filter(target: logging.Filterer) -> None:
+    if _PROJECT_MCP_HTTP_LOG_FILTER not in target.filters:
+        target.addFilter(_PROJECT_MCP_HTTP_LOG_FILTER)
+
+
+def _cover_transport_logger(logger: logging.Logger) -> None:
+    _KNOWN_TRANSPORT_LOGGERS.add(logger)
+    _ensure_filter(logger)
+    for handler in tuple(logger.handlers):
+        _ensure_filter(handler)
+
+
+def _discover_transport_loggers(logger_registry: dict[str, object]) -> None:
+    """Refresh weak transport caches from one stable registry snapshot."""
+
+    global _KNOWN_TRANSPORT_PLACEHOLDER_COUNT
+
+    _KNOWN_TRANSPORT_PLACEHOLDERS.clear()
+    # ``dict.copy`` takes a CPython-GIL-protected snapshot. Logger creation may
+    # continue immediately afterwards; the registry-size/placeholder checks on
+    # the next sensitive request will discover those additions.
+    for name, value in logger_registry.copy().items():
+        if not _is_http_transport_logger(name):
+            continue
+        if isinstance(value, logging.Logger):
+            _KNOWN_TRANSPORT_LOGGERS.add(value)
+        else:
+            try:
+                _KNOWN_TRANSPORT_PLACEHOLDERS[value] = name
+            except TypeError:
+                # A custom logging Manager may use a non-weak-referenceable
+                # placeholder. Do not cache it; the size check still covers
+                # normal logger creation without retaining the object.
+                continue
+    _KNOWN_TRANSPORT_PLACEHOLDER_COUNT = len(_KNOWN_TRANSPORT_PLACEHOLDERS)
+
+
+def _transport_placeholder_changed(logger_registry: dict[str, object]) -> bool:
+    if len(_KNOWN_TRANSPORT_PLACEHOLDERS) != _KNOWN_TRANSPORT_PLACEHOLDER_COUNT:
+        return True
+    return any(logger_registry.get(name) is not placeholder for placeholder, name in tuple(_KNOWN_TRANSPORT_PLACEHOLDERS.items()))
+
 
 def _install_project_mcp_http_log_filter() -> None:
-    """Cover the configured root handlers and any library-owned handlers."""
+    """Cover current handlers without rescanning every unrelated logger."""
 
-    handlers: set[logging.Handler] = set(logging.getLogger().handlers)
-    loggers: set[logging.Logger] = {
-        logging.getLogger("httpx"),
-        logging.getLogger("httpcore"),
-    }
-    for value in logging.Logger.manager.loggerDict.values():
-        if isinstance(value, logging.Logger) and _is_http_transport_logger(value.name):
-            loggers.add(value)
-    for logger in loggers:
-        handlers.update(logger.handlers)
-        if _PROJECT_MCP_HTTP_LOG_FILTER not in logger.filters:
-            logger.addFilter(_PROJECT_MCP_HTTP_LOG_FILTER)
-    for handler in handlers:
-        if _PROJECT_MCP_HTTP_LOG_FILTER not in handler.filters:
-            handler.addFilter(_PROJECT_MCP_HTTP_LOG_FILTER)
+    global _LOGGER_REGISTRY_SIZE
+
+    with _PROJECT_MCP_HTTP_FILTER_LOCK:
+        root = logging.getLogger()
+        for handler in tuple(root.handlers):
+            _ensure_filter(handler)
+        if logging.lastResort is not None:
+            _ensure_filter(logging.lastResort)
+
+        # Always materialize and cover the two base loggers. If either replaces
+        # a cached PlaceHolder without changing registry size, the identity
+        # check below still forces discovery of its descendants.
+        _cover_transport_logger(logging.getLogger("httpx"))
+        _cover_transport_logger(logging.getLogger("httpcore"))
+
+        logger_registry = logging.Logger.manager.loggerDict
+        registry_size = len(logger_registry)
+        if registry_size != _LOGGER_REGISTRY_SIZE or _transport_placeholder_changed(logger_registry):
+            _discover_transport_loggers(logger_registry)
+            _LOGGER_REGISTRY_SIZE = len(logger_registry)
+
+        # This relevant-only walk is required: a library may attach a handler
+        # to an existing httpx/httpcore child after process startup. WeakSet
+        # avoids retaining dynamically removed loggers.
+        for logger in tuple(_KNOWN_TRANSPORT_LOGGERS):
+            _cover_transport_logger(logger)
 
 
 class _ProjectMcpAsyncClient(httpx.AsyncClient):

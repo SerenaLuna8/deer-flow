@@ -212,7 +212,7 @@ services:
       retries: 6
       start_period: 15s
 
-  # Optional profile; config.yaml scheduler.enabled remains authoritative.
+  # Optional profile; platform automations.enabled controls polling.
   scheduler:
     <<: *backend-dev-service
     container_name: deer-flow-scheduler

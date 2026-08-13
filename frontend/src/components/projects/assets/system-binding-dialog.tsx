@@ -20,8 +20,10 @@ import {
   useRollbackProjectSystemBinding,
   useSyncCurrentProjectSystemMcpBinding,
   useUpgradeProjectSystemBinding,
+  SharedAssetApiError,
   type AssetKind,
   type AssetListKind,
+  type AssetVersion,
   type ProjectAssetItem,
 } from "@/core/shared-assets";
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
@@ -32,6 +34,43 @@ const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
   skills: "skill",
   "mcp-servers": "mcp",
 };
+
+type SystemSkillBindingVersion = Pick<
+  Extract<AssetVersion, { skill_id: string }>,
+  "binding_eligible" | "governance_status" | "workflow_status"
+>;
+
+export function systemSkillVersionIsBindable(
+  version: SystemSkillBindingVersion,
+): boolean {
+  return (
+    version.workflow_status === "published" &&
+    version.governance_status === "active" &&
+    version.binding_eligible
+  );
+}
+
+export function systemSkillVersionIsRevoked(
+  version: SystemSkillBindingVersion,
+): boolean {
+  return version.governance_status === "revoked";
+}
+
+export function systemSkillBindingVersionLabel(
+  version: SystemSkillBindingVersion & { version_number: number },
+): string {
+  return `${bindingVersionLabel(version.version_number, "skills")}${
+    systemSkillVersionIsRevoked(version) ? "（已撤销，不可绑定）" : ""
+  }`;
+}
+
+export function isSystemBindingConflict(error: unknown): boolean {
+  return (
+    error instanceof SharedAssetApiError &&
+    error.status === 409 &&
+    error.code === "ASSET_CONFLICT"
+  );
+}
 
 export function canMoveSystemBinding(
   item: Pick<ProjectAssetItem, "status">,
@@ -97,6 +136,7 @@ export function SystemBindingDialog({
   item,
   open,
   onOpenChange,
+  onConflict,
 }: {
   accountId: string;
   projectId: string;
@@ -104,6 +144,7 @@ export function SystemBindingDialog({
   item: ProjectAssetItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  onConflict?: () => void;
 }) {
   const assetKind = BINDING_KIND[kind];
   const isMcp = kind === "mcp-servers";
@@ -142,12 +183,16 @@ export function SystemBindingDialog({
   );
   const bindablePublished = useMemo(
     () =>
-      published.filter(
-        (version) =>
+      published.filter((version) => {
+        if (kind === "skills") {
+          return "skill_id" in version && systemSkillVersionIsBindable(version);
+        }
+        return (
           kind !== "mcp-servers" ||
           !("mcp_server_id" in version) ||
-          mcpVersionRuntimeBlockReason(version, item.scope) === null,
-      ),
+          mcpVersionRuntimeBlockReason(version, item.scope) === null
+        );
+      }),
     [item.scope, kind, published],
   );
   const mcpConfiguration = isMcp
@@ -163,15 +208,29 @@ export function SystemBindingDialog({
       ? mcpVersionRuntimeBlockReason(currentMcpVersion, item.scope)
       : null;
   const firstRuntimeBlockReason = isMcp ? currentMcpRuntimeBlockReason : null;
+  const currentPublished = published.find(
+    (version) => version.id === item.current_published_version_id,
+  );
+  const defaultUnboundVersionId =
+    kind === "skills"
+      ? currentPublished &&
+        "skill_id" in currentPublished &&
+        systemSkillVersionIsBindable(currentPublished)
+        ? currentPublished.id
+        : ""
+      : (item.current_published_version_id ?? "");
 
   useEffect(() => {
     if (!open) return;
     setSelectedVersionId(
-      item.binding?.enabled
-        ? item.binding.version_id
-        : (item.current_published_version_id ?? ""),
+      item.binding?.enabled ? item.binding.version_id : defaultUnboundVersionId,
     );
-  }, [item, open]);
+  }, [
+    defaultUnboundVersionId,
+    item.binding?.enabled,
+    item.binding?.version_id,
+    open,
+  ]);
 
   const pending =
     enable.isPending ||
@@ -194,6 +253,9 @@ export function SystemBindingDialog({
   const pinned = published.find(
     (version) => version.id === item.binding?.version_id,
   );
+  const pinnedRevoked = Boolean(
+    pinned && "skill_id" in pinned && systemSkillVersionIsRevoked(pinned),
+  );
   const availability = systemBindingDialogAvailability({
     historyLoading: history.isLoading,
     historyError: Boolean(history.error),
@@ -208,25 +270,45 @@ export function SystemBindingDialog({
     boundVersionId: item.binding?.enabled ? item.binding.version_id : null,
   });
 
+  function mutationSucceeded() {
+    onOpenChange(false);
+  }
+
+  function mutationFailed(mutationError: unknown) {
+    if (!isSystemBindingConflict(mutationError)) return;
+    setSelectedVersionId("");
+    void history.refetch();
+    onConflict?.();
+  }
+
   function save() {
     if (!availability.canSubmit || !target) return;
     if (isMcp) {
-      syncCurrentMcp.mutate({
-        assetId: item.id,
-        input: item.binding
-          ? { expected_binding_version: item.binding.version }
-          : {},
-      });
+      syncCurrentMcp.mutate(
+        {
+          assetId: item.id,
+          input: item.binding
+            ? { expected_binding_version: item.binding.version }
+            : {},
+        },
+        {
+          onSuccess: mutationSucceeded,
+          onError: mutationFailed,
+        },
+      );
       return;
     }
     if (!item.binding?.enabled) {
-      enable.mutate({
-        asset_id: item.id,
-        version_id: target.id,
-        ...(item.binding
-          ? { expected_binding_version: item.binding.version }
-          : {}),
-      });
+      enable.mutate(
+        {
+          asset_id: item.id,
+          version_id: target.id,
+          ...(item.binding
+            ? { expected_binding_version: item.binding.version }
+            : {}),
+        },
+        { onSuccess: mutationSucceeded, onError: mutationFailed },
+      );
       return;
     }
     if (!target || !pinned || target.id === pinned.id) return;
@@ -237,12 +319,26 @@ export function SystemBindingDialog({
         expected_binding_version: item.binding.version,
       },
     };
-    if (target.version_number > pinned.version_number) upgrade.mutate(input);
-    else rollback.mutate(input);
+    if (target.version_number > pinned.version_number) {
+      upgrade.mutate(input, {
+        onSuccess: mutationSucceeded,
+        onError: mutationFailed,
+      });
+    } else {
+      rollback.mutate(input, {
+        onSuccess: mutationSucceeded,
+        onError: mutationFailed,
+      });
+    }
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!pending) onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent>
         <DialogHeader>
           <DialogTitle>
@@ -283,12 +379,22 @@ export function SystemBindingDialog({
             <select
               value={selectedVersionId}
               onChange={(event) => setSelectedVersionId(event.target.value)}
+              disabled={pending}
               className="border-input bg-background h-9 rounded-md border px-3 text-sm"
             >
               <option value="">请选择版本</option>
               {published.map((version) => (
-                <option key={version.id} value={version.id}>
-                  {bindingVersionLabel(version.version_number, kind)}
+                <option
+                  key={version.id}
+                  value={version.id}
+                  disabled={
+                    "skill_id" in version &&
+                    !systemSkillVersionIsBindable(version)
+                  }
+                >
+                  {"skill_id" in version
+                    ? systemSkillBindingVersionLabel(version)
+                    : bindingVersionLabel(version.version_number, kind)}
                 </option>
               ))}
             </select>
@@ -316,6 +422,11 @@ export function SystemBindingDialog({
             {firstRuntimeBlockReason}
           </p>
         ) : null}
+        {pinnedRevoked && item.binding?.enabled ? (
+          <p role="alert" className="text-destructive text-sm">
+            当前项目固定的版本已撤销，不能继续作为新绑定目标。请选择仍可用的发布版本迁移，或从项目停用。
+          </p>
+        ) : null}
         <dl className="grid gap-2 text-sm">
           <div>
             <dt className="text-muted-foreground text-xs">
@@ -325,7 +436,9 @@ export function SystemBindingDialog({
               {isMcp
                 ? systemMcpBindingStatus(item)
                 : pinned
-                  ? bindingVersionLabel(pinned.version_number, kind)
+                  ? `${bindingVersionLabel(pinned.version_number, kind)}${
+                      pinnedRevoked ? "（已撤销）" : ""
+                    }`
                   : item.binding
                     ? bindingVersionLabel(undefined, kind)
                     : "未绑定"}
@@ -334,7 +447,9 @@ export function SystemBindingDialog({
         </dl>
         {error && (
           <p role="alert" className="text-destructive text-sm">
-            {adminAssetErrorMessage(error)}
+            {isSystemBindingConflict(error)
+              ? "项目绑定已发生变化，已刷新数据。请根据当前固定版本重新选择。"
+              : adminAssetErrorMessage(error)}
           </p>
         )}
         <DialogFooter className="gap-2 sm:justify-between">
@@ -344,10 +459,16 @@ export function SystemBindingDialog({
               variant="outline"
               disabled={pending}
               onClick={() =>
-                disable.mutate({
-                  assetId: item.id,
-                  input: { expected_binding_version: item.binding!.version },
-                })
+                disable.mutate(
+                  {
+                    assetId: item.id,
+                    input: { expected_binding_version: item.binding!.version },
+                  },
+                  {
+                    onSuccess: mutationSucceeded,
+                    onError: mutationFailed,
+                  },
+                )
               }
             >
               从项目停用

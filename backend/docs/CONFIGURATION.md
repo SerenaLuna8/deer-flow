@@ -14,7 +14,11 @@ Run `make config-upgrade` to merge new fields into your config.
 - **Missing `config_version`** in your config is treated as version 0.
 - Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
-- The current example schema is **version 37**. Version 37 adds the independent
+- The current example schema is **version 38**. Version 38 moved the YAML
+  `scheduler:` section (enabled, poll interval, global concurrent Automation cap,
+  and one-time minimum delay) to PostgreSQL system policy at
+  `/admin/settings/system`. Those leaves are rejected in YAML and removed by
+  `make config-upgrade`. Version 37 adds the independent
   `worker.stream.run_event_notify_enabled` rollback switch; version 36 adds bounded root-text
   micro-batching, Run-scoped Project MCP session reuse, and Skill read-evidence TTL settings.
   Version 35 replaces the retired per-URL Project MCP allowlist with
@@ -34,6 +38,22 @@ Run `make config-upgrade` to merge new fields into your config.
 Agent, Skill and MCP definitions are versioned PostgreSQL assets. System admins
 只读治理 packaged bootstrap system catalog；项目成员在经过认证的 UI/API 中管理
 project assets。`config.yaml` 只管理进程和运行时设置。
+
+### System model output limits
+
+模型的 `settings.max_tokens` 是单次 provider 调用的生成上限，不是整个 Agent
+Run 的累计预算。管理员在系统模型设置中创建新版本并切换 current；
+`config.yaml` 不是这个值的权威来源。新空库的 DeepSeek Flash/Pro 初始版本默认
+为 `51_200`，但 bootstrap 不会覆盖已有数据库中的不可变模型版本。
+
+Private Run 的 lead 模型如果以 `length` / `max_tokens` /
+`max_output_tokens` 或 Responses API 的等价 incomplete reason 结束，且当前响应不含
+工具意图或结构化输出，Worker 会在同一 Run 内最多执行一次恢复调用。该调用使用
+同一冻结模型配置，关闭 thinking、禁用工具，并要求根据原始任务和可见的部分答案重新
+形成简洁完整的最终答案；它不会把被截断的隐藏推理当作可靠的续写上下文。
+当前响应含工具/结构化意图、整体 token 预算已 hard-stop，或唯一恢复调用仍被截断/
+没有可见正文时，Run 以稳定的 `MODEL_OUTPUT_LIMIT` 非重试终态结束。前端显示专用
+提示，并仅在该失败轮没有任何工具活动时提供“关闭深度思考后重试”。
 
 ### Project MCP network policy
 
@@ -70,8 +90,21 @@ the intended network boundary.
 - `model_name`：Dream 使用的系统模型名；Dream 准入冻结精确模型版本。SNIP 继续使用独立的
   summarization 模型配置，并在归档回执中记录其精确版本。
 - `dream_interval_minutes`：Scheduler 自动准入 Dream 的间隔，范围 `15..1440`，默认 `120`。
-- `max_injection_tokens`：Run 准入时允许冻结的完整 Memory 文档上限；超限会 fail closed，绝不
-  在运行时静默截断正文。
+- `max_injection_tokens`：Run 准入时允许冻结的完整 Memory 文档上限。文档超限时不会静默截断，
+  也不会阻断 Run；该 Run 不创建 Memory 快照、不注入这份文档，并在同一准入事务追加只含
+  `reason=over_budget` 的 `memory.injection.skipped` 审计事件。摘要、正文、查询或 diff 不会进入
+  审计。`GET /api/projects/{project_id}/memory` 默认返回的二态 `injectionStatus` 是滚动兼容
+  投影，只根据当前文档与当前预算即时派生；它不检查平台或账号开关。新客户端可显式传
+  `injectionContract=advisory_v1`，读取 `injectionAdvisory` 的
+  `eligible | skipped_over_budget | inactive` 与原因。该 opt-in 判定器和普通新 Run 准入共用
+  平台开关、账号偏好、文档完整性、章节结构和预算口径；完整性损坏继续 fail closed，不会
+  包装成普通 200 `invalid`。它仍只是读取事务内的当前证据，不会锁定未来状态，也不是某个
+  Run 已经注入 Memory 的权威证明；continuation Run 不读取当前文档或当前开关，而是从源 Run
+  继承冻结快照或“不注入”结果，并对继承快照重新执行当前预算和完整性检查，因此不受这个
+  current-non-continuation advisory 描述。
+  无待整理 history 的超预算文档可由 Scheduler 或“立即整理”准入零 history 的
+  `budget_rewrite` Dream；压缩后的版本重新满足预算后，后续 Run 才会恢复注入。文档摘要、结构
+  或章节合同损坏仍保持 fail closed，不会被归类为可恢复的超预算跳过。
 - `idle_seal_minutes`：空闲 Thread 自动封存阈值；`0` 关闭，否则范围 `30..10080`，默认
   `1440`。
 - `episode_retention_days`：归档 episodes 的保留天数；`0` 永久保留，否则范围
@@ -91,7 +124,8 @@ Job 终态。新 Run 在准入事务冻结完整文档及章节合同，之后�
 authority 读取该快照；没有 Fact/Candidate Pipeline、`memory_search`、向量排序或旧版
 回退，`recall_memory` 只检索同作用域的 PostgreSQL episodes。
 
-项目页使用 `/api/projects/{project_id}/memory`、`/dream` 和 `/versions` 系列接口查看当前文档、
+项目页使用 `/api/projects/{project_id}/memory`、`/pending`、`/episodes`、`/dream` 和
+`/versions` 系列接口查看当前文档、按 Dream 顺序查看待整理条目、浏览或检索保留期内的 episodes、
 立即整理、查看真实 diff 及 CAS 恢复。账号关闭会从下一模型边界停止使用而不删除数据；reset
 清除长期 Memory 数据和 Run Memory 快照，但保留 Thread、消息、文件及 Thread 摘要。
 
@@ -166,6 +200,18 @@ side-effect revalidation。
 运行 `make setup-db`。未知/legacy marker 或 catalog drift 保持 fail-closed，必须换空目标；不要
 在运行时 `ALTER`、手工 stamp，新增 schema 变更必须同时维护 ORM、`full_schema.sql` 与正式迁移。
 
+打包 System Asset 的发布与 schema 升级是两个显式动作。更新 `skills/public/` 并生成新的
+catalog release 后，存量部署应先停止 Gateway、Worker、Scheduler，在维护窗口从仓库根目录
+运行：
+
+```bash
+make upgrade-system-assets
+```
+
+该命令只接受当前 schema head，保留全部历史 Skill 版本和既有项目 pin，并可幂等重跑；它不会
+迁移 schema，也不会在应用启动时自动执行。空库先用 `make setup-db`，behind 库先备份并运行
+`make upgrade-db`。若命令报告“结果不确定”，先检查数据库，再安全重跑同一命令。
+
 ### 认证反向代理
 
 登录、注册和邀请兑换的限流以真实客户端 IP 为输入。Gateway 只接受受信代理提供的
@@ -179,11 +225,11 @@ auth:
     - ::1/128
 ```
 
-默认 loopback 仅用于仓库自带的本机 Nginx。Docker Compose 与 Helm 会生成独立的
+默认 loopback 仅用于仓库自带的本机 Nginx。Docker Compose 会生成独立的
 `DEER_FLOW_PROXY_AUTH_TOKEN`，由 Nginx 覆盖内部证明 Header，Gateway 以常量时间比较后
 才接受动态容器/Pod 地址转发的 `X-Real-IP`。该 token 不得与
 `DEER_FLOW_INTERNAL_AUTH_TOKEN` 或 `AUTH_JWT_SECRET` 复用，也不得写入 YAML、日志或版本库。
-自定义反向代理应优先配置精确 CIDR；使用自管 Helm application Secret 时必须同时提供
+自定义反向代理应优先配置精确 CIDR；使用自管部署 Secret 时必须同时提供
 `BETTER_AUTH_SECRET`、`DEER_FLOW_INTERNAL_AUTH_TOKEN` 和
 `DEER_FLOW_PROXY_AUTH_TOKEN`。
 
@@ -222,7 +268,7 @@ tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
 decrypted for the exact admitted model version at the execution boundary.
 
-Gateway, Worker, Scheduler, Docker Compose, and Helm do not receive the local
+Gateway, Worker, Scheduler, and Docker Compose do not receive the local
 bootstrap provider key as a process-wide environment block. Each Run records a secret-free,
 immutable model-version snapshot so later catalog changes do not silently alter
 already admitted work. `make doctor` reports whether the PostgreSQL catalog has
@@ -235,35 +281,30 @@ Organize tools into logical groups:
 
 ```yaml
 tool_groups:
-  - name: web          # Web browsing and search
-  - name: file:read    # Read-only file operations
-  - name: file:write   # Write file operations
-  - name: bash         # Shell command execution
+  - name: web # Web browsing and search
+  - name: file:read # Read-only file operations
+  - name: file:write # Write file operations
+  - name: bash # Shell command execution
 ```
 
-### Scheduler
+### Automations
 
-The scheduled-task MVP adds a scheduler section to `config.yaml`:
-
-```yaml
-scheduler:
-  enabled: false
-  poll_interval_seconds: 5
-  lease_seconds: 120
-  max_concurrent_runs: 3
-  min_once_delay_seconds: 60
-```
+Automation polling, the global concurrent occurrence cap, and the one-time
+schedule minimum delay are PostgreSQL system policy (`automations` on
+`/admin/settings/system`), not a `config.yaml` section. Scheduler process
+presence is still an operator choice (`make start` always starts it locally;
+Compose keeps the `scheduler` profile). Edits take effect on later Gateway
+requests and the next Scheduler poll; they do not interrupt already admitted
+work. `enabled: false` stops scheduled admission only. Manual project triggers
+and Memory Dream/Seal polling continue.
 
 Notes:
 
-- `enabled: false` keeps background polling off by default.
-- `max_concurrent_runs` is a global cap on active scheduled runs (queued/running run rows); each poll cycle claims only into the remaining budget, so long runs accumulating across cycles cannot exceed it.
-- All scheduler fields are restart-required; edits need a Gateway restart.
+- `max_concurrent_runs` is a global cap on active Automation occurrences
+  (queued/running occurrence rows) shared by scheduled and manual triggers.
 - Scheduler state, occurrence admission and Run jobs always use the configured PostgreSQL database.
-- The MVP supports thread reuse and fresh-thread-per-run execution modes.
-- The MVP supports only `once` and `cron`.
-- Manual trigger uses the same scheduled-task resource and run lifecycle.
-- Scheduled task definitions and task-run history are persisted in the application database.
+- Thread reuse and fresh-thread-per-run execution modes remain available.
+- Supported schedules are `once` and `cron`.
 
 ### Tools
 
@@ -279,6 +320,7 @@ tools:
 ```
 
 **Built-in Tools**:
+
 - `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute)
 - `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
@@ -349,29 +391,32 @@ deployment and configuration options.
 ActWeave supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
 
 **Local Execution** (runs sandbox code directly on the host machine):
+
 ```yaml
 sandbox:
-   use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
-   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
+  use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
+  allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
 **Docker Execution** (runs sandbox code in isolated Docker containers):
+
 ```yaml
 sandbox:
-   use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+  use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
 ```
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
+
 ```yaml
 sandbox:
-   use: deerflow.community.boxlite:BoxliteProvider
-   image: python:3.12-slim
-   memory_mib: 1024                 # optional per-box memory cap
-   cpus: 2                          # optional per-box vCPUs
-   replicas: 3                      # max active + warm VMs per gateway process
-   idle_timeout: 600                # warm VM idle seconds before stop; 0 disables idle reaping
-   environment:
-      PYTHONUNBUFFERED: "1"
+  use: deerflow.community.boxlite:BoxliteProvider
+  image: python:3.12-slim
+  memory_mib: 1024 # optional per-box memory cap
+  cpus: 2 # optional per-box vCPUs
+  replicas: 3 # max active + warm VMs per gateway process
+  idle_timeout: 600 # warm VM idle seconds before stop; 0 disables idle reaping
+  environment:
+    PYTHONUNBUFFERED: "1"
 ```
 
 Install the optional runtime before selecting this provider:
@@ -393,9 +438,9 @@ This mode runs each sandbox in an isolated Kubernetes Pod on your **host machine
 
 ```yaml
 sandbox:
-   use: deerflow.community.aio_sandbox:AioSandboxProvider
-   provisioner_url: http://provisioner:8002
-   provisioner_api_key: $PROVISIONER_API_KEY
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+  provisioner_api_key: $PROVISIONER_API_KEY
 ```
 
 `PROVISIONER_API_KEY` is required in this mode and must have the same value in
@@ -413,19 +458,19 @@ See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed c
 
 ```yaml
 sandbox:
-   use: deerflow.community.e2b_sandbox:E2BSandboxProvider
-   api_key: $E2B_API_KEY            # required; or set the E2B_API_KEY env var
-   template: code-interpreter-v1     # e2b sandbox template id
-   # domain: e2b.dev                # optional; for self-hosted e2b deployments
-   home_dir: /home/user             # /mnt/user-data is remapped under this directory
-   idle_timeout: 600                # forwarded to e2b's server-side set_timeout()
-   replicas: 3                      # max concurrent sandboxes per gateway process
-   mounts:                          # one-shot upload of host files at sandbox start
-     - host_path: /path/on/host
-       container_path: /home/user/shared
-       read_only: false
-   environment:                     # forwarded to the sandbox at create time
-     WORKLOAD_PROFILE: batch
+  use: deerflow.community.e2b_sandbox:E2BSandboxProvider
+  api_key: $E2B_API_KEY # required; or set the E2B_API_KEY env var
+  template: code-interpreter-v1 # e2b sandbox template id
+  # domain: e2b.dev                # optional; for self-hosted e2b deployments
+  home_dir: /home/user # /mnt/user-data is remapped under this directory
+  idle_timeout: 600 # forwarded to e2b's server-side set_timeout()
+  replicas: 3 # max concurrent sandboxes per gateway process
+  mounts: # one-shot upload of host files at sandbox start
+    - host_path: /path/on/host
+      container_path: /home/user/shared
+      read_only: false
+  environment: # forwarded to the sandbox at create time
+    WORKLOAD_PROFILE: batch
 ```
 
 `e2b-code-interpreter` is bundled as a core dependency of `deerflow-harness`,
@@ -451,6 +496,7 @@ Notes specific to `E2BSandboxProvider`:
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
+
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
@@ -481,6 +527,7 @@ sandbox:
 If the configured `host_path` is not visible to the gateway process, ActWeave logs an error and ignores that mount.
 
 **Option 2: Docker Sandbox** (isolated, more secure):
+
 ```yaml
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
@@ -563,6 +610,7 @@ skills:
 ```
 
 **How Skills Work**:
+
 - Skills are stored in `deer-flow/skills/{public,custom}/`
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
@@ -572,27 +620,29 @@ Skill installs and agent-managed skill writes always run through native determin
 
 **Per-Agent Skill Filtering**:
 Custom agents can restrict which skills they load by defining a `skills` field in their `config.yaml` (located at `workspace/agents/<agent_name>/config.yaml`):
+
 - **Omitted or `null`**: Loads all globally enabled skills (default fallback).
 - **`[]` (empty list)**: Disables all skills for this specific agent.
 - **`["skill-name"]`**: Loads only the explicitly specified skills.
 
 ### Title Generation
 
-Automatic conversation title generation:
+Automatic conversation title generation is a PostgreSQL system setting
+(`agent_runtime.title` on `/admin/settings/system`), not a `config.yaml` leaf.
 
-```yaml
-title:
-  enabled: true
-  max_words: 6
-  max_chars: 60
-  model_name: null  # null = fast local fallback; set a model name to use LLM title generation
-```
+- `enabled`：whether to generate a title after the first successful exchange.
+- `max_words` / `max_chars`：bounds for the generated title.
+- `model_name`：logical catalog model; `null` uses the current system default
+  model. The exact default is frozen into the Run snapshot at admission.
+  Model failure still falls back to a local title derived from the first user
+  message.
 
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
 
 The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.
 
 **Configuration Steps**:
+
 1. Uncomment the `GITHUB_TOKEN` line in the `.env` file and add your personal access token
 2. Restart the ActWeave service to apply changes
 
@@ -640,6 +690,7 @@ ActWeave searches for configuration in this order:
 4. Legacy backend/repository-root locations for monorepo compatibility
 
 ## Security Notes
+
 ### Sandbox Isolation and the Docker Socket (DooD)
 
 ActWeave executes agent-generated shell/code through a configurable sandbox
@@ -647,11 +698,11 @@ ActWeave executes agent-generated shell/code through a configurable sandbox
 one mode requires mounting the host Docker socket. Understand the trade-offs
 before exposing an instance to untrusted input.
 
-| Mode | `config.yaml` | Host Docker socket | Isolation |
-|------|---------------|--------------------|-----------|
-| `local` (default) | `deerflow.sandbox.local:LocalSandboxProvider` | Not mounted | Commands run **inside the gateway container** on its filesystem. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads. |
-| `aio` (pure DooD) | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon. |
-| `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url` | Not mounted | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation. |
+| Mode                       | `config.yaml`                                                              | Host Docker socket           | Isolation                                                                                                                                                                     |
+| -------------------------- | -------------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run **inside the gateway container** on its filesystem. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads. |
+| `aio` (pure DooD)          | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                    |
+| `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url`                                   | Not mounted                  | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation.                                                                                    |
 
 #### The Docker socket is host root
 
@@ -693,18 +744,17 @@ injection, tool/MCP misuse, RCE) would leak all of it.
 These directories are **no longer mounted by default**. Supply CLI credentials
 with the least exposure that fits your setup:
 
-| Need | How | Exposure |
-|------|-----|----------|
-| API-key model adapter | Bind an encrypted, exact Credential version in `/admin/settings/models` | Execution-boundary value only |
-| Claude Code / Codex CLI model adapter | Use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only when local subscription auth is required | Full CLI directory in Worker |
-| ACP agent | Follow the adapter's isolated auth contract; use the CLI overlay only if it genuinely reads the full CLI directory | Adapter-specific / full directory |
+| Need                                  | How                                                                                                                | Exposure                          |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| API-key model adapter                 | Bind an encrypted, exact Credential version in `/admin/settings/models`                                            | Execution-boundary value only     |
+| Claude Code / Codex CLI model adapter | Use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only when local subscription auth is required         | Full CLI directory in Worker      |
+| ACP agent                             | Follow the adapter's isolated auth contract; use the CLI overlay only if it genuinely reads the full CLI directory | Adapter-specific / full directory |
 
 The base Compose stack never forwards root `.env` wholesale to Gateway, Worker,
 Scheduler, or Provisioner. CLI-backed model adapters are the explicit local
 subscription exception: they do not accept a model Credential binding and may
 read the opt-in Worker mount. API-key model adapters must use the PostgreSQL
 Credential binding instead.
-
 
 ## Best Practices
 
@@ -718,19 +768,23 @@ Credential binding instead.
 ## Troubleshooting
 
 ### "Config file not found"
+
 - Ensure `config.yaml` exists in the **project root** directory (`deer-flow/config.yaml`)
 - If the runtime starts outside the project root, set `DEER_FLOW_PROJECT_ROOT`
 - Alternatively, set `DEER_FLOW_CONFIG_PATH` environment variable to custom location
 
 ### "Invalid API key"
+
 - Verify environment variables are set correctly
 - Check that `$` prefix is used for env var references
 
 ### "Skills not loading"
+
 - Project Run：检查 Skill 是否已经发布、绑定到当前项目并被本次 Run snapshot 固定；业务运行不会把仓库目录当作授权来源。
 - 独立 harness/TUI：检查本地 Skill 目录、`SKILL.md`，以及 `skills.path` 或 `DEER_FLOW_SKILLS_PATH`。
 
 ### "Docker sandbox fails to start"
+
 - Ensure Docker is running
 - Check port 8080 (or configured port) is available
 - Verify Docker image is accessible

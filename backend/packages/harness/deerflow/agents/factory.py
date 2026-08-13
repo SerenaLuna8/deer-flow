@@ -45,11 +45,11 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 
 from deerflow.agents.features import RuntimeFeatures
-from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
-from deerflow.agents.middlewares.tool_error_handling_middleware import (
+from deerflow.agents.middlewares.assembly import (
     assemble_agent_middlewares,
     build_runtime_middlewares,
 )
+from deerflow.agents.middlewares.clarification_middleware import ClarificationMiddleware
 from deerflow.agents.thread_state import (
     adapt_state_schema_for_mode,
     get_thread_state_schema,

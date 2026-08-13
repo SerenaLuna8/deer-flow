@@ -16,6 +16,7 @@ import { z } from "zod";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { useModels } from "@/core/models/hooks";
 import {
+  buildOutputLimitRetryProfile,
   collectRunExecutionProfiles,
   REASONING_EFFORTS,
   type RunExecutionProfileRequest,
@@ -30,7 +31,11 @@ import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
 import { isHiddenFromUIMessage } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
-import { isProjectRunTerminalFailure } from "../private-work/api-client";
+import {
+  isModelOutputLimitError,
+  isProjectRunTerminalFailure,
+  MODEL_OUTPUT_LIMIT,
+} from "../private-work/api-client";
 import {
   compareEventSequences,
   type EventSequence,
@@ -262,6 +267,7 @@ const EMPTY_THREAD_VALUES: AgentThreadState = {
   artifacts: [],
   todos: [],
 };
+const EMPTY_MESSAGES: Message[] = [];
 
 function isNonEmptyString(value: string | undefined): value is string {
   return typeof value === "string" && value.length > 0;
@@ -330,6 +336,67 @@ function messageIdentity(message: Message): string | undefined {
     return `message:${message.id}`;
   }
   return undefined;
+}
+
+export type RegenerationTarget = {
+  messageId: string;
+  supersededMessageIds: string[];
+};
+
+function hasToolPayload(value: unknown): boolean {
+  return (
+    value !== null &&
+    value !== undefined &&
+    (!Array.isArray(value) || value.length > 0)
+  );
+}
+
+function hasRetryUnsafeToolActivity(message: Message): boolean {
+  if (message.type === "tool") {
+    return true;
+  }
+  if (message.type !== "ai") {
+    return false;
+  }
+  const toolCalls = Reflect.get(message, "tool_calls");
+  const invalidToolCalls = Reflect.get(message, "invalid_tool_calls");
+  const toolCallChunks = Reflect.get(message, "tool_call_chunks");
+  const additionalToolCalls = message.additional_kwargs?.tool_calls;
+  const additionalFunctionCall = message.additional_kwargs?.function_call;
+  return (
+    hasToolPayload(toolCalls) ||
+    hasToolPayload(invalidToolCalls) ||
+    hasToolPayload(toolCallChunks) ||
+    hasToolPayload(additionalToolCalls) ||
+    hasToolPayload(additionalFunctionCall)
+  );
+}
+
+export function getLatestRegenerationTarget(
+  messages: readonly Message[],
+  targetRunId: string,
+): RegenerationTarget | null {
+  const candidates = messages.filter(
+    (message) => messageRunId(message) === targetRunId,
+  );
+  if (candidates.some(hasRetryUnsafeToolActivity)) {
+    return null;
+  }
+  const target = [...candidates]
+    .reverse()
+    .find((message) => message.type === "ai" && message.id);
+  if (!target?.id) {
+    return null;
+  }
+  const supersededMessageIds = candidates
+    .filter((message) => message.type === "ai" && message.id)
+    .map((message) => message.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+
+  return {
+    messageId: target.id,
+    supersededMessageIds,
+  };
 }
 
 function hasAcknowledgedOptimisticHuman(
@@ -712,6 +779,40 @@ export function getSupersededRunIds(
 export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
   const status = runs?.[0]?.status as string | undefined;
   return status === "error" || status === "failed" || status === "timeout";
+}
+
+export function latestRunFailureCode(
+  runs: Run[] | undefined,
+): typeof MODEL_OUTPUT_LIMIT | null {
+  const latestRun = runs?.[0];
+  if (!latestRunHasTerminalFailure(runs) || !latestRun) {
+    return null;
+  }
+  return isModelOutputLimitError(Reflect.get(latestRun, "error"))
+    ? MODEL_OUTPUT_LIMIT
+    : null;
+}
+
+export function resolveRunFailureCode(
+  streamError: unknown,
+  runs: Run[] | undefined,
+): typeof MODEL_OUTPUT_LIMIT | null {
+  return isModelOutputLimitError(streamError)
+    ? MODEL_OUTPUT_LIMIT
+    : latestRunFailureCode(runs);
+}
+
+export function resolveRunFailureRunId(
+  streamError: unknown,
+  activeRunId: string | null,
+  runs: Run[] | undefined,
+): string | null {
+  if (isModelOutputLimitError(streamError) && activeRunId) {
+    return activeRunId;
+  }
+  return latestRunFailureCode(runs) === MODEL_OUTPUT_LIMIT
+    ? (runs?.[0]?.run_id ?? null)
+    : null;
 }
 
 export function rememberActiveRun(
@@ -1279,6 +1380,108 @@ export function resolvePreservedHistory(
     return visibleHistory;
   }
   return [...visibleHistory, ...missing];
+}
+
+export type ThreadMessageProjectionInput = {
+  threadId: string | null | undefined;
+  visibleHistory: Message[];
+  pendingArchivedMessages: Message[];
+  pendingArchiveThreadId: string | null;
+  renderMessages: Message[];
+  activeRunId: string | null;
+  runBaselineMessageIds: ReadonlySet<string>;
+  pendingSupersededRunIds: ReadonlySet<string>;
+  visibleOptimisticMessages: Message[];
+  historyRuns?: Run[];
+};
+
+/**
+ * Pure long-session display projection. Keeping every input explicit makes the
+ * 100/1k/10k benchmark reproducible and gives React one semantic memo boundary
+ * without changing history, replay, or stream ownership.
+ */
+export function projectThreadMessages({
+  threadId,
+  visibleHistory,
+  pendingArchivedMessages,
+  pendingArchiveThreadId,
+  renderMessages,
+  activeRunId,
+  runBaselineMessageIds,
+  pendingSupersededRunIds,
+  visibleOptimisticMessages,
+  historyRuns,
+}: ThreadMessageProjectionInput): Message[] {
+  const effectiveHistory =
+    pendingArchivedMessages.length > 0 && pendingArchiveThreadId === threadId
+      ? resolvePreservedHistory(visibleHistory, pendingArchivedMessages)
+      : visibleHistory;
+  const baselineMessageIds = new Set(runBaselineMessageIds);
+  for (const message of effectiveHistory) {
+    const identity = messageIdentity(message);
+    if (identity) {
+      baselineMessageIds.add(identity);
+    }
+  }
+  const runScopedPersistedMessages = attachRunIdToNewMessages(
+    renderMessages,
+    activeRunId,
+    baselineMessageIds,
+  );
+  const visibleRunScopedPersistedMessages = filterMessagesBySupersededRunIds(
+    runScopedPersistedMessages,
+    pendingSupersededRunIds,
+  );
+  return mergeMessages(
+    effectiveHistory,
+    visibleRunScopedPersistedMessages,
+    visibleOptimisticMessages,
+    historyRuns,
+  );
+}
+
+export function useProjectedThreadMessages(
+  input: ThreadMessageProjectionInput,
+): Message[] {
+  const {
+    threadId,
+    visibleHistory,
+    pendingArchivedMessages,
+    pendingArchiveThreadId,
+    renderMessages,
+    activeRunId,
+    runBaselineMessageIds,
+    pendingSupersededRunIds,
+    visibleOptimisticMessages,
+    historyRuns,
+  } = input;
+  return useMemo(
+    () =>
+      projectThreadMessages({
+        threadId,
+        visibleHistory,
+        pendingArchivedMessages,
+        pendingArchiveThreadId,
+        renderMessages,
+        activeRunId,
+        runBaselineMessageIds,
+        pendingSupersededRunIds,
+        visibleOptimisticMessages,
+        historyRuns,
+      }),
+    [
+      activeRunId,
+      historyRuns,
+      pendingArchivedMessages,
+      pendingArchiveThreadId,
+      pendingSupersededRunIds,
+      renderMessages,
+      runBaselineMessageIds,
+      threadId,
+      visibleHistory,
+      visibleOptimisticMessages,
+    ],
+  );
 }
 
 /**
@@ -2080,9 +2283,11 @@ export function useThreadStream({
       }
       if (decision?.kind !== "ignore-history-refetch-duplicate") {
         toast.error(
-          isProjectRunTerminalFailure(error)
-            ? t.conversation.runFailedDescription
-            : getStreamErrorMessage(error),
+          isModelOutputLimitError(error)
+            ? t.conversation.modelOutputLimitDescription
+            : isProjectRunTerminalFailure(error)
+              ? t.conversation.runFailedDescription
+              : getStreamErrorMessage(error),
         );
       }
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -2197,9 +2402,11 @@ export function useThreadStream({
         : [],
     [history, pendingSupersededMessageIds, threadId],
   );
-  const humanMessageCount = persistedMessages.filter(
-    (m) => m.type === "human",
-  ).length;
+  const humanMessageCount = useMemo(
+    () =>
+      persistedMessages.filter((message) => message.type === "human").length,
+    [persistedMessages],
+  );
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
   // Synchronous bridge for messages rescued from context summarization. The
@@ -2287,10 +2494,17 @@ export function useThreadStream({
   // appears in the stream (the input message may arrive via "values" events
   // after individual "messages-tuple" events for AI messages).
   const optimisticMessageCount = optimisticMessages.length;
-  const hasHumanOptimistic = optimisticMessages.some((m) => m.type === "human");
-  const optimisticHumanAcknowledged = hasAcknowledgedOptimisticHuman(
-    optimisticMessages,
-    [...visibleHistory, ...persistedMessages],
+  const hasHumanOptimistic = useMemo(
+    () => optimisticMessages.some((message) => message.type === "human"),
+    [optimisticMessages],
+  );
+  const optimisticHumanAcknowledged = useMemo(
+    () =>
+      hasAcknowledgedOptimisticHuman(optimisticMessages, [
+        ...visibleHistory,
+        ...persistedMessages,
+      ]),
+    [optimisticMessages, persistedMessages, visibleHistory],
   );
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
@@ -2528,11 +2742,13 @@ export function useThreadStream({
       prepare,
       getSupersededMessageIds,
       getOptimisticMessages,
+      executionProfileOverride,
     }: {
       threadId: string;
       prepare: () => Promise<TPrepared>;
       getSupersededMessageIds: (prepared: TPrepared) => string[];
       getOptimisticMessages?: (prepared: TPrepared) => Message[];
+      executionProfileOverride?: RunExecutionProfileRequest;
     }) => {
       // The SDK reports both its initial state-load failure and a replay
       // admission failure through the same metadata-less onError callback.
@@ -2624,7 +2840,7 @@ export function useThreadStream({
               ...context,
               thread_id: threadId,
             },
-            executionProfile,
+            executionProfileOverride ?? executionProfile,
           ),
         });
         if (replayAttempt.status === "failed") {
@@ -2697,6 +2913,7 @@ export function useThreadStream({
       threadId: string,
       messageId: string,
       supersededMessageIds: string[] = [messageId],
+      options?: { withoutThinking?: boolean },
     ) => {
       if (!messageId) {
         return false;
@@ -2725,9 +2942,12 @@ export function useThreadStream({
             return (await response.json()) as RegeneratePrepareResponse;
           }),
         getSupersededMessageIds: () => supersededMessageIds,
+        executionProfileOverride: options?.withoutThinking
+          ? buildOutputLimitRetryProfile(executionProfile)
+          : undefined,
       });
     },
-    [privateWork, submitPreparedReplay],
+    [executionProfile, privateWork, submitPreparedReplay],
   );
 
   const editAndRegenerateMessage = useCallback(
@@ -2777,57 +2997,65 @@ export function useThreadStream({
   if (persistedMessages.length >= messagesRef.current.length) {
     messagesRef.current = persistedMessages;
   }
-  const visibleOptimisticMessages = getVisibleOptimisticMessages(
-    optimisticThreadId === currentViewThreadId ? optimisticMessages : [],
-    prevHumanMsgCountRef.current,
-    humanMessageCount,
+  const previousHumanMessageCount = prevHumanMsgCountRef.current;
+  const visibleOptimisticMessages = useMemo(
+    () =>
+      getVisibleOptimisticMessages(
+        optimisticThreadId === currentViewThreadId
+          ? optimisticMessages
+          : EMPTY_MESSAGES,
+        previousHumanMessageCount,
+        humanMessageCount,
+      ),
+    [
+      currentViewThreadId,
+      humanMessageCount,
+      optimisticMessages,
+      optimisticThreadId,
+      previousHumanMessageCount,
+    ],
   );
 
-  // Overlay the summarization rescue buffer only onto the history of the thread
-  // it was captured from. visibleHistory is gated on `threadId`, so comparing the
-  // same prop keeps the buffer from flashing into another thread or the new-chat
-  // screen, and reading it here (instead of clearing a ref during render) is
-  // concurrent-mode safe (#3825).
-  const rescueBuffer = pendingArchivedMessagesRef.current;
-  const effectiveHistory =
-    rescueBuffer.length > 0 && pendingArchiveThreadIdRef.current === threadId
-      ? resolvePreservedHistory(visibleHistory, rescueBuffer)
-      : visibleHistory;
-  const activeRunId = resolveActiveRunIdForMessages(
-    persistedMessages,
-    thread.isLoading,
-    currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null,
+  const explicitActiveRunId =
+    currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null;
+  const activeRunId = useMemo(
+    () =>
+      resolveActiveRunIdForMessages(
+        persistedMessages,
+        thread.isLoading,
+        explicitActiveRunId,
+      ),
+    [explicitActiveRunId, persistedMessages, thread.isLoading],
   );
-  const runBaselineMessageIds = new Set(
-    currentRunBaselineMessageIdsRef.current,
-  );
-  for (const message of effectiveHistory) {
-    const identity = messageIdentity(message);
-    if (identity) {
-      runBaselineMessageIds.add(identity);
-    }
-  }
-  const runScopedPersistedMessages = attachRunIdToNewMessages(
+  // The three refs below are replaced, never mutated in place. Their identities
+  // therefore form safe semantic dependencies for the projection memo.
+  const pendingArchivedMessages = pendingArchivedMessagesRef.current;
+  const pendingArchiveThreadId = pendingArchiveThreadIdRef.current;
+  const runBaselineMessageIds = currentRunBaselineMessageIdsRef.current;
+  const mergedMessages = useProjectedThreadMessages({
+    threadId,
+    visibleHistory,
+    pendingArchivedMessages,
+    pendingArchiveThreadId,
     renderMessages,
     activeRunId,
     runBaselineMessageIds,
-  );
-  const visibleRunScopedPersistedMessages = filterMessagesBySupersededRunIds(
-    runScopedPersistedMessages,
     pendingSupersededRunIds,
-  );
-  const mergedMessages = mergeMessages(
-    effectiveHistory,
-    visibleRunScopedPersistedMessages,
     visibleOptimisticMessages,
     historyRuns,
+  });
+  const pendingUsageBaselineMessageIds =
+    pendingUsageBaselineMessageIdsRef.current;
+  const pendingUsageMessages = useMemo(
+    () =>
+      thread.isLoading
+        ? getMessagesAfterBaseline(
+            persistedMessages,
+            pendingUsageBaselineMessageIds,
+          )
+        : EMPTY_MESSAGES,
+    [pendingUsageBaselineMessageIds, persistedMessages, thread.isLoading],
   );
-  const pendingUsageMessages = thread.isLoading
-    ? getMessagesAfterBaseline(
-        persistedMessages,
-        pendingUsageBaselineMessageIdsRef.current,
-      )
-    : [];
   const projectedThreadError =
     ignoredReplayHistoryError !== null &&
     Object.is(thread.error, ignoredReplayHistoryError.error)
@@ -2842,6 +3070,15 @@ export function useThreadStream({
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   });
+  const runFailureCode = resolveRunFailureCode(
+    projectedThreadError,
+    historyRuns,
+  );
+  const runFailureRunId = resolveRunFailureRunId(
+    projectedThreadError,
+    explicitActiveRunId,
+    historyRuns,
+  );
 
   return {
     thread: mergedThread,
@@ -2858,6 +3095,8 @@ export function useThreadStream({
     retryHistory,
     runExecutionProfiles,
     hasTerminalRunFailure: latestRunHasTerminalFailure(historyRuns),
+    runFailureCode,
+    runFailureRunId,
   } as const;
 }
 

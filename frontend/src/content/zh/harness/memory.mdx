@@ -5,7 +5,7 @@ description: 由 SNIP 归档与 Dream 构成的项目长期记忆。
 
 # 记忆系统
 
-项目 Memory 为当前项目中的每个认证用户维护一份私有、带版本的 Markdown 长期文档。PostgreSQL 保存当前文档、待整理历史、Dream Run、不可变文档版本，以及每个已准入 Run 冻结的精确文档快照。project、owner 和固定的内部 namespace 都由服务端从认证请求生成，浏览器不能选择其他作用域。
+项目 Memory 为当前项目中的每个认证用户维护一份私有、带版本的 Markdown 长期文档。PostgreSQL 保存当前文档、待整理历史、已归档 episode、Dream Run、不可变文档版本，以及每个已准入 Run 冻结的精确文档快照。project、owner 和固定的内部 namespace 都由服务端从认证请求生成，浏览器不能选择其他作用域。
 
 Thread 摘要仍是独立数据。它只压缩一个 Thread 的模型上下文，重置长期 Memory 时会保留。
 
@@ -19,33 +19,45 @@ Thread 摘要仍是独立数据。它只压缩一个 Thread 的模型上下文�
 
 ## SNIP 与待整理历史
 
-Thread 压缩时，SNIP 对完整的早期轮次执行一次有界模型调用。通过标签校验的同一份输出会同时写入 Thread `summary_text` 和一条私有待整理历史。精确的 `(nothing)` 仍会更新 Thread 摘要，但不会创建长期历史。checkpoint receipt 与数据库事务使用幂等握手，重试不会重复归档同一次压缩。
+Thread 压缩时，SNIP 对完整的早期轮次执行一次有界模型调用。续航散文更新 Thread 的 `summary_text`，另一段通过校验的 tagged 内容进入私有待整理历史；精确的 `(nothing)` 不会创建长期条目。checkpoint receipt 与数据库事务使用幂等握手，重试不会重复归档同一次压缩。
 
-使用 `/compact` 只执行这项 Thread 内压缩；完整可见聊天记录仍会保留。
+使用 `/compact` 只执行这项 Thread 内压缩；完整可见聊天记录仍会保留。Memory 页会显示待整理总数，并按下一次 Dream 的消费顺序展示最早 50 条待整理内容；每条还会区分来自自动 SNIP 压缩还是显式 `remember` 工具。
 
-## Dream
+## Dream 与预算压缩
 
 Dream 每次最多把最早的 20 条待整理历史归入当前文档。隔离的 Dream 会话只获得当前文档、有界历史批次，以及内存中的读取/整体替换工具；它不能访问共享 Agent、文件、Shell、Web、MCP、Skill 或 Subagent。
 
-文档替换、不可变新版本、真实 unified diff、cursor 推进、历史正文擦除和 Job 成功会原子结算。模型、工具、格式、超时或数据库任一环节失败时，文档和待整理历史都保持不变，可以安全重试。
+文档替换、不可变新版本、真实 unified diff、cursor 推进、episode 创建、历史正文擦除和 Job 成功会原子结算。模型、工具、格式、超时或数据库任一环节失败时，文档和待整理历史都保持不变，可以安全重试。
 
-`/Dream` 会先压缩当前 Thread，再准入一批手动 Dream。Memory 页的“立即整理”会准入同一种 Job，但不会写入聊天消息。
+`/Dream` 会准入一个可持久恢复的后台 preparation Job。Worker 排空当前 Thread 中的完整轮次，按离散阶段和已完成归档轮数报告进度，然后原子准入一批手动 Dream。刷新页面后，输入区可以恢复这项状态，也可以请求协作式取消。Memory 页的“立即整理”仍准入不带 Thread 参数的 Dream，且不会写入聊天消息。
 
-## 召回
+旧的 `POST /memory/dream` 携带 `threadId` 请求现在会以 `422` 失败关闭，不会回退到 Gateway 或浏览器内同步压缩。本次私有单体发布不跨这一边界兼容旧浏览器 bundle；升级前已打开的标签页需要刷新后再使用 `/Dream`。
 
-Run 准入事务只读取一次当前有界文档及其章节合同，并冻结成一行 Run 快照。Worker 的每个模型边界只复用这份快照；首次召回不会调用模型、向量检索或排序查询。Dream 在 Run 途中完成或管理员修改章节模板，都不会改变该 Run 的 Memory。
+当前文档超过平台注入预算时，新 Run 会继续执行，但不会冻结或注入这份 Memory 文档；系统不会静默截断正文。页面使用 opt-in `injectionAdvisory` 显示当前普通新 Run 的提示状态；它与准入共用平台开关、账号偏好、文档完整性、章节结构和预算口径。旧版二态 `injectionStatus` 只保留为滚动兼容投影。advisory 只是读取时的当前证据，不会锁定未来状态，也不能证明此前某个 Run 实际注入了什么；continuation Run 不读取当前文档或当前开关，而是继承源 Run 的冻结快照或“不注入”结果，并对继承快照重新执行当前预算和完整性检查。Scheduler 或“立即压缩文档”可以准入一项零 history 的 `budget_rewrite` Dream；生成的版本会标为“预算压缩”，只有压缩结果重新满足预算后，后续 Run 才会恢复注入。
 
-启用时，完整冻结文档会作为隐藏、低权限的 Human message 注入，并明确标注它是私有数据而不是指令。关闭 Memory 后，下一个模型边界会跳过注入。重置会删除长期文档、历史、版本、Dream 记录和 Run Memory 快照，但保留聊天与 Thread 摘要。
+## Episode 归档与召回
 
-## 项目 Memory 页面
+Dream 消费待整理 history 时，会在同一结算事务把原始 tagged 条目复制到 episode 归档。“历史归档”页支持：
 
-项目页面只展示：
+- 按时间从新到旧浏览保留期内的 episodes，并通过不透明 cursor 继续加载；
+- 输入不超过 200 个字符的文本，返回最多 50 条结果，先排直接文本命中，再排相似度命中；
+- 按闭合集合 `permanent`、`durable`、`ephemeral`、`correction` 过滤；选择多个标签时匹配任一标签即可；
+- 区分自动 SNIP 条目与显式 `remember` 条目。
 
-- 当前长期文档、版本、更新时间和待整理数量；
-- “立即整理”和正在执行的 Dream 状态；
-- 包含处理条数与真实 diff 的 Dream/恢复记录；
-- 每个已保存文档版本及明确的恢复确认。
+当前 `episode_retention_days` 策略限制页面浏览与搜索的时间窗口。`0` 表示读取时不设时间截止，否则只展示配置的 `30..3650` 天窗口内条目。物理清理由独立于读取的时机完成，因此保留窗口是可见性合同，不承诺某一时刻精确删除存储行。Agent recall 使用该 Run 冻结的保留天数，因此策略刚变更时，它与项目页的结果可能暂时不同。
 
-恢复会把所选历史内容写成一个新版本，不会回退历史 cursor 或删除之后的记录。`/dream-log [version]` 会打开这份历史；`/dream-restore <version>` 会先确认再调用恢复 API。这些命令都不会进入普通 Agent 聊天流。
+Run 准入事务只读取一次当前有界文档及其章节合同，并冻结成一行 Run 快照。Worker 的每个模型边界只复用这份快照；首次文档注入不会调用模型、向量检索或排序查询。Dream 在 Run 途中完成或管理员修改章节模板，都不会改变该 Run 的文档快照。
 
-没有可信项目私有 scope 的 Run 不能读取、注入、整理、恢复或重置 Memory。
+`recall_memory` 工具只在同一 project/owner 作用域内检索保留期内的 episodes，支持相同的闭合标签和确定性的“直接命中优先、相似度其次”排序，不会搜索其他用户的归档。
+
+启用时，完整冻结文档会作为隐藏、低权限的 Human message 注入，并明确标注它是私有数据而不是指令。关闭 Memory 后，下一个模型边界会跳过注入。重置会删除长期文档、待整理历史、episode 归档、版本、Dream 记录和 Run Memory 快照，但保留聊天与 Thread 摘要。
+
+## 版本、复核提示与 diff
+
+每次 Dream 或恢复都会创建不可变版本摘要。`needsReview` 是保守的复核提示：当一次 Dream 在没有更正证据时删除了较大比例的已有内容，版本会被标记；它不会阻止发布，也不会自动回滚。页面会突出最新的需复核版本，并标记对应历史行，方便查看保存文档和真实 diff。
+
+数据库保留完整 unified diff。版本详情响应只返回按完整行截取、最多 64,000 个字符的预览，并通过 `diffTruncated` 明确是否截断。发生截断时页面会显示提示，并在下方继续展示该版本的完整文档；完整复核应以保存文档为准，不能只依赖 diff 预览。
+
+恢复使用 expected-current-version 检查，把所选历史内容写成一个新版本，不会回退 history cursor 或删除之后的记录。`/dream-log [version]` 会打开这份历史；`/dream-restore <version>` 会先确认再调用恢复 API。这些命令都不会进入普通 Agent 聊天流。
+
+没有可信项目私有 scope 的 Run 不能读取、注入、整理、恢复、重置、浏览或搜索 Memory。

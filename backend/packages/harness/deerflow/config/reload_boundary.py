@@ -65,10 +65,6 @@ STARTUP_ONLY_FIELDS: dict[str, str] = {
         "The project-connections router caches legacy deployment-provider flags and the Telegram compatibility username on app.state; "
         "channel_connections.* edits need a Gateway restart. Database-backed project instances reconcile independently from PostgreSQL."
     ),
-    "scheduler": (
-        "ScheduledTaskService is constructed and started once during Gateway lifespan startup; enabled, poll_interval_seconds, "
-        "and max_concurrent_runs are captured into the service instance and the background poller task is not rebuilt on config.yaml edits."
-    ),
     "worker": ("The independent Worker process captures polling, leasing, concurrency, shutdown, and retry policy at process startup; live workers are not rebuilt on config.yaml edits."),
 }
 

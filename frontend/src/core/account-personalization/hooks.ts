@@ -8,6 +8,10 @@ import {
 } from "@tanstack/react-query";
 
 import { GatewayApiError } from "@/core/api/errors";
+import {
+  broadcastProjectMemoryCacheHint,
+  collectAccountProjectCacheScopes,
+} from "@/core/private-work/memory-freshness";
 
 import {
   fetchAccountPersonalization,
@@ -82,11 +86,15 @@ export function useUpdateAccountPersonalization(accountId: string | null) {
     },
     onSuccess: async (result) => {
       if (!accountId) return;
+      const scopes = collectAccountProjectCacheScopes(queryClient, accountId);
       queryClient.setQueryData<AccountPersonalization>(
         accountPersonalizationQueryKey(accountId),
         result,
       );
       await invalidateProjectMemory(queryClient, accountId);
+      for (const scope of scopes) {
+        broadcastProjectMemoryCacheHint(scope, "document");
+      }
     },
     onError: async (error) => {
       if (
@@ -117,12 +125,16 @@ export function useResetAccountMemory(accountId: string | null) {
     },
     onSuccess: async (result) => {
       if (!accountId) return;
+      const scopes = collectAccountProjectCacheScopes(queryClient, accountId);
       queryClient.setQueryData<AccountPersonalization>(
         accountPersonalizationQueryKey(accountId),
         (current) =>
           current ? { ...current, version: result.version } : current,
       );
       await removeProjectMemory(queryClient, accountId);
+      for (const scope of scopes) {
+        broadcastProjectMemoryCacheHint(scope, "reset");
+      }
     },
     onError: async (error) => {
       if (

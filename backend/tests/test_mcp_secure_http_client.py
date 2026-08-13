@@ -1,13 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import gc
+import io
 import logging
+import uuid
+import weakref
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import quote_plus
 
 import httpx
 import pytest
 
-from deerflow.mcp.http_security import make_secure_mcp_http_client_factory
+from deerflow.mcp import http_security
+from deerflow.mcp.http_security import (
+    _PROJECT_MCP_HTTP_LOG_FILTER,
+    _install_project_mcp_http_log_filter,
+    make_secure_mcp_http_client_factory,
+)
+
+
+def _new_transport_logger() -> logging.Logger:
+    return logging.getLogger(f"httpx.codex_test_{uuid.uuid4().hex}")
 
 
 def test_secure_mcp_http_client_disables_redirects_and_environment_proxies() -> None:
@@ -127,3 +141,148 @@ async def test_secure_mcp_http_client_suppresses_query_secrets_in_transport_logs
 
     assert "send_request_headers.started" in caplog.text
     assert "HTTP Request: GET https://observable.example.test/mcp?probe=visible" in caplog.text
+
+
+def test_filter_covers_root_handler_added_after_initial_install() -> None:
+    _install_project_mcp_http_log_filter()
+    handler = logging.NullHandler()
+    root = logging.getLogger()
+    root.addHandler(handler)
+    try:
+        assert _PROJECT_MCP_HTTP_LOG_FILTER not in handler.filters
+
+        _install_project_mcp_http_log_filter()
+
+        assert handler.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+    finally:
+        root.removeHandler(handler)
+
+
+def test_filter_covers_new_transport_logger_and_late_handler() -> None:
+    _install_project_mcp_http_log_filter()
+    logger = _new_transport_logger()
+    _install_project_mcp_http_log_filter()
+    assert logger.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+
+    handler = logging.NullHandler()
+    logger.addHandler(handler)
+    try:
+        assert _PROJECT_MCP_HTTP_LOG_FILTER not in handler.filters
+
+        _install_project_mcp_http_log_filter()
+
+        assert handler.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_filter_discovers_transport_placeholder_conversion_without_size_change() -> None:
+    parent_name = f"httpcore.codex_parent_{uuid.uuid4().hex}"
+    child = logging.getLogger(f"{parent_name}.child")
+    del child
+    _install_project_mcp_http_log_filter()
+    size_before = len(logging.Logger.manager.loggerDict)
+
+    parent = logging.getLogger(parent_name)
+    assert len(logging.Logger.manager.loggerDict) == size_before
+    handler = logging.NullHandler()
+    parent.addHandler(handler)
+    try:
+        _install_project_mcp_http_log_filter()
+
+        assert parent.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+        assert handler.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+    finally:
+        parent.removeHandler(handler)
+
+
+def test_filter_installation_is_concurrent_and_duplicate_safe() -> None:
+    logger = _new_transport_logger()
+    handler = logging.NullHandler()
+    logger.addHandler(handler)
+    try:
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            tuple(executor.map(lambda _index: _install_project_mcp_http_log_filter(), range(128)))
+
+        assert logger.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+        assert handler.filters.count(_PROJECT_MCP_HTTP_LOG_FILTER) == 1
+    finally:
+        logger.removeHandler(handler)
+
+
+def test_incremental_filter_cache_does_not_retain_logger_or_handler() -> None:
+    logger = _new_transport_logger()
+    logger_name = logger.name
+    handler = logging.NullHandler()
+    logger.addHandler(handler)
+    _install_project_mcp_http_log_filter()
+    logger.removeHandler(handler)
+
+    handler_reference = weakref.ref(handler)
+    logger_reference = weakref.ref(logger)
+    logging.Logger.manager.loggerDict.pop(logger_name, None)
+    del handler
+    del logger
+    gc.collect()
+
+    assert handler_reference() is None
+    assert logger_reference() is None
+
+
+def test_hot_path_does_not_rescan_all_unrelated_loggers(monkeypatch) -> None:
+    prefix = f"codex_http_filter_bench_{uuid.uuid4().hex}_"
+    logger_names = [f"{prefix}{index}" for index in range(10_000)]
+    for name in logger_names:
+        logging.getLogger(name)
+    _install_project_mcp_http_log_filter()
+
+    def unexpected_full_scan(*_args, **_kwargs):
+        raise AssertionError("stable logger registry must not be rescanned")
+
+    monkeypatch.setattr(
+        http_security,
+        "_discover_transport_loggers",
+        unexpected_full_scan,
+    )
+    try:
+        for _ in range(100):
+            _install_project_mcp_http_log_filter()
+    finally:
+        for name in logger_names:
+            logging.Logger.manager.loggerDict.pop(name, None)
+
+
+@pytest.mark.anyio
+async def test_late_transport_handler_cannot_capture_query_secret() -> None:
+    _install_project_mcp_http_log_filter()
+    logger = _new_transport_logger()
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    output = io.StringIO()
+    handler = logging.StreamHandler(output)
+    logger.addHandler(handler)
+
+    secret = "late-handler-query-secret"
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        logger.debug("transport target=%s", request.url)
+        return httpx.Response(200, request=request, json={})
+
+    factory = make_secure_mcp_http_client_factory(
+        proxy_url=None,
+        timeout_seconds=9,
+    )
+    client = factory(None, None, None)
+    original_transport = client._transport
+    await original_transport.aclose()
+    client._transport = httpx.MockTransport(respond)
+    try:
+        response = await client.get(f"https://mcp.example.test/mcp?key={secret}")
+        assert response.status_code == 200
+        assert secret not in output.getvalue()
+
+        logger.debug("ordinary transport observation")
+        assert "ordinary transport observation" in output.getvalue()
+    finally:
+        await client.aclose()
+        logger.removeHandler(handler)

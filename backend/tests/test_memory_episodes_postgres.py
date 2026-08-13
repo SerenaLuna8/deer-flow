@@ -414,18 +414,89 @@ async def test_postgres_recall_search_ranks_and_pages_episodes(
                 retention_days=365,
                 now=base_time,
             )
-            assert [record.tagged_text for record in first_page] == [
+            assert [record.tagged_text for record in first_page.items] == [
                 "- [ephemeral] deployment window pending approval",
                 "- [permanent] user prefers 100% test coverage",
             ]
+            assert first_page.next_cursor is not None
             second_page = await repository.list_episodes(
                 scope,
-                before=first_page[-1].occurred_at,
+                cursor=first_page.next_cursor,
                 limit=2,
                 retention_days=365,
                 now=base_time,
             )
-            assert [record.tagged_text for record in second_page] == ["- [durable] deployment target is region-eu"]
+            assert [record.tagged_text for record in second_page.items] == ["- [durable] deployment target is region-eu"]
+            assert second_page.next_cursor is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_postgres_episode_cursor_pages_across_identical_timestamps(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    scope = MemoryDocumentScope(
+        project_id=uuid.UUID(seed.owner_a.resource_scope.project_id),
+        owner_user_id=seed.owner_a.resource_scope.owner_user_id,
+    )
+    now = datetime.now(UTC)
+    shared_time = now - timedelta(days=1)
+    ids = tuple(
+        uuid.UUID(value)
+        for value in (
+            "00000000-0000-4000-8000-000000000004",
+            "00000000-0000-4000-8000-000000000003",
+            "00000000-0000-4000-8000-000000000002",
+        )
+    )
+    try:
+        async with seed.factory() as session, session.begin():
+            for episode_id in ids:
+                row = _episode(
+                    scope,
+                    occurred_at=shared_time,
+                    tagged_text=f"- [durable] same-time-{episode_id.int}",
+                )
+                row.id = episode_id
+                session.add(row)
+            older = _episode(
+                scope,
+                occurred_at=shared_time - timedelta(seconds=1),
+                tagged_text="- [durable] older",
+            )
+            older.id = uuid.UUID("00000000-0000-4000-8000-000000000005")
+            session.add(older)
+
+        async with seed.factory() as session:
+            repository = MemoryDocumentRepository(session, jobs=_jobs(session))
+            first = await repository.list_episodes(
+                scope,
+                limit=2,
+                retention_days=365,
+                now=now,
+            )
+            assert [item.id for item in first.items] == list(ids[:2])
+            assert first.next_cursor is not None
+
+            second = await repository.list_episodes(
+                scope,
+                cursor=first.next_cursor,
+                limit=2,
+                retention_days=365,
+                now=now,
+            )
+            assert [item.id for item in second.items] == [
+                ids[2],
+                older.id,
+            ]
+            assert second.next_cursor is None
+            assert {item.id for item in (*first.items, *second.items)} == {
+                *ids,
+                older.id,
+            }
     finally:
         await seed.engine.dispose()
 
@@ -499,6 +570,7 @@ async def test_postgres_reset_and_retention_purge_delete_episodes(
                 now=base_time,
             )
         assert counts.episodes == 2
+        assert counts.affected_project_ids == (scope_a.project_id,)
 
         async with seed.factory() as session:
             owners = set(

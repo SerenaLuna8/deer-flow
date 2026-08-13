@@ -1,4 +1,4 @@
-"""U8: subagent event-driven waiting — timing and heartbeat equivalence.
+"""Subagent event-driven waiting, timing, and heartbeat equivalence.
 
 The ``task`` tool used to poll ``_background_tasks`` every 5 seconds, so a
 200ms subtask still paid up to 5 seconds of tail latency. These tests pin the
@@ -66,6 +66,8 @@ class _FakeResult:
 class _FakeStatus:
     """Stands in for the SubagentStatus enum that conftest mocks away."""
 
+    PENDING = object()
+    RUNNING = object()
     COMPLETED = object()
     FAILED = object()
     CANCELLED = object()
@@ -203,6 +205,39 @@ def test_notify_survives_a_waiter_whose_loop_already_closed() -> None:
 # ---------------------------------------------------------------------------
 # task_tool waiting helpers (deadline + event, heartbeat fallback)
 # ---------------------------------------------------------------------------
+
+
+def test_execution_wait_budget_starts_when_a_queued_task_begins_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(task_tool, "SubagentStatus", _FakeStatus)
+
+    execution_deadline = task_tool._execution_wait_deadline(
+        status=_FakeStatus.PENDING,
+        now=100.0,
+        wait_budget_seconds=30.0,
+        current_deadline=None,
+    )
+    assert execution_deadline is None
+
+    execution_deadline = task_tool._execution_wait_deadline(
+        status=_FakeStatus.RUNNING,
+        now=120.0,
+        wait_budget_seconds=30.0,
+        current_deadline=execution_deadline,
+    )
+    assert execution_deadline == 150.0
+
+    # Re-reading RUNNING must not turn the budget into a sliding timeout.
+    assert (
+        task_tool._execution_wait_deadline(
+            status=_FakeStatus.RUNNING,
+            now=140.0,
+            wait_budget_seconds=30.0,
+            current_deadline=execution_deadline,
+        )
+        == 150.0
+    )
 
 
 @pytest.mark.asyncio

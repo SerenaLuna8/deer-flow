@@ -20,6 +20,88 @@ export type WriteArtifactSelection = {
   url: string;
 };
 
+export type WriteArtifactAutoOpenState = {
+  threadId: string;
+  initialized: boolean;
+  runHasBeenLoading: boolean;
+  seenKeys: ReadonlySet<string>;
+};
+
+export function createWriteArtifactAutoOpenState(
+  threadId: string,
+): WriteArtifactAutoOpenState {
+  return {
+    threadId,
+    initialized: false,
+    runHasBeenLoading: false,
+    seenKeys: new Set(),
+  };
+}
+
+export function advanceWriteArtifactAutoOpenState({
+  state,
+  threadId,
+  selections,
+  historyIsLoading,
+  runIsLoading,
+}: {
+  state: WriteArtifactAutoOpenState;
+  threadId: string;
+  selections: readonly WriteArtifactSelection[];
+  historyIsLoading: boolean;
+  runIsLoading: boolean;
+}): {
+  state: WriteArtifactAutoOpenState;
+  selection?: WriteArtifactSelection;
+} {
+  const switchedThread = state.threadId !== threadId;
+  const currentState = switchedThread
+    ? createWriteArtifactAutoOpenState(threadId)
+    : state;
+  const seenKeys = new Set(currentState.seenKeys);
+
+  if (historyIsLoading) {
+    for (const selection of selections) {
+      seenKeys.add(selection.key);
+    }
+    return {
+      state: {
+        ...currentState,
+        runHasBeenLoading: currentState.runHasBeenLoading || runIsLoading,
+        seenKeys,
+      },
+    };
+  }
+
+  if (!currentState.initialized) {
+    return {
+      state: {
+        ...currentState,
+        initialized: true,
+        runHasBeenLoading: runIsLoading,
+        seenKeys: new Set(selections.map((selection) => selection.key)),
+      },
+    };
+  }
+
+  const unseenSelections = selections.filter(
+    (selection) => !seenKeys.has(selection.key),
+  );
+  for (const selection of unseenSelections) {
+    seenKeys.add(selection.key);
+  }
+  const runCanAutoOpen = runIsLoading || currentState.runHasBeenLoading;
+
+  return {
+    state: {
+      ...currentState,
+      runHasBeenLoading: runIsLoading,
+      seenKeys,
+    },
+    selection: runCanAutoOpen ? unseenSelections.at(-1) : undefined,
+  };
+}
+
 export function extractWriteArtifactSelections(
   messages: ArtifactPreviewMessage[],
 ): WriteArtifactSelection[] {

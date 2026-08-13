@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import { useProjectPrivateWorkReadiness } from "@/core/private-work/readiness";
 import type { ProjectClientScope } from "@/core/private-work/types";
@@ -18,6 +19,7 @@ import { useAgentMcpDependencyRuntime } from "../assets/use-mcp-dependency-runti
 
 import {
   createProjectChatWithDefaultAgent,
+  projectDefaultAgentUnavailableMessage,
   resolveProjectDefaultAgent,
   type ExecutableProjectAgent,
 } from "./agent-selector-dialog";
@@ -51,12 +53,14 @@ export async function consumeProjectStartChatIntent({
   scope,
   projectSlug,
   intentId,
+  threadDisplayName,
   replace,
   createChat = createProjectChatWithDefaultAgent,
 }: {
   scope: ProjectClientScope;
   projectSlug: string;
   intentId: string;
+  threadDisplayName: string;
   replace: (path: string) => void;
   createChat?: typeof createProjectChatWithDefaultAgent;
 }): Promise<string> {
@@ -67,6 +71,7 @@ export async function consumeProjectStartChatIntent({
       return createChat({
         scope,
         projectSlug,
+        threadDisplayName,
         navigate: () => undefined,
       });
     });
@@ -100,27 +105,14 @@ export function ProjectAgentStartContinuationView({
   onRetry?: () => void;
   errorMessage?: string | null;
 }) {
+  const { t } = useI18n();
+  const statusCopy = t.agents.startContinuation;
   const copy = {
-    "waiting-for-service": {
-      title: "正在确认私有工作服务",
-      detail: "服务就绪后会继续你刚才的开始对话操作。",
-    },
-    "waiting-for-agent": {
-      title: "开始对话意图已保留",
-      detail: "完成 Agent 配置后将自动创建对话。",
-    },
-    "creating-chat": {
-      title: "Agent 已可用",
-      detail: "正在创建你的首个对话…",
-    },
-    "read-only": {
-      title: "当前为只读访问",
-      detail: "你可以查看 Agent，但不能创建新的私有对话。",
-    },
-    error: {
-      title: "自动创建对话失败",
-      detail: "Agent 已完成配置，请重试进入对话。",
-    },
+    "waiting-for-service": statusCopy.waitingForService,
+    "waiting-for-agent": statusCopy.waitingForAgent,
+    "creating-chat": statusCopy.creatingChat,
+    "read-only": statusCopy.readOnly,
+    error: statusCopy.error,
   } satisfies Record<
     ProjectAgentStartContinuationStatus,
     { title: string; detail: string }
@@ -141,7 +133,7 @@ export function ProjectAgentStartContinuationView({
         </div>
         {status === "error" && onRetry && (
           <Button type="button" size="sm" onClick={onRetry}>
-            重试进入对话
+            {statusCopy.retryChat}
           </Button>
         )}
       </div>
@@ -160,6 +152,8 @@ export function ProjectAgentStartContinuation({
   requested: boolean;
   intentId: string | null;
 }) {
+  const { t } = useI18n();
+  const copy = t.agents.startContinuation;
   const router = useRouter();
   const privateWork = usePrivateWorkAccess();
   const canCreate =
@@ -221,13 +215,15 @@ export function ProjectAgentStartContinuation({
       scope: privateWork.scope,
       projectSlug: project.slug,
       intentId: stableIntentId,
+      threadDisplayName: t.agents.newChat.threadName,
       replace: (path) => router.replace(path),
     }).catch(async (error) =>
       setFailure(
         await projectNewChatErrorMessage(
           error,
           () => refetchDefaultAgent(),
-          "Agent 已完成配置，请重试进入对话。",
+          copy.configuredRetry,
+          t.agents.newChat.defaultAdmissionUnavailable,
         ),
       ),
     );
@@ -240,6 +236,9 @@ export function ProjectAgentStartContinuation({
     refetchDefaultAgent,
     router,
     stableIntentId,
+    copy.configuredRetry,
+    t.agents.newChat.defaultAdmissionUnavailable,
+    t.agents.newChat.threadName,
   ]);
 
   if (!requested) return null;
@@ -253,7 +252,7 @@ export function ProjectAgentStartContinuation({
     return (
       <ProjectAgentStartContinuationView
         status="error"
-        errorMessage="无法加载项目默认 Agent，请稍后重试。"
+        errorMessage={copy.defaultLoadFailed}
         onRetry={() => void defaultAgent.refetch()}
       />
     );
@@ -265,7 +264,10 @@ export function ProjectAgentStartContinuation({
     return (
       <ProjectAgentStartContinuationView
         status="error"
-        errorMessage={defaultResolution.reason}
+        errorMessage={projectDefaultAgentUnavailableMessage(
+          defaultResolution.reason,
+          t.agents.newChat,
+        )}
         onRetry={() => void defaultAgent.refetch()}
       />
     );
@@ -277,10 +279,7 @@ export function ProjectAgentStartContinuation({
     return (
       <ProjectAgentStartContinuationView
         status="error"
-        errorMessage={
-          customAgentAssessment?.reason ??
-          "无法验证项目默认 Agent 的运行依赖，请稍后重试。"
-        }
+        errorMessage={customAgentAssessment?.reason ?? copy.dependencyFailed}
         onRetry={() => setRetry((value) => value + 1)}
       />
     );

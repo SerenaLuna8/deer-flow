@@ -48,6 +48,12 @@ export const MCP_TOOL_INVENTORY_ERROR_CODES = [
   "mcp_discovery_unavailable",
   "mcp_catalog_invalid",
 ] as const;
+export const AGENT_RUNTIME_ASSESSMENT_REASON_CODES = [
+  "agent_unavailable",
+  "runtime_dependency_unavailable",
+  "model_unavailable",
+] as const;
+export const MAX_AGENT_RUNTIME_ASSESSMENTS = 100;
 export const CREDENTIAL_PAYLOAD_GROUPS = [
   "env",
   "headers",
@@ -72,6 +78,9 @@ export const mcpToolInventoryErrorCodeSchema = z.enum(
   MCP_TOOL_INVENTORY_ERROR_CODES,
 );
 export const credentialPayloadGroupSchema = z.enum(CREDENTIAL_PAYLOAD_GROUPS);
+export const agentRuntimeAssessmentReasonCodeSchema = z.enum(
+  AGENT_RUNTIME_ASSESSMENT_REASON_CODES,
+);
 export const assetIdSchema = z.string().uuid();
 export const assetCapabilitiesSchema = z.array(capabilitySchema);
 
@@ -436,10 +445,44 @@ export const skillVersionSchema = z
     file_views: z.array(skillFileViewSchema),
     supersedes_version_id: assetIdSchema.nullable(),
     payload_checksum: z.string().min(1),
+    revoked_at: z.string().datetime({ offset: true }).nullable(),
+    revoked_by_user_id: z.string().min(1).nullable(),
+    revocation_reason_code: z
+      .enum(["security", "policy", "integrity"])
+      .nullable(),
+    governance_status: z.enum(["active", "revoked"]),
+    binding_eligible: z.boolean(),
     created_by_user_id: z.string().min(1),
     created_at: z.string().datetime({ offset: true }),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const revoked = value.governance_status === "revoked";
+    const hasCompleteRevocation =
+      value.revoked_at !== null &&
+      value.revoked_by_user_id !== null &&
+      value.revocation_reason_code !== null;
+    const hasNoRevocation =
+      value.revoked_at === null &&
+      value.revoked_by_user_id === null &&
+      value.revocation_reason_code === null;
+    if ((revoked && !hasCompleteRevocation) || (!revoked && !hasNoRevocation)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Skill version revocation fields must be internally consistent",
+        path: ["governance_status"],
+      });
+    }
+    const bindingEligible = value.workflow_status === "published" && !revoked;
+    if (value.binding_eligible !== bindingEligible) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill version binding eligibility is inconsistent",
+        path: ["binding_eligible"],
+      });
+    }
+  });
 
 const mcpCredentialSlotNameSchema = z
   .string()
@@ -830,6 +873,77 @@ export const versionHistoryResponseSchema = z
   .object({ data: z.array(assetVersionSchema), request_id: z.string().min(1) })
   .strict();
 
+export const agentRuntimeAssessmentsInputSchema = z
+  .object({
+    agent_ids: z
+      .array(assetIdSchema)
+      .min(1)
+      .max(MAX_AGENT_RUNTIME_ASSESSMENTS)
+      .refine((ids) => new Set(ids).size === ids.length, {
+        message: "Agent runtime assessment IDs must be unique",
+      }),
+  })
+  .strict();
+
+export const agentRuntimeAssessmentSchema = z.discriminatedUnion(
+  "reason_code",
+  [
+    z
+      .object({
+        agent_asset_id: assetIdSchema,
+        selected_version_id: assetIdSchema,
+        status: z.literal("ready"),
+        reason_code: z.null(),
+      })
+      .strict(),
+    z
+      .object({
+        agent_asset_id: assetIdSchema,
+        selected_version_id: z.null(),
+        status: z.literal("blocked"),
+        reason_code: z.literal("agent_unavailable"),
+      })
+      .strict(),
+    z
+      .object({
+        agent_asset_id: assetIdSchema,
+        selected_version_id: assetIdSchema,
+        status: z.literal("blocked"),
+        reason_code: z.literal("runtime_dependency_unavailable"),
+      })
+      .strict(),
+    z
+      .object({
+        agent_asset_id: assetIdSchema,
+        selected_version_id: assetIdSchema,
+        status: z.literal("blocked"),
+        reason_code: z.literal("model_unavailable"),
+      })
+      .strict(),
+  ],
+);
+
+export const agentRuntimeAssessmentsResponseSchema = z
+  .object({
+    items: z
+      .array(agentRuntimeAssessmentSchema)
+      .max(MAX_AGENT_RUNTIME_ASSESSMENTS),
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (
+      new Set(value.items.map((item) => item.agent_asset_id)).size !==
+      value.items.length
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Agent runtime assessment items must be unique",
+        path: ["items"],
+      });
+    }
+  });
+
 export const credentialMetadataSchema = z
   .object({
     id: assetIdSchema,
@@ -946,6 +1060,63 @@ export const createAssetInputSchema = z
     display_name: z.string().trim().min(1),
   })
   .strict();
+
+export const createAgentInputSchema = z
+  .object({
+    slug: z.string().trim().min(1),
+    display_name: z.string().trim().min(1),
+    description: z.string(),
+    agents_instructions: z.string(),
+    soul: z.string(),
+    identity: z.string(),
+    user_context: z.string(),
+    model_ref: z.string().trim().min(1),
+    model_settings: agentModelSettingsSchema,
+    tool_groups: z.array(z.string().trim().min(1)),
+    skill_version_ids: z.array(assetIdSchema),
+    mcp_version_ids: z.array(assetIdSchema),
+  })
+  .strict();
+
+export const agentCreateResponseSchema = z
+  .object({
+    item: assetSummarySchema,
+    version: agentVersionSchema,
+    request_id: z.string().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const invalid = (path: (string | number)[], message: string) =>
+      context.addIssue({ code: z.ZodIssueCode.custom, path, message });
+    if (value.item.id !== value.version.agent_id) {
+      invalid(
+        ["version", "agent_id"],
+        "Created Agent version must belong to the returned asset",
+      );
+    }
+    if (value.item.scope !== "project" || value.item.project_id === null) {
+      invalid(["item", "scope"], "Created Agent must be project scoped");
+    }
+    if (
+      value.item.status !== "suspended" ||
+      value.item.current_published_version_id !== null
+    ) {
+      invalid(
+        ["item", "status"],
+        "Created Agent must start suspended without a live version",
+      );
+    }
+    if (
+      value.version.version_number !== 1 ||
+      value.version.workflow_status !== "draft" ||
+      value.version.supersedes_version_id !== null
+    ) {
+      invalid(
+        ["version"],
+        "Created Agent must return an initial standalone draft",
+      );
+    }
+  });
 
 export const expectedAssetVersionInputSchema = z
   .object({ expected_asset_version: z.number().int().positive() })
@@ -1293,6 +1464,18 @@ export type ProjectMcpEditableConfigurationResponse = z.infer<
 export type VersionHistoryResponse = z.infer<
   typeof versionHistoryResponseSchema
 >;
+export type AgentRuntimeAssessmentReasonCode = z.infer<
+  typeof agentRuntimeAssessmentReasonCodeSchema
+>;
+export type AgentRuntimeAssessment = z.infer<
+  typeof agentRuntimeAssessmentSchema
+>;
+export type AgentRuntimeAssessmentsInput = z.input<
+  typeof agentRuntimeAssessmentsInputSchema
+>;
+export type AgentRuntimeAssessmentsResponse = z.infer<
+  typeof agentRuntimeAssessmentsResponseSchema
+>;
 export type CredentialMetadata = z.infer<typeof credentialMetadataSchema>;
 export type SystemBinding = z.infer<typeof systemBindingSchema>;
 export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
@@ -1317,6 +1500,8 @@ export type CredentialReplacementResponse = z.infer<
   typeof credentialReplacementResponseSchema
 >;
 export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
+export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
+export type AgentCreateResponse = z.infer<typeof agentCreateResponseSchema>;
 export type AgentInstructionsInput = z.input<
   typeof agentInstructionsInputSchema
 >;

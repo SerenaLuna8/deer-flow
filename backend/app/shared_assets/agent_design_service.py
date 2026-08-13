@@ -27,6 +27,7 @@ from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.agent_design_generation import (
     DEFAULT_GENERATION_TIMEOUT_SECONDS,
+    MAX_AGENT_DESIGN_CONTEXT_ASSETS,
     REQUIRED_INTERVIEW_QUESTIONS,
     AgentDesignDraft,
     AgentDesignGenerationContext,
@@ -35,11 +36,15 @@ from app.shared_assets.agent_design_generation import (
     AgentDesignGenerationResult,
     AgentDesignGenerationService,
     AgentDesignInterviewAnswer,
+    AllowedProjectAssetMetadata,
     CandidateResult,
     ClarificationQuestion,
     NeedsClarificationResult,
 )
-from app.shared_assets.agent_design_repository import AgentDesignRepository
+from app.shared_assets.agent_design_repository import (
+    AgentDesignAllowedAssetRecord,
+    AgentDesignRepository,
+)
 from app.shared_assets.agent_repository import AgentRepository
 from app.shared_assets.agent_service import (
     AgentAssetView,
@@ -454,6 +459,7 @@ class AgentDesignService:
         command: SubmitAgentDesignTurn,
     ) -> AgentDesignSessionView:
         command = self._validate_turn(context, command)
+        self._require_capability(context, Capability.SHARED_ASSETS_READ)
         self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
         session_id = self._validate_uuid(context, session_id)
         operation_hash = self._idempotency_hash(command.idempotency_key)
@@ -854,8 +860,12 @@ class AgentDesignService:
                         blueprint,
                         command.input,
                     )
+                    allowed_assets = await self._generation_allowed_assets(
+                        repository,
+                        context,
+                    )
                     generation_context = AgentDesignGenerationContext(
-                        allowed_assets=(),
+                        allowed_assets=allowed_assets,
                         allowed_capabilities=blueprint.tool_groups,
                     )
                     row.status = AgentDesignStatus.GENERATING.value
@@ -878,6 +888,45 @@ class AgentDesignService:
                 raise AssetConflict(context.request_id) from None
             raise AssetStorageUnavailable(context.request_id) from None
         except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    @staticmethod
+    async def _generation_allowed_assets(
+        repository: AgentDesignRepository,
+        context: ProjectContext,
+    ) -> tuple[AllowedProjectAssetMetadata, ...]:
+        records = await repository.list_allowed_assets(
+            context,
+            limit=MAX_AGENT_DESIGN_CONTEXT_ASSETS,
+        )
+        if any(not isinstance(record, AgentDesignAllowedAssetRecord) for record in records):
+            raise AssetStorageUnavailable(context.request_id)
+        try:
+            ordered = sorted(
+                records,
+                key=lambda record: (
+                    0 if record.kind == "skill" else 1,
+                    0 if record.scope == "project" else 1,
+                    record.slug.casefold(),
+                    record.asset_id.hex,
+                    record.version_id.hex,
+                ),
+            )[:MAX_AGENT_DESIGN_CONTEXT_ASSETS]
+            return tuple(
+                AllowedProjectAssetMetadata(
+                    kind=record.kind,
+                    scope=record.scope,
+                    asset_id=record.asset_id,
+                    version_id=record.version_id,
+                    name=record.name,
+                    slug=record.slug,
+                    description=record.description[:2_000],
+                    capabilities=(),
+                    enabled=True,
+                )
+                for record in ordered
+            )
+        except (AttributeError, TypeError, ValueError, ValidationError):
             raise AssetStorageUnavailable(context.request_id) from None
 
     async def _finish_generation_success(

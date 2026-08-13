@@ -235,10 +235,6 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return None
 
         config = self._get_title_config()
-        if not config.model_name:
-            user_msg = self._get_title_user_message(state)
-            return {"title": self._fallback_title(user_msg)}
-
         user_msg = self._get_title_user_message(state)
 
         try:
@@ -250,6 +246,8 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
             if self._app_config is not None:
                 model_kwargs["app_config"] = self._app_config
+            # ``model_name is None`` uses the AppConfig default model (catalog
+            # default after Worker overlay, otherwise models[0]).
             model = create_chat_model(name=config.model_name, **model_kwargs)
             await check_authorization_boundary(
                 runtime_context,

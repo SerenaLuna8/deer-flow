@@ -16,7 +16,7 @@ from deerflow.community.remote_file_authority import (
     encode_guest_request,
 )
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.exceptions import SandboxRuntimeError
+from deerflow.sandbox.exceptions import SandboxFileError, SandboxRuntimeError
 from deerflow.sandbox.sandbox import (
     Sandbox,
     SandboxAtomicWriter,
@@ -299,9 +299,16 @@ class AioSandbox(Sandbox):
         try:
             result = self._client.file.read_file(file=path)
             return result.data.content if result.data else ""
-        except Exception as e:
-            logger.error(f"Failed to read file in sandbox: {e}")
-            return f"Error: {e}"
+        except Exception as exc:
+            logger.error(
+                "Failed to read file in AIO sandbox; provider_error_type=%s",
+                type(exc).__name__,
+            )
+            raise SandboxFileError(
+                "Failed to read file in sandbox",
+                path=path,
+                operation="read",
+            ) from exc
 
     def _execute_private_guest(
         self,
@@ -435,12 +442,20 @@ class AioSandbox(Sandbox):
             try:
                 if append:
                     existing = self.read_file(path)
-                    if not existing.startswith("Error:"):
-                        content = existing + content
+                    content = existing + content
                 self._client.file.write_file(file=path, content=content)
-            except Exception as e:
-                logger.error(f"Failed to write file in sandbox: {e}")
+            except SandboxFileError:
                 raise
+            except Exception as exc:
+                logger.error(
+                    "Failed to write file in AIO sandbox; provider_error_type=%s",
+                    type(exc).__name__,
+                )
+                raise SandboxFileError(
+                    "Failed to write file in sandbox",
+                    path=path,
+                    operation="write",
+                ) from exc
 
     def glob(self, path: str, pattern: str, *, include_dirs: bool = False, max_results: int = 200) -> tuple[list[str], bool]:
         if not include_dirs:
