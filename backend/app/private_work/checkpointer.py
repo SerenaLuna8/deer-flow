@@ -4,7 +4,7 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from contextlib import asynccontextmanager
-from typing import Any, Protocol, TypeVar, cast
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
@@ -122,13 +122,19 @@ class ProjectScopedCheckpointer:
         except RuntimeError as exc:
             raise RuntimeError("ProjectScopedCheckpointer must be created on its owning event loop") from exc
 
-    def for_context(self, context: PrivateWorkContext) -> _ScopedCheckpointSaver:
+    def for_context(
+        self,
+        context: PrivateWorkContext,
+        *,
+        thread_kind: Literal["chat", "skill_builder"] = "chat",
+    ) -> _ScopedCheckpointSaver:
         return _ScopedCheckpointSaver(
             self._raw,
             self._session_factory,
             require_issued_private_work_context(context),
             self._owner_loop,
             self._quota,
+            thread_kind=thread_kind,
         )
 
 
@@ -140,6 +146,8 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         context: PrivateWorkContext,
         owner_loop: asyncio.AbstractEventLoop,
         quota: PrivateCheckpointQuotaPort,
+        *,
+        thread_kind: Literal["chat", "skill_builder"],
     ) -> None:
         super().__init__(serde=raw_saver.serde)
         self._raw = raw_saver
@@ -147,6 +155,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         self._context = context
         self._owner_loop = owner_loop
         self._quota = quota
+        self._thread_kind = thread_kind
         self._revalidator = PrivateWorkRevalidator()
         self._authorization_boundary: object | None = None
 
@@ -326,6 +335,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         scope=self._context.resource_scope,
                         thread_id=thread_id,
                         lock=True,
+                        thread_kind=self._thread_kind,
                     )
                     if record is None:
                         raise PrivateWorkNotFound(self._context.request_id)
@@ -543,6 +553,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 scope=self._context.resource_scope,
                 thread_id=thread_id,
                 lock=True,
+                thread_kind=self._thread_kind,
             )
             if record is None:
                 raise PrivateWorkNotFound(self._context.request_id)
@@ -635,6 +646,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                 scope=self._context.resource_scope,
                 thread_id=thread_id,
                 lock=True,
+                thread_kind=self._thread_kind,
             )
             if record is None:
                 raise PrivateWorkNotFound(self._context.request_id)
@@ -673,6 +685,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         scope=context.resource_scope,
                         thread_id=thread_id,
                         lock=True,
+                        thread_kind=self._thread_kind,
                     )
                     if record is None:
                         raise PrivateWorkNotFound(context.request_id)
@@ -701,6 +714,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                         scope=context.resource_scope,
                         thread_id=thread_id,
                         expected_version=record.version,
+                        thread_kind=self._thread_kind,
                     )
                     ready_files = (
                         (

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.agents.middleware.types import ModelRequest, ModelResponse
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.graph import END
 from langgraph.runtime import Runtime
+from langgraph.types import Command
 from pydantic import SecretStr, ValidationError
 
 import app.shared_assets.skill_builder_agent_runtime as runtime_module
@@ -701,7 +703,7 @@ async def test_staged_chunks_finalize_checksum_and_resolved_dependencies_once() 
     )
 
     candidate_tool = _tool(toolset, "finalize_skill_candidate")
-    assert candidate_tool.return_direct is True
+    assert candidate_tool.return_direct is False
     result = await candidate_tool.ainvoke(
         {
             "expected_draft_checksum": second["draft_checksum"],
@@ -847,6 +849,88 @@ async def test_terminal_enforcement_fails_closed_without_terminal_tool() -> None
 
     with pytest.raises(SkillBuilderTerminalMissing):
         await middleware.aafter_agent({}, SimpleNamespace())  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_terminal_tool_error_returns_to_model_but_success_exits() -> None:
+    failed_toolset = SkillBuilderToolset(_Catalog(), _DraftSink())
+    failed_middleware = runtime_module._TerminalEnforcementMiddleware(
+        failed_toolset,
+    )
+    request = SimpleNamespace(
+        tool_call={"name": "finalize_skill_candidate", "id": "finalize"},
+    )
+    failure = ToolMessage(
+        content="Terminal validation failed",
+        tool_call_id="finalize",
+        name="finalize_skill_candidate",
+        status="error",
+    )
+
+    assert failed_middleware.wrap_tool_call(request, lambda _request: failure) is failure  # type: ignore[arg-type]
+
+    successful_toolset = SkillBuilderToolset(_Catalog(), _DraftSink())
+    await _tool(successful_toolset, "request_skill_clarification").ainvoke(
+        {
+            "id": "scope",
+            "prompt": "Which scope?",
+            "reason": "The package depends on this choice.",
+            "kind": "single_select",
+            "required": True,
+            "options": ["project", "system"],
+        }
+    )
+    successful_middleware = runtime_module._TerminalEnforcementMiddleware(
+        successful_toolset,
+    )
+    success = ToolMessage(
+        content='{"accepted":true,"terminal":"clarification"}',
+        tool_call_id="clarify",
+        name="request_skill_clarification",
+    )
+    success_request = SimpleNamespace(
+        tool_call={"name": "request_skill_clarification", "id": "clarify"},
+    )
+
+    result = successful_middleware.wrap_tool_call(
+        success_request,  # type: ignore[arg-type]
+        lambda _request: success,
+    )
+
+    assert isinstance(result, Command)
+    assert result.goto == END
+    assert result.update == {"messages": [success]}
+
+
+def test_terminal_enforcement_retries_plain_text_exit_once() -> None:
+    toolset = SkillBuilderToolset(_Catalog(), _DraftSink())
+    middleware = runtime_module._TerminalEnforcementMiddleware(toolset)
+    runtime = Runtime(context={"run_id": "builder-run"})
+    state = {"messages": [AIMessage(content="Candidate files are ready.")]}
+
+    assert middleware.after_model(state, runtime) == {"jump_to": "model"}  # type: ignore[arg-type]
+
+    request = ModelRequest(
+        model=SimpleNamespace(),  # type: ignore[arg-type]
+        messages=[AIMessage(content="Candidate files are ready.")],
+        tools=[],
+        runtime=runtime,
+    )
+    observed: list[object] = []
+
+    def invoke(retry_request: ModelRequest) -> ModelResponse:
+        observed.extend(retry_request.messages)
+        return ModelResponse(result=[AIMessage(content="Still no terminal tool.")])
+
+    middleware.wrap_model_call(request, invoke)
+
+    assert len(request.messages) == 1
+    assert isinstance(observed[-1], HumanMessage)
+    assert observed[-1].name == "skill_builder_terminal_reminder"  # type: ignore[union-attr]
+    assert "SKILL.md" in str(observed[-1].content)  # type: ignore[union-attr]
+    assert middleware.after_model(state, runtime) is None  # type: ignore[arg-type]
+    with pytest.raises(SkillBuilderTerminalMissing):
+        middleware.after_agent(state, runtime)  # type: ignore[arg-type]
 
 
 def test_terminal_enforcement_rejects_parallel_or_mixed_terminal_calls() -> None:
@@ -1057,6 +1141,7 @@ def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
         )
     )
     assert "Keep it concise." in captured["system_prompt"]  # type: ignore[operator]
+    assert 'exactly "SKILL.md"' in captured["system_prompt"]  # type: ignore[operator]
     assert config["metadata"]["agent_name"] == "skill-builder"  # type: ignore[index]
 
     with pytest.raises(SkillBuilderRuntimeError):

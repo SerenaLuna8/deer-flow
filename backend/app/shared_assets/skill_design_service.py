@@ -37,14 +37,24 @@ from app.projects.errors import ProjectForbidden, ProjectNotFound
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
+    AssetNotFound,
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillDesignBaseStale,
+    SkillDesignNoChanges,
+    SkillDesignTargetDeleted,
+    SkillDesignTargetSessionExists,
+    SkillDesignTargetUnsupported,
 )
 from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.project_authoring_catalog import (
     ProjectAuthoringCatalogRepository,
+)
+from app.shared_assets.skill_builder_admission_contract import (
+    SkillBuilderRunAdmission,
+    SkillBuilderRunAdmissionPort,
 )
 from app.shared_assets.skill_builder_contract import (
     SkillBuilderCandidateFileChunk,
@@ -58,10 +68,7 @@ from app.shared_assets.skill_builder_contract import (
     SkillBuilderDraftMutationReceipt,
     SkillBuilderDraftSink,
     SkillBuilderTerminalReceipt,
-)
-from app.shared_assets.skill_builder_run_admission import (
-    SkillBuilderRunAdmission,
-    SkillBuilderRunAdmissionService,
+    _canonical_candidate_path,
 )
 from app.shared_assets.skill_design_generation import (
     DEFAULT_SKILL_DESIGN_TIMEOUT_SECONDS,
@@ -82,6 +89,7 @@ from app.shared_assets.skill_design_generation import (
     contains_secret_like_material,
 )
 from app.shared_assets.skill_design_repository import SkillDesignRepository
+from app.shared_assets.skill_repository import SkillRepository, SkillVersionRecord
 from app.shared_assets.skill_service import (
     CreateSkill,
     ProjectSkillArchiveCreateResult,
@@ -89,6 +97,7 @@ from app.shared_assets.skill_service import (
     SkillAssetView,
     SkillFileChange,
     SkillService,
+    SkillVersionView,
 )
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import JobClaim
@@ -117,6 +126,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
     {
         "uq_skill_design_operations_idempotency",
         "uq_skill_design_sessions_create_idempotency",
+        "uq_skill_design_sessions_live_revise_target",
         "uq_skills_project_display_name",
         "uq_skills_project_slug",
         "uq_skill_versions_asset_number",
@@ -169,6 +179,14 @@ class SkillDesignServiceErrorCode(StrEnum):
 class CreateSkillDesignSession:
     slug: str
     display_name: str
+    idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class CreateSkillDesignRevisionSession:
+    """Open a Builder session seeded from an existing Skill's published base."""
+
+    skill_id: uuid.UUID
     idempotency_key: str
 
 
@@ -274,6 +292,7 @@ class CommitSkillDesignSession:
     expected_draft_checksum: str
     acknowledge_warnings: bool
     idempotency_key: str
+    acknowledge_base_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,6 +309,16 @@ class SkillDesignFileView:
     sha256: str
     encoding: str
     content: str
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDesignBaseFile:
+    """Pinned base-version file identity used for revision diff rendering."""
+
+    path: str
+    media_type: str
+    size_bytes: int
+    sha256: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +363,13 @@ class SkillDesignSessionView:
     updated_at: datetime
     active_run: SkillBuilderRunAdmission | None = None
     authoring_dependencies: SkillBuilderDependencySnapshot | None = None
+    session_kind: str = "create"
+    target_skill_id: uuid.UUID | None = None
+    base_version_id: uuid.UUID | None = None
+    base_version_number: int | None = None
+    base_payload_checksum: str | None = None
+    target_skill_deleted: bool = False
+    base_files: tuple[SkillDesignBaseFile, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,12 +380,14 @@ class SkillDesignSessionSummary:
     status: SkillDesignStatus
     revision: int
     updated_at: datetime
+    session_kind: str = "create"
 
 
 @dataclass(frozen=True, slots=True)
 class SkillDesignCommitResult:
     session: SkillDesignSessionView
     skill: SkillAssetView
+    version: SkillVersionView | None = None
 
 
 class _RepositoryFactory(Protocol):
@@ -502,7 +540,7 @@ class SkillDesignService:
         generator: SkillDesignGenerationService | None = None,
         skill_service: SkillService | None = None,
         repository_factory: _RepositoryFactory = SkillDesignRepository,
-        run_admission: SkillBuilderRunAdmissionService | None = None,
+        run_admission: SkillBuilderRunAdmissionPort | None = None,
         quota: PrivateRunQuotaPort | None = None,
         audit: PrivateRunAuditPort | None = None,
         stale_generating_seconds: float = _DEFAULT_STALE_GENERATING_SECONDS,
@@ -606,6 +644,199 @@ class SkillDesignService:
         except DBAPIError:
             raise AssetStorageUnavailable(context.request_id) from None
 
+    async def create_revision(
+        self,
+        context: ProjectContext,
+        command: CreateSkillDesignRevisionSession,
+    ) -> SkillDesignSessionView:
+        command = self._validate_create_revision(context, command)
+        self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
+        idempotency_hash = self._idempotency_hash(command.idempotency_key)
+        request_checksum = self._request_checksum(
+            {
+                "session_kind": "revise",
+                "skill_id": str(command.skill_id),
+            }
+        )
+        now = self._now()
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    repository = self._repository_factory(session)
+                    await repository.lock_session_create_scope(context)
+                    existing = await repository.get_by_create_idempotency(
+                        context,
+                        idempotency_hash,
+                        for_update=True,
+                    )
+                    if existing is not None:
+                        if existing.create_request_checksum != request_checksum:
+                            raise AssetConflict(context.request_id)
+                        files = await repository.load_draft_files(
+                            context,
+                            existing.id,
+                        )
+                        return self._session_view(
+                            context,
+                            existing,
+                            files,
+                            base_files=await self._base_files_for_row(
+                                repository,
+                                context,
+                                existing,
+                            ),
+                        )
+                    if await repository.count_incomplete(context) >= MAX_INCOMPLETE_SKILL_DESIGN_SESSIONS_PER_OWNER_PROJECT:
+                        raise AssetStorageQuotaExceeded(context.request_id)
+                    skill_repository = SkillRepository(session)
+                    target = await skill_repository.get_project_asset(
+                        context,
+                        command.skill_id,
+                        for_update=True,
+                    )
+                    if target.status not in {"active", "suspended"} or target.current_published_version_id is None:
+                        raise AssetConflict(context.request_id)
+                    if await repository.live_revision_session_exists(
+                        context,
+                        target.id,
+                    ):
+                        raise SkillDesignTargetSessionExists(context.request_id)
+                    record = await skill_repository.get_project_version(
+                        context,
+                        target.id,
+                        target.current_published_version_id,
+                    )
+                    seeded = self._seed_revision_files(context, record)
+                    snapshot = self._draft_snapshot(context, seeded)
+                    if snapshot.draft_checksum != record.row.payload_checksum:
+                        raise SkillDesignTargetUnsupported(context.request_id)
+                    await self._seed_revision_dry_run(context, seeded)
+                    creator = await repository.resolve_current_skill_creator(context)
+                    row = SkillDesignSessionRow(
+                        id=uuid.uuid4(),
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        thread_id=uuid.uuid4(),
+                        slug=target.slug,
+                        display_name=target.display_name,
+                        status=SkillDesignStatus.DRAFT_READY.value,
+                        revision=1,
+                        messages_json=[
+                            self._message_json(
+                                "assistant",
+                                (f"已加载 {target.slug} v{record.row.version_number} 的 {len(seeded)} 个文件，可直接编辑草稿，或描述要修改的内容。"),
+                                now=now,
+                            )
+                        ],
+                        progress_json=self._progress_json(SkillDesignStatus.DRAFT_READY),
+                        active_clarification_json=None,
+                        draft_checksum=snapshot.draft_checksum,
+                        validation_json=None,
+                        validated_draft_checksum=None,
+                        skill_creator_skill_id=creator.skill_id,
+                        skill_creator_version_id=creator.version_id,
+                        skill_creator_payload_checksum=creator.payload_checksum,
+                        error_code=None,
+                        error_message=None,
+                        created_skill_id=None,
+                        created_skill_version_id=None,
+                        created_skill_deleted=False,
+                        session_kind="revise",
+                        target_skill_id=target.id,
+                        base_version_id=record.row.id,
+                        base_version_number=record.row.version_number,
+                        base_payload_checksum=record.row.payload_checksum,
+                        target_skill_deleted=False,
+                        create_idempotency_key_hash=idempotency_hash,
+                        create_request_checksum=request_checksum,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    await repository.create(context, row)
+                    await repository.replace_draft_files(context, row.id, seeded)
+                    return self._session_view(
+                        context,
+                        row,
+                        seeded,
+                        base_files=tuple(
+                            SkillDesignBaseFile(
+                                path=item.path,
+                                media_type=item.media_type,
+                                size_bytes=len(item.content),
+                                sha256=hashlib.sha256(item.content).hexdigest(),
+                            )
+                            for item in seeded
+                        ),
+                    )
+        except SharedAssetError:
+            raise
+        except IntegrityError as exc:
+            self._raise_integrity(context, exc)
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    @staticmethod
+    def _seed_revision_files(
+        context: ProjectContext,
+        record: SkillVersionRecord,
+    ) -> tuple[SkillArchiveFile, ...]:
+        """Copy byte-verified base files, rejecting shapes the Builder cannot hold."""
+
+        try:
+            files = SkillService._verified_archive_files(record, context.request_id)
+        except SharedAssetError:
+            raise SkillDesignTargetUnsupported(context.request_id) from None
+        for item in files:
+            try:
+                _canonical_candidate_path(item.path)
+            except ValueError:
+                raise SkillDesignTargetUnsupported(context.request_id) from None
+        try:
+            return SkillDesignService._validate_builder_files(
+                context,
+                files,
+                allow_empty=False,
+                require_skill_md=True,
+            )
+        except AssetValidationFailed:
+            raise SkillDesignTargetUnsupported(context.request_id) from None
+
+    async def _seed_revision_dry_run(
+        self,
+        context: ProjectContext,
+        files: tuple[SkillArchiveFile, ...],
+    ) -> None:
+        """Re-run frontmatter parsing and SkillScan under current rules."""
+
+        try:
+            await self._skill_service.preview_archive(context, files)
+        except SharedAssetError:
+            raise SkillDesignTargetUnsupported(context.request_id) from None
+
+    @staticmethod
+    async def _base_files_for_row(
+        repository: SkillDesignRepository,
+        context: ProjectContext,
+        row: SkillDesignSessionRow,
+    ) -> tuple[SkillDesignBaseFile, ...]:
+        """Pinned base-version identity for revise sessions, without content."""
+
+        if row.session_kind != "revise" or row.base_version_id is None:
+            return ()
+        metadata = await repository.load_base_file_metadata(
+            context,
+            row.base_version_id,
+        )
+        return tuple(
+            SkillDesignBaseFile(
+                path=item.path,
+                media_type=item.media_type,
+                size_bytes=item.size_bytes,
+                sha256=item.sha256,
+            )
+            for item in metadata
+        )
+
     async def list_incomplete(
         self,
         context: ProjectContext,
@@ -690,6 +921,11 @@ class SkillDesignService:
                         row,
                         files,
                         active_run=active_run,
+                        base_files=await self._base_files_for_row(
+                            repository,
+                            context,
+                            row,
+                        ),
                     )
         except SharedAssetError:
             raise
@@ -816,6 +1052,10 @@ class SkillDesignService:
                     operation.session_id,
                     for_update=True,
                 )
+                if design.session_kind == "revise" and (design.target_skill_deleted or design.target_skill_id is None):
+                    # The revise target was deleted mid-run; fail closed at
+                    # the next tool boundary so the Run settles as failed.
+                    raise AuthorizationRevoked
                 cancel_requested = await PrivateRunRepository(
                     session,
                 ).assert_execution_active(
@@ -860,11 +1100,9 @@ class SkillDesignService:
         context: ProjectContext,
         files: tuple[SkillArchiveFile, ...],
     ) -> _SkillBuilderDraftState:
-        files = SkillDesignService._validate_builder_files(
+        files = SkillDesignService._validate_partial_builder_files(
             context,
             files,
-            allow_empty=True,
-            require_skill_md=False,
         )
         metadata = tuple(
             SkillBuilderDraftFileMetadata(
@@ -1479,6 +1717,7 @@ class SkillDesignService:
                             )
                             return self._session_view(context, row, files)
                         raise AssetConflict(context.request_id)
+                    self._require_revise_target_live(context, row)
                     self._require_expected_revision(
                         context,
                         row,
@@ -1538,6 +1777,7 @@ class SkillDesignService:
                                 current_files,
                             )
                         raise AssetConflict(context.request_id)
+                    self._require_revise_target_live(context, row)
                     self._require_expected_revision(
                         context,
                         row,
@@ -1591,10 +1831,12 @@ class SkillDesignService:
                 "expected_revision": command.expected_revision,
                 "expected_draft_checksum": command.expected_draft_checksum,
                 "acknowledge_warnings": command.acknowledge_warnings,
+                "acknowledge_base_stale": command.acknowledge_base_stale,
             }
         )
         repeated_session: SkillDesignSessionView | None = None
         created_result: ProjectSkillArchiveCreateResult | None = None
+        created_version: SkillVersionView | None = None
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -1605,6 +1847,22 @@ class SkillDesignService:
                         idempotency_key_hash=operation_hash,
                         for_update=True,
                     )
+                    # Lock order: Project → Membership → Skill →
+                    # SkillDesignSession. Read the session without a lock to
+                    # learn the revise target, lock the Skill row first, then
+                    # lock the session row and re-validate what we read.
+                    unlocked = await repository.get(context, session_id)
+                    target_asset = None
+                    if unlocked.session_kind == "revise" and not unlocked.target_skill_deleted and unlocked.target_skill_id is not None:
+                        skill_repository = SkillRepository(session)
+                        try:
+                            target_asset = await skill_repository.get_project_asset(
+                                context,
+                                unlocked.target_skill_id,
+                                for_update=True,
+                            )
+                        except AssetNotFound:
+                            target_asset = None
                     row = await repository.get(
                         context,
                         session_id,
@@ -1639,6 +1897,7 @@ class SkillDesignService:
                             (),
                         )
                     else:
+                        self._require_revise_target_live(context, row)
                         self._require_expected_revision(
                             context,
                             row,
@@ -1672,6 +1931,21 @@ class SkillDesignService:
                             preview,
                         ):
                             raise AssetConflict(context.request_id)
+                        if row.session_kind == "revise":
+                            if row.target_skill_deleted or row.target_skill_id is None or row.base_version_id is None:
+                                raise SkillDesignTargetDeleted(context.request_id)
+                            if target_asset is None or target_asset.id != row.target_skill_id or target_asset.status not in {"active", "suspended"}:
+                                raise AssetConflict(context.request_id)
+                            base_metadata = await repository.load_base_file_metadata(
+                                context,
+                                row.base_version_id,
+                            )
+                            base_identity = {(item.path, item.sha256, item.size_bytes, item.media_type) for item in base_metadata}
+                            draft_identity = {(item.path, item.sha256, item.size_bytes, item.media_type) for item in preview.file_views}
+                            if base_identity == draft_identity:
+                                raise SkillDesignNoChanges(context.request_id)
+                            if target_asset.current_published_version_id != row.base_version_id and not command.acknowledge_base_stale:
+                                raise SkillDesignBaseStale(context.request_id)
                         operation = self._new_operation(
                             context,
                             session_id,
@@ -1682,23 +1956,37 @@ class SkillDesignService:
                         await repository.create_operation(context, operation)
                         row.status = SkillDesignStatus.COMMITTING.value
                         await session.flush()
-                        created_result = await self._skill_service.create_project_from_preview_in_session(
-                            session,
-                            context,
-                            CreateSkill(
-                                slug=row.slug,
-                                display_name=row.display_name,
-                            ),
-                            preview,
-                        )
-                        await repository.clear_draft_files(context, row.id)
+                        if row.session_kind == "revise":
+                            created_version = await self._skill_service.create_project_version_from_preview_in_session(
+                                session,
+                                context,
+                                row.target_skill_id,
+                                preview,
+                                supersedes_version_id=row.base_version_id,
+                            )
+                            row.created_skill_id = row.target_skill_id
+                            row.created_skill_version_id = created_version.id
+                        else:
+                            created_result = await self._skill_service.create_project_from_preview_in_session(
+                                session,
+                                context,
+                                CreateSkill(
+                                    slug=row.slug,
+                                    display_name=row.display_name,
+                                ),
+                                preview,
+                            )
+                            row.created_skill_id = created_result.asset.id
+                            row.created_skill_version_id = created_result.version.id
+                        # Completion CHECK forbids created_skill_* while status is
+                        # still committing. Set the terminal status before any
+                        # follow-up query that would autoflush the session row.
                         row.status = SkillDesignStatus.COMPLETED.value
-                        row.created_skill_id = created_result.asset.id
-                        row.created_skill_version_id = created_result.version.id
                         row.revision += 1
                         row.progress_json = self._progress_json(SkillDesignStatus.COMPLETED)
                         operation.status = "completed"
                         operation.result_revision = row.revision
+                        await repository.clear_draft_files(context, row.id)
                         await session.flush()
                         repeated_session = self._session_view(
                             context,
@@ -1712,15 +2000,33 @@ class SkillDesignService:
                     session=repeated_session,
                     skill=created_result.asset,
                 )
+            if created_version is not None:
+                skill = await self._skill_service.get(
+                    context,
+                    created_version.skill_id,
+                )
+                return SkillDesignCommitResult(
+                    session=repeated_session,
+                    skill=skill,
+                    version=created_version,
+                )
             if repeated_session.created_skill_id is None or row.created_skill_deleted:
                 raise AssetConflict(context.request_id)
             skill = await self._skill_service.get(
                 context,
                 repeated_session.created_skill_id,
             )
+            replayed_version: SkillVersionView | None = None
+            if repeated_session.session_kind == "revise" and row.created_skill_version_id is not None:
+                replayed_version = await self._skill_service.get_project_version_view(
+                    context,
+                    repeated_session.created_skill_id,
+                    row.created_skill_version_id,
+                )
             return SkillDesignCommitResult(
                 session=repeated_session,
                 skill=skill,
+                version=replayed_version,
             )
         except SharedAssetError:
             raise
@@ -1924,6 +2230,7 @@ class SkillDesignService:
                             )
                             return self._session_view(context, row, files)
                         raise AssetConflict(context.request_id)
+                    self._require_revise_target_live(context, row)
                     self._require_expected_revision(
                         context,
                         row,
@@ -2107,6 +2414,7 @@ class SkillDesignService:
                             return self._session_view(context, row, files)
                         raise AssetConflict(context.request_id)
                     else:
+                        self._require_revise_target_live(context, row)
                         self._require_expected_revision(
                             context,
                             row,
@@ -2156,10 +2464,9 @@ class SkillDesignService:
                         context,
                         row.id,
                     )
-                    files = self._validate_builder_files(
+                    files = self._validate_partial_builder_files(
                         context,
                         files,
-                        allow_empty=True,
                     )
                     creator = await repository.load_pinned_skill_creator(
                         context,
@@ -2439,6 +2746,22 @@ class SkillDesignService:
         )
 
     @staticmethod
+    def _validate_create_revision(
+        context: ProjectContext,
+        command: CreateSkillDesignRevisionSession,
+    ) -> CreateSkillDesignRevisionSession:
+        SkillDesignService._require_context(context)
+        if not isinstance(command, CreateSkillDesignRevisionSession):
+            raise AssetValidationFailed(context.request_id)
+        return CreateSkillDesignRevisionSession(
+            skill_id=SkillDesignService._validate_uuid(context, command.skill_id),
+            idempotency_key=SkillDesignService._validate_idempotency_key(
+                context,
+                command.idempotency_key,
+            ),
+        )
+
+    @staticmethod
     def _validate_turn(
         context: ProjectContext,
         command: SubmitSkillDesignTurn,
@@ -2629,6 +2952,7 @@ class SkillDesignService:
             or not isinstance(command.expected_draft_checksum, str)
             or _CHECKSUM_PATTERN.fullmatch(command.expected_draft_checksum) is None
             or type(command.acknowledge_warnings) is not bool
+            or type(command.acknowledge_base_stale) is not bool
         ):
             raise AssetValidationFailed(context.request_id)
         return CommitSkillDesignSession(
@@ -2639,6 +2963,7 @@ class SkillDesignService:
                 context,
                 command.idempotency_key,
             ),
+            acknowledge_base_stale=command.acknowledge_base_stale,
         )
 
     @staticmethod
@@ -2681,6 +3006,16 @@ class SkillDesignService:
             SkillDesignStatus.COMMITTING.value,
         }:
             raise AssetConflict(context.request_id)
+
+    @staticmethod
+    def _require_revise_target_live(
+        context: ProjectContext,
+        row: SkillDesignSessionRow,
+    ) -> None:
+        """A revise session whose target Skill was deleted is terminally dead."""
+
+        if row.session_kind == "revise" and (row.target_skill_deleted or row.target_skill_id is None):
+            raise SkillDesignTargetDeleted(context.request_id)
 
     @staticmethod
     def _require_expected_revision(
@@ -2919,6 +3254,20 @@ class SkillDesignService:
         if require_skill_md and "SKILL.md" not in paths:
             raise AssetValidationFailed(context.request_id)
         return tuple(sorted(snapshot, key=lambda item: item.path))
+
+    @staticmethod
+    def _validate_partial_builder_files(
+        context: ProjectContext,
+        files: tuple[SkillArchiveFile, ...],
+    ) -> tuple[SkillArchiveFile, ...]:
+        """Validate a persisted in-progress draft without requiring completion."""
+
+        return SkillDesignService._validate_builder_files(
+            context,
+            files,
+            allow_empty=True,
+            require_skill_md=False,
+        )
 
     @staticmethod
     def _require_preview_name(
@@ -3171,6 +3520,7 @@ class SkillDesignService:
         files: tuple[SkillArchiveFile, ...],
         *,
         active_run: SkillBuilderRunAdmission | None = None,
+        base_files: tuple[SkillDesignBaseFile, ...] = (),
     ) -> SkillDesignSessionView:
         if contains_secret_like_material(row.messages_json) or (row.active_clarification_json is not None and contains_secret_like_material(row.active_clarification_json)):
             raise AssetValidationFailed(context.request_id)
@@ -3244,6 +3594,13 @@ class SkillDesignService:
                 updated_at=row.updated_at,
                 active_run=active_run,
                 authoring_dependencies=authoring_dependencies,
+                session_kind=row.session_kind,
+                target_skill_id=row.target_skill_id,
+                base_version_id=row.base_version_id,
+                base_version_number=row.base_version_number,
+                base_payload_checksum=row.base_payload_checksum,
+                target_skill_deleted=row.target_skill_deleted,
+                base_files=base_files,
             )
         except (KeyError, TypeError, ValueError, ValidationError):
             raise AssetValidationFailed(context.request_id) from None
@@ -3254,10 +3611,9 @@ class SkillDesignService:
         files: tuple[SkillArchiveFile, ...],
     ) -> tuple[SkillDesignFileView, ...]:
         views: list[SkillDesignFileView] = []
-        for item in SkillDesignService._validate_builder_files(
+        for item in SkillDesignService._validate_partial_builder_files(
             context,
             files,
-            allow_empty=True,
         ):
             try:
                 content = item.content.decode("utf-8")
@@ -3288,6 +3644,7 @@ class SkillDesignService:
             status=SkillDesignStatus(row.status),
             revision=row.revision,
             updated_at=row.updated_at,
+            session_kind=row.session_kind,
         )
 
     @staticmethod
@@ -3371,7 +3728,10 @@ class SkillDesignService:
         context: ProjectContext,
         exc: IntegrityError,
     ) -> None:
-        if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
+        constraint = _constraint_name(exc)
+        if constraint == "uq_skill_design_sessions_live_revise_target":
+            raise SkillDesignTargetSessionExists(context.request_id) from None
+        if constraint in _CONFLICT_CONSTRAINTS:
             raise AssetConflict(context.request_id) from None
         raise AssetStorageUnavailable(context.request_id) from None
 
@@ -3383,8 +3743,10 @@ class SkillDesignService:
 __all__ = [
     "CancelSkillDesignSession",
     "CommitSkillDesignSession",
+    "CreateSkillDesignRevisionSession",
     "CreateSkillDesignSession",
     "MAX_INCOMPLETE_SKILL_DESIGN_SESSIONS_PER_OWNER_PROJECT",
+    "SkillDesignBaseFile",
     "SkillDesignClarificationResponse",
     "SkillDesignClarificationTurn",
     "SkillDesignCommitResult",

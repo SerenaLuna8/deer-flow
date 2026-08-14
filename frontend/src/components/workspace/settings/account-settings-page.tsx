@@ -148,6 +148,10 @@ export function AccountSettingsPage() {
             label={t.settings.account.email}
             value={user?.email ?? "—"}
           />
+          <ProfileField
+            label={t.settings.account.username}
+            value={user?.username ?? "—"}
+          />
           <ProfileField label={t.settings.account.role} value={roleLabel} />
           {isSsoUser ? (
             <ProfileField

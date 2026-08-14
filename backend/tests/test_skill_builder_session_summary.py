@@ -28,3 +28,4 @@ def test_skill_builder_session_summary_exposes_revision_for_safe_deletion() -> N
     )
 
     assert response.revision == 4
+    assert response.session_kind == "create"

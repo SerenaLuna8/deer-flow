@@ -31,12 +31,15 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type { HumanInputResponse } from "@/core/messages/human-input";
 import { useModels } from "@/core/models/hooks";
 import type { Model } from "@/core/models/types";
 import {
   SkillBuilderApiError,
   SKILL_BUILDER_MAX_ATTACHMENT_BYTES,
+  SKILL_BUILDER_MAX_ATTACHMENTS,
   SKILL_BUILDER_MAX_FILE_BYTES,
   SKILL_BUILDER_MAX_MESSAGE_CHARS,
   SKILL_BUILDER_MAX_TOTAL_BYTES,
@@ -56,6 +59,7 @@ import {
   useSubmitSkillBuilderTurn,
   useValidateSkillBuilderSession,
   type SkillBuilderAttachment,
+  type SkillBuilderMergeAttachmentError,
   type SkillBuilderFile,
   type SkillBuilderIdempotencyChannel,
   type SkillBuilderReasoningEffort,
@@ -92,6 +96,7 @@ const SKILL_BUILDER_EFFORT_BY_MODE = {
 
 export function skillBuilderWorkspaceErrorMessage(
   error: unknown,
+  copy: Translations["skills"]["builder"]["errors"],
   commitUncertain = false,
 ): string {
   if (
@@ -103,15 +108,51 @@ export function skillBuilderWorkspaceErrorMessage(
       "SKILL_BUILDER_UNAVAILABLE",
     ].includes(error.code)
   ) {
-    return "创建结果暂时无法确认。请勿重复创建，先返回 Skill 列表检查同名项目；若未出现再重试。";
+    return copy.commitUncertain;
   }
-  if (
-    error instanceof SkillBuilderApiError &&
-    error.code === "SKILL_BUILDER_CONFLICT"
-  ) {
-    return "候选文件已发生变化，请刷新到最新状态后重试。";
+  if (error instanceof SkillBuilderApiError) {
+    if (error.serverCode === "SKILL_DESIGN_TARGET_DELETED") {
+      return copy.targetDeleted;
+    }
+    if (error.serverCode === "SKILL_DESIGN_NO_CHANGES") {
+      return copy.noChanges;
+    }
+    if (error.serverCode === "SKILL_DESIGN_BASE_STALE") {
+      return copy.baseStale;
+    }
+    if (error.code === "SKILL_BUILDER_CONFLICT") {
+      return copy.stale;
+    }
   }
-  return skillBuilderErrorMessage(error);
+  return skillBuilderErrorMessage(error, copy);
+}
+
+export function skillBuilderRevisionCommitSuccessCopy(
+  versionNumber: number | null,
+  copy: Translations["skills"]["builder"]["success"],
+): string {
+  return versionNumber ? copy.withVersion(versionNumber) : copy.withoutVersion;
+}
+
+export function SkillBuilderRevisionCommitSuccess({
+  versionNumber,
+  href,
+}: {
+  versionNumber: number | null;
+  href: string;
+}) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.success;
+  return (
+    <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center px-4 py-16 text-center">
+      <p className="text-sm font-medium">
+        {skillBuilderRevisionCommitSuccessCopy(versionNumber, copy)}
+      </p>
+      <Button asChild type="button" className="mt-6 min-h-11">
+        <Link href={href}>{copy.goPublish}</Link>
+      </Button>
+    </div>
+  );
 }
 
 function SkillBuilderMessageBubble({
@@ -146,13 +187,18 @@ function SkillBuilderMessageBubble({
 }
 
 function SkillBuilderProgress({ session }: { session: SkillBuilderSession }) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.conversation;
   if (session.progress.length === 0) return null;
+  const revising = session.session_kind === "revise";
   return (
     <section
-      aria-label="Skill 创建进度"
+      aria-label={revising ? copy.progressAriaRevise : copy.progressAriaCreate}
       className="border-border/70 bg-muted/20 rounded-2xl border p-4"
     >
-      <p className="mb-3 text-xs font-semibold">创建进度</p>
+      <p className="mb-3 text-xs font-semibold">
+        {revising ? copy.progressRevise : copy.progressCreate}
+      </p>
       <ol className="space-y-2">
         {session.progress.map((item) => (
           <li key={item.id} className="flex items-center gap-2 text-xs">
@@ -228,6 +274,9 @@ export function SkillBuilderConversationView({
   onSelectModel?: (name: string) => void;
   onSelectThinkingMode?: (mode: AgentMode) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.conversation;
+  const errors = t.skills.builder.errors;
   const composerDisabled =
     skillBuilderComposerDisabled(session, pending, dirty) || !canAuthor;
   const projectedMessageIds = new Set(
@@ -239,6 +288,12 @@ export function SkillBuilderConversationView({
     ) ?? [];
   const activeClarification =
     runProjection?.clarification ?? session.active_clarification;
+  const lastAssistantMessage = [...session.messages]
+    .reverse()
+    .find((message) => message.role === "assistant");
+  const terminalErrorAlreadyMessaged =
+    Boolean(session.error_message) &&
+    lastAssistantMessage?.content.trim() === session.error_message?.trim();
   const clarificationOpen = Boolean(activeClarification);
   const generating =
     Boolean(pendingUserMessage) ||
@@ -246,6 +301,13 @@ export function SkillBuilderConversationView({
     Boolean(runProjection && skillBuilderRunIsActive(runProjection.status)) ||
     session.status === "generating" ||
     session.status === "committing";
+  const activeRunActivityVisible =
+    Boolean(session.activeRun) ||
+    Boolean(runProjection && skillBuilderRunIsActive(runProjection.status)) ||
+    Boolean(runPresentation && skillBuilderRunIsActive(runPresentation.status));
+  const showStandaloneGeneratingStatus =
+    session.status === "committing" ||
+    (generating && !activeRunActivityVisible);
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -257,22 +319,47 @@ export function SkillBuilderConversationView({
       <div className="mx-auto w-full max-w-(--chat-content-width) flex-1 space-y-6 p-4 sm:p-5">
         <SkillBuilderProgress session={session} />
 
+        {session.target_skill_deleted ? (
+          <p
+            role="alert"
+            className="border-destructive/30 bg-destructive/5 text-destructive rounded-xl border p-4 text-sm"
+          >
+            {errors.targetDeletedBanner}
+          </p>
+        ) : null}
+
         {!canAuthor ? (
           <p
             role="alert"
             className="border-border/70 bg-muted/20 text-muted-foreground rounded-xl border px-4 py-3 text-sm"
           >
-            当前账号没有继续创建 Skill
-            的权限。你仍可查看已保存的会话和候选文件。
+            {session.session_kind === "revise"
+              ? copy.permissionReadOnlyRevise
+              : copy.permissionReadOnlyCreate}
           </p>
         ) : null}
 
-        {session.messages.length === 0 && projectedMessages.length === 0 ? (
+        {session.messages.length === 0 &&
+        projectedMessages.length === 0 &&
+        !session.target_skill_deleted ? (
           <div className="flex justify-end">
             <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
-              新 Skill 的名称是{" "}
-              <span className="font-semibold">{session.display_name}</span>
-              。请描述用途、触发条件、输入输出和需要的参考资料或脚本。
+              {session.session_kind === "revise" ? (
+                <>
+                  {copy.reviseIntroBefore}{" "}
+                  <span className="font-semibold">{session.slug}</span>
+                  {session.base_version_number
+                    ? ` v${session.base_version_number}`
+                    : ""}{" "}
+                  {copy.reviseIntroAfter}
+                </>
+              ) : (
+                <>
+                  {copy.createIntroBefore}{" "}
+                  <span className="font-semibold">{session.display_name}</span>
+                  {copy.createIntroAfter}
+                </>
+              )}
             </p>
           </div>
         ) : null}
@@ -324,19 +411,23 @@ export function SkillBuilderConversationView({
           </section>
         ) : null}
 
-        {generating ? (
+        {showStandaloneGeneratingStatus ? (
           <p
             role="status"
             className="text-muted-foreground flex items-center gap-2 text-xs"
           >
             <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
             {session.status === "committing"
-              ? "正在创建 Skill…"
-              : "Builder Agent 正在处理…"}
+              ? session.session_kind === "revise"
+                ? copy.creatingDraft
+                : copy.creatingSkill
+              : copy.processing}
           </p>
         ) : null}
 
-        {session.status === "failed" && session.error_message ? (
+        {session.status === "failed" &&
+        session.error_message &&
+        !terminalErrorAlreadyMessaged ? (
           session.error_code === "MODEL_OUTPUT_LIMIT" ? null : (
             <p
               role="alert"
@@ -354,7 +445,7 @@ export function SkillBuilderConversationView({
         ) : null}
       </div>
 
-      {canAuthor ? (
+      {canAuthor && !session.target_skill_deleted ? (
         <form
           className="bg-background/95 border-border/70 sticky bottom-0 mx-auto mt-8 mb-3 w-[calc(100%-1.5rem)] max-w-(--chat-content-width) rounded-2xl border p-2 shadow-lg backdrop-blur"
           onSubmit={submit}
@@ -365,18 +456,24 @@ export function SkillBuilderConversationView({
             onRemove={(name) => onRemoveAttachment?.(name)}
           />
           <Textarea
-            aria-label="描述想要的 Skill"
+            aria-label={
+              session.session_kind === "revise"
+                ? copy.composerAriaRevise
+                : copy.composerAriaCreate
+            }
             value={composerText}
             maxLength={SKILL_BUILDER_MAX_MESSAGE_CHARS}
             disabled={composerDisabled}
             placeholder={
               dirty
-                ? "请先保存或放弃右侧文件修改"
+                ? copy.saveLocalChangesFirst
                 : clarificationOpen
-                  ? "等待你回答上方问题"
+                  ? copy.answerQuestionFirst
                   : generating
-                    ? "正在生成候选文件…"
-                    : "继续描述或要求调整候选 Skill。"
+                    ? copy.generatingFiles
+                    : session.session_kind === "revise"
+                      ? copy.placeholderRevise
+                      : copy.placeholderCreate
             }
             className="min-h-20 resize-none rounded-xl border-0 px-3 py-3 text-sm shadow-none focus-visible:ring-0"
             onChange={(event) => onComposerTextChange(event.target.value)}
@@ -408,7 +505,7 @@ export function SkillBuilderConversationView({
               type="submit"
               size="icon"
               className="size-10 shrink-0 rounded-xl"
-              aria-label="发送"
+              aria-label={copy.send}
               disabled={composerDisabled || composerText.trim().length === 0}
             >
               {pending ? (
@@ -472,8 +569,23 @@ type SkillBuilderTrackedRun = {
   >;
 };
 
+function skillBuilderAttachmentError(
+  code: SkillBuilderMergeAttachmentError,
+  copy: Translations["skills"]["builder"]["errors"],
+): string {
+  if (code === "too_large") return copy.attachmentTooLarge;
+  if (code === "invalid_name") return copy.attachmentInvalidName;
+  if (code === "too_many")
+    return copy.attachmentTooMany(SKILL_BUILDER_MAX_ATTACHMENTS);
+  return copy.attachmentTotalTooLarge;
+}
+
 export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const { user } = useAuth();
+  const { t } = useI18n();
+  const conversation = t.skills.builder.conversation;
+  const dialogs = t.skills.builder.dialogs;
+  const errors = t.skills.builder.errors;
   const project = useCurrentProject();
   const router = useRouter();
   const accountId = user?.id ?? "";
@@ -520,6 +632,10 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   >(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
+  const [baseStaleOpen, setBaseStaleOpen] = useState(false);
+  const [createdDraftVersion, setCreatedDraftVersion] = useState<number | null>(
+    null,
+  );
   const [pendingLeave, setPendingLeave] =
     useState<SkillBuilderPendingLeave | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -582,7 +698,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     ? (drafts[selectedFile.path] ?? selectedFile.content)
     : "";
   const fileEditingAllowed =
-    session?.status === "draft_ready" || session?.status === "validated";
+    (session?.status === "draft_ready" || session?.status === "validated") &&
+    !session.target_skill_deleted;
+  const revising = session?.session_kind === "revise";
   const draftBaselineStale = Boolean(
     dirty &&
     draftBaselineChecksum &&
@@ -617,13 +735,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     if (!session) return;
     const sameSession = observedFilesSessionRef.current === session.id;
     const previousFiles = sameSession ? previousFilesRef.current : [];
-    if (sameSession && previousFiles.length === 0 && session.files.length > 0) {
-      setWorkbenchOpen(true);
-    }
     if (!sameSession) {
       observedFilesSessionRef.current = session.id;
-      setWorkbenchOpen(false);
+      setWorkbenchOpen(session.files.length > 0);
       setMobileSurface("conversation");
+    } else if (previousFiles.length === 0 && session.files.length > 0) {
+      setWorkbenchOpen(true);
     }
     setSelectedPath((current) =>
       reconcileSkillBuilderFileSelection(current, previousFiles, session.files),
@@ -774,7 +891,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     let next = composerAttachments;
     for (const file of files) {
       if (file.size > SKILL_BUILDER_MAX_ATTACHMENT_BYTES) {
-        setLocalError("单个附件不能超过 256 KB。");
+        setLocalError(errors.attachmentTooLarge);
         return;
       }
       let content: string;
@@ -783,7 +900,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           await file.arrayBuffer(),
         );
       } catch {
-        setLocalError(`「${file.name}」不是 UTF-8 文本文件。`);
+        setLocalError(errors.attachmentNotUtf8(file.name));
         return;
       }
       const merged = skillBuilderMergeAttachment(next, {
@@ -791,7 +908,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
         content,
       });
       if (!merged.ok) {
-        setLocalError(merged.error);
+        setLocalError(skillBuilderAttachmentError(merged.error, errors));
         return;
       }
       next = merged.attachments;
@@ -833,7 +950,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       0,
     );
     if (totalBytes > SKILL_BUILDER_MAX_TOTAL_BYTES) {
-      setLocalError("候选文件包不能超过 2 MiB。");
+      setLocalError(errors.packageTooLarge);
       return;
     }
     resetErrors();
@@ -990,7 +1107,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     });
   }
 
-  function confirmCommit() {
+  function confirmCommit(acknowledgeBaseStale = false) {
     const draftChecksum = session?.draft_checksum;
     if (
       !draftChecksum ||
@@ -1006,22 +1123,38 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       draft_checksum: draftChecksum,
       expected_revision: session.revision,
       acknowledge_warnings: acknowledgeWarnings,
+      acknowledge_base_stale: acknowledgeBaseStale,
     });
     const command = idempotency.acquire("commit", signature, (key) => ({
       expected_revision: session.revision,
       expected_draft_checksum: draftChecksum,
       acknowledge_warnings: acknowledgeWarnings,
+      ...(acknowledgeBaseStale ? { acknowledge_base_stale: true } : {}),
       idempotency_key: key,
     }));
     commit.mutate(command, {
       onSuccess: (response) => {
         idempotency.complete("commit", signature);
         setCommitOpen(false);
+        setBaseStaleOpen(false);
+        if (response.data.session.session_kind === "revise") {
+          setCreatedDraftVersion(response.data.version?.version_number ?? null);
+          return;
+        }
         router.replace(
           `/projects/${encodeURIComponent(project.slug)}/skills?skill_id=${encodeURIComponent(response.data.skill.id)}`,
         );
       },
-      onError: (error) => refreshAfterConflict("commit", signature, error),
+      onError: (error) => {
+        refreshAfterConflict("commit", signature, error);
+        if (
+          error instanceof SkillBuilderApiError &&
+          error.serverCode === "SKILL_DESIGN_BASE_STALE"
+        ) {
+          setCommitOpen(false);
+          setBaseStaleOpen(true);
+        }
+      },
     });
   }
 
@@ -1049,13 +1182,13 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const requestError =
     localError ??
     (submitTurn.error
-      ? skillBuilderWorkspaceErrorMessage(submitTurn.error)
+      ? skillBuilderWorkspaceErrorMessage(submitTurn.error, errors)
       : validate.error
-        ? skillBuilderWorkspaceErrorMessage(validate.error)
-        : commit.error
-          ? skillBuilderWorkspaceErrorMessage(commit.error, true)
+        ? skillBuilderWorkspaceErrorMessage(validate.error, errors)
+        : commit.error && !baseStaleOpen
+          ? skillBuilderWorkspaceErrorMessage(commit.error, errors, true)
           : cancel.error
-            ? skillBuilderWorkspaceErrorMessage(cancel.error)
+            ? skillBuilderWorkspaceErrorMessage(cancel.error, errors)
             : null);
 
   if (!user) return null;
@@ -1071,7 +1204,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               type="button"
               size="icon"
               variant="ghost"
-              aria-label="返回 Skill 列表"
+              aria-label={conversation.backToSkills}
               onClick={() =>
                 setPendingLeave({ href: listHref, viaHistory: false })
               }
@@ -1080,23 +1213,32 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             </Button>
           ) : (
             <Button asChild type="button" size="icon" variant="ghost">
-              <Link href={listHref} aria-label="稍后继续，返回 Skill 列表">
+              <Link href={listHref} aria-label={conversation.continueLater}>
                 <ArrowLeftIcon aria-hidden className="size-4" />
               </Link>
             </Button>
           )}
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold">
-              {session?.display_name ?? "创建 Skill"}
+              {session?.display_name ?? conversation.fallbackTitle}
             </p>
             <p className="text-muted-foreground truncate text-xs">
-              {dirty
-                ? "有未保存修改"
-                : session?.activeRun || session?.status === "generating"
-                  ? "Builder Agent 正在执行"
-                  : validationCurrent
-                    ? "已检查，可创建"
-                    : "已自动保存，可稍后继续"}
+              {session?.target_skill_deleted
+                ? errors.targetDeletedStatus
+                : revising && session?.base_version_number
+                  ? conversation.revisingBanner(
+                      session.slug,
+                      session.base_version_number,
+                    )
+                  : dirty
+                    ? conversation.unsavedChanges
+                    : session?.activeRun || session?.status === "generating"
+                      ? conversation.agentRunning
+                      : validationCurrent
+                        ? revising
+                          ? conversation.checkedRevise
+                          : conversation.checkedCreate
+                        : conversation.autosave}
             </p>
           </div>
           <SkillBuilderFilesTrigger
@@ -1113,7 +1255,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   type="button"
                   size="icon"
                   variant="ghost"
-                  aria-label="更多操作"
+                  aria-label={conversation.more}
                   disabled={!session || mutationPending}
                 >
                   <MoreHorizontalIcon aria-hidden className="size-4" />
@@ -1126,7 +1268,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   onSelect={() => setCancelOpen(true)}
                 >
                   <Trash2Icon aria-hidden className="size-4" />
-                  放弃本次创建
+                  {revising
+                    ? conversation.abandonRevise
+                    : conversation.abandonCreate}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
@@ -1139,8 +1283,8 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           <div className="mx-auto max-w-xl px-4 py-16 text-center">
             <p role="alert" className="text-destructive text-sm">
               {sessionQuery.error
-                ? skillBuilderErrorMessage(sessionQuery.error)
-                : "Skill 设计会话暂时不可用。"}
+                ? skillBuilderErrorMessage(sessionQuery.error, errors)
+                : conversation.sessionUnavailable}
             </p>
             <Button
               type="button"
@@ -1149,9 +1293,18 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               disabled={sessionQuery.isFetching}
               onClick={() => void sessionQuery.refetch()}
             >
-              {sessionQuery.isFetching ? "重试中…" : "重试"}
+              {sessionQuery.isFetching
+                ? conversation.retrying
+                : conversation.retry}
             </Button>
           </div>
+        ) : revising &&
+          session.status === "completed" &&
+          session.created_skill_id ? (
+          <SkillBuilderRevisionCommitSuccess
+            versionNumber={createdDraftVersion}
+            href={`${listHref}?skill_id=${encodeURIComponent(session.created_skill_id)}`}
+          />
         ) : (
           <div
             className={cn(
@@ -1161,7 +1314,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             )}
           >
             <section
-              aria-label="Skill 创建对话"
+              aria-label={conversation.conversationAria}
               className={cn(
                 "min-h-0 overflow-y-auto overscroll-contain",
                 mobileSurface === "workbench" && "hidden lg:block",
@@ -1198,7 +1351,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             </section>
             {workbenchOpen ? (
               <section
-                aria-label="Skill 工作台"
+                aria-label={conversation.workbenchAria}
                 className={cn(
                   "border-border/70 min-h-0 lg:border-l",
                   mobileSurface === "conversation" && "hidden lg:block",
@@ -1221,6 +1374,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   canCommit={skillBuilderCanCommit(session) && !dirty}
                   acknowledgeWarnings={acknowledgeWarnings}
                   baselineStale={draftBaselineStale}
+                  sessionKind={session.session_kind}
+                  baseFiles={session.base_files}
+                  baseVersionNumber={session.base_version_number}
                   errorMessage={requestError}
                   onSelectPath={(path) => {
                     setSelectedPath(path);
@@ -1233,7 +1389,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                       new TextEncoder().encode(content).byteLength >
                       SKILL_BUILDER_MAX_FILE_BYTES
                     ) {
-                      setLocalError("单个候选文件不能超过 512 KiB。");
+                      setLocalError(errors.fileTooLarge);
                       return;
                     }
                     if (!dirty && content !== selectedFile.content) {
@@ -1279,16 +1435,24 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       <Dialog open={commitOpen} onOpenChange={setCommitOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>创建 Skill？</DialogTitle>
+            <DialogTitle>
+              {revising ? dialogs.commitTitleRevise : dialogs.commitTitleCreate}
+            </DialogTitle>
             <DialogDescription>
-              将在项目 {project.display_name} 中原子创建并发布版本 1。Skill
-              创建后保持停用，不会自动加入任何 Agent。
+              {revising
+                ? dialogs.commitDescriptionRevise(
+                    session?.slug ?? "",
+                    String(session?.base_version_number ?? "-"),
+                  )
+                : dialogs.commitDescriptionCreate(project.display_name)}
             </DialogDescription>
           </DialogHeader>
           <div className="bg-muted/35 rounded-xl p-4 text-sm">
             <p className="font-medium">{session?.display_name}</p>
             <p className="text-muted-foreground mt-1 text-xs">
-              {session?.files.length ?? 0} 个文件 · 默认停用
+              {revising
+                ? dialogs.fileMetaRevise(session?.files.length ?? 0)
+                : dialogs.fileMetaCreate(session?.files.length ?? 0)}
             </p>
           </div>
           <DialogFooter>
@@ -1298,17 +1462,78 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               disabled={commit.isPending}
               onClick={() => setCommitOpen(false)}
             >
-              返回检查
+              {dialogs.backToReview}
             </Button>
             <Button
               type="button"
               disabled={commit.isPending}
-              onClick={confirmCommit}
+              onClick={() => confirmCommit(false)}
             >
               {commit.isPending ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : null}
-              {commit.isPending ? "正在创建…" : "确认创建"}
+              {commit.isPending
+                ? revising
+                  ? dialogs.creatingVersion
+                  : dialogs.creating
+                : revising
+                  ? dialogs.confirmCreateVersion
+                  : dialogs.confirmCreate}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={baseStaleOpen}
+        onOpenChange={(open) => {
+          if (commit.isPending) return;
+          setBaseStaleOpen(open);
+          if (!open) commit.reset();
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{dialogs.staleTitle}</DialogTitle>
+            <DialogDescription>
+              {dialogs.staleDescription(
+                String(session?.base_version_number ?? "-"),
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          {commit.error &&
+          !(
+            commit.error instanceof SkillBuilderApiError &&
+            commit.error.serverCode === "SKILL_DESIGN_BASE_STALE"
+          ) ? (
+            <p role="alert" className="text-destructive text-sm">
+              {skillBuilderWorkspaceErrorMessage(commit.error, errors, true)}
+            </p>
+          ) : null}
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={commit.isPending}
+              onClick={() => {
+                setBaseStaleOpen(false);
+                commit.reset();
+              }}
+            >
+              {dialogs.backToReview}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={commit.isPending}
+              onClick={() => confirmCommit(true)}
+            >
+              {commit.isPending ? (
+                <Loader2Icon aria-hidden className="size-4 animate-spin" />
+              ) : null}
+              {commit.isPending
+                ? dialogs.creatingVersion
+                : dialogs.confirmOverwrite}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1317,9 +1542,15 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃本次 Skill 创建？</DialogTitle>
+            <DialogTitle>
+              {revising
+                ? dialogs.abandonTitleRevise
+                : dialogs.abandonTitleCreate}
+            </DialogTitle>
             <DialogDescription>
-              这个设计会话将结束，候选文件包会被清理，且不再显示在未完成列表中。
+              {revising
+                ? dialogs.abandonDescriptionRevise
+                : dialogs.abandonDescriptionCreate}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -1329,7 +1560,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               disabled={cancel.isPending}
               onClick={() => setCancelOpen(false)}
             >
-              继续创建
+              {revising ? dialogs.continueRevise : dialogs.continueCreate}
             </Button>
             <Button
               type="button"
@@ -1337,7 +1568,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               disabled={cancel.isPending}
               onClick={confirmCancel}
             >
-              {cancel.isPending ? "正在放弃…" : "确认放弃"}
+              {cancel.isPending ? dialogs.abandoning : dialogs.confirmAbandon}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1351,10 +1582,8 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>放弃未保存修改？</DialogTitle>
-            <DialogDescription>
-              Skill Builder 会话仍会保留，但本次文件修改不会保存。
-            </DialogDescription>
+            <DialogTitle>{dialogs.discardTitle}</DialogTitle>
+            <DialogDescription>{dialogs.discardDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -1362,7 +1591,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               variant="outline"
               onClick={() => setPendingLeave(null)}
             >
-              继续编辑
+              {dialogs.continueEditing}
             </Button>
             <Button
               type="button"
@@ -1386,7 +1615,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 }
               }}
             >
-              放弃修改并离开
+              {dialogs.discardAndLeave}
             </Button>
           </DialogFooter>
         </DialogContent>

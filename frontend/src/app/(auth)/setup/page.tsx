@@ -29,6 +29,7 @@ import {
   isSystemAlreadyInitializedError,
 } from "@/core/auth/setup";
 import { parseAuthError, userSchema } from "@/core/auth/types";
+import { parseUsername } from "@/core/auth/username";
 import { useI18n } from "@/core/i18n/hooks";
 
 type SetupMode = "loading" | "unavailable" | "init_admin" | "change_password";
@@ -42,6 +43,7 @@ export default function SetupPage() {
 
   // --- Shared state ---
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(true);
@@ -96,12 +98,16 @@ export default function SetupPage() {
   }, [checkSetupStatus, isAuthenticated, user, router]);
 
   // ── Init-admin handler ─────────────────────────────────────────────
-  const handleInitAdmin = async (e: React.SubmitEvent) => {
+  const handleInitAdmin = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
     if (newPassword !== confirmPassword) {
       setError(t.setup.passwordMismatch);
+      return;
+    }
+    if (!parseUsername(username)) {
+      setError(t.setup.usernameInvalid);
       return;
     }
 
@@ -119,6 +125,7 @@ export default function SetupPage() {
           body: JSON.stringify(
             buildRememberingCredentialPayload({
               email,
+              username,
               password: newPassword,
               rememberMe,
             }),
@@ -134,7 +141,15 @@ export default function SetupPage() {
           return;
         }
         const authError = parseAuthError(data);
-        setError(authError.message);
+        setError(
+          authError.code === "username_already_exists"
+            ? t.login.usernameTaken
+            : authError.code === "invalid_username"
+              ? t.setup.usernameInvalid
+              : authError.code === "email_already_exists"
+                ? t.login.emailTaken
+                : authError.message,
+        );
         return;
       }
 
@@ -158,7 +173,7 @@ export default function SetupPage() {
   };
 
   // ── Change-password handler ────────────────────────────────────────
-  const handleChangePassword = async (e: React.SubmitEvent) => {
+  const handleChangePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -283,6 +298,26 @@ export default function SetupPage() {
             </p>
           </div>
           <form onSubmit={handleInitAdmin} className="space-y-2">
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="username" className="text-sm font-medium">
+                {t.setup.username}
+              </label>
+              <Input
+                id="username"
+                type="text"
+                autoComplete="username"
+                placeholder={t.setup.usernamePlaceholder}
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+                minLength={3}
+                maxLength={32}
+                pattern="[A-Za-z][A-Za-z0-9_]{2,31}"
+              />
+              <p className="text-muted-foreground text-xs">
+                {t.setup.usernameHint}
+              </p>
+            </div>
             <div className="flex flex-col space-y-1">
               <label htmlFor="email" className="text-sm font-medium">
                 {t.setup.email}

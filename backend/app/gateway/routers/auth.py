@@ -31,6 +31,7 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse, TokenError
+from app.gateway.auth.identity import DuplicateUserIdentity
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -64,6 +65,7 @@ from app.gateway.auth.sessions import (
     revoke_all_access_sessions,
 )
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+from app.gateway.auth.username import UsernameInvalid, parse_username
 from app.gateway.csrf_middleware import (
     CSRF_COOKIE_NAME,
     _request_origin,
@@ -251,14 +253,46 @@ def _validate_strong_password(value: str) -> str:
     return value
 
 
+def _validate_username(value: str) -> str:
+    try:
+        return parse_username(value)
+    except UsernameInvalid as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def _user_response(user) -> UserResponse:
+    return UserResponse(
+        id=str(user.id),
+        email=user.email,
+        username=user.username,
+        system_role=user.system_role,
+        needs_setup=user.needs_setup,
+        oauth_provider=user.oauth_provider,
+    )
+
+
+def _duplicate_identity_http_error(exc: DuplicateUserIdentity) -> HTTPException:
+    if exc.field == "username":
+        return HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(code=AuthErrorCode.USERNAME_ALREADY_EXISTS, message="Username already registered").model_dump(),
+        )
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
+    )
+
+
 class RegisterRequest(BaseModel):
     """Request model for user registration."""
 
     email: EmailStr
+    username: str = Field(..., min_length=3, max_length=32)
     password: str = Field(..., min_length=8)
     remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+    _valid_username = field_validator("username")(classmethod(lambda cls, v: _validate_username(v)))
 
 
 class ChangePasswordRequest(BaseModel):
@@ -450,7 +484,7 @@ async def login_local(
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email or password").model_dump(),
+            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Incorrect email, username, or password").model_dump(),
         )
 
     await _clear_auth_attempts(
@@ -490,12 +524,19 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         request,
     )
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
-    except ValueError:
+        user = await get_local_provider().create_user(
+            email=body.email,
+            username=body.username,
+            password=body.password,
+            system_role="user",
+        )
+    except DuplicateUserIdentity as exc:
+        raise _duplicate_identity_http_error(exc) from None
+    except UsernameInvalid as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-        )
+            detail=AuthErrorResponse(code=AuthErrorCode.INVALID_USERNAME, message=str(exc)).model_dump(),
+        ) from None
 
     token = await _issue_session(user)
     _set_session_cookie(
@@ -505,7 +546,7 @@ async def register(request: Request, response: Response, body: RegisterRequest):
         remember_me=body.remember_me,
     )
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
+    return _user_response(user)
 
 
 @router.post("/logout", response_model=MessageResponse)
@@ -612,13 +653,7 @@ async def change_password(request: Request, response: Response, body: ChangePass
 async def get_me(request: Request):
     """Get current authenticated user info."""
     user = await get_current_user_from_request(request)
-    return UserResponse(
-        id=str(user.id),
-        email=user.email,
-        system_role=user.system_role,
-        needs_setup=user.needs_setup,
-        oauth_provider=user.oauth_provider,
-    )
+    return _user_response(user)
 
 
 # Per-IP cache: ip → (timestamp, needs_setup).
@@ -737,10 +772,12 @@ class InitializeAdminRequest(BaseModel):
     """Request model for first-boot admin account creation."""
 
     email: EmailStr
+    username: str = Field(..., min_length=3, max_length=32)
     password: str = Field(..., min_length=8)
     remember_me: bool = True
 
     _strong_password = field_validator("password")(classmethod(lambda cls, v: _validate_strong_password(v)))
+    _valid_username = field_validator("username")(classmethod(lambda cls, v: _validate_username(v)))
 
 
 @router.post("/initialize", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -765,21 +802,24 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
             try:
                 user = await get_local_provider().create_user(
                     email=body.email,
+                    username=body.username,
                     password=body.password,
                     system_role="system_admin",
                     needs_setup=False,
                 )
-            except ValueError:
+            except DuplicateUserIdentity as exc:
                 admin_count = await get_local_provider().count_admin_users()
                 if admin_count == 0:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-                    )
+                    raise _duplicate_identity_http_error(exc) from None
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-                )
+                ) from None
+            except UsernameInvalid as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=AuthErrorResponse(code=AuthErrorCode.INVALID_USERNAME, message=str(exc)).model_dump(),
+                ) from None
 
             try:
                 factory = get_session_factory()
@@ -808,7 +848,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
         remember_me=body.remember_me,
     )
 
-    return UserResponse(id=str(user.id), email=user.email, system_role=user.system_role, oauth_provider=user.oauth_provider)
+    return _user_response(user)
 
 
 # ── OIDC / SSO Endpoints ────────────────────────────────────────────────

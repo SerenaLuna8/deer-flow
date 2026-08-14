@@ -2,12 +2,19 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { SkillBuilderRunActivity } from "@/components/projects/skills/skill-builder-run-activity";
+import { I18nProvider } from "@/core/i18n/context";
+
+function renderUi(node: React.ReactNode) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">{node}</I18nProvider>,
+  );
+}
 
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("SkillBuilderRunActivity", () => {
   test("shows an explicit empty state before tool events are available", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderRunActivity
         activeRun={{
           runId: RUN_ID,
@@ -19,11 +26,11 @@ describe("SkillBuilderRunActivity", () => {
 
     expect(html).toContain("正在执行");
     expect(html).toContain("尚无工具步骤");
-    expect(html).toContain("当前后端仅提供了可靠的 Run 状态");
+    expect(html).not.toContain("当前后端仅提供了可靠的 Run 状态");
   });
 
   test("renders only projected tool names and statuses", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderRunActivity
         projection={{
           runId: RUN_ID,
@@ -46,7 +53,7 @@ describe("SkillBuilderRunActivity", () => {
   });
 
   test("keeps the terminal outcome visible after activeRun is removed", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderRunActivity
         presentation={{ runId: RUN_ID, status: "cancelled" }}
       />,
@@ -56,7 +63,7 @@ describe("SkillBuilderRunActivity", () => {
   });
 
   test("explains how to resume after the model output limit", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderRunActivity
         presentation={{ runId: RUN_ID, status: "error" }}
         failureCode="MODEL_OUTPUT_LIMIT"

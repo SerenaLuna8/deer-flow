@@ -191,7 +191,7 @@ export function ProjectContextProvider({
       >
         <ProjectShell
           project={entry.project}
-          accountEmail={user.email}
+          accountUsername={user.username}
           systemRole={user.system_role}
           onLogout={logout}
         >

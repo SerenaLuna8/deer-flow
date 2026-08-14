@@ -2061,6 +2061,273 @@ export const enUS: Translations = {
     },
   },
 
+  skills: {
+    builder: {
+      errors: {
+        unavailable:
+          "The Skill design service is unavailable. Try again later.",
+        modelUnavailable:
+          "The selected model is unavailable. Choose another model.",
+        effortUnsupported:
+          "The selected model does not support extended thinking. Adjust thinking intensity.",
+        conflict: "A Skill with that name already exists in this project.",
+        forbidden: "Your account cannot create Skills.",
+        notFound: "This Skill design session no longer exists.",
+        limitExceeded:
+          "You have reached the unfinished Skill design session limit. Continue or abandon an existing session first.",
+        validationFailed:
+          "The candidate files did not pass checks. Fix them and try again.",
+        invalidResponse:
+          "The Skill design service returned an unexpected result. Try again.",
+        network:
+          "Could not reach the Skill design service. Check your connection and retry.",
+        commitUncertain:
+          "The creation result could not be confirmed. Do not create a duplicate. Check the Skill list first, then retry only if it is absent.",
+        stale:
+          "The candidate files changed on the server. Reload the latest state and try again.",
+        targetDeleted:
+          "The target Skill was deleted, so this revision session cannot continue. Return to the Skill list to create a new one.",
+        targetDeletedBanner:
+          "The target Skill was deleted, so this revision session cannot continue. Return to the Skill list to create a new one, or abandon this session.",
+        targetDeletedStatus:
+          "The target Skill was deleted; this revision cannot continue",
+        noChanges:
+          "The draft matches the baseline exactly, so a new version is not needed. Edit a file before submitting.",
+        baseStale:
+          "A newer version is already published. This revision is based on an older baseline. Confirm overwrite when you submit, then try again.",
+        targetSessionExists:
+          "This Skill already has an unfinished revision session. Continue or abandon it from the unfinished list above the Skill list.",
+        targetUnsupported:
+          "The current published version cannot be opened for conversational revision (size or content is outside Builder support). Create a new version by editing files instead.",
+        targetConflict:
+          "The Skill changed (it may have been deleted, archived, or unpublished). Refresh and try again.",
+        attachmentTooLarge: "Each attachment must be 256 KB or smaller.",
+        attachmentNotUtf8: (name) => `“${name}” is not a UTF-8 text file.`,
+        attachmentInvalidName:
+          "The attachment name contains unsupported characters. Rename it and try again.",
+        attachmentTooMany: (max) =>
+          `You can attach at most ${max} reference files at a time.`,
+        attachmentTotalTooLarge:
+          "Attachments together must be 512 KB or smaller.",
+        packageTooLarge: "The candidate file package must be 2 MiB or smaller.",
+        fileTooLarge: "Each candidate file must be 512 KiB or smaller.",
+      },
+      start: {
+        title: "Name your new Skill",
+        hint: "The name becomes the immutable SKILL.md frontmatter name and is stored as lowercase hyphenated text.",
+        nameLabel: "Skill name",
+        placeholder: "For example, paper-review",
+        savedAs: (value) => `Will be saved as ${value}`,
+        creating: "Creating…",
+        continue: "Continue",
+        forbidden: "Your account cannot create Skills.",
+        nameTooShort: "The name must contain at least 3 characters",
+        nameTooLong: "The name cannot exceed 63 characters",
+        nameInvalid: "Use lowercase letters, numbers, and single hyphens only",
+      },
+      resume: {
+        titleCreate: "Continue unfinished Skill creation",
+        titleRevise: "Continue unfinished revisions",
+        titleMixed: "Continue unfinished Skill designs",
+        kindCreate: "Create",
+        kindRevise: "Revise",
+        lastUpdated: (value) => `Last updated ${value}`,
+        deleteAriaCreate: (name) => `Delete unfinished Skill: ${name}`,
+        deleteAriaRevise: (name) => `Delete unfinished revision: ${name}`,
+        deleteTitleCreate: "Delete unfinished Skill?",
+        deleteTitleRevise: "Delete unfinished revision?",
+        deleteDescriptionCreate: (name) =>
+          `This deletes the design draft for “${name}”, so it cannot be continued. Existing Skills are not affected.`,
+        deleteDescriptionRevise: (name) =>
+          `This deletes the revision draft for “${name}”, so it cannot be continued. Published Skills are not affected.`,
+        deleting: "Deleting…",
+        confirmDelete: "Delete draft",
+      },
+      revision: {
+        button: "Revise in conversation",
+        opening: "Opening revision session…",
+        hint: "Starts from the current published version and creates a new draft. It takes effect only after you publish.",
+        saveLocalChangesFirst: "Save or discard unsaved changes first",
+      },
+      conversation: {
+        progressAriaCreate: "Skill creation progress",
+        progressAriaRevise: "Skill revision progress",
+        progressCreate: "Creation progress",
+        progressRevise: "Revision progress",
+        permissionReadOnlyCreate:
+          "Your account cannot continue creating this Skill. Saved session content and candidate files remain available to view.",
+        permissionReadOnlyRevise:
+          "Your account cannot continue revising this Skill. Saved session content and candidate files remain available to view.",
+        reviseIntroBefore: "Loaded",
+        reviseIntroAfter:
+          "from the current published version. Describe what to change, or edit the candidate files on the right.",
+        createIntroBefore: "The new Skill is named",
+        createIntroAfter:
+          ". Describe its purpose, triggers, inputs and outputs, and any references or scripts it needs.",
+        creatingSkill: "Creating Skill…",
+        creatingDraft: "Creating a new version draft…",
+        processing: "The Builder Agent is working…",
+        composerAriaCreate: "Describe the Skill you want",
+        composerAriaRevise: "Describe what to change",
+        saveLocalChangesFirst:
+          "Save or discard the file changes on the right first",
+        answerQuestionFirst: "Answer the question above first",
+        generatingFiles: "Generating candidate files…",
+        placeholderCreate:
+          "Keep describing the Skill, or ask to adjust the candidate files.",
+        placeholderRevise:
+          "Keep describing what to change, or ask to adjust the candidate files.",
+        send: "Send",
+        fallbackTitle: "Create Skill",
+        revisingBanner: (slug, version) => `Revising ${slug} v${version}`,
+        unsavedChanges: "Unsaved changes",
+        agentRunning: "The Builder Agent is running",
+        checkedCreate: "Checked; ready to create",
+        checkedRevise: "Checked; ready to create a draft version",
+        autosave: "Automatically saved; continue later",
+        more: "More actions",
+        abandonCreate: "Abandon this creation",
+        abandonRevise: "Abandon this revision",
+        conversationAria: "Skill creation conversation",
+        workbenchAria: "Skill workbench",
+        sessionUnavailable: "The Skill design session is unavailable.",
+        retrying: "Retrying…",
+        retry: "Retry",
+        backToSkills: "Back to Skills",
+        continueLater: "Continue later and return to Skills",
+      },
+      workbench: {
+        packageAria: "Candidate files",
+        title: "Candidate files",
+        titleRevise: "Candidate files (revision)",
+        fileCount: (count) => `${count} UTF-8 text files`,
+        diffSummary: (version, added, modified, deleted) =>
+          ` · vs baseline${version}: ${added} added · ${modified} modified · ${deleted} deleted`,
+        updating: "Updating",
+        readOnly: "Read-only",
+        closeAria: "Close candidate files",
+        empty:
+          "Candidate files appear here after you describe the Skill in the conversation.",
+        deletedFromBase: "Removed from baseline:",
+        displayModeAria: "File display mode",
+        source: "Source",
+        preview: "Preview",
+        editFile: (path) => `Edit ${path}`,
+        selectFile: "Select a file to view its contents.",
+        baselineStale:
+          "The candidate package was updated elsewhere. Local edits can still be copied; load the latest version before editing.",
+        unsavedHint:
+          "The file has unsaved changes. Save before continuing the conversation or running checks.",
+        loadLatest: "Load latest version",
+        discard: "Discard changes",
+        saving: "Saving…",
+        save: "Save changes",
+        checkPassed: "Checks passed",
+        checkPassedWithWarnings: "Checks passed with warnings",
+        requiredCredentials: "Required credentials:",
+        recheckHint:
+          "After every candidate-file change, paths, frontmatter, security rules, and quota must be checked again.",
+        acknowledgeWarnings: "I understand and accept the warnings above",
+        checkSkill: "Check Skill",
+        commitCreate: "Create Skill (disabled by default)",
+        commitRevise: "Create new version (unpublished)",
+      },
+      activity: {
+        run: {
+          pending: "Queued, waiting to run",
+          running: "Running",
+          success: "This turn completed",
+          error: "This turn failed",
+          timeout: "This turn timed out",
+          interrupted: "This turn was interrupted",
+          cancelled: "This turn was cancelled",
+        },
+        tool: {
+          pending: "Waiting to call",
+          running: "Calling",
+          completed: "Completed",
+          failed: "Call failed",
+        },
+        toolSteps: (count) => `· ${count} tool steps`,
+        noToolSteps: "· No tool steps yet",
+        outputLimit:
+          "This turn reached the model output limit. Candidate drafts that were written successfully are kept. Send “continue from the existing draft” below; the Builder will reread the draft and will not execute incomplete tool calls.",
+      },
+      composer: {
+        mode: {
+          flash: "Flash",
+          thinking: "Thinking",
+          pro: "Pro",
+          ultra: "Ultra",
+        },
+        modeDescription: {
+          flash: "Turn off extended thinking for faster generation",
+          thinking: "Turn on extended thinking at low reasoning intensity",
+          pro: "Medium reasoning intensity; balances quality and time",
+          ultra: "High reasoning intensity; better for complex Skills",
+        },
+        removeAttachment: (name) => `Remove attachment ${name}`,
+        addReference: "Add reference files",
+        selectModel: "Select model",
+        defaultModel: "Default model",
+        defaultBadge: "Default",
+        selectThinking: "Select thinking intensity",
+      },
+      files: {
+        tooltip: "View candidate files",
+        aria: "View candidate files",
+        label: "Files",
+      },
+      dialogs: {
+        commitTitleCreate: "Create Skill?",
+        commitTitleRevise: "Create a new version draft?",
+        commitDescriptionCreate: (project) =>
+          `This atomically creates and publishes version 1 in ${project}. The Skill stays disabled and is not added to any Agent automatically.`,
+        commitDescriptionRevise: (slug, version) =>
+          `This creates a new draft based on ${slug} v${version}. Publishing is what replaces the live version; the current Skill stays unchanged until then.`,
+        fileMetaCreate: (count) => `${count} files · disabled by default`,
+        fileMetaRevise: (count) => `${count} files · unpublished draft`,
+        backToReview: "Back to review",
+        creating: "Creating…",
+        creatingVersion: "Creating new version…",
+        confirmCreate: "Create",
+        confirmCreateVersion: "Create new version",
+        staleTitle: "A newer version is already published",
+        staleDescription: (version) =>
+          `This revision is based on v${version}, but the live version has moved on. Continuing creates an overwrite draft; the running version is unchanged until you publish.`,
+        confirmOverwrite: "Overwrite and create draft",
+        abandonTitleCreate: "Abandon this Skill creation?",
+        abandonTitleRevise: "Abandon this revision?",
+        abandonDescriptionCreate:
+          "This design session will end, the candidate files will be cleaned up, and it will leave the unfinished list.",
+        abandonDescriptionRevise:
+          "This revision session will end and the candidate files will be cleaned up. Published Skills are not affected.",
+        continueCreate: "Continue creating",
+        continueRevise: "Continue revising",
+        abandoning: "Abandoning…",
+        confirmAbandon: "Abandon",
+        discardTitle: "Discard unsaved changes?",
+        discardDescription:
+          "The Skill Builder session remains available, but these file edits will not be saved.",
+        continueEditing: "Continue editing",
+        discardAndLeave: "Discard changes and leave",
+      },
+      success: {
+        withVersion: (version) =>
+          `Created draft version v${version}. Go publish it`,
+        withoutVersion: "Created a draft version. Go publish it",
+        goPublish: "Go publish",
+      },
+      publish: {
+        staleTitle: "A newer version is already published",
+        staleNamed: (live, base) =>
+          `The live version is already v${live}. Publishing will overwrite it with the version based on v${base}. After you confirm, it replaces the version in use; you can still roll back from version history.`,
+        staleGeneric:
+          "This version was not created from the current live version. Publishing will overwrite the version in use; you can still roll back from version history.",
+      },
+    },
+  },
+
   // Breadcrumb
   breadcrumb: {
     workspace: "Workspace",
@@ -2446,6 +2713,7 @@ export const enUS: Translations = {
     account: {
       profileTitle: "Profile",
       email: "Email",
+      username: "Username",
       role: "Role",
       roles: {
         system_admin: "System admin",
@@ -2476,11 +2744,20 @@ export const enUS: Translations = {
   login: {
     signInTitle: "Sign in to your account",
     createAccountTitle: "Create a new account",
+    identifier: "Email or username",
+    identifierPlaceholder: "Email or username",
+    username: "Username",
+    usernamePlaceholder: "Start with a letter; 3–32 letters, digits, or _",
+    usernameHint: "Letters, digits, and underscore only. No Chinese or special characters.",
+    usernameInvalid:
+      "Username must be 3–32 characters, start with a letter, and use only letters, digits, or underscore.",
+    usernameTaken: "This username is already taken.",
     email: "Email",
     emailPlaceholder: "you@example.com",
+    emailTaken: "This email is already registered.",
     password: "Password",
     passwordPlaceholder: "•••••••",
-    rememberMe: "Remember this session and email",
+    rememberMe: "Remember this session and account",
     checkingRegistration: "Checking account registration status…",
     registrationUnavailable:
       "Account registration status is temporarily unavailable.",
@@ -2516,6 +2793,11 @@ export const enUS: Translations = {
     loading: "Loading…",
     initAdminTitle: "Create admin account",
     initAdminDescription: "Set up the administrator account to get started.",
+    username: "Username",
+    usernamePlaceholder: "Start with a letter; 3–32 letters, digits, or _",
+    usernameHint: "Letters, digits, and underscore only. No Chinese or special characters.",
+    usernameInvalid:
+      "Username must be 3–32 characters, start with a letter, and use only letters, digits, or underscore.",
     email: "Email",
     emailPlaceholder: "you@example.com",
     password: "Password",

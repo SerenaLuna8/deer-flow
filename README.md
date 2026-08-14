@@ -21,7 +21,7 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 
 - 多账户、多项目工作区，包含成员、角色、邀请、配额、审计和通知。
 - 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。
-- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。
+- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
@@ -160,6 +160,9 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 - 对外只开放受 TLS 和网络策略保护的 Nginx；不要直接公开 Gateway、Frontend 或
   Provisioner 端口。
 - `LocalSandboxProvider` 在宿主机执行命令，不是强隔离边界；只用于可信环境。
+- Apple silicon Mac 上需要执行 Agent 生成的 Bash/Python 时，优先使用
+  `AioSandboxProvider` + Apple Container；配置与实测流程见
+  [Apple Container Sandbox](./backend/docs/APPLE_CONTAINER.md)。
 - API key、Cookie、Credential、数据库密码和完整连接 URL 不得进入代码、日志、
   截图、浏览器缓存或诊断材料。
 - System admin 不自动拥有项目权限；项目访问必须服从服务端返回的 membership 和

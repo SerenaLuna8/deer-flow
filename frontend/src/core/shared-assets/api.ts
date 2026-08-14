@@ -45,6 +45,7 @@ import {
   projectDefaultAgentSchema,
   projectMcpEditableConfigurationResponseSchema,
   projectSkillImportResponseSchema,
+  publishAssetVersionInputSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
   skillCredentialBindingsInputSchema,
@@ -84,6 +85,7 @@ import {
   type EnableSystemBindingInput,
   type ExpectedAssetVersionInput,
   type MoveSystemBindingInput,
+  type PublishAssetVersionInput,
   type McpToolDiscoveryAttemptResponse,
   type McpVersionInput,
   type McpToolInventoryResponse,
@@ -119,6 +121,7 @@ const serverErrorCodeSchema = z.enum([
   "asset_validation_failed",
   "asset_storage_quota_exceeded",
   "asset_storage_unavailable",
+  "SKILL_PUBLISH_BASE_STALE",
 ]);
 
 const errorEnvelopeSchema = z
@@ -149,6 +152,10 @@ const SAFE_SERVER_ERRORS = {
     "ASSET_STORAGE_UNAVAILABLE",
     "Asset storage unavailable",
   ],
+  SKILL_PUBLISH_BASE_STALE: [
+    "SKILL_PUBLISH_BASE_STALE",
+    "The version being published was not based on the live published version",
+  ],
 } as const;
 
 export const SHARED_ASSET_ERROR_CODES = [
@@ -158,6 +165,7 @@ export const SHARED_ASSET_ERROR_CODES = [
   "ASSET_VALIDATION_FAILED",
   "ASSET_STORAGE_QUOTA_EXCEEDED",
   "ASSET_STORAGE_UNAVAILABLE",
+  "SKILL_PUBLISH_BASE_STALE",
   "ASSET_UPLOAD_TOO_LARGE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
@@ -1274,14 +1282,14 @@ export function publishProjectAssetVersion(
   kind: VersionedAssetListKind,
   assetId: string,
   versionId: string,
-  input: ExpectedAssetVersionInput,
+  input: PublishAssetVersionInput,
   signal?: AbortSignal,
 ): Promise<VersionResponse> {
   const asset = parseInput(assetIdSchema, assetId);
   const version = parseInput(assetIdSchema, versionId);
   return postVersionMutation(
     `${projectAssetUrl(projectId, kind)}/${asset}/versions/${version}/publish`,
-    expectedAssetVersionInputSchema,
+    publishAssetVersionInputSchema,
     publishVersionSchema(kind),
     input,
     signal,
@@ -1293,14 +1301,14 @@ export function publishAdminProjectAssetVersion(
   kind: VersionedAssetListKind,
   assetId: string,
   versionId: string,
-  input: ExpectedAssetVersionInput,
+  input: PublishAssetVersionInput,
   signal?: AbortSignal,
 ): Promise<VersionResponse> {
   const asset = parseInput(assetIdSchema, assetId);
   const version = parseInput(assetIdSchema, versionId);
   return postVersionMutation(
     `${adminProjectAssetUrl(projectId, kind)}/${asset}/versions/${version}/publish`,
-    expectedAssetVersionInputSchema,
+    publishAssetVersionInputSchema,
     publishVersionSchema(kind),
     input,
     signal,

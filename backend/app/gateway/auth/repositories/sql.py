@@ -20,8 +20,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.email import normalize_email
+from app.gateway.auth.identity import DuplicateUserIdentity
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from app.gateway.auth.username import normalize_username, parse_username
 from deerflow.persistence.user.model import UserRow
 
 
@@ -35,11 +37,12 @@ class SQLUserRepository(UserRepository):
 
     @staticmethod
     def _row_to_user(row: UserRow) -> User:
-        if row.principal_type != "human" or row.email is None:
+        if row.principal_type != "human" or row.email is None or row.username is None:
             raise UserNotFoundError("Login user was not found")
         return User(
             id=UUID(row.id),
             email=row.email,
+            username=row.username,
             password_hash=row.password_hash,
             principal_type="human",
             system_role=row.system_role,  # type: ignore[arg-type]
@@ -57,6 +60,7 @@ class SQLUserRepository(UserRepository):
         return UserRow(
             id=str(user.id),
             email=user.email,
+            username=user.username,
             password_hash=user.password_hash,
             principal_type="human",
             system_role=user.system_role,
@@ -70,26 +74,21 @@ class SQLUserRepository(UserRepository):
     # ── CRUD ──────────────────────────────────────────────────────────
 
     async def create_user(self, user: User) -> User:
-        """Insert a new user. Raises ``ValueError`` on duplicate email."""
+        """Insert a new user. Raises ``DuplicateUserIdentity`` on collision."""
         user.email = normalize_email(user.email)
+        user.username = parse_username(user.username)
         row = self._user_to_row(user)
         async with self._sf() as session:
-            existing = (
-                select(UserRow.id)
-                .where(
-                    UserRow.principal_type == "human",
-                    func.lower(UserRow.email) == user.email,
-                )
-                .limit(1)
-            )
-            if await session.scalar(existing) is not None:
-                raise ValueError(f"Email already registered: {user.email}")
+            if await self._email_taken(session, user.email):
+                raise DuplicateUserIdentity("email", user.email)
+            if await self._username_taken(session, user.username):
+                raise DuplicateUserIdentity("username", user.username)
             session.add(row)
             try:
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ValueError(f"Email already registered: {user.email}") from exc
+                raise self._duplicate_from_integrity(exc, user.email, user.username) from exc
         return user
 
     async def get_user_by_id(self, user_id: str) -> User | None:
@@ -107,6 +106,21 @@ class SQLUserRepository(UserRepository):
             .where(
                 UserRow.principal_type == "human",
                 func.lower(UserRow.email) == normalize_email(email),
+            )
+            .order_by(UserRow.created_at, UserRow.id)
+            .limit(1)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            row = result.scalars().first()
+            return self._row_to_user(row) if row is not None else None
+
+    async def get_user_by_username(self, username: str) -> User | None:
+        stmt = (
+            select(UserRow)
+            .where(
+                UserRow.principal_type == "human",
+                UserRow.username == normalize_username(username),
             )
             .order_by(UserRow.created_at, UserRow.id)
             .limit(1)
@@ -135,20 +149,17 @@ class SQLUserRepository(UserRepository):
                 # a row that no longer exists.
                 raise UserNotFoundError(f"User {user.id} no longer exists")
             canonical_email = normalize_email(user.email)
+            canonical_username = parse_username(user.username)
             if canonical_email != normalize_email(row.email):
-                existing = (
-                    select(UserRow.id)
-                    .where(
-                        func.lower(UserRow.email) == canonical_email,
-                        UserRow.principal_type == "human",
-                        UserRow.id != str(user.id),
-                    )
-                    .limit(1)
-                )
-                if await session.scalar(existing) is not None:
-                    raise ValueError(f"Email already registered: {canonical_email}")
+                if await self._email_taken(session, canonical_email, exclude_user_id=str(user.id)):
+                    raise DuplicateUserIdentity("email", canonical_email)
                 row.email = canonical_email
+            if row.username != canonical_username:
+                if await self._username_taken(session, canonical_username, exclude_user_id=str(user.id)):
+                    raise DuplicateUserIdentity("username", canonical_username)
+                row.username = canonical_username
             user.email = row.email
+            user.username = row.username
             row.password_hash = user.password_hash
             row.system_role = user.system_role
             row.oauth_provider = user.oauth_provider
@@ -159,7 +170,7 @@ class SQLUserRepository(UserRepository):
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
-                raise ValueError(f"Email already registered: {canonical_email}") from exc
+                raise self._duplicate_from_integrity(exc, canonical_email, canonical_username) from exc
         return user
 
     async def count_users(self) -> int:
@@ -189,3 +200,44 @@ class SQLUserRepository(UserRepository):
             result = await session.execute(stmt)
             row = result.scalar_one_or_none()
             return self._row_to_user(row) if row is not None else None
+
+    @staticmethod
+    async def _email_taken(
+        session,
+        email: str,
+        *,
+        exclude_user_id: str | None = None,
+    ) -> bool:
+        statement = select(UserRow.id).where(
+            UserRow.principal_type == "human",
+            func.lower(UserRow.email) == email,
+        )
+        if exclude_user_id is not None:
+            statement = statement.where(UserRow.id != exclude_user_id)
+        return await session.scalar(statement.limit(1)) is not None
+
+    @staticmethod
+    async def _username_taken(
+        session,
+        username: str,
+        *,
+        exclude_user_id: str | None = None,
+    ) -> bool:
+        statement = select(UserRow.id).where(
+            UserRow.principal_type == "human",
+            UserRow.username == username,
+        )
+        if exclude_user_id is not None:
+            statement = statement.where(UserRow.id != exclude_user_id)
+        return await session.scalar(statement.limit(1)) is not None
+
+    @staticmethod
+    def _duplicate_from_integrity(
+        exc: IntegrityError,
+        email: str,
+        username: str,
+    ) -> DuplicateUserIdentity:
+        detail = str(getattr(exc, "orig", exc)).lower()
+        if "ix_users_username" in detail:
+            return DuplicateUserIdentity("username", username)
+        return DuplicateUserIdentity("email", email)

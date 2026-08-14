@@ -51,13 +51,13 @@ export function useProjectDesktopNavigation() {
 }
 
 function ProjectAccountMenu({
-  accountEmail,
+  accountUsername,
   systemRole,
   compact = false,
   onOpenSettings,
   onLogout,
 }: {
-  accountEmail: string;
+  accountUsername: string;
   systemRole: User["system_role"];
   compact?: boolean;
   onOpenSettings: () => void;
@@ -73,12 +73,12 @@ function ProjectAccountMenu({
           aria-label="账户"
         >
           <UserRoundIcon aria-hidden className="size-4 shrink-0" />
-          {!compact && <span className="truncate">{accountEmail}</span>}
+          {!compact && <span className="truncate">{accountUsername}</span>}
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuLabel className="truncate">
-          {accountEmail}
+          {accountUsername}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
         {systemRole === "system_admin" ? (
@@ -108,13 +108,13 @@ function ProjectAccountMenu({
 
 export function ProjectShell({
   project,
-  accountEmail,
+  accountUsername,
   systemRole,
   onLogout,
   children,
 }: {
   project: Project;
-  accountEmail: string;
+  accountUsername: string;
   systemRole: User["system_role"];
   onLogout: () => void | Promise<void>;
   children: React.ReactNode;
@@ -151,7 +151,7 @@ export function ProjectShell({
           onCollapsedChange={setDesktopNavCollapsed}
           footer={
             <ProjectAccountMenu
-              accountEmail={accountEmail}
+              accountUsername={accountUsername}
               systemRole={systemRole}
               onOpenSettings={() => setSettingsOpen(true)}
               onLogout={onLogout}
@@ -163,7 +163,7 @@ export function ProjectShell({
             project={project}
             account={
               <ProjectAccountMenu
-                accountEmail={accountEmail}
+                accountUsername={accountUsername}
                 systemRole={systemRole}
                 compact
                 onOpenSettings={() => setSettingsOpen(true)}

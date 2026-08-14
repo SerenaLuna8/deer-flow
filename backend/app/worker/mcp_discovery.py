@@ -11,14 +11,14 @@ from typing import cast
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.private_work.asset_runtime import (
-    PrivateAgentRuntime,
-    _DiscoveredMcpTool,
-    _mcp_tool_inventory_payload,
-    _validate_project_mcp_material_policy,
-    _validate_project_mcp_snapshot_policy,
-)
+from app.private_work.asset_runtime import PrivateAgentRuntime
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkUnavailable
+from app.private_work.mcp_runtime_contracts import (
+    DiscoveredMcpTool,
+    mcp_tool_inventory_payload,
+    validate_project_mcp_material_policy,
+    validate_project_mcp_snapshot_policy,
+)
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context_in_transaction
 from app.projects.errors import (
@@ -263,7 +263,7 @@ class McpToolDiscoveryJobHandler:
                     session,
                     attempt,
                 )
-                _validate_project_mcp_snapshot_policy(
+                validate_project_mcp_snapshot_policy(
                     snapshot,
                     endpoint_policy=self._endpoint_policy,
                     http_client_factory=self._http_client_factory,
@@ -272,7 +272,7 @@ class McpToolDiscoveryJobHandler:
                 context,
                 snapshot,
             )
-            _validate_project_mcp_material_policy(snapshot, materialized.by_slot)
+            validate_project_mcp_material_policy(snapshot, materialized.by_slot)
             return context, snapshot, materialized
         except _McpDiscoveryCancelled:
             raise
@@ -308,7 +308,7 @@ class McpToolDiscoveryJobHandler:
                 )
                 if current.scope is not snapshot.scope or current.definition != snapshot.definition or current.credential_grant_ids != snapshot.credential_grant_ids:
                     raise _McpDiscoveryCancelled
-                _validate_project_mcp_snapshot_policy(
+                validate_project_mcp_snapshot_policy(
                     current,
                     endpoint_policy=self._endpoint_policy,
                     http_client_factory=self._http_client_factory,
@@ -337,14 +337,14 @@ class McpToolDiscoveryJobHandler:
         snapshot: ResolvedMcpSnapshot,
         materialized: MaterializedMcpSecrets,
         authority: JobLeaseAuthority,
-    ) -> tuple[_DiscoveredMcpTool, ...]:
+    ) -> tuple[DiscoveredMcpTool, ...]:
         try:
-            _validate_project_mcp_snapshot_policy(
+            validate_project_mcp_snapshot_policy(
                 snapshot,
                 endpoint_policy=self._endpoint_policy,
                 http_client_factory=self._http_client_factory,
             )
-            _validate_project_mcp_material_policy(
+            validate_project_mcp_material_policy(
                 snapshot,
                 materialized.by_slot,
             )
@@ -375,7 +375,7 @@ class McpToolDiscoveryJobHandler:
         *,
         result_status: McpToolDiscoveryResultStatus,
         error_code: McpToolDiscoveryErrorCode | None,
-        tools: tuple[_DiscoveredMcpTool, ...] | None,
+        tools: tuple[DiscoveredMcpTool, ...] | None,
     ) -> JobSettlement:
         attempted_at = datetime.now(UTC)
 
@@ -389,7 +389,7 @@ class McpToolDiscoveryJobHandler:
                             session,
                             attempt,
                         )
-                        _validate_project_mcp_snapshot_policy(
+                        validate_project_mcp_snapshot_policy(
                             current,
                             endpoint_policy=self._endpoint_policy,
                             http_client_factory=self._http_client_factory,
@@ -420,7 +420,7 @@ class McpToolDiscoveryJobHandler:
                         if final_status == "succeeded" and tools is not None:
                             await inventory.record_success(
                                 **common,
-                                tools=_mcp_tool_inventory_payload(tools),
+                                tools=mcp_tool_inventory_payload(tools),
                             )
                         elif final_status == "failed" and final_error is not None:
                             await inventory.record_failure(

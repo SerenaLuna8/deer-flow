@@ -100,7 +100,9 @@ import `app.*`.
 ### Authentication and secrets
 
 - Account email is normalized with `strip + lowercase` on every path and is
-  protected by the database's case-insensitive unique index.
+  protected by the database's case-insensitive unique index. Login also accepts
+  a required username: 3–32 characters, starting with a letter, `[a-z0-9_]`
+  only, stored lowercase, unique among human accounts.
 - Browser tokens remain valid only while signature, session ID, token version,
   and the durable auth-session row all validate. Logout and password change
   revoke durable authority, not just browser state.
@@ -115,7 +117,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `full_schema_v17`. Fresh setup runs that schema directly and
+the current marker is `full_schema`. Fresh setup runs that schema directly and
 stamps the chain head. Runtime processes never create, migrate, stamp, repair, or
 downgrade an application database.
 

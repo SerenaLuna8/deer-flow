@@ -5,12 +5,8 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
-from alembic import command
-from alembic.config import Config
-from postgres_utils import temporary_postgres_database
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import (
@@ -26,40 +22,11 @@ from deerflow.persistence.bootstrap import (
     bootstrap_schema,
     classify_database,
 )
-from deerflow.persistence.final_schema_contract import (
-    FINAL_M7_CATALOG_SIGNATURE,
-    read_m7_catalog_signature,
-)
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.runtime.events.store.db import DbRunEventStore
 
-BACKEND_ROOT = Path(__file__).resolve().parents[1]
-BASELINE_PATH = BACKEND_ROOT / "migrations" / "baseline" / "full_schema_v5.sql"
-
 pytestmark = pytest.mark.postgres
-
-
-def _baseline_sql() -> str:
-    lines = BASELINE_PATH.read_text(encoding="utf-8").splitlines(keepends=True)
-    return "".join(lines[next(index for index, line in enumerate(lines) if not line.startswith("--")) :])
-
-
-async def _execute_sql_batch(database_url: str, payload: str) -> None:
-    engine = create_async_engine(database_url, poolclass=NullPool)
-    try:
-        async with engine.connect() as connection:
-            raw = await connection.get_raw_connection()
-            await raw.driver_connection.execute(payload)
-    finally:
-        await engine.dispose()
-
-
-def _upgrade_sync(database_url: str, revision: str) -> None:
-    config = Config(str(BACKEND_ROOT / "alembic.ini"))
-    config.set_main_option("script_location", str(BACKEND_ROOT / "migrations"))
-    config.attributes["sqlalchemy_url"] = database_url
-    command.upgrade(config, revision)
 
 
 async def _seed_event_scope(connection: AsyncConnection) -> dict[str, object]:
@@ -932,137 +899,3 @@ async def test_catalog_rejects_disabled_partition_trigger_clone(
                 await classify_database(connection)
     finally:
         await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_v7_to_v8_matches_fresh_catalog_and_preserves_rows(
-    postgres_admin_url: str,
-    postgres_database_url: str,
-) -> None:
-    fresh_engine = create_async_engine(postgres_database_url, poolclass=NullPool)
-    try:
-        await bootstrap_schema(fresh_engine)
-        async with fresh_engine.connect() as connection:
-            fresh_signature = await read_m7_catalog_signature(connection)
-    finally:
-        await fresh_engine.dispose()
-    assert fresh_signature == FINAL_M7_CATALOG_SIGNATURE
-
-    async with temporary_postgres_database(postgres_admin_url) as upgraded_url:
-        await _execute_sql_batch(upgraded_url, _baseline_sql())
-        await asyncio.to_thread(_upgrade_sync, upgraded_url, "full_schema_v7")
-        upgraded_engine = create_async_engine(upgraded_url, poolclass=NullPool)
-        expected_rows: tuple[tuple[object, ...], ...]
-        try:
-            async with upgraded_engine.begin() as connection:
-                scope = await _seed_event_scope(connection)
-                run_ids = scope["run_ids"]
-                assert isinstance(run_ids, dict)
-                await _insert_event(
-                    connection,
-                    scope,
-                    event_id=30_001,
-                    run_id=run_ids["sequence"],
-                    seq=1,
-                    created_at=datetime(2024, 1, 10, tzinfo=UTC),
-                    category="message",
-                    content="january ordinary payload",
-                )
-                await _insert_event(
-                    connection,
-                    scope,
-                    event_id=30_002,
-                    run_id=run_ids["retained"],
-                    seq=2,
-                    created_at=datetime(2024, 2, 10, tzinfo=UTC),
-                    category="stream",
-                    event_type="stream.end",
-                    content='{"status":"completed"}',
-                )
-                expected_rows = tuple(
-                    tuple(row)
-                    for row in await connection.execute(
-                        text(
-                            """SELECT id,thread_id,run_id,owner_user_id,event_type,
-                                      category,content,event_metadata::text,seq,
-                                      created_at,project_id
-                                 FROM run_events ORDER BY id"""
-                        )
-                    )
-                )
-        finally:
-            await upgraded_engine.dispose()
-
-        await asyncio.to_thread(_upgrade_sync, upgraded_url, "head")
-        upgraded_engine = create_async_engine(upgraded_url, poolclass=NullPool)
-        try:
-            async with upgraded_engine.connect() as connection:
-                assert await connection.scalar(text("SELECT version_num FROM alembic_version")) == "full_schema_v17"
-                migrated_rows = tuple(
-                    tuple(row)
-                    for row in await connection.execute(
-                        text(
-                            """SELECT id,thread_id,run_id,owner_user_id,event_type,
-                                      category,content,event_metadata::text,seq,
-                                      created_at,project_id
-                                 FROM run_events ORDER BY id"""
-                        )
-                    )
-                )
-                assert migrated_rows == expected_rows
-                assert await read_m7_catalog_signature(connection) == fresh_signature
-
-            march = datetime(2024, 3, 10, tzinfo=UTC)
-            async with upgraded_engine.begin() as connection:
-                await connection.execute(
-                    text("SELECT ensure_run_events_month_partition(:month)"),
-                    {"month": march},
-                )
-
-            with pytest.raises(IntegrityError):
-                async with upgraded_engine.begin() as connection:
-                    await _insert_event(
-                        connection,
-                        scope,
-                        event_id=30_003,
-                        run_id=run_ids["sequence"],
-                        seq=1,
-                        created_at=march,
-                    )
-
-            with pytest.raises(IntegrityError):
-                async with upgraded_engine.begin() as connection:
-                    await _insert_event(
-                        connection,
-                        scope,
-                        event_id=30_001,
-                        run_id=run_ids["sequence"],
-                        seq=5,
-                        created_at=march,
-                        category="message",
-                    )
-
-            with pytest.raises(IntegrityError):
-                async with upgraded_engine.begin() as connection:
-                    await _insert_event(
-                        connection,
-                        scope,
-                        event_id=30_004,
-                        run_id=run_ids["retained"],
-                        seq=3,
-                        created_at=march,
-                        event_type="stream.end",
-                    )
-
-            with pytest.raises(IntegrityError):
-                async with upgraded_engine.begin() as connection:
-                    await _insert_event(
-                        connection,
-                        scope,
-                        event_id=30_005,
-                        run_id=run_ids["retained"],
-                        seq=4,
-                        created_at=march,
-                    )
-        finally:
-            await upgraded_engine.dispose()

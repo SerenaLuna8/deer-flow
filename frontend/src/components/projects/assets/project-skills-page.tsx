@@ -1,6 +1,7 @@
 "use client";
 
 import { SkillBuilderResumeBanner } from "@/components/projects/skills/skill-builder-resume-banner";
+import { SkillRevisionEntry } from "@/components/projects/skills/skill-revision-entry";
 import { useAuth } from "@/core/auth/AuthProvider";
 import type { Project } from "@/core/projects/types";
 import {
@@ -49,23 +50,30 @@ export function ProjectSkillsPage({
       )}
       renderVersion={(version, context) =>
         "skill_id" in version ? (
-          <SkillAssetDetail
-            version={version}
-            workspace={{
-              accountId: context.accountId,
-              projectId: context.projectId,
-              item: context.item,
-              canAuthor: context.canAuthor,
-              editing: context.editing,
-              onEditingChange: context.onEditingChange,
-              onDirtyChange: context.onDirtyChange,
-              onVersionCreated: context.onVersionCreated,
-              canManageCredentials: project.capabilities.includes(
-                "mcp.credentials.approve",
-              ),
-              credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
-            }}
-          />
+          <div className="space-y-5">
+            <SkillRevisionEntry
+              project={project}
+              item={context.item}
+              disabled={context.editing}
+            />
+            <SkillAssetDetail
+              version={version}
+              workspace={{
+                accountId: context.accountId,
+                projectId: context.projectId,
+                item: context.item,
+                canAuthor: context.canAuthor,
+                editing: context.editing,
+                onEditingChange: context.onEditingChange,
+                onDirtyChange: context.onDirtyChange,
+                onVersionCreated: context.onVersionCreated,
+                canManageCredentials: project.capabilities.includes(
+                  "mcp.credentials.approve",
+                ),
+                credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
+              }}
+            />
+          </div>
         ) : (
           <p role="alert" className="text-destructive text-sm">
             Skill 版本数据无效。

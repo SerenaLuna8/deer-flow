@@ -49,21 +49,22 @@ cleanup_apple_container() {
 
         if [ "$CONTAINER_LIST" != "[]" ] && [ -n "$CONTAINER_LIST" ]; then
             # Extract container IDs that match our prefix
-            CONTAINER_IDS=$(echo "$CONTAINER_LIST" | python3 -c "
+            CONTAINER_IDS=$(echo "$CONTAINER_LIST" | python3 -c '
 import json
 import sys
+prefix = sys.argv[1] + "-"
 try:
     containers = json.load(sys.stdin)
     if isinstance(containers, list):
         for c in containers:
             if isinstance(c, dict):
-                # Apple Container uses 'id' field which contains the container name
-                cid = c.get('configuration').get('id', '')
-                if '${PREFIX}' in cid:
+                # Apple Container 1.x exposes the container name as top-level id.
+                cid = c.get("id", "")
+                if isinstance(cid, str) and cid.startswith(prefix):
                     print(cid)
-except:
+except (json.JSONDecodeError, TypeError):
     pass
-" 2>/dev/null || echo "")
+' "$PREFIX" 2>/dev/null || echo "")
 
             if [ -n "$CONTAINER_IDS" ]; then
                 echo ""

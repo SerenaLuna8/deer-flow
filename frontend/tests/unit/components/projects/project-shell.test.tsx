@@ -51,7 +51,7 @@ function renderShell(project: Project) {
         >
           <ProjectShell
             project={project}
-            accountEmail="member@example.com"
+            accountUsername="member"
             systemRole="user"
             onLogout={() => undefined}
           >

@@ -1622,10 +1622,6 @@ function ProjectAssetCatalog({
           kind={kind}
           item={selectedItem}
           open
-          canManageSystemSkillBinding={projectSystemSkillBindingCanManage(
-            selectedItem,
-            project.capabilities.includes("shared_assets.manage_bindings"),
-          )}
           requestedVersionId={createdVersions[selectedItem.id] ?? null}
           onOpenChange={(next) => !next && navigateToAsset(null, "replace")}
           onCreateVersion={openVersionDialog}
@@ -1641,7 +1637,6 @@ function ProjectAssetCatalog({
             });
           }}
           onDirtyChange={handleDetailDirtyChange}
-          onManageSystemSkillBinding={() => setBindingAssetId(selectedItem.id)}
           onVersionCreated={rememberVersion}
           onRequestedVersionHandled={handleRequestedVersionHandled}
           renderAssetEditor={renderAssetEditor}

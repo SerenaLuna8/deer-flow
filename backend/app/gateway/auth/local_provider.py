@@ -2,10 +2,12 @@
 
 import logging
 
+from app.gateway.auth.identity import DuplicateUserIdentity
 from app.gateway.auth.models import User
 from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.repositories.base import UserRepository
+from app.gateway.auth.username import parse_username, username_from_email_local_part
 
 logger = logging.getLogger(__name__)
 
@@ -22,21 +24,24 @@ class LocalAuthProvider(AuthProvider):
         self._repo = repository
 
     async def authenticate(self, credentials: dict) -> User | None:
-        """Authenticate with email and password.
+        """Authenticate with email or username plus password.
 
         Args:
-            credentials: dict with 'email' and 'password' keys
+            credentials: dict with 'password' and either 'email' or 'username'
 
         Returns:
             User if authentication succeeds, None otherwise
         """
-        email = credentials.get("email")
+        identifier = credentials.get("email") or credentials.get("username")
         password = credentials.get("password")
 
-        if not email or not password:
+        if not identifier or not password:
             return None
 
-        user = await self._repo.get_user_by_email(email)
+        if "@" in identifier:
+            user = await self._repo.get_user_by_email(identifier)
+        else:
+            user = await self._repo.get_user_by_username(identifier)
         if user is None:
             return None
 
@@ -62,11 +67,19 @@ class LocalAuthProvider(AuthProvider):
         """Get user by ID."""
         return await self._repo.get_user_by_id(user_id)
 
-    async def create_user(self, email: str, password: str | None = None, system_role: str = "user", needs_setup: bool = False) -> User:
+    async def create_user(
+        self,
+        email: str,
+        username: str,
+        password: str | None = None,
+        system_role: str = "user",
+        needs_setup: bool = False,
+    ) -> User:
         """Create a new local user.
 
         Args:
             email: User email address
+            username: Unique login username
             password: Plain text password (will be hashed)
             system_role: Role to assign ("system_admin" or "user")
             needs_setup: If True, user must complete setup on first login
@@ -77,6 +90,7 @@ class LocalAuthProvider(AuthProvider):
         password_hash = await hash_password_async(password) if password else None
         user = User(
             email=email,
+            username=parse_username(username),
             password_hash=password_hash,
             system_role=system_role,
             needs_setup=needs_setup,
@@ -103,6 +117,10 @@ class LocalAuthProvider(AuthProvider):
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
 
+    async def get_user_by_username(self, username: str) -> User | None:
+        """Get user by username."""
+        return await self._repo.get_user_by_username(username)
+
     async def create_oauth_user(
         self,
         email: str,
@@ -121,12 +139,24 @@ class LocalAuthProvider(AuthProvider):
         Returns:
             Created User instance
         """
-        user = User(
-            email=email,
-            password_hash=None,
-            system_role=system_role,
-            needs_setup=False,
-            oauth_provider=oauth_provider,
-            oauth_id=oauth_id,
-        )
-        return await self._repo.create_user(user)
+        base = username_from_email_local_part(email)
+        last_error: DuplicateUserIdentity | None = None
+        for index in range(1, 100):
+            suffix = "" if index == 1 else f"_{index}"
+            candidate = parse_username(f"{base[: 32 - len(suffix)]}{suffix}")
+            user = User(
+                email=email,
+                username=candidate,
+                password_hash=None,
+                system_role=system_role,
+                needs_setup=False,
+                oauth_provider=oauth_provider,
+                oauth_id=oauth_id,
+            )
+            try:
+                return await self._repo.create_user(user)
+            except DuplicateUserIdentity as exc:
+                last_error = exc
+                if exc.field != "username":
+                    raise
+        raise last_error or DuplicateUserIdentity("username", base)

@@ -67,12 +67,14 @@ def test_expired_and_invalid_tokens_fail_closed() -> None:
 
 
 def test_user_model_defaults_and_setup_flag() -> None:
-    user = User(email="test@example.com", password_hash="hash")
+    user = User(email="test@example.com", username="testuser", password_hash="hash")
     assert user.needs_setup is False
     assert user.token_version == 0
+    assert user.username == "testuser"
     assert (
         User(
             email="admin@example.com",
+            username="admin",
             password_hash="hash",
             needs_setup=True,
         ).needs_setup

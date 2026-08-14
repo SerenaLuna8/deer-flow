@@ -176,11 +176,12 @@ auth:
   `allow_registraton`、`auto_create_user` 的拼写错误会让配置加载失败，不会静默使用默认允许值。
 - 首次 system-admin 的 `/api/v1/auth/initialize` 不受这个开关影响；OIDC 的受控用户
   provisioning 也不是 local self-registration。
-- 邮箱作为一个大小写不敏感的账号标识保存和查询。register、login、change-email 与 OIDC
+- 邮箱作为一个大小写不敏感的账号标识保存和查询。register 与 `/initialize` 同时要求用户名：
+  3–32 位、字母开头、仅 `[a-z0-9_]`，入库小写；login 可用邮箱或用户名。change-email 与 OIDC
   最终经过规范化的 PostgreSQL user repository，完整 schema 以唯一
-  `lower(users.email)` index 封闭并发大小写碰撞。
+  `lower(users.email)` index 和 `users.username` 部分唯一索引封闭并发碰撞。
 - “保持登录”由每次 local login、register、initialize、change-password 或 OIDC state 的
-  `remember_me` 选择控制。浏览器只能保存 preference 和可选邮箱；密码、access token、CSRF
+  `remember_me` 选择控制。浏览器只能保存 preference 和可选邮箱或用户名；密码、access token、CSRF
   token 与 session ID 不得进入 Web Storage。
 - `remember_me=false` 时 access、CSRF 和 preference cookie 都没有 `Max-Age`。
   `remember_me=true` 时，HTTPS 与 localhost HTTP 可持久到 `auth` token lifetime；普通公网
@@ -398,12 +399,19 @@ sandbox:
   allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
 ```
 
-**Docker Execution** (runs sandbox code in isolated Docker containers):
+**AIO Container Execution** (runs sandbox code in an isolated Docker or Apple Container runtime):
 
 ```yaml
 sandbox:
-  use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+  allow_host_bash: false
 ```
+
+On a native macOS Worker, the local backend prefers Apple Container when its
+CLI is installed. See [APPLE_CONTAINER.md](./APPLE_CONTAINER.md) for the
+supported macOS version, startup commands, live verification, and network
+boundary. Linux and Compose Workers use Docker.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 
@@ -493,7 +501,7 @@ Notes specific to `E2BSandboxProvider`:
   sandbox and surfaced through the standard artifact pipeline) to ship files
   back to the gateway.
 
-Choose between local execution or Docker-based isolation:
+Choose between host-side local execution and container isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
 
@@ -526,13 +534,13 @@ sandbox:
 
 If the configured `host_path` is not visible to the gateway process, ActWeave logs an error and ignores that mount.
 
-**Option 2: Docker Sandbox** (isolated, more secure):
+**Option 2: AIO Container Sandbox** (isolated; Docker or Apple Container):
 
 ```yaml
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  port: 8080
-  auto_start: true
+  image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
+  allow_host_bash: false
   container_prefix: deer-flow-sandbox
 
   # Optional: Additional mounts
@@ -544,16 +552,31 @@ sandbox:
 
 When you configure `sandbox.mounts`, ActWeave exposes those `container_path` values in the agent prompt so the agent can discover and operate on mounted directories directly instead of assuming everything must live under `/mnt/user-data`.
 
-For bare-metal Docker sandbox runs that use localhost, ActWeave binds the sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host interface. Docker-outside-of-Docker deployments that connect through `host.docker.internal` keep the broad legacy bind for compatibility. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address.
+For bare-metal Docker sandbox runs that use localhost, ActWeave binds the
+sandbox HTTP port to `127.0.0.1` by default so it is not exposed on every host
+interface. Docker-outside-of-Docker deployments that connect through
+`host.docker.internal` keep the broad legacy bind for compatibility. Set
+`DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your Docker deployment needs a
+different bind address.
+
+Apple Container does not publish a host port. ActWeave reads the managed
+container's `status.networks[].ipv4Address` and connects to port `8080` on its
+private default-network address. Therefore `sandbox.port` and
+`DEER_FLOW_SANDBOX_BIND_HOST` are ignored on the Apple path. Private/loopback
+sandbox control traffic bypasses ambient HTTP proxy variables.
 
 ### Building a Custom AIO Sandbox Image
 
-`AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; ActWeave treats that image as an upstream AIO sandbox runtime.
+`AioSandboxProvider` talks to the sandbox container through the `agent-sandbox`
+SDK. The Dockerfile for the pinned
+`enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0`
+image is not part of this repository; ActWeave treats that image as an upstream
+AIO sandbox runtime.
 
 For persistent system or language dependencies, extend the published image and keep its startup command intact:
 
 ```dockerfile
-FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+FROM enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0
 
 USER root
 # Example user dependency; not required by ActWeave itself.
@@ -700,8 +723,9 @@ before exposing an instance to untrusted input.
 
 | Mode                       | `config.yaml`                                                              | Host Docker socket           | Isolation                                                                                                                                                                     |
 | -------------------------- | -------------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run **inside the gateway container** on its filesystem. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads. |
-| `aio` (pure DooD)          | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                    |
+| `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run in the Worker OS namespace. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads.                          |
+| `aio` (native macOS)       | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | Not mounted                  | Apple Container runs each sandbox in a lightweight Linux VM. Only explicitly configured/run-scoped mounts expose host paths.                                                 |
+| `aio` (Docker / DooD)      | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                    |
 | `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url`                                   | Not mounted                  | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation.                                                                                    |
 
 #### The Docker socket is host root

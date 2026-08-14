@@ -40,7 +40,8 @@ class SandboxConfig(BaseModel):
         health_check_skip_seconds: Optional reclaim-time skip window in seconds for recently released warm VMs. Default behavior is 0.0 = always validate before reuse.
 
     AioSandboxProvider specific options:
-        port: Base port for sandbox containers (default: 8080)
+        port: Docker local-backend host-port search base (default: 8080).
+            Apple Container uses its private VM address and ignores this field.
         container_prefix: Prefix for container names (default: deer-flow-sandbox)
         mounts: List of volume mounts to share directories with the container
     """
@@ -59,7 +60,7 @@ class SandboxConfig(BaseModel):
     )
     port: int | None = Field(
         default=None,
-        description="Base port for sandbox containers",
+        description="Docker local-backend host-port search base. Apple Container uses its private VM address and ignores this field.",
     )
     replicas: int | None = Field(
         default=None,

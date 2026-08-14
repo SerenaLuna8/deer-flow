@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
@@ -39,6 +40,32 @@ def _sandbox(file_api: _FakeFileApi) -> AioSandbox:
     sandbox._client = SimpleNamespace(file=file_api)
     sandbox._lock = threading.Lock()
     return sandbox
+
+
+def test_private_aio_client_bypasses_environment_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_client(**kwargs: object) -> SimpleNamespace:
+        captured.update(kwargs)
+        transport = kwargs["httpx_client"]
+        return SimpleNamespace(
+            _client_wrapper=SimpleNamespace(
+                httpx_client=SimpleNamespace(httpx_client=transport),
+            )
+        )
+
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient",
+        fake_client,
+    )
+
+    sandbox = AioSandbox(id="test-aio", base_url="http://192.168.64.5:8080")
+
+    transport = captured.get("httpx_client")
+    assert isinstance(transport, httpx.Client)
+    assert transport._trust_env is False
+    sandbox.close()
+    assert transport.is_closed is True
 
 
 def test_read_file_raises_typed_error_instead_of_returning_error_text() -> None:

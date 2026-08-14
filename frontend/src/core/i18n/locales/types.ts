@@ -1760,6 +1760,234 @@ export interface Translations {
     };
   };
 
+  skills: {
+    builder: {
+      errors: {
+        unavailable: string;
+        modelUnavailable: string;
+        effortUnsupported: string;
+        conflict: string;
+        forbidden: string;
+        notFound: string;
+        limitExceeded: string;
+        validationFailed: string;
+        invalidResponse: string;
+        network: string;
+        commitUncertain: string;
+        stale: string;
+        targetDeleted: string;
+        targetDeletedBanner: string;
+        targetDeletedStatus: string;
+        noChanges: string;
+        baseStale: string;
+        targetSessionExists: string;
+        targetUnsupported: string;
+        targetConflict: string;
+        attachmentTooLarge: string;
+        attachmentNotUtf8: (name: string) => string;
+        attachmentInvalidName: string;
+        attachmentTooMany: (max: number) => string;
+        attachmentTotalTooLarge: string;
+        packageTooLarge: string;
+        fileTooLarge: string;
+      };
+      start: {
+        title: string;
+        hint: string;
+        nameLabel: string;
+        placeholder: string;
+        savedAs: (value: string) => string;
+        creating: string;
+        continue: string;
+        forbidden: string;
+        nameTooShort: string;
+        nameTooLong: string;
+        nameInvalid: string;
+      };
+      resume: {
+        titleCreate: string;
+        titleRevise: string;
+        titleMixed: string;
+        kindCreate: string;
+        kindRevise: string;
+        lastUpdated: (value: string) => string;
+        deleteAriaCreate: (name: string) => string;
+        deleteAriaRevise: (name: string) => string;
+        deleteTitleCreate: string;
+        deleteTitleRevise: string;
+        deleteDescriptionCreate: (name: string) => string;
+        deleteDescriptionRevise: (name: string) => string;
+        deleting: string;
+        confirmDelete: string;
+      };
+      revision: {
+        button: string;
+        opening: string;
+        hint: string;
+        saveLocalChangesFirst: string;
+      };
+      conversation: {
+        progressAriaCreate: string;
+        progressAriaRevise: string;
+        progressCreate: string;
+        progressRevise: string;
+        permissionReadOnlyCreate: string;
+        permissionReadOnlyRevise: string;
+        reviseIntroBefore: string;
+        reviseIntroAfter: string;
+        createIntroBefore: string;
+        createIntroAfter: string;
+        creatingSkill: string;
+        creatingDraft: string;
+        processing: string;
+        composerAriaCreate: string;
+        composerAriaRevise: string;
+        saveLocalChangesFirst: string;
+        answerQuestionFirst: string;
+        generatingFiles: string;
+        placeholderCreate: string;
+        placeholderRevise: string;
+        send: string;
+        fallbackTitle: string;
+        revisingBanner: (slug: string, version: number) => string;
+        unsavedChanges: string;
+        agentRunning: string;
+        checkedCreate: string;
+        checkedRevise: string;
+        autosave: string;
+        more: string;
+        abandonCreate: string;
+        abandonRevise: string;
+        conversationAria: string;
+        workbenchAria: string;
+        sessionUnavailable: string;
+        retrying: string;
+        retry: string;
+        backToSkills: string;
+        continueLater: string;
+      };
+      workbench: {
+        packageAria: string;
+        title: string;
+        titleRevise: string;
+        fileCount: (count: number) => string;
+        diffSummary: (
+          version: string,
+          added: number,
+          modified: number,
+          deleted: number,
+        ) => string;
+        updating: string;
+        readOnly: string;
+        closeAria: string;
+        empty: string;
+        deletedFromBase: string;
+        displayModeAria: string;
+        source: string;
+        preview: string;
+        editFile: (path: string) => string;
+        selectFile: string;
+        baselineStale: string;
+        unsavedHint: string;
+        loadLatest: string;
+        discard: string;
+        saving: string;
+        save: string;
+        checkPassed: string;
+        checkPassedWithWarnings: string;
+        requiredCredentials: string;
+        recheckHint: string;
+        acknowledgeWarnings: string;
+        checkSkill: string;
+        commitCreate: string;
+        commitRevise: string;
+      };
+      activity: {
+        run: {
+          pending: string;
+          running: string;
+          success: string;
+          error: string;
+          timeout: string;
+          interrupted: string;
+          cancelled: string;
+        };
+        tool: {
+          pending: string;
+          running: string;
+          completed: string;
+          failed: string;
+        };
+        toolSteps: (count: number) => string;
+        noToolSteps: string;
+        outputLimit: string;
+      };
+      composer: {
+        mode: {
+          flash: string;
+          thinking: string;
+          pro: string;
+          ultra: string;
+        };
+        modeDescription: {
+          flash: string;
+          thinking: string;
+          pro: string;
+          ultra: string;
+        };
+        removeAttachment: (name: string) => string;
+        addReference: string;
+        selectModel: string;
+        defaultModel: string;
+        defaultBadge: string;
+        selectThinking: string;
+      };
+      files: {
+        tooltip: string;
+        aria: string;
+        label: string;
+      };
+      dialogs: {
+        commitTitleCreate: string;
+        commitTitleRevise: string;
+        commitDescriptionCreate: (project: string) => string;
+        commitDescriptionRevise: (slug: string, version: string) => string;
+        fileMetaCreate: (count: number) => string;
+        fileMetaRevise: (count: number) => string;
+        backToReview: string;
+        creating: string;
+        creatingVersion: string;
+        confirmCreate: string;
+        confirmCreateVersion: string;
+        staleTitle: string;
+        staleDescription: (version: string) => string;
+        confirmOverwrite: string;
+        abandonTitleCreate: string;
+        abandonTitleRevise: string;
+        abandonDescriptionCreate: string;
+        abandonDescriptionRevise: string;
+        continueCreate: string;
+        continueRevise: string;
+        abandoning: string;
+        confirmAbandon: string;
+        discardTitle: string;
+        discardDescription: string;
+        continueEditing: string;
+        discardAndLeave: string;
+      };
+      success: {
+        withVersion: (version: number) => string;
+        withoutVersion: string;
+        goPublish: string;
+      };
+      publish: {
+        staleTitle: string;
+        staleNamed: (live: number, base: number) => string;
+        staleGeneric: string;
+      };
+    };
+  };
+
   // Breadcrumb
   breadcrumb: {
     workspace: string;
@@ -2107,6 +2335,7 @@ export interface Translations {
     account: {
       profileTitle: string;
       email: string;
+      username: string;
       role: string;
       roles: {
         system_admin: string;
@@ -2138,8 +2367,16 @@ export interface Translations {
   login: {
     signInTitle: string;
     createAccountTitle: string;
+    identifier: string;
+    identifierPlaceholder: string;
+    username: string;
+    usernamePlaceholder: string;
+    usernameHint: string;
+    usernameInvalid: string;
+    usernameTaken: string;
     email: string;
     emailPlaceholder: string;
+    emailTaken: string;
     password: string;
     passwordPlaceholder: string;
     rememberMe: string;
@@ -2174,6 +2411,10 @@ export interface Translations {
     loading: string;
     initAdminTitle: string;
     initAdminDescription: string;
+    username: string;
+    usernamePlaceholder: string;
+    usernameHint: string;
+    usernameInvalid: string;
     email: string;
     emailPlaceholder: string;
     password: string;

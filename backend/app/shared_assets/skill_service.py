@@ -32,6 +32,7 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillPublishBaseStale,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatus
@@ -845,6 +846,50 @@ class SkillService:
             prepared,
         )
 
+    async def create_project_version_from_preview_in_session(
+        self,
+        session: AsyncSession,
+        actor: ProjectContext,
+        asset_id: uuid.UUID,
+        preview: SkillArchivePreview,
+        *,
+        supersedes_version_id: uuid.UUID,
+    ) -> SkillVersionView:
+        """Create one draft version for an existing Project Skill in the caller transaction.
+
+        The caller pins the revision base: ``supersedes_version_id`` records the
+        version the draft was derived from, which the publish lineage guard
+        later compares against the live pointer.
+        """
+
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+        if not isinstance(preview, SkillArchivePreview):
+            raise AssetValidationFailed(actor.request_id)
+        if not isinstance(supersedes_version_id, uuid.UUID):
+            raise AssetValidationFailed(actor.request_id)
+        repository = SkillRepository(session)
+        asset = await repository.get_project_asset(actor, asset_id, for_update=True)
+        if asset.status not in {"active", "suspended"}:
+            raise AssetConflict(actor.request_id)
+        self._require_archive_name_matches_asset(actor, asset, preview)
+        version = await self._create_version(
+            repository,
+            actor,
+            asset,
+            preview,
+            supersedes_version_id=supersedes_version_id,
+        )
+        await self._record_governance(
+            session,
+            actor,
+            asset_id,
+            version.id,
+            "skill.version.create",
+        )
+        return version
+
     async def import_project_archives_atomic(
         self,
         actor: ProjectContext,
@@ -1129,8 +1174,11 @@ class SkillService:
         version_id: uuid.UUID,
         *,
         expected_asset_version: int,
+        acknowledge_stale_base: bool = False,
     ) -> SkillVersionView:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        if type(acknowledge_stale_base) is not bool:
+            raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
             return await self._publish_in_transaction(
@@ -1139,6 +1187,7 @@ class SkillService:
                 asset_id,
                 version_id,
                 expected_asset_version=expected_asset_version,
+                acknowledge_stale_base=acknowledge_stale_base,
             )
 
         return await self._execute(
@@ -1315,6 +1364,23 @@ class SkillService:
                     description=descriptions.get(row.id, ""),
                 )
                 for row in rows
+            )
+
+        return await self._execute(actor, operation)
+
+    async def get_project_version_view(
+        self,
+        actor: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionView:
+        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+        if not isinstance(actor, ProjectContext):
+            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+
+        async def operation(repository: SkillRepository) -> SkillVersionView:
+            return self._version_view(
+                await repository.get_project_version(actor, asset_id, version_id),
             )
 
         return await self._execute(actor, operation)
@@ -1691,6 +1757,7 @@ class SkillService:
         version_id: uuid.UUID,
         *,
         expected_asset_version: int,
+        acknowledge_stale_base: bool = False,
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
@@ -1699,6 +1766,12 @@ class SkillService:
         record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
         if record.row.workflow_status != WorkflowStatus.DRAFT.value:
             raise AssetConflict(actor.request_id)
+        # Lineage guard: publishing a draft whose recorded base is no longer the
+        # live pointer silently shadows the newer live version. Require an
+        # explicit acknowledgement for that; the first published version
+        # (supersedes NULL onto a NULL pointer) never triggers.
+        if record.row.supersedes_version_id != asset.current_published_version_id and not acknowledge_stale_base:
+            raise SkillPublishBaseStale(actor.request_id)
         files = await asyncio.to_thread(
             self._archive_files,
             record,
@@ -1921,7 +1994,7 @@ class SkillService:
             if row.size_bytes != len(row.content) or row.sha256 != hashlib.sha256(row.content).hexdigest():
                 raise AssetValidationFailed(request_id)
             files.append(SkillArchiveFile(path=row.path, content=bytes(row.content), media_type=row.media_type))
-        snapshot = tuple(files)
+        snapshot = tuple(sorted(files, key=lambda item: item.path))
         normalized = normalize_skill_files(snapshot, request_id=request_id)
         if normalized != snapshot:
             raise AssetValidationFailed(request_id)

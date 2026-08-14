@@ -1121,6 +1121,14 @@ export const agentCreateResponseSchema = z
 export const expectedAssetVersionInputSchema = z
   .object({ expected_asset_version: z.number().int().positive() })
   .strict();
+/**
+ * Publish accepts an explicit stale-base acknowledgement: publishing a draft
+ * whose recorded base is no longer the live pointer requires user consent
+ * (Skill lineage guard). Only Skill publish sends the flag.
+ */
+export const publishAssetVersionInputSchema = expectedAssetVersionInputSchema
+  .extend({ acknowledge_stale_base: z.boolean().optional() })
+  .strict();
 export const projectDefaultAgentSchema = z
   .object({
     agent_asset_id: assetIdSchema.nullable(),
@@ -1539,6 +1547,9 @@ export type SyncCurrentSystemMcpBindingInput = z.input<
 export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
   typeof expectedAssetVersionInputSchema
+>;
+export type PublishAssetVersionInput = z.input<
+  typeof publishAssetVersionInputSchema
 >;
 export type ProjectDefaultAgentInput = z.input<
   typeof projectDefaultAgentInputSchema

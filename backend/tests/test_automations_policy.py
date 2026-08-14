@@ -24,15 +24,14 @@ from app.system_runtime_settings.validation import (
     canonical_policy_payload,
 )
 from deerflow.config.app_config import AppConfig
-from migrations.versions.full_schema_v17_automations_runtime_policy import (
-    _DEFAULT_POLICY_CHECKSUM,
-    _DEFAULT_POLICY_VERSION_ID,
-)
+
+_DEFAULT_POLICY_VERSION_ID = "b83a268d-e534-50c5-80a3-61155aede852"
+_DEFAULT_POLICY_CHECKSUM = "cd4eae7f36175c2eda25d142cb6d816becfa6d0984a3735a27f3d76465a1975f"
 
 _POLICY_VERSION_NAMESPACE = uuid.UUID("e80287de-83d9-5d3a-a4c8-df0eeaa2a955")
 
 
-def test_automations_policy_defaults_match_the_v17_seed() -> None:
+def test_automations_policy_defaults_match_the_schema_seed() -> None:
     assert RuntimePolicySection.AUTOMATIONS.value == "automations"
     policy = default_policy_value(RuntimePolicySection.AUTOMATIONS)
 

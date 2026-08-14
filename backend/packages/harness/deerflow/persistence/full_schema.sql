@@ -204,6 +204,7 @@ CREATE UNIQUE INDEX uq_scheduled_task_runs_manual_idempotency ON scheduled_task_
 CREATE TABLE users (
     id VARCHAR(36) NOT NULL,
     email VARCHAR(320),
+    username VARCHAR(32),
     password_hash VARCHAR(128),
     principal_type VARCHAR(16) DEFAULT 'human' NOT NULL,
     system_role VARCHAR(16) NOT NULL,
@@ -218,7 +219,8 @@ CREATE TABLE users (
     CONSTRAINT ck_users_system_role CHECK (system_role IN ('system_admin', 'user')),
     CONSTRAINT ck_users_principal_type CHECK (principal_type IN ('human', 'channel_guest')),
     CONSTRAINT ck_users_oauth_identity_shape CHECK ((oauth_provider IS NULL AND oauth_id IS NULL) OR (oauth_provider IS NOT NULL AND oauth_id IS NOT NULL)),
-    CONSTRAINT ck_users_channel_guest_identity CHECK ((principal_type = 'human' AND email IS NOT NULL) OR (principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)),
+    CONSTRAINT ck_users_username_format CHECK (username IS NULL OR username ~ '^[a-z][a-z0-9_]{2,31}$'),
+    CONSTRAINT ck_users_channel_guest_identity CHECK ((principal_type = 'human' AND email IS NOT NULL) OR (principal_type = 'channel_guest' AND email IS NULL AND username IS NULL AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)),
     CONSTRAINT ck_users_preferences_version CHECK (preferences_version >= 1),
     CONSTRAINT uq_users_id_principal_type UNIQUE (id, principal_type)
 );
@@ -226,6 +228,8 @@ CREATE TABLE users (
 CREATE UNIQUE INDEX idx_users_oauth_identity ON users (oauth_provider, oauth_id) WHERE oauth_provider IS NOT NULL AND oauth_id IS NOT NULL;
 
 CREATE UNIQUE INDEX ix_users_email ON users (lower(email)) WHERE email IS NOT NULL;
+
+CREATE UNIQUE INDEX ix_users_username ON users (username) WHERE username IS NOT NULL;
 
 CREATE TABLE auth_sessions (
     session_id_hash CHAR(64) NOT NULL,
@@ -2525,6 +2529,12 @@ CREATE TABLE skill_design_sessions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     authoring_dependencies_json JSONB,
+    session_kind VARCHAR(16) DEFAULT 'create' NOT NULL,
+    target_skill_id UUID,
+    base_version_id UUID,
+    base_version_number BIGINT,
+    base_payload_checksum CHAR(64),
+    target_skill_deleted BOOLEAN DEFAULT false NOT NULL,
     CONSTRAINT pk_skill_design_sessions PRIMARY KEY (id),
     CONSTRAINT ck_skill_design_sessions_status CHECK (status IN ('interviewing', 'generating', 'awaiting_clarification', 'draft_ready', 'validated', 'committing', 'completed', 'failed', 'cancelled')),
     CONSTRAINT ck_skill_design_sessions_revision CHECK (revision >= 1),
@@ -2538,18 +2548,26 @@ CREATE TABLE skill_design_sessions (
     CONSTRAINT ck_skill_design_sessions_authoring_dependencies CHECK (authoring_dependencies_json IS NULL OR (jsonb_typeof(authoring_dependencies_json) = 'object' AND authoring_dependencies_json ->> 'version' = '1' AND (authoring_dependencies_json ->> 'draft_checksum') ~ '^[0-9a-f]{64}$' AND CASE WHEN jsonb_typeof(authoring_dependencies_json -> 'requirements') = 'array' THEN jsonb_array_length(authoring_dependencies_json -> 'requirements') <= 64 ELSE FALSE END)),
     CONSTRAINT ck_skill_design_sessions_error CHECK ((status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)),
     CONSTRAINT ck_skill_design_sessions_completion CHECK ((status = 'completed' AND ((created_skill_deleted IS FALSE AND created_skill_id IS NOT NULL AND created_skill_version_id IS NOT NULL) OR (created_skill_deleted IS TRUE AND created_skill_id IS NULL AND created_skill_version_id IS NULL))) OR (status <> 'completed' AND created_skill_deleted IS FALSE AND created_skill_id IS NULL AND created_skill_version_id IS NULL)),
+    CONSTRAINT ck_skill_design_sessions_kind CHECK (session_kind IN ('create', 'revise')),
+    CONSTRAINT ck_skill_design_sessions_base_checksum CHECK (base_payload_checksum IS NULL OR base_payload_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_skill_design_sessions_base_version_number CHECK (base_version_number IS NULL OR base_version_number >= 1),
+    CONSTRAINT ck_skill_design_sessions_revision_target CHECK ((session_kind = 'create' AND target_skill_id IS NULL AND base_version_id IS NULL AND base_version_number IS NULL AND base_payload_checksum IS NULL AND target_skill_deleted IS FALSE) OR (session_kind = 'revise' AND ((target_skill_deleted IS FALSE AND target_skill_id IS NOT NULL AND base_version_id IS NOT NULL AND base_version_number IS NOT NULL AND base_payload_checksum IS NOT NULL) OR (target_skill_deleted IS TRUE AND target_skill_id IS NULL AND base_version_id IS NULL AND base_version_number IS NULL AND base_payload_checksum IS NULL)))),
     CONSTRAINT fk_skill_design_sessions_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_skill_creator_version FOREIGN KEY(skill_creator_skill_id, skill_creator_version_id) REFERENCES skill_versions (skill_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_created_skill_project FOREIGN KEY(project_id, created_skill_id) REFERENCES skills (project_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_created_skill_version FOREIGN KEY(created_skill_id, created_skill_version_id) REFERENCES skill_versions (skill_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_skill_design_sessions_target_skill_project FOREIGN KEY(project_id, target_skill_id) REFERENCES skills (project_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_skill_design_sessions_base_version FOREIGN KEY(target_skill_id, base_version_id) REFERENCES skill_versions (skill_id, id) ON DELETE RESTRICT,
     CONSTRAINT uq_skill_design_sessions_private_scope UNIQUE (project_id, owner_user_id, id),
     CONSTRAINT uq_skill_design_sessions_thread_scope UNIQUE (project_id, owner_user_id, thread_id),
     CONSTRAINT uq_skill_design_sessions_create_idempotency UNIQUE (project_id, owner_user_id, create_idempotency_key_hash)
 );
 
 CREATE INDEX ix_skill_design_sessions_resume ON skill_design_sessions (project_id, owner_user_id, status, updated_at DESC, id DESC);
+
+CREATE UNIQUE INDEX uq_skill_design_sessions_live_revise_target ON skill_design_sessions (project_id, owner_user_id, target_skill_id) WHERE session_kind = 'revise' AND target_skill_id IS NOT NULL AND status NOT IN ('completed', 'cancelled');
 
 CREATE TABLE skill_design_operations (
     id UUID NOT NULL,
@@ -3296,7 +3314,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 85 static tables and 1031 columns.
+-- Coverage: 85 static tables and 1038 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -3422,6 +3440,7 @@ COMMENT ON COLUMN scheduled_task_runs.updated_at IS '调度任务运行：记录
 COMMENT ON TABLE users IS '保存平台用户、渠道访客及其登录与偏好状态。';
 COMMENT ON COLUMN users.id IS '用户：主键标识。';
 COMMENT ON COLUMN users.email IS '用户：规范化邮箱地址。';
+COMMENT ON COLUMN users.username IS '用户：登录用户名。';
 COMMENT ON COLUMN users.password_hash IS '用户：密码验证哈希（不存储明文密码）。';
 COMMENT ON COLUMN users.principal_type IS '用户：主体类型。';
 COMMENT ON COLUMN users.system_role IS '用户：系统角色。';
@@ -4210,6 +4229,12 @@ COMMENT ON COLUMN skill_design_sessions.create_request_checksum IS '技能设计
 COMMENT ON COLUMN skill_design_sessions.created_at IS '技能设计会话：记录创建时间。';
 COMMENT ON COLUMN skill_design_sessions.updated_at IS '技能设计会话：记录最近更新时间。';
 COMMENT ON COLUMN skill_design_sessions.authoring_dependencies_json IS '技能设计会话：编写用途依赖JSON 数据。';
+COMMENT ON COLUMN skill_design_sessions.session_kind IS '技能设计会话：会话类型。';
+COMMENT ON COLUMN skill_design_sessions.target_skill_id IS '技能设计会话：目标技能标识。';
+COMMENT ON COLUMN skill_design_sessions.base_version_id IS '技能设计会话：基线版本标识。';
+COMMENT ON COLUMN skill_design_sessions.base_version_number IS '技能设计会话：基线版本编号。';
+COMMENT ON COLUMN skill_design_sessions.base_payload_checksum IS '技能设计会话：基线载荷校验和。';
+COMMENT ON COLUMN skill_design_sessions.target_skill_deleted IS '技能设计会话：目标技能已删除。';
 
 COMMENT ON TABLE skill_design_operations IS '保存技能设计会话中的幂等操作及其结果。';
 COMMENT ON COLUMN skill_design_operations.id IS '技能设计操作：主键标识。';
@@ -4509,6 +4534,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('full_schema_v17');
+INSERT INTO alembic_version (version_num) VALUES ('full_schema');
 
 COMMIT;

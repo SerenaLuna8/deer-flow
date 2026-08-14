@@ -26,22 +26,9 @@ from deerflow.persistence.final_schema_contract import (
 # tuple to the actual scripts under ``backend/migrations/versions``. The head
 # is the only marker the runtime accepts; any known ancestor classifies as
 # "behind" (explicit ``make upgrade-db`` required), and anything else stays
-# fail-closed.
-KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
-    "full_schema_v5",
-    "full_schema_v6",
-    "full_schema_v7",
-    "full_schema_v8",
-    "full_schema_v9",
-    "full_schema_v10",
-    "full_schema_v11",
-    "full_schema_v12",
-    "full_schema_v13",
-    "full_schema_v14",
-    "full_schema_v15",
-    "full_schema_v16",
-    "full_schema_v17",
-)
+# fail-closed. The product is not yet live, so the chain is a single
+# unversioned snapshot; numbered ``full_schema_v*`` markers are unknown.
+KNOWN_CHAIN_REVISIONS: tuple[str, ...] = ("full_schema",)
 
 # The migration-chain head revision id. ``full_schema.sql`` stamps exactly
 # this marker, so a fresh install is always already at head.

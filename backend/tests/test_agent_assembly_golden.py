@@ -26,6 +26,10 @@ from deerflow.agents.middlewares.assembly import (
     build_lead_runtime_middlewares,
     build_subagent_runtime_middlewares,
 )
+from deerflow.agents.middlewares.manifest import (
+    MiddlewareHook,
+    middleware_dispatch_order,
+)
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
@@ -142,12 +146,107 @@ NON_PRIVATE_LEAD_GOLDEN_CHAIN = [
 ]
 
 PRIVATE_LEAD_GOLDEN_CHAIN = [
-    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[:15],
+    "InputSanitizationMiddleware",
+    "ToolOutputBudgetMiddleware",
+    "ToolResultSanitizationMiddleware",
+    "ThreadDataMiddleware",
+    "UploadsMiddleware",
+    "SandboxMiddleware",
+    "DanglingToolCallMiddleware",
+    "LLMErrorHandlingMiddleware",
+    "SandboxAuditMiddleware",
+    "ReadBeforeWriteMiddleware",
+    "ToolProgressMiddleware",
+    "GuardrailMiddleware",
+    "ToolErrorHandlingMiddleware",
+    "DynamicContextMiddleware",
+    "SkillActivationMiddleware",
     "SkillToolPolicyMiddleware",
-    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[15:18],
+    "DurableContextMiddleware",
+    "DeerFlowSummarizationMiddleware",
+    "TodoMiddleware",
     "OutputLimitRecoveryMiddleware",
-    *NON_PRIVATE_LEAD_GOLDEN_CHAIN[18:],
+    "TokenUsageMiddleware",
+    "TitleMiddleware",
+    "ViewImageMiddleware",
+    "McpRoutingMiddleware",
+    "DeferredToolFilterMiddleware",
+    "SystemMessageCoalescingMiddleware",
+    "SubagentLimitMiddleware",
+    "LoopDetectionMiddleware",
+    "TokenBudgetMiddleware",
+    "SafetyFinishReasonMiddleware",
+    "ClarificationMiddleware",
 ]
+
+PRIVATE_LEAD_HOOK_GOLDEN = {
+    MiddlewareHook.BEFORE_AGENT: (
+        "ThreadDataMiddleware",
+        "UploadsMiddleware",
+        "SandboxMiddleware",
+        "ToolProgressMiddleware",
+        "DynamicContextMiddleware",
+        "TodoMiddleware",
+        "LoopDetectionMiddleware",
+        "TokenBudgetMiddleware",
+    ),
+    MiddlewareHook.BEFORE_MODEL: (
+        "DynamicContextMiddleware",
+        "DurableContextMiddleware",
+        "DeerFlowSummarizationMiddleware",
+        "TodoMiddleware",
+        "ViewImageMiddleware",
+        "McpRoutingMiddleware",
+    ),
+    MiddlewareHook.WRAP_MODEL_CALL: (
+        "InputSanitizationMiddleware",
+        "ToolOutputBudgetMiddleware",
+        "DanglingToolCallMiddleware",
+        "LLMErrorHandlingMiddleware",
+        "ToolProgressMiddleware",
+        "ToolErrorHandlingMiddleware",
+        "SkillActivationMiddleware",
+        "SkillToolPolicyMiddleware",
+        "DurableContextMiddleware",
+        "TodoMiddleware",
+        "OutputLimitRecoveryMiddleware",
+        "ViewImageMiddleware",
+        "DeferredToolFilterMiddleware",
+        "SystemMessageCoalescingMiddleware",
+        "LoopDetectionMiddleware",
+        "TokenBudgetMiddleware",
+    ),
+    MiddlewareHook.WRAP_TOOL_CALL: (
+        "ToolOutputBudgetMiddleware",
+        "ToolResultSanitizationMiddleware",
+        "SandboxMiddleware",
+        "SandboxAuditMiddleware",
+        "ReadBeforeWriteMiddleware",
+        "ToolProgressMiddleware",
+        "GuardrailMiddleware",
+        "ToolErrorHandlingMiddleware",
+        "SkillToolPolicyMiddleware",
+        "DeferredToolFilterMiddleware",
+        "ClarificationMiddleware",
+    ),
+    MiddlewareHook.AFTER_MODEL: (
+        "SafetyFinishReasonMiddleware",
+        "TokenBudgetMiddleware",
+        "LoopDetectionMiddleware",
+        "SubagentLimitMiddleware",
+        "TitleMiddleware",
+        "TokenUsageMiddleware",
+        "OutputLimitRecoveryMiddleware",
+        "TodoMiddleware",
+        "DurableContextMiddleware",
+    ),
+    MiddlewareHook.AFTER_AGENT: (
+        "TokenBudgetMiddleware",
+        "LoopDetectionMiddleware",
+        "TodoMiddleware",
+        "SandboxMiddleware",
+    ),
+}
 
 
 def _build_production_lead_chain(*, private: bool) -> list[AgentMiddleware]:
@@ -325,6 +424,12 @@ EMBEDDED_GOLDEN_CHAIN = NON_PRIVATE_LEAD_GOLDEN_CHAIN
 )
 def test_each_assembly_path_matches_its_exact_golden(builder, golden) -> None:
     assert _names(builder()) == golden
+
+
+def test_private_lead_hook_dispatch_matches_exact_golden() -> None:
+    chain = _build_private_lead_chain()
+
+    assert {hook: middleware_dispatch_order(chain, hook) for hook in MiddlewareHook} == PRIVATE_LEAD_HOOK_GOLDEN
 
 
 @pytest.mark.parametrize(

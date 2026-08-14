@@ -6,7 +6,14 @@ import {
   SkillBuilderComposerControls,
   skillBuilderAvailableThinkingModes,
 } from "@/components/projects/skills/skill-builder-composer-controls";
+import { I18nProvider } from "@/core/i18n/context";
 import type { Model } from "@/core/models/types";
+
+function renderUi(node: React.ReactNode) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="zh-CN">{node}</I18nProvider>,
+  );
+}
 
 function model(overrides: Partial<Model> = {}): Model {
   return {
@@ -47,7 +54,7 @@ describe("skillBuilderAvailableThinkingModes", () => {
 describe("SkillBuilderComposerAttachments", () => {
   test("renders nothing without attachments", () => {
     expect(
-      renderToStaticMarkup(
+      renderUi(
         <SkillBuilderComposerAttachments
           attachments={[]}
           disabled={false}
@@ -58,7 +65,7 @@ describe("SkillBuilderComposerAttachments", () => {
   });
 
   test("shows removable chips for queued reference files", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderComposerAttachments
         attachments={[{ name: "接口说明.md", content: "# API" }]}
         disabled={false}
@@ -72,7 +79,7 @@ describe("SkillBuilderComposerAttachments", () => {
 
 describe("SkillBuilderComposerControls", () => {
   test("offers upload, model, and thinking pickers like the chat composer", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderComposerControls
         attachDisabled={false}
         pickersDisabled={false}
@@ -92,7 +99,7 @@ describe("SkillBuilderComposerControls", () => {
   });
 
   test("hides pickers when the catalog or capabilities do not allow them", () => {
-    const html = renderToStaticMarkup(
+    const html = renderUi(
       <SkillBuilderComposerControls
         attachDisabled={false}
         pickersDisabled={false}

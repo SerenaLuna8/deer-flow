@@ -1,0 +1,950 @@
+"""Real-PostgreSQL gates for Skill Builder revision sessions."""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import uuid
+from datetime import UTC, datetime
+
+import pytest
+import sqlalchemy as sa
+from sqlalchemy.exc import IntegrityError, OperationalError
+from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+
+from app.private_work.run_repository import PrivateRunRepository
+from app.projects.context import ProjectContext
+from app.shared_assets.bootstrap import service as bootstrap_service
+from app.shared_assets.errors import (
+    AssetConflict,
+    AssetNotFound,
+    SkillDesignBaseStale,
+    SkillDesignNoChanges,
+    SkillDesignTargetDeleted,
+    SkillDesignTargetSessionExists,
+    SkillDesignTargetUnsupported,
+    SkillPublishBaseStale,
+)
+from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
+from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
+from app.shared_assets.skill_design_service import (
+    CommitSkillDesignSession,
+    CreateSkillDesignRevisionSession,
+    SkillDesignDraftUpdateTurn,
+    SkillDesignMessageTurn,
+    SkillDesignService,
+    SkillDesignStatus,
+    SubmitSkillDesignTurn,
+    ValidateSkillDesignSession,
+)
+from app.shared_assets.skill_service import (
+    CreateSkill,
+    SkillArchiveFile,
+    SkillFileChange,
+    SkillService,
+)
+from app.system_runtime_settings import SystemRuntimePolicyService
+from app.system_settings import SystemModelCatalogService
+from deerflow.persistence.jobs.model import WorkerNodeRow
+from deerflow.persistence.jobs.sql import JobRepository
+from deerflow.persistence.run.model import RunRow
+from deerflow.persistence.shared_assets import (
+    SkillDesignOperationRow,
+    SkillDesignSessionRow,
+    SkillRow,
+    SkillVersionFileRow,
+    SkillVersionRow,
+)
+from deerflow.sandbox.sandbox import AuthorizationRevoked
+
+
+class _SkillQuota:
+    def __init__(self) -> None:
+        self.reserved: list[uuid.UUID] = []
+        self.released: list[uuid.UUID] = []
+
+    async def reserve_skill_version(self, _session, *, project_id, version_id, size) -> None:
+        assert project_id and size >= 0
+        self.reserved.append(version_id)
+
+    async def release_skill_version_if_reserved(
+        self,
+        _session,
+        project_id,
+        *,
+        version_id,
+        size,
+    ) -> bool:
+        assert project_id and size >= 0
+        self.released.append(version_id)
+        return True
+
+    async def reconcile_project_storage(self, _session, project_id) -> None:
+        assert project_id
+
+
+class _RecordingRunQuota:
+    async def reserve_concurrent_run(self, _session, _context, _run) -> None:
+        return None
+
+    async def release_concurrent_run(self, _session, _scope, *, run_id: str, request_id: str) -> None:
+        assert run_id and request_id
+
+
+class _RecordingRunAudit:
+    async def run_admitted(self, _session, _context, _run, _job) -> None:
+        return None
+
+    async def run_cancel_requested(self, _session, _context, *, run_id: str, job_id: uuid.UUID) -> None:
+        assert run_id and isinstance(job_id, uuid.UUID)
+
+    async def run_terminal(
+        self,
+        _session,
+        _scope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None:
+        assert run_id and job_type == "private_run" and request_id
+        assert isinstance(job_id, uuid.UUID)
+        assert public_error_code is None or public_error_code.isupper()
+
+
+def _project_context(seed: PrivateThreadSeed, *, request_id: str) -> ProjectContext:
+    source = seed.owner_a
+    return ProjectContext(
+        user_id=source.user_id,
+        project_id=source.project_id,
+        membership_id=source.membership_id,
+        role=source.role,
+        capabilities=source.capabilities,
+        membership_version=source.membership_version,
+        request_id=request_id,
+    )
+
+
+def _skill_md(slug: str, body: str) -> SkillArchiveFile:
+    content = (f"---\nname: {slug}\ndescription: Describe when and how to use this skill.\n---\n\n# {slug}\n\n{body}").encode()
+    return SkillArchiveFile("SKILL.md", content, "text/markdown")
+
+
+def _template_body() -> str:
+    return "Add instructions for this skill here.\n"
+
+
+async def _environment(database_url: str, *, with_model: bool = False):
+    seed = await seed_private_thread_database(database_url)
+    await bootstrap_service.bootstrap_system_assets(seed.factory)
+    if with_model:
+        await _seed_default_model(seed)
+    context = _project_context(seed, request_id="a" * 32)
+    quota = _SkillQuota()
+    run_quota = _RecordingRunQuota()
+    run_audit = _RecordingRunAudit()
+    skills = SkillService(seed.factory, quota=quota)
+    admission = SkillBuilderRunAdmissionService(
+        seed.factory,
+        model_catalog=SystemModelCatalogService(seed.factory),
+        runtime_policy=SystemRuntimePolicyService,
+        quota=run_quota,
+        audit=run_audit,
+    )
+    design = SkillDesignService(
+        seed.factory,
+        skill_service=skills,
+        run_admission=admission,
+        quota=run_quota,
+        audit=run_audit,
+    )
+    return seed, context, skills, design, quota
+
+
+async def _seed_default_model(seed: PrivateThreadSeed) -> None:
+    model_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    logical_name = f"builder-rev-{model_id.hex}"
+    async with seed.engine.begin() as connection:
+        await connection.execute(
+            sa.text(
+                """INSERT INTO system_model_configs
+                (id,logical_name,display_name,description,status,current_version_id,
+                 revision,sort_order,created_by_user_id,updated_by_user_id)
+                VALUES (:id,:name,'Builder revision model','Builder revision model','active',
+                        NULL,1,0,:owner,:owner)"""
+            ),
+            {"id": model_id, "name": logical_name, "owner": str(seed.owner_a.user_id)},
+        )
+        await connection.execute(
+            sa.text(
+                """INSERT INTO system_model_config_versions
+                (id,model_config_id,version_number,provider_adapter,provider_model,
+                 settings,supports_thinking,supports_reasoning_effort,
+                 supports_vision,credential_id,credential_version_id,
+                 credential_env_key,payload_checksum,supersedes_version_id,
+                 created_by_user_id)
+                VALUES (:id,:model,1,'codex_cli',:name,'{}'::jsonb,false,false,
+                        false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
+            ),
+            {
+                "id": version_id,
+                "model": model_id,
+                "name": logical_name,
+                "checksum": "b" * 64,
+                "owner": str(seed.owner_a.user_id),
+            },
+        )
+        await connection.execute(
+            sa.text(
+                """UPDATE system_model_configs
+                   SET current_version_id=:version
+                 WHERE id=:model"""
+            ),
+            {"version": version_id, "model": model_id},
+        )
+        await connection.execute(
+            sa.text(
+                """UPDATE system_model_catalog_state
+                   SET default_model_config_id=:model, revision=revision+1,
+                       updated_by_user_id=:owner
+                 WHERE id=1"""
+            ),
+            {"model": model_id, "owner": str(seed.owner_a.user_id)},
+        )
+
+
+async def _publish_template(skills: SkillService, context: ProjectContext, slug: str):
+    asset = await skills.create_project_with_template(context, CreateSkill(slug, slug))
+    history = await skills.get_version_history(context, asset.id)
+    draft = next(item for item in history if item.version_number == 1)
+    published = await skills.publish(
+        context,
+        asset.id,
+        draft.id,
+        expected_asset_version=asset.version,
+    )
+    current = await skills.get(context, asset.id)
+    return current, published
+
+
+async def _open_revision(design: SkillDesignService, context: ProjectContext, skill_id: uuid.UUID, key: str):
+    return await design.create_revision(
+        context,
+        CreateSkillDesignRevisionSession(skill_id=skill_id, idempotency_key=key),
+    )
+
+
+def _replace_skill_md(content: str, *, media_type: str | None = "text/markdown") -> SkillFileChange:
+    return SkillFileChange("replace", "SKILL.md", content, media_type)
+
+
+async def _edit_draft(
+    design: SkillDesignService,
+    context: ProjectContext,
+    session,
+    content: str,
+    *,
+    key: str,
+    media_type: str | None = "text/markdown",
+):
+    assert session.draft_checksum is not None
+    return await design.submit_turn(
+        context,
+        session.id,
+        SubmitSkillDesignTurn(
+            input=SkillDesignDraftUpdateTurn(
+                kind="draft_update",
+                expected_draft_checksum=session.draft_checksum,
+                changes=(_replace_skill_md(content, media_type=media_type),),
+            ),
+            expected_revision=session.revision,
+            idempotency_key=key,
+        ),
+    )
+
+
+async def _validate_session(design: SkillDesignService, context: ProjectContext, session, key: str):
+    assert session.draft_checksum is not None
+    return await design.validate(
+        context,
+        session.id,
+        ValidateSkillDesignSession(
+            expected_revision=session.revision,
+            expected_draft_checksum=session.draft_checksum,
+            idempotency_key=key,
+        ),
+    )
+
+
+async def _commit_session(
+    design: SkillDesignService,
+    context: ProjectContext,
+    session,
+    key: str,
+    *,
+    acknowledge_base_stale: bool = False,
+):
+    assert session.draft_checksum is not None
+    return await design.commit(
+        context,
+        session.id,
+        CommitSkillDesignSession(
+            expected_revision=session.revision,
+            expected_draft_checksum=session.draft_checksum,
+            acknowledge_warnings=True,
+            idempotency_key=key,
+            acknowledge_base_stale=acknowledge_base_stale,
+        ),
+    )
+
+
+async def _insert_published_skill(
+    seed: PrivateThreadSeed,
+    context: ProjectContext,
+    *,
+    slug: str,
+    files: tuple[SkillArchiveFile, ...],
+) -> uuid.UUID:
+    skill_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    checksum = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "path": item.path,
+                    "sha256": hashlib.sha256(item.content).hexdigest(),
+                    "size_bytes": len(item.content),
+                }
+                for item in sorted(files, key=lambda value: value.path)
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    async with seed.factory() as session, session.begin():
+        session.add(
+            SkillRow(
+                id=skill_id,
+                scope="project",
+                project_id=context.project_id,
+                slug=slug,
+                display_name=slug,
+                status="suspended",
+                current_published_version_id=None,
+                version=2,
+                created_by_user_id=str(context.user_id),
+            )
+        )
+        await session.flush()
+        session.add(
+            SkillVersionRow(
+                id=version_id,
+                skill_id=skill_id,
+                version_number=1,
+                workflow_status="draft",
+                description="Describe when and how to use this skill.",
+                frontmatter={"name": slug, "description": "Describe when and how to use this skill."},
+                compatibility=None,
+                secret_requirements=[],
+                scan_decision="allow",
+                scan_summary={},
+                payload_checksum=checksum,
+                created_by_user_id=str(context.user_id),
+            )
+        )
+        await session.flush()
+        for item in files:
+            session.add(
+                SkillVersionFileRow(
+                    skill_version_id=version_id,
+                    path=item.path,
+                    media_type=item.media_type,
+                    size_bytes=len(item.content),
+                    sha256=hashlib.sha256(item.content).hexdigest(),
+                    content=item.content,
+                )
+            )
+        await session.flush()
+        version = await session.get(SkillVersionRow, version_id)
+        asset = await session.get(SkillRow, skill_id)
+        assert version is not None and asset is not None
+        version.workflow_status = "published"
+        asset.current_published_version_id = version_id
+    return skill_id
+
+
+async def _claim_and_begin(seed: PrivateThreadSeed, *, now: datetime):
+    worker_id = uuid.uuid4()
+    async with seed.factory() as session, session.begin():
+        session.add(
+            WorkerNodeRow(
+                id=worker_id,
+                version="skill-builder-revision-pg",
+                capabilities_json=["private_run"],
+                max_concurrent_jobs=1,
+            )
+        )
+    async with seed.factory() as session, session.begin():
+        jobs = JobRepository(session)
+        claim = await jobs.claim_next(
+            worker_id=worker_id,
+            capabilities=frozenset({"private_run"}),
+            lease_seconds=60,
+            now=now,
+        )
+        assert claim is not None
+        assert await jobs.mark_running(claim.job_id, lease_token=claim.lease_token, now=now)
+        await PrivateRunRepository(session).begin_execution(
+            scope=seed.owner_a.resource_scope,
+            run_id=claim.run_id or "",
+            job_id=claim.job_id,
+            lease_token=claim.lease_token,
+            origin_trace_id=claim.origin_trace_id,
+            now=now,
+        )
+    return claim
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, published = await _publish_template(skills, context, "seed-auditor")
+        opened = await _open_revision(design, context, asset.id, "seed-open")
+        assert opened.status is SkillDesignStatus.DRAFT_READY
+        assert opened.session_kind == "revise"
+        assert opened.target_skill_id == asset.id
+        assert opened.base_version_id == published.id
+        assert opened.base_version_number == 1
+        assert opened.draft_checksum == published.payload_checksum == opened.base_payload_checksum
+        assert [item.path for item in opened.files] == ["SKILL.md"]
+        assert opened.files[0].content.encode() == _skill_md("seed-auditor", _template_body()).content
+        assert opened.base_files[0].sha256 == opened.files[0].sha256
+        assert opened.base_files[0].media_type == opened.files[0].media_type
+
+        edited = await _edit_draft(
+            design,
+            context,
+            opened,
+            opened.files[0].content.replace("Add instructions", "Use reviewed inputs"),
+            key="seed-edit",
+        )
+        assert edited.status is SkillDesignStatus.DRAFT_READY
+        assert edited.draft_checksum != opened.draft_checksum
+
+        validated = await _validate_session(design, context, edited, "seed-validate")
+        assert validated.status is SkillDesignStatus.VALIDATED
+        assert validated.validation is not None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_seed_dry_run_rejects_unsupported_published_shapes(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, _skills, design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        too_many = (
+            _skill_md("too-many-files", _template_body()),
+            *(SkillArchiveFile(f"notes/file-{index}.md", b"note\n", "text/markdown") for index in range(128)),
+        )
+        oversized = (
+            _skill_md("oversized-file", _template_body()),
+            SkillArchiveFile("notes/big.md", (b"x" * (512 * 1024 + 1)), "text/markdown"),
+        )
+        dotted = (
+            _skill_md("dotted-path", _template_body()),
+            SkillArchiveFile(".gitignore", b"*.pyc\n", "text/plain"),
+        )
+        secret = (_skill_md("secret-material", 'api_key = "abcdefghijklmnop"\n'),)
+        binary = (
+            _skill_md("binary-note", _template_body()),
+            SkillArchiveFile("notes/raw.txt", b"\xff\xfe not utf-8", "text/plain"),
+        )
+        blocked = (
+            _skill_md("scan-blocked", _template_body()),
+            SkillArchiveFile("tools/run.py", b'exec("print(1)")\n', "text/x-python"),
+        )
+        cases = (
+            ("too-many-files", too_many),
+            ("oversized-file", oversized),
+            ("dotted-path", dotted),
+            ("secret-material", secret),
+            ("binary-note", binary),
+            ("scan-blocked", blocked),
+        )
+        for slug, files in cases:
+            skill_id = await _insert_published_skill(seed, context, slug=slug, files=files)
+            with pytest.raises(SkillDesignTargetUnsupported):
+                await _open_revision(design, context, skill_id, f"reject-{slug}")
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_session_uniqueness_and_target_404(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, _published = await _publish_template(skills, context, "unique-auditor")
+        first = await _open_revision(design, context, asset.id, "unique-open")
+        replay = await _open_revision(design, context, asset.id, "unique-open")
+        assert replay.id == first.id
+
+        with pytest.raises(SkillDesignTargetSessionExists):
+            await _open_revision(design, context, asset.id, "unique-other")
+
+        async with seed.factory() as session, session.begin():
+            row = await session.get(SkillDesignSessionRow, first.id)
+            assert row is not None
+            row.status = "failed"
+            row.error_code = "SKILL_DESIGN_TARGET_SESSION_EXISTS"
+            row.error_message = "A live revision session already occupies this target."
+        with pytest.raises(SkillDesignTargetSessionExists):
+            await _open_revision(design, context, asset.id, "unique-after-failed")
+
+        async with seed.factory() as session, session.begin():
+            with pytest.raises(IntegrityError) as exc_info:
+                await session.execute(
+                    sa.text(
+                        """INSERT INTO skill_design_sessions
+                        (id,project_id,owner_user_id,thread_id,slug,display_name,status,
+                         revision,messages_json,progress_json,draft_checksum,
+                         skill_creator_skill_id,skill_creator_version_id,
+                         skill_creator_payload_checksum,error_code,error_message,
+                         session_kind,target_skill_id,base_version_id,base_version_number,
+                         base_payload_checksum,target_skill_deleted,
+                         create_idempotency_key_hash,create_request_checksum)
+                        SELECT :id,project_id,owner_user_id,:thread,slug,display_name,status,
+                               revision,messages_json,progress_json,draft_checksum,
+                               skill_creator_skill_id,skill_creator_version_id,
+                               skill_creator_payload_checksum,error_code,error_message,
+                               session_kind,target_skill_id,base_version_id,
+                               base_version_number,base_payload_checksum,
+                               target_skill_deleted,:hash,create_request_checksum
+                          FROM skill_design_sessions WHERE id=:existing"""
+                    ),
+                    {
+                        "id": uuid.uuid4(),
+                        "thread": uuid.uuid4(),
+                        "hash": "c" * 64,
+                        "existing": first.id,
+                    },
+                )
+        assert "uq_skill_design_sessions_live_revise_target" in str(exc_info.value)
+
+        second_asset, _second_published = await _publish_template(skills, context, "race-auditor")
+        results = await asyncio.gather(
+            _open_revision(design, context, second_asset.id, "race-a"),
+            _open_revision(design, context, second_asset.id, "race-b"),
+            return_exceptions=True,
+        )
+        opened = [item for item in results if not isinstance(item, Exception)]
+        conflicts = [item for item in results if isinstance(item, SkillDesignTargetSessionExists)]
+        assert len(opened) == 1
+        assert len(conflicts) == 1
+
+        async with seed.factory() as session:
+            system_skill_id = await session.scalar(sa.select(SkillRow.id).where(SkillRow.scope == "system").limit(1))
+        assert system_skill_id is not None
+        with pytest.raises(AssetNotFound):
+            await _open_revision(design, context, system_skill_id, "missing-system")
+        with pytest.raises(AssetNotFound):
+            await _open_revision(design, context, uuid.uuid4(), "missing-id")
+
+        other_project_id = uuid.uuid4()
+        other_skill_id = uuid.uuid4()
+        async with seed.engine.begin() as connection:
+            await connection.execute(
+                sa.text(
+                    """INSERT INTO projects (id,slug,display_name,created_by_user_id)
+                       VALUES (:id,:slug,'Other',:owner)"""
+                ),
+                {
+                    "id": other_project_id,
+                    "slug": f"other-{other_project_id.hex[:12]}",
+                    "owner": str(context.user_id),
+                },
+            )
+            await connection.execute(
+                sa.text(
+                    """INSERT INTO skills
+                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    VALUES (:id,'project',:project,'foreign-skill','foreign-skill',
+                            'suspended',1,:owner)"""
+                ),
+                {
+                    "id": other_skill_id,
+                    "project": other_project_id,
+                    "owner": str(context.user_id),
+                },
+            )
+        with pytest.raises(AssetNotFound):
+            await _open_revision(design, context, other_skill_id, "missing-foreign")
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_turn_authoring_payload_is_isolated(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+        with_model=True,
+    )
+    try:
+        asset, published = await _publish_template(skills, context, "authoring-auditor")
+        opened = await _open_revision(design, context, asset.id, "authoring-open")
+        admitted = await design.submit_turn(
+            context,
+            opened.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignMessageTurn(kind="message", message="收紧已发布说明"),
+                expected_revision=opened.revision,
+                idempotency_key="authoring-turn",
+            ),
+        )
+        assert admitted.run_id
+        async with seed.factory() as session:
+            run = (await session.execute(sa.select(RunRow).where(RunRow.run_id == admitted.run_id))).scalar_one()
+        payload = json.loads(run.kwargs_json["input"]["messages"][0]["content"])
+        assert payload["authoring"] == {
+            "kind": "revise",
+            "target_slug": "authoring-auditor",
+            "base_version_number": published.version_number,
+        }
+        assert payload["conversation"]["mode"] == "initial"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_commit_creates_draft_without_moving_pointer(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, published = await _publish_template(skills, context, "commit-auditor")
+        opened = await _open_revision(design, context, asset.id, "commit-open")
+        edited = await _edit_draft(
+            design,
+            context,
+            opened,
+            opened.files[0].content.replace("Add instructions", "Use reviewed inputs"),
+            key="commit-edit",
+        )
+        validated = await _validate_session(design, context, edited, "commit-validate")
+        reserved_before = set(quota.reserved)
+        committed = await _commit_session(design, context, validated, "commit-save")
+        assert committed.session.status is SkillDesignStatus.COMPLETED
+        assert committed.session.created_skill_id == asset.id
+        assert committed.version is not None
+        assert committed.version.version_number == 2
+        assert committed.version.workflow_status.value == "draft"
+        assert committed.version.supersedes_version_id == published.id
+        assert committed.version.id in quota.reserved
+        assert committed.version.id not in reserved_before
+        current = await skills.get(context, asset.id)
+        assert current.current_published_version_id == published.id
+        replayed = await _commit_session(design, context, validated, "commit-save")
+        assert replayed.version is not None
+        assert replayed.version.id == committed.version.id
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_commit_rejects_noop_and_requires_stale_ack(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, published = await _publish_template(skills, context, "noop-auditor")
+        opened = await _open_revision(design, context, asset.id, "noop-open")
+        validated = await _validate_session(design, context, opened, "noop-validate")
+        with pytest.raises(SkillDesignNoChanges):
+            await _commit_session(design, context, validated, "noop-commit")
+
+        media_only = await _edit_draft(
+            design,
+            context,
+            validated,
+            validated.files[0].content,
+            key="media-edit",
+            media_type="text/plain",
+        )
+        assert media_only.draft_checksum == opened.draft_checksum
+        assert media_only.files[0].media_type == "text/plain"
+        media_validated = await _validate_session(design, context, media_only, "media-validate")
+        media_committed = await _commit_session(design, context, media_validated, "media-commit")
+        assert media_committed.version is not None
+        assert media_committed.version.supersedes_version_id == published.id
+
+        stale_asset, stale_base = await _publish_template(skills, context, "stale-auditor")
+        stale_session = await _open_revision(design, context, stale_asset.id, "stale-open")
+        live_draft = await skills.create_version_from_archive(
+            context,
+            stale_asset.id,
+            (_skill_md("stale-auditor", "Newer live successor.\n"),),
+            expected_asset_version=stale_asset.version,
+        )
+        live = await skills.publish(
+            context,
+            stale_asset.id,
+            live_draft.id,
+            expected_asset_version=stale_asset.version + 1,
+        )
+        edited = await _edit_draft(
+            design,
+            context,
+            stale_session,
+            stale_session.files[0].content.replace("Add instructions", "Branch from the old base"),
+            key="stale-edit",
+        )
+        stale_validated = await _validate_session(design, context, edited, "stale-validate")
+        with pytest.raises(SkillDesignBaseStale):
+            await _commit_session(design, context, stale_validated, "stale-commit")
+        committed = await _commit_session(
+            design,
+            context,
+            stale_validated,
+            "stale-ack",
+            acknowledge_base_stale=True,
+        )
+        assert committed.version is not None
+        assert committed.version.supersedes_version_id == stale_base.id
+        current = await skills.get(context, stale_asset.id)
+        assert current.current_published_version_id == live.id
+        replayed = await _commit_session(
+            design,
+            context,
+            stale_validated,
+            "stale-ack",
+            acknowledge_base_stale=True,
+        )
+        assert replayed.version is not None
+        assert replayed.version.id == committed.version.id
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_delete_and_commit_converge_without_deadlock(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, _published = await _publish_template(skills, context, "race-delete")
+        opened = await _open_revision(design, context, asset.id, "race-delete-open")
+        edited = await _edit_draft(
+            design,
+            context,
+            opened,
+            opened.files[0].content.replace("Add instructions", "Race against delete"),
+            key="race-delete-edit",
+        )
+        validated = await _validate_session(design, context, edited, "race-delete-validate")
+        current = await skills.get(context, asset.id)
+
+        results = await asyncio.wait_for(
+            asyncio.gather(
+                skills.delete(
+                    context,
+                    asset.id,
+                    expected_asset_version=current.version,
+                ),
+                _commit_session(design, context, validated, "race-delete-commit"),
+                return_exceptions=True,
+            ),
+            timeout=20,
+        )
+        for result in results:
+            assert not isinstance(result, OperationalError)
+        delete_result, commit_result = results
+        delete_ok = delete_result is None
+        commit_ok = not isinstance(commit_result, Exception)
+        assert delete_ok != commit_ok, (delete_result, commit_result)
+        if delete_ok:
+            assert isinstance(commit_result, (SkillDesignTargetDeleted, AssetConflict, AssetNotFound))
+            closed = await design.get(context, validated.id)
+            assert closed.target_skill_deleted is True
+            assert closed.status is SkillDesignStatus.FAILED
+            with pytest.raises(AssetNotFound):
+                await skills.get(context, asset.id)
+        else:
+            assert isinstance(delete_result, AssetConflict)
+            assert commit_ok
+            assert commit_result.version is not None
+            persisted = await skills.get(context, asset.id)
+            assert persisted.current_published_version_id == current.current_published_version_id
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_delete_fails_open_sessions_and_revokes_in_flight_tools(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+        with_model=True,
+    )
+    try:
+        asset, _published = await _publish_template(skills, context, "delete-auditor")
+        opened = await _open_revision(design, context, asset.id, "delete-open")
+        admitted = await design.submit_turn(
+            context,
+            opened.id,
+            SubmitSkillDesignTurn(
+                input=SkillDesignMessageTurn(kind="message", message="继续修订"),
+                expected_revision=opened.revision,
+                idempotency_key="delete-turn",
+            ),
+        )
+        claim = await _claim_and_begin(seed, now=datetime.now(UTC))
+        current = await skills.get(context, asset.id)
+        await skills.delete(context, asset.id, expected_asset_version=current.version)
+
+        closed = await design.get(context, opened.id)
+        assert closed.status is SkillDesignStatus.FAILED
+        assert closed.error_code == "SKILL_DESIGN_TARGET_DELETED"
+        assert closed.target_skill_deleted is True
+        assert closed.target_skill_id is None
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admitted.run_id,
+                    )
+                )
+            ).scalar_one()
+        assert operation.status == "failed"
+        assert operation.public_error_code == "SKILL_DESIGN_TARGET_DELETED"
+
+        sink = design.terminal_sink(seed.owner_a, claim)
+        with pytest.raises(AuthorizationRevoked):
+            await sink.list_candidate_files(SkillBuilderCandidateFileList())
+
+        with pytest.raises(SkillDesignTargetDeleted):
+            await design.submit_turn(
+                context,
+                opened.id,
+                SubmitSkillDesignTurn(
+                    input=SkillDesignMessageTurn(kind="message", message="删除后不应继续"),
+                    expected_revision=closed.revision,
+                    idempotency_key="delete-turn-after",
+                ),
+            )
+        with pytest.raises(SkillDesignTargetDeleted):
+            await design.validate(
+                context,
+                opened.id,
+                ValidateSkillDesignSession(
+                    expected_revision=closed.revision,
+                    expected_draft_checksum=closed.draft_checksum or ("d" * 64),
+                    idempotency_key="delete-validate",
+                ),
+            )
+        with pytest.raises(SkillDesignTargetDeleted):
+            await design.commit(
+                context,
+                opened.id,
+                CommitSkillDesignSession(
+                    expected_revision=closed.revision,
+                    expected_draft_checksum=closed.draft_checksum or ("d" * 64),
+                    acknowledge_warnings=True,
+                    idempotency_key="delete-commit",
+                ),
+            )
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_publish_lineage_guard_on_postgres(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, _design, _quota = await _environment(migrated_postgres_database_url)
+    try:
+        asset, first = await _publish_template(skills, context, "lineage-auditor")
+        assert first.supersedes_version_id is None
+        current = await skills.get(context, asset.id)
+        assert current.current_published_version_id == first.id
+
+        live_draft = await skills.create_version_from_archive(
+            context,
+            asset.id,
+            (_skill_md("lineage-auditor", "Newer live successor.\n"),),
+            expected_asset_version=current.version,
+        )
+        await skills.publish(
+            context,
+            asset.id,
+            live_draft.id,
+            expected_asset_version=current.version + 1,
+        )
+        latest = await skills.get(context, asset.id)
+        forked = await skills.fork_version(
+            context,
+            asset.id,
+            first.id,
+            (
+                SkillFileChange(
+                    "replace",
+                    "SKILL.md",
+                    _skill_md("lineage-auditor", "Forked from the first version.\n").content.decode(),
+                    "text/markdown",
+                ),
+            ),
+            expected_asset_version=latest.version,
+            expected_source_payload_checksum=first.payload_checksum,
+        )
+        latest = await skills.get(context, asset.id)
+        with pytest.raises(SkillPublishBaseStale):
+            await skills.publish(
+                context,
+                asset.id,
+                forked.id,
+                expected_asset_version=latest.version,
+            )
+        with pytest.raises(AssetConflict):
+            await skills.publish(
+                context,
+                asset.id,
+                forked.id,
+                expected_asset_version=latest.version - 1,
+                acknowledge_stale_base=True,
+            )
+        published_fork = await skills.publish(
+            context,
+            asset.id,
+            forked.id,
+            expected_asset_version=latest.version,
+            acknowledge_stale_base=True,
+        )
+        assert published_fork.id == forked.id
+        assert published_fork.supersedes_version_id == first.id
+        after = await skills.get(context, asset.id)
+        assert after.current_published_version_id == forked.id
+    finally:
+        await seed.engine.dispose()

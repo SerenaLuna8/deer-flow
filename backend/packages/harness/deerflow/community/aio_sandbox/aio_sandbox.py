@@ -5,6 +5,7 @@ import shlex
 import threading
 import uuid
 
+import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
 
@@ -24,6 +25,8 @@ from deerflow.sandbox.sandbox import (
     _validate_extra_env,
 )
 from deerflow.sandbox.search import GrepMatch, path_matches, should_ignore_path, truncate_line
+
+from .backend import _sandbox_url_bypasses_env_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +66,20 @@ class AioSandbox(Sandbox):
         """
         super().__init__(id)
         self._base_url = base_url
-        self._client = AioSandboxClient(base_url=base_url, timeout=600)
+        http_client = httpx.Client(
+            timeout=600,
+            follow_redirects=True,
+            trust_env=not _sandbox_url_bypasses_env_proxy(base_url),
+        )
+        try:
+            self._client = AioSandboxClient(
+                base_url=base_url,
+                timeout=600,
+                httpx_client=http_client,
+            )
+        except BaseException:
+            http_client.close()
+            raise
         self._home_dir = home_dir
         self._lock = threading.Lock()
         self._closed = False

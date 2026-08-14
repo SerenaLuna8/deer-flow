@@ -69,6 +69,7 @@ async function mockMemoryClient(page: Page, state: SharedMemoryState) {
       return json(route, {
         id: ACCOUNT_ID,
         email: "owner@example.test",
+        username: "owner",
         system_role: "user",
         needs_setup: false,
         oauth_provider: null,

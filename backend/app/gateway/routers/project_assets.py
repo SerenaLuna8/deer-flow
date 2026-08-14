@@ -70,7 +70,13 @@ from app.shared_assets import (
     SkillArchiveFile,
     SkillCredentialBindingInput,
     SkillCredentialBindingService,
+    SkillDesignBaseStale,
+    SkillDesignNoChanges,
+    SkillDesignTargetDeleted,
+    SkillDesignTargetSessionExists,
+    SkillDesignTargetUnsupported,
     SkillFileChange,
+    SkillPublishBaseStale,
     SkillService,
     WorkflowStatus,
 )
@@ -241,6 +247,10 @@ class AgentCreateRequest(_StrictModel):
 
 class ExpectedAssetVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
+
+
+class SkillPublishRequest(ExpectedAssetVersionRequest):
+    acknowledge_stale_base: bool = False
 
 
 class ProjectDefaultAgentRequest(_StrictModel):
@@ -792,6 +802,12 @@ ASSET_ERRORS = (
     AssetStorageUnavailable,
     AssetStorageQuotaExceeded,
     AssetRunQuotaExceeded,
+    SkillDesignTargetUnsupported,
+    SkillDesignTargetSessionExists,
+    SkillDesignTargetDeleted,
+    SkillDesignBaseStale,
+    SkillDesignNoChanges,
+    SkillPublishBaseStale,
 )
 
 
@@ -804,6 +820,12 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         AssetStorageQuotaExceeded: 429,
         AssetRunQuotaExceeded: 429,
         AssetStorageUnavailable: 503,
+        SkillDesignTargetUnsupported: 422,
+        SkillDesignTargetSessionExists: 409,
+        SkillDesignTargetDeleted: 409,
+        SkillDesignBaseStale: 409,
+        SkillDesignNoChanges: 409,
+        SkillPublishBaseStale: 409,
     }
     status_code = known.get(type(exc))
     if status_code is None:
@@ -1463,8 +1485,8 @@ def register_asset_routes(
     async def get_skill_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), SkillVersionHistoryResponse)
 
-    async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), SkillVersionResponse)
+    async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: SkillPublishRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version, acknowledge_stale_base=body.acknowledge_stale_base), SkillVersionResponse)
 
     async def delete_skill(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         try:

@@ -28,12 +28,14 @@ export function normalizeSkillBuilderSlug(value: string): string {
     .replace(/^-+|-+$/gu, "");
 }
 
-export function skillBuilderSlugError(value: string): string | null {
-  if (value.length < 3) return "名称至少需要 3 个字符";
-  if (value.length > 63) return "名称不能超过 63 个字符";
-  if (!SKILL_SLUG_PATTERN.test(value)) {
-    return "仅支持小写字母、数字和单个连字符";
-  }
+export type SkillBuilderSlugErrorCode = "too-short" | "too-long" | "invalid";
+
+export function skillBuilderSlugErrorCode(
+  value: string,
+): SkillBuilderSlugErrorCode | null {
+  if (value.length < 3) return "too-short";
+  if (value.length > 63) return "too-long";
+  if (!SKILL_SLUG_PATTERN.test(value)) return "invalid";
   return null;
 }
 
@@ -72,6 +74,7 @@ export function skillBuilderComposerDisabled(
   return (
     mutationPending ||
     localDraftDirty ||
+    session.target_skill_deleted ||
     Boolean(session.activeRun) ||
     session.status === "generating" ||
     session.status === "awaiting_clarification" ||
@@ -94,6 +97,7 @@ export function skillBuilderCanCommit(session: SkillBuilderSession): boolean {
   return (
     session.status === "validated" &&
     session.created_skill_id === null &&
+    !session.target_skill_deleted &&
     session.files.some((file) => file.path === "SKILL.md") &&
     skillBuilderValidationCurrent(session)
   );
@@ -156,9 +160,15 @@ export function skillBuilderRunPresentation(
   return null;
 }
 
+export type SkillBuilderMergeAttachmentError =
+  | "too_large"
+  | "invalid_name"
+  | "too_many"
+  | "total_too_large";
+
 export type SkillBuilderMergeAttachmentResult =
   | { ok: true; attachments: SkillBuilderAttachment[] }
-  | { ok: false; error: string };
+  | { ok: false; error: SkillBuilderMergeAttachmentError };
 
 /** Merge one uploaded reference file into the composer queue, replacing a same-name entry. */
 export function skillBuilderMergeAttachment(
@@ -175,24 +185,21 @@ export function skillBuilderMergeAttachment(
       new TextEncoder().encode(candidate.content).byteLength >
       SKILL_BUILDER_MAX_ATTACHMENT_BYTES
     ) {
-      return { ok: false, error: "单个附件不能超过 256 KB。" };
+      return { ok: false, error: "too_large" };
     }
-    return { ok: false, error: "附件名包含不支持的字符，请重命名后重试。" };
+    return { ok: false, error: "invalid_name" };
   }
   const next = current.filter((item) => item.name !== parsed.data.name);
   next.push(parsed.data);
   if (next.length > SKILL_BUILDER_MAX_ATTACHMENTS) {
-    return {
-      ok: false,
-      error: `一次最多附加 ${SKILL_BUILDER_MAX_ATTACHMENTS} 个参考文件。`,
-    };
+    return { ok: false, error: "too_many" };
   }
   const total = next.reduce(
     (sum, item) => sum + new TextEncoder().encode(item.content).byteLength,
     0,
   );
   if (total > SKILL_BUILDER_MAX_ATTACHMENTS_TOTAL_BYTES) {
-    return { ok: false, error: "附件总大小不能超过 512 KB。" };
+    return { ok: false, error: "total_too_large" };
   }
   return { ok: true, attachments: next };
 }

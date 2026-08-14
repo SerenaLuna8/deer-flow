@@ -1,10 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  projectAssetVersionDisplayStatus,
-  ProjectSystemSkillBindingAction,
-} from "@/components/projects/assets/project-asset-detail-sheet";
+import { projectAssetVersionDisplayStatus } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   ProjectAssetListView,
   projectSystemSkillBindingCanManage,
@@ -90,27 +87,6 @@ describe("project System Skill binding", () => {
         "skills",
       ).disabled,
     ).toBe(true);
-  });
-
-  test("renders version management inside the detail action area only when authorized", () => {
-    const enabled = renderToStaticMarkup(
-      <ProjectSystemSkillBindingAction
-        visible
-        disabled={false}
-        onManage={() => undefined}
-      />,
-    );
-    const denied = renderToStaticMarkup(
-      <ProjectSystemSkillBindingAction
-        visible={false}
-        disabled={false}
-        onManage={() => undefined}
-      />,
-    );
-
-    expect(enabled).toContain("管理项目版本");
-    expect(enabled).toContain("在详情中管理项目使用的 System Skill 版本");
-    expect(denied).not.toContain("管理项目版本");
   });
 
   test("keeps an enabled binding manageable after its asset is suspended", () => {

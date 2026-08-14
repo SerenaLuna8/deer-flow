@@ -115,6 +115,37 @@ def test_after_model_dispatches_in_reverse_registration_order() -> None:
     assert after == ["second:after_model", "first:after_model"]
 
 
+def test_after_agent_dispatches_in_reverse_registration_order() -> None:
+    """Sandbox/Todo/LoopDetection/TokenBudget placement depends on this."""
+
+    journal: list[str] = []
+
+    def recorder(label: str) -> AgentMiddleware:
+        class _AgentRecorder(AgentMiddleware):
+            def before_agent(self, state, runtime):
+                journal.append(f"{label}:before_agent")
+                return None
+
+            def after_agent(self, state, runtime):
+                journal.append(f"{label}:after_agent")
+                return None
+
+        _AgentRecorder.__name__ = f"AgentRecorder_{label.title()}"
+        _AgentRecorder.__qualname__ = _AgentRecorder.__name__
+        return _AgentRecorder()
+
+    agent = create_agent(
+        model=_fake_model([AIMessage(content="done")]),
+        middleware=[recorder("first"), recorder("second")],
+    )
+    agent.invoke({"messages": [HumanMessage(content="hi")]})
+
+    before = [entry for entry in journal if entry.endswith(":before_agent")]
+    after = [entry for entry in journal if entry.endswith(":after_agent")]
+    assert before == ["first:before_agent", "second:before_agent"]
+    assert after == ["second:after_agent", "first:after_agent"]
+
+
 # ---------------------------------------------------------------------------
 # Group 2 — wrap_model_call / wrap_tool_call compose first-registered-outermost
 # ---------------------------------------------------------------------------

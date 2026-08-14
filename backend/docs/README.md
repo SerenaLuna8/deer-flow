@@ -29,6 +29,7 @@
 | 文档                                                   | 内容                          |
 | ------------------------------------------------------ | ----------------------------- |
 | [GUARDRAILS.md](./GUARDRAILS.md)                       | Tool call 前置策略与 provider |
+| [HOST_EXECUTION_APPROVAL.md](./HOST_EXECUTION_APPROVAL.md) | Local Provider 本机命令单次审批设计（未实现） |
 | [FILE_UPLOAD.md](./FILE_UPLOAD.md)                     | 文件上传和转换                |
 | [AUTO_TITLE_GENERATION.md](./AUTO_TITLE_GENERATION.md) | Thread title 生成             |
 | [plan_mode_usage.md](./plan_mode_usage.md)             | Plan Mode 与 Todo middleware  |

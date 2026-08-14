@@ -8,7 +8,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from app.bootstrap_identities import BUILTIN_MODEL_EMAIL, BUILTIN_MODEL_USER_ID
+from app.bootstrap_identities import BUILTIN_MODEL_EMAIL, BUILTIN_MODEL_USER_ID, BUILTIN_MODEL_USERNAME
 from app.system_runtime_settings.models import (
     RuntimePolicySection,
     default_policy_value,
@@ -55,6 +55,7 @@ async def _ensure_bootstrap_principal(session: AsyncSession) -> None:
             UserRow(
                 id=principal_id,
                 email=BUILTIN_MODEL_EMAIL,
+                username=BUILTIN_MODEL_USERNAME,
                 password_hash=None,
                 system_role="user",
                 oauth_provider=None,
@@ -66,6 +67,7 @@ async def _ensure_bootstrap_principal(session: AsyncSession) -> None:
         await session.flush()
     elif (
         principal.email != BUILTIN_MODEL_EMAIL
+        or principal.username != BUILTIN_MODEL_USERNAME
         or principal.password_hash is not None
         or principal.system_role != "user"
         or principal.oauth_provider is not None

@@ -133,10 +133,10 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
         bucket_end = (bucket_end - 1) // bucket_size
         return f"{path}:{bucket_start}-{bucket_end}"
 
-    # write_file / str_replace are content-sensitive: same path may be updated
-    # with different payloads during iteration. Using only salient fields (path)
-    # can collapse distinct calls, so we hash full args to reduce false positives.
-    if name in {"write_file", "str_replace"}:
+    # File mutations are content-sensitive: the same path may be updated with
+    # different payloads during iteration or bounded chunking. Using only the
+    # path would collapse distinct calls and can stop a valid write sequence.
+    if name in {"write_file", "str_replace", "upsert_candidate_file"}:
         if fallback_key is not None:
             return fallback_key
         return json.dumps(args, sort_keys=True, default=str)

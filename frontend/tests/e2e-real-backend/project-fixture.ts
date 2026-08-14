@@ -22,6 +22,7 @@ export async function registerReplayProject(
     {
       data: {
         email: `e2e-${uniq}@example.com`,
+        username: `e2e_${uniq.replaceAll("-", "_")}`,
         password: "very-strong-password-123",
       },
     },

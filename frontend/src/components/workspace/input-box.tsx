@@ -1,25 +1,15 @@
 "use client";
 
 import type { Message } from "@langchain/langgraph-sdk";
-import { useQueryClient } from "@tanstack/react-query";
 import type { ChatStatus } from "ai";
 import {
   CheckIcon,
-  GraduationCapIcon,
-  LightbulbIcon,
   Loader2Icon,
-  MicIcon,
-  PaperclipIcon,
-  PlusIcon,
-  RocketIcon,
   SparklesIcon,
-  SquareIcon,
-  TargetIcon,
   Undo2Icon,
   XIcon,
-  ZapIcon,
 } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import {
   useCallback,
   useEffect,
@@ -36,10 +26,6 @@ import { toast } from "sonner";
 
 import {
   PromptInput,
-  PromptInputActionMenu,
-  PromptInputActionMenuContent,
-  PromptInputActionMenuItem,
-  PromptInputActionMenuTrigger,
   PromptInputAttachment,
   PromptInputAttachments,
   PromptInputButton,
@@ -48,46 +34,19 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
-  usePromptInputAttachments,
   usePromptInputController,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
 import { Button } from "@/components/ui/button";
-import { ConfettiButton } from "@/components/ui/confetti-button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
-import {
-  DropdownMenuGroup,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-} from "@/components/ui/dropdown-menu";
-import { GatewayApiError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import { hasOpenHumanInputRequest } from "@/core/messages/human-input";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
-import {
-  getProjectMemory,
-  restoreProjectMemoryVersion,
-} from "@/core/private-work/memory/api";
-import { useMemoryDreamPreparation } from "@/core/private-work/memory/preparation-hooks";
-import { projectMemoryRootQueryKey } from "@/core/private-work/memory/query-keys";
-import { commitProjectMemoryCacheChange } from "@/core/private-work/memory-freshness";
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
-import { privateWorkQueryKey } from "@/core/private-work/query-keys";
 import { useProjectRuntimeSlashSkills } from "@/core/shared-assets";
-import {
-  buildReferenceMessageMetadata,
-  type SidecarContext,
-} from "@/core/sidecar";
+import { buildReferenceMessageMetadata } from "@/core/sidecar";
 import { useSuggestionsConfig } from "@/core/suggestions/hooks";
 import type { AgentThreadContext, GoalState } from "@/core/threads";
 import {
@@ -95,7 +54,6 @@ import {
   resolveAgentMode,
   type AgentMode,
 } from "@/core/threads/agent-mode";
-import { compactThreadContext } from "@/core/threads/api";
 import {
   buildComposerDraftKey,
   clearComposerDraft,
@@ -105,134 +63,60 @@ import {
   writeComposerDraft,
   type ComposerDraft,
 } from "@/core/threads/composer-draft";
-import { threadContextUsageQueryKey } from "@/core/threads/context-usage";
 import { useThreadContextUsage } from "@/core/threads/hooks";
-import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
   splitUnsupportedUploadFiles,
   useUploadLimits,
   validateUploadLimits,
-  type UploadLimits,
   type UploadLimitViolation,
 } from "@/core/uploads";
-import {
-  getVoiceInputButtonState,
-  getVoiceInputToggleAction,
-} from "@/core/voice-input/interaction";
-import {
-  appendSpeechTranscript,
-  getSpeechRecognitionConstructor,
-  getSpeechRecognitionLanguage,
-  mapSpeechRecognitionError,
-  readSpeechRecognitionTranscript,
-  shouldRestartSpeechRecognition,
-  type BrowserSpeechRecognition,
-  type SpeechRecognitionErrorKind,
-} from "@/core/voice-input/speech-recognition";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
-import { Suggestion, Suggestions } from "../ai-elements/suggestion";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "../ui/dropdown-menu";
-
 import { ContextWindowIndicator } from "./context-window-indicator";
 import {
-  abortGoalRequest,
-  beginGoalRequest,
+  AddAttachmentsButton,
+  SuggestionList,
+  VoiceInputButton,
+} from "./input-box-controls";
+import {
+  DreamRestoreConfirmDialog,
+  FollowupConfirmDialog,
+} from "./input-box-dialogs";
+import {
+  focusContentEditableEnd,
+  insertPlainTextAtSelection,
+} from "./input-box-dom";
+import { FollowupSuggestions } from "./input-box-followups";
+import {
   canPolishInput,
   completeLatestCheckpointContinuation,
-  createGoalRequestState,
   createLatestCheckpointContinuationState,
   findSuggestionTemplatePlaceholder,
-  finishGoalRequest,
   getInputSubmitAction,
   getLeadingSlashSkillQuery,
   getMatchingSkillSuggestions,
-  type GoalCommand,
   isAbortError,
-  isCurrentGoalRequest,
   markLatestCheckpointContinuation,
-  readGoalResponseError,
   resetLatestCheckpointContinuation,
   shouldContinueFromLatestCheckpoint,
   type SlashSuggestion,
 } from "./input-box-helpers";
-import {
-  memoryDreamPreparationCanCancel,
-  memoryDreamPreparationLabelKind,
-  memoryDreamPreparationTerminalNotice,
-} from "./memory-dream-preparation-view-model";
+import { InputBoxModeChooser } from "./input-box-mode-chooser";
+import { InputBoxModelChooser } from "./input-box-model-chooser";
+import { buildHiddenConversationQuoteMessage } from "./input-box-quote";
+import { SlashSkillSuggestionsListbox } from "./input-box-skill-suggestions";
+import { memoryDreamPreparationCanCancel } from "./memory-dream-preparation-view-model";
 import { useThread } from "./messages/context";
-import { ModeHoverGuide } from "./mode-hover-guide";
-import {
-  ModelSelector,
-  ModelSelectorContent,
-  ModelSelectorItem,
-  ModelSelectorLabel,
-  ModelSelectorList,
-  ModelSelectorName,
-  ModelSelectorTrigger,
-} from "./model-selector-popover";
 import { ReferenceAttachmentSummary, useMaybeSidecar } from "./sidecar";
 import { SlashSkillChip } from "./slash-skill-chip";
 import { Tooltip } from "./tooltip";
+import { useInputBoxCommands } from "./use-input-box-commands";
+import { useInputBoxVoice } from "./use-input-box-voice";
 
 const COMPOSER_DRAFT_SAVE_DELAY_MS = 300;
-
-function focusContentEditableEnd(element: HTMLElement | null) {
-  if (!element) {
-    return;
-  }
-
-  element.focus();
-  const selection = window.getSelection();
-  if (!selection) {
-    return;
-  }
-
-  const range = document.createRange();
-  range.selectNodeContents(element);
-  range.collapse(false);
-  selection.removeAllRanges();
-  selection.addRange(range);
-}
-
-function insertPlainTextAtSelection(container: HTMLElement, text: string) {
-  const selection = window.getSelection();
-  if (!selection || selection.rangeCount === 0) {
-    return false;
-  }
-
-  const range = selection.getRangeAt(0);
-  const ancestor = range.commonAncestorContainer;
-  if (ancestor !== container && !container.contains(ancestor)) {
-    return false;
-  }
-
-  range.deleteContents();
-  const node = document.createTextNode(text);
-  range.insertNode(node);
-  range.setStartAfter(node);
-  range.setEndAfter(node);
-  selection.removeAllRanges();
-  selection.addRange(range);
-  return true;
-}
-
-function escapeXmlAttribute(value: string) {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
 
 export type InputBoxSubmitOptions = {
   additionalKwargs?: Record<string, unknown>;
@@ -240,58 +124,6 @@ export type InputBoxSubmitOptions = {
   continueFromLatestCheckpoint?: boolean;
   onSent?: () => void;
 };
-
-type VoiceRecognitionStartOptions = {
-  focusAfterStart?: boolean;
-};
-
-function buildHiddenConversationQuoteMessage({
-  contexts,
-}: {
-  contexts: SidecarContext[];
-}): Message {
-  return {
-    type: "human",
-    content: [
-      {
-        type: "text",
-        text: [
-          contexts.length === 1
-            ? "The user added the following quoted context to this conversation."
-            : `The user added the following ${contexts.length} quoted contexts to this conversation.`,
-          "Use the referenced_message blocks as reference material for the user's next message.",
-          "",
-          ...contexts.flatMap((context, index) =>
-            [
-              `<referenced_message index="${index + 1}" label="${escapeXmlAttribute(
-                context.label,
-              )}">`,
-              `Role: ${context.role === "user" ? "User" : "Assistant"}`,
-              context.messageId ? `Message ID: ${context.messageId}` : null,
-              "",
-              context.content,
-              "</referenced_message>",
-              "",
-            ].filter((line): line is string => line !== null),
-          ),
-        ]
-          .filter((line): line is string => line !== null)
-          .join("\n"),
-      },
-    ],
-    additional_kwargs: {
-      hide_from_ui: true,
-      conversation_quote_context: true,
-      // Keep ids/roles/count 1:1 parallel with `contexts` so consumers can zip
-      // them safely; do not dedupe ids here.
-      referenced_message_ids: contexts.map(
-        (context) => context.messageId ?? "",
-      ),
-      referenced_message_roles: contexts.map((context) => context.role),
-      quote_context_count: contexts.length,
-    },
-  } as Message;
-}
 
 export function InputBox({
   className,
@@ -377,8 +209,6 @@ export function InputBox({
   onStop?: () => void;
 }) {
   const { locale, t } = useI18n();
-  const queryClient = useQueryClient();
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const { models } = useModels();
@@ -399,17 +229,26 @@ export function InputBox({
   const { skills, isLoading: skillsLoading } =
     useProjectRuntimeSlashSkills(agentMetadata);
   const { data: uploadLimits } = useUploadLimits(threadId);
+  const draftKey = useMemo(
+    () =>
+      buildComposerDraftKey({
+        accountId: privateWork.scope.accountId,
+        projectId: privateWork.scope.projectId,
+        agentName:
+          typeof context.agent_name === "string" ? context.agent_name : null,
+        conversationScope: draftConversationScope,
+      }),
+    [
+      context.agent_name,
+      draftConversationScope,
+      privateWork.scope.accountId,
+      privateWork.scope.projectId,
+    ],
+  );
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
   const inlineSkillComposingRef = useRef(false);
-  const goalRequestStateRef = useRef(createGoalRequestState());
-  const compactRequestStateRef = useRef(createGoalRequestState());
-  const dreamRestoreRequestStateRef = useRef(createGoalRequestState());
-  const [pendingDreamRestoreVersion, setPendingDreamRestoreVersion] = useState<
-    number | null
-  >(null);
-  const [restoringMemoryVersion, setRestoringMemoryVersion] = useState(false);
   const latestCheckpointContinuationRef = useRef(
     createLatestCheckpointContinuationState(),
   );
@@ -420,17 +259,6 @@ export function InputBox({
     controller: null,
     sequence: 0,
   });
-  const voiceRecognitionRef = useRef<BrowserSpeechRecognition | null>(null);
-  const voiceBaseTextRef = useRef("");
-  const voiceLatestTextRef = useRef("");
-  const voiceLastErrorKindRef = useRef<SpeechRecognitionErrorKind | null>(null);
-  const voiceStopRequestedRef = useRef(false);
-  const voiceRestartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null,
-  );
-  const startVoiceRecognitionRef = useRef<
-    ((options?: VoiceRecognitionStartOptions) => boolean) | null
-  >(null);
   const promptHistoryIndexRef = useRef<number | null>(null);
   const promptHistoryDraftRef = useRef("");
   const latestDraftRef = useRef<{
@@ -438,7 +266,7 @@ export function InputBox({
     draft: ComposerDraft;
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
-  const dreamPreparationNotificationRef = useRef<string | null>(null);
+  const commandRequestsCleanupRef = useRef<() => void>(() => undefined);
 
   const [followups, setFollowups] = useState<string[]>([]);
   const { data: suggestionsConfig } = useSuggestionsConfig();
@@ -447,7 +275,7 @@ export function InputBox({
   const [followupsHidden, setFollowupsHidden] = useState(false);
   const [followupsLoading, setFollowupsLoading] = useState(false);
   const [polishingInput, setPolishingInput] = useState(false);
-  const [voiceListening, setVoiceListening] = useState(false);
+  const composerLocked = disabled === true || polishingInput;
   const [inputPolishUndo, setInputPolishUndo] = useState<{
     originalText: string;
     rewrittenText: string;
@@ -459,11 +287,26 @@ export function InputBox({
   const [hydratedDraftKey, setHydratedDraftKey] = useState<string | null>(null);
   const [dismissedSkillSuggestionValue, setDismissedSkillSuggestionValue] =
     useState<string | null>(null);
-  const dreamPreparation = useMemoryDreamPreparation({
-    privateWork,
-    threadId,
-    enabled: compactCommandEnabled && threadExists && !isMock,
-  });
+  const clearMemoryCommandInput = useCallback(() => {
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    latestDraftRef.current = null;
+    if (draftSaveTimerRef.current !== null) {
+      window.clearTimeout(draftSaveTimerRef.current);
+      draftSaveTimerRef.current = null;
+    }
+    clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
+    setTextInput("");
+    setFollowups([]);
+    setFollowupsHidden(false);
+    setFollowupsLoading(false);
+  }, [draftKey, setTextInput]);
+  const markLatestCheckpoint = useCallback(() => {
+    markLatestCheckpointContinuation(
+      latestCheckpointContinuationRef.current,
+      threadId,
+    );
+  }, [threadId]);
   const latestAiId = useMemo(() => {
     const id = [...thread.messages]
       .reverse()
@@ -478,58 +321,6 @@ export function InputBox({
   const followupScopeKey = `${privateWork.scope.accountId}:${privateWork.scope.projectId}:${threadId}`;
   const followupScopeKeyRef = useRef(followupScopeKey);
   const messagesRef = useRef(thread.messages);
-
-  const clearVoiceRestartTimer = useCallback(() => {
-    if (voiceRestartTimerRef.current === null) {
-      return;
-    }
-    clearTimeout(voiceRestartTimerRef.current);
-    voiceRestartTimerRef.current = null;
-  }, []);
-
-  const cleanupVoiceRecognition = useCallback(
-    (
-      recognition: BrowserSpeechRecognition | null,
-      options: { keepListening?: boolean } = {},
-    ) => {
-      clearVoiceRestartTimer();
-      if (!recognition) {
-        if (!options.keepListening) {
-          voiceLastErrorKindRef.current = null;
-          voiceStopRequestedRef.current = false;
-          setVoiceListening(false);
-        }
-        return;
-      }
-      recognition.onend = null;
-      recognition.onerror = null;
-      recognition.onresult = null;
-      if (voiceRecognitionRef.current === recognition) {
-        voiceRecognitionRef.current = null;
-      }
-      if (!options.keepListening) {
-        voiceLastErrorKindRef.current = null;
-        voiceStopRequestedRef.current = false;
-        setVoiceListening(false);
-      }
-    },
-    [clearVoiceRestartTimer],
-  );
-
-  const abortVoiceInput = useCallback(() => {
-    const recognition = voiceRecognitionRef.current;
-    voiceStopRequestedRef.current = true;
-    if (!recognition) {
-      cleanupVoiceRecognition(null);
-      return;
-    }
-    cleanupVoiceRecognition(recognition);
-    try {
-      recognition.abort();
-    } catch {
-      // Browser implementations can throw when the recognizer already ended.
-    }
-  }, [cleanupVoiceRecognition]);
 
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [pendingSuggestion, setPendingSuggestion] = useState<string | null>(
@@ -739,22 +530,6 @@ export function InputBox({
   );
   const modelDisplayName = selectedModel?.display_name ?? resolvedModelName;
 
-  const draftKey = useMemo(
-    () =>
-      buildComposerDraftKey({
-        accountId: privateWork.scope.accountId,
-        projectId: privateWork.scope.projectId,
-        agentName:
-          typeof context.agent_name === "string" ? context.agent_name : null,
-        conversationScope: draftConversationScope,
-      }),
-    [
-      context.agent_name,
-      draftConversationScope,
-      privateWork.scope.accountId,
-      privateWork.scope.projectId,
-    ],
-  );
   const enabledSkillNames = useMemo(
     () =>
       new Set(
@@ -801,18 +576,6 @@ export function InputBox({
     }
     return history;
   }, [thread.messages]);
-
-  useLayoutEffect(() => {
-    abortVoiceInput();
-    flushLatestDraft();
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-    setTextInput("");
-    setSelectedSlashSkill(null);
-    setInputPolishUndo(null);
-    setHydratedDraftKey(null);
-    latestDraftRef.current = null;
-  }, [abortVoiceInput, draftKey, flushLatestDraft, setTextInput]);
 
   useEffect(() => {
     if (skillsLoading || hydratedDraftKey === draftKey) return;
@@ -880,15 +643,8 @@ export function InputBox({
   }, [flushLatestDraft]);
 
   useEffect(() => {
-    const goalRequestState = goalRequestStateRef.current;
-    const compactRequestState = compactRequestStateRef.current;
-    const dreamRestoreRequestState = dreamRestoreRequestStateRef.current;
     resetLatestCheckpointContinuation(latestCheckpointContinuationRef.current);
-    return () => {
-      abortGoalRequest(goalRequestState);
-      abortGoalRequest(compactRequestState);
-      abortGoalRequest(dreamRestoreRequestState);
-    };
+    return () => commandRequestsCleanupRef.current();
   }, [threadId]);
 
   const abortInputPolishRequest = useCallback(() => {
@@ -902,9 +658,63 @@ export function InputBox({
     return () => abortInputPolishRequest();
   }, [abortInputPolishRequest, threadId]);
 
-  useEffect(() => {
-    return () => abortVoiceInput();
-  }, [abortVoiceInput, draftKey, threadId]);
+  const focusVoiceInput = useCallback(() => {
+    if (selectedSlashSkill) {
+      focusContentEditableEnd(inlineSkillTextRef.current);
+    } else {
+      textareaRef.current?.focus();
+    }
+  }, [selectedSlashSkill]);
+  const setVoiceInputText = useCallback(
+    (value: string) => {
+      textInput.setInput(value);
+    },
+    [textInput],
+  );
+  const prepareForVoiceInput = useCallback(() => {
+    abortInputPolishRequest();
+    setInputPolishUndo(null);
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+  }, [abortInputPolishRequest]);
+  const {
+    abort: abortVoiceInput,
+    listening: voiceListening,
+    supported: voiceInputSupported,
+    toggle: toggleVoiceInput,
+  } = useInputBoxVoice({
+    callbacks: {
+      focusInput: focusVoiceInput,
+      onBeforeStart: prepareForVoiceInput,
+      setInput: setVoiceInputText,
+    },
+    composerLocked,
+    draftKey,
+    locale,
+    messages: {
+      failed: t.inputBox.voiceInputFailed,
+      microphoneUnavailable: t.inputBox.voiceInputMicrophoneUnavailable,
+      networkError: t.inputBox.voiceInputNetworkError,
+      noSpeech: t.inputBox.voiceInputNoSpeech,
+      permissionDenied: t.inputBox.voiceInputPermissionDenied,
+      unsupported: t.inputBox.voiceInputUnsupported,
+      unsupportedLanguage: t.inputBox.voiceInputUnsupportedLanguage,
+    },
+    text: textInput.value ?? "",
+    threadId,
+  });
+
+  useLayoutEffect(() => {
+    abortVoiceInput();
+    flushLatestDraft();
+    promptHistoryIndexRef.current = null;
+    promptHistoryDraftRef.current = "";
+    setTextInput("");
+    setSelectedSlashSkill(null);
+    setInputPolishUndo(null);
+    setHydratedDraftKey(null);
+    latestDraftRef.current = null;
+  }, [abortVoiceInput, draftKey, flushLatestDraft, setTextInput]);
 
   useEffect(() => {
     const currentIndex = promptHistoryIndexRef.current;
@@ -966,446 +776,35 @@ export function InputBox({
     ],
   );
 
-  const handleGoalCommand = useCallback(
-    async (command: GoalCommand): Promise<boolean> => {
-      const request = beginGoalRequest(goalRequestStateRef.current, threadId);
-      const signal = request.controller.signal;
-      try {
-        let goal: GoalState | null = null;
-        if (command.kind === "status") {
-          const response = await fetch(
-            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
-              threadId,
-            )}/goal`,
-            { method: "GET", signal },
-          );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
-          if (
-            !isCurrentGoalRequest(
-              goalRequestStateRef.current,
-              request,
-              threadId,
-            )
-          ) {
-            throw new DOMException("Goal request superseded", "AbortError");
-          }
-          const objective = goal?.objective;
-          toast.info(
-            objective !== undefined
-              ? // Function replacer so a goal containing `$&`/`$1` isn't
-                // interpreted as a replacement pattern.
-                t.inputBox.goalActive.replace("{goal}", () => objective)
-              : t.inputBox.goalNone,
-          );
-          onGoalChange?.(goal);
-        } else if (command.kind === "clear") {
-          const response = await fetch(
-            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
-              threadId,
-            )}/goal`,
-            { method: "DELETE", signal },
-          );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          if (
-            !isCurrentGoalRequest(
-              goalRequestStateRef.current,
-              request,
-              threadId,
-            )
-          ) {
-            throw new DOMException("Goal request superseded", "AbortError");
-          }
-          toast.success(t.inputBox.goalCleared);
-          onGoalChange?.(null);
-        } else {
-          const response = await fetch(
-            `${privateWork.apiBaseURL}/threads/${encodeURIComponent(
-              threadId,
-            )}/goal`,
-            {
-              method: "PUT",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ objective: command.objective }),
-              signal,
-            },
-          );
-          if (!response.ok) {
-            throw new Error(await readGoalResponseError(response));
-          }
-          goal =
-            ((await response.json()) as { goal?: GoalState | null }).goal ??
-            null;
-          if (
-            !isCurrentGoalRequest(
-              goalRequestStateRef.current,
-              request,
-              threadId,
-            )
-          ) {
-            throw new DOMException("Goal request superseded", "AbortError");
-          }
-          toast.success(t.inputBox.goalSet);
-          onGoalChange?.(goal);
-        }
-        return true;
-      } catch (error) {
-        if (
-          isAbortError(error) ||
-          !isCurrentGoalRequest(goalRequestStateRef.current, request, threadId)
-        ) {
-          throw error;
-        }
-        toast.error(
-          error instanceof Error ? error.message : t.inputBox.goalFailed,
-        );
-        throw error;
-      } finally {
-        finishGoalRequest(goalRequestStateRef.current, request);
-      }
-    },
-    [
-      onGoalChange,
-      t.inputBox.goalActive,
-      t.inputBox.goalCleared,
-      t.inputBox.goalFailed,
-      t.inputBox.goalNone,
-      t.inputBox.goalSet,
-      privateWork.apiBaseURL,
-      threadId,
-    ],
-  );
-
-  const handleCompactCommand = useCallback(async (): Promise<void> => {
-    if (!threadExists) {
-      toast.info(t.inputBox.compactSkipped);
-      return;
-    }
-    const request = beginGoalRequest(compactRequestStateRef.current, threadId);
-    const signal = request.controller.signal;
-    try {
-      const result = await compactThreadContext(threadId, {
-        apiBaseURL: privateWork.apiBaseURL,
-        signal,
-      });
-      if (
-        !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
-      ) {
-        throw new DOMException("Compact request superseded", "AbortError");
-      }
-      if (result.compacted) {
-        markLatestCheckpointContinuation(
-          latestCheckpointContinuationRef.current,
-          threadId,
-        );
-        promptHistoryIndexRef.current = null;
-        promptHistoryDraftRef.current = "";
-        latestDraftRef.current = null;
-        if (draftSaveTimerRef.current !== null) {
-          window.clearTimeout(draftSaveTimerRef.current);
-          draftSaveTimerRef.current = null;
-        }
-        clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
-        setTextInput("");
-        setFollowups([]);
-        setFollowupsHidden(false);
-        setFollowupsLoading(false);
-        toast.success(t.inputBox.compactSuccess);
-      } else {
-        toast.info(t.inputBox.compactSkipped);
-      }
-      await Promise.all([
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(
-            privateWork.scope,
-            ...threadTokenUsageQueryKey(threadId),
-          ),
-        }),
-        queryClient.invalidateQueries({
-          queryKey: privateWorkQueryKey(
-            privateWork.scope,
-            ...threadContextUsageQueryKey(threadId),
-          ),
-        }),
-        ...(result.compacted
-          ? [
-              commitProjectMemoryCacheChange(
-                queryClient,
-                privateWork.scope,
-                "pending",
-              ),
-            ]
-          : []),
-      ]);
-    } catch (error) {
-      if (
-        isAbortError(error) ||
-        !isCurrentGoalRequest(compactRequestStateRef.current, request, threadId)
-      ) {
-        throw error;
-      }
-      toast.error(
-        error instanceof Error ? error.message : t.inputBox.compactFailed,
-      );
-      throw error;
-    } finally {
-      finishGoalRequest(compactRequestStateRef.current, request);
-    }
-  }, [
-    queryClient,
-    draftKey,
-    t.inputBox.compactFailed,
-    t.inputBox.compactSkipped,
-    t.inputBox.compactSuccess,
-    privateWork,
-    setTextInput,
-    threadExists,
-    threadId,
-  ]);
-
-  const clearMemoryCommandInput = useCallback(() => {
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-    latestDraftRef.current = null;
-    if (draftSaveTimerRef.current !== null) {
-      window.clearTimeout(draftSaveTimerRef.current);
-      draftSaveTimerRef.current = null;
-    }
-    clearComposerDraft(getSessionComposerDraftStorage(), draftKey);
-    setTextInput("");
-    setFollowups([]);
-    setFollowupsHidden(false);
-    setFollowupsLoading(false);
-  }, [draftKey, setTextInput]);
-
-  const handleDreamCommand = useCallback(async (): Promise<void> => {
-    if (!threadExists) {
-      toast.info(t.inputBox.dreamRequiresThread);
-      return;
-    }
-    try {
-      const result = await dreamPreparation.start(crypto.randomUUID());
-      clearMemoryCommandInput();
-      if (result.disposition === "already_running") {
-        toast.info(t.inputBox.dreamAlreadyRunning);
-      } else {
-        toast.success(t.inputBox.dreamPreparationStarted);
-      }
-    } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : t.inputBox.dreamFailed,
-      );
-      throw error;
-    }
-  }, [
-    clearMemoryCommandInput,
+  const {
+    cleanupCommandRequests,
+    confirmDreamRestore,
+    dismissDreamRestore,
     dreamPreparation,
-    t.inputBox.dreamAlreadyRunning,
-    t.inputBox.dreamFailed,
-    t.inputBox.dreamPreparationStarted,
-    t.inputBox.dreamRequiresThread,
-    threadExists,
-  ]);
-
-  const handleDreamLogCommand = useCallback(
-    (version: number | null): void => {
-      if (!memoryRoutePath) {
-        toast.error(t.inputBox.dreamRouteUnavailable);
-        return;
-      }
-      clearMemoryCommandInput();
-      const query = version === null ? "" : `?version=${version}`;
-      router.push(`${memoryRoutePath}${query}`);
-    },
-    [
-      clearMemoryCommandInput,
-      memoryRoutePath,
-      router,
-      t.inputBox.dreamRouteUnavailable,
-    ],
-  );
-
-  useEffect(() => {
-    const preparation = dreamPreparation.preparation;
-    if (!preparation) return;
-    if (preparation.compactedPasses > 0) {
-      markLatestCheckpointContinuation(
-        latestCheckpointContinuationRef.current,
-        threadId,
-      );
-    }
-    const terminalNotice = memoryDreamPreparationTerminalNotice(preparation);
-    if (terminalNotice.kind === "none") return;
-    const notificationKey = `${preparation.jobId}:${preparation.status}`;
-    if (dreamPreparationNotificationRef.current === notificationKey) return;
-    dreamPreparationNotificationRef.current = notificationKey;
-    void Promise.all([
-      queryClient.invalidateQueries({
-        queryKey: privateWorkQueryKey(privateWork.scope, "thread", threadId),
-      }),
-      queryClient.invalidateQueries({
-        queryKey: privateWorkQueryKey(
-          privateWork.scope,
-          ...threadTokenUsageQueryKey(threadId),
-        ),
-      }),
-      queryClient.invalidateQueries({
-        queryKey: privateWorkQueryKey(
-          privateWork.scope,
-          ...threadContextUsageQueryKey(threadId),
-        ),
-      }),
-      commitProjectMemoryCacheChange(queryClient, privateWork.scope, "pending"),
-      commitProjectMemoryCacheChange(
-        queryClient,
-        privateWork.scope,
-        "document",
-      ),
-    ]).catch(() => undefined);
-    if (terminalNotice.kind === "nothing_pending") {
-      toast.info(t.inputBox.dreamNothingPending);
-    } else if (terminalNotice.kind === "already_running") {
-      toast.info(t.inputBox.dreamAlreadyRunning);
-    } else if (terminalNotice.kind === "budget_rewrite") {
-      toast.success(t.projectMemory.dreamQueuedBudget);
-    } else if (terminalNotice.kind === "queued") {
-      toast.success(
-        t.inputBox.dreamQueued.replace(
-          "{count}",
-          String(terminalNotice.historyCount),
-        ),
-      );
-    } else if (terminalNotice.kind === "cancelled") {
-      toast.info(t.inputBox.dreamPreparationCancelled);
-    } else {
-      toast.error(t.inputBox.dreamFailed);
-    }
-  }, [
-    dreamPreparation.preparation,
-    privateWork.scope,
-    queryClient,
-    t.inputBox.dreamAlreadyRunning,
-    t.inputBox.dreamFailed,
-    t.inputBox.dreamNothingPending,
-    t.inputBox.dreamPreparationCancelled,
-    t.inputBox.dreamQueued,
-    t.projectMemory.dreamQueuedBudget,
-    threadId,
-  ]);
-
-  const dreamPreparationLabel = useMemo(() => {
-    const preparation = dreamPreparation.preparation;
-    if (!preparation) return null;
-    const labels = {
-      queued: t.inputBox.dreamPreparationQueued,
-      running: t.inputBox.dreamPreparationRunning,
-      verifying: t.inputBox.dreamPreparationVerifying,
-      completed: t.inputBox.dreamPreparationCompleted,
-      cancelled: t.inputBox.dreamPreparationCancelled,
-      failed: t.inputBox.dreamPreparationFailed,
-    } as const;
-    return labels[memoryDreamPreparationLabelKind(preparation)];
-  }, [dreamPreparation.preparation, t.inputBox]);
-
-  const handleDreamRestoreCommand = useCallback(
-    (version: number): void => {
-      if (!memoryRoutePath) {
-        toast.error(t.inputBox.dreamRouteUnavailable);
-        return;
-      }
-      clearMemoryCommandInput();
-      setPendingDreamRestoreVersion(version);
-    },
-    [
-      clearMemoryCommandInput,
-      memoryRoutePath,
-      t.inputBox.dreamRouteUnavailable,
-    ],
-  );
-
-  const confirmDreamRestore = useCallback(async (): Promise<void> => {
-    if (pendingDreamRestoreVersion === null || !memoryRoutePath) return;
-    const request = beginGoalRequest(
-      dreamRestoreRequestStateRef.current,
-      threadId,
-    );
-    setRestoringMemoryVersion(true);
-    try {
-      const current = await getProjectMemory(
-        privateWork,
-        request.controller.signal,
-      );
-      const result = await restoreProjectMemoryVersion(
-        privateWork,
-        pendingDreamRestoreVersion,
-        { expectedCurrentVersion: current.version },
-        request.controller.signal,
-      );
-      if (
-        !isCurrentGoalRequest(
-          dreamRestoreRequestStateRef.current,
-          request,
-          threadId,
-        )
-      ) {
-        throw new DOMException("Memory restore superseded", "AbortError");
-      }
-      await commitProjectMemoryCacheChange(
-        queryClient,
-        privateWork.scope,
-        "document",
-      );
-      setPendingDreamRestoreVersion(null);
-      toast.success(
-        t.inputBox.dreamRestoreSuccess.replace(
-          "{version}",
-          String(result.version),
-        ),
-      );
-      router.push(`${memoryRoutePath}?version=${result.version}`);
-    } catch (error) {
-      if (
-        isAbortError(error) ||
-        !isCurrentGoalRequest(
-          dreamRestoreRequestStateRef.current,
-          request,
-          threadId,
-        )
-      ) {
-        throw error;
-      }
-      if (error instanceof GatewayApiError && error.status === 409) {
-        await queryClient.invalidateQueries({
-          queryKey: projectMemoryRootQueryKey(privateWork.scope),
-        });
-      }
-      toast.error(
-        error instanceof Error ? error.message : t.inputBox.dreamRestoreFailed,
-      );
-      throw error;
-    } finally {
-      setRestoringMemoryVersion(false);
-      finishGoalRequest(dreamRestoreRequestStateRef.current, request);
-    }
-  }, [
-    memoryRoutePath,
+    dreamPreparationCancel,
+    dreamPreparationCancelling,
+    dreamPreparationLabel,
+    handleCompactCommand,
+    handleDreamCommand,
+    handleDreamLogCommand,
+    handleDreamRestoreCommand,
+    handleGoalCommand,
     pendingDreamRestoreVersion,
+    restoringMemoryVersion,
+  } = useInputBoxCommands({
+    clearMemoryCommandInput,
+    compactCommandEnabled,
+    isMock,
+    markLatestCheckpoint,
+    memoryRoutePath,
+    onGoalChange,
     privateWork,
-    queryClient,
-    router,
-    t.inputBox.dreamRestoreFailed,
-    t.inputBox.dreamRestoreSuccess,
+    threadExists,
     threadId,
-  ]);
+  });
+  useLayoutEffect(() => {
+    commandRequestsCleanupRef.current = cleanupCommandRequests;
+  }, [cleanupCommandRequests]);
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
@@ -1710,7 +1109,6 @@ export function InputBox({
       ),
     [thread.messages],
   );
-  const composerLocked = isComposerDisabled || polishingInput;
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -1724,195 +1122,6 @@ export function InputBox({
       (status === "streaming" ||
         slashSkillQuery !== null ||
         !canPolishInput(textInput.value ?? "")));
-  const speechRecognitionConstructor = useMemo(
-    () =>
-      typeof window === "undefined"
-        ? null
-        : getSpeechRecognitionConstructor(window),
-    [],
-  );
-  const voiceInputSupported = speechRecognitionConstructor !== null;
-
-  const getVoiceInputErrorMessage = useCallback(
-    (kind: SpeechRecognitionErrorKind) => {
-      switch (kind) {
-        case "permission_denied":
-          return t.inputBox.voiceInputPermissionDenied;
-        case "microphone_unavailable":
-          return t.inputBox.voiceInputMicrophoneUnavailable;
-        case "unsupported_language":
-          return t.inputBox.voiceInputUnsupportedLanguage;
-        case "network":
-          return t.inputBox.voiceInputNetworkError;
-        case "no_speech":
-          return t.inputBox.voiceInputNoSpeech;
-        case "cancelled":
-          return null;
-        default:
-          return t.inputBox.voiceInputFailed;
-      }
-    },
-    [t],
-  );
-
-  const startVoiceRecognition = useCallback(
-    (options: VoiceRecognitionStartOptions = {}) => {
-      if (composerLocked || !speechRecognitionConstructor) {
-        return false;
-      }
-
-      const recognition = new speechRecognitionConstructor();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = getSpeechRecognitionLanguage(locale);
-      recognition.maxAlternatives = 1;
-      voiceLastErrorKindRef.current = null;
-      voiceLatestTextRef.current = voiceBaseTextRef.current;
-      voiceRecognitionRef.current = recognition;
-
-      recognition.onresult = (event) => {
-        if (voiceRecognitionRef.current !== recognition) {
-          return;
-        }
-        const transcript = readSpeechRecognitionTranscript(event.results).text;
-        const nextValue = appendSpeechTranscript(
-          voiceBaseTextRef.current,
-          transcript,
-        );
-        voiceLatestTextRef.current = nextValue;
-        textInput.setInput(nextValue);
-      };
-      recognition.onerror = (event) => {
-        const errorKind = mapSpeechRecognitionError(event.error);
-        voiceLastErrorKindRef.current = errorKind;
-        if (
-          !voiceStopRequestedRef.current &&
-          shouldRestartSpeechRecognition(errorKind)
-        ) {
-          return;
-        }
-
-        const message = getVoiceInputErrorMessage(errorKind);
-        if (message) {
-          toast.error(message);
-        }
-      };
-      recognition.onend = () => {
-        const shouldRestart =
-          voiceRecognitionRef.current === recognition &&
-          !voiceStopRequestedRef.current &&
-          shouldRestartSpeechRecognition(voiceLastErrorKindRef.current);
-        if (shouldRestart) {
-          voiceBaseTextRef.current = voiceLatestTextRef.current;
-          cleanupVoiceRecognition(recognition, { keepListening: true });
-          voiceRestartTimerRef.current = setTimeout(() => {
-            voiceRestartTimerRef.current = null;
-            if (voiceStopRequestedRef.current) {
-              cleanupVoiceRecognition(null);
-              return;
-            }
-            const restarted = startVoiceRecognitionRef.current?.() ?? false;
-            if (!restarted) {
-              cleanupVoiceRecognition(null);
-            }
-          }, 150);
-          return;
-        }
-        cleanupVoiceRecognition(recognition);
-      };
-
-      setVoiceListening(true);
-      try {
-        recognition.start();
-        if (options.focusAfterStart) {
-          requestAnimationFrame(() => {
-            if (selectedSlashSkill) {
-              focusContentEditableEnd(inlineSkillTextRef.current);
-            } else {
-              textareaRef.current?.focus();
-            }
-          });
-        }
-        return true;
-      } catch {
-        cleanupVoiceRecognition(recognition);
-        toast.error(t.inputBox.voiceInputFailed);
-        return false;
-      }
-    },
-    [
-      cleanupVoiceRecognition,
-      composerLocked,
-      getVoiceInputErrorMessage,
-      locale,
-      selectedSlashSkill,
-      speechRecognitionConstructor,
-      t.inputBox.voiceInputFailed,
-      textInput,
-    ],
-  );
-
-  useEffect(() => {
-    startVoiceRecognitionRef.current = startVoiceRecognition;
-  }, [startVoiceRecognition]);
-
-  const stopVoiceInput = useCallback(() => {
-    const recognition = voiceRecognitionRef.current;
-    voiceStopRequestedRef.current = true;
-    if (!recognition) {
-      cleanupVoiceRecognition(null);
-      return;
-    }
-    try {
-      recognition.stop();
-    } catch {
-      cleanupVoiceRecognition(recognition);
-    }
-  }, [cleanupVoiceRecognition]);
-
-  const toggleVoiceInput = useCallback(() => {
-    const action = getVoiceInputToggleAction({
-      composerDisabled: composerLocked,
-      listening: voiceListening,
-      supported: speechRecognitionConstructor !== null,
-    });
-    if (action === "stop") {
-      stopVoiceInput();
-      return;
-    }
-    if (action === "ignore") {
-      return;
-    }
-    if (action === "report_unsupported") {
-      toast.error(t.inputBox.voiceInputUnsupported);
-      return;
-    }
-
-    abortInputPolishRequest();
-    setInputPolishUndo(null);
-    promptHistoryIndexRef.current = null;
-    promptHistoryDraftRef.current = "";
-    voiceStopRequestedRef.current = false;
-    voiceBaseTextRef.current = textInput.value ?? "";
-    voiceLatestTextRef.current = voiceBaseTextRef.current;
-    startVoiceRecognition({ focusAfterStart: true });
-  }, [
-    abortInputPolishRequest,
-    composerLocked,
-    speechRecognitionConstructor,
-    startVoiceRecognition,
-    stopVoiceInput,
-    t.inputBox.voiceInputUnsupported,
-    textInput.value,
-    voiceListening,
-  ]);
-
-  useEffect(() => {
-    if (composerLocked && voiceListening) {
-      abortVoiceInput();
-    }
-  }, [abortVoiceInput, composerLocked, voiceListening]);
-
   useEffect(() => {
     setSkillSuggestionIndex(0);
   }, [slashSkillQuery, skillSuggestions.length]);
@@ -2450,82 +1659,22 @@ export function InputBox({
   return (
     <div ref={promptRootRef} className="relative flex min-w-0 flex-col gap-2">
       {showFollowups && (
-        <div className="flex items-center justify-center pb-1">
-          <div className="flex items-center gap-2">
-            {followupsLoading ? (
-              <div className="text-muted-foreground bg-background/80 rounded-full border px-4 py-1.5 text-xs backdrop-blur-sm">
-                {t.inputBox.followupLoading}
-              </div>
-            ) : (
-              <Suggestions className="w-fit items-center">
-                {followups.map((s) => (
-                  <Suggestion
-                    key={s}
-                    className="py-1.5"
-                    suggestion={s}
-                    onClick={() => handleFollowupClick(s)}
-                  />
-                ))}
-                <Button
-                  aria-label={t.common.close}
-                  className="text-muted-foreground h-auto cursor-pointer rounded-full px-2.5 py-1.5 text-xs font-normal"
-                  variant="outline"
-                  size="sm"
-                  type="button"
-                  onClick={() => setFollowupsHidden(true)}
-                >
-                  <XIcon className="size-4" />
-                </Button>
-              </Suggestions>
-            )}
-          </div>
-        </div>
+        <FollowupSuggestions
+          closeLabel={t.common.close}
+          loading={followupsLoading}
+          loadingLabel={t.inputBox.followupLoading}
+          suggestions={followups}
+          onClose={() => setFollowupsHidden(true)}
+          onSelect={handleFollowupClick}
+        />
       )}
       {showSkillSuggestions && (
-        <div className="absolute right-0 bottom-full left-0 z-40 mb-2 px-1">
-          <div
-            aria-label="Skill suggestions"
-            className="bg-popover/95 text-popover-foreground border-border max-h-72 overflow-y-auto rounded-xl border p-1 shadow-lg backdrop-blur-sm"
-            role="listbox"
-          >
-            {skillSuggestions.map((suggestion, index) => {
-              const selected = index === skillSuggestionIndex;
-              return (
-                <button
-                  aria-selected={selected}
-                  className={cn(
-                    "flex min-h-12 w-full min-w-0 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors",
-                    selected
-                      ? "bg-accent text-accent-foreground"
-                      : "text-popover-foreground hover:bg-accent/70 hover:text-accent-foreground",
-                  )}
-                  key={`${suggestion.kind}:${suggestion.name}`}
-                  onClick={() => applySkillSuggestion(suggestion)}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onMouseEnter={() => setSkillSuggestionIndex(index)}
-                  role="option"
-                  type="button"
-                >
-                  {suggestion.kind === "builtin" ? (
-                    <TargetIcon className="text-muted-foreground size-4 shrink-0" />
-                  ) : (
-                    <SparklesIcon className="text-muted-foreground size-4 shrink-0" />
-                  )}
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium">
-                      /{suggestion.name}
-                    </span>
-                    {suggestion.description && (
-                      <span className="text-muted-foreground block truncate text-xs">
-                        {suggestion.description}
-                      </span>
-                    )}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
+        <SlashSkillSuggestionsListbox
+          selectedIndex={skillSuggestionIndex}
+          suggestions={skillSuggestions}
+          onApply={applySkillSuggestion}
+          onHighlight={setSkillSuggestionIndex}
+        />
       )}
       <PromptInput
         className={cn(
@@ -2554,44 +1703,42 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
-          {dreamPreparation.preparation && dreamPreparationLabel && (
+          {dreamPreparation && dreamPreparationLabel && (
             <div
               aria-live="polite"
               className="bg-muted/70 text-muted-foreground flex w-full items-center gap-2 rounded-lg border px-2.5 py-2 text-xs"
               data-testid="dream-preparation-status"
               role="status"
             >
-              {dreamPreparation.preparation.status === "queued" ||
-              dreamPreparation.preparation.status === "running" ? (
+              {dreamPreparation.status === "queued" ||
+              dreamPreparation.status === "running" ? (
                 <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
-              ) : dreamPreparation.preparation.status === "succeeded" ? (
+              ) : dreamPreparation.status === "succeeded" ? (
                 <CheckIcon className="size-3.5 shrink-0" />
               ) : (
                 <XIcon className="size-3.5 shrink-0" />
               )}
               <span className="min-w-0 flex-1">
                 {dreamPreparationLabel}
-                {dreamPreparation.preparation.compactedPasses > 0 && (
+                {dreamPreparation.compactedPasses > 0 && (
                   <span className="ml-1">
                     {t.inputBox.dreamPreparationPasses.replace(
                       "{count}",
-                      String(dreamPreparation.preparation.compactedPasses),
+                      String(dreamPreparation.compactedPasses),
                     )}
                   </span>
                 )}
               </span>
-              {(dreamPreparation.preparation.status === "queued" ||
-                dreamPreparation.preparation.status === "running") && (
+              {(dreamPreparation.status === "queued" ||
+                dreamPreparation.status === "running") && (
                 <Button
                   className="h-6 px-2 text-xs"
                   disabled={
-                    dreamPreparation.cancelling ||
-                    !memoryDreamPreparationCanCancel(
-                      dreamPreparation.preparation,
-                    )
+                    dreamPreparationCancelling ||
+                    !memoryDreamPreparationCanCancel(dreamPreparation)
                   }
                   onClick={() => {
-                    void dreamPreparation.cancel().catch((error) => {
+                    void dreamPreparationCancel().catch((error) => {
                       toast.error(
                         error instanceof Error
                           ? error.message
@@ -2603,7 +1750,7 @@ export function InputBox({
                   type="button"
                   variant="ghost"
                 >
-                  {dreamPreparation.preparation.cancelRequested
+                  {dreamPreparation.cancelRequested
                     ? t.inputBox.dreamPreparationCancelRequested
                     : t.inputBox.dreamPreparationCancel}
                 </Button>
@@ -2762,181 +1909,14 @@ export function InputBox({
                 )}
               </PromptInputButton>
             </Tooltip>
-            <PromptInputActionMenu>
-              <ModeHoverGuide mode={effectiveMode}>
-                <PromptInputActionMenuTrigger
-                  className="max-w-28 gap-1! px-2! sm:max-w-none"
-                  disabled={composerLocked}
-                >
-                  <div>
-                    {effectiveMode === "flash" && (
-                      <ZapIcon className="size-3" />
-                    )}
-                    {effectiveMode === "thinking" && (
-                      <LightbulbIcon className="size-3" />
-                    )}
-                    {effectiveMode === "pro" && (
-                      <GraduationCapIcon className="size-3" />
-                    )}
-                    {effectiveMode === "ultra" && (
-                      <RocketIcon className="size-3 text-[#dabb5e]" />
-                    )}
-                  </div>
-                  <div
-                    className={cn(
-                      "truncate text-xs font-normal",
-                      effectiveMode === "ultra" ? "golden-text" : "",
-                    )}
-                  >
-                    {(effectiveMode === "flash" && t.inputBox.flashMode) ||
-                      (effectiveMode === "thinking" &&
-                        t.inputBox.reasoningMode) ||
-                      (effectiveMode === "pro" && t.inputBox.proMode) ||
-                      (effectiveMode === "ultra" && t.inputBox.ultraMode)}
-                  </div>
-                </PromptInputActionMenuTrigger>
-              </ModeHoverGuide>
-              <PromptInputActionMenuContent className="w-80">
-                <DropdownMenuGroup>
-                  <DropdownMenuLabel className="text-muted-foreground text-xs">
-                    {t.inputBox.mode}
-                  </DropdownMenuLabel>
-                  <PromptInputActionMenu>
-                    <PromptInputActionMenuItem
-                      className={cn(
-                        effectiveMode === "flash"
-                          ? "text-accent-foreground"
-                          : "text-muted-foreground/65",
-                      )}
-                      onSelect={() => handleModeSelect("flash")}
-                    >
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-center gap-1 font-bold">
-                          <ZapIcon
-                            className={cn(
-                              "mr-2 size-4",
-                              effectiveMode === "flash" &&
-                                "text-accent-foreground",
-                            )}
-                          />
-                          {t.inputBox.flashMode}
-                        </div>
-                        <div className="pl-7 text-xs">
-                          {t.inputBox.flashModeDescription}
-                        </div>
-                      </div>
-                      {effectiveMode === "flash" ? (
-                        <CheckIcon className="ml-auto size-4" />
-                      ) : (
-                        <div className="ml-auto size-4" />
-                      )}
-                    </PromptInputActionMenuItem>
-                    {supportThinking && (
-                      <>
-                        <PromptInputActionMenuItem
-                          className={cn(
-                            effectiveMode === "thinking"
-                              ? "text-accent-foreground"
-                              : "text-muted-foreground/65",
-                          )}
-                          onSelect={() => handleModeSelect("thinking")}
-                        >
-                          <div className="flex flex-col gap-2">
-                            <div className="flex items-center gap-1 font-bold">
-                              <LightbulbIcon
-                                className={cn(
-                                  "mr-2 size-4",
-                                  effectiveMode === "thinking" &&
-                                    "text-accent-foreground",
-                                )}
-                              />
-                              {t.inputBox.reasoningMode}
-                            </div>
-                            <div className="pl-7 text-xs">
-                              {t.inputBox.reasoningModeDescription}
-                            </div>
-                          </div>
-                          {effectiveMode === "thinking" ? (
-                            <CheckIcon className="ml-auto size-4" />
-                          ) : (
-                            <div className="ml-auto size-4" />
-                          )}
-                        </PromptInputActionMenuItem>
-                        {supportReasoningEffort && (
-                          <>
-                            <PromptInputActionMenuItem
-                              className={cn(
-                                effectiveMode === "pro"
-                                  ? "text-accent-foreground"
-                                  : "text-muted-foreground/65",
-                              )}
-                              onSelect={() => handleModeSelect("pro")}
-                            >
-                              <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-1 font-bold">
-                                  <GraduationCapIcon
-                                    className={cn(
-                                      "mr-2 size-4",
-                                      effectiveMode === "pro" &&
-                                        "text-accent-foreground",
-                                    )}
-                                  />
-                                  {t.inputBox.proMode}
-                                </div>
-                                <div className="pl-7 text-xs">
-                                  {t.inputBox.proModeDescription}
-                                </div>
-                              </div>
-                              {effectiveMode === "pro" ? (
-                                <CheckIcon className="ml-auto size-4" />
-                              ) : (
-                                <div className="ml-auto size-4" />
-                              )}
-                            </PromptInputActionMenuItem>
-                            <PromptInputActionMenuItem
-                              className={cn(
-                                effectiveMode === "ultra"
-                                  ? "text-accent-foreground"
-                                  : "text-muted-foreground/65",
-                              )}
-                              onSelect={() => handleModeSelect("ultra")}
-                            >
-                              <div className="flex flex-col gap-2">
-                                <div className="flex items-center gap-1 font-bold">
-                                  <RocketIcon
-                                    className={cn(
-                                      "mr-2 size-4",
-                                      effectiveMode === "ultra" &&
-                                        "text-[#dabb5e]",
-                                    )}
-                                  />
-                                  <div
-                                    className={cn(
-                                      effectiveMode === "ultra" &&
-                                        "golden-text",
-                                    )}
-                                  >
-                                    {t.inputBox.ultraMode}
-                                  </div>
-                                </div>
-                                <div className="pl-7 text-xs">
-                                  {t.inputBox.ultraModeDescription}
-                                </div>
-                              </div>
-                              {effectiveMode === "ultra" ? (
-                                <CheckIcon className="ml-auto size-4" />
-                              ) : (
-                                <div className="ml-auto size-4" />
-                              )}
-                            </PromptInputActionMenuItem>
-                          </>
-                        )}
-                      </>
-                    )}
-                  </PromptInputActionMenu>
-                </DropdownMenuGroup>
-              </PromptInputActionMenuContent>
-            </PromptInputActionMenu>
+            <InputBoxModeChooser
+              disabled={composerLocked}
+              labels={t.inputBox}
+              mode={effectiveMode}
+              supportReasoningEffort={supportReasoningEffort}
+              supportThinking={supportThinking}
+              onSelect={handleModeSelect}
+            />
           </PromptInputTools>
           <PromptInputTools className="min-w-0 justify-end">
             {threadExists && compactCommandEnabled && !isMock && (
@@ -2946,69 +1926,17 @@ export function InputBox({
                 usage={contextUsage.data}
               />
             )}
-            {modelSelectionLocked ? (
-              <Tooltip content={t.inputBox.agentModelLocked}>
-                <PromptInputButton
-                  className="max-w-40 min-w-0 sm:max-w-56"
-                  data-testid="agent-model-locked"
-                  disabled
-                >
-                  <div className="flex min-w-0 flex-col items-start text-left">
-                    <ModelSelectorName className="text-xs font-normal">
-                      {modelDisplayName}
-                    </ModelSelectorName>
-                  </div>
-                </PromptInputButton>
-              </Tooltip>
-            ) : (
-              <ModelSelector
-                open={modelDialogOpen}
-                onOpenChange={setModelDialogOpen}
-              >
-                <ModelSelectorTrigger asChild>
-                  <PromptInputButton
-                    className="max-w-40 min-w-0 sm:max-w-56"
-                    disabled={composerLocked}
-                  >
-                    <div className="flex min-w-0 flex-col items-start text-left">
-                      <ModelSelectorName className="text-xs font-normal">
-                        {modelDisplayName}
-                      </ModelSelectorName>
-                    </div>
-                  </PromptInputButton>
-                </ModelSelectorTrigger>
-                <ModelSelectorContent>
-                  <ModelSelectorLabel>{t.inputBox.model}</ModelSelectorLabel>
-                  <ModelSelectorList>
-                    {models.map((m) => (
-                      <ModelSelectorItem
-                        className={cn(
-                          m.name === context.model_name
-                            ? "text-accent-foreground"
-                            : "text-muted-foreground/65",
-                        )}
-                        key={m.name}
-                        onSelect={() => handleModelSelect(m.name)}
-                      >
-                        <div className="flex min-w-0 flex-1 flex-col">
-                          <ModelSelectorName>
-                            {m.display_name}
-                          </ModelSelectorName>
-                          <span className="text-muted-foreground truncate text-xs">
-                            {m.model}
-                          </span>
-                        </div>
-                        {m.name === context.model_name ? (
-                          <CheckIcon className="ml-auto size-4" />
-                        ) : (
-                          <div className="ml-auto size-4" />
-                        )}
-                      </ModelSelectorItem>
-                    ))}
-                  </ModelSelectorList>
-                </ModelSelectorContent>
-              </ModelSelector>
-            )}
+            <InputBoxModelChooser
+              disabled={composerLocked}
+              displayName={modelDisplayName}
+              labels={t.inputBox}
+              locked={modelSelectionLocked}
+              models={models}
+              open={modelDialogOpen}
+              selectedModelName={context.model_name}
+              onOpenChange={setModelDialogOpen}
+              onSelect={handleModelSelect}
+            />
             <PromptInputSubmit
               className="rounded-full"
               disabled={composerLocked}
@@ -3041,216 +1969,28 @@ export function InputBox({
           </div>
         )}
 
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.inputBox.followupConfirmTitle}</DialogTitle>
-            <DialogDescription>
-              {t.inputBox.followupConfirmDescription}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-              {t.common.cancel}
-            </Button>
-            <Button variant="secondary" onClick={confirmAppendAndSend}>
-              {t.inputBox.followupConfirmAppend}
-            </Button>
-            <Button onClick={confirmReplaceAndSend}>
-              {t.inputBox.followupConfirmReplace}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-      <Dialog
-        open={pendingDreamRestoreVersion !== null}
+      <FollowupConfirmDialog
+        cancelLabel={t.common.cancel}
+        labels={t.inputBox}
+        open={confirmOpen}
+        onAppend={confirmAppendAndSend}
+        onCancel={() => setConfirmOpen(false)}
+        onOpenChange={setConfirmOpen}
+        onReplace={confirmReplaceAndSend}
+      />
+      <DreamRestoreConfirmDialog
+        cancelLabel={t.common.cancel}
+        labels={t.inputBox}
+        restoring={restoringMemoryVersion}
+        version={pendingDreamRestoreVersion}
         onOpenChange={(open) => {
           if (!open && !restoringMemoryVersion) {
-            setPendingDreamRestoreVersion(null);
+            dismissDreamRestore();
           }
         }}
-      >
-        <DialogContent closeLabel={t.common.cancel}>
-          <DialogHeader>
-            <DialogTitle>
-              {t.inputBox.dreamRestoreConfirmTitle.replace(
-                "{version}",
-                String(pendingDreamRestoreVersion ?? ""),
-              )}
-            </DialogTitle>
-            <DialogDescription>
-              {t.inputBox.dreamRestoreConfirmDescription}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={restoringMemoryVersion}
-              onClick={() => setPendingDreamRestoreVersion(null)}
-            >
-              {t.common.cancel}
-            </Button>
-            <Button
-              type="button"
-              disabled={restoringMemoryVersion}
-              onClick={() => void confirmDreamRestore().catch(() => undefined)}
-            >
-              {restoringMemoryVersion ? (
-                <Loader2Icon className="size-4 animate-spin" />
-              ) : (
-                <Undo2Icon className="size-4" />
-              )}
-              {t.inputBox.dreamRestoreConfirmAction}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onCancel={dismissDreamRestore}
+        onConfirm={() => void confirmDreamRestore().catch(() => undefined)}
+      />
     </div>
-  );
-}
-
-function SuggestionList({
-  onSelectPlaceholder,
-}: {
-  onSelectPlaceholder: (newText: string) => void;
-}) {
-  const { t } = useI18n();
-  const { textInput } = usePromptInputController();
-  const handleSuggestionClick = useCallback(
-    (prompt: string | undefined) => {
-      if (!prompt) return;
-      textInput.setInput(prompt);
-      onSelectPlaceholder(prompt);
-    },
-    [textInput, onSelectPlaceholder],
-  );
-  return (
-    <Suggestions className="w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
-      <ConfettiButton
-        className="text-muted-foreground cursor-pointer rounded-full px-4 text-xs font-normal"
-        variant="outline"
-        size="sm"
-        onClick={() => handleSuggestionClick(t.inputBox.surpriseMePrompt)}
-      >
-        <SparklesIcon className="size-4" /> {t.inputBox.surpriseMe}
-      </ConfettiButton>
-      {t.inputBox.suggestions.map((suggestion) => (
-        <Suggestion
-          key={suggestion.suggestion}
-          icon={suggestion.icon}
-          suggestion={suggestion.suggestion}
-          onClick={() => handleSuggestionClick(suggestion.prompt)}
-        />
-      ))}
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Suggestion icon={PlusIcon} suggestion={t.common.create} />
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start">
-          <DropdownMenuGroup>
-            {t.inputBox.suggestionsCreate.map((suggestion, index) =>
-              "type" in suggestion && suggestion.type === "separator" ? (
-                <DropdownMenuSeparator key={index} />
-              ) : (
-                !("type" in suggestion) && (
-                  <DropdownMenuItem
-                    key={suggestion.suggestion}
-                    onClick={() => handleSuggestionClick(suggestion.prompt)}
-                  >
-                    {suggestion.icon && <suggestion.icon className="size-4" />}
-                    {suggestion.suggestion}
-                  </DropdownMenuItem>
-                )
-              ),
-            )}
-          </DropdownMenuGroup>
-        </DropdownMenuContent>
-      </DropdownMenu>
-    </Suggestions>
-  );
-}
-
-function AddAttachmentsButton({
-  className,
-  disabled,
-  uploadLimits,
-}: {
-  className?: string;
-  disabled?: boolean;
-  uploadLimits?: UploadLimits;
-}) {
-  const { t } = useI18n();
-  const attachments = usePromptInputAttachments();
-  const tooltipContent = uploadLimits
-    ? t.uploads.limitsHint(
-        uploadLimits.max_files,
-        formatUploadSize(uploadLimits.max_file_size),
-        formatUploadSize(uploadLimits.max_total_size),
-      )
-    : t.inputBox.addAttachments;
-  return (
-    <Tooltip content={<span className="block max-w-80">{tooltipContent}</span>}>
-      <PromptInputButton
-        aria-label={t.inputBox.addAttachments}
-        className={cn("px-2!", className)}
-        data-testid="add-attachments-button"
-        disabled={disabled}
-        onClick={() => attachments.openFileDialog()}
-      >
-        <PaperclipIcon className="size-3" />
-      </PromptInputButton>
-    </Tooltip>
-  );
-}
-
-function VoiceInputButton({
-  disabled,
-  listening,
-  supported,
-  onToggle,
-}: {
-  disabled?: boolean;
-  listening: boolean;
-  supported: boolean;
-  onToggle: () => void;
-}) {
-  const { t } = useI18n();
-  const tooltipContent = !supported
-    ? t.inputBox.voiceInputUnsupported
-    : listening
-      ? t.inputBox.voiceInputListening
-      : t.inputBox.voiceInputStart;
-  const label = listening
-    ? t.inputBox.voiceInputStopLabel
-    : t.inputBox.voiceInputStartLabel;
-  const buttonState = getVoiceInputButtonState({
-    composerDisabled: disabled ?? false,
-    supported,
-  });
-
-  return (
-    <Tooltip content={<span className="block max-w-72">{tooltipContent}</span>}>
-      <PromptInputButton
-        aria-label={label}
-        aria-disabled={buttonState.ariaDisabled}
-        aria-pressed={listening}
-        className={cn(
-          "px-2!",
-          listening && "text-primary bg-primary/10 hover:bg-primary/15",
-          buttonState.visuallyDisabled &&
-            "cursor-not-allowed opacity-50 hover:bg-transparent dark:hover:bg-transparent",
-        )}
-        data-testid="voice-input-button"
-        disabled={buttonState.nativeDisabled}
-        onClick={onToggle}
-      >
-        {listening ? (
-          <SquareIcon className="size-3 fill-current" />
-        ) : (
-          <MicIcon className="size-3" />
-        )}
-      </PromptInputButton>
-    </Tooltip>
   );
 }

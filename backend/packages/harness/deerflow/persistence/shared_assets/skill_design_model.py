@@ -133,6 +133,22 @@ class SkillDesignSessionRow(Base):
         JSONB(none_as_null=True),
         nullable=True,
     )
+    session_kind: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="create",
+        server_default="create",
+    )
+    target_skill_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    base_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    base_version_number: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    base_payload_checksum: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    target_skill_deleted: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_skill_design_sessions"),
@@ -199,6 +215,32 @@ class SkillDesignSessionRow(Base):
             "AND created_skill_id IS NULL AND created_skill_version_id IS NULL)",
             name="ck_skill_design_sessions_completion",
         ),
+        CheckConstraint(
+            "session_kind IN ('create', 'revise')",
+            name="ck_skill_design_sessions_kind",
+        ),
+        CheckConstraint(
+            "base_payload_checksum IS NULL OR base_payload_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_skill_design_sessions_base_checksum",
+        ),
+        CheckConstraint(
+            "base_version_number IS NULL OR base_version_number >= 1",
+            name="ck_skill_design_sessions_base_version_number",
+        ),
+        CheckConstraint(
+            "(session_kind = 'create' AND target_skill_id IS NULL "
+            "AND base_version_id IS NULL AND base_version_number IS NULL "
+            "AND base_payload_checksum IS NULL "
+            "AND target_skill_deleted IS FALSE) OR "
+            "(session_kind = 'revise' AND ("
+            "(target_skill_deleted IS FALSE AND target_skill_id IS NOT NULL "
+            "AND base_version_id IS NOT NULL AND base_version_number IS NOT NULL "
+            "AND base_payload_checksum IS NOT NULL) OR "
+            "(target_skill_deleted IS TRUE AND target_skill_id IS NULL "
+            "AND base_version_id IS NULL AND base_version_number IS NULL "
+            "AND base_payload_checksum IS NULL)))",
+            name="ck_skill_design_sessions_revision_target",
+        ),
         UniqueConstraint(
             "project_id",
             "owner_user_id",
@@ -241,6 +283,18 @@ class SkillDesignSessionRow(Base):
             name="fk_skill_design_sessions_created_skill_version",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["project_id", "target_skill_id"],
+            ["skills.project_id", "skills.id"],
+            name="fk_skill_design_sessions_target_skill_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["target_skill_id", "base_version_id"],
+            ["skill_versions.skill_id", "skill_versions.id"],
+            name="fk_skill_design_sessions_base_version",
+            ondelete="RESTRICT",
+        ),
         Index(
             "ix_skill_design_sessions_resume",
             "project_id",
@@ -248,6 +302,14 @@ class SkillDesignSessionRow(Base):
             "status",
             updated_at.desc(),
             id.desc(),
+        ),
+        Index(
+            "uq_skill_design_sessions_live_revise_target",
+            "project_id",
+            "owner_user_id",
+            "target_skill_id",
+            unique=True,
+            postgresql_where=text("session_kind = 'revise' AND target_skill_id IS NOT NULL AND status NOT IN ('completed', 'cancelled')"),
         ),
     )
 

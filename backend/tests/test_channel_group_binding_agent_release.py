@@ -41,4 +41,4 @@ def test_full_schema_pins_the_v13_binding_lifecycle_contract() -> None:
     assert "agent_asset_id UUID," in schema
     assert "CONSTRAINT ck_project_channel_group_bindings_agent_ref_pair CHECK ((agent_asset_id IS NULL) = (agent_scope IS NULL))" in schema
     assert "CONSTRAINT ck_project_channel_group_bindings_agent_lifecycle CHECK ((deleted_at IS NULL) = (agent_asset_id IS NOT NULL))" in schema
-    assert "INSERT INTO alembic_version (version_num) VALUES ('full_schema_v17');" in schema
+    assert "INSERT INTO alembic_version (version_num) VALUES ('full_schema');" in schema

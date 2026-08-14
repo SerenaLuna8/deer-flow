@@ -6,6 +6,7 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   cancelSkillBuilderSessionInputSchema,
   commitSkillBuilderSessionInputSchema,
+  createSkillBuilderRevisionInputSchema,
   createSkillBuilderSessionInputSchema,
   skillBuilderCommitResponseSchema,
   skillBuilderSessionListResponseSchema,
@@ -15,6 +16,7 @@ import {
   validateSkillBuilderSessionInputSchema,
   type CancelSkillBuilderSessionInput,
   type CommitSkillBuilderSessionInput,
+  type CreateSkillBuilderRevisionInput,
   type CreateSkillBuilderSessionInput,
   type SkillBuilderTurnInput,
   type ValidateSkillBuilderSessionInput,
@@ -156,6 +158,20 @@ export function createSkillBuilderSession(
   signal?: AbortSignal,
 ) {
   const body = createSkillBuilderSessionInputSchema.parse(input);
+  return request(baseURL(projectId), skillBuilderSessionResponseSchema, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal,
+  });
+}
+
+export function createSkillBuilderRevisionSession(
+  projectId: string,
+  input: CreateSkillBuilderRevisionInput,
+  signal?: AbortSignal,
+) {
+  const body = createSkillBuilderRevisionInputSchema.parse(input);
   return request(baseURL(projectId), skillBuilderSessionResponseSchema, {
     method: "POST",
     headers: { "Content-Type": "application/json" },

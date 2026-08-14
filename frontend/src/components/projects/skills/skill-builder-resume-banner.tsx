@@ -13,6 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   createSkillBuilderIdempotencyRegistry,
   skillBuilderSemanticSignature,
@@ -32,6 +33,8 @@ export function SkillBuilderResumeBannerView({
   sessions: SkillBuilderSessionSummary[];
   onDelete: (session: SkillBuilderSessionSummary) => Promise<void>;
 }) {
+  const { locale, t } = useI18n();
+  const copy = t.skills.builder.resume;
   const [deleteTarget, setDeleteTarget] =
     useState<SkillBuilderSessionSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -55,13 +58,19 @@ export function SkillBuilderResumeBannerView({
       await onDelete(deleteTarget);
       setDeleteTarget(null);
     } catch (error) {
-      setDeleteError(skillBuilderErrorMessage(error));
+      setDeleteError(skillBuilderErrorMessage(error, t.skills.builder.errors));
     } finally {
       setDeleting(false);
     }
   }
 
   if (unfinished.length === 0) return null;
+
+  const title = unfinished.every((session) => session.session_kind === "revise")
+    ? copy.titleRevise
+    : unfinished.every((session) => session.session_kind === "create")
+      ? copy.titleCreate
+      : copy.titleMixed;
 
   return (
     <>
@@ -72,7 +81,7 @@ export function SkillBuilderResumeBannerView({
         <div className="mb-3 flex items-center gap-2">
           <Clock3Icon aria-hidden className="text-muted-foreground size-4" />
           <h2 id="skill-builder-resume-title" className="text-sm font-semibold">
-            继续创建未完成的 Skill
+            {title}
           </h2>
         </div>
         <div className="grid gap-2 sm:grid-cols-2">
@@ -90,13 +99,18 @@ export function SkillBuilderResumeBannerView({
                     {session.display_name}
                   </span>
                   <span className="text-muted-foreground mt-0.5 block text-xs">
-                    上次更新{" "}
-                    {new Intl.DateTimeFormat("zh-CN", {
-                      month: "numeric",
-                      day: "numeric",
-                      hour: "2-digit",
-                      minute: "2-digit",
-                    }).format(new Date(session.updated_at))}
+                    {session.session_kind === "revise"
+                      ? copy.kindRevise
+                      : copy.kindCreate}{" "}
+                    ·{" "}
+                    {copy.lastUpdated(
+                      new Intl.DateTimeFormat(locale, {
+                        month: "numeric",
+                        day: "numeric",
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      }).format(new Date(session.updated_at)),
+                    )}
                   </span>
                 </span>
               </Link>
@@ -106,7 +120,11 @@ export function SkillBuilderResumeBannerView({
                   size="icon"
                   variant="ghost"
                   className="text-destructive hover:text-destructive hover:bg-destructive/10"
-                  aria-label={`删除未完成的 Skill：${session.display_name}`}
+                  aria-label={
+                    session.session_kind === "revise"
+                      ? copy.deleteAriaRevise(session.display_name)
+                      : copy.deleteAriaCreate(session.display_name)
+                  }
                   onClick={() => {
                     setDeleteError(null);
                     setDeleteTarget(session);
@@ -126,9 +144,17 @@ export function SkillBuilderResumeBannerView({
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>删除未完成的 Skill？</DialogTitle>
+            <DialogTitle>
+              {deleteTarget?.session_kind === "revise"
+                ? copy.deleteTitleRevise
+                : copy.deleteTitleCreate}
+            </DialogTitle>
             <DialogDescription>
-              {`将删除“${deleteTarget?.display_name ?? ""}”的设计草稿，之后无法继续。已经创建的 Skill 不受影响。`}
+              {deleteTarget?.session_kind === "revise"
+                ? copy.deleteDescriptionRevise(deleteTarget.display_name)
+                : copy.deleteDescriptionCreate(
+                    deleteTarget?.display_name ?? "",
+                  )}
             </DialogDescription>
           </DialogHeader>
           {deleteError ? (
@@ -143,7 +169,7 @@ export function SkillBuilderResumeBannerView({
               disabled={deleting}
               onClick={closeDeleteDialog}
             >
-              取消
+              {t.common.cancel}
             </Button>
             <Button
               type="button"
@@ -154,7 +180,7 @@ export function SkillBuilderResumeBannerView({
               {deleting ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : null}
-              {deleting ? "正在删除…" : "确认删除"}
+              {deleting ? copy.deleting : copy.confirmDelete}
             </Button>
           </DialogFooter>
         </DialogContent>

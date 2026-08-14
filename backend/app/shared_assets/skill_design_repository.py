@@ -16,6 +16,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
 )
 from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_repository import SkillVersionFileMetadataRecord
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
@@ -56,7 +57,7 @@ def _metadata_checksum(files: tuple[SkillVersionFileRow, ...]) -> str:
                 "sha256": item.sha256,
                 "size_bytes": item.size_bytes,
             }
-            for item in files
+            for item in sorted(files, key=lambda item: item.path)
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -161,6 +162,74 @@ class SkillDesignRepository:
             )
         )
         return int(value or 0)
+
+    async def live_revision_session_exists(
+        self,
+        context: ProjectContext,
+        target_skill_id: uuid.UUID,
+    ) -> bool:
+        """Pre-check the single-live-revision rule the partial index enforces."""
+
+        self._require_context(context)
+        value = await self.session.scalar(
+            select(func.count())
+            .select_from(SkillDesignSessionRow)
+            .where(
+                SkillDesignSessionRow.project_id == context.project_id,
+                SkillDesignSessionRow.owner_user_id == str(context.user_id),
+                SkillDesignSessionRow.session_kind == "revise",
+                SkillDesignSessionRow.target_skill_id == target_skill_id,
+                SkillDesignSessionRow.status.not_in(("completed", "cancelled")),
+                self._context_exists(context),
+            )
+        )
+        return bool(value)
+
+    async def load_base_file_metadata(
+        self,
+        context: ProjectContext,
+        base_version_id: uuid.UUID,
+    ) -> tuple[SkillVersionFileMetadataRecord, ...]:
+        """Load pinned base-version file identities without content BLOBs.
+
+        Callers must have already authorized the owning session row; the
+        composite foreign keys tie the version to the session's target Skill
+        inside the same project.
+        """
+
+        self._require_context(context)
+        statement = (
+            select(
+                SkillVersionFileRow.skill_version_id,
+                SkillVersionFileRow.path,
+                SkillVersionFileRow.media_type,
+                SkillVersionFileRow.size_bytes,
+                SkillVersionFileRow.sha256,
+            )
+            .join(
+                SkillVersionRow,
+                SkillVersionRow.id == SkillVersionFileRow.skill_version_id,
+            )
+            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            .where(
+                SkillVersionFileRow.skill_version_id == base_version_id,
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
+                self._context_exists(context),
+            )
+            .order_by(SkillVersionFileRow.path)
+        )
+        rows = (await self.session.execute(statement)).all()
+        return tuple(
+            SkillVersionFileMetadataRecord(
+                skill_version_id=item.skill_version_id,
+                path=item.path,
+                media_type=item.media_type,
+                size_bytes=item.size_bytes,
+                sha256=item.sha256,
+            )
+            for item in rows
+        )
 
     async def create(
         self,
@@ -566,7 +635,9 @@ class SkillDesignRepository:
                     )
                     .order_by(SkillVersionFileRow.path)
                 )
-            ).scalars()
+            )
+            .scalars()
+            .all()
         )
         if not files or _metadata_checksum(files) != expected_checksum:
             raise AssetValidationFailed(context.request_id)

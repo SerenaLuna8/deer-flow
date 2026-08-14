@@ -9,6 +9,7 @@ import type { User } from "@/core/auth/types";
 const validUser = {
   id: "10000000-0000-4000-8000-000000000001",
   email: "user@example.com",
+  username: "exampleuser",
   system_role: "user",
   needs_setup: false,
   oauth_provider: null,

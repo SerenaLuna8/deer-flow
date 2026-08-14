@@ -1,6 +1,9 @@
 import { z } from "zod";
 
-import { assetSummarySchema } from "@/core/shared-assets/types";
+import {
+  assetSummarySchema,
+  skillVersionSchema,
+} from "@/core/shared-assets/types";
 
 const uuidSchema = z.string().uuid();
 const timestampSchema = z.string().datetime({ offset: true });
@@ -34,6 +37,8 @@ export const skillBuilderStatusSchema = z.enum([
   "failed",
   "cancelled",
 ]);
+
+export const skillBuilderSessionKindSchema = z.enum(["create", "revise"]);
 
 export const skillBuilderProgressStatusSchema = z.enum([
   "pending",
@@ -221,6 +226,16 @@ const skillBuilderFilesSchema = z
     }
   });
 
+/** Pinned base-version file identity (metadata only) for revision diffs. */
+export const skillBuilderBaseFileSchema = z
+  .object({
+    path: skillBuilderFilePathSchema,
+    media_type: z.string().trim().min(1).max(255),
+    size_bytes: z.number().int().nonnegative(),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/u),
+  })
+  .strict();
+
 export const skillBuilderSecretRequirementSchema = z
   .object({
     name: z.string().trim().min(1),
@@ -342,6 +357,15 @@ export const skillBuilderSessionSchema = z
     error_message: z.string().trim().min(1).nullable(),
     created_skill_id: uuidSchema.nullable(),
     authoring_dependencies: skillBuilderDependencySnapshotSchema.nullish(),
+    session_kind: skillBuilderSessionKindSchema,
+    target_skill_id: uuidSchema.nullable(),
+    base_version_id: uuidSchema.nullable(),
+    base_version_number: z.number().int().positive().nullable(),
+    base_payload_checksum: checksumSchema.nullable(),
+    target_skill_deleted: z.boolean(),
+    base_files: z
+      .array(skillBuilderBaseFileSchema)
+      .max(SKILL_BUILDER_MAX_FILES),
     // Rolling-compatible durable Builder extension. Legacy Gateway responses
     // omit this property; an active asynchronous Run supplies it.
     activeRun: skillBuilderRunAdmissionSchema.nullish(),
@@ -358,6 +382,7 @@ export const skillBuilderSessionSummarySchema = z
     status: skillBuilderStatusSchema,
     revision: z.number().int().positive(),
     updated_at: timestampSchema,
+    session_kind: skillBuilderSessionKindSchema,
   })
   .strict();
 
@@ -385,6 +410,15 @@ export const createSkillBuilderSessionInputSchema = z
   .object({
     slug: z.string().trim().min(1),
     display_name: z.string().trim().min(1).max(120),
+    idempotency_key: idempotencyKeySchema,
+  })
+  .strict();
+
+/** Opens a Builder session seeded from an existing Skill's published version. */
+export const createSkillBuilderRevisionInputSchema = z
+  .object({
+    kind: z.literal("revise"),
+    skill_id: uuidSchema,
     idempotency_key: idempotencyKeySchema,
   })
   .strict();
@@ -572,6 +606,7 @@ export const commitSkillBuilderSessionInputSchema =
   validateSkillBuilderSessionInputSchema
     .extend({
       acknowledge_warnings: z.boolean(),
+      acknowledge_base_stale: z.boolean().optional(),
     })
     .strict();
 
@@ -588,6 +623,9 @@ export const skillBuilderCommitResponseSchema = z
       .object({
         session: skillBuilderSessionSchema,
         skill: assetSummarySchema,
+        // Revision commits return the exact created version; create commits
+        // return null.
+        version: skillVersionSchema.nullable(),
       })
       .strict(),
     request_id: z.string().trim().min(1),
@@ -629,11 +667,18 @@ export type SkillBuilderDependencySnapshot = z.infer<
   typeof skillBuilderDependencySnapshotSchema
 >;
 export type SkillBuilderSession = z.infer<typeof skillBuilderSessionSchema>;
+export type SkillBuilderSessionKind = z.infer<
+  typeof skillBuilderSessionKindSchema
+>;
+export type SkillBuilderBaseFile = z.infer<typeof skillBuilderBaseFileSchema>;
 export type SkillBuilderSessionSummary = z.infer<
   typeof skillBuilderSessionSummarySchema
 >;
 export type CreateSkillBuilderSessionInput = z.input<
   typeof createSkillBuilderSessionInputSchema
+>;
+export type CreateSkillBuilderRevisionInput = z.input<
+  typeof createSkillBuilderRevisionInputSchema
 >;
 export type SkillBuilderTurnInput = z.input<typeof skillBuilderTurnInputSchema>;
 export type SkillBuilderTurnResponse = z.infer<

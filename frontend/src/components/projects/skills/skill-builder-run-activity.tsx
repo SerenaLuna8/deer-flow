@@ -8,6 +8,7 @@ import {
   WrenchIcon,
 } from "lucide-react";
 
+import { useI18n } from "@/core/i18n/hooks";
 import type {
   SkillBuilderRunAdmission,
   SkillBuilderRunPresentation,
@@ -16,26 +17,6 @@ import type {
   SkillBuilderRunToolStepProjection,
 } from "@/core/skill-builder";
 import { cn } from "@/lib/utils";
-
-const RUN_STATUS_LABELS: Record<SkillBuilderRunPresentationStatus, string> = {
-  pending: "已排队，等待执行",
-  running: "正在执行",
-  success: "本轮已完成",
-  error: "本轮执行失败",
-  timeout: "本轮执行超时",
-  interrupted: "本轮执行已中断",
-  cancelled: "本轮执行已取消",
-};
-
-const TOOL_STATUS_LABELS: Record<
-  SkillBuilderRunToolStepProjection["status"],
-  string
-> = {
-  pending: "等待调用",
-  running: "调用中",
-  completed: "已完成",
-  failed: "调用失败",
-};
 
 function ToolStatusIcon({
   status,
@@ -73,6 +54,8 @@ export function SkillBuilderRunActivity({
   presentation?: SkillBuilderRunPresentation | null;
   failureCode?: string | null;
 }) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.activity;
   const status =
     projection?.status ?? activeRun?.status ?? presentation?.status;
   if (!status) return null;
@@ -97,9 +80,9 @@ export function SkillBuilderRunActivity({
             className="text-destructive size-3.5"
           />
         )}
-        <span>{RUN_STATUS_LABELS[status]}</span>
+        <span>{copy.run[status]}</span>
         <span className="text-muted-foreground font-normal">
-          {steps.length > 0 ? `· ${steps.length} 个工具步骤` : "· 尚无工具步骤"}
+          {steps.length > 0 ? copy.toolSteps(steps.length) : copy.noToolSteps}
         </span>
       </summary>
 
@@ -119,23 +102,18 @@ export function SkillBuilderRunActivity({
                 {step.toolName}
               </span>
               <span className="text-muted-foreground shrink-0">
-                {TOOL_STATUS_LABELS[step.status]}
+                {copy.tool[step.status]}
               </span>
             </li>
           ))}
         </ol>
-      ) : (
-        <p className="text-muted-foreground border-border/70 mt-2 border-t pt-2 text-xs leading-5">
-          当前后端仅提供了可靠的 Run 状态，尚无可安全展示的工具步骤。
-        </p>
-      )}
+      ) : null}
       {status === "error" && failureCode === "MODEL_OUTPUT_LIMIT" ? (
         <p
           role="alert"
           className="border-border/70 mt-2 border-t pt-2 text-xs leading-5"
         >
-          本轮达到模型输出上限。已成功写入的候选草稿仍然保留；请在下方继续发送“基于现有草稿继续完成”，Builder
-          会重新读取草稿后续作，不会执行残缺的工具调用。
+          {copy.outputLimit}
         </p>
       ) : null}
     </details>

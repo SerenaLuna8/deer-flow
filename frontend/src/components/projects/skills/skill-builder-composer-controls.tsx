@@ -20,6 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useI18n } from "@/core/i18n/hooks";
 import type { Model } from "@/core/models/types";
 import type { SkillBuilderAttachment } from "@/core/skill-builder";
 import type { AgentMode } from "@/core/threads/agent-mode";
@@ -52,20 +53,6 @@ const ATTACHMENT_ACCEPT = [
   ".log",
 ].join(",");
 
-export const SKILL_BUILDER_THINKING_MODE_LABELS: Record<AgentMode, string> = {
-  flash: "闪速",
-  thinking: "思考",
-  pro: "Pro",
-  ultra: "Ultra",
-};
-
-const THINKING_MODE_DESCRIPTIONS: Record<AgentMode, string> = {
-  flash: "关闭扩展思考，快速生成",
-  thinking: "开启扩展思考，低推理强度",
-  pro: "中等推理强度，平衡质量与耗时",
-  ultra: "高推理强度，适合复杂 Skill",
-};
-
 const THINKING_MODE_ICONS: Record<
   AgentMode,
   ComponentType<{ className?: string }>
@@ -95,6 +82,7 @@ export function SkillBuilderComposerAttachments({
   disabled: boolean;
   onRemove: (name: string) => void;
 }) {
+  const { t } = useI18n();
   if (attachments.length === 0) return null;
   return (
     <div className="flex flex-wrap gap-1.5 px-2 pt-2">
@@ -109,7 +97,7 @@ export function SkillBuilderComposerAttachments({
           </span>
           <button
             type="button"
-            aria-label={`移除附件 ${item.name}`}
+            aria-label={t.skills.builder.composer.removeAttachment(item.name)}
             className="text-muted-foreground hover:text-foreground shrink-0 disabled:opacity-50"
             disabled={disabled}
             onClick={() => onRemove(item.name)}
@@ -141,6 +129,8 @@ export function SkillBuilderComposerControls({
   onSelectModel: (name: string) => void;
   onSelectThinkingMode: (mode: AgentMode) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.composer;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const thinkingModes = skillBuilderAvailableThinkingModes(selectedModel);
   const ThinkingModeIcon = THINKING_MODE_ICONS[thinkingMode];
@@ -164,7 +154,7 @@ export function SkillBuilderComposerControls({
         size="icon-sm"
         variant="ghost"
         className="text-muted-foreground hover:text-foreground"
-        aria-label="添加参考文件"
+        aria-label={copy.addReference}
         disabled={attachDisabled}
         onClick={() => fileInputRef.current?.click()}
       >
@@ -178,11 +168,11 @@ export function SkillBuilderComposerControls({
               type="button"
               variant="ghost"
               className="text-muted-foreground hover:text-foreground h-8 gap-1 px-2 text-xs"
-              aria-label="选择模型"
+              aria-label={copy.selectModel}
               disabled={pickersDisabled}
             >
               <span className="max-w-36 truncate">
-                {selectedModel?.display_name ?? "默认模型"}
+                {selectedModel?.display_name ?? copy.defaultModel}
               </span>
               <ChevronDownIcon aria-hidden className="size-3.5" />
             </Button>
@@ -201,7 +191,7 @@ export function SkillBuilderComposerControls({
                 </span>
                 {model.is_default ? (
                   <span className="text-muted-foreground text-[10px]">
-                    默认
+                    {copy.defaultBadge}
                   </span>
                 ) : null}
                 {selectedModel?.name === model.name ? (
@@ -220,11 +210,11 @@ export function SkillBuilderComposerControls({
               type="button"
               variant="ghost"
               className="text-muted-foreground hover:text-foreground h-8 gap-1 px-2 text-xs"
-              aria-label="选择思考强度"
+              aria-label={copy.selectThinking}
               disabled={pickersDisabled}
             >
               <ThinkingModeIcon aria-hidden className="size-3.5" />
-              {SKILL_BUILDER_THINKING_MODE_LABELS[thinkingMode]}
+              {copy.mode[thinkingMode]}
               <ChevronDownIcon aria-hidden className="size-3.5" />
             </Button>
           </DropdownMenuTrigger>
@@ -238,11 +228,9 @@ export function SkillBuilderComposerControls({
                 >
                   <ModeIcon aria-hidden className="size-4" />
                   <span className="min-w-0 flex-1">
-                    <span className="block text-sm">
-                      {SKILL_BUILDER_THINKING_MODE_LABELS[mode]}
-                    </span>
+                    <span className="block text-sm">{copy.mode[mode]}</span>
                     <span className="text-muted-foreground block text-xs">
-                      {THINKING_MODE_DESCRIPTIONS[mode]}
+                      {copy.modeDescription[mode]}
                     </span>
                   </span>
                   {mode === thinkingMode ? (

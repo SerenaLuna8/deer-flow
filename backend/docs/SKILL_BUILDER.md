@@ -78,7 +78,21 @@ refs、项目 System binding、Run asset snapshot 和 Worker 实时授权边界�
 - finalize 后仍需走现有 validate/SkillScan/commit 流程。创建出的项目 Skill 默认停用，
   发布与启用仍是独立治理动作。
 
-Schema v14 引入 durable Builder Thread/Run 关联；v15 引入依赖快照与终态重放字段；
-v16 将依赖数组约束规范化为对非数组值安全失败的 `CASE` 表达式。
-旧数据库应依次执行 `make upgrade-db` 和 `make upgrade-system-assets`，不能在运行时自动
+## 修订模式
+
+项目自建 Skill 可以从详情页发起「对话修改」。Builder 以当前已发布版本播种草稿，
+会话 `session_kind=revise`，状态机、工具集和 validate/SkillScan 门禁与创建模式相同。
+
+- 播种时执行完整 Builder dry-run；超出草稿信封或未通过扫描的已发布版本不能开会话。
+- 同一 owner 对同一目标同时只能有一个未完成修订会话（含 `failed`）。
+- commit 只创建 draft 版本，不移动 `current_published_version_id`；发布仍走既有
+  版本管理端点。若草稿基线已不是线上版本，commit 与 publish 都要求显式确认。
+- 删除目标 Skill 时，未完成修订会话被标记 `failed`（`SKILL_DESIGN_TARGET_DELETED`），
+  在途 Run 在下一次工具调用边界 fail closed。
+- Run 输入的 `authoring` 块声明 `create` / `revise`，与 `conversation` 字段隔离。
+
+当前 `full_schema` 快照已包含 durable Builder Thread/Run 关联、依赖快照与终态
+重放字段、对非数组值安全失败的依赖 `CASE` 约束，以及修订会话的目标/基线列、
+复合外键、部分唯一索引和 publish 基线漂移守卫。编号迁移链已收口；未上线环境
+请用 `make setup-db` 重建空库，不要从 `full_schema_v*` 升级。运行时不能自动
 建表、stamp 或导入内部 Agent。

@@ -21,8 +21,11 @@ import {
 } from "@/components/projects/assets/skill-file-workbench-state";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
 import type {
+  SkillBuilderBaseFile,
   SkillBuilderFile,
+  SkillBuilderSessionKind,
   SkillBuilderValidation,
 } from "@/core/skill-builder";
 import { SafeStreamdown } from "@/core/streamdown/components";
@@ -44,6 +47,54 @@ function ancestorFolders(path: string | null) {
   return parts.map((_, index) => parts.slice(0, index + 1).join("/"));
 }
 
+export type SkillBuilderRevisionDiff = {
+  added: number;
+  modified: number;
+  deleted: number;
+  deletedPaths: string[];
+  stateByPath: ReadonlyMap<string, "unchanged" | "modified" | "added">;
+};
+
+export function skillBuilderRevisionDiff(
+  files: readonly Pick<
+    SkillBuilderFile,
+    "path" | "sha256" | "media_type" | "size_bytes"
+  >[],
+  baseFiles: readonly SkillBuilderBaseFile[],
+): SkillBuilderRevisionDiff {
+  const base = new Map(baseFiles.map((file) => [file.path, file]));
+  const stateByPath = new Map<string, "unchanged" | "modified" | "added">();
+  let added = 0;
+  let modified = 0;
+  for (const file of files) {
+    const baseline = base.get(file.path);
+    if (!baseline) {
+      stateByPath.set(file.path, "added");
+      added += 1;
+    } else if (
+      baseline.sha256 !== file.sha256 ||
+      baseline.media_type !== file.media_type ||
+      baseline.size_bytes !== file.size_bytes
+    ) {
+      stateByPath.set(file.path, "modified");
+      modified += 1;
+    } else {
+      stateByPath.set(file.path, "unchanged");
+    }
+  }
+  const candidatePaths = new Set(files.map((file) => file.path));
+  const deletedPaths = baseFiles
+    .map((file) => file.path)
+    .filter((path) => !candidatePaths.has(path));
+  return {
+    added,
+    modified,
+    deleted: deletedPaths.length,
+    deletedPaths,
+    stateByPath,
+  };
+}
+
 export function SkillBuilderCandidateWorkbench({
   files,
   selectedPath,
@@ -60,6 +111,9 @@ export function SkillBuilderCandidateWorkbench({
   canCommit,
   acknowledgeWarnings,
   errorMessage,
+  sessionKind = "create",
+  baseFiles = [],
+  baseVersionNumber = null,
   onSelectPath,
   onDraftContentChange,
   onDisplayModeChange,
@@ -85,6 +139,9 @@ export function SkillBuilderCandidateWorkbench({
   canCommit: boolean;
   acknowledgeWarnings: boolean;
   errorMessage: string | null;
+  sessionKind?: SkillBuilderSessionKind;
+  baseFiles?: SkillBuilderBaseFile[];
+  baseVersionNumber?: number | null;
   onSelectPath: (path: string) => void;
   onDraftContentChange: (content: string) => void;
   onDisplayModeChange: (mode: "source" | "preview") => void;
@@ -95,12 +152,19 @@ export function SkillBuilderCandidateWorkbench({
   onCommit: () => void;
   onClose?: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.workbench;
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
     () => new Set(ancestorFolders(selectedPath)),
   );
   const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
   const markdown = selectedFile ? isMarkdown(selectedFile) : false;
   const warning = validation?.scan_decision === "warn";
+  const revising = sessionKind === "revise";
+  const revisionDiff = useMemo(
+    () => (revising ? skillBuilderRevisionDiff(files, baseFiles) : null),
+    [baseFiles, files, revising],
+  );
   const workingFiles = useMemo<WorkingSkillFile[]>(
     () =>
       files.map((file) => ({
@@ -108,9 +172,11 @@ export function SkillBuilderCandidateWorkbench({
         media_type: file.media_type,
         size_bytes: file.size_bytes,
         sha256: file.sha256,
-        state: dirtyPaths.has(file.path) ? "modified" : "unchanged",
+        state: dirtyPaths.has(file.path)
+          ? "modified"
+          : (revisionDiff?.stateByPath.get(file.path) ?? "unchanged"),
       })),
-    [dirtyPaths, files],
+    [dirtyPaths, files, revisionDiff],
   );
   const tree = useMemo(() => buildSkillFileTree(workingFiles), [workingFiles]);
   const selection: SkillFileTreeSelection | null = selectedPath
@@ -134,12 +200,25 @@ export function SkillBuilderCandidateWorkbench({
   }
 
   return (
-    <section className="flex h-full min-h-0 flex-col" aria-label="候选文件包">
+    <section
+      className="flex h-full min-h-0 flex-col"
+      aria-label={copy.packageAria}
+    >
       <div className="border-border/70 flex min-h-14 shrink-0 items-center justify-between gap-3 border-b px-4">
         <div className="min-w-0">
-          <h2 className="truncate text-sm font-semibold">候选文件包</h2>
-          <p className="text-muted-foreground text-xs">
-            {files.length} 个 UTF-8 文本文件
+          <h2 className="truncate text-sm font-semibold">
+            {revising ? copy.titleRevise : copy.title}
+          </h2>
+          <p className="text-muted-foreground truncate text-xs">
+            {copy.fileCount(files.length)}
+            {revisionDiff
+              ? copy.diffSummary(
+                  baseVersionNumber ? ` v${baseVersionNumber}` : "",
+                  revisionDiff.added,
+                  revisionDiff.modified,
+                  revisionDiff.deleted,
+                )
+              : ""}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -148,7 +227,7 @@ export function SkillBuilderCandidateWorkbench({
               {pending ? (
                 <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
               ) : null}
-              {pending ? "正在更新" : "只读"}
+              {pending ? copy.updating : copy.readOnly}
             </span>
           ) : null}
           {onClose ? (
@@ -156,7 +235,7 @@ export function SkillBuilderCandidateWorkbench({
               type="button"
               size="icon"
               variant="ghost"
-              aria-label="关闭候选文件包"
+              aria-label={copy.closeAria}
               onClick={onClose}
             >
               <XIcon />
@@ -178,9 +257,19 @@ export function SkillBuilderCandidateWorkbench({
             />
           ) : (
             <p className="text-muted-foreground px-3 py-8 text-center text-xs leading-5">
-              通过左侧对话描述 Skill 后，候选文件会显示在这里。
+              {copy.empty}
             </p>
           )}
+          {revisionDiff && revisionDiff.deletedPaths.length > 0 ? (
+            <div className="text-muted-foreground mt-2 space-y-1 border-t border-dashed px-3 pt-2 text-[11px] leading-5">
+              <p className="font-medium">{copy.deletedFromBase}</p>
+              {revisionDiff.deletedPaths.map((path) => (
+                <p key={path} className="truncate font-mono line-through">
+                  {path}
+                </p>
+              ))}
+            </div>
+          ) : null}
         </aside>
 
         <div className="min-h-0 overflow-y-auto">
@@ -200,7 +289,7 @@ export function SkillBuilderCandidateWorkbench({
                   <div
                     className="bg-muted flex rounded-lg p-1"
                     role="group"
-                    aria-label="文件显示方式"
+                    aria-label={copy.displayModeAria}
                   >
                     <Button
                       type="button"
@@ -211,7 +300,7 @@ export function SkillBuilderCandidateWorkbench({
                       onClick={() => onDisplayModeChange("source")}
                     >
                       <Code2Icon aria-hidden className="size-3.5" />
-                      源码
+                      {copy.source}
                     </Button>
                     <Button
                       type="button"
@@ -224,7 +313,7 @@ export function SkillBuilderCandidateWorkbench({
                       onClick={() => onDisplayModeChange("preview")}
                     >
                       <EyeIcon aria-hidden className="size-3.5" />
-                      预览
+                      {copy.preview}
                     </Button>
                   </div>
                 ) : null}
@@ -238,7 +327,7 @@ export function SkillBuilderCandidateWorkbench({
                 </div>
               ) : canAuthor && !readOnly ? (
                 <Textarea
-                  aria-label={`编辑 ${selectedFile.path}`}
+                  aria-label={copy.editFile(selectedFile.path)}
                   value={draftContent}
                   spellCheck={false}
                   className="min-h-80 resize-none rounded-none border-0 p-5 font-mono text-sm leading-6 shadow-none focus-visible:ring-0"
@@ -252,7 +341,7 @@ export function SkillBuilderCandidateWorkbench({
             </>
           ) : (
             <div className="text-muted-foreground flex min-h-80 items-center justify-center p-6 text-center text-sm">
-              选择一个文件查看内容。
+              {copy.selectFile}
             </div>
           )}
         </div>
@@ -261,9 +350,7 @@ export function SkillBuilderCandidateWorkbench({
       {dirty && canAuthor ? (
         <div className="border-border/70 bg-background flex shrink-0 flex-col gap-3 border-t p-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs">
-            {baselineStale
-              ? "候选包已在其他位置更新。本地修改仍可复制；请加载最新版本后再编辑。"
-              : "文件有未保存修改；保存前不能继续对话或检查。"}
+            {baselineStale ? copy.baselineStale : copy.unsavedHint}
           </p>
           <div className="flex gap-2">
             <Button
@@ -272,7 +359,7 @@ export function SkillBuilderCandidateWorkbench({
               disabled={pending}
               onClick={onDiscard}
             >
-              {baselineStale ? "加载最新版本" : "放弃修改"}
+              {baselineStale ? copy.loadLatest : copy.discard}
             </Button>
             <Button
               type="button"
@@ -284,7 +371,7 @@ export function SkillBuilderCandidateWorkbench({
               ) : (
                 <SaveIcon aria-hidden className="size-4" />
               )}
-              {pending ? "保存中…" : "保存修改"}
+              {pending ? copy.saving : copy.save}
             </Button>
           </div>
         </div>
@@ -305,7 +392,7 @@ export function SkillBuilderCandidateWorkbench({
                   className="size-4 text-emerald-600"
                 />
               )}
-              {warning ? "检查通过，但有警告" : "检查通过"}
+              {warning ? copy.checkPassedWithWarnings : copy.checkPassed}
             </p>
             <p className="text-muted-foreground">{validation.description}</p>
             {validation.scan_rule_ids.length > 0 ? (
@@ -315,16 +402,16 @@ export function SkillBuilderCandidateWorkbench({
             ) : null}
             {validation.secret_requirements.length > 0 ? (
               <p className="text-muted-foreground">
-                所需凭据：
+                {copy.requiredCredentials}
                 {validation.secret_requirements
                   .map((item) => item.name)
-                  .join("、")}
+                  .join(", ")}
               </p>
             ) : null}
           </div>
         ) : (
           <p className="text-muted-foreground text-xs leading-5">
-            每次候选文件变化后都需要重新检查路径、frontmatter、安全规则和配额。
+            {copy.recheckHint}
           </p>
         )}
 
@@ -339,7 +426,7 @@ export function SkillBuilderCandidateWorkbench({
                 onAcknowledgeWarningsChange(event.target.checked)
               }
             />
-            <span>确认并接受上述警告</span>
+            <span>{copy.acknowledgeWarnings}</span>
           </label>
         ) : null}
 
@@ -362,7 +449,7 @@ export function SkillBuilderCandidateWorkbench({
               ) : (
                 <ShieldCheckIcon aria-hidden className="size-4" />
               )}
-              检查 Skill
+              {copy.checkSkill}
             </Button>
             <Button
               type="button"
@@ -371,7 +458,7 @@ export function SkillBuilderCandidateWorkbench({
               }
               onClick={onCommit}
             >
-              创建 Skill（默认停用）
+              {revising ? copy.commitRevise : copy.commitCreate}
             </Button>
           </div>
         ) : null}

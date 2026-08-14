@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.bootstrap_identities import (
     BUILTIN_ASSET_EMAIL,
     BUILTIN_ASSET_USER_ID,
+    BUILTIN_ASSET_USERNAME,
 )
 from app.shared_assets.bootstrap.catalog import (
     BootstrapCatalog,
@@ -215,6 +216,7 @@ async def _ensure_builtin_principal(session: AsyncSession) -> None:
             UserRow(
                 id=principal_id,
                 email=BUILTIN_ASSET_EMAIL,
+                username=BUILTIN_ASSET_USERNAME,
                 password_hash=None,
                 system_role="user",
                 oauth_provider=None,
@@ -224,7 +226,7 @@ async def _ensure_builtin_principal(session: AsyncSession) -> None:
             )
         )
         await session.flush()
-    elif row.email != BUILTIN_ASSET_EMAIL or row.password_hash is not None or row.oauth_provider is not None or row.oauth_id is not None or row.system_role != "user" or row.needs_setup:
+    elif row.email != BUILTIN_ASSET_EMAIL or row.username != BUILTIN_ASSET_USERNAME or row.password_hash is not None or row.oauth_provider is not None or row.oauth_id is not None or row.system_role != "user" or row.needs_setup:
         raise BootstrapConflict("builtin asset principal conflicts with canonical identity")
     membership = (await session.execute(select(ProjectMembershipRow.id).where(ProjectMembershipRow.user_id == principal_id).limit(1))).scalar_one_or_none()
     if membership is not None:

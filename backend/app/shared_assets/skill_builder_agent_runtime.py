@@ -30,10 +30,13 @@ from langchain.agents.middleware.types import (
     ModelRequest,
     ModelResponse,
     PrivateStateAttr,
+    ToolCallRequest,
+    hook_config,
 )
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, StructuredTool
+from langgraph.graph import END
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 from pydantic import (
@@ -198,10 +201,21 @@ Mandatory boundaries:
   upsert_candidate_file, and delete_candidate_file. Every mutation uses the
   latest returned draft checksum. Write at most one bounded chunk per call;
   use replace for a first chunk and append for later chunks of a large file.
+- Candidate paths are already relative to the package root. The required root
+  manifest path is exactly "SKILL.md"; never prefix it with the Skill slug or
+  another wrapper directory. Create every script, reference, or asset that the
+  manifest claims is bundled.
+- Search before reading or declaring a Skill/MCP dependency. Wait for the
+  search result before using its exact reference; never invent a reference.
 - Finish every turn by invoking exactly one terminal tool:
   request_skill_clarification when one high-information answer is required, or
   finalize_skill_candidate with the latest draft checksum when the complete
   UTF-8 package is ready. Do not end a turn with ordinary assistant text.
+- The run input's `authoring` block declares whether you are creating a new
+  Skill or revising an existing one. When revising, the persisted candidate
+  draft starts as the exact current published version: read before you edit,
+  make targeted changes, preserve unrelated files, and never change the
+  frontmatter `name`.
 
 The trusted, exact skill-creator instructions admitted for this Run follow.
 --- BEGIN TRUSTED PINNED skill-creator SKILL.md ---
@@ -899,24 +913,21 @@ class SkillBuilderToolset:
             ),
         )
         built: list[BaseTool] = []
-        for name, description, args_schema, coroutine, return_direct in definitions:
+        for name, description, args_schema, coroutine, terminal in definitions:
             tool = StructuredTool.from_function(
                 coroutine=cast(object, coroutine),
                 name=name,
                 description=description,
                 args_schema=args_schema,
-                return_direct=return_direct,
+                return_direct=False,
             )
-            if not return_direct:
-                if name in {
-                    "upsert_candidate_file",
-                    "delete_candidate_file",
-                }:
-                    mark_trusted_idempotent_tool(tool)
-                else:
-                    mark_trusted_read_only_tool(tool)
-            else:
+            if terminal or name in {
+                "upsert_candidate_file",
+                "delete_candidate_file",
+            }:
                 mark_trusted_idempotent_tool(tool)
+            else:
+                mark_trusted_read_only_tool(tool)
             mark_inline_only_tool_output(tool)
             built.append(tool)
         if tuple(item.name for item in built) != SKILL_BUILDER_TOOL_NAMES:
@@ -1204,9 +1215,80 @@ class _TerminalEnforcementMiddleware(
 ):
     state_schema = ClarificationMiddlewareState
 
+    _REMINDER = """Your previous response attempted to end this Builder turn
+without the required terminal tool. Do not answer with ordinary text. Candidate
+paths are relative to the package root, so the required manifest is exactly
+SKILL.md, never <skill-slug>/SKILL.md. Inspect and complete the persisted draft
+with the candidate-file tools if needed, then invoke exactly one terminal tool:
+request_skill_clarification or finalize_skill_candidate."""
+
     def __init__(self, toolset: SkillBuilderToolset) -> None:
         super().__init__()
         self._toolset = toolset
+        self._retry_pending = False
+        self._retry_used = False
+
+    def _augment_request(self, request: ModelRequest) -> ModelRequest:
+        if not self._retry_pending:
+            return request
+        self._retry_pending = False
+        return request.override(
+            messages=[
+                *request.messages,
+                HumanMessage(
+                    content=self._REMINDER,
+                    name="skill_builder_terminal_reminder",
+                    additional_kwargs={"hide_from_ui": True},
+                ),
+            ]
+        )
+
+    @override
+    def wrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], ModelResponse],
+    ) -> ModelCallResult:
+        return handler(self._augment_request(request))
+
+    @override
+    async def awrap_model_call(
+        self,
+        request: ModelRequest,
+        handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
+    ) -> ModelCallResult:
+        return await handler(self._augment_request(request))
+
+    def _route_terminal_result(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if request.tool_call.get("name") not in _TERMINAL_TOOL_NAMES or not self._toolset.terminal_completed or not isinstance(result, ToolMessage) or result.status == "error":
+            return result
+        return Command(
+            update={"messages": [result]},
+            goto=END,
+        )
+
+    @override
+    def wrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[[ToolCallRequest], ToolMessage | Command],
+    ) -> ToolMessage | Command:
+        return self._route_terminal_result(request, handler(request))
+
+    @override
+    async def awrap_tool_call(
+        self,
+        request: ToolCallRequest,
+        handler: Callable[
+            [ToolCallRequest],
+            Awaitable[ToolMessage | Command],
+        ],
+    ) -> ToolMessage | Command:
+        return self._route_terminal_result(request, await handler(request))
 
     def _require_terminal(self) -> None:
         if not self._toolset.terminal_completed:
@@ -1232,6 +1314,7 @@ class _TerminalEnforcementMiddleware(
                 "Skill Builder terminal tool cannot share a model turn",
             )
 
+    @hook_config(can_jump_to=["model"])
     @override
     def after_model(
         self,
@@ -1240,6 +1323,19 @@ class _TerminalEnforcementMiddleware(
     ) -> dict | None:
         del runtime
         self._require_isolated_terminal_call(state)
+        if self._toolset.terminal_completed:
+            return None
+        messages = state.get("messages") or ()
+        last_ai = next(
+            (message for message in reversed(messages) if isinstance(message, AIMessage)),
+            None,
+        )
+        if last_ai is None or message_reports_output_limit(last_ai) or last_ai.tool_calls or last_ai.invalid_tool_calls:
+            return None
+        if not self._retry_used:
+            self._retry_used = True
+            self._retry_pending = True
+            return {"jump_to": "model"}
         return None
 
     @override

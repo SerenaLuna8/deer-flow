@@ -107,28 +107,28 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
         digest="ecb90025be6b347c48da90c87fd51ea974a1f213f8b1766f589a6369379766c7",
     ),
     "columns": CatalogInvariant(
-        count=1030,
-        digest="246ffe739435eff956c7f4337ae8cfb9f49e88faf7e39e6a670a367b1720644f",
+        count=1037,
+        digest="ae0383e3ca6c9cd14ce9979463fadeb43173b6ab3cba64c77663d4aa2ce627c6",
     ),
     "table_comments": CatalogInvariant(
         count=85,
         digest="6862ef91cc007c76af51b93988096424b2fce9d4e95da50c2bb6021a1beecb5f",
     ),
     "column_comments": CatalogInvariant(
-        count=1031,
-        digest="e73eca67df9f92a562edfba918bc802b078750ede9c76b251ce12e232f38e8ab",
+        count=1038,
+        digest="a6634e9ebbf5652dc415af4bd4dd249f6f610297f8c295a24edbefcf4890ee7f",
     ),
     "sequences": CatalogInvariant(
         count=2,
         digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=753,
-        digest="681c93ae20561973c6088e3584cc923ba662d62898596a7c69dd9a58c5cf7275",
+        count=760,
+        digest="0fa4c1fe72034c8f20ff737a8a86b3a4612f54932148d6b5b62435f03f00f39d",
     ),
     "indexes": CatalogInvariant(
-        count=290,
-        digest="01563bf3997bd02ae415bfacc2746a4a44581d8e9f76c1b6b70e3971ff0872e5",
+        count=292,
+        digest="4796f7a42d4ec49015fcc58ea1d36e30d1d4746a2304ab00b5d92d109ddfdf53",
     ),
     "functions": CatalogInvariant(
         count=21,

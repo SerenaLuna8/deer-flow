@@ -11,6 +11,7 @@ from deerflow.runtime.user_context import DEFAULT_USER_ID
 AUTH_DISABLED_ENV_VAR = "DEER_FLOW_AUTH_DISABLED"
 AUTH_DISABLED_USER_ID = DEFAULT_USER_ID
 AUTH_DISABLED_USER_EMAIL = "default@test.local"
+AUTH_DISABLED_USER_USERNAME = "default"
 
 AUTH_SOURCE_SESSION = "session"
 AUTH_SOURCE_INTERNAL = "internal"
@@ -49,6 +50,7 @@ def get_auth_disabled_user():
     return SimpleNamespace(
         id=AUTH_DISABLED_USER_ID,
         email=AUTH_DISABLED_USER_EMAIL,
+        username=AUTH_DISABLED_USER_USERNAME,
         password_hash=None,
         system_role="system_admin",
         needs_setup=False,

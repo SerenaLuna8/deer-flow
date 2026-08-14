@@ -12,6 +12,7 @@ import { projectAssetKey } from "@/core/shared-assets/query-keys";
 import {
   cancelSkillBuilderSession,
   commitSkillBuilderSession,
+  createSkillBuilderRevisionSession,
   createSkillBuilderSession,
   getSkillBuilderSession,
   listSkillBuilderSessions,
@@ -28,6 +29,7 @@ import { isSkillBuilderRunAdmission } from "./types";
 import type {
   CancelSkillBuilderSessionInput,
   CommitSkillBuilderSessionInput,
+  CreateSkillBuilderRevisionInput,
   CreateSkillBuilderSessionInput,
   SkillBuilderSession,
   SkillBuilderSessionSummary,
@@ -159,6 +161,34 @@ export function useCreateSkillBuilderSession(
     mutationFn: (input: CreateSkillBuilderSessionInput) =>
       runMutation((signal) =>
         createSkillBuilderSession(projectId, input, signal),
+      ),
+    onSuccess: (response) => {
+      queryClient.setQueryData(
+        skillBuilderSessionKey(accountId, projectId, response.data.id),
+        response.data,
+      );
+      void queryClient.invalidateQueries(
+        skillBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+  });
+}
+
+export function useCreateSkillBuilderRevisionSession(
+  accountId: string,
+  projectId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useSkillBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: skillBuilderMutationKey(
+      accountId,
+      projectId,
+      "create-revision-session",
+    ),
+    mutationFn: (input: CreateSkillBuilderRevisionInput) =>
+      runMutation((signal) =>
+        createSkillBuilderRevisionSession(projectId, input, signal),
       ),
     onSuccess: (response) => {
       queryClient.setQueryData(

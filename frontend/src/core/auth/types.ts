@@ -6,6 +6,7 @@ export const userSchema = z
   .object({
     id: z.string().uuid(),
     email: z.string().email(),
+    username: z.string().min(3).max(32),
     system_role: z.enum(["system_admin", "user"]),
     needs_setup: z.boolean(),
     oauth_provider: z.string().nullable(),
@@ -40,6 +41,8 @@ const AUTH_ERROR_CODES = [
   "token_invalid",
   "user_not_found",
   "email_already_exists",
+  "username_already_exists",
+  "invalid_username",
   "provider_not_found",
   "not_authenticated",
   "system_already_initialized",

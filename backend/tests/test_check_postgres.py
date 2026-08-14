@@ -6,9 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from deerflow.persistence.base import Base
+from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from scripts import check_postgres
 
-CURRENT_SCHEMA_MARKER = "full_schema_v17"
+CURRENT_SCHEMA_MARKER = CURRENT_SCHEMA_REVISION
 
 
 def test_required_tables_exactly_cover_final_application_and_langgraph_schema() -> None:
@@ -155,7 +156,7 @@ async def test_check_reports_legacy_schema_as_recreate_required(
 @pytest.mark.asyncio
 async def test_check_reports_a_known_ancestor_as_upgrade_required(monkeypatch) -> None:
     connection = _connection(
-        revision="full_schema_v5",
+        revision="full_schema_ancestor",
         present_tables=set(check_postgres.REQUIRED_TABLES),
     )
     monkeypatch.setattr(
@@ -176,7 +177,7 @@ async def test_check_reports_a_known_ancestor_as_upgrade_required(monkeypatch) -
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
-    assert result.current_revision == "full_schema_v5"
+    assert result.current_revision == "full_schema_ancestor"
     assert result.head_revision == CURRENT_SCHEMA_MARKER
     assert result.schema_state == "upgrade_required"
     assert result.revision_matches is False

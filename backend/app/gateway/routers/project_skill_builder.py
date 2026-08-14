@@ -15,14 +15,17 @@ from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
     AssetItemResponse,
     AssetRoute,
+    SkillVersionItemResponse,
     project_asset_context,
     raise_asset_domain,
 )
+from app.private_work.skill_builder_run_admission import (
+    SkillBuilderRunAdmissionService,
+)
 from app.projects.context import ProjectContext
 from app.shared_assets.errors import AssetStorageUnavailable
-from app.shared_assets.skill_builder_run_admission import (
+from app.shared_assets.skill_builder_admission_contract import (
     SkillBuilderRunAdmission,
-    SkillBuilderRunAdmissionService,
 )
 from app.shared_assets.skill_design_generation import (
     MAX_SKILL_DESIGN_ATTACHMENTS,
@@ -30,6 +33,7 @@ from app.shared_assets.skill_design_generation import (
 from app.shared_assets.skill_design_service import (
     CancelSkillDesignSession,
     CommitSkillDesignSession,
+    CreateSkillDesignRevisionSession,
     CreateSkillDesignSession,
     SkillDesignClarificationResponse,
     SkillDesignClarificationTurn,
@@ -64,9 +68,28 @@ class _StrictModel(BaseModel):
 
 
 class CreateSkillDesignSessionRequest(_StrictModel):
-    slug: str
-    display_name: str
+    """Single strict model with kind cross-validation.
+
+    A discriminated union would 422 existing clients that omit the tag, so
+    ``kind`` defaults to ``create`` and field pairing is enforced after
+    parsing. Revise mode rejects slug/display_name: the server copies both
+    from the target asset so they cannot drift.
+    """
+
+    kind: Literal["create", "revise"] = "create"
+    slug: str | None = None
+    display_name: str | None = None
+    skill_id: uuid.UUID | None = None
     idempotency_key: str
+
+    @model_validator(mode="after")
+    def validate_kind_fields(self) -> CreateSkillDesignSessionRequest:
+        if self.kind == "create":
+            if self.slug is None or self.display_name is None or self.skill_id is not None:
+                raise ValueError("create requires slug and display_name")
+        elif self.slug is not None or self.display_name is not None or self.skill_id is None:
+            raise ValueError("revise requires only skill_id")
+        return self
 
 
 SkillDesignReasoningEffort = Literal["none", "low", "medium", "high"]
@@ -147,6 +170,7 @@ class SkillDesignValidateRequest(_StrictModel):
 
 class SkillDesignCommitRequest(SkillDesignValidateRequest):
     acknowledge_warnings: bool
+    acknowledge_base_stale: bool = False
 
 
 class SkillDesignCancelRequest(_StrictModel):
@@ -193,6 +217,13 @@ class SkillDesignFileResponse(_StrictModel):
     sha256: str
     encoding: Literal["utf-8"]
     content: str
+
+
+class SkillDesignBaseFileResponse(_StrictModel):
+    path: str
+    media_type: str
+    size_bytes: int = Field(ge=0)
+    sha256: str
 
 
 class SkillDesignSecretRequirementResponse(_StrictModel):
@@ -297,6 +328,13 @@ class SkillDesignSessionItemResponse(_StrictModel):
     error_message: str | None
     created_skill_id: uuid.UUID | None
     authoring_dependencies: SkillDesignDependencySnapshotResponse | None
+    session_kind: Literal["create", "revise"]
+    target_skill_id: uuid.UUID | None
+    base_version_id: uuid.UUID | None
+    base_version_number: int | None = Field(default=None, ge=1)
+    base_payload_checksum: str | None
+    target_skill_deleted: bool
+    base_files: tuple[SkillDesignBaseFileResponse, ...]
     activeRun: SkillDesignActiveRunResponse | None = Field(
         default=None,
         validation_alias="active_run",
@@ -322,6 +360,7 @@ class SkillDesignSessionSummaryResponse(_StrictModel):
     ]
     revision: int = Field(ge=1)
     updated_at: datetime
+    session_kind: Literal["create", "revise"]
 
 
 class SkillDesignSessionResponse(_StrictModel):
@@ -343,6 +382,7 @@ class SkillDesignSessionListResponse(_StrictModel):
 class SkillDesignCommitDataResponse(_StrictModel):
     session: SkillDesignSessionItemResponse
     skill: AssetItemResponse
+    version: SkillVersionItemResponse | None = None
 
 
 class SkillDesignCommitResponse(_StrictModel):
@@ -520,6 +560,14 @@ def _commit_response(
                 result.skill,
                 from_attributes=True,
             ),
+            version=(
+                SkillVersionItemResponse.model_validate(
+                    result.version,
+                    from_attributes=True,
+                )
+                if result.version is not None
+                else None
+            ),
         ),
         request_id=context.request_id,
     )
@@ -536,14 +584,23 @@ async def create_skill_design_session(
     service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
 ) -> SkillDesignSessionResponse:
     try:
-        view = await service.create(
-            context,
-            CreateSkillDesignSession(
-                slug=body.slug,
-                display_name=body.display_name,
-                idempotency_key=body.idempotency_key,
-            ),
-        )
+        if body.kind == "revise":
+            view = await service.create_revision(
+                context,
+                CreateSkillDesignRevisionSession(
+                    skill_id=body.skill_id,
+                    idempotency_key=body.idempotency_key,
+                ),
+            )
+        else:
+            view = await service.create(
+                context,
+                CreateSkillDesignSession(
+                    slug=body.slug,
+                    display_name=body.display_name,
+                    idempotency_key=body.idempotency_key,
+                ),
+            )
         return _session_response(view, context)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
@@ -723,6 +780,7 @@ async def commit_skill_design_session(
                 expected_draft_checksum=body.expected_draft_checksum,
                 acknowledge_warnings=body.acknowledge_warnings,
                 idempotency_key=body.idempotency_key,
+                acknowledge_base_stale=body.acknowledge_base_stale,
             ),
         )
         return _commit_response(result, context)

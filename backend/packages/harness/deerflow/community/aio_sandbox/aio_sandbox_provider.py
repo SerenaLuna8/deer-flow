@@ -54,7 +54,7 @@ from .sandbox_info import SandboxInfo
 logger = logging.getLogger(__name__)
 
 # Default configuration
-DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
+DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0"
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
@@ -126,7 +126,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     Configuration options in config.yaml under sandbox:
         use: deerflow.community.aio_sandbox:AioSandboxProvider
         image: <container image>
-        port: 8080                      # Base port for local containers
+        port: 8080                      # Docker host-port base; ignored by Apple Container
         container_prefix: deer-flow-sandbox
         idle_timeout: 600               # Idle timeout in seconds (0 to disable)
         replicas: 3                     # Max concurrent sandbox containers (LRU eviction when exceeded)

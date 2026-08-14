@@ -499,9 +499,9 @@ export function AdminOperationsShell({
           className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto px-2.5 py-4"
         />
         <div className="border-sidebar-border border-t px-2.5 py-3">
-          {user?.email && desktopNavigationExpanded ? (
+          {user?.username && desktopNavigationExpanded ? (
             <p className="text-muted-foreground mb-2 truncate px-2 text-xs">
-              {user.email}
+              {user.username}
             </p>
           ) : null}
           <AdminSignOut
@@ -599,9 +599,9 @@ export function AdminOperationsShell({
                 className="min-h-0 flex-1 overflow-y-auto px-2.5 py-4"
               />
               <div className="border-sidebar-border border-t px-3 py-3">
-                {user?.email ? (
+                {user?.username ? (
                   <p className="text-muted-foreground mb-2 truncate px-2 text-xs">
-                    {user.email}
+                    {user.username}
                   </p>
                 ) : null}
                 <div className="grid gap-1">
@@ -620,7 +620,7 @@ export function AdminOperationsShell({
           </Dialog>
           <div className="hidden min-w-0 lg:block">
             <p className="text-muted-foreground max-w-[18rem] truncate text-xs">
-              {user?.email}
+              {user?.username}
             </p>
           </div>
         </header>

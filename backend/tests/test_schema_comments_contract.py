@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import stat
 from pathlib import Path
@@ -11,14 +10,11 @@ from deerflow.persistence.final_schema_contract import (
     LANGGRAPH_COMMENT_SIGNATURE,
     _rows_digest,
 )
-from migrations.versions import full_schema_v10_table_column_comments as v10_comments
 from scripts import generate_schema_comments, setup_postgres
 
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_PATH = BACKEND_ROOT / "packages" / "harness" / "deerflow" / "persistence" / "full_schema.sql"
 COMMENTS_PATH = SCHEMA_PATH.with_name("schema_comments.sql")
-MIGRATION_COMMENTS_PATH = BACKEND_ROOT / "migrations" / "versions" / "full_schema_v10_comments.sql"
-MIGRATION_PATH = BACKEND_ROOT / "migrations" / "versions" / "full_schema_v10_table_column_comments.py"
 CHINESE_TEXT_PATTERN = re.compile(r"[\u3400-\u9fff]")
 
 
@@ -58,46 +54,18 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         re.MULTILINE,
     )
     assert len(table_comments) == 85
-    assert len(column_comments) == 1031
+    assert len(column_comments) == 1038
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _table, _column, comment in column_comments)
 
 
-def test_v10_migration_owns_a_frozen_checked_comment_resource() -> None:
-    migration_source = MIGRATION_PATH.read_text(encoding="utf-8")
-    frozen_payload = MIGRATION_COMMENTS_PATH.read_bytes()
-    expected_checksum = hashlib.sha256(frozen_payload).hexdigest()
-
-    assert f'_COMMENTS_SHA256 = "{expected_checksum}"' in migration_source
-    assert 'revision = "full_schema_v10"' in migration_source
-    assert 'down_revision = "full_schema_v9"' in migration_source
-
-
-def test_langgraph_setup_migration_and_readiness_comments_match_exactly() -> None:
-    migration_tables = dict(
-        re.findall(
-            r"EXECUTE 'COMMENT ON TABLE ([a-z][a-z0-9_]*) IS ''([^']+)''';",
-            v10_comments._LANGGRAPH_COMMENTS_SQL,
-        )
-    )
-    migration_columns = {
-        (table_name, column_name): comment
-        for table_name, column_name, comment in re.findall(
-            r"EXECUTE 'COMMENT ON COLUMN ([a-z][a-z0-9_]*)\.([a-z][a-z0-9_]*) IS ''([^']+)''';",
-            v10_comments._LANGGRAPH_COMMENTS_SQL,
-        )
-    }
+def test_langgraph_readiness_comments_match_the_frozen_signature() -> None:
     inventory = sorted(
         setup_postgres._LANGGRAPH_COMMENT_INVENTORY,
         key=lambda item: item.table_name,
     )
-    expected_tables = {item.table_name: item.table_comment for item in inventory}
-    expected_columns = {(item.table_name, column_name): comment for item in inventory for column_name, comment in item.column_comments}
-
-    assert migration_tables == expected_tables
-    assert migration_columns == expected_columns
     table_rows = tuple((item.table_name, item.table_comment) for item in inventory)
     column_rows = tuple((item.table_name, column_name, comment) for item in inventory for column_name, comment in item.column_comments)
     assert len(table_rows) == LANGGRAPH_COMMENT_SIGNATURE["table_comments"].count

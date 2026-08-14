@@ -19,6 +19,7 @@ class User(BaseModel):
 
     id: UUID = Field(default_factory=uuid4, description="Primary key")
     email: EmailStr = Field(..., description="Unique email address")
+    username: str = Field(..., description="Unique login username")
     password_hash: str | None = Field(None, description="bcrypt hash, nullable for OAuth users")
     principal_type: Literal["human"] = Field(default="human")
     system_role: Literal["system_admin", "user"] = Field(default="user")
@@ -38,6 +39,7 @@ class UserResponse(BaseModel):
 
     id: str
     email: str
+    username: str
     system_role: Literal["system_admin", "user"]
     needs_setup: bool = False
     oauth_provider: str | None = Field(None, description="OAuth/SSO provider ID if the user logged in via SSO (e.g. 'keycloak')")

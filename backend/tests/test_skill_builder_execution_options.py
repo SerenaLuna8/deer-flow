@@ -264,6 +264,7 @@ class TestDurableRunInput:
             "mode": "initial",
             "brief": request.brief,
         }
+        assert payload["authoring"] == {"kind": "create"}
         assert "content" not in payload["draft"]["files"][0]
         assert payload["draft"]["checksum"] == "a" * 64
         assert payload["prior_dependency_references"] == []

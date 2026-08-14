@@ -17,11 +17,25 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentVersionSkillRefRow,
     ProjectSystemSkillBindingRow,
+    SkillDesignOperationRow,
     SkillDesignSessionRow,
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
 )
+
+# Builder session states that may still progress; a deleted revision target
+# collapses them to ``failed`` inside the delete transaction.
+_LIVE_SKILL_DESIGN_STATUSES = (
+    "interviewing",
+    "generating",
+    "awaiting_clarification",
+    "draft_ready",
+    "validated",
+    "committing",
+)
+SKILL_DESIGN_TARGET_DELETED_ERROR_CODE = "SKILL_DESIGN_TARGET_DELETED"
+_SKILL_DESIGN_TARGET_DELETED_MESSAGE = "修订目标 Skill 已被删除，本次修订会话已终止。"
 
 
 class SkillCreateCommand(Protocol):
@@ -273,6 +287,52 @@ class SkillRepository:
                 created_skill_deleted=True,
             )
         )
+
+        # Sever revision sessions that pinned this Skill as their target, and
+        # fail-close the ones that could still progress. In-flight Builder
+        # Runs observe the failed operation at their next tool-call boundary.
+        revise_rows = (
+            (
+                await self.session.execute(
+                    select(SkillDesignSessionRow)
+                    .where(
+                        SkillDesignSessionRow.project_id == context.project_id,
+                        SkillDesignSessionRow.target_skill_id == asset.id,
+                    )
+                    .with_for_update(of=SkillDesignSessionRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for design_row in revise_rows:
+            design_row.target_skill_id = None
+            design_row.base_version_id = None
+            design_row.base_version_number = None
+            design_row.base_payload_checksum = None
+            design_row.target_skill_deleted = True
+            if design_row.status in _LIVE_SKILL_DESIGN_STATUSES:
+                design_row.status = "failed"
+                design_row.error_code = SKILL_DESIGN_TARGET_DELETED_ERROR_CODE
+                design_row.error_message = _SKILL_DESIGN_TARGET_DELETED_MESSAGE
+                design_row.active_clarification_json = None
+                design_row.validation_json = None
+                design_row.validated_draft_checksum = None
+                design_row.revision += 1
+                await self.session.execute(
+                    update(SkillDesignOperationRow)
+                    .where(
+                        SkillDesignOperationRow.project_id == design_row.project_id,
+                        SkillDesignOperationRow.owner_user_id == design_row.owner_user_id,
+                        SkillDesignOperationRow.session_id == design_row.id,
+                        SkillDesignOperationRow.status == "in_progress",
+                    )
+                    .values(
+                        status="failed",
+                        result_revision=design_row.revision,
+                        public_error_code=SKILL_DESIGN_TARGET_DELETED_ERROR_CODE,
+                    )
+                )
 
         # This transient state is never committed: it combines with the cleared
         # pointer to authorize the published-child trigger added in revision 0002.

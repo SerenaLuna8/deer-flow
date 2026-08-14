@@ -6,11 +6,13 @@ Handles container lifecycle, port allocation, and cross-process container discov
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import shlex
 import subprocess
+import time
 from datetime import datetime
 
 from deerflow.utils.network import get_free_port, release_port
@@ -19,6 +21,10 @@ from .backend import SandboxBackend, wait_for_sandbox_ready
 from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
+
+_APPLE_MANAGED_LABEL = "io.actweave.sandbox.managed"
+_APPLE_SCHEMA_LABEL = "io.actweave.sandbox.schema"
+_APPLE_SCHEMA_VERSION = "1"
 
 
 def _parse_docker_timestamp(raw: str) -> float:
@@ -65,6 +71,66 @@ def _extract_host_port(inspect_entry: dict, container_port: int) -> int | None:
     except (ValueError, TypeError, AttributeError):
         pass
     return None
+
+
+def _parse_apple_container_payload(raw: str, *, operation: str) -> list[dict]:
+    """Parse Apple Container's version-1 structured container output.
+
+    Both ``container list --format json`` and ``container inspect`` return a
+    top-level JSON array of managed-container objects. Keep this parser strict
+    so a CLI schema change cannot be mistaken for a dead container.
+    """
+    try:
+        payload = json.loads(raw or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Failed to parse Apple Container {operation} output") from exc
+    if not isinstance(payload, list) or any(not isinstance(entry, dict) for entry in payload):
+        raise RuntimeError(f"Failed to parse Apple Container {operation} output")
+    return payload
+
+
+def _is_managed_apple_sandbox(entry: dict) -> bool:
+    """Return whether an Apple container is owned by this backend schema."""
+    container_id = entry.get("id")
+    configuration = entry.get("configuration")
+    if not isinstance(container_id, str) or not isinstance(configuration, dict):
+        return False
+    if configuration.get("id") != container_id:
+        return False
+    labels = configuration.get("labels")
+    return isinstance(labels, dict) and labels.get(_APPLE_MANAGED_LABEL) == "true" and labels.get(_APPLE_SCHEMA_LABEL) == _APPLE_SCHEMA_VERSION
+
+
+def _extract_apple_sandbox_ipv4(entry: dict) -> str | None:
+    """Return the usable IPv4 address on Apple Container's default VM network."""
+    status = entry.get("status")
+    if not isinstance(status, dict) or str(status.get("state", "")).lower() != "running":
+        return None
+    networks = status.get("networks")
+    if not isinstance(networks, list):
+        return None
+    for network in networks:
+        if not isinstance(network, dict) or network.get("network") != "default":
+            continue
+        raw_address = network.get("ipv4Address")
+        if not isinstance(raw_address, str) or not raw_address:
+            continue
+        try:
+            interface = ipaddress.ip_interface(raw_address)
+        except ValueError:
+            continue
+        address = interface.ip
+        if not isinstance(address, ipaddress.IPv4Address):
+            continue
+        if address.is_unspecified or address.is_loopback or address.is_multicast or address.is_link_local:
+            continue
+        return str(address)
+    return None
+
+
+def _apple_sandbox_url(entry: dict) -> str | None:
+    address = _extract_apple_sandbox_ipv4(entry)
+    return f"http://{address}:8080" if address else None
 
 
 def _format_container_mount(runtime: str, host_path: str, container_path: str, read_only: bool) -> list[str]:
@@ -187,6 +253,11 @@ def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
     return container_name.lower() in message or "container" in message or "object" in message
 
 
+def _is_container_name_conflict(error: str) -> bool:
+    message = error.lower()
+    return "is already in use by container" in message or "conflict. the container name" in message or ("container with id" in message and "already exists" in message)
+
+
 class LocalContainerBackend(SandboxBackend):
     """Backend that manages sandbox containers locally using Docker or Apple Container.
 
@@ -285,6 +356,38 @@ class LocalContainerBackend(SandboxBackend):
         del user_id
         container_name = f"{self._container_prefix}-{sandbox_id}"
 
+        if self._runtime == "container":
+            try:
+                container_id = self._start_container(container_name, None, extra_mounts)
+            except RuntimeError as exc:
+                if _is_container_name_conflict(str(exc)):
+                    logger.warning(
+                        "Apple container name %s already exists, attempting discovery",
+                        container_name,
+                    )
+                    existing = self.discover(sandbox_id)
+                    if existing is not None:
+                        return existing
+                raise
+
+            try:
+                entry = self._wait_for_apple_container_network(container_name, timeout=10)
+                sandbox_url = _apple_sandbox_url(entry) if entry is not None else None
+                if not sandbox_url:
+                    raise RuntimeError("Apple sandbox container did not receive a usable network address")
+                configuration = entry.get("configuration")
+                created_raw = configuration.get("creationDate", "") if isinstance(configuration, dict) else ""
+                return SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url=sandbox_url,
+                    container_name=container_name,
+                    container_id=container_id,
+                    created_at=_parse_docker_timestamp(str(created_raw)) or time.time(),
+                )
+            except BaseException:
+                self._stop_private_container(container_id or container_name)
+                raise
+
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
         # next one.  The socket-bind check in get_free_port mirrors Docker's
@@ -310,7 +413,7 @@ class LocalContainerBackend(SandboxBackend):
                 # Container-name conflict: another process may have already started
                 # the deterministic sandbox container for this sandbox_id. Try to
                 # discover and adopt the existing container instead of failing.
-                if "is already in use by container" in err_lower or "conflict. the container name" in err_lower:
+                if _is_container_name_conflict(err_lower):
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
                     existing = self.discover(sandbox_id)
                     if existing is not None:
@@ -337,7 +440,8 @@ class LocalContainerBackend(SandboxBackend):
         stop_target = info.container_id or info.container_name
         if stop_target:
             self._stop_container(stop_target)
-        self._release_sandbox_port(info)
+        if self._runtime == "docker":
+            self._release_sandbox_port(info)
 
     def destroy_private(self, info: SandboxInfo) -> None:
         """Strictly destroy a private container or keep its lease retryable."""
@@ -346,7 +450,8 @@ class LocalContainerBackend(SandboxBackend):
         if not stop_target:
             raise RuntimeError("Private container identity is unavailable")
         self._stop_private_container(stop_target)
-        self._release_sandbox_port(info)
+        if self._runtime == "docker":
+            self._release_sandbox_port(info)
 
     @staticmethod
     def _release_sandbox_port(info: SandboxInfo) -> None:
@@ -362,6 +467,9 @@ class LocalContainerBackend(SandboxBackend):
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check if the container is still running (lightweight, no HTTP)."""
+        if self._runtime == "container" and info.container_name:
+            entry = self._inspect_apple_container(info.container_name)
+            return entry is not None and _is_managed_apple_sandbox(entry) and _apple_sandbox_url(entry) == info.sandbox_url
         if info.container_name:
             return self._is_container_running(info.container_name)
         return False
@@ -383,6 +491,31 @@ class LocalContainerBackend(SandboxBackend):
             hard-failing on a hiccup.
         """
         container_name = f"{self._container_prefix}-{sandbox_id}"
+
+        if self._runtime == "container":
+            try:
+                entry = self._inspect_apple_container(container_name)
+            except RuntimeError as exc:
+                logger.warning(
+                    "Could not verify Apple container %s during discovery; not adopting it: %s",
+                    container_name,
+                    exc,
+                )
+                return None
+            if entry is None or not _is_managed_apple_sandbox(entry):
+                return None
+            sandbox_url = _apple_sandbox_url(entry)
+            if not sandbox_url or not wait_for_sandbox_ready(sandbox_url, timeout=5):
+                return None
+            configuration = entry.get("configuration")
+            created_raw = configuration.get("creationDate", "") if isinstance(configuration, dict) else ""
+            return SandboxInfo(
+                sandbox_id=sandbox_id,
+                sandbox_url=sandbox_url,
+                container_name=container_name,
+                container_id=container_name,
+                created_at=_parse_docker_timestamp(str(created_raw)),
+            )
 
         try:
             running = self._is_container_running(container_name)
@@ -424,6 +557,9 @@ class LocalContainerBackend(SandboxBackend):
         sandbox_url) so that startup reconciliation can adopt orphans
         regardless of their port state.
         """
+        if self._runtime == "container":
+            return self._list_running_apple()
+
         # Step 1: enumerate container names via docker ps
         try:
             result = subprocess.run(
@@ -485,6 +621,64 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Found {len(infos)} running sandbox container(s)")
         return infos
 
+    def _list_running_apple(self) -> list[SandboxInfo]:
+        """Enumerate managed Apple Container 1.x sandboxes."""
+        try:
+            result = subprocess.run(
+                ["container", "list", "--format", "json"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+            logger.warning("Failed to list running Apple containers: %s", exc)
+            return []
+
+        if result.returncode != 0:
+            logger.warning(
+                "Failed to list running Apple containers (returncode=%s, stderr=%s)",
+                result.returncode,
+                (result.stderr or "").strip() or "<empty>",
+            )
+            return []
+
+        try:
+            entries = _parse_apple_container_payload(result.stdout, operation="list")
+        except RuntimeError as exc:
+            logger.warning("%s", exc)
+            return []
+
+        prefix = self._container_prefix + "-"
+        infos: list[SandboxInfo] = []
+        for entry in entries:
+            container_name = entry.get("id")
+            status = entry.get("status")
+            if not isinstance(container_name, str) or not container_name.startswith(prefix):
+                continue
+            if not isinstance(status, dict) or str(status.get("state", "")).lower() != "running":
+                continue
+            if not _is_managed_apple_sandbox(entry):
+                continue
+
+            configuration = entry.get("configuration")
+            created_raw = configuration.get("creationDate", "") if isinstance(configuration, dict) else ""
+            sandbox_url = _apple_sandbox_url(entry)
+            if not sandbox_url:
+                logger.warning("Ignoring managed Apple sandbox %s without a usable default-network IPv4 address", container_name)
+                continue
+            infos.append(
+                SandboxInfo(
+                    sandbox_id=container_name[len(prefix) :],
+                    sandbox_url=sandbox_url,
+                    container_name=container_name,
+                    container_id=container_name,
+                    created_at=_parse_docker_timestamp(str(created_raw)),
+                )
+            )
+
+        logger.info("Found %d running Apple sandbox container(s)", len(infos))
+        return infos
+
     def _batch_inspect(self, container_names: list[str]) -> dict[str, tuple[float, int | None]]:
         """Batch-inspect containers in a single subprocess call.
 
@@ -536,14 +730,15 @@ class LocalContainerBackend(SandboxBackend):
     def _start_container(
         self,
         container_name: str,
-        port: int,
+        port: int | None,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
     ) -> str:
         """Start a new container.
 
         Args:
             container_name: Name for the container.
-            port: Host port to map to container port 8080.
+            port: Host port to map to container port 8080 for Docker. Apple
+                Container uses its private VM address and must pass None.
             extra_mounts: Additional volume mounts.
 
         Returns:
@@ -558,21 +753,22 @@ class LocalContainerBackend(SandboxBackend):
         if self._runtime == "docker":
             cmd.extend(["--security-opt", "seccomp=unconfined"])
 
+        cmd.extend(["--rm", "-d"])
         if self._runtime == "docker":
+            if port is None:
+                raise ValueError("Docker sandbox requires a host port")
             port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
+            cmd.extend(["-p", port_mapping])
         else:
-            port_mapping = f"{port}:8080"
-
-        cmd.extend(
-            [
-                "--rm",
-                "-d",
-                "-p",
-                port_mapping,
-                "--name",
-                container_name,
-            ]
-        )
+            cmd.extend(
+                [
+                    "--label",
+                    f"{_APPLE_MANAGED_LABEL}=true",
+                    "--label",
+                    f"{_APPLE_SCHEMA_LABEL}={_APPLE_SCHEMA_VERSION}",
+                ]
+            )
+        cmd.extend(["--name", container_name])
 
         # Environment variables
         for key, value in self._environment.items():
@@ -661,6 +857,15 @@ class LocalContainerBackend(SandboxBackend):
                 destroy healthy containers during transient Docker/Container
                 daemon failures.
         """
+        if self._runtime == "container":
+            entry = self._inspect_apple_container(container_name)
+            if entry is None:
+                return False
+            status = entry.get("status")
+            if not isinstance(status, dict) or not isinstance(status.get("state"), str):
+                raise RuntimeError("Failed to parse Apple Container inspect output")
+            return status["state"].lower() == "running"
+
         try:
             result = subprocess.run(
                 [self._runtime, "inspect", "-f", "{{.State.Running}}", container_name],
@@ -677,6 +882,47 @@ class LocalContainerBackend(SandboxBackend):
             return False
         raise RuntimeError(f"Failed to inspect container {container_name}: {result.stderr.strip()}")
 
+    def _inspect_apple_container(self, container_name: str) -> dict | None:
+        """Return one Apple managed-container entry, or None when absent."""
+        try:
+            result = subprocess.run(
+                ["container", "inspect", container_name],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError(f"Timed out checking container {container_name}") from exc
+        except (FileNotFoundError, OSError) as exc:
+            raise RuntimeError(f"Failed to inspect container {container_name}") from exc
+
+        if result.returncode != 0:
+            if _is_no_such_container_error(result.stderr or "", container_name):
+                return None
+            raise RuntimeError(f"Failed to inspect container {container_name}: {(result.stderr or '').strip()}")
+
+        entries = _parse_apple_container_payload(result.stdout, operation="inspect")
+        matches = [entry for entry in entries if entry.get("id") == container_name]
+        if len(matches) != 1:
+            raise RuntimeError("Failed to parse Apple Container inspect output")
+        return matches[0]
+
+    def _wait_for_apple_container_network(self, container_name: str, *, timeout: float) -> dict | None:
+        """Wait briefly for Apple Container to assign its default-network IP."""
+        deadline = time.monotonic() + timeout
+        while True:
+            entry = self._inspect_apple_container(container_name)
+            if entry is not None:
+                status = entry.get("status")
+                state = str(status.get("state", "")).lower() if isinstance(status, dict) else ""
+                if state == "running" and _is_managed_apple_sandbox(entry) and _apple_sandbox_url(entry):
+                    return entry
+                if state in {"stopped", "stopping"}:
+                    return None
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.2)
+
     def _get_container_port(self, container_name: str) -> int | None:
         """Get the host port of a running container.
 
@@ -686,6 +932,9 @@ class LocalContainerBackend(SandboxBackend):
         Returns:
             The host port mapped to container port 8080, or None if not found.
         """
+        if self._runtime == "container":
+            return None
+
         try:
             result = subprocess.run(
                 [self._runtime, "port", container_name, "8080"],

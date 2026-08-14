@@ -32,7 +32,7 @@ class UserRepository(ABC):
             Created User with ID assigned
 
         Raises:
-            ValueError: If email already exists
+            DuplicateUserIdentity: If email or username already exists
         """
         raise NotImplementedError
 
@@ -54,6 +54,18 @@ class UserRepository(ABC):
 
         Args:
             email: User email address
+
+        Returns:
+            User if found, None otherwise
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_user_by_username(self, username: str) -> User | None:
+        """Get user by username.
+
+        Args:
+            username: Login username
 
         Returns:
             User if found, None otherwise

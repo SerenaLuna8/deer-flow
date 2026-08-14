@@ -119,6 +119,7 @@ async function mockProjectMemoryRoute(
       return json(route, {
         id: ACCOUNT_ID,
         email: "owner@example.test",
+        username: "owner",
         system_role: "user",
         needs_setup: false,
         oauth_provider: null,

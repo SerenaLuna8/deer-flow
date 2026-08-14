@@ -289,12 +289,17 @@ class PrivateThreadRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         expected_version: int,
+        thread_kind: str = "chat",
     ) -> PrivateThreadRecord:
         now = datetime.now(UTC)
         statement = (
             update(ThreadMetaRow)
             .where(
-                *self._active_scope(scope, thread_id),
+                *self._active_scope(
+                    scope,
+                    thread_id,
+                    thread_kind=thread_kind,
+                ),
                 ThreadMetaRow.version == expected_version,
             )
             .values(

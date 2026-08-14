@@ -15,10 +15,35 @@ from typing import TYPE_CHECKING
 
 from langchain.agents.middleware import AgentMiddleware
 
+from deerflow.agents.middlewares.manifest import (
+    MiddlewareDispatchConstraint,
+    MiddlewareHook,
+    MiddlewarePhase,
+    assign_middleware_layer,
+    validate_middleware_dispatch_constraints,
+    validate_middleware_phase_ladder,
+)
 from deerflow.config.app_config import AppConfig
 
 if TYPE_CHECKING:
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
+
+
+def _layer(
+    middleware: AgentMiddleware,
+    *,
+    layer_id: str,
+    phase: MiddlewarePhase,
+    slot: int,
+    why: str,
+) -> AgentMiddleware:
+    return assign_middleware_layer(
+        middleware,
+        layer_id=layer_id,
+        phase=phase,
+        slot=slot,
+        why=why,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,12 +110,36 @@ def build_sandbox_infrastructure(
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
-    middlewares: list[AgentMiddleware] = [ThreadDataMiddleware(lazy_init=lazy_init)]
+    middlewares: list[AgentMiddleware] = [
+        _layer(
+            ThreadDataMiddleware(lazy_init=lazy_init),
+            layer_id="thread_data",
+            phase=MiddlewarePhase.THREAD_INFRA,
+            slot=10,
+            why="Thread identity must exist before uploads and sandbox setup.",
+        )
+    ]
     if include_uploads:
         from deerflow.agents.middlewares.uploads_middleware import UploadsMiddleware
 
-        middlewares.append(UploadsMiddleware())
-    middlewares.append(SandboxMiddleware(lazy_init=lazy_init))
+        middlewares.append(
+            _layer(
+                UploadsMiddleware(),
+                layer_id="uploads",
+                phase=MiddlewarePhase.THREAD_INFRA,
+                slot=20,
+                why="Uploads resolve against the thread before sandbox mounts.",
+            )
+        )
+    middlewares.append(
+        _layer(
+            SandboxMiddleware(lazy_init=lazy_init),
+            layer_id="sandbox",
+            phase=MiddlewarePhase.THREAD_INFRA,
+            slot=30,
+            why="Sandbox consumes thread identity and admitted uploads.",
+        )
+    )
     return middlewares
 
 
@@ -123,32 +172,165 @@ def assemble_agent_middlewares(
     invariant rather than a convention duplicated by each caller.
     """
 
-    middlewares = [*runtime, *before_summarization]
-    for middleware in (
-        summarization,
-        planning,
-        output_limit_recovery,
-        token_usage,
-        title,
-    ):
+    middlewares = list(runtime)
+    for index, middleware in enumerate(before_summarization, start=1):
+        middlewares.append(
+            _layer(
+                middleware,
+                layer_id=(f"private_context_{index}_{type(middleware).__name__}"),
+                phase=MiddlewarePhase.PRIVATE_CONTEXT,
+                slot=index * 10,
+                why="Private runtime context is established before compaction.",
+            )
+        )
+    optional_layers = (
+        (
+            summarization,
+            "summarization",
+            MiddlewarePhase.COMPACTION,
+            10,
+            "Compaction runs after private context capture.",
+        ),
+        (
+            planning,
+            "planning",
+            MiddlewarePhase.PLANNING,
+            10,
+            "Planning consumes compacted conversation state.",
+        ),
+        (
+            output_limit_recovery,
+            "output_limit_recovery",
+            MiddlewarePhase.RESPONSE_RECOVERY,
+            10,
+            "Output-limit recovery precedes accounting in registration order.",
+        ),
+        (
+            token_usage,
+            "token_usage",
+            MiddlewarePhase.ACCOUNTING,
+            10,
+            "Token usage observes recovered model output.",
+        ),
+        (
+            title,
+            "title",
+            MiddlewarePhase.ACCOUNTING,
+            20,
+            "Title generation follows token accounting.",
+        ),
+    )
+    for middleware, layer_id, phase, slot, why in optional_layers:
         if middleware is not None:
-            middlewares.append(middleware)
-    middlewares.extend(after_title)
+            middlewares.append(
+                _layer(
+                    middleware,
+                    layer_id=layer_id,
+                    phase=phase,
+                    slot=slot,
+                    why=why,
+                )
+            )
+    for index, middleware in enumerate(after_title, start=1):
+        middlewares.append(
+            _layer(
+                middleware,
+                layer_id=(f"accounting_after_title_{index}_{type(middleware).__name__}"),
+                phase=MiddlewarePhase.ACCOUNTING,
+                slot=20 + index * 10,
+                why="Caller accounting extensions follow title handling.",
+            )
+        )
     if vision is not None:
-        middlewares.append(vision)
-    middlewares.extend(routing)
+        middlewares.append(
+            _layer(
+                vision,
+                layer_id="vision",
+                phase=MiddlewarePhase.REQUEST_SHAPING,
+                slot=10,
+                why="Vision shapes the final model request.",
+            )
+        )
+    for index, middleware in enumerate(routing, start=1):
+        middlewares.append(
+            _layer(
+                middleware,
+                layer_id=(f"request_routing_{index}_{type(middleware).__name__}"),
+                phase=MiddlewarePhase.REQUEST_SHAPING,
+                slot=10 + index * 10,
+                why="Routing and deferred filtering shape available tools.",
+            )
+        )
     for middleware in (
-        system_message,
-        subagent,
-        loop_detection,
-        token_budget,
+        (
+            system_message,
+            "system_message_coalescing",
+            MiddlewarePhase.REQUEST_SHAPING,
+            90,
+            "Provider-facing system messages are coalesced after routing.",
+        ),
+        (
+            subagent,
+            "subagent_limit",
+            MiddlewarePhase.EXECUTION_LIMITS,
+            10,
+            "Subagent limits apply before loop and token limits.",
+        ),
+        (
+            loop_detection,
+            "loop_detection",
+            MiddlewarePhase.EXECUTION_LIMITS,
+            20,
+            "Loop accounting observes subagent activity.",
+        ),
+        (
+            token_budget,
+            "token_budget",
+            MiddlewarePhase.EXECUTION_LIMITS,
+            30,
+            "Token budget is the innermost execution limit.",
+        ),
     ):
-        if middleware is not None:
-            middlewares.append(middleware)
-    middlewares.extend(custom)
+        instance, layer_id, phase, slot, why = middleware
+        if instance is not None:
+            middlewares.append(
+                _layer(
+                    instance,
+                    layer_id=layer_id,
+                    phase=phase,
+                    slot=slot,
+                    why=why,
+                )
+            )
+    for index, middleware in enumerate(custom, start=1):
+        middlewares.append(
+            _layer(
+                middleware,
+                layer_id=f"custom_{index}_{type(middleware).__name__}",
+                phase=MiddlewarePhase.CUSTOM,
+                slot=index * 10,
+                why="Caller-owned middleware occupies the explicit custom phase.",
+            )
+        )
     if safety is not None:
-        middlewares.append(safety)
-    middlewares.append(clarification)
+        middlewares.append(
+            _layer(
+                safety,
+                layer_id="safety_finish_reason",
+                phase=MiddlewarePhase.RESPONSE_GATE,
+                slot=10,
+                why="Safety sees the raw model response before reverse hooks.",
+            )
+        )
+    middlewares.append(
+        _layer(
+            clarification,
+            layer_id="clarification",
+            phase=MiddlewarePhase.INTERRUPT_TAIL,
+            slot=10,
+            why="Clarification is the structural tail.",
+        )
+    )
 
     invariants = [
         _MiddlewareOrderInvariant(
@@ -173,6 +355,40 @@ def assemble_agent_middlewares(
             )
         )
     _validate_middleware_invariants(middlewares, invariants)
+    validate_middleware_phase_ladder(middlewares)
+    validate_middleware_dispatch_constraints(
+        middlewares,
+        (
+            MiddlewareDispatchConstraint(
+                name="safety cleanup before loop accounting",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="safety_finish_reason",
+                then="loop_detection",
+                why="Safety must clear unsafe tool calls before loop accounting.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="token budget before output-limit recovery",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="token_budget",
+                then="output_limit_recovery",
+                why="Recovery must see the final token-budget outcome.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="token usage before output-limit recovery",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="token_usage",
+                then="output_limit_recovery",
+                why="Recovery consumes accounting captured from the response.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="output-limit recovery before planning cleanup",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="output_limit_recovery",
+                then="planning",
+                why="Planning is intentionally downstream of recovery.",
+            ),
+        ),
+    )
     return middlewares
 
 
@@ -220,16 +436,42 @@ def build_runtime_middlewares(
         assert app_config is not None
         outer_wrappers.extend(
             [
-                InputSanitizationMiddleware(),
-                ToolOutputBudgetMiddleware.from_app_config(app_config),
-                ToolResultSanitizationMiddleware(),
+                _layer(
+                    InputSanitizationMiddleware(),
+                    layer_id="input_sanitization",
+                    phase=MiddlewarePhase.UNTRUSTED_CONTENT,
+                    slot=10,
+                    why="Every inner model wrapper must see sanitized input.",
+                ),
+                _layer(
+                    ToolOutputBudgetMiddleware.from_app_config(app_config),
+                    layer_id="tool_output_budget",
+                    phase=MiddlewarePhase.UNTRUSTED_CONTENT,
+                    slot=20,
+                    why="Budgeting wraps sanitized remote tool output.",
+                ),
+                _layer(
+                    ToolResultSanitizationMiddleware(),
+                    layer_id="tool_result_sanitization",
+                    phase=MiddlewarePhase.UNTRUSTED_CONTENT,
+                    slot=30,
+                    why="Raw remote tool results are sanitized before reuse.",
+                ),
             ]
         )
 
     if sandbox is False:
         thread_hooks: list[AgentMiddleware] = []
     elif isinstance(sandbox, AgentMiddleware):
-        thread_hooks = [sandbox]
+        thread_hooks = [
+            _layer(
+                sandbox,
+                layer_id="sandbox",
+                phase=MiddlewarePhase.THREAD_INFRA,
+                slot=30,
+                why="Caller-supplied sandbox occupies the canonical sandbox slot.",
+            )
+        ]
     elif sandbox is True:
         thread_hooks = build_sandbox_infrastructure(
             lazy_init=lazy_init,
@@ -244,14 +486,30 @@ def build_runtime_middlewares(
             DanglingToolCallMiddleware,
         )
 
-        tail.append(DanglingToolCallMiddleware())
+        tail.append(
+            _layer(
+                DanglingToolCallMiddleware(),
+                layer_id="dangling_tool_call",
+                phase=MiddlewarePhase.TRANSCRIPT_REPAIR,
+                slot=10,
+                why="Repair dangling tool calls before model and tool wrappers.",
+            )
+        )
     if include_security_wrappers:
         from deerflow.agents.middlewares.llm_error_handling_middleware import (
             LLMErrorHandlingMiddleware,
         )
 
         assert app_config is not None
-        tail.append(LLMErrorHandlingMiddleware(app_config=app_config))
+        tail.append(
+            _layer(
+                LLMErrorHandlingMiddleware(app_config=app_config),
+                layer_id="llm_error_handling",
+                phase=MiddlewarePhase.TRANSCRIPT_REPAIR,
+                slot=20,
+                why="Translate model failures after transcript repair.",
+            )
+        )
 
     if include_security_wrappers and guardrail_middleware is None:
         from deerflow.guardrails.middleware import GuardrailMiddleware
@@ -282,7 +540,13 @@ def build_runtime_middlewares(
             SandboxAuditMiddleware,
         )
 
-        sandbox_audit_middleware = SandboxAuditMiddleware()
+        sandbox_audit_middleware = _layer(
+            SandboxAuditMiddleware(),
+            layer_id="sandbox_audit",
+            phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+            slot=10,
+            why="Audit wraps all admitted sandbox side effects.",
+        )
         tail.append(sandbox_audit_middleware)
 
     read_before_write_middleware: AgentMiddleware | None = None
@@ -291,7 +555,13 @@ def build_runtime_middlewares(
             ReadBeforeWriteMiddleware,
         )
 
-        read_before_write_middleware = ReadBeforeWriteMiddleware()
+        read_before_write_middleware = _layer(
+            ReadBeforeWriteMiddleware(),
+            layer_id="read_before_write",
+            phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+            slot=20,
+            why="Read-before-write policy precedes progress and execution.",
+        )
         tail.append(read_before_write_middleware)
 
     tool_progress_middleware: AgentMiddleware | None = None
@@ -300,10 +570,23 @@ def build_runtime_middlewares(
             ToolProgressMiddleware,
         )
 
-        tool_progress_middleware = ToolProgressMiddleware.from_config(app_config.tool_progress)
+        tool_progress_middleware = _layer(
+            ToolProgressMiddleware.from_config(app_config.tool_progress),
+            layer_id="tool_progress",
+            phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+            slot=30,
+            why="Progress observes the complete guarded tool call.",
+        )
         tail.append(tool_progress_middleware)
 
     if guardrail_middleware is not None:
+        guardrail_middleware = _layer(
+            guardrail_middleware,
+            layer_id="guardrail",
+            phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+            slot=40,
+            why="Guardrail admission runs before error stamping.",
+        )
         tail.append(guardrail_middleware)
 
     # Delay this import so importing ``assembly`` directly cannot cycle through
@@ -312,7 +595,13 @@ def build_runtime_middlewares(
         ToolErrorHandlingMiddleware,
     )
 
-    tool_error_middleware = ToolErrorHandlingMiddleware(app_config=app_config)
+    tool_error_middleware = _layer(
+        ToolErrorHandlingMiddleware(app_config=app_config),
+        layer_id="tool_error_handling",
+        phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+        slot=50,
+        why="Innermost tool wrapper stamps stable public failures.",
+    )
     tail.append(tool_error_middleware)
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -328,6 +617,26 @@ def build_runtime_middlewares(
                     guardrail_middleware,
                     tool_error_middleware,
                 ),
+            ),
+        ),
+    )
+    validate_middleware_phase_ladder(middlewares)
+    validate_middleware_dispatch_constraints(
+        middlewares,
+        (
+            MiddlewareDispatchConstraint(
+                name="tool progress wraps tool error handling",
+                hook=MiddlewareHook.WRAP_TOOL_CALL,
+                first="tool_progress",
+                then="tool_error_handling",
+                why="Progress must observe the final stamped tool result.",
+            ),
+            MiddlewareDispatchConstraint(
+                name="guardrail precedes tool error handling",
+                hook=MiddlewareHook.WRAP_TOOL_CALL,
+                first="guardrail",
+                then="tool_error_handling",
+                why="Denied calls must still receive stable result stamping.",
             ),
         ),
     )
@@ -376,10 +685,26 @@ def build_subagent_runtime_middlewares(
     model_config = app_config.get_model_config(model_name) if model_name else None
     from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
 
-    middlewares.append(ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)))
+    middlewares.append(
+        _layer(
+            ViewImageMiddleware(enable_injection=bool(model_config is not None and model_config.supports_vision)),
+            layer_id="vision",
+            phase=MiddlewarePhase.REQUEST_SHAPING,
+            slot=10,
+            why="Vision shapes the final subagent model request.",
+        )
+    )
 
     if mcp_routing_middleware is not None:
-        middlewares.append(mcp_routing_middleware)
+        middlewares.append(
+            _layer(
+                mcp_routing_middleware,
+                layer_id="request_routing_1_McpRoutingMiddleware",
+                phase=MiddlewarePhase.REQUEST_SHAPING,
+                slot=20,
+                why="MCP routing precedes deferred tool filtering.",
+            )
+        )
 
     if deferred_setup is not None and deferred_setup.deferred_names:
         from deerflow.agents.middlewares.deferred_tool_filter_middleware import (
@@ -387,9 +712,15 @@ def build_subagent_runtime_middlewares(
         )
 
         middlewares.append(
-            DeferredToolFilterMiddleware(
-                deferred_setup.deferred_names,
-                deferred_setup.catalog_hash,
+            _layer(
+                DeferredToolFilterMiddleware(
+                    deferred_setup.deferred_names,
+                    deferred_setup.catalog_hash,
+                ),
+                layer_id="request_routing_2_DeferredToolFilterMiddleware",
+                phase=MiddlewarePhase.REQUEST_SHAPING,
+                slot=30,
+                why="Deferred filtering consumes MCP routing decisions.",
             )
         )
         from deerflow.agents.middlewares.mcp_routing_middleware import (
@@ -405,7 +736,13 @@ def build_subagent_runtime_middlewares(
             LoopDetectionMiddleware,
         )
 
-        loop_detection_middleware = LoopDetectionMiddleware.from_config(loop_detection_config)
+        loop_detection_middleware = _layer(
+            LoopDetectionMiddleware.from_config(loop_detection_config),
+            layer_id="loop_detection",
+            phase=MiddlewarePhase.EXECUTION_LIMITS,
+            slot=20,
+            why="Loop accounting runs before token budget in registration order.",
+        )
         middlewares.append(loop_detection_middleware)
 
     token_budget_config = app_config.subagents.get_token_budget_for(agent_name) if agent_name is not None else app_config.subagents.token_budget
@@ -414,7 +751,15 @@ def build_subagent_runtime_middlewares(
             TokenBudgetMiddleware,
         )
 
-        middlewares.append(TokenBudgetMiddleware.from_config(token_budget_config))
+        middlewares.append(
+            _layer(
+                TokenBudgetMiddleware.from_config(token_budget_config),
+                layer_id="token_budget",
+                phase=MiddlewarePhase.EXECUTION_LIMITS,
+                slot=30,
+                why="Token budget is the innermost subagent execution limit.",
+            )
+        )
 
     safety_middleware: AgentMiddleware | None = None
     safety_config = app_config.safety_finish_reason
@@ -423,7 +768,13 @@ def build_subagent_runtime_middlewares(
             SafetyFinishReasonMiddleware,
         )
 
-        safety_middleware = SafetyFinishReasonMiddleware.from_config(safety_config)
+        safety_middleware = _layer(
+            SafetyFinishReasonMiddleware.from_config(safety_config),
+            layer_id="safety_finish_reason",
+            phase=MiddlewarePhase.RESPONSE_GATE,
+            slot=10,
+            why="Safety sees raw subagent output before reverse hooks.",
+        )
         middlewares.append(safety_middleware)
 
     _validate_middleware_invariants(
@@ -436,6 +787,19 @@ def build_subagent_runtime_middlewares(
                     safety_middleware,
                 ),
                 reverse_hook="after_model",
+            ),
+        ),
+    )
+    validate_middleware_phase_ladder(middlewares)
+    validate_middleware_dispatch_constraints(
+        middlewares,
+        (
+            MiddlewareDispatchConstraint(
+                name="subagent safety cleanup before loop accounting",
+                hook=MiddlewareHook.AFTER_MODEL,
+                first="safety_finish_reason",
+                then="loop_detection",
+                why="Safety must clean the response before loop accounting.",
             ),
         ),
     )

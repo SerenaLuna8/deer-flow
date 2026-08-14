@@ -97,6 +97,7 @@ import type {
   ExpectedAssetVersionInput,
   MoveSystemBindingInput,
   McpVersionInput,
+  PublishAssetVersionInput,
   McpToolInventoryResponse,
   ProjectAssetList,
   ProjectAssetStatusAction,
@@ -1265,7 +1266,7 @@ export function usePublishProjectAssetVersion(
     }: {
       assetId: string;
       versionId: string;
-      input: ExpectedAssetVersionInput;
+      input: PublishAssetVersionInput;
     }) => {
       return runMutation((signal) =>
         publishProjectAssetVersion(
@@ -1284,7 +1285,7 @@ export function usePublishProjectAssetVersion(
         variables: {
           assetId: string;
           versionId: string;
-          input: ExpectedAssetVersionInput;
+          input: PublishAssetVersionInput;
         },
       ) =>
         kind === "agents"
@@ -1318,7 +1319,7 @@ export function usePublishAdminProjectAssetVersion(
     }: {
       assetId: string;
       versionId: string;
-      input: ExpectedAssetVersionInput;
+      input: PublishAssetVersionInput;
     }) => {
       return publishAdminProjectAssetVersion(
         projectId,

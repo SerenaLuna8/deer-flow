@@ -1,10 +1,10 @@
 export function buildLocalLoginBody(input: {
-  email: string;
+  identifier: string;
   password: string;
   rememberMe: boolean;
 }): string {
   return new URLSearchParams({
-    username: input.email,
+    username: input.identifier,
     password: input.password,
     remember_me: String(input.rememberMe),
   }).toString();
@@ -12,11 +12,13 @@ export function buildLocalLoginBody(input: {
 
 export function buildRememberingCredentialPayload(input: {
   email: string;
+  username: string;
   password: string;
   rememberMe: boolean;
 }) {
   return {
     email: input.email,
+    username: input.username,
     password: input.password,
     remember_me: input.rememberMe,
   };

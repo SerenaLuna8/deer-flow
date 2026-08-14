@@ -18,6 +18,7 @@ from app.shared_assets.errors import (
     AssetNotFound,
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
+    SkillPublishBaseStale,
 )
 from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
 from app.shared_assets.skill_repository import SkillVersionRecord
@@ -547,3 +548,102 @@ async def test_template_persistence_failure_rolls_back_asset_quota_and_governanc
     assert harness.store.governance == []
     assert harness.session.commit_count == 0
     assert harness.session.rollback_count == 1
+
+
+@pytest.mark.asyncio
+async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    asset = await harness.service.create_project_with_template(
+        actor,
+        skill_service_module.CreateSkill("lineage-skill", "Lineage Skill"),
+    )
+    first_draft = next(iter(harness.store.versions.values()))
+    first = await harness.service.publish(
+        actor,
+        asset.id,
+        first_draft.row.id,
+        expected_asset_version=2,
+    )
+    stale = await harness.service.create_version_from_archive(
+        actor,
+        asset.id,
+        _files("lineage-skill", body="Stale fork from the first published version.\n"),
+        expected_asset_version=3,
+    )
+    live = await harness.service.create_version_from_archive(
+        actor,
+        asset.id,
+        _files("lineage-skill", body="Newer live successor of the first version.\n"),
+        expected_asset_version=4,
+    )
+    published_live = await harness.service.publish(
+        actor,
+        asset.id,
+        live.id,
+        expected_asset_version=5,
+    )
+
+    with pytest.raises(SkillPublishBaseStale) as exc_info:
+        await harness.service.publish(
+            actor,
+            asset.id,
+            stale.id,
+            expected_asset_version=6,
+        )
+
+    persisted = harness.store.assets[asset.id]
+    assert exc_info.value.request_id == actor.request_id
+    assert persisted.current_published_version_id == published_live.id
+    assert harness.store.versions[stale.id].row.workflow_status == WorkflowStatus.DRAFT.value
+
+    published_stale = await harness.service.publish(
+        actor,
+        asset.id,
+        stale.id,
+        expected_asset_version=6,
+        acknowledge_stale_base=True,
+    )
+    assert published_stale.id == stale.id
+    assert published_stale.workflow_status is WorkflowStatus.PUBLISHED
+    assert harness.store.assets[asset.id].current_published_version_id == stale.id
+    assert first.workflow_status is WorkflowStatus.PUBLISHED
+
+
+@pytest.mark.asyncio
+async def test_create_project_version_from_preview_pins_supersedes_without_publishing(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    asset = await harness.service.create_project_with_template(
+        actor,
+        skill_service_module.CreateSkill("revise-skill", "Revise Skill"),
+    )
+    first_draft = next(iter(harness.store.versions.values()))
+    published = await harness.service.publish(
+        actor,
+        asset.id,
+        first_draft.row.id,
+        expected_asset_version=2,
+    )
+    preview = await harness.service.preview_archive(
+        actor,
+        _files("revise-skill", body="Revision draft from the published base.\n"),
+    )
+
+    created = await harness.service.create_project_version_from_preview_in_session(
+        harness.session,
+        actor,
+        asset.id,
+        preview,
+        supersedes_version_id=published.id,
+    )
+
+    persisted = harness.store.assets[asset.id]
+    record = harness.store.versions[created.id]
+    assert created.workflow_status is WorkflowStatus.DRAFT
+    assert created.supersedes_version_id == published.id
+    assert record.row.supersedes_version_id == published.id
+    assert persisted.current_published_version_id == published.id
+    assert persisted.status == "suspended"

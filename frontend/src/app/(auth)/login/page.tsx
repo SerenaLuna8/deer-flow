@@ -36,6 +36,7 @@ import {
   type SetupStatusResponse,
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
+import { parseUsername } from "@/core/auth/username";
 import { useI18n } from "@/core/i18n/hooks";
 
 type SetupStatusPhase = "checking" | "ready" | "unavailable";
@@ -48,6 +49,7 @@ export default function LoginPage() {
   const { t } = useI18n();
 
   const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [rememberMe, setRememberMe] = useState(true);
   const [isLogin, setIsLogin] = useState(true);
@@ -145,6 +147,13 @@ export default function LoginPage() {
     setShowSsoHint(false);
     setLoading(true);
 
+    if (!isLogin) {
+      if (!parseUsername(username)) {
+        setError(t.login.usernameInvalid);
+        setLoading(false);
+        return;
+      }
+    }
     if (!isLogin && !regularSignupAllowed) {
       setError(
         setupStatusPhase === "unavailable"
@@ -166,10 +175,11 @@ export default function LoginPage() {
         ? "/api/v1/auth/login/local"
         : "/api/v1/auth/register";
       const body = isLogin
-        ? buildLocalLoginBody({ email, password, rememberMe })
+        ? buildLocalLoginBody({ identifier: email, password, rememberMe })
         : JSON.stringify(
             buildRememberingCredentialPayload({
               email,
+              username,
               password,
               rememberMe,
             }),
@@ -193,7 +203,15 @@ export default function LoginPage() {
       if (!res.ok) {
         const data: unknown = await res.json();
         const authError = parseAuthError(data);
-        setError(authError.message);
+        setError(
+          authError.code === "username_already_exists"
+            ? t.login.usernameTaken
+            : authError.code === "invalid_username"
+              ? t.login.usernameInvalid
+              : authError.code === "email_already_exists"
+                ? t.login.emailTaken
+                : authError.message,
+        );
         // On a failed login with SSO configured, surface a hint pointing at the
         // SSO buttons — the "wrong password" may really mean "this is an SSO account".
         if (isLogin && ssoProviders.length > 0) {
@@ -292,16 +310,43 @@ export default function LoginPage() {
         )}
 
         <form onSubmit={handleSubmit} className="space-y-2">
+          {!isLogin && (
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="username" className="text-sm font-medium">
+                {t.login.username}
+              </label>
+              <Input
+                id="username"
+                type="text"
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder={t.login.usernamePlaceholder}
+                required
+                minLength={3}
+                maxLength={32}
+                pattern="[A-Za-z][A-Za-z0-9_]{2,31}"
+              />
+              <p className="text-muted-foreground text-xs">
+                {t.login.usernameHint}
+              </p>
+            </div>
+          )}
           <div className="flex flex-col space-y-1">
             <label htmlFor="email" className="text-sm font-medium">
-              {t.login.email}
+              {isLogin ? t.login.identifier : t.login.email}
             </label>
             <Input
               id="email"
-              type="email"
+              type={isLogin ? "text" : "email"}
+              autoComplete={isLogin ? "username" : "email"}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder={t.login.emailPlaceholder}
+              placeholder={
+                isLogin
+                  ? t.login.identifierPlaceholder
+                  : t.login.emailPlaceholder
+              }
               required
             />
           </div>

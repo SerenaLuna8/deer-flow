@@ -39,6 +39,7 @@ class UserRow(Base):
     # no email identity.  Every public/authenticated account remains ``human``
     # and keeps the canonical non-null email contract.
     email: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    username: Mapped[str | None] = mapped_column(String(32), nullable=True)
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     principal_type: Mapped[str] = mapped_column(
         String(16),
@@ -93,10 +94,14 @@ class UserRow(Base):
             name="ck_users_oauth_identity_shape",
         ),
         CheckConstraint(
+            "username IS NULL OR username ~ '^[a-z][a-z0-9_]{2,31}$'",
+            name="ck_users_username_format",
+        ),
+        CheckConstraint(
             "(principal_type = 'human' AND email IS NOT NULL) OR "
-            "(principal_type = 'channel_guest' AND email IS NULL AND password_hash IS NULL "
-            "AND oauth_provider IS NULL AND oauth_id IS NULL AND system_role = 'user' "
-            "AND needs_setup IS FALSE AND token_version = 0)",
+            "(principal_type = 'channel_guest' AND email IS NULL AND username IS NULL "
+            "AND password_hash IS NULL AND oauth_provider IS NULL AND oauth_id IS NULL "
+            "AND system_role = 'user' AND needs_setup IS FALSE AND token_version = 0)",
             name="ck_users_channel_guest_identity",
         ),
         CheckConstraint(
@@ -113,6 +118,12 @@ class UserRow(Base):
             func.lower(email),
             unique=True,
             postgresql_where=text("email IS NOT NULL"),
+        ),
+        Index(
+            "ix_users_username",
+            username,
+            unique=True,
+            postgresql_where=text("username IS NOT NULL"),
         ),
         Index(
             "idx_users_oauth_identity",

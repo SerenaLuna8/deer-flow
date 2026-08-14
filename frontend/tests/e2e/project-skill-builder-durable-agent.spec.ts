@@ -123,6 +123,13 @@ function session(lifecycle: Lifecycle): SkillBuilderSession {
     error_code: null,
     error_message: null,
     created_skill_id: null,
+    session_kind: "create",
+    target_skill_id: null,
+    base_version_id: null,
+    base_version_number: null,
+    base_payload_checksum: null,
+    target_skill_deleted: false,
+    base_files: [],
     ...(complete
       ? {
           authoring_dependencies: {
@@ -187,6 +194,7 @@ async function mockSkillBuilderDurableAgent(page: Page) {
       return json(route, {
         id: ACCOUNT_ID,
         email: "owner@example.test",
+        username: "owner",
         system_role: "user",
         needs_setup: false,
         oauth_provider: null,
@@ -304,8 +312,8 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   const builder = await mockSkillBuilderDurableAgent(page);
 
   await page.goto("/projects/alpha/skills/new");
-  await page.getByLabel("Skill 名称").fill("Research Helper");
-  await page.getByRole("button", { name: "继续" }).click();
+  await page.getByLabel("Skill name").fill("Research Helper");
+  await page.getByRole("button", { name: "Continue" }).click();
 
   await expect(page).toHaveURL(`/projects/alpha/skills/new/${SESSION_ID}`);
   expect(builder.createBodies).toEqual([
@@ -316,13 +324,13 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
     },
   ]);
 
-  const composer = page.getByLabel("描述想要的 Skill");
+  const composer = page.getByLabel("Describe the Skill you want");
   await expect(composer).toBeVisible();
   await composer.fill("创建一个能检索项目资料的 Skill");
-  await page.getByRole("button", { name: "发送" }).click();
+  await page.getByRole("button", { name: "Send" }).click();
 
   await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "已排队，等待执行",
+    "Queued, waiting to run",
   );
   expect(builder.turnBodies).toEqual([
     {
@@ -339,11 +347,11 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   const readsBeforeRefresh = builder.sessionReads();
   await page.reload();
   await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "正在执行",
+    "Running",
   );
-  await expect(page.getByRole("heading", { name: "候选文件包" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toHaveCount(0);
   expect(builder.sessionReads()).toBeGreaterThan(readsBeforeRefresh);
 
   builder.setLifecycle("draft_ready");
@@ -353,30 +361,36 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
     timeout: 8_000,
   });
   await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
-    "本轮已完成",
+    "This turn completed",
   );
-  await expect(page.getByRole("heading", { name: "候选文件包" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toBeVisible();
   await expect(page.getByRole("tab")).toHaveCount(0);
   await expect(page.getByTestId("skill-builder-dependencies")).toHaveCount(0);
 
-  await page.getByRole("button", { name: "关闭候选文件包" }).click();
-  await expect(page.getByRole("heading", { name: "候选文件包" })).toHaveCount(
-    0,
-  );
-  const filesTrigger = page.getByRole("button", { name: "查看候选文件包" });
+  await page.getByRole("button", { name: "Close candidate files" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toHaveCount(0);
+  const filesTrigger = page.getByRole("button", {
+    name: "View candidate files",
+  });
   await expect(filesTrigger).toBeVisible();
 
   await page.reload();
-  await expect(page.getByRole("heading", { name: "候选文件包" })).toHaveCount(
-    0,
-  );
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toHaveCount(0);
   await expect(filesTrigger).toBeVisible();
 
   await page.setViewportSize({ width: 390, height: 844 });
   await filesTrigger.click();
-  await expect(page.getByRole("heading", { name: "候选文件包" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "Candidate files" }),
+  ).toBeVisible();
   await expect(composer).toBeHidden();
-  await page.getByRole("button", { name: "关闭候选文件包" }).click();
+  await page.getByRole("button", { name: "Close candidate files" }).click();
   await expect(composer).toBeVisible();
   expect(builder.unexpectedRequests).toEqual([]);
 });

@@ -72,12 +72,12 @@ function ProjectCardWithActions({
 
 export function ProjectWorkbench({
   userId,
-  accountEmail,
+  accountUsername,
   systemRole,
   onLogout,
 }: {
   userId: string;
-  accountEmail: string;
+  accountUsername: string;
   systemRole: User["system_role"];
   onLogout: () => Promise<void>;
 }) {
@@ -128,7 +128,7 @@ export function ProjectWorkbench({
               <Button type="button" variant="ghost" aria-label="账户">
                 <UserRoundIcon className="size-4" />
                 <span className="hidden max-w-56 truncate sm:inline">
-                  {accountEmail}
+                  {accountUsername}
                 </span>
                 <ChevronDownIcon
                   aria-hidden
@@ -138,7 +138,7 @@ export function ProjectWorkbench({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-64">
               <DropdownMenuLabel className="truncate">
-                {accountEmail}
+                {accountUsername}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
               {systemRole === "system_admin" ? (

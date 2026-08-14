@@ -303,6 +303,8 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
   ASSET_STORAGE_QUOTA_EXCEEDED:
     "项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。",
   ASSET_STORAGE_UNAVAILABLE: "资产存储暂时不可用，请稍后重试。",
+  SKILL_PUBLISH_BASE_STALE:
+    "线上已发布更新的版本，本版本基于较旧的基线。请确认覆盖后再发布。",
   AUTH_REQUIRED: "登录状态已失效，请重新登录。",
   ASSET_NETWORK_ERROR: "暂时无法连接资产服务，请稍后重试。",
   ASSET_RESPONSE_INVALID: "资产服务返回了无效数据。",

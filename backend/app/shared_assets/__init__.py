@@ -34,6 +34,12 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillDesignBaseStale,
+    SkillDesignNoChanges,
+    SkillDesignTargetDeleted,
+    SkillDesignTargetSessionExists,
+    SkillDesignTargetUnsupported,
+    SkillPublishBaseStale,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.mcp_service import (
@@ -139,6 +145,12 @@ __all__ = [
     "ResolvedMcpSnapshot",
     "ResolvedSkillSnapshot",
     "SharedAssetError",
+    "SkillDesignBaseStale",
+    "SkillDesignNoChanges",
+    "SkillDesignTargetDeleted",
+    "SkillDesignTargetSessionExists",
+    "SkillDesignTargetUnsupported",
+    "SkillPublishBaseStale",
     "SharedAssetGovernanceEventSink",
     "SkillArchiveFile",
     "SkillArchivePreview",
