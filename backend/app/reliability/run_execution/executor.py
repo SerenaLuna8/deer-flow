@@ -19,6 +19,13 @@ from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.asset_runtime import PrivateAssetRuntime
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.errors import PrivateWorkAssetStale, PrivateWorkMcpQuotaExceeded
+from app.private_work.execution_approval import (
+    HostExecutionProviderPolicySnapshot,
+    WorkerHostExecutionApprovalPort,
+)
+from app.private_work.execution_approval_audit import (
+    NoopHostExecutionApprovalAudit,
+)
 from app.private_work.execution_profile import (
     RUN_EXECUTION_PROFILE_KWARG,
     RunExecutionProfileUnsupported,
@@ -118,6 +125,10 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
+from deerflow.runtime.host_execution_approval import (
+    HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
+)
+from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.runtime.user_context import (
     reset_current_user,
@@ -130,6 +141,25 @@ from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 logger = logging.getLogger("app.reliability.execution")
+
+
+def _persisted_channel_user_id(
+    kwargs: Mapping[str, object],
+) -> str | None:
+    """Read the Gateway-persisted, server-owned channel identity."""
+
+    config = kwargs.get("config")
+    if not isinstance(config, Mapping):
+        return None
+    context = config.get("context")
+    if not isinstance(context, Mapping):
+        return None
+    value = context.get("channel_user_id")
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH:
+        raise ValueError("persisted channel identity is invalid")
+    return value
 
 
 class _PrivateRunThreadMetadataStore:
@@ -186,6 +216,7 @@ class RunAgentPrivateExecutor:
         runner=run_agent,
         quota: PrivateRunAgentQuotaPort | None = None,
         audit: PrivateFileFinalizationAuditPort | None = None,
+        host_execution_domain: HostExecutionDomainSnapshot | None = None,
     ) -> None:
         self._factory = session_factory
         self._app_config = app_config
@@ -225,6 +256,24 @@ class RunAgentPrivateExecutor:
         self._runner = runner
         self._quota = quota or _NoopPrivateRunAgentQuota()
         self._file_finalization_audit = audit
+        if (
+            host_execution_domain is not None
+            and type(
+                host_execution_domain,
+            )
+            is not HostExecutionDomainSnapshot
+        ):
+            raise TypeError(
+                "host_execution_domain must be a HostExecutionDomainSnapshot",
+            )
+        self._host_execution_domain = host_execution_domain
+        self._execution_approval_audit = (
+            audit
+            if callable(
+                getattr(audit, "host_execution_approval_requested", None),
+            )
+            else NoopHostExecutionApprovalAudit()
+        )
 
     @staticmethod
     def _default_agent_factory():
@@ -418,6 +467,7 @@ class RunAgentPrivateExecutor:
                 idempotency_key=(automation_run_idempotency_key(claim.occurrence_id) if claim.job_type == "automation_run" and claim.occurrence_id is not None else private_run_idempotency_key(execution.run.run_id)),
                 status="running",
                 origin_trace_id=execution.run.origin_trace_id,
+                execution_domain_affinity=claim.execution_domain_affinity,
             ),
             snapshot=execution.snapshot,
             opaque_runtime_scope=execution.context.resource_scope,
@@ -682,6 +732,34 @@ class RunAgentPrivateExecutor:
                 if execution.runtime_kind == "chat"
                 else None
             )
+            continuation_approval_id = execution.run.kwargs.get(
+                "host_execution_approval_id",
+            )
+            host_execution_approval_port = (
+                WorkerHostExecutionApprovalPort(
+                    self._factory,
+                    context=execution.context,
+                    claim=claim,
+                    thread_id=execution.run.thread_id,
+                    request_ttl_seconds=(runtime_app_config.sandbox.host_execution_approval.request_ttl_seconds),
+                    provider_policy=(
+                        HostExecutionProviderPolicySnapshot.from_app_config(
+                            runtime_app_config,
+                        )
+                    ),
+                    execution_domain=self._host_execution_domain,
+                    continuation_approval_id=(continuation_approval_id if isinstance(continuation_approval_id, str) else None),
+                    audit=self._execution_approval_audit,
+                )
+                if execution.runtime_kind == "chat"
+                else None
+            )
+            try:
+                channel_user_id = _persisted_channel_user_id(
+                    execution.run.kwargs,
+                )
+            except ValueError:
+                raise PermanentExecutionError("RUN_ASSET_STALE") from None
             run_context = RunContext(
                 checkpointer=checkpointer,
                 store=self._store,
@@ -711,6 +789,8 @@ class RunAgentPrivateExecutor:
                     execution.run,
                 ),
                 private_agent_runtime=private_runtime,
+                host_execution_approval_port=(host_execution_approval_port),
+                channel_user_id=channel_user_id,
             )
             owner_token = set_current_user(
                 SimpleNamespace(id=execution.run.owner_user_id),

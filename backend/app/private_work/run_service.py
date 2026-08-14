@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Protocol
 
@@ -20,6 +21,18 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.execution_approval_audit import (
+    HostExecutionApprovalAuditPort,
+    NoopHostExecutionApprovalAudit,
+)
+from app.private_work.execution_approval_lifecycle import (
+    ApprovalRunDependency,
+    ExecutionApprovalPrivateLifecycleConflict,
+    LockedExecutionApprovalRows,
+    cancel_locked_execution_approval_continuation,
+    lock_execution_approval_private_rows,
+    reconcile_locked_execution_approval,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
     PrivateRunConflict,
@@ -28,6 +41,11 @@ from app.private_work.run_repository import (
 )
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
+from deerflow.persistence.execution_approvals import (
+    EXECUTION_APPROVAL_ACTIVE_STATUSES,
+    ExecutionApprovalRequestRow,
+    ExecutionApprovalResultReceiptRow,
+)
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.models.run_event import RunEventRow
@@ -37,6 +55,7 @@ from deerflow.persistence.private_work.model import (
     RunMcpGrantSnapshotRow,
     RunSkillCredentialSnapshotRow,
 )
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import SkillDesignOperationRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -125,12 +144,14 @@ class PrivateRunService:
         *,
         quota: PrivateRunQuotaPort | None = None,
         audit: PrivateRunAuditPort | None = None,
+        approval_audit: HostExecutionApprovalAuditPort | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._revalidator = PrivateWorkRevalidator()
         self._automation_reconciler = AutomationReconciler(session_factory)
         self._quota = quota or _NoopPrivateRunQuota()
         self._audit = audit or _NoopPrivateRunAudit()
+        self._approval_audit = approval_audit or NoopHostExecutionApprovalAudit()
 
     @staticmethod
     async def _require_thread(
@@ -244,6 +265,87 @@ class PrivateRunService:
         except PrivateRunConflict:
             raise PrivateWorkConflict(context.request_id) from None
 
+    async def _cancel_execution_approval(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        row: ExecutionApprovalRequestRow,
+        *,
+        now: datetime,
+    ) -> None:
+        if row.status not in EXECUTION_APPROVAL_ACTIVE_STATUSES:
+            return
+        row.status = "cancelled"
+        row.version += 1
+        row.terminal_at = now
+        row.updated_at = now
+        await self._approval_audit.host_execution_approval_terminal(
+            session,
+            project_id=row.project_id,
+            source_run_id=row.source_run_id,
+            status="cancelled",
+            request_id=context.request_id,
+            occurred_at=now,
+        )
+
+    async def _cancel_linked_approval_run(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        locked: LockedExecutionApprovalRows,
+        row: ExecutionApprovalRequestRow,
+        *,
+        now: datetime,
+    ) -> tuple[bool, str | None]:
+        """Stop a linked Run before erasing its replay authority.
+
+        Returns ``(wait_required, synchronously_terminal_run_id)``. A leased
+        continuation receives a durable cancellation request, but the approval
+        link remains until the Worker has actually settled that Run.
+        """
+
+        if row.continuation_job_id is None or row.continuation_run_id is None:
+            return False, None
+        job = locked.jobs.get(row.continuation_job_id)
+        if job is None:
+            raise PrivateRunConflict
+        try:
+            cancel_result = cancel_locked_execution_approval_continuation(
+                row,
+                locked,
+                now=now,
+                reason="approval_run_deleted",
+            )
+        except ExecutionApprovalPrivateLifecycleConflict:
+            raise PrivateRunConflict from None
+        if cancel_result == "requested":
+            await self._audit.run_cancel_requested(
+                session,
+                context,
+                run_id=row.continuation_run_id,
+                job_id=row.continuation_job_id,
+            )
+        if cancel_result in {"cancelled", "terminal"}:
+            await self._quota.release_concurrent_run(
+                session,
+                context.resource_scope,
+                run_id=row.continuation_run_id,
+                request_id=context.request_id,
+            )
+        if cancel_result == "cancelled":
+            await self._audit.run_terminal(
+                session,
+                context.resource_scope,
+                run_id=row.continuation_run_id,
+                job_id=row.continuation_job_id,
+                job_type=job.job_type,
+                status="interrupted",
+                public_error_code=None,
+                request_id=context.request_id,
+            )
+            return False, row.continuation_run_id
+        return cancel_result == "requested", None
+
     async def delete(
         self,
         context: PrivateWorkContext,
@@ -251,6 +353,8 @@ class PrivateRunService:
         run_id: str,
     ) -> None:
         context = require_issued_private_work_context(context)
+        conflict_after_commit = False
+        synchronously_cancelled_runs: set[str] = set()
         try:
             async with self._session_factory() as session, session.begin():
                 await self._revalidator.require(
@@ -266,71 +370,192 @@ class PrivateRunService:
                     lock=True,
                 )
                 repository = PrivateRunRepository(session)
+                # Discover target coordinates without authority. The shared
+                # helper then locks Job -> Run -> approval, matching Worker
+                # claim/completion before this method mutates private data.
                 record = await repository.get(
                     scope=context.resource_scope,
                     run_id=run_id,
-                    lock=True,
                 )
                 if record is None or record.thread_id != thread_id:
                     raise PrivateWorkNotFound(context.request_id)
                 if record.status not in TERMINAL_PRIVATE_RUN_STATUSES:
                     raise PrivateWorkConflict(context.request_id)
-                # Builder idempotency records outlive deletable Run telemetry.
-                # Clear only the scoped optional link; the durable operation
-                # outcome and result revision remain available for replay.
-                await session.execute(
-                    sa.update(SkillDesignOperationRow)
-                    .where(
-                        SkillDesignOperationRow.project_id == context.project_id,
-                        SkillDesignOperationRow.owner_user_id == str(context.user_id),
-                        SkillDesignOperationRow.run_id == run_id,
+
+                try:
+                    locked_approvals = await lock_execution_approval_private_rows(
+                        session,
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        thread_id=thread_id,
+                        related_run_id=run_id,
+                        extra_run_dependencies=(
+                            ApprovalRunDependency(
+                                owner_user_id=str(context.user_id),
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                job_id=record.job_id,
+                            ),
+                        ),
                     )
-                    .values(run_id=None)
+                except ExecutionApprovalPrivateLifecycleConflict:
+                    raise PrivateRunConflict from None
+                approval_rows = locked_approvals.rows
+                approval_now = await session.scalar(
+                    sa.select(sa.func.clock_timestamp()),
                 )
-                await session.execute(
-                    sa.delete(RunEventRow).where(
-                        RunEventRow.project_id == context.project_id,
-                        RunEventRow.owner_user_id == str(context.user_id),
-                        RunEventRow.thread_id == thread_id,
-                        RunEventRow.run_id == run_id,
+                if not isinstance(approval_now, datetime) or approval_now.tzinfo is None:
+                    raise PrivateRunConflict
+                approval_now = approval_now.astimezone(UTC)
+                for approval in approval_rows:
+                    if approval.status in EXECUTION_APPROVAL_ACTIVE_STATUSES:
+                        await reconcile_locked_execution_approval(
+                            session,
+                            approval,
+                            now=approval_now,
+                            audit=self._approval_audit,
+                        )
+
+                # A live claim may already have launched the host process. No
+                # deletion can revoke that side effect, so retain its receipt
+                # authority and let the caller retry after lease convergence.
+                conflict_after_commit = any(
+                    approval.status == "claimed"
+                    or approval_now
+                    < locked_approvals.claimed_absolute_deadlines.get(
+                        approval.id,
+                        approval_now,
                     )
+                    for approval in approval_rows
                 )
-                await session.execute(
-                    sa.delete(FeedbackRow).where(
-                        FeedbackRow.project_id == context.project_id,
-                        FeedbackRow.owner_user_id == str(context.user_id),
-                        FeedbackRow.thread_id == thread_id,
-                        FeedbackRow.run_id == run_id,
-                    )
-                )
-                await session.execute(
-                    sa.delete(PrivateArtifactRow).where(
-                        PrivateArtifactRow.project_id == context.project_id,
-                        PrivateArtifactRow.owner_user_id == str(context.user_id),
-                        PrivateArtifactRow.thread_id == thread_id,
-                        PrivateArtifactRow.run_id == run_id,
-                    )
-                )
-                for snapshot_type in (
-                    RunSkillCredentialSnapshotRow,
-                    RunMcpGrantSnapshotRow,
-                    RunAssetVersionRow,
-                ):
+                if not conflict_after_commit:
+                    for approval in approval_rows:
+                        wait_required, cancelled_run_id = await self._cancel_linked_approval_run(
+                            session,
+                            context,
+                            locked_approvals,
+                            approval,
+                            now=approval_now,
+                        )
+                        if cancelled_run_id is not None:
+                            synchronously_cancelled_runs.add(cancelled_run_id)
+                        if approval.status in {
+                            "staged",
+                            "pending",
+                            "approved",
+                        }:
+                            await self._cancel_execution_approval(
+                                session,
+                                context,
+                                approval,
+                                now=approval_now,
+                            )
+                        conflict_after_commit = conflict_after_commit or wait_required
+
+                if not conflict_after_commit:
+                    locked_target = (
+                        await session.execute(
+                            sa.select(RunRow.thread_id, RunRow.status).where(
+                                RunRow.project_id == context.project_id,
+                                RunRow.owner_user_id == str(context.user_id),
+                                RunRow.run_id == run_id,
+                            )
+                        )
+                    ).one_or_none()
+                    if locked_target is None or locked_target.thread_id != thread_id:
+                        raise PrivateWorkNotFound(context.request_id)
+                    if locked_target.status not in TERMINAL_PRIVATE_RUN_STATUSES:
+                        raise PrivateRunConflict
+
+                    approval_ids = tuple(row.id for row in approval_rows)
+                    if approval_ids:
+                        await session.flush()
+                        await session.execute(
+                            sa.delete(ExecutionApprovalResultReceiptRow).where(
+                                ExecutionApprovalResultReceiptRow.project_id == context.project_id,
+                                ExecutionApprovalResultReceiptRow.owner_user_id == str(context.user_id),
+                                ExecutionApprovalResultReceiptRow.thread_id == thread_id,
+                                ExecutionApprovalResultReceiptRow.approval_id.in_(
+                                    approval_ids,
+                                ),
+                            )
+                        )
+                        await session.execute(
+                            sa.delete(ExecutionApprovalRequestRow).where(
+                                ExecutionApprovalRequestRow.project_id == context.project_id,
+                                ExecutionApprovalRequestRow.owner_user_id == str(context.user_id),
+                                ExecutionApprovalRequestRow.thread_id == thread_id,
+                                ExecutionApprovalRequestRow.id.in_(approval_ids),
+                                sa.or_(
+                                    ExecutionApprovalRequestRow.source_run_id == run_id,
+                                    ExecutionApprovalRequestRow.continuation_run_id == run_id,
+                                ),
+                            )
+                        )
+
+                    # Builder idempotency outcomes remain durable, while their
+                    # optional private telemetry link is cleared.
                     await session.execute(
-                        sa.delete(snapshot_type).where(
-                            snapshot_type.project_id == context.project_id,
-                            snapshot_type.owner_user_id == str(context.user_id),
-                            snapshot_type.thread_id == thread_id,
-                            snapshot_type.run_id == run_id,
+                        sa.update(SkillDesignOperationRow)
+                        .where(
+                            SkillDesignOperationRow.project_id == context.project_id,
+                            SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                            SkillDesignOperationRow.run_id == run_id,
+                        )
+                        .values(run_id=None)
+                    )
+                    await session.execute(
+                        sa.delete(RunEventRow).where(
+                            RunEventRow.project_id == context.project_id,
+                            RunEventRow.owner_user_id == str(context.user_id),
+                            RunEventRow.thread_id == thread_id,
+                            RunEventRow.run_id == run_id,
                         )
                     )
-                if not await repository.delete(
-                    scope=context.resource_scope,
-                    run_id=run_id,
-                ):
-                    raise PrivateWorkNotFound(context.request_id)
+                    await session.execute(
+                        sa.delete(FeedbackRow).where(
+                            FeedbackRow.project_id == context.project_id,
+                            FeedbackRow.owner_user_id == str(context.user_id),
+                            FeedbackRow.thread_id == thread_id,
+                            FeedbackRow.run_id == run_id,
+                        )
+                    )
+                    await session.execute(
+                        sa.delete(PrivateArtifactRow).where(
+                            PrivateArtifactRow.project_id == context.project_id,
+                            PrivateArtifactRow.owner_user_id == str(context.user_id),
+                            PrivateArtifactRow.thread_id == thread_id,
+                            PrivateArtifactRow.run_id == run_id,
+                        )
+                    )
+                    for snapshot_type in (
+                        RunSkillCredentialSnapshotRow,
+                        RunMcpGrantSnapshotRow,
+                        RunAssetVersionRow,
+                    ):
+                        await session.execute(
+                            sa.delete(snapshot_type).where(
+                                snapshot_type.project_id == context.project_id,
+                                snapshot_type.owner_user_id == str(context.user_id),
+                                snapshot_type.thread_id == thread_id,
+                                snapshot_type.run_id == run_id,
+                            )
+                        )
+                    if not await repository.delete(
+                        scope=context.resource_scope,
+                        run_id=run_id,
+                    ):
+                        raise PrivateWorkNotFound(context.request_id)
+            for cancelled_run_id in synchronously_cancelled_runs:
+                await self._automation_reconciler.handle_run_completion(
+                    SimpleNamespace(run_id=cancelled_run_id),
+                )
+            if conflict_after_commit:
+                raise PrivateWorkConflict(context.request_id)
         except PrivateWorkError:
             raise
+        except AutomationError:
+            raise PrivateWorkUnavailable(context.request_id) from None
         except DBAPIError:
             raise PrivateWorkUnavailable(context.request_id) from None
         except PrivateRunConflict:

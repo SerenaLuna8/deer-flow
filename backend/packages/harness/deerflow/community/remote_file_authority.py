@@ -31,6 +31,105 @@ _MAX_TRANSPORT_CHUNK = 48 * 1024
 _MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 _MAX_PATH_BYTES = 4096
 
+# Fixed root bootstrap for local AIO containers.  It runs once through the
+# container runtime as root before readiness, while the AIO HTTP executor runs
+# as the unprivileged ``gem`` user.  No request data is interpolated into this
+# source.  The descriptor checks refuse image/config aliases before changing
+# ownership, then the ordinary guest protocol below verifies the same roots as
+# ``gem`` before a private lease is returned.
+PRIVATE_ROOT_BOOTSTRAP_SCRIPT = r"""
+import os, pwd, stat
+
+PRIVATE_MOUNT_ROOT = "/mnt"
+PRIVATE_RUNTIME_USER = "gem"
+
+def same(left, right):
+    return left.st_dev == right.st_dev and left.st_ino == right.st_ino
+
+def open_absolute_dir(path):
+    fd = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        for part in path.strip("/").split("/") if path != "/" else ():
+            newfd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = newfd
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def open_or_create_owned_dir(parent_fd, name, owner_uid, owner_gid):
+    try:
+        os.mkdir(name, 0o700, dir_fd=parent_fd)
+    except FileExistsError:
+        pass
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        raise RuntimeError("unsafe private root")
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    try:
+        opened = os.fstat(fd)
+        if not same(before, opened):
+            raise RuntimeError("private root changed during bootstrap")
+        os.fchown(fd, owner_uid, owner_gid)
+        os.fchmod(fd, 0o700)
+        final = os.fstat(fd)
+        current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        if (
+            not same(final, current)
+            or final.st_uid != owner_uid
+            or final.st_gid != owner_gid
+            or stat.S_IMODE(final.st_mode) != 0o700
+        ):
+            raise RuntimeError("private root bootstrap verification failed")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+def require_empty_dir(fd):
+    if os.listdir(fd):
+        raise RuntimeError("private root contains preloaded data")
+
+runtime_user = pwd.getpwnam(PRIVATE_RUNTIME_USER)
+mount_fd = open_absolute_dir(PRIVATE_MOUNT_ROOT)
+try:
+    user_data_fd = open_or_create_owned_dir(
+        mount_fd,
+        "user-data",
+        runtime_user.pw_uid,
+        runtime_user.pw_gid,
+    )
+    try:
+        for name in ("workspace", "uploads", "outputs"):
+            child_fd = open_or_create_owned_dir(
+                user_data_fd,
+                name,
+                runtime_user.pw_uid,
+                runtime_user.pw_gid,
+            )
+            try:
+                require_empty_dir(child_fd)
+            finally:
+                os.close(child_fd)
+        if set(os.listdir(user_data_fd)) != {"workspace", "uploads", "outputs"}:
+            raise RuntimeError("private user-data root contains unexpected entries")
+    finally:
+        os.close(user_data_fd)
+    acp_fd = open_or_create_owned_dir(
+        mount_fd,
+        "acp-workspace",
+        runtime_user.pw_uid,
+        runtime_user.pw_gid,
+    )
+    try:
+        require_empty_dir(acp_fd)
+    finally:
+        os.close(acp_fd)
+finally:
+    os.close(mount_fd)
+"""
+
 # Fixed server-owned guest source.  The only input is one JSON/base64 envelope
 # supplied separately by the provider adapter.  Keep imports stdlib-only so the
 # same program works in AIO, e2b code-interpreter, and minimal BoxLite images
@@ -40,6 +139,9 @@ import base64, errno, json, os, stat, sys, uuid
 
 ENV = "DEERFLOW_PRIVATE_FILE_REQUEST_B64"
 MAX_REQUEST = 2 * 1024 * 1024
+PRIVATE_MOUNT_ROOT = "/mnt"
+PRIVATE_RUNTIME_EUID = os.geteuid()
+PRIVATE_RUNTIME_EGID = os.getegid()
 
 def fail(code, message):
     print(json.dumps({"ok": False, "error": code, "message": str(message)[:300]}, separators=(",", ":")))
@@ -86,6 +188,24 @@ def open_absolute_dir(path):
         os.close(fd)
         raise
 
+def open_verified_private_dir(parent_fd, name):
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    if not stat.S_ISDIR(before.st_mode):
+        fail("unsafe", "private root is not a directory")
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    after = os.fstat(fd)
+    if not same(before, after):
+        os.close(fd)
+        fail("changed", "private root changed during initialization")
+    if (
+        after.st_uid != PRIVATE_RUNTIME_EUID
+        or after.st_gid != PRIVATE_RUNTIME_EGID
+        or stat.S_IMODE(after.st_mode) != 0o700
+    ):
+        os.close(fd)
+        fail("unsafe", "private root ownership or mode is invalid")
+    return fd
+
 def open_parent(root, parts, create=False):
     fd = open_absolute_dir(root)
     try:
@@ -119,6 +239,39 @@ try:
     if not isinstance(request, dict) or request.get("version") != 1:
         fail("protocol", "invalid private request")
     action = request.get("action")
+
+    if action == "init_private_roots":
+        if set(request) != {"version", "action", "root", "path", "display_path"}:
+            fail("protocol", "invalid private root initialization request")
+        if request.get("root") != "/mnt/user-data" or request.get("path") != "/mnt/user-data" or request.get("display_path") != "/mnt/user-data":
+            fail("protocol", "invalid private root initialization request")
+        if PRIVATE_RUNTIME_EUID == 0:
+            fail("permission", "private root verifier must be unprivileged")
+        mount_fd = open_absolute_dir(PRIVATE_MOUNT_ROOT)
+        try:
+            user_data_fd = open_verified_private_dir(mount_fd, "user-data")
+            try:
+                for name in ("workspace", "uploads", "outputs"):
+                    child_fd = open_verified_private_dir(user_data_fd, name)
+                    try:
+                        if os.listdir(child_fd):
+                            fail("unsafe", "private root contains preloaded data")
+                    finally:
+                        os.close(child_fd)
+                if set(os.listdir(user_data_fd)) != {"workspace", "uploads", "outputs"}:
+                    fail("unsafe", "private user-data root contains unexpected entries")
+            finally:
+                os.close(user_data_fd)
+            acp_fd = open_verified_private_dir(mount_fd, "acp-workspace")
+            try:
+                if os.listdir(acp_fd):
+                    fail("unsafe", "private ACP root contains preloaded data")
+            finally:
+                os.close(acp_fd)
+        finally:
+            os.close(mount_fd)
+        emit({"initialized": True})
+
     root, parts = relative(request.get("root"), request.get("path"))
 
     if action == "scan":
@@ -414,6 +567,14 @@ class RemotePrivateFileAuthority:
                 )
             )
         return iter(result)
+
+    def initialize_private_roots(self) -> None:
+        """Verify the fixed private virtual roots through the secure guest."""
+
+        self._request(
+            "init_private_roots",
+            "/mnt/user-data",
+        )
 
     def open_regular_reader(self, path: str) -> SandboxBinaryReader:
         identity = self._request("open_reader", path)

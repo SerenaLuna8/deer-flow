@@ -289,6 +289,13 @@ def check_config_version(config_path: Path, project_root: Path) -> CheckResult:
             f"v{user_ver} < v{example_ver} (latest)",
             fix="make config-upgrade",
         )
+    if user_ver > example_ver:
+        return CheckResult(
+            "config.yaml version",
+            "fail",
+            f"v{user_ver} > v{example_ver} (supported)",
+            fix="Use a checkout that supports this config.yaml version",
+        )
     return CheckResult("config.yaml version", "ok", f"v{user_ver}")
 
 

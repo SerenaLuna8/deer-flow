@@ -132,11 +132,13 @@ async def test_worker_authorization_boundary_keeps_scope_revalidation_in_checkpo
         scope: object,
         thread_id: str,
         lock: bool,
+        thread_kind: str,
     ) -> object:
         del scope
         assert session.in_transaction()
         assert thread_id == "thread-1"
         assert lock is True
+        assert thread_kind == "chat"
         events.append("thread")
         return object()
 

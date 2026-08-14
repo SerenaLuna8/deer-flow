@@ -269,7 +269,7 @@ API Gateway for ActWeave - A LangGraph-based AI agent backend with sandbox execu
 
 This gateway provides project-scoped runtime endpoints and administrative operations.
         """,
-        version="0.1.0",
+        version="1.0.0",
         lifespan=lifespan,
         docs_url=docs_url,
         redoc_url=redoc_url,

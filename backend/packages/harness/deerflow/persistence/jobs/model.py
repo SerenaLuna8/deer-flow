@@ -59,6 +59,7 @@ class JobRow(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    execution_domain_affinity: Mapped[str | None] = mapped_column(CHAR(64))
 
     __table_args__ = (
         UniqueConstraint("job_type", "idempotency_key", name="uq_jobs_type_idempotency"),
@@ -74,6 +75,14 @@ class JobRow(Base):
             "owner_user_id",
             "run_id",
             name="uq_jobs_id_project_owner_run",
+        ),
+        UniqueConstraint(
+            "id",
+            "project_id",
+            "owner_user_id",
+            "run_id",
+            "execution_domain_affinity",
+            name="uq_jobs_id_project_owner_run_execution_domain",
         ),
         UniqueConstraint(
             "id",
@@ -125,6 +134,10 @@ class JobRow(Base):
             name="ck_jobs_status",
         ),
         CheckConstraint("retry_safety IN ('safe', 'unknown', 'unsafe')", name="ck_jobs_retry_safety"),
+        CheckConstraint(
+            "execution_domain_affinity IS NULL OR (job_type = 'private_run' AND execution_domain_affinity ~ '^[0-9a-f]{64}$')",
+            name="ck_jobs_execution_domain_affinity",
+        ),
         CheckConstraint("attempt_count >= 0 AND max_attempts >= 1", name="ck_jobs_attempts"),
         CheckConstraint(
             "(job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) "
@@ -154,6 +167,15 @@ class JobRow(Base):
             postgresql_where=text("job_type = 'memory_seal' AND status IN ('queued', 'leased', 'running', 'retry_wait')"),
         ),
         Index("ix_jobs_claim", "status", "available_at", priority.desc(), "created_at"),
+        Index(
+            "ix_jobs_execution_domain_claim",
+            "execution_domain_affinity",
+            "status",
+            "available_at",
+            priority.desc(),
+            "created_at",
+            postgresql_where=text("execution_domain_affinity IS NOT NULL"),
+        ),
         Index(
             "ix_jobs_active_lease",
             "lease_expires_at",

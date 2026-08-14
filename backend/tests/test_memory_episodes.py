@@ -338,6 +338,8 @@ class _PurgeSession:
         return _Result(rows=())
 
     async def scalar(self, statement, parameters=None):
+        if "clock_timestamp" in str(statement):
+            return NOW
         # ``to_regclass`` probes report the checkpoint tables as absent.
         return None
 

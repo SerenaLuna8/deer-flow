@@ -87,7 +87,8 @@ make setup-db
 make check-db
 ```
 
-- `make setup-db` 只初始化空目标库。
+- `make setup-db` 只初始化空目标库，并把完整快照记录为首个正式 revision
+  `initial_schema`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本必须先备份，再通过 `make upgrade-db` 显式升级。
@@ -159,7 +160,11 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 
 - 对外只开放受 TLS 和网络策略保护的 Nginx；不要直接公开 Gateway、Frontend 或
   Provisioner 端口。
-- `LocalSandboxProvider` 在宿主机执行命令，不是强隔离边界；只用于可信环境。
+- `LocalSandboxProvider` 在 Worker 的 OS namespace 执行命令，不是强隔离边界；
+  native 本机部署就是宿主账号，Compose 部署则是 Worker 容器；只用于可信环境。
+- 如确需 Local Bash，可配置逐条 `allow_once` / `deny` 审批；批准仍是宿主 RCE，
+  不会变成沙箱，也没有会话级授权。详见
+  [Local Provider 本机命令单次审批](./backend/docs/HOST_EXECUTION_APPROVAL.md)。
 - Apple silicon Mac 上需要执行 Agent 生成的 Bash/Python 时，优先使用
   `AioSandboxProvider` + Apple Container；配置与实测流程见
   [Apple Container Sandbox](./backend/docs/APPLE_CONTAINER.md)。

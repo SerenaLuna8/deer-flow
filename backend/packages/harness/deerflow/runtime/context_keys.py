@@ -13,6 +13,10 @@ from deerflow.agents.memory.authority_resolution import (
 )
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_CONTEXT_KEY
 from deerflow.guardrails.provider import GUARDRAIL_ATTRIBUTION_CONTEXT_KEY
+from deerflow.runtime.host_execution_approval import (
+    HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY,
+    HOST_EXECUTION_APPROVAL_CONTEXT_KEY,
+)
 from deerflow.runtime.secret_context import (
     REDACTED_CONTEXT_KEYS,
     SECRETS_CONTEXT_KEY,
@@ -67,6 +71,8 @@ class RuntimeContextKeys:
     VERIFIED_SKILL_SOURCE: Final[str] = VERIFIED_SKILL_SOURCE_CONTEXT_KEY
     LEAD_MODEL_CALL_SEQ: Final[str] = LEAD_MODEL_CALL_SEQ_CONTEXT_KEY
     SANDBOX_ID: Final[str] = "sandbox_id"
+    HOST_EXECUTION_APPROVAL_PORT: Final[str] = HOST_EXECUTION_APPROVAL_CONTEXT_KEY
+    HOST_EXECUTION_AGENT_PATH: Final[str] = HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY
 
     # Supported non-authority values that intentionally survive a Worker merge.
     # Unknown non-reserved extension keys remain pass-through compatible too;
@@ -105,6 +111,8 @@ class RuntimeContextKeys:
             TRACE_ID,
             RUN_JOURNAL,
             MEMORY_ARCHIVE_CONTEXT,
+            HOST_EXECUTION_APPROVAL_PORT,
+            HOST_EXECUTION_AGENT_PATH,
         },
     )
     CALLER_PASSTHROUGH_KEYS: Final[frozenset[str]] = frozenset(

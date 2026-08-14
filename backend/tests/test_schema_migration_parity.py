@@ -1,8 +1,7 @@
-"""迁移链契约：单修订 head、fresh install catalog、upgrade 闸门。
+"""首个正式数据库基线契约：单 head、fresh catalog、未来升级闸门。
 
-空库新装走 ``full_schema.sql`` 并 stamp ``full_schema``。链当前只有这一个
-修订；已知祖先升级路径留给未来增量。旧的 ``full_schema_v*`` 标记视为未知，
-要求重建。
+空库新装走 ``full_schema.sql`` 并直接 stamp ``initial_schema``。所有发布前
+marker 都不是正式祖先，必须重建；未来正式 revision 才能接入显式升级链。
 """
 
 from __future__ import annotations
@@ -52,7 +51,7 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
     script = _script_directory()
     walked = tuple(revision.revision for revision in script.walk_revisions("base", "heads"))
     root_to_head = tuple(reversed(walked))
-    assert root_to_head == KNOWN_CHAIN_REVISIONS == ("full_schema",)
+    assert root_to_head == KNOWN_CHAIN_REVISIONS == ("initial_schema",)
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
 
 
@@ -60,13 +59,13 @@ def test_setup_and_upgrade_share_the_schema_mutation_advisory_lock() -> None:
     assert upgrade_module._UPGRADE_LOCK_KEY == bootstrap_module.SCHEMA_MUTATION_LOCK_KEY
 
 
-def test_chain_root_is_a_noop_stamped_by_full_schema() -> None:
+def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None:
     script = _script_directory()
     root = script.get_revision(KNOWN_CHAIN_REVISIONS[0])
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
-    assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{KNOWN_CHAIN_REVISIONS[0]}');") == 1
-    assert CURRENT_SCHEMA_REVISION == KNOWN_CHAIN_REVISIONS[0]
+    assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
+    assert CURRENT_SCHEMA_REVISION == "initial_schema"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -74,7 +73,7 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
     assert payload.startswith("BEGIN;\n")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
     assert not list((MIGRATIONS_PATH / "baseline").glob("*.sql"))
-    assert list((MIGRATIONS_PATH / "versions").glob("full_schema_v*.py")) == []
+    assert sorted(path.name for path in (MIGRATIONS_PATH / "versions").glob("*.py")) == ["initial_schema.py"]
 
 
 async def _catalog_signature(database_url: str):
@@ -113,7 +112,7 @@ async def test_fresh_install_matches_frozen_catalog_and_detects_drift(
 
 
 def _pretend_head_is(monkeypatch: pytest.MonkeyPatch, fake_head: str) -> None:
-    """Simulate a released head one step past the real chain."""
+    """Simulate a future released head one step past the initial baseline."""
     chain = (*KNOWN_CHAIN_REVISIONS, fake_head)
     monkeypatch.setattr(bootstrap_module, "KNOWN_CHAIN_REVISIONS", chain)
     monkeypatch.setattr(bootstrap_module, "CURRENT_SCHEMA_REVISION", fake_head)
@@ -128,7 +127,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
     engine = create_async_engine(postgres_database_url)
     try:
         await bootstrap_schema(engine)
-        _pretend_head_is(monkeypatch, "full_schema_next")
+        _pretend_head_is(monkeypatch, "future_schema")
 
         async with engine.connect() as connection:
             assert await classify_database(connection) == "behind"
@@ -136,7 +135,7 @@ async def test_behind_database_is_recognized_and_gated_fail_closed(
         with pytest.raises(SchemaUpgradeRequired) as validate_error:
             await validate_schema(engine)
         assert "make upgrade-db" in str(validate_error.value)
-        assert "full_schema_next" in str(validate_error.value)
+        assert "future_schema" in str(validate_error.value)
 
         with pytest.raises(SchemaUpgradeRequired):
             await bootstrap_schema(engine)
@@ -164,6 +163,31 @@ async def test_upgrade_runner_is_a_noop_on_a_current_database(
     assert result.applied is False
     assert result.from_revision == CURRENT_SCHEMA_REVISION
     assert result.to_revision == CURRENT_SCHEMA_REVISION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provisional_marker", ["full_schema", "execution_approvals"])
+async def test_pre_release_markers_are_not_supported_upgrade_ancestors(
+    postgres_database_url: str,
+    provisional_marker: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("UPDATE alembic_version SET version_num = :marker"),
+                {"marker": provisional_marker},
+            )
+        async with engine.connect() as connection:
+            with pytest.raises(M7RecreateRequired):
+                await classify_database(connection)
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(PostgresUpgradeError) as error:
+        await upgrade_postgres(postgres_database_url, assume_yes=True)
+    assert "显式重建" in str(error.value)
 
 
 @pytest.mark.asyncio
@@ -199,7 +223,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
     finally:
         await engine.dispose()
 
-    fake_head = "full_schema_next"
+    fake_head = "future_schema"
     _pretend_head_is(monkeypatch, fake_head)
 
     applied_urls: list[str] = []
@@ -231,7 +255,7 @@ async def test_upgrade_runner_fails_closed_when_the_migrated_catalog_does_not_ve
     finally:
         await engine.dispose()
 
-    _pretend_head_is(monkeypatch, "full_schema_next")
+    _pretend_head_is(monkeypatch, "future_schema")
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", lambda url: None)
 
     with pytest.raises(PostgresUpgradeError) as error:

@@ -137,6 +137,8 @@ def test_carrier_fields_cover_the_complete_install_key_set() -> None:
         trace_id="trace-1",
         run_journal=object(),
         memory_archive_context=object(),
+        host_execution_approval_port=object(),
+        host_execution_agent_path=("lead",),
     ).build()
 
     assert frozenset(context) == RuntimeContextKeys.INSTALL_KEYS

@@ -11,6 +11,8 @@ Gateway 只公开认证账户、项目和平台管理 API。除公开认证入�
 | `/api/projects/{project_id}` | project | 项目详情、成员、readiness 和资产 binding |
 | `/api/projects/{project_id}/private-work/threads` | project + owner | Thread 搜索、创建、更新、删除 |
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/runs` | project + owner | private Run admission、stream、feed；feedback 使用 GET/PUT/DELETE，POST 仅保留弃用兼容 |
+| `/api/projects/{project_id}/private-work/threads/{thread_id}/execution-approvals/active` and `/{approval_id}` | project + owner | Local host command active/by-id 状态；terminal 请求通过 by-id 恢复 |
+| `/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{source_run_id}/execution-approvals/{approval_id}/decision` | project + owner | `allow_once` / `deny` CAS 决策；命令 authority 始终来自服务端冻结计划 |
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/uploads` | project + owner | upload、list 和 delete；Viewer 可删除自己的 ready upload/workspace/output，但不能创建或转换文件 |
 | `/api/projects/{project_id}/private-work/artifacts/{artifact_id}` | project + owner | Run artifact 下载 |
 | `/api/projects/{project_id}/memory` | project + owner | Memory 查询、导入、更新和清理 |

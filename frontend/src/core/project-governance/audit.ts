@@ -51,6 +51,11 @@ export const auditActionSchema = z.enum([
   "run.cancel_requested",
   "run.files_finalized",
   "run.terminal",
+  "host_execution.approval_requested",
+  "host_execution.approval_available",
+  "host_execution.approval_decided",
+  "host_execution.approval_claimed",
+  "host_execution.approval_terminal",
   "memory.remember",
   "memory.recall.executed",
   "memory.seal.admitted",
@@ -201,6 +206,20 @@ const runFilesFinalizedMetadataSchema = z
     deleted_count: z.number().int().nonnegative(),
     artifact_count: z.number().int().nonnegative(),
     committed_bytes: z.number().int().nonnegative(),
+  })
+  .strict();
+const hostExecutionApprovalDecisionMetadataSchema = z
+  .object({ decision: z.enum(["allow_once", "deny"]) })
+  .strict();
+const hostExecutionApprovalTerminalMetadataSchema = z
+  .object({
+    status: z.enum([
+      "finished",
+      "launch_failed",
+      "unknown",
+      "cancelled",
+      "expired",
+    ]),
   })
   .strict();
 const memoryRememberMetadataSchema = z
@@ -417,6 +436,13 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "run.cancel_requested": emptyMetadataSchema,
   "run.files_finalized": runFilesFinalizedMetadataSchema,
   "run.terminal": runTerminalMetadataSchema,
+  "host_execution.approval_requested": emptyMetadataSchema,
+  "host_execution.approval_available": emptyMetadataSchema,
+  "host_execution.approval_decided":
+    hostExecutionApprovalDecisionMetadataSchema,
+  "host_execution.approval_claimed": emptyMetadataSchema,
+  "host_execution.approval_terminal":
+    hostExecutionApprovalTerminalMetadataSchema,
   "memory.remember": memoryRememberMetadataSchema,
   "memory.recall.executed": memoryRecallExecutedMetadataSchema,
   "memory.seal.admitted": emptyMetadataSchema,

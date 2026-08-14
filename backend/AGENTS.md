@@ -117,9 +117,9 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `full_schema`. Fresh setup runs that schema directly and
-stamps the chain head. Runtime processes never create, migrate, stamp, repair, or
-downgrade an application database.
+the current marker is `initial_schema`. Fresh setup runs that schema directly
+and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
+or downgrade an application database.
 
 - `make setup-db` accepts a new empty target only and initializes application,
   LangGraph, system-asset, and default-project state.
@@ -239,10 +239,12 @@ Model definitions, runtime/auth/Memory/quota/Automation policy, and provider Cre
 PostgreSQL authority and must not be reintroduced as YAML or ambient-key
 fallbacks.
 
-The example declares `config_version: 38`. Version 38 replaces the YAML `scheduler:`
-section with PostgreSQL automations policy. Removed top-level
-policy keys remain fail-closed tombstones; use `make config-upgrade` rather than
-manually guessing a migration.
+The example declares `config_version: 1`. Version 1 is the initial public
+configuration schema. It includes the explicit restart-required
+`host_execution_approval` policy, PostgreSQL-owned Automation policy, and the
+current process/runtime settings as one baseline rather than as public upgrade
+milestones. Removed top-level policy keys remain fail-closed tombstones; use
+`make config-upgrade` rather than manually guessing a future migration.
 
 `make setup-db` is the only command allowed to consume initial provider keys and
 persist encrypted Credential versions. Normal Gateway, Worker, Scheduler,

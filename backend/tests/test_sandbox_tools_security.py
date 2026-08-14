@@ -9,6 +9,7 @@ from deerflow.agents.middlewares.tool_error_handling_middleware import (
     _is_trusted_read_only_tool,
 )
 from deerflow.sandbox.exceptions import SandboxError
+from deerflow.sandbox.security import HostBashExecutionMode
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _apply_cwd_prefix,
@@ -617,7 +618,10 @@ def test_bash_tool_rejects_host_bash_when_local_sandbox_default(monkeypatch) -> 
         "deerflow.sandbox.tools.ensure_sandbox_initialized",
         lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("host bash should not execute")),
     )
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: False)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._runtime_host_bash_execution_mode",
+        lambda *_args: HostBashExecutionMode.LOCAL_DISABLED,
+    )
 
     result = bash_tool.func(
         runtime=runtime,
@@ -726,7 +730,10 @@ def test_run_scoped_local_bash_uses_host_bash_disable_guard(monkeypatch) -> None
         "deerflow.sandbox.tools.ensure_sandbox_initialized",
         lambda _runtime: RecordingSandbox(),
     )
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: False)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._runtime_host_bash_execution_mode",
+        lambda *_args: HostBashExecutionMode.LOCAL_DISABLED,
+    )
 
     result = bash_tool.func(
         runtime=runtime,
@@ -749,7 +756,10 @@ def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) 
         lambda runtime: SimpleNamespace(execute_command=lambda command: pytest.fail("unsafe command should not execute")),
     )
     monkeypatch.setattr("deerflow.sandbox.tools.ensure_thread_directories_exist", lambda runtime: None)
-    monkeypatch.setattr("deerflow.sandbox.tools.is_host_bash_allowed", lambda: True)
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools._runtime_host_bash_execution_mode",
+        lambda *_args: HostBashExecutionMode.LOCAL_LEGACY_ALLOW,
+    )
 
     result = bash_tool.func(
         runtime=runtime,

@@ -19,6 +19,7 @@ export const CAPABILITIES = [
   "mcp.credentials.approve",
   "private_work.create",
   "private_work.read_own",
+  "private_work.approve_host_execution",
   "automation.manage_own",
   "project.audit.read",
   "project.usage.read",

@@ -37,3 +37,14 @@ def test_sandbox_environment_drops_ambient_postgres_admin_url(
     )
 
     assert "POSTGRES_ADMIN_URL" not in build_sandbox_env()
+
+
+def test_sandbox_environment_drops_ambient_channel_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "DEERFLOW_CHANNEL_USER_ID",
+        "stale-worker-channel-user",
+    )
+
+    assert "DEERFLOW_CHANNEL_USER_ID" not in build_sandbox_env()

@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
@@ -199,6 +199,7 @@ class SubagentResult:
     completed_at: datetime | None = None
     ai_messages: list[dict[str, Any]] | None = None
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
+    host_execution_approval_artifact: dict[str, object] | None = None
     usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     # Event-driven waiting (U8): writers on the isolated loop / scheduler
@@ -246,6 +247,7 @@ class SubagentResult:
         completed_at: datetime | None = None,
         ai_messages: list[dict[str, Any]] | None = None,
         token_usage_records: list[dict[str, int | str | None]] | None = None,
+        host_execution_approval_artifact: dict[str, object] | None = None,
     ) -> bool:
         """Set a terminal status exactly once.
 
@@ -270,6 +272,10 @@ class SubagentResult:
                 self.ai_messages = ai_messages
             if token_usage_records is not None:
                 self.token_usage_records = token_usage_records
+            if host_execution_approval_artifact is not None:
+                self.host_execution_approval_artifact = dict(
+                    host_execution_approval_artifact,
+                )
             self.completed_at = completed_at or datetime.now()
             self.status = status
         # Outside the lock: waking waiters must not hold the state lock.
@@ -335,6 +341,46 @@ def _extract_llm_error_fallback(final_state: Any) -> str | None:
 
         return llm_error_code_for_reason(metadata.get("error_reason"))
 
+    return None
+
+
+def _extract_host_execution_approval(
+    final_state: Any,
+) -> dict[str, object] | None:
+    """Return one validated approval anchor emitted by a delegated bash call."""
+
+    if not isinstance(final_state, dict):
+        return None
+    for message in reversed(final_state.get("messages", [])):
+        if not isinstance(message, ToolMessage):
+            continue
+        artifact = message.artifact
+        if not isinstance(artifact, dict):
+            continue
+        approval = artifact.get("host_execution_approval")
+        if not isinstance(approval, dict):
+            continue
+        required = {
+            "schema_version": int,
+            "kind": str,
+            "approval_id": str,
+            "source_run_id": str,
+            "source_tool_call_id": str,
+        }
+        if (
+            all(type(approval.get(key)) is expected for key, expected in required.items())
+            and approval.get("schema_version") == 1
+            and approval.get("kind") == "local_shell"
+            and all(
+                approval.get(key)
+                for key in (
+                    "approval_id",
+                    "source_run_id",
+                    "source_tool_call_id",
+                )
+            )
+        ):
+            return dict(approval)
     return None
 
 
@@ -672,6 +718,7 @@ class SubagentExecutor:
         authorization_checker: object | None = None,
         run_read_only_mounts: tuple[object, ...] = (),
         channel_user_id: str | None = None,
+        channel_identity_present: bool = False,
         deerflow_trace_id: str | None = None,
         runtime_skills: tuple[Skill, ...] = (),
         agent_prompt_bundle: object | None = None,
@@ -682,6 +729,8 @@ class SubagentExecutor:
         ]
         | None = None,
         skill_secret_provider: Callable[..., object] | None = None,
+        host_execution_approval_port: object | None = None,
+        host_execution_agent_path: tuple[str, ...] = (),
     ):
         """Initialize the executor.
 
@@ -717,6 +766,9 @@ class SubagentExecutor:
                 authorization checks.
             run_read_only_mounts: Exact server-issued read-only mounts admitted
                 for the parent Run.
+            channel_identity_present: Whether the parent carried an explicit
+                server-owned channel identity state, including an explicit
+                clear represented by ``channel_user_id=None``.
             deerflow_trace_id: ActWeave request-level correlation id propagated
                 from the parent run for Langfuse metadata correlation.
             runtime_skills: Exact immutable Skill objects admitted for the
@@ -732,6 +784,10 @@ class SubagentExecutor:
                 so parent and child execution cannot mutate one another.
             skill_secret_provider: Opaque owner-loop proxy that revalidates and
                 decrypts one short-lived Skill carrier for each sandbox command.
+            host_execution_approval_port: Opaque owner-loop proxy that stages
+                and completes one exact Local host command.
+            host_execution_agent_path: Stable delegated Agent path bound into
+                the exact execution digest.
         """
         self.config = config
         self.app_config = app_config
@@ -760,10 +816,13 @@ class SubagentExecutor:
         self.authorization_boundary = authorization_boundary
         self.authorization_checker = authorization_checker
         self.run_read_only_mounts = run_read_only_mounts if isinstance(run_read_only_mounts, tuple) else ()
+        if type(channel_identity_present) is not bool:
+            raise TypeError("channel_identity_present must be a boolean")
         # IM-channel sender identity captured at task_tool dispatch: group
         # chats share one thread across senders, so delegated bash commands
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
+        self.channel_identity_present = channel_identity_present
         self.deerflow_trace_id = deerflow_trace_id
         self._runtime_skills = tuple(runtime_skills)
         self._agent_prompt_bundle = agent_prompt_bundle
@@ -775,6 +834,8 @@ class SubagentExecutor:
         self._agent_model_settings = agent_model_settings
         self._skill_scoped_secrets = {path: dict(values) for path, values in (skill_scoped_secrets or {}).items()}
         self._skill_secret_provider = skill_secret_provider
+        self._host_execution_approval_port = host_execution_approval_port
+        self._host_execution_agent_path = host_execution_agent_path
 
         self._base_tools = _filter_tools(
             tools,
@@ -1135,7 +1196,7 @@ class SubagentExecutor:
                 user_role=self.user_role,
                 oauth_provider=self.oauth_provider,
                 oauth_id=self.oauth_id,
-                channel_user_id=self.channel_user_id or None,
+                channel_user_id=self.channel_user_id,
                 is_subagent=True,
                 private_scope=self.private_scope,
                 authorization_checker=self.authorization_checker,
@@ -1146,7 +1207,11 @@ class SubagentExecutor:
                 skill_scoped_secrets=self._skill_scoped_secrets or None,
                 skill_secret_provider=(self._skill_secret_provider if self.private_scope is not None and callable(self._skill_secret_provider) else None),
                 trace_id=self.deerflow_trace_id or None,
+                host_execution_approval_port=self._host_execution_approval_port,
+                host_execution_agent_path=(self._host_execution_agent_path or None),
             ).build()
+            if self.private_scope is not None and self.channel_identity_present:
+                context[RuntimeContextKeys.CHANNEL_USER_ID] = self.channel_user_id
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1197,8 +1262,18 @@ class SubagentExecutor:
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
+            host_execution_approval = _extract_host_execution_approval(
+                final_state,
+            )
             llm_error = _extract_llm_error_fallback(final_state)
-            if llm_error is not None:
+            if host_execution_approval is not None:
+                result.try_set_terminal(
+                    SubagentStatus.COMPLETED,
+                    result="Host command execution requires approval.",
+                    host_execution_approval_artifact=host_execution_approval,
+                    token_usage_records=token_usage_records,
+                )
+            elif llm_error is not None:
                 result.try_set_terminal(
                     SubagentStatus.FAILED,
                     error=llm_error,

@@ -694,19 +694,36 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         if not isinstance(self._backend, LocalContainerBackend):
             raise SandboxRuntimeError("AIO backend lacks required private sandbox security capabilities")
         extra_mounts = self._validated_private_local_mounts(mounts)
-        info = self._backend.create(
+        info = self._backend.create_private(
             f"private-{hashlib.sha256(identity.encode()).hexdigest()[:16]}",
             sandbox_id,
             extra_mounts=extra_mounts or None,
             user_id=scope.owner_user_id,
         )
+        registered = False
         try:
+            self._register_created_sandbox(None, sandbox_id, info, private=True)
+            registered = True
+            self._backend.initialize_private_roots(info)
             if not wait_for_sandbox_ready(info.sandbox_url, timeout=60):
                 raise SandboxRuntimeError("Private AIO sandbox failed readiness")
-            self._register_created_sandbox(None, sandbox_id, info, private=True)
+            sandbox = self.get(sandbox_id)
+            initialize_private_roots = getattr(
+                sandbox,
+                "initialize_private_roots",
+                None,
+            )
+            if not callable(initialize_private_roots):
+                raise SandboxRuntimeError(
+                    "Private AIO sandbox initialization is unavailable",
+                )
+            initialize_private_roots()
             return sandbox_id
         except BaseException:
-            self._backend.destroy_private(info)
+            if registered:
+                self._destroy_private_sandbox(sandbox_id)
+            else:
+                self._backend.destroy_private(info)
             raise
 
     def _destroy_private_sandbox(self, sandbox_id: str) -> None:
@@ -741,6 +758,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         protected_container_roots = [
             PurePosixPath("/mnt/user-data"),
             PurePosixPath("/mnt/acp-workspace"),
+        ]
+        protected_runtime_roots = [
+            PurePosixPath(path)
+            for path in (
+                "/bin",
+                "/dev",
+                "/etc",
+                "/home",
+                "/lib",
+                "/lib64",
+                "/opt",
+                "/proc",
+                "/root",
+                "/run",
+                "/sbin",
+                "/sys",
+                "/usr",
+                "/var",
+            )
         ]
         container_socket_roots = tuple(
             PurePosixPath(path)
@@ -786,20 +822,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             container = resolve_container(mount.container_path)
             if any(paths_overlap(container, protected) for protected in protected_container_roots):
                 raise SandboxRuntimeError("Private AIO run mount overlaps private storage")
+            if any(paths_overlap(container, protected) for protected in protected_runtime_roots):
+                raise SandboxRuntimeError("Private AIO run mount overlaps private runtime")
             if any(paths_overlap(host, other_host) or paths_overlap(container, other_container) for other_host, other_container in run_mounts):
                 raise SandboxRuntimeError("Private AIO mounts overlap")
             run_mounts.append((host, container))
-
-        config_mounts = getattr(self._backend, "_config_mounts", ())
-        for mount in config_mounts:
-            host = resolve_host(mount.host_path)
-            container = resolve_container(mount.container_path)
-            if any(paths_overlap(container, protected) for protected in protected_container_roots):
-                raise SandboxRuntimeError("Private AIO config mount overlaps private storage")
-            host_alias = any(paths_overlap(host, run_host) for run_host, _ in run_mounts)
-            container_alias = any(paths_overlap(container, run_container) for _, run_container in run_mounts)
-            if container_alias or (host_alias and not mount.read_only):
-                raise SandboxRuntimeError("Private AIO config mount bypasses a run read-only mount")
 
         return [(str(host), container.as_posix(), True) for host, container in run_mounts]
 
@@ -1077,6 +1104,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Args:
             sandbox_id: The ID of the sandbox to destroy.
         """
+        with self._lock:
+            is_private = sandbox_id in self._private_runtime_ids
+        if is_private:
+            self._destroy_private_sandbox(sandbox_id)
+            return
+
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
         if sandbox is not None:
@@ -1093,22 +1126,37 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Destroyed sandbox {sandbox_id}")
 
     def shutdown(self) -> None:
-        """Shutdown all sandboxes. Thread-safe and idempotent."""
+        """Shutdown all sandboxes and retry unconfirmed private destruction."""
         with self._lock:
-            if self._shutdown_called:
-                return
-            self._shutdown_called = True
-            sandbox_ids = list(self._sandboxes.keys())
-            warm_items = list(self._warm_pool.items())
-            self._warm_pool.clear()
+            first_shutdown = not self._shutdown_called
+            if first_shutdown:
+                self._shutdown_called = True
+                sandbox_ids = list(self._sandboxes.keys())
+                for sandbox_id in self._private_runtime_ids:
+                    if sandbox_id in self._sandbox_infos and sandbox_id not in self._sandboxes:
+                        sandbox_ids.append(sandbox_id)
+                warm_items = list(self._warm_pool.items())
+                self._warm_pool.clear()
+            else:
+                sandbox_ids = [sandbox_id for sandbox_id in self._private_runtime_ids if sandbox_id in self._sandbox_infos]
+                warm_items = []
+                if not sandbox_ids:
+                    return
 
-        self._stop_idle_checker()
-
-        logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
+        if first_shutdown:
+            self._stop_idle_checker()
+            logger.info(f"Shutting down {len(sandbox_ids)} active + {len(warm_items)} warm-pool sandbox(es)")
+        else:
+            logger.info("Retrying shutdown of %d private sandbox(es)", len(sandbox_ids))
 
         for sandbox_id in sandbox_ids:
             try:
-                self.destroy(sandbox_id)
+                with self._lock:
+                    is_private = sandbox_id in self._private_runtime_ids
+                if is_private:
+                    self._destroy_private_sandbox(sandbox_id)
+                else:
+                    self.destroy(sandbox_id)
             except Exception as e:
                 logger.error(f"Failed to destroy sandbox {sandbox_id} during shutdown: {e}")
 

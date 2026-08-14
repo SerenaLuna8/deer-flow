@@ -4,6 +4,12 @@ from fastapi import HTTPException
 
 from app.private_work.errors import (
     PRIVATE_WORK_ERROR_STATUS,
+    ExecutionApprovalConflict,
+    ExecutionApprovalExpired,
+    ExecutionApprovalForbidden,
+    ExecutionApprovalInvalid,
+    ExecutionApprovalNotFound,
+    ExecutionApprovalPolicyDisabled,
     PrivateWorkAssetStale,
     PrivateWorkConflict,
     PrivateWorkDefaultAgentUnavailable,
@@ -22,6 +28,12 @@ from app.private_work.errors import (
 )
 
 _PRIVATE_WORK_ERROR_TYPES = (
+    ExecutionApprovalNotFound,
+    ExecutionApprovalForbidden,
+    ExecutionApprovalConflict,
+    ExecutionApprovalExpired,
+    ExecutionApprovalPolicyDisabled,
+    ExecutionApprovalInvalid,
     PrivateWorkNotFound,
     PrivateWorkForbidden,
     PrivateWorkConflict,

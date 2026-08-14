@@ -29,6 +29,8 @@ _CLIENT_AUTHORITY_FIELDS = frozenset(
         "available_skills",
         "is_internal",
         "is_subagent",
+        "host_execution_approval_id",
+        "host_execution_decision_digest",
         "membership_id",
         "membership_version",
         "mcp_servers",

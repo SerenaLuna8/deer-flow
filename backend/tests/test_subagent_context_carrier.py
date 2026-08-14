@@ -29,6 +29,8 @@ def test_subagent_executor_installs_context_through_typed_carrier() -> None:
             "__authorization_checker",
             "__file_authority",
             "__guardrail_attribution",
+            "__host_execution_agent_path",
+            "__host_execution_approval_port",
             "__run_read_only_mounts",
             "__skill_scoped_secrets",
             "__skill_secret_provider",
@@ -45,4 +47,14 @@ def test_subagent_executor_installs_context_through_typed_carrier() -> None:
         "is_subagent": True,
         "guardrail_is_subagent": True,
         "secret_copy": True,
+        "approval_port_identity": True,
+        "approval_agent_path": ["lead", "subagent:context-probe"],
+        "approval_artifact": {
+            "schema_version": 1,
+            "kind": "local_shell",
+            "approval_id": "approval-1",
+            "source_run_id": "run-1",
+            "source_tool_call_id": "inner-call-1",
+        },
+        "explicit_channel_identity_clear": True,
     }

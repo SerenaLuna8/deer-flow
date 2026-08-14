@@ -1,5 +1,6 @@
 import errno
 import logging
+import math
 import ntpath
 import os
 import re
@@ -8,15 +9,16 @@ import signal
 import stat
 import subprocess
 import threading
+import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
 from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import NamedTuple
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.sandbox.env_policy import build_sandbox_env
+from deerflow.sandbox.env_policy import build_sandbox_env, is_blocked_env_name
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import build_output_mask_pattern
 from deerflow.sandbox.sandbox import (
@@ -37,6 +39,50 @@ logger = logging.getLogger(__name__)
 DEFAULT_COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_CAPTURE_LIMIT_BYTES = 10 * 1024 * 1024
 _PIPE_DRAIN_JOIN_TIMEOUT_SECONDS = 0.2
+
+
+class LocalProcessSpawnDeadlineExpired(RuntimeError):
+    """A guarded Local process was not created before its spawn deadline."""
+
+
+class LocalProcessSpawnAuthorizationFailed(RuntimeError):
+    """A guarded Local process failed its final synchronous authorization."""
+
+
+def _assert_process_spawn_deadline(
+    spawn_deadline_monotonic: float | None,
+) -> None:
+    if spawn_deadline_monotonic is None:
+        return
+    if isinstance(spawn_deadline_monotonic, bool) or not isinstance(spawn_deadline_monotonic, (int, float)) or not math.isfinite(spawn_deadline_monotonic):
+        raise ValueError("Local process spawn deadline is invalid")
+    if time.monotonic() >= float(spawn_deadline_monotonic):
+        raise LocalProcessSpawnDeadlineExpired
+
+
+def _authorize_process_spawn(
+    *,
+    spawn_deadline_monotonic: float | None,
+    spawn_authorization_guard: Callable[[], float] | None,
+) -> None:
+    guarded_deadline = None
+    if spawn_authorization_guard is not None:
+        try:
+            guarded_deadline = spawn_authorization_guard()
+        except (
+            LocalProcessSpawnAuthorizationFailed,
+            LocalProcessSpawnDeadlineExpired,
+        ):
+            raise
+        except Exception as error:
+            raise LocalProcessSpawnAuthorizationFailed from error
+        if isinstance(guarded_deadline, bool) or not isinstance(guarded_deadline, (int, float)) or not math.isfinite(guarded_deadline):
+            raise LocalProcessSpawnAuthorizationFailed
+        guarded_deadline = float(guarded_deadline)
+    effective_deadline = spawn_deadline_monotonic
+    if guarded_deadline is not None and (effective_deadline is None or guarded_deadline < effective_deadline):
+        effective_deadline = guarded_deadline
+    _assert_process_spawn_deadline(effective_deadline)
 
 
 class _BoundedPipeCapture:
@@ -80,6 +126,17 @@ class PathMapping:
     container_path: str
     local_path: str
     read_only: bool = False
+
+
+@dataclass(frozen=True)
+class LocalCommandExecutionResult:
+    """Structured result for one exact prepared host process launch."""
+
+    output: str
+    stdout: str
+    stderr: str
+    exit_code: int
+    timed_out: bool
 
 
 class _LocalBinaryReader:
@@ -1177,6 +1234,54 @@ class LocalSandbox(Sandbox):
         env: dict[str, str] | None = None,
         timeout: float | None = None,
     ) -> str:
+        resolved_command = self.resolve_command_for_execution(command)
+        return self.execute_prepared_command(
+            resolved_command,
+            shell=self.get_execution_shell(),
+            env=env,
+            timeout=timeout,
+        )
+
+    def resolve_command_for_execution(self, command: str) -> str:
+        """Freeze virtual path mappings before a host approval is requested."""
+
+        return self._resolve_paths_in_command(command)
+
+    def get_execution_shell(self) -> str:
+        """Return the exact shell executable included in an approval digest."""
+
+        return self._get_shell()
+
+    def execute_prepared_command(
+        self,
+        command: str,
+        *,
+        shell: str,
+        env: dict[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Execute a command whose path mapping and shell were already frozen."""
+
+        return self.execute_prepared_command_result(
+            command,
+            shell=shell,
+            env=env,
+            timeout=timeout,
+        ).output
+
+    def execute_prepared_command_result(
+        self,
+        command: str,
+        *,
+        shell: str,
+        env: dict[str, str] | None = None,
+        prepared_base_env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+        spawn_deadline_monotonic: float | None = None,
+        spawn_authorization_guard: Callable[[], float] | None = None,
+    ) -> LocalCommandExecutionResult:
+        """Execute a frozen host plan and retain authoritative exit metadata."""
+
         # Validate ``env`` keys against the POSIX env-var rule. Defense in
         # depth: ``subprocess.run(env=...)`` does not go through a shell so a
         # metachar in a key here would not actually inject — but the public
@@ -1185,24 +1290,32 @@ class LocalSandbox(Sandbox):
         # rule on both implementations keeps the contract consistent and forces
         # any new caller to use safe key names.
         _validate_extra_env(env)
-        # Resolve container paths in command before execution
-        resolved_command = self._resolve_paths_in_command(command)
-        shell = self._get_shell()
         if timeout is None:
             timeout = DEFAULT_COMMAND_TIMEOUT_SECONDS
 
         # Inherit os.environ minus platform secrets, then layer any injected
         # request-scoped secrets on top (#3861). An explicit env is always passed
         # so platform credentials never leak into skill subprocesses.
-        sandbox_env = build_sandbox_env(env)
+        if prepared_base_env is None:
+            sandbox_env = build_sandbox_env(env)
+        else:
+            if any(not isinstance(key, str) or not isinstance(value, str) or is_blocked_env_name(key) for key, value in prepared_base_env.items()):
+                raise ValueError("prepared sandbox environment is invalid")
+            # The approval continuation captured and fingerprinted this exact
+            # sanitized mapping immediately before this call. Copying it does
+            # not re-read ``os.environ`` and therefore closes the check/spawn
+            # time-of-check/time-of-use gap.
+            sandbox_env = dict(prepared_base_env)
+            if env:
+                sandbox_env.update(env)
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
-                args = [shell, "-NoProfile", "-Command", resolved_command]
+                args = [shell, "-NoProfile", "-Command", command]
             elif self._is_cmd_shell(shell):
-                args = [shell, "/c", resolved_command]
+                args = [shell, "/c", command]
             else:
-                args = [shell, "-c", resolved_command]
+                args = [shell, "-c", command]
                 if self._is_msys_shell(shell):
                     sandbox_env = {
                         **sandbox_env,
@@ -1211,6 +1324,10 @@ class LocalSandbox(Sandbox):
                     }
 
             try:
+                _authorize_process_spawn(
+                    spawn_deadline_monotonic=spawn_deadline_monotonic,
+                    spawn_authorization_guard=spawn_authorization_guard,
+                )
                 result = subprocess.run(
                     args,
                     shell=False,
@@ -1224,10 +1341,16 @@ class LocalSandbox(Sandbox):
                 timed_out = True
                 stdout = self._coerce_process_output(exc.stdout if exc.stdout is not None else exc.output)
                 stderr = self._coerce_process_output(exc.stderr)
-                returncode = 0
+                returncode = 124
         else:
-            args = [shell, "-c", resolved_command]
-            stdout, stderr, returncode, timed_out = self._run_posix_command(args, timeout, sandbox_env)
+            args = [shell, "-c", command]
+            stdout, stderr, returncode, timed_out = self._run_posix_command(
+                args,
+                timeout,
+                sandbox_env,
+                spawn_deadline_monotonic=spawn_deadline_monotonic,
+                spawn_authorization_guard=spawn_authorization_guard,
+            )
 
         output = stdout
         if stderr:
@@ -1240,13 +1363,22 @@ class LocalSandbox(Sandbox):
 
         final_output = output if output else "(no output)"
         # Reverse resolve local paths back to container paths in output
-        return self._reverse_resolve_paths_in_output(final_output)
+        return LocalCommandExecutionResult(
+            output=self._reverse_resolve_paths_in_output(final_output),
+            stdout=self._reverse_resolve_paths_in_output(stdout),
+            stderr=self._reverse_resolve_paths_in_output(stderr),
+            exit_code=returncode,
+            timed_out=timed_out,
+        )
 
     @staticmethod
     def _run_posix_command(
         args: list[str],
         timeout: float,
         env: dict[str, str] | None = None,
+        *,
+        spawn_deadline_monotonic: float | None = None,
+        spawn_authorization_guard: Callable[[], float] | None = None,
     ) -> tuple[str, str, int, bool]:
         """Run a command on POSIX with bounded pipe capture.
 
@@ -1271,6 +1403,10 @@ class LocalSandbox(Sandbox):
         stdout_read_fd, stdout_write_fd = os.pipe()
         stderr_read_fd, stderr_write_fd = os.pipe()
         try:
+            _authorize_process_spawn(
+                spawn_deadline_monotonic=spawn_deadline_monotonic,
+                spawn_authorization_guard=spawn_authorization_guard,
+            )
             process = subprocess.Popen(
                 args,
                 shell=False,

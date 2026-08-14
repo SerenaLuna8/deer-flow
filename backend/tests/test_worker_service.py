@@ -21,6 +21,7 @@ from app.worker.service import (
 )
 from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobScope
+from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.trace_context import get_current_trace_id
 
 
@@ -70,6 +71,7 @@ class _FakeBackend:
         self.heartbeat_result: JobHeartbeat | bool = JobHeartbeat(cancel_requested=False)
         self.heartbeat_error: Exception | None = None
         self.claim_calls = 0
+        self.claim_kwargs: list[dict[str, object]] = []
         self.transaction_active = False
         self.claim_gate: asyncio.Event | None = None
         self.claim_started: asyncio.Event | None = None
@@ -81,6 +83,7 @@ class _FakeRepository:
 
     async def claim_next(self, **_kwargs):
         self.backend.claim_calls += 1
+        self.backend.claim_kwargs.append(dict(_kwargs))
         if self.backend.claim_started is not None:
             self.backend.claim_started.set()
         if self.backend.claim_gate is not None:
@@ -164,6 +167,21 @@ def _config(**updates) -> WorkerConfig:
     return WorkerConfig().model_copy(update=updates)
 
 
+def _execution_domain() -> HostExecutionDomainSnapshot:
+    return HostExecutionDomainSnapshot(
+        configured_id="mac-primary",
+        public_label="My Mac",
+        os_name="posix",
+        sys_platform="darwin",
+        machine="arm64",
+        device_fingerprint="d" * 64,
+        environment_fingerprint="f" * 64,
+        euid=501,
+        egid=20,
+        runtime_base_dir="/private/tmp/actweave",
+    )
+
+
 def test_worker_job_type_contract_accepts_dream_and_rejects_unknown() -> None:
     WorkerService(
         None,
@@ -205,6 +223,34 @@ async def test_after_claim_commit_hook_runs_outside_claim_transaction() -> None:
 
     assert await service._claim_next() is None
     assert observations == [(False, 1)]
+
+
+@pytest.mark.asyncio
+async def test_worker_passes_stable_execution_domain_affinity_to_claim_sql() -> None:
+    backend = _FakeBackend(job_count=0)
+    execution_domain = _execution_domain()
+    service = WorkerService(
+        _Factory(backend),
+        _FakeRegistry(),
+        {},
+        _config(),
+        repository_builder=_FakeRepository,
+        execution_domain=execution_domain,
+    )
+
+    assert await service._claim_next() is None
+    assert backend.claim_kwargs[0]["execution_domain_affinity"] == execution_domain.affinity
+
+
+def test_worker_rejects_malformed_execution_domain_affinity() -> None:
+    with pytest.raises(TypeError, match="execution_domain"):
+        WorkerService(
+            None,
+            None,
+            {},
+            WorkerConfig(),
+            execution_domain="not-a-domain",  # type: ignore[arg-type]
+        )
 
 
 @pytest.mark.parametrize(

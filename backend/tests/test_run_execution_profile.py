@@ -26,9 +26,12 @@ from app.private_work.execution_profile import (
     selected_run_model_ref,
 )
 from app.private_work.http_runtime import start_private_run
+from app.private_work.inbound_dedupe import PrivateRunInboundDelivery
 from app.private_work.run_admission import (
     PersistedRunSnapshot,
+    PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
+    PrivateRunInboundAuthority,
 )
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord
 from app.private_work.sandbox_files import (
@@ -95,6 +98,48 @@ def test_private_run_execution_profile_is_strict_and_separate_from_generic_conte
 
     with pytest.raises(ValidationError):
         PrivateRunCreateRequest.model_validate({"execution_profile": {"model_name": "gpt-5.6-luna", "unknown": True}})
+
+
+def test_private_run_server_context_owns_channel_identity() -> None:
+    caller_kwargs = {
+        "config": {
+            "context": {
+                "channel_user_id": "forged-browser-identity",
+                "safe": "value",
+            },
+        },
+    }
+    ordinary = PrivateRunAdmissionService._server_kwargs(
+        caller_kwargs,
+        None,
+    )
+    continuation = PrivateRunAdmissionService._server_kwargs(
+        caller_kwargs,
+        PrivateRunAdmissionServerContext(
+            channel_user_id="frozen-channel-user",
+        ),
+    )
+    inbound = PrivateRunAdmissionService._server_kwargs(
+        caller_kwargs,
+        PrivateRunAdmissionServerContext(
+            inbound_authority=PrivateRunInboundAuthority(
+                connection_id=str(uuid.uuid4()),
+                provider="feishu",
+                external_account_id="verified-inbound-user",
+                workspace_id=None,
+                external_conversation_id="chat-1",
+                external_topic_id=None,
+            ),
+            inbound_delivery=PrivateRunInboundDelivery("delivery-1"),
+        ),
+    )
+
+    assert ordinary["config"]["context"] == {
+        "channel_user_id": None,
+        "safe": "value",
+    }
+    assert continuation["config"]["context"]["channel_user_id"] == ("frozen-channel-user")
+    assert inbound["config"]["context"]["channel_user_id"] == ("verified-inbound-user")
 
 
 def test_default_agent_selection_and_effective_profile_are_fail_closed() -> None:

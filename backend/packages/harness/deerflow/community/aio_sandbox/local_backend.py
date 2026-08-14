@@ -15,6 +15,7 @@ import subprocess
 import time
 from datetime import datetime
 
+from deerflow.community.remote_file_authority import PRIVATE_ROOT_BOOTSTRAP_SCRIPT
 from deerflow.utils.network import get_free_port, release_port
 
 from .backend import SandboxBackend, wait_for_sandbox_ready
@@ -154,9 +155,18 @@ def _format_container_mount(runtime: str, host_path: str, container_path: str, r
 
 
 def _redact_container_command_for_log(cmd: list[str]) -> list[str]:
-    """Return a Docker/Container command with environment values redacted."""
+    """Return a Docker/Container command with secrets and host paths redacted."""
     redacted: list[str] = []
     redact_next_env = False
+    redact_next_mount = False
+    redact_next_volume = False
+
+    def redact_mount_spec(value: str) -> str:
+        return ",".join(f"{part.split('=', 1)[0]}=<redacted>" if part.startswith(("src=", "source=")) else part for part in value.split(","))
+
+    def redact_volume_spec(value: str) -> str:
+        target_offset = value.find(":/")
+        return f"<redacted>{value[target_offset:]}" if target_offset >= 0 else "<redacted>"
 
     for arg in cmd:
         if redact_next_env:
@@ -166,6 +176,16 @@ def _redact_container_command_for_log(cmd: list[str]) -> list[str]:
             else:
                 redacted.append(arg)
             redact_next_env = False
+            continue
+
+        if redact_next_mount:
+            redacted.append(redact_mount_spec(arg))
+            redact_next_mount = False
+            continue
+
+        if redact_next_volume:
+            redacted.append(redact_volume_spec(arg))
+            redact_next_volume = False
             continue
 
         if arg in {"-e", "--env"}:
@@ -180,6 +200,24 @@ def _redact_container_command_for_log(cmd: list[str]) -> list[str]:
                 redacted.append(f"--env={key}=<redacted>" if key else "--env=<redacted>")
             else:
                 redacted.append(arg)
+            continue
+
+        if arg == "--mount":
+            redacted.append(arg)
+            redact_next_mount = True
+            continue
+
+        if arg in {"-v", "--volume"}:
+            redacted.append(arg)
+            redact_next_volume = True
+            continue
+
+        if arg.startswith("--mount="):
+            redacted.append(f"--mount={redact_mount_spec(arg.removeprefix('--mount='))}")
+            continue
+
+        if arg.startswith("--volume="):
+            redacted.append(f"--volume={redact_volume_spec(arg.removeprefix('--volume='))}")
             continue
 
         redacted.append(arg)
@@ -353,14 +391,59 @@ class LocalContainerBackend(SandboxBackend):
         Raises:
             RuntimeError: If the container fails to start.
         """
-        del user_id
+        return self._create(
+            thread_id,
+            sandbox_id,
+            extra_mounts,
+            user_id=user_id,
+            private=False,
+        )
+
+    def create_private(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        user_id: str | None = None,
+    ) -> SandboxInfo:
+        """Start one fresh private container without global config mounts."""
+
+        if not sandbox_id.startswith("private-") or any(not read_only for _host, _container, read_only in (extra_mounts or ())):
+            raise RuntimeError("Invalid private container request")
+        return self._create(
+            thread_id,
+            sandbox_id,
+            extra_mounts,
+            user_id=user_id,
+            private=True,
+        )
+
+    def _create(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        extra_mounts: list[tuple[str, str, bool]] | None,
+        *,
+        user_id: str | None,
+        private: bool,
+    ) -> SandboxInfo:
+        """Shared local create path with private discovery/mount isolation."""
+
+        del thread_id, user_id
         container_name = f"{self._container_prefix}-{sandbox_id}"
+        start_options = {"include_config_mounts": False} if private else {}
 
         if self._runtime == "container":
             try:
-                container_id = self._start_container(container_name, None, extra_mounts)
+                container_id = self._start_container(
+                    container_name,
+                    None,
+                    extra_mounts,
+                    **start_options,
+                )
             except RuntimeError as exc:
-                if _is_container_name_conflict(str(exc)):
+                if not private and _is_container_name_conflict(str(exc)):
                     logger.warning(
                         "Apple container name %s already exists, attempting discovery",
                         container_name,
@@ -399,7 +482,12 @@ class LocalContainerBackend(SandboxBackend):
         for _attempt in range(10):
             port = get_free_port(start_port=_next_start)
             try:
-                container_id = self._start_container(container_name, port, extra_mounts)
+                container_id = self._start_container(
+                    container_name,
+                    port,
+                    extra_mounts,
+                    **start_options,
+                )
                 break
             except RuntimeError as exc:
                 release_port(port)
@@ -413,7 +501,7 @@ class LocalContainerBackend(SandboxBackend):
                 # Container-name conflict: another process may have already started
                 # the deterministic sandbox container for this sandbox_id. Try to
                 # discover and adopt the existing container instead of failing.
-                if _is_container_name_conflict(err_lower):
+                if not private and _is_container_name_conflict(err_lower):
                     logger.warning(f"Container name {container_name} already in use, attempting to discover existing sandbox instance")
                     existing = self.discover(sandbox_id)
                     if existing is not None:
@@ -452,6 +540,42 @@ class LocalContainerBackend(SandboxBackend):
         self._stop_private_container(stop_target)
         if self._runtime == "docker":
             self._release_sandbox_port(info)
+
+    def initialize_private_roots(self, info: SandboxInfo) -> None:
+        """Create fixed private roots for the image's unprivileged user.
+
+        The AIO HTTP process runs as ``gem`` and cannot create entries below the
+        image-owned ``/mnt`` directory.  Bootstrap through the local container
+        runtime as root with one fixed Python program, then let the descriptor-
+        based guest authority verify the roots through the ordinary HTTP path.
+        """
+
+        expected_name = f"{self._container_prefix}-{info.sandbox_id}"
+        if self._runtime not in {"container", "docker"} or not info.sandbox_id.startswith("private-") or info.container_name != expected_name:
+            raise RuntimeError("Private container identity is unavailable")
+
+        command = [
+            self._runtime,
+            "exec",
+            "--user",
+            "0:0",
+            expected_name,
+            "/usr/bin/python3",
+            "-I",
+            "-S",
+            "-c",
+            PRIVATE_ROOT_BOOTSTRAP_SCRIPT,
+        ]
+        try:
+            subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=30,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise RuntimeError("Failed to initialize private sandbox roots") from exc
 
     @staticmethod
     def _release_sandbox_port(info: SandboxInfo) -> None:
@@ -732,6 +856,8 @@ class LocalContainerBackend(SandboxBackend):
         container_name: str,
         port: int | None,
         extra_mounts: list[tuple[str, str, bool]] | None = None,
+        *,
+        include_config_mounts: bool = True,
     ) -> str:
         """Start a new container.
 
@@ -775,15 +901,16 @@ class LocalContainerBackend(SandboxBackend):
             cmd.extend(["-e", f"{key}={value}"])
 
         # Config-level volume mounts
-        for mount in self._config_mounts:
-            cmd.extend(
-                _format_container_mount(
-                    self._runtime,
-                    mount.host_path,
-                    mount.container_path,
-                    mount.read_only,
+        if include_config_mounts:
+            for mount in self._config_mounts:
+                cmd.extend(
+                    _format_container_mount(
+                        self._runtime,
+                        mount.host_path,
+                        mount.container_path,
+                        mount.read_only,
+                    )
                 )
-            )
 
         # Extra mounts (thread-specific, skills, etc.)
         if extra_mounts:
@@ -808,8 +935,21 @@ class LocalContainerBackend(SandboxBackend):
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
             return container_id
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to start container using {self._runtime}: {e.stderr}")
-            raise RuntimeError(f"Failed to start sandbox container: {e.stderr}")
+            stderr = e.stderr or ""
+            returncode = e.returncode
+            if "port is already allocated" in stderr or "address already in use" in stderr.lower():
+                safe_detail = "port is already allocated"
+            elif _is_container_name_conflict(stderr):
+                safe_detail = "Conflict. The container name is already in use"
+            else:
+                safe_detail = "runtime rejected the request"
+
+        logger.error(
+            "Failed to start container using %s (returncode=%s)",
+            self._runtime,
+            returncode,
+        )
+        raise RuntimeError(f"Failed to start sandbox container: {safe_detail}")
 
     def _stop_container(self, container_id: str) -> None:
         """Stop a container (--rm ensures automatic removal)."""

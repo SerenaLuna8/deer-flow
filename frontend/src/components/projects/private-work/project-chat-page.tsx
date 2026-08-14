@@ -39,6 +39,9 @@ export function projectChatRouteScope(
     threadListPath: base,
     canCreate,
     canRun,
+    canApproveHostExecution: project.capabilities.includes(
+      "private_work.approve_host_execution",
+    ),
     canUpload: canRun,
     canDelete: canRead,
     canDeleteFiles: canRead,

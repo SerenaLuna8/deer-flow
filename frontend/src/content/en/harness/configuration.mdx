@@ -87,7 +87,7 @@ work.
 `config.yaml` includes a `config_version` field that tracks the schema version:
 
 ```yaml
-config_version: 33
+config_version: 1
 ```
 
 When the schema changes (new fields, renamed sections), this number is bumped. If your local `config.yaml` is behind the current version, run:
@@ -129,7 +129,7 @@ At least one active database-backed model must also be configured through the
 admin UI before conversations can run:
 
 ```yaml
-config_version: 33
+config_version: 1
 
 database:
   url: $DATABASE_URL

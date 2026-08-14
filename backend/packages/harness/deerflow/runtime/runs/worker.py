@@ -76,6 +76,9 @@ from deerflow.runtime.goal import (
     visible_conversation_signature,
     write_thread_goal,
 )
+from deerflow.runtime.host_execution_runner import (
+    execute_frozen_host_execution_continuation,
+)
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
 from deerflow.sandbox.sandbox import (
@@ -474,6 +477,8 @@ def _build_runtime_context(
     run_read_only_mounts: tuple[object, ...] = (),
     runtime_owner_user_id: str | None = None,
     memory_archive_context: object | None = None,
+    host_execution_approval_port: object | None = None,
+    channel_user_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -487,7 +492,7 @@ def _build_runtime_context(
     under ``config['configurable']['__pregel_runtime']`` — see
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
-    return RuntimeContextCarrier(
+    runtime_context = RuntimeContextCarrier(
         thread_id=thread_id,
         run_id=run_id,
         app_config=app_config,
@@ -500,7 +505,15 @@ def _build_runtime_context(
         guardrail_attribution=guardrail_attribution,
         run_read_only_mounts=run_read_only_mounts or None,
         memory_archive_context=memory_archive_context,
+        host_execution_approval_port=host_execution_approval_port,
+        host_execution_agent_path=(("lead",) if host_execution_approval_port is not None else None),
+        channel_user_id=channel_user_id,
     ).build(caller_context)
+    if private_scope is not None and channel_user_id is None:
+        # A private Run without verified IM identity must explicitly clear the
+        # inherited host/sandbox variable instead of inheriting Worker state.
+        runtime_context[RuntimeContextKeys.CHANNEL_USER_ID] = None
+    return runtime_context
 
 
 class PrivateAgentRuntime(Protocol):
@@ -545,6 +558,8 @@ class RunContext:
     memory_archive_context: object | None = field(default=None)
     guardrail_attribution: Mapping[str, object] | None = field(default=None)
     private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
+    host_execution_approval_port: object | None = field(default=None)
+    channel_user_id: str | None = field(default=None)
 
 
 def _checkpoint_runtime_settings(
@@ -998,6 +1013,8 @@ async def run_agent(
             ),
             runtime_owner_user_id=private_owner_user_id,
             memory_archive_context=ctx.memory_archive_context,
+            host_execution_approval_port=ctx.host_execution_approval_port,
+            channel_user_id=ctx.channel_user_id,
         )
         runtime_model_name = None
         prompt_bundle = None
@@ -1076,6 +1093,21 @@ async def run_agent(
                 user_id=run_mount_user_id,
                 mounts=run_mounts,
             )
+
+        # A Local host-execution continuation consumes its app-owned frozen
+        # plan and launches it here, before graph construction or any model
+        # call.  The returned hidden input replaces the legacy retry prompt;
+        # the model only receives the bounded, durably settled result.
+        record_metadata = record.metadata
+        continuation_required = isinstance(record_metadata, Mapping) and record_metadata.get("execution_approval_continuation") is True
+        graph_input = await execute_frozen_host_execution_continuation(
+            approval_port=ctx.host_execution_approval_port,
+            app_config=ctx.app_config,
+            runtime_context=runtime_ctx,
+            file_authority=ctx.file_authority,
+            graph_input=graph_input,
+            continuation_required=continuation_required,
+        )
 
         # Inject RunJournal as a LangChain callback handler.
         # on_llm_end captures token usage; on_chain_start/end captures lifecycle.

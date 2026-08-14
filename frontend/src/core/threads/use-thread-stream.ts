@@ -304,6 +304,7 @@ export function useThreadStream({
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const preparedReplayAttemptRef = useRef<PreparedReplayAttempt | null>(null);
+  const attachedContinuationRunIdsRef = useRef<Set<string>>(new Set());
   const [ignoredReplayHistoryError, setIgnoredReplayHistoryError] = useState<{
     error: unknown;
   } | null>(null);
@@ -789,6 +790,60 @@ export function useThreadStream({
     threadId,
   ]);
 
+  const attachRun = useCallback(
+    async (runId: string) => {
+      const selectedRunId = runId.trim();
+      const selectedThreadId = threadIdRef.current;
+      if (
+        !selectedRunId ||
+        !selectedThreadId ||
+        currentViewThreadIdRef.current !== selectedThreadId ||
+        privateWork.isActive?.() === false
+      ) {
+        return false;
+      }
+
+      const attachmentKey = `${selectedThreadId}:${selectedRunId}`;
+      if (attachedContinuationRunIdsRef.current.has(attachmentKey)) {
+        return true;
+      }
+      if (thread.isLoading) {
+        return currentRunIdRef.current === selectedRunId;
+      }
+
+      attachedContinuationRunIdsRef.current.add(attachmentKey);
+      setIgnoredReplayHistoryError(null);
+      setLiveMessagesThreadId(selectedThreadId);
+      handleStreamStart(selectedThreadId, selectedRunId);
+      const runQueryKey = scopedThreadQueryKey(
+        privateWork.scope,
+        "thread",
+        selectedThreadId,
+      );
+      queryClient.setQueryData<Run[]>(runQueryKey, (runs) =>
+        rememberActiveRun(runs, {
+          threadId: selectedThreadId,
+          runId: selectedRunId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      void queryClient.invalidateQueries({
+        queryKey: runQueryKey,
+        exact: true,
+      });
+
+      try {
+        await thread.joinStream(selectedRunId);
+        return true;
+      } catch {
+        attachedContinuationRunIdsRef.current.delete(attachmentKey);
+        retryHistory();
+        return false;
+      }
+    },
+    [handleStreamStart, privateWork, queryClient, retryHistory, thread],
+  );
+
   const hasVisibleStreamState =
     Boolean(threadId) || liveMessagesThreadId === currentViewThreadId;
   const persistedMessages = useMemo(
@@ -858,6 +913,7 @@ export function useThreadStream({
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
     preparedReplayAttemptRef.current = null;
+    attachedContinuationRunIdsRef.current = new Set();
     setIgnoredReplayHistoryError(null);
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
@@ -1497,6 +1553,7 @@ export function useThreadStream({
     thread: mergedThread,
     boundThreadId: onStreamThreadId ?? null,
     pendingUsageMessages,
+    attachRun,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,

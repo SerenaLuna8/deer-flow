@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import asdict
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import (
     APIRouter,
@@ -59,6 +59,10 @@ from app.private_work.errors import (
     PrivateWorkInvalid,
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
+)
+from app.private_work.execution_approval import (
+    ExecutionApprovalProjection,
+    ExecutionApprovalService,
 )
 from app.private_work.execution_profile import (
     RunExecutionProfileUnsupported,
@@ -213,6 +217,150 @@ class PrivateRunResponse(StrictPrivateWorkResponse):
     execution_profile: PrivateRunExecutionProfileResponse | None = None
     created_at: str = ""
     updated_at: str = ""
+
+
+class ExecutionApprovalContinuationRunResponse(StrictPrivateWorkResponse):
+    run_id: str = Field(min_length=1, max_length=64)
+    status: Literal[
+        "pending",
+        "running",
+        "error",
+        "success",
+        "timeout",
+        "interrupted",
+    ]
+
+
+class ExecutionApprovalDomainResponse(StrictPrivateWorkResponse):
+    label: str = Field(min_length=1, max_length=256)
+    effective_user_label: str = Field(min_length=1, max_length=256)
+
+
+class ExecutionApprovalSourceAgentResponse(StrictPrivateWorkResponse):
+    kind: Literal["lead", "subagent"]
+    label: str = Field(min_length=1, max_length=256)
+    path: list[str] = Field(min_length=1, max_length=16)
+
+    @model_validator(mode="after")
+    def validate_path(self) -> ExecutionApprovalSourceAgentResponse:
+        if any(not item or len(item) > 256 for item in self.path):
+            raise ValueError("source agent path is invalid")
+        return self
+
+
+class ExecutionApprovalBaseResponse(StrictPrivateWorkResponse):
+    approval_id: uuid.UUID
+    source_run_id: str = Field(min_length=1, max_length=64)
+    source_tool_call_id: str = Field(min_length=1, max_length=128)
+    version: str = Field(pattern=r"^(?:0|[1-9][0-9]*)$")
+    execution_domain: ExecutionApprovalDomainResponse
+    command_preview: str = Field(min_length=1, max_length=65_536)
+    cwd_preview: str = Field(min_length=1, max_length=4_096)
+    timeout_seconds: int = Field(ge=1, le=3_600)
+    source_agent: ExecutionApprovalSourceAgentResponse
+    risk_level: Literal["host_execution"]
+    warning_code: Literal[
+        "LOCAL_PROCESS_RUNS_ON_HOST",
+        "HOST_EXECUTION_STATE_UNKNOWN",
+    ]
+    can_decide: bool
+    continuation_run: ExecutionApprovalContinuationRunResponse | None
+
+
+class ExecutionApprovalPendingResponse(ExecutionApprovalBaseResponse):
+    status: Literal["pending"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    continuation_run: None
+    decision_expires_at: datetime
+    remaining_ttl_seconds: int = Field(ge=0, le=86_400)
+
+
+class ExecutionApprovalApprovedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["approved"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    decision_at: datetime
+    claim_expires_at: datetime
+
+
+class ExecutionApprovalClaimedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["claimed"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    continuation_run: ExecutionApprovalContinuationRunResponse
+    claimed_at: datetime
+
+
+class ExecutionApprovalFinishedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["finished"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    exit_code: int
+    finished_at: datetime
+    result_summary_code: str = Field(min_length=1, max_length=128)
+
+
+class ExecutionApprovalLaunchFailedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["launch_failed"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    finished_at: datetime
+    reason_code: str = Field(min_length=1, max_length=128)
+
+
+class ExecutionApprovalUnknownResponse(ExecutionApprovalBaseResponse):
+    status: Literal["unknown"]
+    warning_code: Literal["HOST_EXECUTION_STATE_UNKNOWN"]
+    can_decide: Literal[False]
+    finished_at: datetime
+
+
+class ExecutionApprovalDeniedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["denied"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    decision_at: datetime
+    denial_delivery_status: Literal[
+        "not_required",
+        "pending",
+        "admitted",
+        "delivered",
+        "failed",
+    ]
+
+
+class ExecutionApprovalClosedResponse(ExecutionApprovalBaseResponse):
+    status: Literal["expired", "cancelled"]
+    warning_code: Literal["LOCAL_PROCESS_RUNS_ON_HOST"]
+    can_decide: Literal[False]
+    finished_at: datetime
+    reason_code: str = Field(min_length=1, max_length=128)
+
+
+ExecutionApprovalResponse = Annotated[
+    ExecutionApprovalPendingResponse
+    | ExecutionApprovalApprovedResponse
+    | ExecutionApprovalClaimedResponse
+    | ExecutionApprovalFinishedResponse
+    | ExecutionApprovalLaunchFailedResponse
+    | ExecutionApprovalUnknownResponse
+    | ExecutionApprovalDeniedResponse
+    | ExecutionApprovalClosedResponse,
+    Field(discriminator="status"),
+]
+
+
+class ExecutionApprovalEnvelopeResponse(StrictPrivateWorkResponse):
+    schema_version: Literal[1]
+    server_time: datetime
+    approval: ExecutionApprovalResponse | None
+
+
+class ExecutionApprovalDecisionRequest(StrictPrivateWorkRequest):
+    schema_version: Literal[1]
+    decision: Literal["allow_once", "deny"]
+    expected_version: str = Field(pattern=r"^(?:0|[1-9][0-9]*)$")
+    idempotency_key: uuid.UUID
 
 
 class PrivateRunDeleteResponse(StrictPrivateWorkResponse):
@@ -471,6 +619,26 @@ def _thread_service(request: Request, request_id: str) -> PrivateThreadService:
     if not isinstance(service, PrivateThreadService):
         raise PrivateWorkUnavailable(request_id)
     return service
+
+
+def _execution_approval_service(
+    request: Request,
+    request_id: str,
+) -> ExecutionApprovalService:
+    service = getattr(request.app.state, "execution_approval_service", None)
+    if not isinstance(service, ExecutionApprovalService):
+        raise PrivateWorkUnavailable(request_id)
+    return service
+
+
+def _execution_approval_response(
+    projection: ExecutionApprovalProjection,
+) -> ExecutionApprovalEnvelopeResponse:
+    return ExecutionApprovalEnvelopeResponse(
+        schema_version=1,
+        server_time=projection.server_time,
+        approval=projection.approval,
+    )
 
 
 def _chat_control_service(
@@ -1389,6 +1557,75 @@ async def download_private_artifact(
     except PrivateWorkError as error:
         _raise_http(error)
     return private_streaming_response(stream)
+
+
+@router.get(
+    "/threads/{thread_id}/execution-approvals/active",
+    response_model=ExecutionApprovalEnvelopeResponse,
+)
+async def get_active_execution_approval(
+    thread_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ExecutionApprovalEnvelopeResponse:
+    try:
+        projection = await _execution_approval_service(
+            request,
+            context.request_id,
+        ).active(context, str(thread_id))
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return _execution_approval_response(projection)
+
+
+@router.get(
+    "/threads/{thread_id}/execution-approvals/{approval_id}",
+    response_model=ExecutionApprovalEnvelopeResponse,
+)
+async def get_execution_approval(
+    thread_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ExecutionApprovalEnvelopeResponse:
+    try:
+        projection = await _execution_approval_service(
+            request,
+            context.request_id,
+        ).get(context, str(thread_id), approval_id)
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return _execution_approval_response(projection)
+
+
+@router.post(
+    "/threads/{thread_id}/runs/{source_run_id}/execution-approvals/{approval_id}/decision",
+    response_model=ExecutionApprovalEnvelopeResponse,
+)
+async def decide_execution_approval(
+    thread_id: uuid.UUID,
+    source_run_id: uuid.UUID,
+    approval_id: uuid.UUID,
+    body: ExecutionApprovalDecisionRequest,
+    request: Request,
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> ExecutionApprovalEnvelopeResponse:
+    try:
+        projection = await _execution_approval_service(
+            request,
+            context.request_id,
+        ).decide(
+            context,
+            thread_id=str(thread_id),
+            source_run_id=str(source_run_id),
+            approval_id=approval_id,
+            decision=body.decision,
+            expected_version=int(body.expected_version),
+            idempotency_key=body.idempotency_key,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
+    return _execution_approval_response(projection)
 
 
 @router.post(

@@ -195,7 +195,7 @@ def build_minimal_config(
     include_bash_tool: bool = False,
     include_write_tools: bool = True,
     channel_connection_providers: list[str] | None = None,
-    config_version: int = 35,
+    config_version: int = 1,
     base_config: dict[str, Any] | None = None,
 ) -> str:
     """Build model-free infrastructure configuration.
@@ -210,7 +210,7 @@ def build_minimal_config(
     data: dict[str, Any] = deepcopy(base_config or {})
     # Defensive tombstone: callers may pass defaults from an older checkout.
     # Never carry the retired YAML model catalog or its secret references into
-    # a newly generated v35 configuration.
+    # a newly generated v1 configuration.
     data.pop("models", None)
     for field_path in DATABASE_RUNTIME_YAML_PATH_TOMBSTONES:
         _remove_path_and_empty(data, field_path)
@@ -268,14 +268,14 @@ def write_config_yaml(
 ) -> None:
     """Write (or overwrite) config.yaml with a minimal working configuration."""
     # Read config_version from config.example.yaml if present
-    config_version = 35
+    config_version = 1
     example_path = config_path.parent / "config.example.yaml"
     if example_path.exists():
         try:
             import yaml as _yaml
 
             raw = _yaml.safe_load(example_path.read_text(encoding="utf-8")) or {}
-            config_version = int(raw.get("config_version", 35))
+            config_version = int(raw.get("config_version", 1))
             example_defaults = raw
         except Exception:
             example_defaults = None

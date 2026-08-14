@@ -91,7 +91,7 @@ _QUOTAS = QuotaConfig()
 
 DOCUMENTED_CONSTANTS = (
     DocumentedConstant(
-        pattern=r"current marker is `(full_schema_v\d+)`",
+        pattern=r"current marker is `([a-z0-9_]+)`",
         expected=CURRENT_SCHEMA_REVISION,
         source="deerflow.persistence.bootstrap.CURRENT_SCHEMA_REVISION",
     ),
@@ -101,7 +101,7 @@ DOCUMENTED_CONSTANTS = (
         source="config.example.yaml config_version",
     ),
     DocumentedConstant(
-        pattern=r"Version (\d+) replaces",
+        pattern=r"Version (\d+) is the initial",
         expected=_example_config_version(),
         source="config.example.yaml config_version",
     ),

@@ -51,6 +51,8 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "credential_versions",
     "credentials",
     "dead_jobs",
+    "execution_approval_requests",
+    "execution_approval_result_receipts",
     "feedback",
     "file_chunks",
     "files",

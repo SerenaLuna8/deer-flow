@@ -18,7 +18,7 @@
 
 | 文档                                                     | 内容                                        |
 | -------------------------------------------------------- | ------------------------------------------- |
-| [CONFIGURATION.md](./CONFIGURATION.md)                   | `config.yaml`、环境变量、系统策略和 Sandbox |
+| [CONFIGURATION.md](./CONFIGURATION.md)                   | `config.yaml` v1、环境变量、系统策略和 Sandbox |
 | [SSO.md](./SSO.md)                                       | OIDC SSO 配置                               |
 | [IM_CHANNEL_CONNECTIONS.md](./IM_CHANNEL_CONNECTIONS.md) | 项目 Channel Connection                     |
 | [MCP_SERVER.md](./MCP_SERVER.md)                         | MCP、Credential 和 Run snapshot             |
@@ -29,7 +29,7 @@
 | 文档                                                   | 内容                          |
 | ------------------------------------------------------ | ----------------------------- |
 | [GUARDRAILS.md](./GUARDRAILS.md)                       | Tool call 前置策略与 provider |
-| [HOST_EXECUTION_APPROVAL.md](./HOST_EXECUTION_APPROVAL.md) | Local Provider 本机命令单次审批设计（未实现） |
+| [HOST_EXECUTION_APPROVAL.md](./HOST_EXECUTION_APPROVAL.md) | Local Provider 本机命令单次审批、恢复与安全边界 |
 | [FILE_UPLOAD.md](./FILE_UPLOAD.md)                     | 文件上传和转换                |
 | [AUTO_TITLE_GENERATION.md](./AUTO_TITLE_GENERATION.md) | Thread title 生成             |
 | [plan_mode_usage.md](./plan_mode_usage.md)             | Plan Mode 与 Todo middleware  |

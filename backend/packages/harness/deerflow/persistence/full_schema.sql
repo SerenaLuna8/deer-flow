@@ -68,16 +68,19 @@ CREATE TABLE jobs (
     started_at TIMESTAMP WITH TIME ZONE,
     completed_at TIMESTAMP WITH TIME ZONE,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    execution_domain_affinity CHAR(64),
     PRIMARY KEY (id),
     CONSTRAINT ck_jobs_authority_shape CHECK ((job_type = 'private_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'automation_run' AND run_id IS NOT NULL AND owner_user_id IS NOT NULL AND automation_occurrence_id IS NOT NULL AND origin_trace_id IS NOT NULL) OR (job_type = 'retention_purge' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'mcp_discovery' AND owner_user_id IS NOT NULL AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_dream_prepare' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL) OR (job_type = 'memory_seal' AND owner_user_id IS NOT NULL AND namespace IS NOT NULL AND namespace <> '' AND run_id IS NULL AND automation_occurrence_id IS NULL AND origin_trace_id IS NULL)),
     CONSTRAINT ck_jobs_memory_namespace CHECK ((job_type IN ('memory_dream', 'memory_dream_prepare', 'memory_seal')) = (namespace IS NOT NULL)),
     CONSTRAINT ck_jobs_type CHECK (job_type IN ('private_run', 'automation_run', 'retention_purge', 'mcp_discovery', 'memory_dream', 'memory_dream_prepare', 'memory_seal')),
     CONSTRAINT ck_jobs_retry_safety CHECK (retry_safety IN ('safe', 'unknown', 'unsafe')),
+    CONSTRAINT ck_jobs_execution_domain_affinity CHECK (execution_domain_affinity IS NULL OR (job_type = 'private_run' AND execution_domain_affinity ~ '^[0-9a-f]{64}$')),
     CONSTRAINT ck_jobs_status CHECK (status IN ('queued', 'leased', 'running', 'retry_wait', 'succeeded', 'failed', 'cancelled', 'dead')),
     CONSTRAINT ck_jobs_attempts CHECK (attempt_count >= 0 AND max_attempts >= 1),
     CONSTRAINT uq_jobs_type_idempotency UNIQUE (job_type, idempotency_key),
     CONSTRAINT uq_jobs_id_project_owner UNIQUE (id, project_id, owner_user_id),
     CONSTRAINT uq_jobs_id_project_owner_run UNIQUE (id, project_id, owner_user_id, run_id),
+    CONSTRAINT uq_jobs_id_project_owner_run_execution_domain UNIQUE (id, project_id, owner_user_id, run_id, execution_domain_affinity),
     CONSTRAINT uq_jobs_id_project_owner_namespace UNIQUE (id, project_id, owner_user_id, namespace),
     CONSTRAINT uq_jobs_predecessor_dead_job UNIQUE (predecessor_dead_job_id)
 );
@@ -85,6 +88,8 @@ CREATE TABLE jobs (
 CREATE INDEX ix_jobs_active_lease ON jobs (lease_expires_at, id) WHERE status IN ('leased', 'running');
 
 CREATE INDEX ix_jobs_claim ON jobs (status, available_at, priority DESC, created_at);
+
+CREATE INDEX ix_jobs_execution_domain_claim ON jobs (execution_domain_affinity, status, available_at, priority DESC, created_at) WHERE execution_domain_affinity IS NOT NULL;
 
 CREATE INDEX ix_jobs_private_scope ON jobs (project_id, owner_user_id, created_at);
 
@@ -1229,6 +1234,105 @@ CREATE INDEX ix_threads_meta_assistant_id ON threads_meta (assistant_id);
 CREATE INDEX ix_threads_meta_owner_user_id ON threads_meta (owner_user_id);
 
 CREATE INDEX ix_threads_meta_project_id ON threads_meta (project_id);
+
+CREATE TABLE execution_approval_requests (
+    id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    source_run_id VARCHAR(64) NOT NULL,
+    source_job_id UUID NOT NULL,
+    source_job_attempt_id UUID NOT NULL,
+    source_agent_path JSON NOT NULL,
+    tool_call_id VARCHAR(128) NOT NULL,
+    kind VARCHAR(32) NOT NULL,
+    command_digest CHAR(64) NOT NULL,
+    execution_domain_affinity CHAR(64) NOT NULL,
+    command_private_json JSON NOT NULL,
+    status VARCHAR(24) DEFAULT 'staged' NOT NULL,
+    version BIGINT DEFAULT 1 NOT NULL,
+    decision VARCHAR(16),
+    decision_idempotency_key CHAR(64),
+    decision_request_digest CHAR(64),
+    decided_by_user_id VARCHAR(36),
+    decided_at TIMESTAMP WITH TIME ZONE,
+    continuation_run_id VARCHAR(64),
+    continuation_job_id UUID,
+    execution_job_attempt_id UUID,
+    claimed_at TIMESTAMP WITH TIME ZONE,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    terminal_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_execution_approval_requests_private_scope UNIQUE (id, project_id, owner_user_id, thread_id),
+    CONSTRAINT uq_execution_approval_requests_source_tool UNIQUE (project_id, owner_user_id, source_run_id, tool_call_id),
+    CONSTRAINT uq_execution_approval_requests_receipt_scope UNIQUE (id, project_id, owner_user_id, thread_id, continuation_job_id, execution_job_attempt_id),
+    CONSTRAINT fk_execution_approval_requests_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_private_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_execution_approval_requests_source_run FOREIGN KEY(project_id, owner_user_id, thread_id, source_run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE CASCADE,
+    CONSTRAINT fk_execution_approval_requests_source_job FOREIGN KEY(source_job_id, project_id, owner_user_id, source_run_id) REFERENCES jobs (id, project_id, owner_user_id, run_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_source_attempt FOREIGN KEY(source_job_attempt_id, source_job_id) REFERENCES job_attempts (id, job_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_decider FOREIGN KEY(decided_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_continuation_run FOREIGN KEY(project_id, owner_user_id, thread_id, continuation_run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_continuation_job FOREIGN KEY(continuation_job_id, project_id, owner_user_id, continuation_run_id, execution_domain_affinity) REFERENCES jobs (id, project_id, owner_user_id, run_id, execution_domain_affinity) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_requests_execution_attempt FOREIGN KEY(execution_job_attempt_id, continuation_job_id) REFERENCES job_attempts (id, job_id) ON DELETE RESTRICT,
+    CONSTRAINT ck_execution_approval_requests_status CHECK (status IN ('staged', 'pending', 'approved', 'claimed', 'finished', 'launch_failed', 'unknown', 'denied', 'expired', 'cancelled')),
+    CONSTRAINT ck_execution_approval_requests_kind CHECK (kind IN ('local_bash')),
+    CONSTRAINT ck_execution_approval_requests_digest CHECK (command_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_execution_approval_requests_execution_domain_affinity CHECK (execution_domain_affinity ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_execution_approval_requests_command_json CHECK (json_typeof(command_private_json) = 'object' AND octet_length(command_private_json::text) <= 1048576),
+    CONSTRAINT ck_execution_approval_requests_agent_path_json CHECK (json_typeof(source_agent_path) = 'array' AND json_array_length(source_agent_path) BETWEEN 1 AND 16),
+    CONSTRAINT ck_execution_approval_requests_tool_call CHECK (tool_call_id <> '' AND tool_call_id = btrim(tool_call_id)),
+    CONSTRAINT ck_execution_approval_requests_version CHECK (version >= 1),
+    CONSTRAINT ck_execution_approval_requests_decision_shape CHECK ((decision IS NULL AND decision_idempotency_key IS NULL AND decision_request_digest IS NULL AND decided_by_user_id IS NULL AND decided_at IS NULL) OR (decision IN ('allow_once', 'deny') AND decision_idempotency_key ~ '^[0-9a-f]{64}$' AND decision_request_digest ~ '^[0-9a-f]{64}$' AND decided_by_user_id IS NOT NULL AND decided_at IS NOT NULL)),
+    CONSTRAINT ck_execution_approval_requests_status_decision CHECK ((status IN ('staged', 'pending') AND decision IS NULL) OR (status = 'denied' AND decision = 'deny') OR (status IN ('approved', 'claimed', 'finished', 'launch_failed', 'unknown') AND decision = 'allow_once') OR (status = 'expired' AND (decision IS NULL OR decision = 'allow_once')) OR (status = 'cancelled' AND (decision IS NULL OR decision = 'allow_once'))),
+    CONSTRAINT ck_execution_approval_requests_execution_shape CHECK ((continuation_run_id IS NULL) = (continuation_job_id IS NULL) AND (execution_job_attempt_id IS NULL) = (claimed_at IS NULL) AND (execution_job_attempt_id IS NULL OR continuation_job_id IS NOT NULL) AND (status IN ('staged', 'pending', 'denied') AND continuation_job_id IS NULL AND execution_job_attempt_id IS NULL OR status = 'approved' AND execution_job_attempt_id IS NULL OR status IN ('claimed', 'finished', 'launch_failed', 'unknown') AND continuation_job_id IS NOT NULL AND execution_job_attempt_id IS NOT NULL OR status = 'expired' AND execution_job_attempt_id IS NULL OR status = 'cancelled')),
+    CONSTRAINT ck_execution_approval_requests_terminal_shape CHECK ((status IN ('staged', 'pending', 'approved', 'claimed') AND terminal_at IS NULL) OR (status IN ('finished', 'launch_failed', 'unknown', 'denied', 'expired', 'cancelled') AND terminal_at IS NOT NULL)),
+    CONSTRAINT ck_execution_approval_requests_timestamps CHECK (expires_at > created_at AND updated_at >= created_at AND (decided_at IS NULL OR decided_at >= created_at) AND (claimed_at IS NULL OR claimed_at >= created_at) AND (terminal_at IS NULL OR terminal_at >= created_at))
+);
+
+CREATE INDEX ix_execution_approval_requests_private_cursor ON execution_approval_requests (project_id, owner_user_id, thread_id, created_at DESC, id DESC);
+
+CREATE INDEX ix_execution_approval_requests_status_expiry ON execution_approval_requests (status, expires_at, id);
+
+CREATE UNIQUE INDEX uq_execution_approval_requests_active_thread ON execution_approval_requests (project_id, owner_user_id, thread_id) WHERE status IN ('staged', 'pending', 'approved', 'claimed');
+
+CREATE UNIQUE INDEX uq_execution_approval_requests_decision_idempotency ON execution_approval_requests (project_id, owner_user_id, decision_idempotency_key) WHERE decision_idempotency_key IS NOT NULL;
+
+CREATE TABLE execution_approval_result_receipts (
+    id UUID NOT NULL,
+    approval_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    execution_job_id UUID NOT NULL,
+    execution_job_attempt_id UUID NOT NULL,
+    outcome VARCHAR(24) NOT NULL,
+    exit_code INTEGER,
+    result_digest CHAR(64) NOT NULL,
+    result_private_json JSON NOT NULL,
+    public_error_code VARCHAR(64),
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT uq_execution_approval_result_receipts_approval UNIQUE (approval_id),
+    CONSTRAINT uq_execution_approval_result_receipts_attempt UNIQUE (execution_job_attempt_id),
+    CONSTRAINT fk_execution_approval_result_receipts_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_result_receipts_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_result_receipts_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_result_receipts_private_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_execution_approval_result_receipts_approval_execution FOREIGN KEY(approval_id, project_id, owner_user_id, thread_id, execution_job_id, execution_job_attempt_id) REFERENCES execution_approval_requests (id, project_id, owner_user_id, thread_id, continuation_job_id, execution_job_attempt_id) ON DELETE CASCADE,
+    CONSTRAINT fk_execution_approval_result_receipts_execution_job FOREIGN KEY(execution_job_id, project_id, owner_user_id) REFERENCES jobs (id, project_id, owner_user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_execution_approval_result_receipts_execution_attempt FOREIGN KEY(execution_job_attempt_id, execution_job_id) REFERENCES job_attempts (id, job_id) ON DELETE RESTRICT,
+    CONSTRAINT ck_execution_approval_result_receipts_outcome CHECK (outcome IN ('finished', 'launch_failed')),
+    CONSTRAINT ck_execution_approval_result_receipts_digest CHECK (result_digest ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_execution_approval_result_receipts_result_json CHECK (json_typeof(result_private_json) = 'object' AND octet_length(result_private_json::text) <= 2097152),
+    CONSTRAINT ck_execution_approval_result_receipts_result_shape CHECK ((outcome = 'finished' AND exit_code IS NOT NULL) OR (outcome = 'launch_failed' AND exit_code IS NULL AND public_error_code IS NOT NULL))
+);
+
+CREATE INDEX ix_execution_approval_result_receipts_private_created ON execution_approval_result_receipts (project_id, owner_user_id, thread_id, created_at DESC, id DESC);
 
 CREATE TABLE agent_version_mcp_refs (
     agent_version_id UUID NOT NULL,
@@ -3314,7 +3418,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 85 static tables and 1038 columns.
+-- Coverage: 87 static tables and 1080 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -3364,6 +3468,7 @@ COMMENT ON COLUMN jobs.created_at IS '后台任务：记录创建时间。';
 COMMENT ON COLUMN jobs.started_at IS '后台任务：开始时间。';
 COMMENT ON COLUMN jobs.completed_at IS '后台任务：完成时间。';
 COMMENT ON COLUMN jobs.updated_at IS '后台任务：记录最近更新时间。';
+COMMENT ON COLUMN jobs.execution_domain_affinity IS '后台任务：限制本机命令续接任务的执行域亲和摘要。';
 
 COMMENT ON TABLE project_invitation_rate_limits IS '记录项目邀请码失败尝试的限流窗口。';
 COMMENT ON COLUMN project_invitation_rate_limits.key_hash IS '项目邀请限流：键不可逆哈希。';
@@ -3968,6 +4073,51 @@ COMMENT ON COLUMN threads_meta.checkpoint_delete_status IS '线程元数据：�
 COMMENT ON COLUMN threads_meta.version IS '线程元数据：记录版本号。';
 COMMENT ON COLUMN threads_meta.thread_kind IS '线程元数据：线程类型。';
 
+COMMENT ON TABLE execution_approval_requests IS '保存本机命令的一次性审批、领取与终态生命周期。';
+COMMENT ON COLUMN execution_approval_requests.id IS '执行审批请求：主键标识。';
+COMMENT ON COLUMN execution_approval_requests.project_id IS '执行审批请求：所属项目标识。';
+COMMENT ON COLUMN execution_approval_requests.owner_user_id IS '执行审批请求：私有数据所有者的用户标识。';
+COMMENT ON COLUMN execution_approval_requests.thread_id IS '执行审批请求：线程标识。';
+COMMENT ON COLUMN execution_approval_requests.source_run_id IS '执行审批请求：产生审批请求的运行标识。';
+COMMENT ON COLUMN execution_approval_requests.source_job_id IS '执行审批请求：产生审批请求的任务标识。';
+COMMENT ON COLUMN execution_approval_requests.source_job_attempt_id IS '执行审批请求：产生审批请求的任务尝试标识。';
+COMMENT ON COLUMN execution_approval_requests.source_agent_path IS '执行审批请求：产生命令的智能体调用路径。';
+COMMENT ON COLUMN execution_approval_requests.tool_call_id IS '执行审批请求：产生命令的工具调用标识。';
+COMMENT ON COLUMN execution_approval_requests.kind IS '执行审批请求：业务类型。';
+COMMENT ON COLUMN execution_approval_requests.command_digest IS '执行审批请求：规范化私有命令的内容摘要。';
+COMMENT ON COLUMN execution_approval_requests.execution_domain_affinity IS '执行审批请求：执行域私有快照的不可逆亲和摘要。';
+COMMENT ON COLUMN execution_approval_requests.command_private_json IS '执行审批请求：规范化且仅限授权边界读取的私有命令计划 JSON（最多 1 MiB）。';
+COMMENT ON COLUMN execution_approval_requests.status IS '执行审批请求：生命周期状态。';
+COMMENT ON COLUMN execution_approval_requests.version IS '执行审批请求：记录版本号。';
+COMMENT ON COLUMN execution_approval_requests.decision IS '执行审批请求：一次性审批决定。';
+COMMENT ON COLUMN execution_approval_requests.decision_idempotency_key IS '执行审批请求：审批决定的幂等键摘要。';
+COMMENT ON COLUMN execution_approval_requests.decision_request_digest IS '执行审批请求：审批决定请求的内容摘要。';
+COMMENT ON COLUMN execution_approval_requests.decided_by_user_id IS '执行审批请求：作出审批决定的用户标识。';
+COMMENT ON COLUMN execution_approval_requests.decided_at IS '执行审批请求：审批决定时间。';
+COMMENT ON COLUMN execution_approval_requests.continuation_run_id IS '执行审批请求：审批通过后续接运行的标识。';
+COMMENT ON COLUMN execution_approval_requests.continuation_job_id IS '执行审批请求：审批通过后续接任务的标识。';
+COMMENT ON COLUMN execution_approval_requests.execution_job_attempt_id IS '执行审批请求：执行已审批命令的任务尝试标识。';
+COMMENT ON COLUMN execution_approval_requests.claimed_at IS '执行审批请求：已审批命令的领取时间。';
+COMMENT ON COLUMN execution_approval_requests.expires_at IS '执行审批请求：审批请求过期时间。';
+COMMENT ON COLUMN execution_approval_requests.terminal_at IS '执行审批请求：审批请求进入终态的时间。';
+COMMENT ON COLUMN execution_approval_requests.created_at IS '执行审批请求：记录创建时间。';
+COMMENT ON COLUMN execution_approval_requests.updated_at IS '执行审批请求：记录最近更新时间。';
+
+COMMENT ON TABLE execution_approval_result_receipts IS '保存一次已审批本机命令的有界私有执行结果。';
+COMMENT ON COLUMN execution_approval_result_receipts.id IS '执行审批结果回执：主键标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.approval_id IS '执行审批结果回执：执行审批请求标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.project_id IS '执行审批结果回执：所属项目标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.owner_user_id IS '执行审批结果回执：私有数据所有者的用户标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.thread_id IS '执行审批结果回执：线程标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.execution_job_id IS '执行审批结果回执：执行已审批命令的任务标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.execution_job_attempt_id IS '执行审批结果回执：执行已审批命令的任务尝试标识。';
+COMMENT ON COLUMN execution_approval_result_receipts.outcome IS '执行审批结果回执：命令启动或完成结果。';
+COMMENT ON COLUMN execution_approval_result_receipts.exit_code IS '执行审批结果回执：命令进程退出代码。';
+COMMENT ON COLUMN execution_approval_result_receipts.result_digest IS '执行审批结果回执：有界私有执行结果的内容摘要。';
+COMMENT ON COLUMN execution_approval_result_receipts.result_private_json IS '执行审批结果回执：仅限授权边界读取的有界命令结果 JSON（最多 2 MiB）。';
+COMMENT ON COLUMN execution_approval_result_receipts.public_error_code IS '执行审批结果回执：可公开的稳定错误代码。';
+COMMENT ON COLUMN execution_approval_result_receipts.created_at IS '执行审批结果回执：记录创建时间。';
+
 COMMENT ON TABLE agent_version_mcp_refs IS '保存智能体版本到 MCP 服务版本的有序依赖。';
 COMMENT ON COLUMN agent_version_mcp_refs.agent_version_id IS '智能体 MCP 引用：智能体版本标识。';
 COMMENT ON COLUMN agent_version_mcp_refs.mcp_server_version_id IS '智能体 MCP 引用：MCP服务版本标识。';
@@ -4534,6 +4684,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('full_schema');
+INSERT INTO alembic_version (version_num) VALUES ('initial_schema');
 
 COMMIT;

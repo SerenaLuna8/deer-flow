@@ -39,6 +39,8 @@ export function computeNextSubtask(
   const preserveTerminalStatus =
     isTerminalSubtaskStatus(previousStatus) &&
     (task.status === "in_progress" || hasLowerAuthority);
+  const preserveEqualHigherAuthorityStatus =
+    hasLowerAuthority && task.status === previousStatus;
 
   // MessageList writes the pending task tool-call state before parsing the
   // matching ToolMessage in the same render. Keep authoritative terminal
@@ -55,6 +57,14 @@ export function computeNextSubtask(
     next.result = previous.result;
     next.error = previous.error;
     next.stopReason = previous.stopReason;
+  } else if (preserveEqualHigherAuthorityStatus && previous) {
+    // MessageList replays its inferred task-tool projection on every render.
+    // A pending approval can already have an unstructured ToolMessage whose
+    // safest status is still `in_progress`.  Do not let that equal, weaker
+    // projection oscillate `tool_result -> inferred -> tool_result`: the
+    // tool-result write deliberately schedules a provider update and would
+    // otherwise create an unbounded render loop.
+    next.statusSource = previous.statusSource;
   } else if (task.status === "completed") {
     delete next.error;
   } else if (task.status === "failed") {
@@ -77,8 +87,13 @@ export function computeNextSubtask(
 
   const becameTerminal =
     isTerminalSubtaskStatus(next.status) && previousStatus !== next.status;
+  const changed = subtaskChanged(previous, next);
 
-  return { next, becameTerminal, changed: subtaskChanged(previous, next) };
+  return {
+    next: !changed && previous ? previous : next,
+    becameTerminal,
+    changed,
+  };
 }
 
 function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {

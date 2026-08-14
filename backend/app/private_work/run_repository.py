@@ -374,6 +374,38 @@ class PrivateRunRepository:
     ) -> bool:
         return job.status == "running" and job.lease_token_hash == token_hash and job.lease_expires_at is not None and job.lease_expires_at > now
 
+    async def _locked_active_attempt(
+        self,
+        *,
+        job: JobRow,
+        job_id: uuid.UUID,
+        token_hash: str,
+    ) -> JobAttemptRow:
+        attempt = (
+            await self.session.execute(
+                select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.attempt_number == job.attempt_count,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            raise PrivateRunExecutionLeaseLost
+        return attempt
+
+    async def _authority_time_after_locks(
+        self,
+        now: datetime | None,
+    ) -> datetime:
+        checked_at = now if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(checked_at, datetime) or checked_at.tzinfo is None:
+            raise PrivateRunExecutionLeaseLost
+        return checked_at
+
     async def begin_execution(
         self,
         *,
@@ -384,19 +416,23 @@ class PrivateRunRepository:
         origin_trace_id: str | None = None,
         now: datetime | None = None,
     ) -> PrivateRunExecutionState:
-        started_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
             scope=scope,
             run_id=run_id,
             job_id=job_id,
         )
+        started_at = now if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(started_at, datetime) or started_at.tzinfo is None:
+            raise PrivateRunExecutionLeaseLost
         if origin_trace_id is not None and (normalize_trace_id(origin_trace_id) is None or origin_trace_id != run.origin_trace_id):
             raise PrivateRunExecutionLeaseLost
         if not self._active_job_lease(job, token_hash=token_hash, now=started_at):
             raise PrivateRunExecutionLeaseLost
         if run.status not in {"pending", "running"}:
             raise PrivateRunConflict
+        if run.status == "running" and run.execution_lease_token_hash == token_hash and (run.execution_lease_expires_at is None or run.execution_lease_expires_at <= started_at):
+            raise PrivateRunExecutionLeaseLost
         if run.execution_lease_token_hash not in {None, token_hash} and (run.execution_lease_expires_at is None or run.execution_lease_expires_at > started_at):
             raise PrivateRunExecutionLeaseLost
         cancel_requested = any(
@@ -438,7 +474,6 @@ class PrivateRunRepository:
         later attempts in resume mode even when no additional progress occurs.
         """
 
-        checked_at = now or datetime.now(UTC)
         if latest_checkpoint_id is not None and (not latest_checkpoint_id or len(latest_checkpoint_id) > 128):
             raise PrivateRunConflict
         token_hash = self._lease_token_hash(lease_token)
@@ -447,16 +482,6 @@ class PrivateRunRepository:
             run_id=run_id,
             job_id=job_id,
         )
-        if (
-            not self._active_job_lease(
-                job,
-                token_hash=token_hash,
-                now=checked_at,
-            )
-            or run.status != "running"
-            or run.execution_lease_token_hash != token_hash
-        ):
-            raise PrivateRunExecutionLeaseLost
         attempt = (
             await self.session.execute(
                 select(JobAttemptRow)
@@ -470,6 +495,22 @@ class PrivateRunRepository:
             )
         ).scalar_one_or_none()
         if attempt is None:
+            raise PrivateRunExecutionLeaseLost
+        checked_at = now if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(checked_at, datetime) or checked_at.tzinfo is None:
+            raise PrivateRunExecutionLeaseLost
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+            or attempt.attempt_number != job.attempt_count
+        ):
             raise PrivateRunExecutionLeaseLost
         baseline = (
             await self.session.execute(
@@ -498,13 +539,29 @@ class PrivateRunRepository:
         lease_token: str,
         now: datetime | None = None,
     ) -> None:
-        heartbeat_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
             scope=scope,
             run_id=run_id,
             job_id=job_id,
         )
+        attempt = (
+            await self.session.execute(
+                select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.attempt_number == job.attempt_count,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
+            )
+        ).scalar_one_or_none()
+        if attempt is None:
+            raise PrivateRunExecutionLeaseLost
+        heartbeat_at = now if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(heartbeat_at, datetime) or heartbeat_at.tzinfo is None:
+            raise PrivateRunExecutionLeaseLost
         if (
             not self._active_job_lease(
                 job,
@@ -513,6 +570,8 @@ class PrivateRunRepository:
             )
             or run.status != "running"
             or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= heartbeat_at
         ):
             raise PrivateRunExecutionLeaseLost
         run.execution_lease_expires_at = job.lease_expires_at
@@ -537,13 +596,20 @@ class PrivateRunRepository:
         side-effect hook after its heartbeat loop has lost ownership.
         """
 
-        checked_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
             scope=scope,
             run_id=run_id,
             job_id=job_id,
         )
+        await self._locked_active_attempt(
+            job=job,
+            job_id=job_id,
+            token_hash=token_hash,
+        )
+        # Lease timestamps are issued against PostgreSQL time. Sample the same
+        # authoritative clock only after Job, Run, and Attempt are locked.
+        checked_at = await self._authority_time_after_locks(now)
         if (
             not self._active_job_lease(
                 job,
@@ -596,13 +662,20 @@ class PrivateRunRepository:
     ) -> bool:
         """Persist the unsafe replay boundary before an external side effect."""
 
-        checked_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
             scope=scope,
             run_id=run_id,
             job_id=job_id,
         )
+        await self._locked_active_attempt(
+            job=job,
+            job_id=job_id,
+            token_hash=token_hash,
+        )
+        # This is the final pre-side-effect authority boundary. A Worker-local
+        # clock must never make an already expired database lease look live.
+        checked_at = await self._authority_time_after_locks(now)
         if (
             not self._active_job_lease(
                 job,
@@ -652,7 +725,6 @@ class PrivateRunRepository:
             raise PrivateRunConflict
         if attempt_usage is not None and type(attempt_usage) is not PrivateRunUsageSnapshot:
             raise PrivateRunConflict
-        settled_at = now or datetime.now(UTC)
         token_hash = self._lease_token_hash(lease_token)
         job, run = await self._locked_job_run(
             scope=scope,
@@ -668,6 +740,12 @@ class PrivateRunRepository:
                 run=self.record(run),
                 run_terminal_published=True,
             )
+        await self._locked_active_attempt(
+            job=job,
+            job_id=job_id,
+            token_hash=token_hash,
+        )
+        settled_at = await self._authority_time_after_locks(now)
         if (
             not self._active_job_lease(
                 job,
@@ -675,6 +753,8 @@ class PrivateRunRepository:
                 now=settled_at,
             )
             or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= settled_at
         ):
             raise PrivateRunExecutionLeaseLost
 

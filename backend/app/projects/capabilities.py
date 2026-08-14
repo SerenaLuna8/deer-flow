@@ -19,6 +19,7 @@ class Capability(StrEnum):
     MCP_CREDENTIALS_APPROVE = "mcp.credentials.approve"
     PRIVATE_WORK_CREATE = "private_work.create"
     PRIVATE_WORK_READ_OWN = "private_work.read_own"
+    PRIVATE_WORK_APPROVE_HOST_EXECUTION = "private_work.approve_host_execution"
     AUTOMATION_MANAGE_OWN = "automation.manage_own"
     PROJECT_AUDIT_READ = "project.audit.read"
     PROJECT_USAGE_READ = "project.usage.read"

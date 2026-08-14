@@ -49,6 +49,87 @@ describe("project audit contract", () => {
     ).toEqual(recallAuditItem.metadata);
   });
 
+  test("accepts all closed host execution approval events", () => {
+    const events = [
+      {
+        ...recallAuditItem,
+        action: "host_execution.approval_requested",
+        metadata: {},
+      },
+      {
+        ...recallAuditItem,
+        action: "host_execution.approval_available",
+        metadata: {},
+      },
+      {
+        ...recallAuditItem,
+        actor: "user",
+        action: "host_execution.approval_decided",
+        metadata: { decision: "allow_once" },
+      },
+      {
+        ...recallAuditItem,
+        action: "host_execution.approval_claimed",
+        metadata: {},
+      },
+      {
+        ...recallAuditItem,
+        action: "host_execution.approval_terminal",
+        metadata: { status: "finished" },
+      },
+    ] as const;
+
+    for (const event of events) {
+      expect(auditItemSchema.safeParse(event).success).toBe(true);
+      expect(
+        adminAuditItemSchema.safeParse({
+          ...event,
+          actor_user_id: null,
+          actor_email: null,
+          project_id: "22222222-2222-4222-8222-222222222222",
+          project_slug: "host-approval-project",
+          project_display_name: "Host approval project",
+        }).success,
+      ).toBe(true);
+    }
+
+    const decision = auditItemSchema.parse(events[2]);
+    const terminal = auditItemSchema.parse(events[4]);
+    expect(describeAuditItem(decision, "zh-CN")).toMatchObject({
+      action: "已处理宿主机命令审批",
+      metadata: [{ label: "审批决定", value: "允许一次" }],
+    });
+    expect(describeAuditItem(terminal, "en-US")).toMatchObject({
+      action: "Host command approval finished",
+      metadata: [{ label: "Terminal status", value: "Execution finished" }],
+    });
+  });
+
+  test("rejects open or invalid host execution approval metadata", () => {
+    expect(
+      auditItemSchema.safeParse({
+        ...recallAuditItem,
+        action: "host_execution.approval_requested",
+        metadata: { command: "python private.py" },
+      }).success,
+    ).toBe(false);
+    expect(
+      auditItemSchema.safeParse({
+        ...recallAuditItem,
+        actor: "user",
+        action: "host_execution.approval_decided",
+        metadata: { decision: "allow_session" },
+      }).success,
+    ).toBe(false);
+    expect(
+      auditItemSchema.safeParse({
+        ...recallAuditItem,
+        action: "host_execution.approval_terminal",
+        metadata: { status: "running" },
+      }).success,
+    ).toBe(false);
+  });
+
   test("rejects missing or open-ended memory recall metadata", () => {
     const missingQueryLength = {
       result_bucket: recallAuditItem.metadata.result_bucket,

@@ -21,6 +21,8 @@ boundary:
   private VM network. Other devices cannot route into that network by default.
 - `allow_host_bash: false` keeps `LocalSandboxProvider` host Bash disabled. It
   does not disable Bash inside the AIO container.
+- AIO Bash does not enter the Local host-execution approval flow. AIO startup or
+  command failure is reported as a failure and never falls back to Local host Bash.
 
 Apple documents the dedicated-IP model in its
 [container tutorial](https://github.com/apple/container/blob/main/docs/tutorial.md).

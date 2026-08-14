@@ -332,7 +332,7 @@ class AioSandbox(Sandbox):
     ) -> dict[str, object]:
         """Run the fixed secure-I/O helper with separately encoded input."""
 
-        command = f"python3 -c {shlex.quote(PRIVATE_GUEST_SCRIPT)}"
+        command = f"/usr/bin/python3 -I -S -c {shlex.quote(PRIVATE_GUEST_SCRIPT)}"
         encoded = encode_guest_request(request)
         with self._lock:
             client = self._client
@@ -363,6 +363,14 @@ class AioSandbox(Sandbox):
         if boundary is None:
             raise SandboxRuntimeError("Private file authority is unavailable")
         return boundary.list_secure_files(root, max_entries=max_entries)
+
+    def initialize_private_roots(self) -> None:
+        """Verify the fixed private virtual roots before lease preflight."""
+
+        boundary = getattr(self, "_private_files", None)
+        if boundary is None:
+            raise SandboxRuntimeError("Private file authority is unavailable")
+        boundary.initialize_private_roots()
 
     def open_regular_reader(self, path: str) -> SandboxBinaryReader:
         boundary = getattr(self, "_private_files", None)

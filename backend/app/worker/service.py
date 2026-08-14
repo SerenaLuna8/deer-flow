@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.config.worker_config import WorkerConfig
 from deerflow.persistence.jobs.sql import JobClaim, JobHeartbeat, JobRepository
+from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 
 _PUBLIC_ERROR_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
@@ -213,6 +214,7 @@ class WorkerService:
         repository_builder: RepositoryBuilder = JobRepository,
         worker_id: uuid.UUID | None = None,
         after_claim_commit: Callable[[], Awaitable[None]] | None = None,
+        execution_domain: HostExecutionDomainSnapshot | None = None,
     ) -> None:
         if not isinstance(config, WorkerConfig):
             raise TypeError("WorkerConfig is required")
@@ -234,6 +236,18 @@ class WorkerService:
         self._handlers = dict(handlers)
         self._config = config
         self._after_claim_commit = after_claim_commit
+        if (
+            execution_domain is not None
+            and type(
+                execution_domain,
+            )
+            is not HostExecutionDomainSnapshot
+        ):
+            raise TypeError(
+                "execution_domain must be a HostExecutionDomainSnapshot",
+            )
+        self._execution_domain = execution_domain
+        self._execution_domain_affinity = execution_domain.affinity if execution_domain is not None else None
         self.worker_id = worker_id or uuid.uuid4()
         self._inflight: set[asyncio.Task[None]] = set()
         self._detached: set[asyncio.Task] = set()
@@ -263,6 +277,7 @@ class WorkerService:
                 worker_id=self.worker_id,
                 capabilities=frozenset(self._handlers),
                 lease_seconds=self._config.lease_seconds,
+                execution_domain_affinity=self._execution_domain_affinity,
             )
         if self._after_claim_commit is not None:
             await self._after_claim_commit()

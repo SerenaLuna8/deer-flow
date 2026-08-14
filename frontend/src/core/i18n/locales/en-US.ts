@@ -2490,6 +2490,44 @@ export const enUS: Translations = {
     answeredValue: (value: string) => `Answered: ${value}`,
   },
 
+  executionApproval: {
+    title: "Request to run a command in the ActWeave Worker host environment.",
+    localHost: "Local host",
+    riskTitle: "Runs with your local account permissions",
+    riskWarning:
+      "This is not an isolated sandbox. The command runs in the ActWeave Worker OS environment and may access files and credentials available to your local account, use the network, start background processes, and return output to the Agent or model. Allow it only if you trust this exact command.",
+    command: "Exact command",
+    workingDirectory: "Working directory",
+    sourceAgent: "Source Agent",
+    effectiveUser: "Local account",
+    timeout: "Timeout",
+    timeoutSeconds: (seconds) => `${seconds} seconds`,
+    expiresIn: (seconds) => `This request expires in ${seconds} seconds.`,
+    allowOnce: "Allow once",
+    deny: "Deny",
+    allowing: "Allowing…",
+    denying: "Denying…",
+    decisionFailed: "The decision could not be submitted. Please try again.",
+    exitCode: (code) => `Exit code: ${code}`,
+    reason: "Reason",
+    finishedWarning:
+      "The main process exited, but this does not prove that it had no side effects or left no background processes.",
+    unknownTitle: "Execution state is unknown",
+    unknownWarning:
+      "The command or one of its child processes may still be running and producing side effects. Inspect the ActWeave Worker host environment before requesting it again; this authorization cannot be retried.",
+    statuses: {
+      pending: "Waiting for approval",
+      approved: "Approved",
+      claimed: "Running in the Worker host environment",
+      finished: "Finished",
+      launch_failed: "Launch failed",
+      unknown: "State unknown",
+      denied: "Denied",
+      expired: "Expired",
+      cancelled: "Cancelled",
+    },
+  },
+
   // Subtasks
   uploads: {
     uploading: "Uploading...",
@@ -2748,7 +2786,8 @@ export const enUS: Translations = {
     identifierPlaceholder: "Email or username",
     username: "Username",
     usernamePlaceholder: "Start with a letter; 3–32 letters, digits, or _",
-    usernameHint: "Letters, digits, and underscore only. No Chinese or special characters.",
+    usernameHint:
+      "Letters, digits, and underscore only. No Chinese or special characters.",
     usernameInvalid:
       "Username must be 3–32 characters, start with a letter, and use only letters, digits, or underscore.",
     usernameTaken: "This username is already taken.",
@@ -2795,7 +2834,8 @@ export const enUS: Translations = {
     initAdminDescription: "Set up the administrator account to get started.",
     username: "Username",
     usernamePlaceholder: "Start with a letter; 3–32 letters, digits, or _",
-    usernameHint: "Letters, digits, and underscore only. No Chinese or special characters.",
+    usernameHint:
+      "Letters, digits, and underscore only. No Chinese or special characters.",
     usernameInvalid:
       "Username must be 3–32 characters, start with a letter, and use only letters, digits, or underscore.",
     email: "Email",

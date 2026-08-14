@@ -33,6 +33,10 @@ from deerflow.persistence.channel_connections.model import (
     ProjectChannelInstanceLeaseRow,
     ProjectChannelInstanceRow,
 )
+from deerflow.persistence.execution_approvals import (
+    ExecutionApprovalRequestRow,
+    ExecutionApprovalResultReceiptRow,
+)
 from deerflow.persistence.feedback.model import FeedbackRow
 from deerflow.persistence.jobs import DeadJobRow, JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.models.run_event import (
@@ -140,6 +144,8 @@ __all__ = [
     "CredentialRow",
     "CredentialVersionRow",
     "FeedbackRow",
+    "ExecutionApprovalRequestRow",
+    "ExecutionApprovalResultReceiptRow",
     "DeadJobRow",
     "JobAttemptRow",
     "JobRow",

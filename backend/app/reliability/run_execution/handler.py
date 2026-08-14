@@ -18,6 +18,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded
+from app.private_work.execution_approval import (
+    settle_staged_execution_approvals,
+)
+from app.private_work.execution_approval_audit import (
+    NoopHostExecutionApprovalAudit,
+)
 from app.private_work.run_admission import PersistedRunSnapshot
 from app.private_work.run_repository import (
     PrivateRunExecutionLeaseLost,
@@ -106,17 +112,32 @@ class PrivateRunJobHandler:
         endpoint_policy: McpEndpointPolicy | None = None,
         quota: PrivateRunExecutionQuotaPort | None = None,
         audit: PrivateRunExecutionAuditPort | None = None,
+        execution_approval_ttl_seconds: int = 300,
     ) -> None:
         if retry_initial_seconds < 1 or retry_max_seconds < retry_initial_seconds:
             raise ValueError("invalid private Run retry policy")
+        if execution_approval_ttl_seconds < 1:
+            raise ValueError("invalid execution approval TTL")
         self._factory = session_factory
         self._executor = executor
         self._retry_initial_seconds = retry_initial_seconds
         self._retry_max_seconds = retry_max_seconds
+        self._execution_approval_ttl_seconds = execution_approval_ttl_seconds
         self._job_repository_builder = job_repository_builder
         self._project_checkpointer = project_checkpointer
         self._quota = quota or _NoopPrivateRunExecutionQuota()
         self._audit = audit or _NoopPrivateRunExecutionAudit()
+        self._execution_approval_audit = (
+            self._audit
+            if callable(
+                getattr(
+                    self._audit,
+                    "host_execution_approval_available",
+                    None,
+                ),
+            )
+            else NoopHostExecutionApprovalAudit()
+        )
         self._snapshots = RunSnapshotRepository(
             session_factory,
             endpoint_policy=endpoint_policy,
@@ -619,6 +640,19 @@ class PrivateRunJobHandler:
                         attempt_usage=result.attempt_usage,
                     )
                     settled_run = settlement.run
+                    if settled_run.status in {
+                        "success",
+                        "error",
+                        "timeout",
+                        "interrupted",
+                    }:
+                        await settle_staged_execution_approvals(
+                            session,
+                            claim=claim,
+                            succeeded=settled_run.status == "success",
+                            request_ttl_seconds=(self._execution_approval_ttl_seconds),
+                            audit=self._execution_approval_audit,
+                        )
                     if settled_run.status in {
                         "success",
                         "error",

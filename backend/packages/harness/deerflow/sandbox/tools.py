@@ -9,17 +9,33 @@ from functools import lru_cache
 from pathlib import Path
 
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
+from langgraph.graph import END
+from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.config import get_app_config
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.file_authority import require_private_file_authority
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.host_execution_approval import (
+    HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY,
+    HOST_EXECUTION_APPROVAL_CONTEXT_KEY,
+    HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
+    HOST_EXECUTION_MAX_REQUESTED_COMMAND_BYTES,
+    HOST_EXECUTION_MAX_TOOL_CALL_ID_BYTES,
+    HostExecutionApprovalPort,
+    HostExecutionChannelIdentityMode,
+    HostExecutionOutcome,
+    HostExecutionPlan,
+)
 from deerflow.runtime.secret_context import (
     ACTIVE_SECRETS_CONTEXT_KEY,
     SKILL_SECRET_EXEC_READY_CONTEXT_KEY,
     SKILL_SECRET_PROVIDER_CONTEXT_KEY,
     active_provider_secret_request,
+    extract_request_secrets,
     read_active_secrets,
     resolve_provider_active_secrets,
 )
@@ -38,7 +54,13 @@ from deerflow.sandbox.sandbox_provider import (
     get_sandbox_provider,
 )
 from deerflow.sandbox.search import GrepMatch
-from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.security import (
+    LOCAL_HOST_BASH_DISABLED_MESSAGE,
+    HostBashExecutionMode,
+    resolve_host_bash_execution_mode,
+    resolve_local_host_bash_execution_mode,
+    uses_local_sandbox_provider,
+)
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -1555,14 +1577,36 @@ CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
-# body.context is client-writable on web requests, so bound the value: real
-# platform ids are tens of chars; anything past this is hostile or corrupt and
-# must not bloat every command string sent to the sandbox.
-_CHANNEL_USER_ID_MAX_LEN = 256
-
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _channel_identity_state(
+    runtime: Runtime,
+) -> tuple[HostExecutionChannelIdentityMode, str | None]:
+    """Read the trusted runtime carrier's exact channel identity state."""
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
+        return "absent", None
+    channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
+    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH:
+        return "set", channel_user_id
+    return "unset", None
+
+
+def _channel_identity_prefix_from_state(
+    mode: HostExecutionChannelIdentityMode,
+    channel_user_id: str | None,
+) -> str | None:
+    if mode == "absent":
+        return None
+    if mode == "set":
+        if channel_user_id is None:  # pragma: no cover - plan/state gate
+            raise ValueError("set channel identity requires channel_user_id")
+        return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
+    return f"unset {CHANNEL_USER_ID_ENV}; "
 
 
 def _channel_identity_prefix(runtime: Runtime) -> str | None:
@@ -1587,13 +1631,7 @@ def _channel_identity_prefix(runtime: Runtime) -> str | None:
     dropped inherits the previous sender's value. Values are identifiers, not
     secrets, so keeping them in the audit-visible command string is fine.
     """
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict) or _CHANNEL_USER_ID_CONTEXT_KEY not in context:
-        return None
-    channel_user_id = context.get(_CHANNEL_USER_ID_CONTEXT_KEY)
-    if isinstance(channel_user_id, str) and 0 < len(channel_user_id) <= _CHANNEL_USER_ID_MAX_LEN:
-        return f"export {CHANNEL_USER_ID_ENV}={shlex.quote(channel_user_id)}; "
-    return f"unset {CHANNEL_USER_ID_ENV}; "
+    return _channel_identity_prefix_from_state(*_channel_identity_state(runtime))
 
 
 def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
@@ -1641,6 +1679,389 @@ def _github_env_from_runtime(runtime: Runtime) -> dict[str, str] | None:
     return {"GH_TOKEN": token, "GITHUB_TOKEN": token}
 
 
+def _runtime_app_config(runtime: Runtime) -> object | None:
+    context = getattr(runtime, "context", None)
+    if isinstance(context, Mapping):
+        return context.get(RuntimeContextKeys.APP_CONFIG)
+    return None
+
+
+def _runtime_host_bash_execution_mode(
+    runtime: Runtime,
+    app_config: object,
+) -> HostBashExecutionMode:
+    """Resolve bash authority from both configuration and actual runtime kind.
+
+    A Local provider can be re-exported, subclassed, or temporarily disagree
+    with the configured class path.  Once the trusted runtime identifies a
+    Local sandbox, never let a configuration-only ``isolated_direct`` result
+    bypass the Local approval policy.
+    """
+
+    if is_local_sandbox(runtime) or uses_local_sandbox_provider(app_config):
+        return resolve_local_host_bash_execution_mode(app_config)
+    return resolve_host_bash_execution_mode(app_config)
+
+
+def _host_execution_agent_path(context: object) -> tuple[str, ...]:
+    if isinstance(context, Mapping):
+        raw_path = context.get(HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY)
+        if isinstance(raw_path, tuple) and raw_path and all(isinstance(part, str) and part for part in raw_path):
+            return raw_path
+        if context.get(RuntimeContextKeys.IS_SUBAGENT) is True:
+            return ("subagent",)
+    return ("lead",)
+
+
+def _host_execution_environment_keys(context: object) -> tuple[str, ...]:
+    names = set(extract_request_secrets(context))
+    names.update(read_active_secrets(context))
+    for requested_names in active_provider_secret_request(context).values():
+        names.update(requested_names)
+    if isinstance(context, Mapping) and context.get("github_token") is not None:
+        names.update({"GH_TOKEN", "GITHUB_TOKEN"})
+    return tuple(sorted(names))
+
+
+async def _approval_scan_secrets(runtime: Runtime) -> dict[str, str]:
+    """Materialize only enough secret plaintext to reject command embedding."""
+
+    context = getattr(runtime, "context", None)
+    secrets = {
+        **extract_request_secrets(context),
+        **read_active_secrets(context),
+    }
+    github_env = _github_env_from_runtime(runtime)
+    if github_env:
+        secrets.update(github_env)
+    if not isinstance(context, dict) or "private_scope" not in context:
+        return secrets
+    provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY)
+    requested = active_provider_secret_request(context)
+    if not callable(provider) or not requested:
+        return secrets
+
+    fresh_scoped = await provider(requested)
+    try:
+        secrets.update(resolve_provider_active_secrets(context, fresh_scoped))
+    finally:
+        if isinstance(fresh_scoped, dict):
+            for values in fresh_scoped.values():
+                if isinstance(values, dict):
+                    values.clear()
+            fresh_scoped.clear()
+    return secrets
+
+
+def _command_contains_secret(
+    requested_command: str,
+    effective_command: str,
+    secrets: Mapping[str, str],
+) -> bool:
+    return any(value and (value in requested_command or value in effective_command) for value in secrets.values() if isinstance(value, str))
+
+
+def _prepare_local_host_execution(
+    runtime: Runtime,
+    sandbox: object,
+    *,
+    description: str,
+    requested_command: str,
+) -> tuple[HostExecutionPlan, int]:
+    """Freeze the exact Local command, shell, timeout, and path mappings."""
+
+    if not isinstance(requested_command, str) or not requested_command:
+        raise SandboxRuntimeError("Host command is required")
+    if len(requested_command.encode("utf-8", errors="surrogatepass")) > HOST_EXECUTION_MAX_REQUESTED_COMMAND_BYTES:
+        raise SandboxRuntimeError("Host command exceeds the approval limit")
+    tool_call_id = getattr(runtime, "tool_call_id", None)
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        raise SandboxRuntimeError("Host execution tool call id is unavailable")
+    if len(tool_call_id.encode("utf-8", errors="surrogatepass")) > HOST_EXECUTION_MAX_TOOL_CALL_ID_BYTES:
+        raise SandboxRuntimeError("Host execution tool call id exceeds the approval limit")
+    ensure_thread_directories_exist(runtime)
+    thread_data = get_thread_data(runtime)
+    validate_local_bash_command_paths(requested_command, thread_data)
+    command = replace_virtual_paths_in_command(requested_command, thread_data)
+    command = _apply_cwd_prefix(command, thread_data)
+    channel_identity_mode, channel_user_id = _channel_identity_state(runtime)
+    identity_prefix = _channel_identity_prefix_from_state(
+        channel_identity_mode,
+        channel_user_id,
+    )
+    if identity_prefix and not _is_windows():
+        command = identity_prefix + command
+
+    resolve_command = getattr(sandbox, "resolve_command_for_execution", None)
+    resolve_shell = getattr(sandbox, "get_execution_shell", None)
+    execute_prepared = getattr(sandbox, "execute_prepared_command_result", None)
+    if not callable(resolve_command) or not callable(resolve_shell) or not callable(execute_prepared):
+        raise SandboxRuntimeError(
+            "Local sandbox does not support frozen host execution plans",
+        )
+    effective_command = resolve_command(command)
+    shell = resolve_shell()
+    if not isinstance(effective_command, str) or not effective_command:
+        raise SandboxRuntimeError("Local sandbox returned an invalid prepared command")
+    if not isinstance(shell, str) or not shell:
+        raise SandboxRuntimeError("Local sandbox returned an invalid shell")
+
+    app_config = _runtime_app_config(runtime)
+    if app_config is None:
+        app_config = get_app_config()
+    sandbox_config = getattr(app_config, "sandbox", None)
+    configured_timeout = int(getattr(sandbox_config, "bash_command_timeout", 600))
+    approval_config = getattr(sandbox_config, "host_execution_approval", None)
+    approval_timeout = int(getattr(approval_config, "max_timeout_seconds", configured_timeout))
+    timeout_seconds = min(configured_timeout, approval_timeout)
+    max_chars = int(getattr(sandbox_config, "bash_output_max_chars", 20000))
+
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, Mapping):
+        raise SandboxRuntimeError("Trusted runtime context is unavailable")
+    run_id = context.get(RuntimeContextKeys.RUN_ID)
+    thread_id = context.get(RuntimeContextKeys.THREAD_ID)
+    if not isinstance(run_id, str) or not run_id:
+        raise SandboxRuntimeError("Host execution source run id is unavailable")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise SandboxRuntimeError("Host execution source thread id is unavailable")
+
+    cwd = thread_data.get("workspace_path") if thread_data else None
+    return (
+        HostExecutionPlan(
+            source_tool_call_id=tool_call_id,
+            source_run_id=run_id,
+            source_thread_id=thread_id,
+            description=description,
+            requested_command=requested_command,
+            effective_command=effective_command,
+            shell=shell,
+            cwd=cwd if isinstance(cwd, str) and cwd else None,
+            timeout_seconds=timeout_seconds,
+            environment_keys=_host_execution_environment_keys(context),
+            agent_path=_host_execution_agent_path(context),
+            channel_identity_mode=channel_identity_mode,
+            channel_user_id=channel_user_id,
+        ),
+        max_chars,
+    )
+
+
+def _execute_prepared_local_host_command(
+    runtime: Runtime,
+    plan: HostExecutionPlan,
+    max_chars: int,
+) -> tuple[str, int, str, str]:
+    """Spawn exactly one already-approved Local process launch."""
+
+    context = getattr(runtime, "context", None)
+    injected_env = read_active_secrets(context) or None
+    github_env = _github_env_from_runtime(runtime)
+    if github_env:
+        injected_env = {**(injected_env or {}), **github_env}
+    sandbox = ensure_sandbox_initialized(runtime)
+    if not is_local_sandbox(runtime):
+        raise SandboxRuntimeError("Approved host execution requires LocalSandboxProvider")
+    execute_prepared = getattr(sandbox, "execute_prepared_command_result", None)
+    if not callable(execute_prepared):
+        raise SandboxRuntimeError("Local sandbox cannot execute a frozen command")
+    result = execute_prepared(
+        plan.effective_command,
+        shell=plan.shell,
+        env=injected_env,
+        timeout=plan.timeout_seconds,
+    )
+    exit_code = getattr(result, "exit_code", None)
+    output = getattr(result, "output", None)
+    stdout = getattr(result, "stdout", None)
+    stderr = getattr(result, "stderr", None)
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise SandboxRuntimeError("Local command returned no authoritative exit code")
+    if not all(isinstance(value, str) for value in (output, stdout, stderr)):
+        raise SandboxRuntimeError("Local command returned invalid structured output")
+
+    thread_data = get_thread_data(runtime)
+
+    def scrub(value: str) -> str:
+        return _truncate_bash_output(
+            mask_secret_values(
+                mask_local_paths_in_output(value, thread_data),
+                injected_env,
+            ),
+            max_chars,
+        )
+
+    return scrub(output), exit_code, scrub(stdout), scrub(stderr)
+
+
+async def _runtime_with_fresh_skill_secrets(
+    runtime: Runtime,
+) -> tuple[Runtime, dict | None]:
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, dict) or "private_scope" not in context:
+        return runtime, None
+    provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY)
+    if not callable(provider):
+        return runtime, None
+
+    call_context = dict(context)
+    call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+    requested = active_provider_secret_request(call_context)
+    fresh_scoped = await provider(requested) if requested else {}
+    try:
+        active = resolve_provider_active_secrets(call_context, fresh_scoped)
+    finally:
+        if isinstance(fresh_scoped, dict):
+            for values in fresh_scoped.values():
+                if isinstance(values, dict):
+                    values.clear()
+            fresh_scoped.clear()
+    if active:
+        call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
+    call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
+    return _RuntimeContextOverlay(runtime, call_context), call_context
+
+
+def _clear_fresh_skill_runtime(call_context: dict | None) -> None:
+    if call_context is None:
+        return
+    call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
+    active = call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+    if isinstance(active, dict):
+        active.clear()
+
+
+async def _complete_host_execution(
+    port: HostExecutionApprovalPort,
+    approval_id: str,
+    outcome: HostExecutionOutcome,
+) -> None:
+    try:
+        await port.complete_host_execution(approval_id, outcome)
+    except Exception as error:
+        raise RuntimeError(
+            "Host execution completion could not be persisted",
+        ) from error
+
+
+async def _approval_required_bash(
+    runtime: Runtime,
+    description: str,
+    command: str,
+) -> str | Command:
+    """Stage or consume one exact Local host-execution approval."""
+
+    runtime_context = getattr(runtime, "context", None)
+    if isinstance(runtime_context, Mapping) and runtime_context.get(RuntimeContextKeys.NON_INTERACTIVE) is True:
+        return "Error: Host execution approval is unavailable for non-interactive runs"
+
+    try:
+        sandbox = await ensure_sandbox_initialized_async(runtime)
+        plan, max_chars = _prepare_local_host_execution(
+            runtime,
+            sandbox,
+            description=description,
+            requested_command=command,
+        )
+        scan_secrets = await _approval_scan_secrets(runtime)
+        try:
+            if _command_contains_secret(
+                plan.requested_command,
+                plan.effective_command,
+                scan_secrets,
+            ):
+                return "Error: Host command contains secret plaintext and cannot be staged"
+        finally:
+            scan_secrets.clear()
+    except (SandboxError, PermissionError) as error:
+        return f"Error: {_sanitize_error(error, runtime)}"
+    except Exception as error:
+        return f"Error: Unexpected error preparing host execution: {_sanitize_error(error, runtime)}"
+
+    context = getattr(runtime, "context", None)
+    port = context.get(HOST_EXECUTION_APPROVAL_CONTEXT_KEY) if isinstance(context, Mapping) else None
+    if not isinstance(port, HostExecutionApprovalPort):
+        return "Error: Host execution approval is unavailable"
+
+    try:
+        decision = await port.request_host_execution(plan)
+    except Exception:
+        return "Error: Host execution approval is unavailable"
+    if decision.status == "denied":
+        return "Error: Host execution request was denied"
+    if decision.status == "pending":
+        artifact = decision.artifact
+        if artifact is None or artifact.source_run_id != plan.source_run_id or artifact.source_tool_call_id != plan.source_tool_call_id:
+            return "Error: Host execution approval returned an invalid artifact"
+        message = ToolMessage(
+            content="Host command execution requires approval.",
+            tool_call_id=plan.source_tool_call_id,
+            name="bash",
+            artifact={
+                "host_execution_approval": artifact.to_payload(),
+            },
+        )
+        return Command(update={"messages": [message]}, goto=END)
+
+    approval_id = decision.approval_id
+    if not isinstance(approval_id, str) or not approval_id:
+        return "Error: Host execution approval returned an invalid decision"
+
+    from deerflow.sandbox.sandbox import check_authorization_boundary
+
+    try:
+        await check_authorization_boundary(
+            getattr(runtime, "context", None),
+            "before_sandbox_exec",
+        )
+        call_runtime, call_context = await _runtime_with_fresh_skill_secrets(
+            runtime,
+        )
+    except Exception:
+        await _complete_host_execution(
+            port,
+            approval_id,
+            HostExecutionOutcome(
+                status="launch_failed",
+                reason_code="pre_spawn_authorization_failed",
+            ),
+        )
+        return "Error: Approved host execution failed before process launch"
+
+    try:
+        output, exit_code, stdout, stderr = await asyncio.to_thread(
+            _execute_prepared_local_host_command,
+            call_runtime,
+            plan,
+            max_chars,
+        )
+    except Exception:
+        await _complete_host_execution(
+            port,
+            approval_id,
+            HostExecutionOutcome(
+                status="unknown",
+                reason_code="process_outcome_unknown",
+            ),
+        )
+        return "Error: Approved host execution outcome is unknown"
+    finally:
+        _clear_fresh_skill_runtime(call_context)
+
+    await _complete_host_execution(
+        port,
+        approval_id,
+        HostExecutionOutcome(
+            status="finished",
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            result_text=output,
+        ),
+    )
+    return output
+
+
 @tool("bash", parse_docstring=True)
 def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     """Execute a bash command in a Linux environment.
@@ -1676,9 +2097,18 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         github_env = _github_env_from_runtime(runtime)
         if github_env:
             injected_env = {**(injected_env or {}), **github_env}
-        if is_local_sandbox(runtime):
-            if not is_host_bash_allowed():
-                return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
+        runtime_app_config = _runtime_app_config(runtime)
+        if runtime_app_config is None:
+            runtime_app_config = get_app_config()
+        host_execution_mode = _runtime_host_bash_execution_mode(
+            runtime,
+            runtime_app_config,
+        )
+        if host_execution_mode is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED:
+            return "Error: Host execution approval requires the asynchronous bash path"
+        if host_execution_mode is HostBashExecutionMode.LOCAL_DISABLED:
+            return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
+        if host_execution_mode is HostBashExecutionMode.LOCAL_LEGACY_ALLOW:
             ensure_thread_directories_exist(runtime)
             thread_data = get_thread_data(runtime)
             validate_local_bash_command_paths(command, thread_data)
@@ -1689,9 +2119,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             if identity_prefix and not _is_windows():
                 command = identity_prefix + command
             try:
-                from deerflow.config.app_config import get_app_config
-
-                sandbox_cfg = get_app_config().sandbox
+                sandbox_cfg = getattr(runtime_app_config, "sandbox", None)
                 max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
                 command_timeout = sandbox_cfg.bash_command_timeout if sandbox_cfg else None
             except Exception:
@@ -1707,9 +2135,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
         if identity_prefix:
             command = identity_prefix + command
         try:
-            from deerflow.config.app_config import get_app_config
-
-            sandbox_cfg = get_app_config().sandbox
+            sandbox_cfg = getattr(runtime_app_config, "sandbox", None)
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
@@ -1728,7 +2154,26 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
             injected_env.clear()
 
 
-async def _bash_tool_async(runtime: Runtime, description: str, command: str) -> str:
+async def _bash_tool_async(
+    runtime: Runtime,
+    description: str,
+    command: str,
+) -> str | Command:
+    runtime_app_config = _runtime_app_config(runtime)
+    if runtime_app_config is None:
+        runtime_app_config = get_app_config()
+    host_execution_mode = _runtime_host_bash_execution_mode(
+        runtime,
+        runtime_app_config,
+    )
+    if host_execution_mode is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED:
+        return await _approval_required_bash(
+            runtime,
+            description,
+            command,
+        )
+    if host_execution_mode is HostBashExecutionMode.LOCAL_DISABLED:
+        return f"Error: {LOCAL_HOST_BASH_DISABLED_MESSAGE}"
     return await _run_sync_tool_after_async_sandbox_init(
         bash_tool.func,
         runtime,

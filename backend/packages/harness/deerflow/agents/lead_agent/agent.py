@@ -58,6 +58,7 @@ from deerflow.runtime.checkpoint_mode import (
     frozen_checkpoint_channel_mode,
     inject_checkpoint_mode,
 )
+from deerflow.sandbox.security import requires_host_bash_approval
 from deerflow.skills.types import Skill
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
 from deerflow.tracing import build_tracing_callbacks
@@ -738,6 +739,8 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     configured_tools = candidate_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]
+        if requires_host_bash_approval(resolved_app_config):
+            configured_tools = [tool for tool in configured_tools if tool.name != "bash"]
     final_tools, setup = assemble_deferred_tools(
         configured_tools,
         enabled=resolved_app_config.tool_search.enabled,

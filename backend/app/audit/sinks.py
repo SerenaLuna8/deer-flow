@@ -616,6 +616,147 @@ class OperationalAuditSink:
             job_id=_uuid(job_id),
         )
 
+    async def host_execution_approval_requested(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        source_run_id: str,
+        request_id: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._host_execution_process_event(
+            session,
+            action=AuditAction.HOST_EXECUTION_APPROVAL_REQUESTED,
+            project_id=project_id,
+            source_run_id=source_run_id,
+            metadata={},
+            request_id=request_id,
+            occurred_at=occurred_at,
+        )
+
+    async def host_execution_approval_available(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        source_run_id: str,
+        request_id: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._host_execution_process_event(
+            session,
+            action=AuditAction.HOST_EXECUTION_APPROVAL_AVAILABLE,
+            project_id=project_id,
+            source_run_id=source_run_id,
+            metadata={},
+            request_id=request_id,
+            occurred_at=occurred_at,
+        )
+
+    async def host_execution_approval_decided(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        source_run_id: str,
+        decision: str,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        if not is_issued_private_work_context(context):
+            raise AuditAuthorityRejected()
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            AuditAction.HOST_EXECUTION_APPROVAL_DECIDED,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(source_run_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {"decision": decision},
+            request_id=context.request_id,
+            occurred_at=occurred_at,
+        )
+
+    async def host_execution_approval_claimed(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        source_run_id: str,
+        request_id: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_process(AuditProcess.WORKER)
+        await self._host_execution_process_event(
+            session,
+            action=AuditAction.HOST_EXECUTION_APPROVAL_CLAIMED,
+            project_id=project_id,
+            source_run_id=source_run_id,
+            metadata={},
+            request_id=request_id,
+            occurred_at=occurred_at,
+        )
+
+    async def host_execution_approval_terminal(
+        self,
+        session: AsyncSession,
+        *,
+        project_id: uuid.UUID,
+        source_run_id: str,
+        status: str,
+        request_id: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY, AuditProcess.WORKER)
+        await self._host_execution_process_event(
+            session,
+            action=AuditAction.HOST_EXECUTION_APPROVAL_TERMINAL,
+            project_id=project_id,
+            source_run_id=source_run_id,
+            metadata={"status": status},
+            request_id=request_id,
+            occurred_at=occurred_at,
+        )
+
+    async def _host_execution_process_event(
+        self,
+        session: AsyncSession,
+        *,
+        action: AuditAction,
+        project_id: uuid.UUID,
+        source_run_id: str,
+        metadata: dict[str, object],
+        request_id: str | None,
+        occurred_at: datetime,
+    ) -> None:
+        if action not in {
+            AuditAction.HOST_EXECUTION_APPROVAL_REQUESTED,
+            AuditAction.HOST_EXECUTION_APPROVAL_AVAILABLE,
+            AuditAction.HOST_EXECUTION_APPROVAL_CLAIMED,
+            AuditAction.HOST_EXECUTION_APPROVAL_TERMINAL,
+        }:
+            raise AuditAuthorityRejected()
+        await self._service.append(
+            session,
+            AuditActor.trusted_process(self._process_context),
+            action,
+            AuditTarget(
+                AuditTargetKind.RUN,
+                _uuid(source_run_id),
+                _uuid(project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            metadata,
+            request_id=request_id,
+            occurred_at=occurred_at,
+        )
+
     async def memory_remembered(
         self,
         session: AsyncSession,

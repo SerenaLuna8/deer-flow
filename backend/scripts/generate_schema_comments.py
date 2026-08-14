@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 85
-_EXPECTED_COLUMN_COUNT = 1038
+_EXPECTED_TABLE_COUNT = 87
+_EXPECTED_COLUMN_COUNT = 1080
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -52,6 +52,14 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "alembic_version": ("数据库迁移版本", "记录当前数据库采用的 Alembic 架构版本。"),
     "asset_catalog_state": ("资产目录状态", "记录系统资产目录的单例代次与更新时间。"),
     "dead_jobs": ("死信任务", "保存超过重试边界或无法安全重试的后台任务终态。"),
+    "execution_approval_requests": (
+        "执行审批请求",
+        "保存本机命令的一次性审批、领取与终态生命周期。",
+    ),
+    "execution_approval_result_receipts": (
+        "执行审批结果回执",
+        "保存一次已审批本机命令的有界私有执行结果。",
+    ),
     "jobs": ("后台任务", "保存 Worker 可领取、续租、重试和结算的持久化任务。"),
     "project_invitation_rate_limits": ("项目邀请限流", "记录项目邀请码失败尝试的限流窗口。"),
     "runs": ("智能体运行", "保存一次智能体运行的身份、状态、用量与执行租约。"),
@@ -303,11 +311,35 @@ _COLUMN_PHRASES: dict[str, str] = {
     "scan_summary": "安全扫描摘要",
     "scan_decision": "安全扫描结论",
     "url": "不含凭据的服务访问地址",
+    "source_job_id": "产生审批请求的任务标识",
+    "source_job_attempt_id": "产生审批请求的任务尝试标识",
+    "source_agent_path": "产生命令的智能体调用路径",
+    "tool_call_id": "产生命令的工具调用标识",
+    "command_digest": "规范化私有命令的内容摘要",
+    "execution_domain_affinity": "执行域私有快照的不可逆亲和摘要",
+    "decision": "一次性审批决定",
+    "decision_idempotency_key": "审批决定的幂等键摘要",
+    "decision_request_digest": "审批决定请求的内容摘要",
+    "decided_by_user_id": "作出审批决定的用户标识",
+    "decided_at": "审批决定时间",
+    "continuation_run_id": "审批通过后续接运行的标识",
+    "continuation_job_id": "审批通过后续接任务的标识",
+    "execution_job_id": "执行已审批命令的任务标识",
+    "execution_job_attempt_id": "执行已审批命令的任务尝试标识",
+    "claimed_at": "已审批命令的领取时间",
+    "terminal_at": "审批请求进入终态的时间",
+    "approval_id": "执行审批请求标识",
+    "exit_code": "命令进程退出代码",
+    "result_digest": "有界私有执行结果的内容摘要",
 }
 
 # Reused column names can carry materially different privacy and storage
 # semantics. Table-specific entries take precedence over the shared glossary.
 _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
+    (
+        "jobs",
+        "execution_domain_affinity",
+    ): "限制本机命令续接任务的执行域亲和摘要",
     ("skill_versions", "revoked_at"): "不可逆治理撤销时间",
     ("project_channel_group_bindings", "agent_scope"): "活动绑定的智能体范围；软删除后为空",
     ("project_channel_group_bindings", "agent_asset_id"): "活动绑定的智能体资产标识；软删除后为空",
@@ -321,6 +353,26 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("memory_documents", "content"): "当前结构化记忆文档正文（属于私有内容）",
     ("memory_document_versions", "content"): "该版本的结构化记忆文档正文（属于私有内容）",
     ("run_memory_context_snapshots", "content"): "运行时冻结的记忆文档正文（属于私有内容）",
+    (
+        "execution_approval_requests",
+        "command_private_json",
+    ): "规范化且仅限授权边界读取的私有命令计划 JSON（最多 1 MiB）",
+    (
+        "execution_approval_requests",
+        "source_run_id",
+    ): "产生审批请求的运行标识",
+    (
+        "execution_approval_requests",
+        "expires_at",
+    ): "审批请求过期时间",
+    (
+        "execution_approval_result_receipts",
+        "result_private_json",
+    ): "仅限授权边界读取的有界命令结果 JSON（最多 2 MiB）",
+    (
+        "execution_approval_result_receipts",
+        "outcome",
+    ): "命令启动或完成结果",
 }
 
 

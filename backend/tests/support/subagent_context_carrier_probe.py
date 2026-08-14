@@ -6,8 +6,20 @@ import asyncio
 import json
 from types import MethodType, SimpleNamespace
 
+from langchain_core.messages import ToolMessage
+
 from deerflow.subagents.config import SubagentConfig
 from deerflow.subagents.executor import SubagentExecutor
+
+
+class _HostExecutionApprovalPort:
+    async def request_host_execution(self, plan):
+        del plan
+        raise AssertionError("probe must not execute commands")
+
+    async def complete_host_execution(self, approval_id, outcome):
+        del approval_id, outcome
+        raise AssertionError("probe must not execute commands")
 
 
 class _Agent:
@@ -17,10 +29,28 @@ class _Agent:
     async def astream(self, state, *, config, context, stream_mode):
         del state, config, stream_mode
         self.context = context
-        yield {"messages": []}
+        yield {
+            "messages": [
+                ToolMessage(
+                    "approval required",
+                    tool_call_id="inner-call-1",
+                    name="bash",
+                    artifact={
+                        "host_execution_approval": {
+                            "schema_version": 1,
+                            "kind": "local_shell",
+                            "approval_id": "approval-1",
+                            "source_run_id": "run-1",
+                            "source_tool_call_id": "inner-call-1",
+                        },
+                    },
+                ),
+            ],
+        }
 
 
 async def _run() -> dict[str, object]:
+    approval_port = _HostExecutionApprovalPort()
     attribution = {
         "user_id": "user-1",
         "is_subagent": False,
@@ -57,6 +87,8 @@ async def _run() -> dict[str, object]:
         guardrail_attribution=attribution,
         skill_scoped_secrets=secrets,
         skill_secret_provider=lambda: None,
+        host_execution_approval_port=approval_port,
+        host_execution_agent_path=("lead", "subagent:context-probe"),
     )
     agent = _Agent()
 
@@ -87,14 +119,30 @@ async def _run() -> dict[str, object]:
 
     result = await executor._aexecute("probe")
     assert agent.context is not None
-    installed_secrets = agent.context["__skill_scoped_secrets"]
-    installed_attribution = agent.context["__guardrail_attribution"]
+    installed_context = agent.context
+    installed_secrets = installed_context["__skill_scoped_secrets"]
+    installed_attribution = installed_context["__guardrail_attribution"]
+
+    # Private Lead Runs carry an explicit channel-identity clear. Delegation
+    # must preserve that three-state value instead of collapsing None to
+    # "absent", which could inherit stale Worker environment state.
+    executor.channel_user_id = None
+    executor.channel_identity_present = True
+    cleared_agent = _Agent()
+    agent = cleared_agent
+    await executor._aexecute("probe-explicit-clear")
+    assert cleared_agent.context is not None
+    explicit_clear = "channel_user_id" in cleared_agent.context and cleared_agent.context["channel_user_id"] is None
     return {
         "status": result.status.value,
-        "keys": sorted(agent.context),
-        "is_subagent": agent.context["is_subagent"],
+        "keys": sorted(installed_context),
+        "is_subagent": installed_context["is_subagent"],
         "guardrail_is_subagent": installed_attribution["is_subagent"],
         "secret_copy": installed_secrets is not secrets and installed_secrets["/mnt/skills/custom/example/SKILL.md"] is not secrets["/mnt/skills/custom/example/SKILL.md"],
+        "approval_port_identity": (installed_context["__host_execution_approval_port"] is approval_port),
+        "approval_agent_path": installed_context["__host_execution_agent_path"],
+        "approval_artifact": result.host_execution_approval_artifact,
+        "explicit_channel_identity_clear": explicit_clear,
     }
 
 

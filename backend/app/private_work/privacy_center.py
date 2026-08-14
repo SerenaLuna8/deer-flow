@@ -3,8 +3,9 @@
 Only the authenticated account's ended memberships are visible. Exports use a
 PostgreSQL repeatable-read snapshot and stream NDJSON records. File chunks are
 encoded one at a time, so a valid 100 MiB file never requires a 100 MiB Python
-buffer. Credential, envelope, OAuth-token, and secret-bearing tables are never
-queried.
+buffer. Credential envelopes, OAuth tokens, and secret-bearing tables are never
+queried. Host-execution JSON is projected through an explicit scalar allowlist;
+provider policy, host paths, digests, and environment-key names stay private.
 """
 
 from __future__ import annotations
@@ -16,7 +17,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from sqlalchemy import select, text
+from sqlalchemy import case, func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     AsyncSessionTransaction,
@@ -29,6 +30,10 @@ from app.private_work.retention_jobs import (
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
     ChannelConversationRow,
+)
+from deerflow.persistence.execution_approvals import (
+    ExecutionApprovalRequestRow,
+    ExecutionApprovalResultReceiptRow,
 )
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.models.run_event import RunEventRow
@@ -397,7 +402,7 @@ class PrivacyCenterService:
         try:
             yield _export_line(
                 "manifest",
-                schema_version=2,
+                schema_version=3,
                 format="deer-flow-privacy-ndjson",
                 generated_at=generated_at.isoformat(),
                 project={
@@ -454,6 +459,189 @@ class PrivacyCenterService:
                         "updated_at": _iso(row.updated_at),
                     },
                 )
+
+            # Never load the complete frozen command envelope. PostgreSQL
+            # projects only the user-facing logical fields approved for this
+            # owner export; effective host commands, cwd/shell, provider
+            # policy, digests, and environment-key names remain inaccessible.
+            command_plan = ExecutionApprovalRequestRow.command_private_json["plan"]
+            plan_description = command_plan["description"]
+            plan_requested_command = command_plan["requested_command"]
+            plan_timeout_seconds = command_plan["timeout_seconds"]
+            approval_plans = (
+                select(
+                    ExecutionApprovalRequestRow.id,
+                    ExecutionApprovalRequestRow.thread_id,
+                    ExecutionApprovalRequestRow.source_run_id,
+                    ExecutionApprovalRequestRow.tool_call_id,
+                    ExecutionApprovalRequestRow.kind,
+                    ExecutionApprovalRequestRow.status,
+                    ExecutionApprovalRequestRow.decision,
+                    ExecutionApprovalRequestRow.expires_at,
+                    ExecutionApprovalRequestRow.decided_at,
+                    ExecutionApprovalRequestRow.continuation_run_id,
+                    ExecutionApprovalRequestRow.terminal_at,
+                    ExecutionApprovalRequestRow.created_at,
+                    case(
+                        (
+                            func.json_typeof(plan_description) == "string",
+                            plan_description.as_string(),
+                        ),
+                    ).label("description"),
+                    case(
+                        (
+                            func.json_typeof(plan_requested_command) == "string",
+                            plan_requested_command.as_string(),
+                        ),
+                    ).label("requested_command"),
+                    case(
+                        (
+                            func.json_typeof(plan_timeout_seconds) == "number",
+                            plan_timeout_seconds.as_integer(),
+                        ),
+                    ).label("timeout_seconds"),
+                    ExecutionApprovalRequestRow.source_agent_path,
+                )
+                .where(
+                    ExecutionApprovalRequestRow.project_id == scope[0],
+                    ExecutionApprovalRequestRow.owner_user_id == scope[1],
+                )
+                .order_by(
+                    ExecutionApprovalRequestRow.created_at,
+                    ExecutionApprovalRequestRow.id,
+                )
+            )
+            approval_plan_rows = await self._session.stream(
+                approval_plans.execution_options(
+                    yield_per=_STREAM_BATCH_SIZE,
+                )
+            )
+            try:
+                async for row in approval_plan_rows:
+                    yield _export_line(
+                        "execution_approval_plan",
+                        data={
+                            "approval_id": str(row.id),
+                            "thread_id": row.thread_id,
+                            "source_run_id": row.source_run_id,
+                            "source_tool_call_id": row.tool_call_id,
+                            "kind": row.kind,
+                            "status": row.status,
+                            "decision": row.decision,
+                            "description": row.description,
+                            "requested_command": row.requested_command,
+                            "timeout_seconds": row.timeout_seconds,
+                            "source_agent_path": list(
+                                row.source_agent_path,
+                            ),
+                            "continuation_run_id": row.continuation_run_id,
+                            "expires_at": _iso(row.expires_at),
+                            "decided_at": _iso(row.decided_at),
+                            "terminal_at": _iso(row.terminal_at),
+                            "created_at": _iso(row.created_at),
+                        },
+                    )
+            finally:
+                await approval_plan_rows.close()
+
+            # Result output is owner-private user data, like Run events and
+            # files. Select only the frozen result fields; execution Job IDs,
+            # result digests, and any future envelope additions are excluded.
+            result_json = ExecutionApprovalResultReceiptRow.result_private_json
+            result_stdout = result_json["stdout"]
+            result_stderr = result_json["stderr"]
+            result_text = result_json["result_text"]
+            result_reason_code = result_json["reason_code"]
+            stdout_truncated = result_json["stdout_truncated"]
+            stderr_truncated = result_json["stderr_truncated"]
+            result_text_truncated = result_json["result_text_truncated"]
+            approval_results = (
+                select(
+                    ExecutionApprovalResultReceiptRow.id,
+                    ExecutionApprovalResultReceiptRow.approval_id,
+                    ExecutionApprovalResultReceiptRow.thread_id,
+                    ExecutionApprovalResultReceiptRow.outcome,
+                    ExecutionApprovalResultReceiptRow.exit_code,
+                    ExecutionApprovalResultReceiptRow.created_at,
+                    case(
+                        (
+                            func.json_typeof(result_stdout) == "string",
+                            result_stdout.as_string(),
+                        ),
+                    ).label("stdout"),
+                    case(
+                        (
+                            func.json_typeof(result_stderr) == "string",
+                            result_stderr.as_string(),
+                        ),
+                    ).label("stderr"),
+                    case(
+                        (
+                            func.json_typeof(result_text) == "string",
+                            result_text.as_string(),
+                        ),
+                    ).label("result_text"),
+                    case(
+                        (
+                            func.json_typeof(result_reason_code) == "string",
+                            result_reason_code.as_string(),
+                        ),
+                    ).label("reason_code"),
+                    case(
+                        (
+                            func.json_typeof(stdout_truncated) == "boolean",
+                            stdout_truncated.as_boolean(),
+                        ),
+                    ).label("stdout_truncated"),
+                    case(
+                        (
+                            func.json_typeof(stderr_truncated) == "boolean",
+                            stderr_truncated.as_boolean(),
+                        ),
+                    ).label("stderr_truncated"),
+                    case(
+                        (
+                            func.json_typeof(result_text_truncated) == "boolean",
+                            result_text_truncated.as_boolean(),
+                        ),
+                    ).label("result_text_truncated"),
+                )
+                .where(
+                    ExecutionApprovalResultReceiptRow.project_id == scope[0],
+                    ExecutionApprovalResultReceiptRow.owner_user_id == scope[1],
+                )
+                .order_by(
+                    ExecutionApprovalResultReceiptRow.created_at,
+                    ExecutionApprovalResultReceiptRow.id,
+                )
+            )
+            approval_result_rows = await self._session.stream(
+                approval_results.execution_options(
+                    yield_per=_STREAM_BATCH_SIZE,
+                )
+            )
+            try:
+                async for row in approval_result_rows:
+                    yield _export_line(
+                        "execution_approval_result",
+                        data={
+                            "receipt_id": str(row.id),
+                            "approval_id": str(row.approval_id),
+                            "thread_id": row.thread_id,
+                            "outcome": row.outcome,
+                            "exit_code": row.exit_code,
+                            "stdout": row.stdout,
+                            "stderr": row.stderr,
+                            "result_text": row.result_text,
+                            "reason_code": row.reason_code,
+                            "stdout_truncated": row.stdout_truncated,
+                            "stderr_truncated": row.stderr_truncated,
+                            "result_text_truncated": (row.result_text_truncated),
+                            "created_at": _iso(row.created_at),
+                        },
+                    )
+            finally:
+                await approval_result_rows.close()
 
             events = (
                 select(RunEventRow)

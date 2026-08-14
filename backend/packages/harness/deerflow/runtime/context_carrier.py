@@ -58,6 +58,8 @@ class RuntimeContextCarrier:
     trace_id: str | None = None
     run_journal: object | None = None
     memory_archive_context: object | None = None
+    host_execution_approval_port: object | None = None
+    host_execution_agent_path: tuple[str, ...] | None = None
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(<opaque>)"
@@ -118,6 +120,14 @@ class RuntimeContextCarrier:
             (
                 RuntimeContextKeys.MEMORY_ARCHIVE_CONTEXT,
                 self.memory_archive_context,
+            ),
+            (
+                RuntimeContextKeys.HOST_EXECUTION_APPROVAL_PORT,
+                self.host_execution_approval_port,
+            ),
+            (
+                RuntimeContextKeys.HOST_EXECUTION_AGENT_PATH,
+                self.host_execution_agent_path,
             ),
         )
         for key, value in values:

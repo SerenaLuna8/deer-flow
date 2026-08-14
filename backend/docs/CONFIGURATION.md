@@ -14,22 +14,18 @@ Run `make config-upgrade` to merge new fields into your config.
 - **Missing `config_version`** in your config is treated as version 0.
 - Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
-- The current example schema is **version 38**. Version 38 moved the YAML
-  `scheduler:` section (enabled, poll interval, global concurrent Automation cap,
-  and one-time minimum delay) to PostgreSQL system policy at
-  `/admin/settings/system`. Those leaves are rejected in YAML and removed by
-  `make config-upgrade`. Version 37 adds the independent
-  `worker.stream.run_event_notify_enabled` rollback switch; version 36 adds bounded root-text
-  micro-batching, Run-scoped Project MCP session reuse, and Skill read-evidence TTL settings.
-  Version 35 replaces the retired per-URL Project MCP allowlist with
-  `mcp_security.project_remote_allowed_networks`. During upgrade, an omitted or
-  empty version-34 endpoint list becomes an empty deny-all network list; a nonempty endpoint list
-  requires an explicit operator-selected CIDR and makes `make config-upgrade` stop without writing.
-  Version 34 moved the allowlisted Agent runtime leaves, local self-registration switch, and
-  project-quota defaults to PostgreSQL system policy.
-  These leaves are rejected in YAML and removed by `make config-upgrade`; deployment-owned
-  siblings such as custom prompt text and storage paths remain. Version 33 removed the legacy
-  top-level `models:` section, and version 32 removed `authorization:`.
+- A config version newer than the current checkout is rejected rather than
+  guessed or downgraded; use code that explicitly supports that version.
+- The current example schema is **version 1**, the initial public configuration
+  contract. All current settings are part of this baseline, including exact
+  one-time Local Provider command approval, PostgreSQL-owned Automation and
+  runtime policies, bounded stream/MCP/Skill settings, and CIDR-based Project
+  MCP policy. There are no earlier public configuration versions.
+- `make config-upgrade` can normalize an unversioned pre-release file into v1.
+  An empty retired Project MCP endpoint list becomes an empty deny-all network
+  list; a nonempty endpoint list requires an explicit operator-selected CIDR
+  and stops without writing. Removed YAML policy fields are deleted, while
+  deployment-owned siblings such as custom prompt text and storage paths remain.
 
 ## Configuration Sections
 
@@ -192,13 +188,15 @@ auth:
   并撤销当前 durable session；密码变更撤销全部旧 session。
 
 ActWeave 当前没有启用 generic `AuthorizationProvider` 配置。旧顶层 `authorization:` 不会被
-静默忽略：version 32 把它列为 tombstone，直接加载会失败，`make config-upgrade` 会删除它。
+静默忽略：它是 v1 的 fail-closed tombstone，直接加载会失败；从未版本化的预发布配置运行
+`make config-upgrade` 会删除它。
 项目权限继续来自 server-issued ProjectContext、当前 membership/capability、owner scope 和
 side-effect revalidation。
 
 `lower(email)` 是完整数据库 schema 的一部分。已处于受支持 Alembic 链上、marker 为已知
 祖先 revision 的数据库，先备份后只能通过 `make upgrade-db` 显式升级；新装仍只接受空目标并
-运行 `make setup-db`。未知/legacy marker 或 catalog drift 保持 fail-closed，必须换空目标；不要
+运行 `make setup-db`，直接记录首个正式 revision `initial_schema`。未知/legacy marker 或 catalog
+drift 保持 fail-closed，必须换空目标；不要
 在运行时 `ALTER`、手工 stamp，新增 schema 变更必须同时维护 ORM、`full_schema.sql` 与正式迁移。
 
 打包 System Asset 的发布与 schema 升级是两个显式动作。更新 `skills/public/` 并生成新的
@@ -236,9 +234,10 @@ auth:
 
 ### Models
 
-Model configuration is no longer part of `config.yaml`. Since schema version 33,
-top-level `models:` is a rejected tombstone and `make config-upgrade` removes it.
-The setup wizard does not write model definitions to `config.yaml`.
+Model configuration is not part of the v1 `config.yaml` contract. Top-level
+`models:` is a rejected tombstone; `make config-upgrade` removes it while
+normalizing an unversioned pre-release file. The setup wizard does not write
+model definitions to `config.yaml`.
 
 For a new local database, place `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY`,
 `DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID`, and
@@ -396,8 +395,58 @@ ActWeave supports multiple sandbox execution modes. Configure your preferred mod
 ```yaml
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider # Local execution
-  allow_host_bash: false # default; host bash is disabled unless explicitly re-enabled
+  allow_host_bash: false
+  host_execution_approval:
+    mode: disabled # default: host Bash is unavailable
+    request_ttl_seconds: 300
+    max_timeout_seconds: 600
+    execution_domain_id: null
+    execution_domain_label: Worker host environment
 ```
+
+`LocalSandboxProvider` is a host-side path mapper and process runner, not a
+security sandbox. If an interactive private conversation needs Local Bash,
+prefer per-command approval over the legacy direct switch:
+
+```yaml
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+  allow_host_bash: false
+  host_execution_approval:
+    mode: approval_required
+    request_ttl_seconds: 300
+    max_timeout_seconds: 600
+    execution_domain_id: mac-primary-worker
+    execution_domain_label: My local Worker
+```
+
+In `approval_required` mode, every Lead or delegated Agent Bash call freezes its
+exact logical command and requires a separate `allow_once` or `deny` decision.
+This includes Python launched by Bash, pipelines, redirects, and here-documents.
+The standalone `write_file` tool does not require host-execution approval, but a
+Bash command that writes a file does. One approval authorizes one top-level Shell
+launch; the Shell can still start multiple child processes and produce
+irreversible side effects. There is no session/thread/permanent grant.
+
+Local `approval_required` requires an operator-provisioned
+`execution_domain_id`. The ID is private and must be unique per intended Worker
+OS namespace; the Worker additionally binds a secret-free device/namespace,
+uid/gid, runtime-base and sanitized-environment fingerprint, so copying the ID
+to another machine does not make it eligible. `execution_domain_label` is the
+presentation-only approval-card label and must not contain hostnames, usernames,
+paths, secrets, control characters, or Unicode bidirectional controls. A
+continuation can only be claimed by a Worker with the exact frozen affinity;
+an unclaimable queued continuation is cancelled with its Run and quota when the
+approval claim TTL expires.
+
+`allow_host_bash: true` remains a dangerous compatibility switch for immediate
+host execution. It is mutually exclusive with `mode: approval_required`.
+Non-interactive Runs fail closed when approval would be required. Unknown
+providers and custom subclasses of trusted isolated providers also fail closed;
+only the exact built-in AIO/BoxLite/E2B classes (including re-exports of those
+same classes) receive isolated-direct execution authority. See
+[HOST_EXECUTION_APPROVAL.md](./HOST_EXECUTION_APPROVAL.md) for lifecycle,
+recovery, limits, and current validation status.
 
 **AIO Container Execution** (runs sandbox code in an isolated Docker or Apple Container runtime):
 
@@ -411,7 +460,10 @@ sandbox:
 On a native macOS Worker, the local backend prefers Apple Container when its
 CLI is installed. See [APPLE_CONTAINER.md](./APPLE_CONTAINER.md) for the
 supported macOS version, startup commands, live verification, and network
-boundary. Linux and Compose Workers use Docker.
+boundary. Linux and Compose Workers use Docker. Bash in an explicitly trusted
+built-in AIO/BoxLite/E2B provider executes inside that provider without Local approval. Provider startup
+or command failure is reported as a failure and never falls back to Local host
+Bash.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 
@@ -509,16 +561,37 @@ Choose between host-side local execution and container isolation:
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
   allow_host_bash: false
+  host_execution_approval:
+    mode: disabled
+    execution_domain_id: null
+    execution_domain_label: Worker host environment
 ```
 
-`allow_host_bash` is intentionally `false` by default. ActWeave's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
+`allow_host_bash` and host-execution approval are intentionally disabled by
+default. ActWeave's local sandbox is a host-side convenience mode, not a secure
+shell isolation boundary. If you need Bash, prefer `AioSandboxProvider`. For a
+fully trusted, interactive, single-user Local workflow, set
+`host_execution_approval.mode: approval_required` to require one decision per
+command. Only set `allow_host_bash: true` when immediate, unapproved host
+execution is explicitly intended.
 
-When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
+When `LocalSandboxProvider` runs under `make up`, Agent commands run inside the
+`deer-flow-worker` container. In that mode, `sandbox.mounts[].host_path` is
+resolved from the Worker container's filesystem, not directly from your Docker
+host. If you need a Local-provider custom mount in production Docker, bind the
+host directory into the Worker service first, then use the in-container path in
+`config.yaml`:
+
+In Local `approval_required` mode, every configured mount must already have an
+absolute, existing `host_path` when configuration loads. Its `container_path`
+must be absolute and cannot overlap `/mnt/acp-workspace`, `/mnt/user-data`, or
+the configured `skills.container_path`. These stricter startup checks also
+apply to Local Provider re-exports and subclasses.
 
 ```yaml
 # docker/docker-compose.yaml or an override file
 services:
-  gateway:
+  worker:
     volumes:
       - ${DEER_FLOW_REPO_ROOT}/.deer-flow/knowledge:/app/.deer-flow/knowledge:ro
 ```
@@ -532,7 +605,8 @@ sandbox:
       read_only: true
 ```
 
-If the configured `host_path` is not visible to the gateway process, ActWeave logs an error and ignores that mount.
+If the configured `host_path` is not visible to the Worker process, ActWeave
+logs an error and ignores that mount.
 
 **Option 2: AIO Container Sandbox** (isolated; Docker or Apple Container):
 
@@ -723,7 +797,7 @@ before exposing an instance to untrusted input.
 
 | Mode                       | `config.yaml`                                                              | Host Docker socket           | Isolation                                                                                                                                                                     |
 | -------------------------- | -------------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run in the Worker OS namespace. Not a strong boundary — `allow_host_bash` is `false` by default and should stay off for untrusted workloads.                          |
+| `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run in the Worker OS namespace. Not a strong boundary. Keep Bash disabled for untrusted workloads; per-command approval adds consent and one-shot accounting, not isolation. |
 | `aio` (native macOS)       | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | Not mounted                  | Apple Container runs each sandbox in a lightweight Linux VM. Only explicitly configured/run-scoped mounts expose host paths.                                                 |
 | `aio` (Docker / DooD)      | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                    |
 | `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url`                                   | Not mounted                  | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation.                                                                                    |

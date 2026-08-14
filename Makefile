@@ -56,7 +56,7 @@ help:
 	@echo "  make support-bundle                   生成脱敏诊断材料"
 	@echo ""
 	@echo "PostgreSQL 与运维："
-	@echo "  make setup-db                         空库安装当前 head 并初始化"
+	@echo "  make setup-db                         空库安装首版 initial_schema 并初始化"
 	@echo "  make upgrade-db                       显式升级存量库到迁移链头（先备份）"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make upgrade-system-assets            在维护窗口应用新增 System Asset release"

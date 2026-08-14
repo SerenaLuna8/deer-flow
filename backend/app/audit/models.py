@@ -81,6 +81,11 @@ class AuditAction(StrEnum):
     RUN_CANCEL_REQUESTED = "run.cancel_requested"
     RUN_FILES_FINALIZED = "run.files_finalized"
     RUN_TERMINAL = "run.terminal"
+    HOST_EXECUTION_APPROVAL_REQUESTED = "host_execution.approval_requested"
+    HOST_EXECUTION_APPROVAL_AVAILABLE = "host_execution.approval_available"
+    HOST_EXECUTION_APPROVAL_DECIDED = "host_execution.approval_decided"
+    HOST_EXECUTION_APPROVAL_CLAIMED = "host_execution.approval_claimed"
+    HOST_EXECUTION_APPROVAL_TERMINAL = "host_execution.approval_terminal"
     MEMORY_REMEMBER = "memory.remember"
     MEMORY_RECALL_EXECUTED = "memory.recall.executed"
     MEMORY_SEAL_ADMITTED = "memory.seal.admitted"
@@ -352,6 +357,41 @@ _ACTION_CONTRACTS[AuditAction.RUN_TERMINAL] = AuditActionContract(
             "process",
             processes=(AuditProcess.GATEWAY,),
             metadata_equals=(("status", "cancelled"),),
+        ),
+    ),
+)
+for _action in (
+    AuditAction.HOST_EXECUTION_APPROVAL_REQUESTED,
+    AuditAction.HOST_EXECUTION_APPROVAL_AVAILABLE,
+    AuditAction.HOST_EXECUTION_APPROVAL_CLAIMED,
+):
+    _ACTION_CONTRACTS[_action] = _contract(
+        AuditTargetKind.RUN,
+        AuditScope.PROJECT,
+        "process",
+        processes=(AuditProcess.WORKER,),
+    )
+_ACTION_CONTRACTS[AuditAction.HOST_EXECUTION_APPROVAL_DECIDED] = _contract(
+    AuditTargetKind.RUN,
+    AuditScope.PROJECT,
+    "user",
+)
+_ACTION_CONTRACTS[AuditAction.HOST_EXECUTION_APPROVAL_TERMINAL] = AuditActionContract(
+    target_kind=AuditTargetKind.RUN,
+    variants=(
+        _variant(
+            AuditScope.PROJECT,
+            "process",
+            processes=(AuditProcess.WORKER,),
+        ),
+        *(
+            _variant(
+                AuditScope.PROJECT,
+                "process",
+                processes=(AuditProcess.GATEWAY,),
+                metadata_equals=(("status", status),),
+            )
+            for status in ("expired", "cancelled", "unknown")
         ),
     ),
 )
@@ -903,6 +943,20 @@ class RunFilesFinalizedAuditMetadata(_AuditMetadata):
     committed_bytes: StrictInt = Field(ge=0)
 
 
+class HostExecutionApprovalDecisionAuditMetadata(_AuditMetadata):
+    decision: Literal["allow_once", "deny"]
+
+
+class HostExecutionApprovalTerminalAuditMetadata(_AuditMetadata):
+    status: Literal[
+        "finished",
+        "launch_failed",
+        "unknown",
+        "cancelled",
+        "expired",
+    ]
+
+
 class MemoryRememberAuditMetadata(_AuditMetadata):
     # Only the closed durability tag is recorded; memory content never
     # reaches the audit trail.
@@ -1106,6 +1160,8 @@ _AUDIT_METADATA_MODELS[AuditAction.QUOTA_RECONCILED] = QuotaReconciledAuditMetad
 _AUDIT_METADATA_MODELS[AuditAction.RUN_ADMITTED] = RunAdmittedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_FILES_FINALIZED] = RunFilesFinalizedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.RUN_TERMINAL] = RunTerminalAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.HOST_EXECUTION_APPROVAL_DECIDED] = HostExecutionApprovalDecisionAuditMetadata
+_AUDIT_METADATA_MODELS[AuditAction.HOST_EXECUTION_APPROVAL_TERMINAL] = HostExecutionApprovalTerminalAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_REMEMBER] = MemoryRememberAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_RECALL_EXECUTED] = MemoryRecallExecutedAuditMetadata
 _AUDIT_METADATA_MODELS[AuditAction.MEMORY_SEAL_SETTLED] = MemorySealSettledAuditMetadata

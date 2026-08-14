@@ -78,6 +78,7 @@ class EnqueueJob:
     priority: int = 0
     available_at: datetime | None = None
     predecessor_dead_job_id: uuid.UUID | None = None
+    execution_domain_affinity: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.scope) is not JobScope:
@@ -98,6 +99,15 @@ class EnqueueJob:
             raise ValueError("max_attempts must be between 1 and 20")
         if self.retry_safety not in {"safe", "unknown", "unsafe"}:
             raise ValueError("unsupported retry safety")
+        if self.execution_domain_affinity is not None:
+            if _SHA256_HEX.fullmatch(self.execution_domain_affinity) is None:
+                raise ValueError(
+                    "execution domain affinity must be a lowercase SHA-256 digest",
+                )
+            if self.job_type != "private_run":
+                raise ValueError(
+                    "execution domain affinity is supported only for private_run jobs",
+                )
         if not -32768 <= self.priority <= 32767:
             raise ValueError("priority is outside the smallint range")
         if self.available_at is not None and self.available_at.tzinfo is None:
@@ -152,6 +162,7 @@ class JobClaim:
     cancel_requested: bool
     namespace: str | None = None
     origin_trace_id: str | None = None
+    execution_domain_affinity: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,6 +362,7 @@ class JobRepository:
             and row.namespace == request.namespace
             and row.predecessor_dead_job_id == request.predecessor_dead_job_id
             and row.origin_trace_id == request.origin_trace_id
+            and row.execution_domain_affinity == request.execution_domain_affinity
             and row.max_attempts == request.max_attempts
             and row.retry_safety == request.retry_safety
             and row.priority == request.priority
@@ -373,6 +385,7 @@ class JobRepository:
                 automation_occurrence_id=request.occurrence_id,
                 predecessor_dead_job_id=request.predecessor_dead_job_id,
                 origin_trace_id=request.origin_trace_id,
+                execution_domain_affinity=request.execution_domain_affinity,
                 idempotency_key=request.idempotency_key,
                 status="queued",
                 priority=request.priority,
@@ -514,6 +527,7 @@ class JobRepository:
             sa.update(JobAttemptRow)
             .where(
                 JobAttemptRow.job_id == row.id,
+                JobAttemptRow.attempt_number == row.attempt_count,
                 JobAttemptRow.lease_token_hash == row.lease_token_hash,
                 JobAttemptRow.outcome.is_(None),
             )
@@ -628,11 +642,15 @@ class JobRepository:
         worker_id: uuid.UUID,
         capabilities: frozenset[str],
         lease_seconds: int,
+        execution_domain_affinity: str | None = None,
         now: datetime | None = None,
     ) -> JobClaim | None:
-        claimed_at = self._now(now)
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
+        if execution_domain_affinity is not None and _SHA256_HEX.fullmatch(execution_domain_affinity) is None:
+            raise ValueError(
+                "execution domain affinity must be a lowercase SHA-256 digest",
+            )
         job_types = sorted(
             capabilities
             & {
@@ -647,18 +665,45 @@ class JobRepository:
         )
         if not job_types:
             return None
-        claimable = sa.or_(
-            sa.and_(
-                JobRow.status.in_(("queued", "retry_wait")),
-                JobRow.available_at <= claimed_at,
-            ),
-            sa.and_(
-                JobRow.status.in_(("leased", "running")),
-                JobRow.lease_expires_at <= claimed_at,
-            ),
-        )
+        execution_domain_claimable = JobRow.execution_domain_affinity.is_(None)
+        if execution_domain_affinity is not None:
+            execution_domain_claimable = sa.or_(
+                execution_domain_claimable,
+                JobRow.execution_domain_affinity == execution_domain_affinity,
+            )
+        explicit_claimed_at = self._now(now) if now is not None else None
+
+        def claimable_at(value):
+            return sa.or_(
+                sa.and_(
+                    JobRow.status.in_(("queued", "retry_wait")),
+                    JobRow.available_at <= value,
+                ),
+                sa.and_(
+                    JobRow.status.in_(("leased", "running")),
+                    JobRow.lease_expires_at <= value,
+                ),
+            )
+
+        def row_is_claimable(row: JobRow, value: datetime) -> bool:
+            if row.status in {"queued", "retry_wait"}:
+                return row.available_at <= value
+            return row.status in {"leased", "running"} and row.lease_expires_at is not None and row.lease_expires_at <= value
+
         skipped_ids: set[uuid.UUID] = set()
         for _ in range(100):
+            # Evaluate candidate eligibility against PostgreSQL time. Worker
+            # clock skew must not make a live lease or future Job appear due.
+            candidate_at = (
+                explicit_claimed_at
+                if explicit_claimed_at is not None
+                else await self.session.scalar(
+                    sa.select(sa.func.clock_timestamp()),
+                )
+            )
+            if not isinstance(candidate_at, datetime) or candidate_at.tzinfo is None:
+                raise RuntimeError("database claim clock is unavailable")
+            candidate_claimable = claimable_at(candidate_at)
             candidate_statement = (
                 sa.select(
                     JobRow.id,
@@ -668,7 +713,8 @@ class JobRepository:
                 )
                 .where(
                     JobRow.job_type.in_(job_types),
-                    claimable,
+                    candidate_claimable,
+                    execution_domain_claimable,
                 )
                 .order_by(
                     JobRow.priority.desc(),
@@ -704,12 +750,40 @@ class JobRepository:
                         .where(
                             JobRow.id == candidate.id,
                             JobRow.job_type.in_(job_types),
-                            claimable,
+                            execution_domain_claimable,
                         )
                         .with_for_update(of=JobRow, skip_locked=True)
                     )
                 ).scalar_one_or_none()
                 if row is None:
+                    await savepoint.rollback()
+                    skipped_ids.add(candidate.id)
+                    continue
+                if row.status in {"leased", "running"}:
+                    active_attempt_id = await self.session.scalar(
+                        sa.select(JobAttemptRow.id)
+                        .where(
+                            JobAttemptRow.job_id == row.id,
+                            JobAttemptRow.attempt_number == row.attempt_count,
+                            JobAttemptRow.lease_token_hash == row.lease_token_hash,
+                            JobAttemptRow.outcome.is_(None),
+                        )
+                        .with_for_update(of=JobAttemptRow),
+                    )
+                    if active_attempt_id is None:
+                        raise RuntimeError(
+                            "active job attempt authority is missing",
+                        )
+                claimed_at = (
+                    explicit_claimed_at
+                    if explicit_claimed_at is not None
+                    else await self.session.scalar(
+                        sa.select(sa.func.clock_timestamp()),
+                    )
+                )
+                if not isinstance(claimed_at, datetime) or claimed_at.tzinfo is None:
+                    raise RuntimeError("database claim clock is unavailable")
+                if not row_is_claimable(row, claimed_at):
                     await savepoint.rollback()
                     skipped_ids.add(candidate.id)
                     continue
@@ -808,6 +882,7 @@ class JobRepository:
                 cancel_requested=False,
                 namespace=row.namespace,
                 origin_trace_id=row.origin_trace_id,
+                execution_domain_affinity=row.execution_domain_affinity,
             )
         return None
 
@@ -839,41 +914,53 @@ class JobRepository:
         lease_seconds: int,
         now: datetime | None = None,
     ) -> JobHeartbeat | Literal[False]:
-        heartbeat_at = self._now(now)
         if lease_seconds < 1:
             raise ValueError("lease_seconds must be positive")
         token_hash = _lease_token_hash(lease_token)
-        updated = (
+        row = (
             await self.session.execute(
-                sa.update(JobRow)
+                sa.select(JobRow)
                 .where(
                     JobRow.id == job_id,
                     JobRow.status.in_(("leased", "running")),
                     JobRow.lease_token_hash == token_hash,
-                    JobRow.lease_expires_at > heartbeat_at,
                 )
-                .values(
-                    heartbeat_at=heartbeat_at,
-                    lease_expires_at=heartbeat_at + timedelta(seconds=lease_seconds),
-                    updated_at=heartbeat_at,
-                )
-                .returning(JobRow.id, JobRow.cancel_requested_at)
+                .with_for_update(of=JobRow)
             )
-        ).one_or_none()
-        if updated is None:
+        ).scalar_one_or_none()
+        if row is None:
             return False
-        attempt_result = await self.session.execute(
-            sa.update(JobAttemptRow)
-            .where(
-                JobAttemptRow.job_id == job_id,
-                JobAttemptRow.lease_token_hash == token_hash,
-                JobAttemptRow.outcome.is_(None),
+
+        # The active attempt is part of the lease authority. Lock it before
+        # sampling production time so a wait on either row cannot carry a
+        # pre-lock timestamp past the old deadline and revive an expired lease.
+        attempt = (
+            await self.session.execute(
+                sa.select(JobAttemptRow)
+                .where(
+                    JobAttemptRow.job_id == job_id,
+                    JobAttemptRow.attempt_number == row.attempt_count,
+                    JobAttemptRow.lease_token_hash == token_hash,
+                    JobAttemptRow.outcome.is_(None),
+                )
+                .with_for_update(of=JobAttemptRow)
             )
-            .values(heartbeat_at=heartbeat_at)
-        )
-        if attempt_result.rowcount != 1:
+        ).scalar_one_or_none()
+        if attempt is None:
             raise RuntimeError("active job attempt authority is missing")
-        return JobHeartbeat(cancel_requested=updated.cancel_requested_at is not None)
+
+        heartbeat_at = self._now(now) if now is not None else await self.session.scalar(sa.select(sa.func.clock_timestamp()))
+        if not isinstance(heartbeat_at, datetime) or heartbeat_at.tzinfo is None:
+            raise RuntimeError("database heartbeat clock is unavailable")
+        if row.lease_expires_at is None or row.lease_expires_at <= heartbeat_at:
+            return False
+
+        row.heartbeat_at = heartbeat_at
+        row.lease_expires_at = heartbeat_at + timedelta(seconds=lease_seconds)
+        row.updated_at = heartbeat_at
+        attempt.heartbeat_at = heartbeat_at
+        await self.session.flush()
+        return JobHeartbeat(cancel_requested=row.cancel_requested_at is not None)
 
     async def request_cancel(
         self,
@@ -1255,6 +1342,7 @@ class JobRepository:
                 and existing_successor.automation_occurrence_id == predecessor.automation_occurrence_id
                 and existing_successor.namespace == predecessor.namespace
                 and existing_successor.origin_trace_id == predecessor.origin_trace_id
+                and existing_successor.execution_domain_affinity == predecessor.execution_domain_affinity
                 and existing_successor.status == "queued"
                 and existing_successor.attempt_count == 0
                 and existing_successor.retry_safety == "safe"
@@ -1274,6 +1362,7 @@ class JobRepository:
             priority=predecessor.priority,
             predecessor_dead_job_id=predecessor.id,
             origin_trace_id=predecessor.origin_trace_id,
+            execution_domain_affinity=predecessor.execution_domain_affinity,
         )
         successor_id, created = await self._enqueue(request)
         if created:
@@ -1289,6 +1378,7 @@ class JobRepository:
                         JobRow.run_id == predecessor.run_id,
                         JobRow.automation_occurrence_id == predecessor.automation_occurrence_id,
                         JobRow.predecessor_dead_job_id == predecessor.id,
+                        JobRow.execution_domain_affinity == predecessor.execution_domain_affinity,
                         JobRow.status == "queued",
                         JobRow.attempt_count == 0,
                         JobRow.retry_safety == "safe",

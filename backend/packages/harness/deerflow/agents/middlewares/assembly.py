@@ -511,6 +511,27 @@ def build_runtime_middlewares(
             )
         )
 
+    host_execution_batch_barrier: AgentMiddleware | None = None
+    if include_security_wrappers and app_config is not None:
+        from deerflow.sandbox.security import (
+            HostBashExecutionMode,
+            resolve_host_bash_execution_mode,
+        )
+
+        if resolve_host_bash_execution_mode(app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED:
+            from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
+                HostExecutionBatchBarrierMiddleware,
+            )
+
+            host_execution_batch_barrier = _layer(
+                HostExecutionBatchBarrierMiddleware(),
+                layer_id="host_execution_batch_barrier",
+                phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+                slot=5,
+                why=("Approval-capable tool batches are serialized before any ToolNode sibling can start."),
+            )
+            tail.append(host_execution_batch_barrier)
+
     if include_security_wrappers and guardrail_middleware is None:
         from deerflow.guardrails.middleware import GuardrailMiddleware
         from deerflow.reflection import resolve_variable
@@ -611,6 +632,7 @@ def build_runtime_middlewares(
             _MiddlewareOrderInvariant(
                 name="private tool-call boundary",
                 registration_order=(
+                    host_execution_batch_barrier,
                     sandbox_audit_middleware,
                     read_before_write_middleware,
                     tool_progress_middleware,

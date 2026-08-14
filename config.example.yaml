@@ -1,4 +1,4 @@
-config_version: 38
+config_version: 1
 log_level: info
 logging:
   enhance:
@@ -89,7 +89,28 @@ uploads:
   pdf_converter: auto
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Local Provider launches commands in the Worker's OS namespace. Keep direct
+  # host Bash disabled unless the deployment is fully trusted. This flag and
+  # host_execution_approval.mode=approval_required are mutually exclusive.
   allow_host_bash: false
+  host_execution_approval:
+    # Local Provider only: approval_required stages every Lead/subagent Bash
+    # call for one exact, single-use host launch. It does not turn Local into a
+    # sandbox. Non-Local providers execute inside their selected sandbox without
+    # this approval and never fall back to Local on failure.
+    mode: disabled
+    # Pending user-decision TTL. Non-interactive Runs fail closed.
+    request_ttl_seconds: 300
+    # Approval-side cap; the actual timeout is also bounded by
+    # sandbox.bash_command_timeout.
+    max_timeout_seconds: 600
+    # Required when Local mode is approval_required. Provision a stable ID for
+    # this Worker execution domain; keep it private and unique per intended
+    # host/OS namespace. It is never returned to the browser.
+    execution_domain_id: null
+    # Safe presentation-only label for the approval card. Do not include a
+    # hostname, username, path, credential, or other private identifier.
+    execution_domain_label: Worker host environment
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000
   ls_output_max_chars: 20000

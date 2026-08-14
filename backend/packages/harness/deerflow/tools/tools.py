@@ -5,7 +5,7 @@ from langchain.tools import BaseTool
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.reflection import resolve_variable
-from deerflow.sandbox.security import is_host_bash_allowed
+from deerflow.sandbox.security import is_host_bash_available
 from deerflow.tools.builtins import (
     ask_clarification_tool,
     list_uploaded_files_tool,
@@ -78,7 +78,7 @@ def get_available_tools(
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
-    if not is_host_bash_allowed(config):
+    if not is_host_bash_available(config):
         tool_configs = [tool for tool in tool_configs if not _is_host_bash_tool(tool)]
 
     loaded_tools_raw = [(cfg, resolve_variable(cfg.use, BaseTool)) for cfg in tool_configs]

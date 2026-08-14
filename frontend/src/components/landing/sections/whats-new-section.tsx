@@ -52,8 +52,8 @@ export function WhatsNewSection({ className }: { className?: string }) {
   return (
     <Section
       className={cn("", className)}
-      title="Whats New in ActWeave 2.0"
-      subtitle="ActWeave is now evolving from a Deep Research agent into a full-stack Super Agent"
+      title="Meet ActWeave 1.0"
+      subtitle="The first public release of a project-first, full-stack Super Agent"
     >
       <div className="flex w-full items-center justify-center">
         <MagicBento data={features} />

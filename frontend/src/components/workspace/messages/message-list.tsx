@@ -310,6 +310,7 @@ export function MessageList({
   canDeleteFiles = false,
   enableSidecarActions = true,
   sidecarSurface = false,
+  trailingContent,
   initialScroll = "smooth",
   resizeScroll = "smooth",
 }: {
@@ -347,6 +348,7 @@ export function MessageList({
   canDeleteFiles?: boolean;
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
+  trailingContent?: ReactNode;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
 }) {
@@ -1607,6 +1609,11 @@ export function MessageList({
                 <RunActivity startTime={turnStartTime} />
               </div>
             )}
+          {trailingContent ? (
+            <div className="w-full" data-testid="message-list-trailing-content">
+              {trailingContent}
+            </div>
+          ) : null}
           <div style={{ height: `${paddingBottom}px` }} />
         </ConversationContent>
       </Conversation>

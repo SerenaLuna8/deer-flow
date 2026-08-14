@@ -2137,6 +2137,42 @@ export interface Translations {
     answeredValue: (value: string) => string;
   };
 
+  executionApproval: {
+    title: string;
+    localHost: string;
+    riskTitle: string;
+    riskWarning: string;
+    command: string;
+    workingDirectory: string;
+    sourceAgent: string;
+    effectiveUser: string;
+    timeout: string;
+    timeoutSeconds: (seconds: number) => string;
+    expiresIn: (seconds: number) => string;
+    allowOnce: string;
+    deny: string;
+    allowing: string;
+    denying: string;
+    decisionFailed: string;
+    exitCode: (code: number) => string;
+    reason: string;
+    finishedWarning: string;
+    unknownTitle: string;
+    unknownWarning: string;
+    statuses: Record<
+      | "pending"
+      | "approved"
+      | "claimed"
+      | "finished"
+      | "launch_failed"
+      | "unknown"
+      | "denied"
+      | "expired"
+      | "cancelled",
+      string
+    >;
+  };
+
   // Uploads
   uploads: {
     uploading: string;

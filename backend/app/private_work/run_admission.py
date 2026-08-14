@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import copy
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -29,6 +31,14 @@ from app.private_work.errors import (
     PrivateWorkRunModelSelectionLocked,
     PrivateWorkRunModelUnavailable,
     PrivateWorkUnavailable,
+)
+from app.private_work.execution_approval_audit import (
+    NoopHostExecutionApprovalAudit,
+)
+from app.private_work.execution_approval_lifecycle import (
+    ExecutionApprovalPrivateLifecycleConflict,
+    lock_execution_approval_private_rows,
+    reconcile_locked_execution_approval_and_continuation,
 )
 from app.private_work.execution_profile import (
     RUN_EXECUTION_PROFILE_KWARG,
@@ -80,6 +90,9 @@ from deerflow.persistence.channel_connections import (
     ChannelConnectionRow,
     ChannelConversationRow,
     ProjectChannelInstanceRow,
+)
+from deerflow.runtime.host_execution_approval import (
+    HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.trace_context import generate_trace_id, normalize_trace_id
@@ -139,6 +152,10 @@ class PrivateRunAdmissionServerContext:
     inbound_authority: PrivateRunInboundAuthority | None = None
     inbound_delivery: PrivateRunInboundDelivery | None = None
     origin_trace_id: str | None = None
+    host_execution_approval_id: uuid.UUID | None = None
+    host_execution_decision_digest: str | None = None
+    host_execution_domain_affinity: str | None = None
+    channel_user_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.non_interactive) is not bool:
@@ -158,6 +175,41 @@ class PrivateRunAdmissionServerContext:
             if normalized is None:
                 raise ValueError("origin_trace_id is invalid")
             object.__setattr__(self, "origin_trace_id", normalized)
+        if self.host_execution_approval_id is not None and type(self.host_execution_approval_id) is not uuid.UUID:
+            raise TypeError("host_execution_approval_id must be a UUID")
+        if (
+            len(
+                {
+                    self.host_execution_approval_id is None,
+                    self.host_execution_decision_digest is None,
+                    self.host_execution_domain_affinity is None,
+                },
+            )
+            != 1
+        ):
+            raise TypeError(
+                "host execution approval id, decision digest, and domain affinity must be supplied together",
+            )
+        if (
+            self.host_execution_decision_digest is not None
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                self.host_execution_decision_digest,
+            )
+            is None
+        ):
+            raise ValueError("host_execution_decision_digest is invalid")
+        if (
+            self.host_execution_domain_affinity is not None
+            and re.fullmatch(
+                r"[0-9a-f]{64}",
+                self.host_execution_domain_affinity,
+            )
+            is None
+        ):
+            raise ValueError("host_execution_domain_affinity is invalid")
+        if self.channel_user_id is not None and (not isinstance(self.channel_user_id, str) or not self.channel_user_id or len(self.channel_user_id) > HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH):
+            raise ValueError("channel_user_id is invalid")
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +233,15 @@ class PrivateRunAdmissionQuotaPort(Protocol):
         run: PrivateRunRecord,
     ) -> None: ...
 
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None: ...
+
 
 class PrivateRunAdmissionAuditPort(Protocol):
     async def run_admitted(
@@ -189,6 +250,28 @@ class PrivateRunAdmissionAuditPort(Protocol):
         context: PrivateWorkContext,
         run: PrivateRunRecord,
         job: AdmittedJobRecord,
+    ) -> None: ...
+
+    async def run_cancel_requested(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> None: ...
+
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
     ) -> None: ...
 
 
@@ -279,6 +362,16 @@ class _NoopPrivateRunAdmissionQuota:
     ) -> None:
         del session, context, run
 
+    async def release_concurrent_run(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        request_id: str,
+    ) -> None:
+        del session, scope, run_id, request_id
+
 
 class _NoopPrivateRunAdmissionAudit:
     async def run_admitted(
@@ -289,6 +382,39 @@ class _NoopPrivateRunAdmissionAudit:
         job: AdmittedJobRecord,
     ) -> None:
         del session, context, run, job
+
+    async def run_cancel_requested(
+        self,
+        session: AsyncSession,
+        context: PrivateWorkContext,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+    ) -> None:
+        del session, context, run_id, job_id
+
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None:
+        del (
+            session,
+            scope,
+            run_id,
+            job_id,
+            job_type,
+            status,
+            public_error_code,
+            request_id,
+        )
 
 
 class PrivateRunAdmissionService:
@@ -322,6 +448,17 @@ class PrivateRunAdmissionService:
         )
         self._quota = quota or _NoopPrivateRunAdmissionQuota()
         self._audit = audit or _NoopPrivateRunAdmissionAudit()
+        self._execution_approval_audit = (
+            self._audit
+            if callable(
+                getattr(
+                    self._audit,
+                    "host_execution_approval_terminal",
+                    None,
+                ),
+            )
+            else NoopHostExecutionApprovalAudit()
+        )
         self._human_input_response_promoter = human_input_response_promoter
 
     async def _persisted_snapshot(
@@ -477,17 +614,35 @@ class PrivateRunAdmissionService:
         kwargs: dict[str, object],
         server_context: PrivateRunAdmissionServerContext | None,
     ) -> dict[str, object]:
-        if server_context is None:
-            return kwargs
-        if type(server_context) is not PrivateRunAdmissionServerContext:
+        if server_context is not None and type(server_context) is not PrivateRunAdmissionServerContext:
             raise TypeError("PrivateRunAdmissionServerContext is required")
-        if not server_context.non_interactive:
-            return kwargs
         result = dict(kwargs)
         config_value = result.get("config")
         config = dict(config_value) if isinstance(config_value, dict) else {}
         context_value = config.get("context")
         runtime_context = dict(context_value) if isinstance(context_value, dict) else {}
+
+        # The browser/request context is never channel authority. Persist an
+        # explicit clear for ordinary Runs, or the exact server-owned identity
+        # resolved from a verified inbound connection / approval continuation.
+        channel_user_id = server_context.channel_user_id if server_context is not None else None
+        inbound_authority = server_context.inbound_authority if server_context is not None else None
+        if inbound_authority is not None:
+            if channel_user_id is not None and channel_user_id != inbound_authority.external_account_id:
+                raise TypeError("channel_user_id conflicts with inbound authority")
+            channel_user_id = inbound_authority.external_account_id
+        runtime_context["channel_user_id"] = channel_user_id
+        config["context"] = runtime_context
+        result["config"] = config
+
+        if server_context is None:
+            return result
+        if server_context.host_execution_approval_id is not None:
+            result["host_execution_approval_id"] = str(
+                server_context.host_execution_approval_id,
+            )
+        if not server_context.non_interactive:
+            return result
         runtime_context["non_interactive"] = True
         config["context"] = runtime_context
         result["config"] = config
@@ -554,6 +709,57 @@ class PrivateRunAdmissionService:
                     raise PrivateWorkNotFound(context.request_id)
                 if inbound_agent is not None and (thread.agent_asset_id != inbound_agent[0] or thread.agent_scope != inbound_agent[1]):
                     raise PrivateWorkNotFound(context.request_id)
+
+                locked_execution_approvals = await lock_execution_approval_private_rows(
+                    session,
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    thread_id=thread_id,
+                    active_only=True,
+                )
+                approval_checked_at = await session.scalar(
+                    select(func.clock_timestamp()),
+                )
+                if not isinstance(approval_checked_at, datetime) or approval_checked_at.tzinfo is None:
+                    raise PrivateWorkUnavailable(context.request_id)
+                approval_checked_at = approval_checked_at.astimezone(UTC)
+                active_execution_approval = locked_execution_approvals.rows[0] if locked_execution_approvals.rows else None
+                if active_execution_approval is not None:
+                    await reconcile_locked_execution_approval_and_continuation(
+                        session,
+                        active_execution_approval,
+                        locked=locked_execution_approvals,
+                        context=context,
+                        now=approval_checked_at,
+                        quota=self._quota,
+                        run_audit=self._audit,
+                        approval_audit=self._execution_approval_audit,
+                    )
+                if active_execution_approval is not None and active_execution_approval.status not in {
+                    "staged",
+                    "pending",
+                    "approved",
+                    "claimed",
+                }:
+                    active_execution_approval = None
+                continuation_approval_id = server_context.host_execution_approval_id if server_context is not None else None
+                if continuation_approval_id is None:
+                    if active_execution_approval is not None:
+                        raise PrivateWorkConflict(context.request_id)
+                else:
+                    decision_digest = server_context.host_execution_decision_digest if server_context is not None else None
+                    if (
+                        active_execution_approval is None
+                        or active_execution_approval.id != continuation_approval_id
+                        or active_execution_approval.status != "approved"
+                        or active_execution_approval.decision != "allow_once"
+                        or active_execution_approval.decision_request_digest != decision_digest
+                        or active_execution_approval.execution_domain_affinity != server_context.host_execution_domain_affinity
+                        or active_execution_approval.expires_at <= approval_checked_at
+                        or active_execution_approval.continuation_run_id not in {None, server_request.run_id}
+                        or (active_execution_approval.continuation_run_id is None) != (active_execution_approval.continuation_job_id is None)
+                    ):
+                        raise PrivateWorkConflict(context.request_id)
 
                 runs = PrivateRunRepository(session)
                 jobs = PrivateRunJobRepository(session)
@@ -631,6 +837,7 @@ class PrivateRunAdmissionService:
                         or locked_existing is None
                         or locked_existing.job_id != existing_job.job_id
                         or locked_existing.origin_trace_id != existing_job.origin_trace_id
+                        or existing_job.execution_domain_affinity != (server_context.host_execution_domain_affinity if continuation_approval_id is not None else None)
                         or not self._is_same_request(
                             locked_existing,
                             thread_id=thread_id,
@@ -638,6 +845,19 @@ class PrivateRunAdmissionService:
                         )
                     ):
                         raise PrivateWorkConflict(context.request_id)
+                    if continuation_approval_id is not None:
+                        if active_execution_approval is None:
+                            raise PrivateWorkConflict(context.request_id)
+                        if active_execution_approval.continuation_run_id is None and active_execution_approval.continuation_job_id is None:
+                            active_execution_approval.continuation_run_id = locked_existing.run_id
+                            active_execution_approval.continuation_job_id = existing_job.job_id
+                            active_execution_approval.version += 1
+                            active_execution_approval.updated_at = datetime.now(
+                                UTC,
+                            )
+                            await session.flush()
+                        elif active_execution_approval.continuation_run_id != locked_existing.run_id or active_execution_approval.continuation_job_id != existing_job.job_id:
+                            raise PrivateWorkConflict(context.request_id)
                     if inbound_authority is not None and inbound_delivery is not None:
                         await inbound_deliveries.bind(
                             scope=context.resource_scope,
@@ -713,12 +933,28 @@ class PrivateRunAdmissionService:
                     scope=job_scope,
                     run_id=run.run_id,
                     origin_trace_id=run.origin_trace_id,
+                    execution_domain_affinity=(server_context.host_execution_domain_affinity if continuation_approval_id is not None else None),
                 )
                 run = await runs.attach_job(
                     scope=context.resource_scope,
                     run_id=run.run_id,
                     job_id=job.job_id,
                 )
+                if continuation_approval_id is not None:
+                    if active_execution_approval is None:
+                        raise PrivateWorkConflict(context.request_id)
+                    if active_execution_approval.continuation_run_id is not None or active_execution_approval.continuation_job_id is not None:
+                        raise PrivateWorkConflict(context.request_id)
+                    active_execution_approval.continuation_run_id = run.run_id
+                    active_execution_approval.continuation_job_id = job.job_id
+                    active_execution_approval.version += 1
+                    linked_at = await session.scalar(
+                        select(func.clock_timestamp()),
+                    )
+                    if not isinstance(linked_at, datetime) or linked_at.tzinfo is None:
+                        raise PrivateWorkUnavailable(context.request_id)
+                    active_execution_approval.updated_at = linked_at.astimezone(UTC)
+                    await session.flush()
                 if inbound_authority is not None and inbound_delivery is not None:
                     await inbound_deliveries.bind(
                         scope=context.resource_scope,
@@ -758,6 +994,8 @@ class PrivateRunAdmissionService:
         except AssetValidationFailed:
             raise PrivateWorkConflict(context.request_id) from None
         except AssetStorageUnavailable:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except ExecutionApprovalPrivateLifecycleConflict:
             raise PrivateWorkUnavailable(context.request_id) from None
         except (JobIdempotencyConflict, PrivateRunConflict):
             raise PrivateWorkConflict(context.request_id) from None

@@ -47,6 +47,7 @@ from deerflow.config.worker_config import WorkerConfig
 logger = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
+CURRENT_CONFIG_VERSION = 1
 LEGACY_CONFIG_TOMBSTONES = frozenset(
     {
         "agents_api",
@@ -453,47 +454,26 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _check_config_version(cls, config_data: dict, config_path: Path) -> None:
-        """Check if the user's config.yaml is outdated compared to config.example.yaml.
+        """Check whether this checkout understands the user's config schema.
 
-        Emits a warning if the user's config_version is lower than the example's.
-        Missing config_version is treated as version 0 (pre-versioning).
+        Emits a warning if the user's config_version is lower than the runtime's
+        and rejects a version newer than this checkout can interpret. Missing
+        config_version is treated as version 0 (pre-versioning).
         """
+        del config_path
         try:
             user_version = int(config_data.get("config_version", 0))
         except (TypeError, ValueError):
             user_version = 0
 
-        # Find config.example.yaml by searching config.yaml's directory and its parents
-        example_path = None
-        search_dir = config_path.parent
-        for _ in range(5):  # search up to 5 levels
-            candidate = search_dir / "config.example.yaml"
-            if candidate.exists():
-                example_path = candidate
-                break
-            parent = search_dir.parent
-            if parent == search_dir:
-                break
-            search_dir = parent
-        if example_path is None:
-            return
+        if user_version > CURRENT_CONFIG_VERSION:
+            raise ValueError(f"CONFIG_VERSION_UNSUPPORTED: config.yaml version {user_version} is newer than the supported version {CURRENT_CONFIG_VERSION}; use a checkout that supports this configuration")
 
-        try:
-            with open(example_path, encoding="utf-8") as f:
-                example_data = yaml.safe_load(f)
-            raw = example_data.get("config_version", 0) if example_data else 0
-            try:
-                example_version = int(raw)
-            except (TypeError, ValueError):
-                example_version = 0
-        except Exception:
-            return
-
-        if user_version < example_version:
+        if user_version < CURRENT_CONFIG_VERSION:
             logger.warning(
                 "Your config.yaml (version %d) is outdated — the latest version is %d. Run `make config-upgrade` to merge new fields into your config.",
                 user_version,
-                example_version,
+                CURRENT_CONFIG_VERSION,
             )
 
     @classmethod
@@ -532,6 +512,21 @@ class AppConfig(BaseModel):
         ``setdefault`` keeps the first entry on duplicate names, preserving the
         prior ``next(...)`` first-match semantics.
         """
+        from deerflow.sandbox.security import uses_local_sandbox_provider_use
+
+        if self.sandbox.host_execution_approval.mode == "approval_required" and uses_local_sandbox_provider_use(
+            self.sandbox.use,
+        ):
+            skills_path = self.skills.container_path.rstrip("/") or "/"
+            for mount in self.sandbox.mounts:
+                container_path = mount.container_path.rstrip("/") or "/"
+                if container_path == skills_path or container_path.startswith(
+                    skills_path + "/",
+                ):
+                    raise ValueError(
+                        "Local approval mode rejects sandbox.mounts entries under skills.container_path",
+                    )
+
         models_by_name: dict[str, ModelConfig] = {}
         for model in self.models:
             models_by_name.setdefault(model.name, model)

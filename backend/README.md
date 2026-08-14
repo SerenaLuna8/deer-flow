@@ -29,7 +29,8 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 - Run 固定精确的 Agent、模型、Skill、MCP 和 Credential 引用快照。
 - System 资产定义由 packaged catalog 初始化；项目资产使用不可变版本。
 - Credential 明文只在 Worker 的精确执行边界解密，不进入 API、日志或快照。
-- `full_schema.sql` 用于新空库；运行时从不自动创建、迁移或修复 schema。
+- `full_schema.sql` 用于新空库并直接记录首个正式 revision `initial_schema`；运行时
+  从不自动创建、迁移或修复 schema。
 
 ## 开发命令
 

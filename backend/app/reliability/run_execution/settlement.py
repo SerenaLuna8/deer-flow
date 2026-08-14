@@ -7,6 +7,12 @@ import asyncio
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.private_work.execution_approval_audit import (
+    NoopHostExecutionApprovalAudit,
+)
+from app.private_work.execution_approval_lifecycle import (
+    converge_execution_approvals_for_terminal_job,
+)
 from app.reliability.run_execution.ports import (
     NoopPrivateRunExecutionAudit,
     NoopPrivateRunExecutionQuota,
@@ -46,6 +52,17 @@ class PrivateRunJobTerminalPort:
         self._automation_reconciliation_pending = asyncio.Event()
         self._quota = quota or NoopPrivateRunExecutionQuota()
         self._audit = audit or NoopPrivateRunExecutionAudit()
+        self._execution_approval_audit = (
+            self._audit
+            if callable(
+                getattr(
+                    self._audit,
+                    "host_execution_approval_terminal",
+                    None,
+                ),
+            )
+            else NoopHostExecutionApprovalAudit()
+        )
 
     def take_automation_reconciliation_pending(self) -> bool:
         if not self._automation_reconciliation_pending.is_set():
@@ -100,6 +117,30 @@ class PrivateRunJobTerminalPort:
         )
         if project_exists is None or membership_version is None:
             raise RuntimeError("private job terminal membership is missing")
+        terminal_run = await session.scalar(
+            sa.select(RunRow.run_id)
+            .where(
+                RunRow.project_id == event.project_id,
+                RunRow.owner_user_id == event.owner_user_id,
+                RunRow.run_id == event.run_id,
+                RunRow.job_id == event.job_id,
+            )
+            .with_for_update(of=RunRow)
+        )
+        if terminal_run is None:
+            raise RuntimeError("private terminal Run authority is missing")
+        # Job settlement owns Job first; take Run before approval so every
+        # host-execution mutation follows the same dependency order.
+        await converge_execution_approvals_for_terminal_job(
+            session,
+            project_id=event.project_id,
+            owner_user_id=event.owner_user_id,
+            run_id=event.run_id,
+            job_id=event.job_id,
+            now=event.occurred_at,
+            request_id=origin_trace_id,
+            audit=self._execution_approval_audit,
+        )
         run_status = "interrupted" if event.status == "cancelled" else "error"
         run_error = event.cancel_reason if event.status == "cancelled" else event.public_error_code
         finalization_status = sa.case(

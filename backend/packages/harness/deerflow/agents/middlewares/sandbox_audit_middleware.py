@@ -15,6 +15,8 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadState
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.sandbox.security import requires_host_bash_approval
 
 logger = logging.getLogger(__name__)
 
@@ -206,9 +208,10 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
        via the standard logger (visible in gateway.log). The raw command is
        classified in memory but is never written to logs or result messages.
 
-    High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked:
-    the handler is not called and an error ``ToolMessage`` is returned so the
-    agent loop can continue gracefully.
+    High-risk commands (e.g. ``rm -rf /``, ``curl url | bash``) are blocked in
+    direct modes. Under Local one-time approval they continue to the lower
+    execution barrier so the owner can explicitly review them. Malformed input
+    remains fail-closed in every mode.
 
     Medium-risk commands (e.g. ``pip install``, ``chmod 777``) are executed
     normally; a warning is appended to the tool result so the LLM is aware.
@@ -230,6 +233,15 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             cfg = getattr(runtime, "config", None) or {}
             thread_id = cfg.get("configurable", {}).get("thread_id")
         return thread_id
+
+    @staticmethod
+    def _uses_local_approval(request: ToolCallRequest) -> bool:
+        runtime = request.runtime
+        context = getattr(runtime, "context", None)
+        app_config = context.get(RuntimeContextKeys.APP_CONFIG) if isinstance(context, dict) else None
+        if app_config is None:
+            return False
+        return requires_host_bash_approval(app_config)
 
     def _write_audit(self, thread_id: str | None, command: str, verdict: str, *, truncate: bool = False) -> None:
         # ``truncate`` remains in the private call contract for compatibility
@@ -369,7 +381,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             return handler(request)
 
         command, _, verdict, reject_reason = self._pre_process(request)
-        if verdict == "block":
+        if verdict == "block" and (reject_reason is not None or not self._uses_local_approval(request)):
             reason = reject_reason or "security violation detected"
             return self._build_block_message(request, reason)
         result = handler(request)
@@ -387,7 +399,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             return await handler(request)
 
         command, _, verdict, reject_reason = self._pre_process(request)
-        if verdict == "block":
+        if verdict == "block" and (reject_reason is not None or not self._uses_local_approval(request)):
             reason = reject_reason or "security violation detected"
             return self._build_block_message(request, reason)
         result = await handler(request)

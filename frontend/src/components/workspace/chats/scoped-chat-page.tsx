@@ -20,6 +20,7 @@ import {
   MESSAGE_LIST_DEFAULT_PADDING_BOTTOM,
 } from "@/components/workspace/messages";
 import { ThreadContext } from "@/components/workspace/messages/context";
+import { ExecutionApprovalCard } from "@/components/workspace/messages/execution-approval-card";
 import {
   canRetryModelOutputLimit,
   RunFailureAlert,
@@ -33,6 +34,17 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
+import {
+  commitExecutionApprovalDecisionResponse,
+  executionApprovalActiveQueryKey,
+  executionApprovalBlocksSending,
+  executionApprovalContinuationRunId,
+  executionApprovalNeedsAdmissionRecovery,
+  findLatestExecutionApprovalArtifact,
+  submitExecutionApprovalDecision,
+  type ExecutionApprovalDecision,
+  useThreadExecutionApproval,
+} from "@/core/execution-approvals";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -44,7 +56,10 @@ import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
 import { commitProjectMemoryCacheChange } from "@/core/private-work/memory-freshness";
-import type { ProjectPrivateWorkScope } from "@/core/private-work/types";
+import {
+  runPrivateWorkAbortable,
+  type ProjectPrivateWorkScope,
+} from "@/core/private-work/types";
 import {
   CHAT_CONTENT_WIDTH_CSS_VALUES,
   useLocalSettings,
@@ -73,6 +88,7 @@ export interface ChatRouteScope {
   threadListPath: string;
   canCreate: boolean;
   canRun: boolean;
+  canApproveHostExecution: boolean;
   canUpload: boolean;
   canDelete: boolean;
 }
@@ -182,6 +198,7 @@ export function ScopedChatPage({
   const {
     thread,
     pendingUsageMessages,
+    attachRun,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,
@@ -206,6 +223,10 @@ export function ScopedChatPage({
       setIsWelcomeMode(false);
     },
     onFinish: (state) => {
+      void queryClient.invalidateQueries({
+        queryKey: executionApprovalActiveQueryKey(privateWork.scope, threadId),
+        exact: true,
+      });
       // A completed Run may have appended explicit `remember` or automatic
       // SNIP history. The hint carries no Run or Memory content; receivers
       // re-read the owner-scoped server APIs.
@@ -230,6 +251,211 @@ export function ScopedChatPage({
       }
     },
   });
+
+  const persistedExecutionApproval = useMemo(
+    () => findLatestExecutionApprovalArtifact(thread.messages),
+    [thread.messages],
+  );
+  const executionApproval = useThreadExecutionApproval({
+    privateWork,
+    threadId,
+    persistedApprovalId: persistedExecutionApproval?.approval_id,
+    enabled: !isMock,
+  });
+
+  const approval = executionApproval.approval;
+  const approvalBlocksSending =
+    executionApprovalBlocksSending(approval) ||
+    (!isMock && executionApproval.active.isPending);
+  const [pendingExecutionDecision, setPendingExecutionDecision] =
+    useState<ExecutionApprovalDecision | null>(null);
+  const [executionDecisionError, setExecutionDecisionError] = useState<
+    string | null
+  >(null);
+  type ExecutionDecisionAttempt = {
+    threadId: string;
+    approvalId: string;
+    expectedVersion: string;
+    decision: ExecutionApprovalDecision;
+    idempotencyKey: string;
+  };
+  const executionDecisionInFlightRef = useRef<ExecutionDecisionAttempt | null>(
+    null,
+  );
+  const executionDecisionAttemptRef = useRef<ExecutionDecisionAttempt | null>(
+    null,
+  );
+  const executionDecisionViewRef = useRef({
+    threadId,
+    approvalId: approval?.approval_id ?? null,
+  });
+  executionDecisionViewRef.current = {
+    threadId,
+    approvalId: approval?.approval_id ?? null,
+  };
+
+  useEffect(() => {
+    const attempt = executionDecisionAttemptRef.current;
+    const preserveApprovedRecovery =
+      attempt?.decision === "allow_once" &&
+      attempt.threadId === threadId &&
+      attempt.approvalId === approval?.approval_id &&
+      approval.status === "approved" &&
+      approval.continuation_run === null;
+    if (
+      attempt &&
+      !preserveApprovedRecovery &&
+      (attempt.threadId !== threadId ||
+        attempt.approvalId !== approval?.approval_id ||
+        attempt.expectedVersion !== approval.version ||
+        approval.status !== "pending")
+    ) {
+      executionDecisionAttemptRef.current = null;
+      setPendingExecutionDecision(null);
+      setExecutionDecisionError(null);
+    }
+  }, [
+    approval?.approval_id,
+    approval?.continuation_run,
+    approval?.status,
+    approval?.version,
+    threadId,
+  ]);
+
+  const handleExecutionApprovalDecision = useCallback(
+    async (decision: ExecutionApprovalDecision) => {
+      const isPendingDecision =
+        approval?.status === "pending" && approval.can_decide;
+      const isApprovedRecovery =
+        decision === "allow_once" &&
+        executionApprovalNeedsAdmissionRecovery(approval);
+      if (
+        executionDecisionInFlightRef.current?.threadId === threadId ||
+        !scope.canRun ||
+        !scope.canApproveHostExecution ||
+        (!isPendingDecision && !isApprovedRecovery) ||
+        !approval
+      ) {
+        return;
+      }
+
+      const existingAttempt = executionDecisionAttemptRef.current;
+      const attempt =
+        existingAttempt?.threadId === threadId &&
+        existingAttempt.approvalId === approval.approval_id &&
+        existingAttempt.decision === decision &&
+        (isApprovedRecovery ||
+          existingAttempt.expectedVersion === approval.version)
+          ? existingAttempt
+          : {
+              threadId,
+              approvalId: approval.approval_id,
+              expectedVersion: approval.version,
+              decision,
+              idempotencyKey: crypto.randomUUID(),
+            };
+      executionDecisionAttemptRef.current = attempt;
+      executionDecisionInFlightRef.current = attempt;
+      setPendingExecutionDecision(decision);
+      setExecutionDecisionError(null);
+
+      try {
+        const response = await runPrivateWorkAbortable(privateWork, (signal) =>
+          submitExecutionApprovalDecision(
+            privateWork,
+            threadId,
+            approval.source_run_id,
+            approval.approval_id,
+            {
+              schema_version: 1,
+              decision,
+              expected_version: attempt.expectedVersion,
+              idempotency_key: attempt.idempotencyKey,
+            },
+            signal,
+          ),
+        );
+        if (privateWork.isActive?.() === false) return;
+        commitExecutionApprovalDecisionResponse(
+          queryClient,
+          privateWork.scope,
+          threadId,
+          approval.approval_id,
+          response,
+        );
+        if (executionDecisionAttemptRef.current === attempt) {
+          executionDecisionAttemptRef.current = null;
+        }
+        void Promise.all([
+          executionApproval.active.refetch(),
+          executionApproval.byId.refetch(),
+        ]);
+      } catch (error) {
+        const currentView = executionDecisionViewRef.current;
+        if (
+          currentView.threadId === attempt.threadId &&
+          currentView.approvalId === attempt.approvalId
+        ) {
+          setExecutionDecisionError(
+            error instanceof Error
+              ? error.message
+              : t.executionApproval.decisionFailed,
+          );
+        }
+        void Promise.all([
+          executionApproval.active.refetch(),
+          executionApproval.byId.refetch(),
+        ]);
+      } finally {
+        if (executionDecisionInFlightRef.current === attempt) {
+          executionDecisionInFlightRef.current = null;
+        }
+        const currentView = executionDecisionViewRef.current;
+        if (
+          currentView.threadId === attempt.threadId &&
+          currentView.approvalId === attempt.approvalId
+        ) {
+          setPendingExecutionDecision(null);
+        }
+      }
+    },
+    [
+      approval,
+      executionApproval.active,
+      executionApproval.byId,
+      privateWork,
+      queryClient,
+      scope.canApproveHostExecution,
+      scope.canRun,
+      t.executionApproval.decisionFailed,
+      threadId,
+    ],
+  );
+
+  useEffect(() => {
+    if (
+      !executionApprovalNeedsAdmissionRecovery(approval) ||
+      !scope.canRun ||
+      !scope.canApproveHostExecution
+    ) {
+      return;
+    }
+    const timeout = window.setTimeout(() => {
+      void handleExecutionApprovalDecision("allow_once");
+    }, 1_500);
+    return () => window.clearTimeout(timeout);
+  }, [
+    approval,
+    handleExecutionApprovalDecision,
+    scope.canApproveHostExecution,
+    scope.canRun,
+  ]);
+
+  const continuationRunId = executionApprovalContinuationRunId(approval);
+  useEffect(() => {
+    if (!continuationRunId) return;
+    void attachRun(continuationRunId);
+  }, [attachRun, continuationRunId, thread.isLoading]);
 
   const hasThreadMessages = thread.messages.length > 0;
   const visibleMessageCount = useMemo(
@@ -277,7 +503,11 @@ export function ScopedChatPage({
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
-      if (!scope.canRun || (!scope.canUpload && message.files.length > 0)) {
+      if (
+        !scope.canRun ||
+        approvalBlocksSending ||
+        (!scope.canUpload && message.files.length > 0)
+      ) {
         return;
       }
       const sendPromise = sendMessage(threadId, message, undefined, options);
@@ -286,11 +516,17 @@ export function ScopedChatPage({
       }
       void sendPromise;
     },
-    [scope.canRun, scope.canUpload, sendMessage, threadId],
+    [
+      approvalBlocksSending,
+      scope.canRun,
+      scope.canUpload,
+      sendMessage,
+      threadId,
+    ],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
-      if (!scope.canRun) return false;
+      if (!scope.canRun || approvalBlocksSending) return false;
       let sent = false;
       await sendMessage(
         threadId,
@@ -311,7 +547,7 @@ export function ScopedChatPage({
       );
       return sent;
     },
-    [scope.canRun, sendMessage, threadId],
+    [approvalBlocksSending, scope.canRun, sendMessage, threadId],
   );
   const handleStop = useCallback(async () => {
     if (!scope.canRun) return;
@@ -375,7 +611,7 @@ export function ScopedChatPage({
     [runFailureRunId, thread.messages],
   );
   const canRetryFailedRun = canRetryModelOutputLimit({
-    canRun: scope.canRun,
+    canRun: scope.canRun && !approvalBlocksSending,
     isRunLoading: thread.isLoading,
     hasRegenerationTarget: failedRunRegenerationTarget !== null,
     retrySurfaceAvailable:
@@ -497,6 +733,7 @@ export function ScopedChatPage({
                   canRegenerate={
                     scope.regenerateVisible !== false &&
                     scope.canRun &&
+                    !approvalBlocksSending &&
                     !isMock &&
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
@@ -511,6 +748,7 @@ export function ScopedChatPage({
                   canEdit={
                     scope.regenerateVisible !== false &&
                     scope.canRun &&
+                    !approvalBlocksSending &&
                     !isMock &&
                     !isStaticWebsiteOnly() &&
                     !isUploading &&
@@ -527,6 +765,7 @@ export function ScopedChatPage({
                   }
                   onSubmitHumanInput={
                     !scope.canRun ||
+                    approvalBlocksSending ||
                     agentModelBlocked ||
                     isMock ||
                     isStaticWebsiteOnly()
@@ -544,6 +783,23 @@ export function ScopedChatPage({
                   }
                   onBranchTurn={
                     scope.branchVisible === false ? undefined : handleBranchTurn
+                  }
+                  trailingContent={
+                    approval ? (
+                      <ExecutionApprovalCard
+                        approval={approval}
+                        decisionError={executionDecisionError}
+                        disabled={
+                          !scope.canRun || !scope.canApproveHostExecution
+                        }
+                        pendingDecision={pendingExecutionDecision}
+                        onDecision={
+                          scope.canRun && scope.canApproveHostExecution
+                            ? handleExecutionApprovalDecision
+                            : undefined
+                        }
+                      />
+                    ) : undefined
                   }
                 />
               </div>
@@ -650,7 +906,8 @@ export function ScopedChatPage({
                         isStaticWebsiteOnly() ||
                         isUploading ||
                         agentModelBlocked ||
-                        isHistoryLoading
+                        isHistoryLoading ||
+                        approvalBlocksSending
                       }
                       onContextChange={(context) =>
                         setSettings("context", context)

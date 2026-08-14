@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -12,6 +14,7 @@ from deerflow.community.aio_sandbox.local_backend import (
     _is_container_name_conflict,
 )
 from deerflow.community.aio_sandbox.sandbox_info import SandboxInfo
+from deerflow.community.remote_file_authority import PRIVATE_ROOT_BOOTSTRAP_SCRIPT
 
 
 def _backend(*, runtime: str = "container") -> LocalContainerBackend:
@@ -27,6 +30,214 @@ def _backend(*, runtime: str = "container") -> LocalContainerBackend:
 
 def test_default_aio_image_is_pinned_to_structured_bash_runtime() -> None:
     assert DEFAULT_IMAGE.endswith("/all-in-one-sandbox:1.11.0")
+
+
+@pytest.mark.parametrize("runtime", ["container", "docker"])
+def test_private_root_bootstrap_uses_fixed_root_exec_argv(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+) -> None:
+    backend = _backend(runtime=runtime)
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    info = SandboxInfo(
+        sandbox_id="private-test1234",
+        sandbox_url="http://192.168.64.5:8080",
+        container_name="deer-flow-sandbox-private-test1234",
+        container_id="runtime-container-id",
+    )
+
+    def fake_run(cmd: list[str], **kwargs: object) -> SimpleNamespace:
+        calls.append((cmd, kwargs))
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        fake_run,
+    )
+
+    backend.initialize_private_roots(info)
+
+    assert calls == [
+        (
+            [
+                runtime,
+                "exec",
+                "--user",
+                "0:0",
+                "deer-flow-sandbox-private-test1234",
+                "/usr/bin/python3",
+                "-I",
+                "-S",
+                "-c",
+                PRIVATE_ROOT_BOOTSTRAP_SCRIPT,
+            ],
+            {
+                "capture_output": True,
+                "text": True,
+                "check": True,
+                "timeout": 30,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.CalledProcessError(
+            7,
+            ["container", "exec"],
+            stderr="permission denied",
+        ),
+        subprocess.TimeoutExpired(["container", "exec"], 30),
+    ],
+)
+def test_private_root_bootstrap_fails_closed_on_exec_error(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    backend = _backend()
+    info = SandboxInfo(
+        sandbox_id="private-test1234",
+        sandbox_url="http://192.168.64.5:8080",
+        container_name="deer-flow-sandbox-private-test1234",
+        container_id="runtime-container-id",
+    )
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to initialize private sandbox roots"):
+        backend.initialize_private_roots(info)
+
+
+@pytest.mark.parametrize("runtime", ["container", "docker"])
+def test_private_create_excludes_every_config_mount(
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+) -> None:
+    backend = _backend(runtime=runtime)
+    backend._config_mounts = [
+        SimpleNamespace(
+            host_path="/host/private-rw",
+            container_path="/data/rw",
+            read_only=False,
+        ),
+        SimpleNamespace(
+            host_path="/host/private-ro",
+            container_path="/data/ro",
+            read_only=True,
+        ),
+    ]
+    starts: list[tuple[str, int | None, object, bool]] = []
+
+    def start(
+        name: str,
+        port: int | None,
+        extra_mounts: object = None,
+        *,
+        include_config_mounts: bool = True,
+    ) -> str:
+        starts.append((name, port, extra_mounts, include_config_mounts))
+        return name
+
+    monkeypatch.setattr(backend, "_start_container", start)
+    if runtime == "container":
+        monkeypatch.setattr(
+            backend,
+            "_wait_for_apple_container_network",
+            lambda _name, timeout=10: _apple_container_payload()[0],
+        )
+    else:
+        monkeypatch.setattr(
+            "deerflow.community.aio_sandbox.local_backend.get_free_port",
+            lambda **_kwargs: 31415,
+        )
+
+    info = backend.create_private(
+        None,
+        "private-test1234",
+        extra_mounts=[("/run/skill", "/mnt/skills/private", True)],
+    )
+
+    assert info.sandbox_id == "private-test1234"
+    assert starts == [
+        (
+            "deer-flow-sandbox-private-test1234",
+            None if runtime == "container" else 31415,
+            [("/run/skill", "/mnt/skills/private", True)],
+            False,
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("runtime", "port"),
+    [("container", None), ("docker", 31415)],
+)
+def test_container_start_log_redacts_mount_host_sources(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    runtime: str,
+    port: int | None,
+) -> None:
+    backend = _backend(runtime=runtime)
+    secret_source = "/host/private/run-secret/skill"
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            returncode=0,
+            stdout="container-id\n",
+            stderr="",
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        backend._start_container(
+            "deer-flow-sandbox-private-test1234",
+            port,
+            [(secret_source, "/mnt/skills/private", True)],
+            include_config_mounts=False,
+        )
+
+    assert secret_source not in caplog.text
+    assert "<redacted>" in caplog.text
+    assert "/mnt/skills/private" in caplog.text
+
+
+def test_container_start_failure_does_not_disclose_runtime_stderr(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _backend()
+    secret_source = "/host/private/run-secret/skill"
+
+    def fail(cmd: list[str], **_kwargs: object) -> None:
+        raise subprocess.CalledProcessError(
+            125,
+            cmd,
+            stderr=f"bind source path does not exist: {secret_source}",
+        )
+
+    monkeypatch.setattr(
+        "deerflow.community.aio_sandbox.local_backend.subprocess.run",
+        fail,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        with pytest.raises(RuntimeError) as exc_info:
+            backend._start_container(
+                "deer-flow-sandbox-private-test1234",
+                None,
+                [(secret_source, "/mnt/skills/private", True)],
+                include_config_mounts=False,
+            )
+
+    assert secret_source not in caplog.text
+    assert secret_source not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
 
 
 def _apple_container_payload(

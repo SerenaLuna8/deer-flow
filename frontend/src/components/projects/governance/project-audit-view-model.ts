@@ -112,6 +112,26 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "en-US": "Run files finalized",
   },
   "run.terminal": { "zh-CN": "运行已结束", "en-US": "Run finished" },
+  "host_execution.approval_requested": {
+    "zh-CN": "已创建宿主机命令审批",
+    "en-US": "Host command approval requested",
+  },
+  "host_execution.approval_available": {
+    "zh-CN": "宿主机命令正在等待审批",
+    "en-US": "Host command awaiting approval",
+  },
+  "host_execution.approval_decided": {
+    "zh-CN": "已处理宿主机命令审批",
+    "en-US": "Host command approval decided",
+  },
+  "host_execution.approval_claimed": {
+    "zh-CN": "已领取一次性宿主机执行权限",
+    "en-US": "One-time host execution authority claimed",
+  },
+  "host_execution.approval_terminal": {
+    "zh-CN": "宿主机命令审批已结束",
+    "en-US": "Host command approval finished",
+  },
   "memory.remember": {
     "zh-CN": "已登记记忆条目",
     "en-US": "Memory entry remembered",
@@ -229,6 +249,7 @@ const METADATA_LABELS: Record<string, LocalizedLabel> = {
   artifact_count: { "zh-CN": "产物数", "en-US": "Artifacts" },
   committed_bytes: { "zh-CN": "提交字节数", "en-US": "Committed bytes" },
   status: { "zh-CN": "结束状态", "en-US": "Terminal status" },
+  decision: { "zh-CN": "审批决定", "en-US": "Approval decision" },
   origin: { "zh-CN": "准入来源", "en-US": "Admission origin" },
   trigger: { "zh-CN": "整理触发方式", "en-US": "Organization trigger" },
   history_count: { "zh-CN": "历史条目数", "en-US": "History entries" },
@@ -299,6 +320,11 @@ const VALUE_LABELS: Record<string, LocalizedLabel> = {
   completed: { "zh-CN": "已完成", "en-US": "Completed" },
   failed: { "zh-CN": "失败", "en-US": "Failed" },
   cancelled: { "zh-CN": "已取消", "en-US": "Cancelled" },
+  allow_once: { "zh-CN": "允许一次", "en-US": "Allow once" },
+  deny: { "zh-CN": "拒绝", "en-US": "Deny" },
+  finished: { "zh-CN": "执行完成", "en-US": "Execution finished" },
+  launch_failed: { "zh-CN": "启动失败", "en-US": "Launch failed" },
+  expired: { "zh-CN": "已过期", "en-US": "Expired" },
   safe: { "zh-CN": "可安全重试", "en-US": "Safe to retry" },
   unknown: { "zh-CN": "待确认", "en-US": "Unknown" },
   unsafe: { "zh-CN": "不可安全重试", "en-US": "Unsafe to retry" },

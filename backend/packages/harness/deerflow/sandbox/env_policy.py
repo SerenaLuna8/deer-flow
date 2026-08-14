@@ -51,6 +51,9 @@ _SECRET_NAME_PATTERNS: tuple[str, ...] = (
 # already cover ``PGPASSWORD``, ``MYSQL_PASSWORD``, ``REDIS_PASSWORD``, ...)
 _BLOCKED_EXACT_NAMES: frozenset[str] = frozenset(
     {
+        # Runtime channel attribution is server-owned per Run. It must never
+        # leak from a Worker/operator environment into an unrelated command.
+        "DEERFLOW_CHANNEL_USER_ID",
         "DATABASE_URL",
         "DATABASE_URI",
         "REDIS_URL",

@@ -54,6 +54,8 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpointer.async_provider import make_checkpointer
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
+from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
+from deerflow.sandbox.security import resolve_host_bash_execution_mode
 
 WORKER_VERSION = "m6"
 
@@ -89,6 +91,15 @@ async def run_worker(
     configure_logging(config)
     if not config.worker.enabled:
         return
+    host_execution_domain: HostExecutionDomainSnapshot | None = None
+    if resolve_host_bash_execution_mode(config).value == "local_approval_required":
+        try:
+            host_execution_domain = await asyncio.to_thread(
+                HostExecutionDomainSnapshot.capture,
+                config,
+            )
+        except Exception:
+            raise WorkerConfigurationUnavailable() from None
     try:
         database = config.database
         mode = getattr(database, "checkpoint_channel_mode", "full")
@@ -196,6 +207,7 @@ async def run_worker(
                 event_store=run_event_store,
                 quota=quota_enforcer,
                 audit=audit_sink,
+                host_execution_domain=host_execution_domain,
             )
             private_run_handler = PrivateRunJobHandler(
                 session_factory,
@@ -207,6 +219,7 @@ async def run_worker(
                 endpoint_policy=mcp_endpoint_policy,
                 quota=quota_enforcer,
                 audit=audit_sink,
+                execution_approval_ttl_seconds=(config.sandbox.host_execution_approval.request_ttl_seconds),
             )
             memory_archive_barrier = ProjectChatControlService(
                 session_factory,
@@ -225,8 +238,11 @@ async def run_worker(
                 "retention_purge": RetentionPurgeJobHandler(
                     session_factory,
                     audit=retention_audit_sink,
+                    approval_audit=audit_sink,
                     quota=quota_enforcer,
                     job_repository_builder=repository_builder,
+                    retry_initial_seconds=(config.worker.retry_initial_seconds),
+                    retry_max_seconds=config.worker.retry_max_seconds,
                 ),
                 "mcp_discovery": McpToolDiscoveryJobHandler(
                     session_factory,
@@ -270,6 +286,7 @@ async def run_worker(
             config.worker,
             repository_builder=repository_builder,
             after_claim_commit=reconcile_deferred_automation_terminals,
+            execution_domain=host_execution_domain,
         )
         await service.run(stop_event or asyncio.Event())
 

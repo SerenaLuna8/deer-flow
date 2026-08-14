@@ -14,6 +14,7 @@ from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_stream_writer
+from langgraph.graph import END
 from langgraph.types import Command
 from pydantic import BaseModel
 
@@ -23,8 +24,19 @@ from deerflow.guardrails.provider import (
     GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
     copy_guardrail_attribution,
 )
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.host_execution_approval import (
+    HostExecutionApprovalPort,
+    HostExecutionApprovalResult,
+    HostExecutionOutcome,
+    HostExecutionPlan,
+)
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.sandbox.security import (
+    LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
+    is_host_bash_available,
+    requires_host_bash_approval,
+)
 from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.change_signal import wait_for_change
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
@@ -97,6 +109,40 @@ class _OwnerLoopAuthorityProxy:
             )
 
         return invoke
+
+
+class _OwnerLoopHostExecutionApprovalProxy:
+    """Preserve the typed approval port across the subagent thread boundary."""
+
+    def __init__(
+        self,
+        target: HostExecutionApprovalPort,
+        owner_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._target = target
+        self._owner_loop = owner_loop
+
+    async def request_host_execution(
+        self,
+        plan: HostExecutionPlan,
+    ) -> HostExecutionApprovalResult:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.request_host_execution,
+            plan,
+        )
+
+    async def complete_host_execution(
+        self,
+        approval_id: str,
+        outcome: HostExecutionOutcome,
+    ) -> None:
+        await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.complete_host_execution,
+            approval_id,
+            outcome,
+        )
 
 
 class _OwnerLoopCheckerProxy:
@@ -466,6 +512,30 @@ def _task_result_command(
     )
 
 
+def _host_execution_approval_command(
+    *,
+    tool_call_id: str,
+    artifact: Mapping[str, object],
+) -> Command:
+    """Bubble a delegated approval anchor into the parent Agent checkpoint."""
+
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    content=("Delegated host command execution requires approval."),
+                    tool_call_id=tool_call_id,
+                    name="task",
+                    artifact={
+                        "host_execution_approval": dict(artifact),
+                    },
+                ),
+            ],
+        },
+        goto=END,
+    )
+
+
 async def _assemble_subagent_tools(
     *,
     parent_context: dict[str, Any],
@@ -506,6 +576,8 @@ async def _assemble_subagent_tools(
         available_tools_kwargs["asset_context"] = asset_context
 
     tools = await asyncio.to_thread(get_available_tools, **available_tools_kwargs)
+    if parent_context.get(RuntimeContextKeys.NON_INTERACTIVE) is True and app_config is not None and requires_host_bash_approval(app_config):
+        tools = [tool for tool in tools if tool.name != "bash"]
     if private_run:
         owner_loop = asyncio.get_running_loop()
         admitted_mcp_tools = runtime_agent_profile.mcp_tools if runtime_agent_profile is not None else _trusted_private_mcp_tools(parent_context)
@@ -608,8 +680,9 @@ async def task_tool(
             error=error,
         )
     if subagent_type == "bash":
-        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-        if not host_bash_allowed:
+        host_bash_allowed = is_host_bash_available(runtime_app_config) if runtime_app_config is not None else is_host_bash_available()
+        approval_unavailable = parent_context.get(RuntimeContextKeys.NON_INTERACTIVE) is True and runtime_app_config is not None and requires_host_bash_approval(runtime_app_config)
+        if not host_bash_allowed or approval_unavailable:
             return _task_result_command(
                 tool_call_id=tool_call_id,
                 status="failed",
@@ -671,6 +744,7 @@ async def task_tool(
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
+    channel_identity_present = "channel_user_id" in parent_context
     deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
@@ -710,6 +784,7 @@ async def task_tool(
         "oauth_id": oauth_id,
         "run_id": run_id,
         "channel_user_id": channel_user_id,
+        "channel_identity_present": channel_identity_present,
         "deerflow_trace_id": deerflow_trace_id,
     }
     if guardrail_attribution is not None:
@@ -743,6 +818,23 @@ async def task_tool(
                 skill_secret_provider,
                 owner_loop,
             )
+    approval_port = parent_context.get(
+        RuntimeContextKeys.HOST_EXECUTION_APPROVAL_PORT,
+    )
+    if isinstance(approval_port, HostExecutionApprovalPort):
+        owner_loop = asyncio.get_running_loop()
+        executor_kwargs["host_execution_approval_port"] = _OwnerLoopHostExecutionApprovalProxy(
+            approval_port,
+            owner_loop,
+        )
+        raw_parent_path = parent_context.get(
+            RuntimeContextKeys.HOST_EXECUTION_AGENT_PATH,
+        )
+        parent_path = raw_parent_path if isinstance(raw_parent_path, tuple) and raw_parent_path and all(isinstance(part, str) and part for part in raw_parent_path) else ("lead",)
+        executor_kwargs["host_execution_agent_path"] = (
+            *parent_path,
+            f"subagent:{config.name}",
+        )
     run_read_only_mounts = parent_context.get("__run_read_only_mounts")
     if isinstance(run_read_only_mounts, tuple):
         executor_kwargs["run_read_only_mounts"] = run_read_only_mounts
@@ -864,6 +956,13 @@ async def task_tool(
             if result.status == SubagentStatus.COMPLETED:
                 _cache_subagent_usage(tool_call_id, usage, enabled=cache_token_usage)
                 _report_subagent_usage(runtime, result)
+                approval_artifact = result.host_execution_approval_artifact
+                if approval_artifact is not None:
+                    cleanup_background_task(task_id)
+                    return _host_execution_approval_command(
+                        tool_call_id=tool_call_id,
+                        artifact=approval_artifact,
+                    )
                 writer(
                     {
                         "type": "task_completed",

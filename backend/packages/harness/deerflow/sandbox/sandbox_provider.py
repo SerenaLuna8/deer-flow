@@ -12,6 +12,12 @@ from deerflow.reflection import resolve_class
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox import Sandbox
 
+_PRIVATE_SANDBOX_SECURE_ROOTS = (
+    "/mnt/user-data/workspace",
+    "/mnt/user-data/uploads",
+    "/mnt/user-data/outputs",
+)
+
 
 async def _await_joined_thread(task: asyncio.Task) -> tuple[object, bool]:
     """Join a blocking provider call even when its async caller is cancelled."""
@@ -116,12 +122,13 @@ class SandboxProvider(ABC):
                 raise SandboxRuntimeError("Private sandbox was not registered")
             # Exercise the real secure metadata boundary before returning a
             # lease.  Merely allocating a fresh VM is not enough.
-            tuple(
-                sandbox.list_secure_files(
-                    "/mnt/user-data/workspace",
-                    max_entries=1,
+            for root in _PRIVATE_SANDBOX_SECURE_ROOTS:
+                tuple(
+                    sandbox.list_secure_files(
+                        root,
+                        max_entries=1,
+                    )
                 )
-            )
             lock, leases = self._private_lease_state()
             with lock:
                 if sandbox_id in leases or any(registered.run_id == run_id for registered in leases.values()):

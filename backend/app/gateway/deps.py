@@ -257,8 +257,13 @@ async def gateway_platform_runtime(
             app.state._raw_checkpointer,
             sf,
             quota=project_quota_enforcer,
+            approval_audit=operational_audit_sink,
         )
         from app.private_work.connection_service import ProjectConnectionService
+        from app.private_work.execution_approval import (
+            ExecutionApprovalService,
+            HostExecutionProviderPolicySnapshot,
+        )
         from app.private_work.file_service import PrivateFileService
         from app.private_work.file_streaming import PrivateFileStreamer
         from app.private_work.human_input_response import (
@@ -342,10 +347,21 @@ async def gateway_platform_runtime(
                 config,
             ),
         )
+        app.state.execution_approval_service = ExecutionApprovalService(
+            sf,
+            admission=app.state.private_run_admission_service,
+            provider_policy=HostExecutionProviderPolicySnapshot.from_app_config(
+                config,
+            ),
+            quota=project_quota_enforcer,
+            run_audit=operational_audit_sink,
+            audit=operational_audit_sink,
+        )
         app.state.private_run_service = PrivateRunService(
             sf,
             quota=project_quota_enforcer,
             audit=operational_audit_sink,
+            approval_audit=operational_audit_sink,
         )
         app.state.private_feedback_service = PrivateFeedbackService(sf)
         app.state.private_file_streamer = PrivateFileStreamer(sf)

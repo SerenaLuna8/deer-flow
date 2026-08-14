@@ -1,7 +1,7 @@
 """Tool exception handling and compatibility exports for assembly builders."""
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import override
 
 from langchain.agents import AgentState
@@ -31,6 +31,7 @@ from deerflow.config.summarization_config import (
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import (
     AuthorizationRevoked,
     check_authorization_boundary,
@@ -119,6 +120,29 @@ def _is_trusted_idempotent_tool(request: ToolCallRequest) -> bool:
         is _TRUSTED_IDEMPOTENT_TOOL_MARKER
         for attribute in ("coroutine", "func")
     )
+
+
+def _is_local_approval_staging_call(request: ToolCallRequest) -> bool:
+    """Treat pre-approval Bash as lease-safe without weakening other modes.
+
+    In Local approval mode the canonical async Bash handler can only persist a
+    staged request and end the graph; the frozen continuation runner owns the
+    later side-effect boundary immediately before process spawn.  AIO and the
+    legacy Local allow mode still execute inside this tool call and therefore
+    retain the ordinary non-retryable boundary.
+    """
+
+    from deerflow.sandbox.security import requires_host_bash_approval
+    from deerflow.sandbox.tools import bash_tool
+
+    if getattr(request, "tool", None) is not bash_tool:
+        return False
+    runtime = getattr(request, "runtime", None)
+    context = getattr(runtime, "context", None)
+    if not isinstance(context, Mapping):
+        return False
+    app_config = context.get(RuntimeContextKeys.APP_CONFIG)
+    return app_config is not None and requires_host_bash_approval(app_config)
 
 
 def _stamp_task_exception_status(
@@ -285,7 +309,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             runtime_context = self._runtime_context(request)
             if _is_trusted_read_only_tool(request):
                 authorization_method = "before_read_only_tool_call"
-            elif _is_trusted_idempotent_tool(request):
+            elif _is_trusted_idempotent_tool(
+                request,
+            ) or _is_local_approval_staging_call(request):
                 authorization_method = "before_idempotent_tool_call"
             else:
                 authorization_method = "before_tool_call"

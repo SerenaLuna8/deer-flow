@@ -2358,6 +2358,44 @@ export const zhCN: Translations = {
     answeredValue: (value: string) => `已回答：${value}`,
   },
 
+  executionApproval: {
+    title: "请求在 ActWeave Worker 所在环境执行命令。",
+    localHost: "本机宿主环境",
+    riskTitle: "将使用你的本机账号权限运行",
+    riskWarning:
+      "这不是隔离沙箱。命令会在 ActWeave Worker 所在的操作系统环境中运行，可能访问本机账号可读取的文件和凭据、使用网络、启动后台进程，并把输出返回给 Agent 或模型。仅在你信任这条精确命令时允许。",
+    command: "完整命令",
+    workingDirectory: "工作目录",
+    sourceAgent: "来源 Agent",
+    effectiveUser: "本机账号",
+    timeout: "超时时间",
+    timeoutSeconds: (seconds) => `${seconds} 秒`,
+    expiresIn: (seconds) => `该请求将在 ${seconds} 秒后过期。`,
+    allowOnce: "允许一次",
+    deny: "拒绝",
+    allowing: "正在允许…",
+    denying: "正在拒绝…",
+    decisionFailed: "无法提交审批决定，请重试。",
+    exitCode: (code) => `退出码：${code}`,
+    reason: "原因",
+    finishedWarning:
+      "主进程已经退出，但这不能证明它没有产生副作用或遗留后台进程。",
+    unknownTitle: "无法确定执行状态",
+    unknownWarning:
+      "该命令或其子进程可能仍在运行并产生副作用。重新请求前请先检查 ActWeave Worker 所在环境；本次授权不能直接重试。",
+    statuses: {
+      pending: "等待审批",
+      approved: "已批准",
+      claimed: "正在 Worker 宿主环境执行",
+      finished: "执行完成",
+      launch_failed: "启动失败",
+      unknown: "状态未知",
+      denied: "已拒绝",
+      expired: "已过期",
+      cancelled: "已取消",
+    },
+  },
+
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",

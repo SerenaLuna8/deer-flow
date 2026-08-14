@@ -1,0 +1,39 @@
+---
+title: ActWeave 1.0
+description: ActWeave 1.0 establishes the first public baseline for project-scoped agents, durable runs, governed assets, and isolated execution.
+date: 2026-08-15
+tags:
+  - Release
+---
+
+## ActWeave 1.0
+
+ActWeave 1.0 is the first public release of the project-first agent platform.
+It combines a browser workspace with durable Agent execution, governed project
+assets, PostgreSQL-backed state, and explicitly selected execution providers.
+
+### What ships in the first release
+
+- Project-scoped Agents, Skills, MCP connections, Credentials, Memory, and
+  Automations with server-enforced authorization.
+- Durable Runs with resumable event streams, checkpoints, and Worker-owned
+  execution.
+- Versioned assets and immutable Run snapshots so retries continue from the
+  exact admitted configuration.
+- Local, all-in-one, and other configured execution providers with clear
+  isolation boundaries and no silent fallback to the host.
+
+### Exact approval for Local host commands
+
+Deployments that deliberately use `LocalSandboxProvider` can require one-time
+approval for each exact Bash command. Allowing a command authorizes only that
+single host launch; the next command requires a new decision. Rejecting or
+letting the approval expire leaves the process unstarted.
+
+Approval does not turn Local Provider into a sandbox. Commands selected for an
+isolated provider run inside that provider, do not enter the Local approval
+flow, and never fall back to Local execution when isolation fails.
+
+This release is the v1 product baseline. Application packages use `1.0.0`;
+configuration and database evolution continue under their own explicit
+compatibility contracts.

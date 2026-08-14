@@ -2,7 +2,7 @@
 #
 # config-upgrade.sh - Upgrade config.yaml to match config.example.yaml
 #
-# 1. Runs version-specific migrations (value replacements, renames, etc.)
+# 1. Normalizes unversioned pre-release files and runs future migrations
 # 2. Merges missing fields from the example into the user config
 # 3. Backs up config.yaml to config.yaml.bak before modifying.
 
@@ -50,7 +50,13 @@ import sys, shutil, copy, re
 from pathlib import Path
 
 import yaml
-from deerflow.config.app_config import DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
+from deerflow.config.app_config import (
+    DATABASE_RUNTIME_YAML_PATH_TOMBSTONES,
+    DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES,
+    LEGACY_CONFIG_PATH_TOMBSTONES,
+    LEGACY_CONFIG_TOMBSTONES,
+    YAML_CONFIG_TOMBSTONES,
+)
 
 config_path = Path(os.environ['CONFIG_WIN_PATH'])
 example_path = Path(os.environ['EXAMPLE_WIN_PATH'])
@@ -62,10 +68,20 @@ with open(config_path, encoding='utf-8') as f:
 with open(example_path, encoding='utf-8') as f:
     example = yaml.safe_load(f) or {}
 
-user_version = user.get('config_version', 0)
-example_version = example.get('config_version', 0)
+try:
+    user_version = int(user.get('config_version', 0))
+    example_version = int(example.get('config_version', 0))
+except (TypeError, ValueError):
+    print('✗ config_version must be an integer.')
+    print('  No files were changed.')
+    sys.exit(1)
 
-if user_version >= example_version:
+if user_version > example_version:
+    print(f'✗ config.yaml version {user_version} is newer than the supported version {example_version}.')
+    print('  Use a checkout that supports this configuration. No files were changed.')
+    sys.exit(1)
+
+if user_version == example_version:
     print(f'OK config.yaml is already up to date (version {user_version}).')
     sys.exit(0)
 
@@ -81,53 +97,23 @@ print()
 
 MIGRATIONS = {
     1: {
-        'description': 'Rename src.* module paths to deerflow.*',
+        'description': 'Normalize an unversioned pre-release configuration into the v1 public baseline',
         'replacements': [
             ('src.community.', 'deerflow.community.'),
             ('src.sandbox.', 'deerflow.sandbox.'),
             ('src.models.', 'deerflow.models.'),
             ('src.tools.', 'deerflow.tools.'),
         ],
-    },
-    24: {
-        'description': 'Remove the retired database backup and restore configuration',
-        'remove_keys': ['recovery'],
-    },
-    25: {
-        'description': 'Remove configuration fields no longer consumed by the project-first runtime',
-        'remove_keys': ['skill_evolution', 'skill_scan'],
-        'remove_paths': [
-            'uploads.max_files',
-            'uploads.max_file_size',
-            'uploads.max_total_size',
-            'uploads.auto_convert_documents',
-            'scheduler.lease_seconds',
-            'worker.default_max_attempts',
-            'quotas.max_member_limit',
-            'quotas.max_storage_bytes_limit',
-            'quotas.max_concurrent_run_limit',
-            'quotas.max_mcp_calls_daily_limit',
-        ],
-    },
-    32: {
-        'description': 'Reject the unsupported legacy generic authorization provider configuration',
-        'remove_keys': ['authorization'],
-    },
-    33: {
-        'description': 'Move model configuration to PostgreSQL-backed system settings',
-        'remove_keys': ['models'],
-    },
-    34: {
-        'description': 'Move live agent, registration and quota policy leaves to PostgreSQL system settings',
-        'remove_paths': sorted(DATABASE_RUNTIME_YAML_PATH_TOMBSTONES),
-    },
-    35: {
-        'description': 'Replace exact project MCP endpoints with bounded CIDR network policy',
+        'remove_keys': sorted(
+            LEGACY_CONFIG_TOMBSTONES
+            | YAML_CONFIG_TOMBSTONES
+            | DYNAMIC_MIDDLEWARE_CONFIG_TOMBSTONES
+        ),
+        'remove_paths': sorted(
+            LEGACY_CONFIG_PATH_TOMBSTONES
+            | DATABASE_RUNTIME_YAML_PATH_TOMBSTONES
+        ),
         'migrate_mcp_endpoint_policy': True,
-    },
-    38: {
-        'description': 'Move Automation scheduler policy to PostgreSQL system settings',
-        'remove_keys': ['scheduler'],
     },
     # Future migrations go here:
     # 2: {
@@ -176,7 +162,7 @@ if migrate_mcp_endpoint_policy:
         migrated.append('mcp_security.project_remote_allowed_endpoints=[] -> project_remote_allowed_networks=[] (deny all)')
     if 'project_remote_allowed_networks' not in mcp_security:
         mcp_security['project_remote_allowed_networks'] = []
-        migrated.append('v34 implicit project MCP deny-all -> project_remote_allowed_networks=[]')
+        migrated.append('pre-release implicit project MCP deny-all -> project_remote_allowed_networks=[]')
 removed = []
 for key in keys_to_remove:
     if key in user:

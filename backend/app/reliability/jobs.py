@@ -38,6 +38,7 @@ class AdmittedJobRecord:
     idempotency_key: str
     status: str
     origin_trace_id: str
+    execution_domain_affinity: str | None = None
 
 
 def private_run_idempotency_key(run_id: str) -> str:
@@ -74,6 +75,7 @@ class PrivateRunJobRepository:
             idempotency_key=row.idempotency_key,
             status=row.status,
             origin_trace_id=row.origin_trace_id,
+            execution_domain_affinity=row.execution_domain_affinity,
         )
 
     async def enqueue(
@@ -83,6 +85,7 @@ class PrivateRunJobRepository:
         run_id: str,
         origin_trace_id: str,
         max_attempts: int = 3,
+        execution_domain_affinity: str | None = None,
     ) -> AdmittedJobRecord:
         key = private_run_idempotency_key(run_id)
         job_id = await self._jobs.enqueue(
@@ -95,6 +98,7 @@ class PrivateRunJobRepository:
                 max_attempts=max_attempts,
                 origin_trace_id=origin_trace_id,
                 retry_safety="safe",
+                execution_domain_affinity=execution_domain_affinity,
             )
         )
         row = (

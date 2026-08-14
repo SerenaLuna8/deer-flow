@@ -5,13 +5,29 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Protocol
 
 from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.audit.sinks import TrustedOperationAuditSink
+from app.private_work.execution_approval_audit import (
+    HostExecutionApprovalAuditPort,
+)
+from app.private_work.execution_approval_lifecycle import (
+    ExecutionApprovalPrivateLifecycleConflict,
+    LockedExecutionApprovalRows,
+    cancel_locked_execution_approval_continuation,
+    lock_execution_approval_private_rows,
+    reconcile_locked_execution_approval,
+)
 from app.quotas.integration import ProjectQuotaEnforcer
+from deerflow.persistence.execution_approvals import (
+    EXECUTION_APPROVAL_ACTIVE_STATUSES,
+    ExecutionApprovalRequestRow,
+    ExecutionApprovalResultReceiptRow,
+)
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.private_work.memory_document_model import (
     MemoryDocumentRow,
@@ -44,6 +60,34 @@ _PURGE_NAMESPACE = uuid.UUID("1960a83e-df43-4f8c-85f4-b7193c08a9d0")
 class RetentionNotEligible(RuntimeError):
     def __init__(self) -> None:
         super().__init__("RETENTION_NOT_ELIGIBLE")
+
+
+class RetentionExecutionApprovalActive(RuntimeError):
+    """A live host-execution continuation still owns private scope data."""
+
+    def __init__(self, *, retry_after: datetime | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__("RETENTION_EXECUTION_APPROVAL_ACTIVE")
+
+
+class RetentionExecutionApprovalAuditPort(
+    HostExecutionApprovalAuditPort,
+    Protocol,
+):
+    """Worker audit authority needed to converge approval-owned Runs."""
+
+    async def run_terminal(
+        self,
+        session: AsyncSession,
+        scope: PrivateResourceScope,
+        *,
+        run_id: str,
+        job_id: uuid.UUID,
+        job_type: str,
+        status: str,
+        public_error_code: str | None,
+        request_id: str,
+    ) -> None: ...
 
 
 def _aware(value: datetime) -> datetime:
@@ -249,9 +293,18 @@ class RetentionPurgeRepository:
         candidate: RetentionCandidate,
         *,
         quota: ProjectQuotaEnforcer,
+        approval_audit: RetentionExecutionApprovalAuditPort,
     ) -> int:
         if candidate.resource_kind == "project":
             assert candidate.project_id is not None
+            await _purge_execution_approvals(
+                session,
+                project_id=candidate.project_id,
+                owner_user_id=None,
+                request_id=candidate.request_id,
+                quota=quota,
+                audit=approval_audit,
+            )
             await release_private_storage_quota(
                 session,
                 project_id=candidate.project_id,
@@ -265,7 +318,14 @@ class RetentionPurgeRepository:
                 quota=quota,
                 request_id=candidate.request_id,
             )
-            await purge_private_scope(session, project_id=candidate.project_id, owner_user_id=None)
+            await purge_private_scope(
+                session,
+                project_id=candidate.project_id,
+                owner_user_id=None,
+                quota=quota,
+                request_id=candidate.request_id,
+                approval_audit=approval_audit,
+            )
             await purge_project_shared_scope(
                 session,
                 project_id=candidate.project_id,
@@ -278,6 +338,14 @@ class RetentionPurgeRepository:
         if candidate.resource_kind == "former_owner":
             assert candidate.project_id is not None
             assert candidate.owner_user_id is not None
+            await _purge_execution_approvals(
+                session,
+                project_id=candidate.project_id,
+                owner_user_id=candidate.owner_user_id,
+                request_id=candidate.request_id,
+                quota=quota,
+                audit=approval_audit,
+            )
             await release_private_storage_quota(
                 session,
                 project_id=candidate.project_id,
@@ -289,9 +357,21 @@ class RetentionPurgeRepository:
                 session,
                 project_id=candidate.project_id,
                 owner_user_id=candidate.owner_user_id,
+                quota=quota,
+                request_id=candidate.request_id,
+                approval_audit=approval_audit,
             )
             return 1
         assert candidate.owner_user_id is not None
+        for project_id in candidate.project_ids:
+            await _purge_execution_approvals(
+                session,
+                project_id=project_id,
+                owner_user_id=candidate.owner_user_id,
+                request_id=candidate.request_id,
+                quota=quota,
+                audit=approval_audit,
+            )
         for project_id in candidate.project_ids:
             await release_private_storage_quota(
                 session,
@@ -304,6 +384,9 @@ class RetentionPurgeRepository:
                 session,
                 project_id=project_id,
                 owner_user_id=candidate.owner_user_id,
+                quota=quota,
+                request_id=candidate.request_id,
+                approval_audit=approval_audit,
             )
         return len(candidate.project_ids)
 
@@ -396,11 +479,208 @@ async def release_project_skill_storage_quota(
         )
 
 
+async def _cancel_retention_approval(
+    session: AsyncSession,
+    row: ExecutionApprovalRequestRow,
+    *,
+    now: datetime,
+    request_id: str,
+    audit: RetentionExecutionApprovalAuditPort,
+) -> None:
+    if row.status not in EXECUTION_APPROVAL_ACTIVE_STATUSES:
+        return
+    row.status = "cancelled"
+    row.version += 1
+    row.terminal_at = now
+    row.updated_at = now
+    await audit.host_execution_approval_terminal(
+        session,
+        project_id=row.project_id,
+        source_run_id=row.source_run_id,
+        status="cancelled",
+        request_id=request_id,
+        occurred_at=now,
+    )
+
+
+async def _cancel_unowned_approval_continuation(
+    session: AsyncSession,
+    locked: LockedExecutionApprovalRows,
+    row: ExecutionApprovalRequestRow,
+    *,
+    now: datetime,
+    request_id: str,
+    quota: ProjectQuotaEnforcer,
+    audit: RetentionExecutionApprovalAuditPort,
+) -> tuple[bool, datetime | None]:
+    """Cancel an unowned linked Run and report whether settlement must wait."""
+
+    if row.continuation_job_id is None or row.continuation_run_id is None:
+        return False, None
+    job = locked.jobs.get(row.continuation_job_id)
+    if job is None:
+        raise RetentionExecutionApprovalActive()
+
+    membership_version = await session.scalar(
+        select(ProjectMembershipRow.version).where(
+            ProjectMembershipRow.project_id == row.project_id,
+            ProjectMembershipRow.user_id == row.owner_user_id,
+        )
+    )
+    if membership_version is None:
+        raise RetentionExecutionApprovalActive()
+    scope = PrivateResourceScope(
+        project_id=str(row.project_id),
+        owner_user_id=row.owner_user_id,
+        membership_version=membership_version,
+    )
+    try:
+        cancel_result = cancel_locked_execution_approval_continuation(
+            row,
+            locked,
+            now=now,
+            reason="retention_scope_purged",
+        )
+    except ExecutionApprovalPrivateLifecycleConflict:
+        raise RetentionExecutionApprovalActive() from None
+    if cancel_result == "requested":
+        # Each Worker lease has a concrete upper bound. A heartbeat may renew
+        # it, but every retry re-locks and re-evaluates the new authority while
+        # preserving the purge Job's real failure budget.
+        return True, job.lease_expires_at
+
+    await quota.release_concurrent_run(
+        session,
+        scope,
+        run_id=row.continuation_run_id,
+        request_id=request_id,
+    )
+    if cancel_result == "cancelled":
+        await audit.run_terminal(
+            session,
+            scope,
+            run_id=row.continuation_run_id,
+            job_id=row.continuation_job_id,
+            job_type=job.job_type,
+            status="interrupted",
+            public_error_code=None,
+            request_id=request_id,
+        )
+    return False, None
+
+
+async def _purge_execution_approvals(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    owner_user_id: str | None,
+    request_id: str,
+    quota: ProjectQuotaEnforcer | None,
+    audit: RetentionExecutionApprovalAuditPort | None,
+) -> None:
+    """Converge, stop, and remove private approval payload before Run scrub."""
+
+    try:
+        locked = await lock_execution_approval_private_rows(
+            session,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+        )
+    except ExecutionApprovalPrivateLifecycleConflict:
+        raise RetentionExecutionApprovalActive() from None
+    now = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(now, datetime) or now.tzinfo is None:
+        raise RetentionExecutionApprovalActive()
+    now = now.astimezone(UTC)
+    rows = locked.rows
+    if not rows:
+        return
+    if audit is None or quota is None:
+        # Direct/test callers without Worker audit+quota authority may purge a
+        # scope with no approvals, but may never converge or erase approvals.
+        raise RetentionExecutionApprovalActive()
+
+    retry_after: datetime | None = None
+    blocked_without_deadline = False
+    for row in rows:
+        claimed_deadline = locked.claimed_absolute_deadlines.get(row.id)
+        if row.status in EXECUTION_APPROVAL_ACTIVE_STATUSES:
+            await reconcile_locked_execution_approval(
+                session,
+                row,
+                now=now,
+                audit=audit,
+            )
+        # A dead DB lease cannot prove that a recently launched Local process
+        # has stopped. Preserve its frozen command timeout even if lazy
+        # reconciliation just changed claimed -> unknown.
+        if claimed_deadline is not None and now < claimed_deadline:
+            retry_after = max((claimed_deadline, retry_after) if retry_after is not None else (claimed_deadline,))
+            continue
+        if row.status == "claimed":
+            blocked_without_deadline = True
+            continue
+
+        if row.continuation_job_id is not None:
+            wait_required, deadline = await _cancel_unowned_approval_continuation(
+                session,
+                locked,
+                row,
+                now=now,
+                request_id=request_id,
+                quota=quota,
+                audit=audit,
+            )
+            if deadline is not None:
+                retry_after = max(
+                    (value for value in (retry_after, deadline) if value is not None),
+                    default=retry_after,
+                )
+            if wait_required and deadline is None:
+                blocked_without_deadline = True
+
+        if row.status in {"staged", "pending", "approved"}:
+            await _cancel_retention_approval(
+                session,
+                row,
+                now=now,
+                request_id=request_id,
+                audit=audit,
+            )
+
+    if retry_after is not None or blocked_without_deadline:
+        # Persist any safe cancellation/reconciliation in the surrounding
+        # retention Job transaction, then retry after the owned process lease.
+        raise RetentionExecutionApprovalActive(
+            retry_after=None if blocked_without_deadline else retry_after,
+        )
+
+    await session.flush()
+    approval_ids = tuple(row.id for row in rows)
+    await session.execute(
+        delete(ExecutionApprovalResultReceiptRow).where(
+            ExecutionApprovalResultReceiptRow.project_id == project_id,
+            ExecutionApprovalResultReceiptRow.approval_id.in_(approval_ids),
+            *(() if owner_user_id is None else (ExecutionApprovalResultReceiptRow.owner_user_id == owner_user_id,)),
+        )
+    )
+    await session.execute(
+        delete(ExecutionApprovalRequestRow).where(
+            ExecutionApprovalRequestRow.project_id == project_id,
+            ExecutionApprovalRequestRow.id.in_(approval_ids),
+            *(() if owner_user_id is None else (ExecutionApprovalRequestRow.owner_user_id == owner_user_id,)),
+        )
+    )
+
+
 async def purge_private_scope(
     session: AsyncSession,
     *,
     project_id: uuid.UUID,
     owner_user_id: str | None,
+    quota: ProjectQuotaEnforcer | None = None,
+    request_id: str = "retention-purge",
+    approval_audit: RetentionExecutionApprovalAuditPort | None = None,
 ) -> None:
     """Delete/scrub private payload for one exact project or project+owner scope.
 
@@ -408,7 +688,11 @@ async def purge_private_scope(
     retained.  Rows with no immutable references are physically removed.
     """
 
-    parameters: dict[str, object] = {"project_id": project_id, "purged_at": datetime.now(UTC)}
+    purged_at = datetime.now(UTC)
+    parameters: dict[str, object] = {
+        "project_id": project_id,
+        "purged_at": purged_at,
+    }
     owner_clause = ""
     if owner_user_id is not None:
         owner_clause = " AND owner_user_id = :owner_user_id"
@@ -416,6 +700,15 @@ async def purge_private_scope(
 
     def owner_for(alias: str) -> str:
         return "" if owner_user_id is None else f" AND {alias}.owner_user_id = :owner_user_id"
+
+    await _purge_execution_approvals(
+        session,
+        project_id=project_id,
+        owner_user_id=owner_user_id,
+        request_id=request_id,
+        quota=quota,
+        audit=approval_audit,
+    )
 
     # Jobs are immutable governance shells, so retention does not delete them.
     # Request cancellation for every active Memory producer in the exact purge
@@ -1057,6 +1350,7 @@ class RetentionPurger:
         sessions: async_sessionmaker,
         *,
         audit: TrustedOperationAuditSink,
+        approval_audit: RetentionExecutionApprovalAuditPort,
         quota: ProjectQuotaEnforcer,
         repository: RetentionPurgeRepository | None = None,
     ) -> None:
@@ -1066,6 +1360,7 @@ class RetentionPurger:
             raise TypeError("retention purge requires quota authority")
         self._sessions = sessions
         self._audit = audit
+        self._approval_audit = approval_audit
         self._quota = quota
         self.repository = repository or RetentionPurgeRepository()
 
@@ -1085,6 +1380,7 @@ class RetentionPurger:
                 session,
                 candidate,
                 quota=self._quota,
+                approval_audit=self._approval_audit,
             )
             await session.flush()
             await self._audit.purge_completed(
@@ -1105,6 +1401,7 @@ class RetentionPurger:
 
 __all__ = [
     "RetentionCandidate",
+    "RetentionExecutionApprovalActive",
     "RetentionNotEligible",
     "RetentionPurgeResult",
     "RetentionPurgeRepository",

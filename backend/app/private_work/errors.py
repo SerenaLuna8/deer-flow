@@ -17,6 +17,12 @@ PRIVATE_WORK_ERROR_STATUS = {
     "PROJECT_MCP_QUOTA_EXCEEDED": 429,
     "PRIVATE_WORK_INVALID": 422,
     "PRIVATE_WORK_UNAVAILABLE": 503,
+    "EXECUTION_APPROVAL_NOT_FOUND": 404,
+    "EXECUTION_APPROVAL_FORBIDDEN": 403,
+    "EXECUTION_APPROVAL_CONFLICT": 409,
+    "EXECUTION_APPROVAL_EXPIRED": 409,
+    "EXECUTION_APPROVAL_POLICY_DISABLED": 409,
+    "EXECUTION_APPROVAL_INVALID": 422,
 }
 
 
@@ -97,3 +103,33 @@ class PrivateWorkInvalid(PrivateWorkError):
 class PrivateWorkUnavailable(PrivateWorkError):
     code = "PRIVATE_WORK_UNAVAILABLE"
     public_message = "Private work is unavailable."
+
+
+class ExecutionApprovalNotFound(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_NOT_FOUND"
+    public_message = "Execution approval was not found."
+
+
+class ExecutionApprovalForbidden(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_FORBIDDEN"
+    public_message = "Host execution approval is forbidden."
+
+
+class ExecutionApprovalConflict(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_CONFLICT"
+    public_message = "Execution approval state changed."
+
+
+class ExecutionApprovalExpired(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_EXPIRED"
+    public_message = "Execution approval expired."
+
+
+class ExecutionApprovalPolicyDisabled(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_POLICY_DISABLED"
+    public_message = "Host execution approval is disabled."
+
+
+class ExecutionApprovalInvalid(PrivateWorkError):
+    code = "EXECUTION_APPROVAL_INVALID"
+    public_message = "Execution approval request is invalid."
