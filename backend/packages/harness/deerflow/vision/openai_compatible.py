@@ -335,6 +335,7 @@ class OpenAICompatibleVisionEvidenceClient:
         model_config: ModelConfig,
         *,
         transport: httpx.AsyncBaseTransport | None = None,
+        transient_gate_key: str | None = None,
     ) -> None:
         self._endpoint = _validated_endpoint(getattr(model_config, "base_url", None))
         self._api_key = _api_key(model_config)
@@ -342,9 +343,9 @@ class OpenAICompatibleVisionEvidenceClient:
         if type(self._model) is not str or not self._model:
             raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
         version_id = model_config._system_model_config_version_id
-        if version_id is None:
+        if version_id is None and (type(transient_gate_key) is not str or not transient_gate_key):
             raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
-        self._gate_key = str(version_id)
+        self._gate_key = str(version_id) if version_id is not None else transient_gate_key
         self._run_gate = asyncio.Semaphore(1)
         self._transport = transport
 

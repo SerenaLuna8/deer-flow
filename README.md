@@ -139,6 +139,10 @@ make stop
   固定调用 `{base_url}/chat/completions`。它不接受任意 headers、`extra_body`、重试、
   stream 或 timeout 覆盖。
 
+管理端“测试连接”会用平台生成的无敏感 64×64 蓝色方块 PNG 走同一图片/strict Schema
+协议；仅支持普通文本 Chat Completions、但不支持图片或结构化输出的 Endpoint 不能通过
+该测试。
+
 真实 adapter 只发送规范化后的单张图片、固定 `vision.prompt.v1`、固定 mode 指令和
 `vision.evidence.v1` Schema，不发送完整对话或文件路径。Credential 撤销会阻断已准入
 Run 的下一次外发；启用 LangSmith/Langfuse 内容 tracing 时真实 Bridge 失败关闭。选择

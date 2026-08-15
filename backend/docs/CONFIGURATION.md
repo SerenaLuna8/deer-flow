@@ -300,6 +300,12 @@ The request contains only the normalized image, fixed `vision.prompt.v1`, the
 fixed mode task and `vision.evidence.v1`; paths, full chat history, Memory and
 other attachments are not sent.
 
+The administrator **Test connection** action for this adapter sends only a
+platform-generated 64x64 blue-square PNG through that same image/strict-schema
+profile. A plain text-compatible endpoint therefore cannot pass the probe while
+lacking the required visual or structured-output capability. The synthetic
+probe does not contain project, user or uploaded-file data.
+
 The one runtime-policy timeout covers file read, normalization, queueing,
 connection, one bounded retry, response buffering and validation. Requests are
 non-streaming, redirects and ambient proxies are disabled, response bytes and

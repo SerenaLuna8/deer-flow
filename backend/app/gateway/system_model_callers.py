@@ -3,12 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import time
 from dataclasses import dataclass
+from threading import Event
 
 from app.system_settings import SystemModelMaterializer
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.utils.oneshot_llm import run_oneshot_llm
+from deerflow.vision.compatibility import VISION_OPENAI_COMPATIBLE_V1_ADAPTER
+from deerflow.vision.openai_compatible import (
+    OpenAICompatibleVisionEvidenceClient,
+)
+
+# Platform-generated 64x64 blue-square PNG. It contains no user/project data
+# and exists only to prove that an administrator-supplied endpoint supports the
+# exact image and strict structured-output profile, rather than merely accepting
+# text chat.
+_VISION_CONNECTION_PROBE_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAAlklEQVR4nO3awQmEUAAD0XGwBGuwMsuyMmuwh28NIosM67sHArlmGmNQJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3ESJ3Hz3cC6nfzSsS//tYDESZzESZzESZzESZzESZzESZzESZzESZzESZzESZzESZzESZzESZzESZzESdz0/YVeJnESJ3ESJ3ESJ3ESJ3ESJ3ESJ3G+XeCpCyOACXsXBLW8AAAAAElFTkSuQmCC"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +66,23 @@ class ModelConnectionTester:
 
     async def test(self, model: ModelConfig) -> bool:
         try:
+            if getattr(model, "system_provider_adapter", None) == VISION_OPENAI_COMPATIBLE_V1_ADAPTER:
+                client = OpenAICompatibleVisionEvidenceClient(
+                    model,
+                    transient_gate_key="admin-vision-connection-test",
+                )
+                deadline = time.monotonic() + self.timeout_seconds
+                await asyncio.wait_for(
+                    client.analyze(
+                        image_bytes=_VISION_CONNECTION_PROBE_PNG,
+                        mime_type="image/png",
+                        mode="auto",
+                        deadline_monotonic=deadline,
+                        abort_signal=Event(),
+                    ),
+                    timeout=self.timeout_seconds,
+                )
+                return True
             runtime_config = self.app_config.with_runtime_models((model,))
             await asyncio.wait_for(
                 run_oneshot_llm(

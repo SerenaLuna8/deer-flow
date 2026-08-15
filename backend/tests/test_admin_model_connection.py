@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from threading import Event
 from types import SimpleNamespace
 
 import pytest
@@ -71,6 +72,42 @@ async def test_model_connection_tester_hides_provider_failures(
     )
 
     assert connected is False
+
+
+@pytest.mark.anyio
+async def test_real_vision_connection_test_uses_synthetic_image_and_narrow_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class ProbeClient:
+        def __init__(self, model: object, *, transient_gate_key: str) -> None:
+            observed["model"] = model
+            observed["gate_key"] = transient_gate_key
+
+        async def analyze(self, **kwargs: object) -> object:
+            observed.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(
+        "app.gateway.system_model_callers.OpenAICompatibleVisionEvidenceClient",
+        ProbeClient,
+    )
+    model = SimpleNamespace(
+        name="vision-probe",
+        system_provider_adapter="vision_openai_compatible_v1",
+    )
+
+    connected = await ModelConnectionTester(_RuntimeConfig()).test(model)
+
+    assert connected is True
+    assert observed["model"] is model
+    assert observed["gate_key"] == "admin-vision-connection-test"
+    assert bytes(observed["image_bytes"]).startswith(b"\x89PNG\r\n\x1a\n")
+    assert observed["mime_type"] == "image/png"
+    assert observed["mode"] == "auto"
+    assert isinstance(observed["deadline_monotonic"], float)
+    assert isinstance(observed["abort_signal"], Event)
 
 
 def test_connection_test_reuses_provider_and_credential_validation() -> None:
