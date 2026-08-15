@@ -61,6 +61,8 @@ class AuthorizationBoundary(Protocol):
 
     async def before_idempotent_tool_call(self) -> None: ...
 
+    async def before_deferred_dispatch_tool_call(self) -> None: ...
+
     async def before_mcp_call(self) -> None: ...
 
     async def before_mcp_tool_dispatch(self) -> None: ...
@@ -89,6 +91,7 @@ async def check_authorization_boundary(
     if not callable(method) and operation in {
         "before_read_only_tool_call",
         "before_idempotent_tool_call",
+        "before_deferred_dispatch_tool_call",
     }:
         method = getattr(boundary, "before_tool_call", None)
     if callable(method):

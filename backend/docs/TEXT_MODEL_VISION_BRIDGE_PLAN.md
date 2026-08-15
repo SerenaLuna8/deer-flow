@@ -502,17 +502,24 @@ Agent 定义或工具参数中添加视觉模型名/API Key 回退。
 }
 ```
 
-当前 checkout 已落地 P1 基础闭环：严格 `vision_bridge` policy、schema v2 兼容读取、
+当前 checkout 已落地 P1 基础闭环和一个窄协议 P2 adapter：严格 `vision_bridge` policy、
 `purpose="vision"` Run snapshot/Worker 物化、共享安全图片规范化、固定 prompt/Schema、
-条件内置 `inspect_image`、对象 provenance、inline-only 结果以及管理端模型过滤。P1 的
-唯一兼容 adapter 是不可配置 Endpoint/Credential 且不联网的 `vision_bridge_fake`；它只
-验证控制面和数据通路，不提供真实语义识图，也不会发生第三方视觉外发。
+条件内置 `inspect_image`、对象 provenance、inline-only 结果以及管理端模型过滤。
+`vision_bridge_fake` 继续只验证控制面和数据通路；`vision_openai_compatible_v1` 要求精确
+Credential 与唯一 HTTPS `base_url`，固定调用 `/chat/completions`，不复用通用 adapter 的
+任意 extras、headers、重试、stream 或 timeout。
 
-真实 Provider、调用前外发授权复验、usage/quota settlement、敏感 tracing 排除、
-ambiguous-side-effect fence、provider retry/response cap 和 emergency kill switch 仍属于
-P2，当前代码通过 adapter/contract allowlist 硬性拒绝 OpenAI、Anthropic、vLLM 等真实
-Provider 被选为 Bridge。管理员现在可以配置并验证 P1 fake，但不能用旁路 YAML、环境
-变量或通用模型 adapter 提前接入真实 API。
+真实 adapter 已实现单一绝对 deadline、最多一次可恢复错误重试、redirect/ambient proxy
+禁用、请求/响应上限、严格本地 Schema、每 Run 和每精确模型并发/累计预算、服务端取消、
+Credential/精确 snapshot 前后复验、ambiguous-side-effect fence 以及 RunJournal usage
+归因。Credential 撤销作为即时外发熔断。当前选择的保守 tracing 策略是：外部
+LangSmith/Langfuse 内容 tracing 与真实 Bridge 互斥并失败关闭，而不是假设
+`attach_tracing=false` 能隐藏工具参数和 OCR。
+
+通用 `openai`、Anthropic、vLLM 等 adapter 仍不能直接被 Bridge 选择。管理员不能使用
+旁路 YAML、环境变量或任意 HTTP passthrough 接入。供应商数据政策批准、真实 Credential
+staging 质量/延迟/限流/成本评测以及生产验收仍是部署前 P3 门禁，mock/fake 测试不能
+替代这些外部证据。
 
 ### 10.2 Runtime Policy
 

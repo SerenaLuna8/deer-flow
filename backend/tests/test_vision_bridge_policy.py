@@ -1,4 +1,4 @@
-"""Strict Runtime Policy and compatibility contracts for Vision Bridge P1."""
+"""Strict Runtime Policy and compatibility contracts for Vision Bridge."""
 
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.vision.compatibility import (
     VISION_BRIDGE_CONTRACT_V1,
     VISION_BRIDGE_FAKE_ADAPTER,
+    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
     is_vision_bridge_adapter_compatible,
 )
 
@@ -130,9 +131,13 @@ def test_runtime_overlay_materializes_bridge_but_yaml_rejects_it() -> None:
         )
 
 
-def test_p1_compatibility_allowlist_cannot_admit_real_provider() -> None:
+def test_compatibility_allowlist_admits_only_versioned_bridge_adapters() -> None:
     assert is_vision_bridge_adapter_compatible(
         VISION_BRIDGE_FAKE_ADAPTER,
+        VISION_BRIDGE_CONTRACT_V1,
+    )
+    assert is_vision_bridge_adapter_compatible(
+        VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
         VISION_BRIDGE_CONTRACT_V1,
     )
     assert not is_vision_bridge_adapter_compatible(

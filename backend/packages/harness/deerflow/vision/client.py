@@ -1,4 +1,4 @@
-"""Narrow Vision Evidence client interface and P1 fake implementation."""
+"""Narrow Vision Evidence client interface and approved implementations."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from PIL import Image
 from deerflow.config.model_config import ModelConfig
 from deerflow.vision.compatibility import (
     VISION_BRIDGE_FAKE_ADAPTER,
+    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
     is_vision_bridge_adapter_compatible,
 )
 from deerflow.vision.contracts import (
@@ -34,6 +35,8 @@ class VisionClientError(RuntimeError):
 
 
 class VisionEvidenceClient(Protocol):
+    requires_external_dispatch: bool
+
     async def analyze(
         self,
         *,
@@ -47,6 +50,8 @@ class VisionEvidenceClient(Protocol):
 
 class FakeVisionEvidenceClient:
     """Deterministic, non-networking P1 adapter for closed-loop tests."""
+
+    requires_external_dispatch = False
 
     async def analyze(
         self,
@@ -103,6 +108,23 @@ def build_vision_evidence_client(
         raise VisionClientError("VISION_CONFIGURATION_ERROR")
     if adapter == VISION_BRIDGE_FAKE_ADAPTER:
         return FakeVisionEvidenceClient()
+    if adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER:
+        from deerflow.config import is_tracing_enabled
+        from deerflow.vision.openai_compatible import (
+            OpenAICompatibleVisionError,
+            OpenAICompatibleVisionEvidenceClient,
+        )
+
+        # Root graph callbacks can otherwise capture the image path, fixed
+        # prompt, OCR and evidence.  Until selective tool redaction is proven,
+        # fail closed rather than silently exporting that payload to a second
+        # observability provider.
+        if is_tracing_enabled():
+            raise VisionClientError("DATA_POLICY_BLOCKED")
+        try:
+            return OpenAICompatibleVisionEvidenceClient(model_config)
+        except OpenAICompatibleVisionError as error:
+            raise VisionClientError(error.code) from None
     raise VisionClientError("VISION_CONFIGURATION_ERROR")
 
 

@@ -66,6 +66,8 @@ class RuntimeContextKeys:
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS: Final[str] = CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
     TRACE_ID: Final[str] = DEERFLOW_TRACE_METADATA_KEY
     RUN_JOURNAL: Final[str] = "__run_journal"
+    SERVER_ABORT_EVENT: Final[str] = "__server_abort_event"
+    VISION_DISPATCH_AUTHORITY: Final[str] = "__vision_dispatch_authority"
     MEMORY_ARCHIVE_CONTEXT: Final[str] = MEMORY_ARCHIVE_CONTEXT_KEY
     STOP_REASON: Final[str] = "stop_reason"
     VERIFIED_SKILL_SOURCE: Final[str] = VERIFIED_SKILL_SOURCE_CONTEXT_KEY
@@ -110,6 +112,8 @@ class RuntimeContextKeys:
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS,
             TRACE_ID,
             RUN_JOURNAL,
+            SERVER_ABORT_EVENT,
+            VISION_DISPATCH_AUTHORITY,
             MEMORY_ARCHIVE_CONTEXT,
             HOST_EXECUTION_APPROVAL_PORT,
             HOST_EXECUTION_AGENT_PATH,

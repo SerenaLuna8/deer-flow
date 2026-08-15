@@ -49,6 +49,7 @@ _TASK_TOOL_NAME = "task"
 _RECOVERY_HINT = "Continue with available context, or choose an alternative tool."
 _TRUSTED_READ_ONLY_TOOL_MARKER = object()
 _TRUSTED_IDEMPOTENT_TOOL_MARKER = object()
+_DEFERRED_EXTERNAL_DISPATCH_TOOL_MARKER = object()
 
 
 def mark_trusted_read_only_tool(tool: object) -> object:
@@ -88,6 +89,26 @@ def mark_trusted_idempotent_tool(tool: object) -> object:
     raise TypeError("trusted idempotent tools require a registered callable")
 
 
+def mark_deferred_external_dispatch_tool(tool: object) -> object:
+    """Mark an app-owned tool whose side effect starts at a later authority hook.
+
+    The entry middleware performs a lease/authorization check without claiming
+    the tool is read-only.  The canonical implementation must invoke its
+    dedicated dispatch authority immediately before the remote side effect.
+    """
+
+    for attribute in ("coroutine", "func"):
+        implementation = getattr(tool, attribute, None)
+        if callable(implementation):
+            setattr(
+                implementation,
+                "__deerflow_deferred_external_dispatch_tool__",
+                _DEFERRED_EXTERNAL_DISPATCH_TOOL_MARKER,
+            )
+            return tool
+    raise TypeError("deferred dispatch tools require a registered callable")
+
+
 def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
     """Recognize only canonical code-registered read-only tool objects."""
 
@@ -118,6 +139,19 @@ def _is_trusted_idempotent_tool(request: ToolCallRequest) -> bool:
             None,
         )
         is _TRUSTED_IDEMPOTENT_TOOL_MARKER
+        for attribute in ("coroutine", "func")
+    )
+
+
+def _is_deferred_external_dispatch_tool(request: ToolCallRequest) -> bool:
+    tool = getattr(request, "tool", None)
+    return any(
+        getattr(
+            getattr(tool, attribute, None),
+            "__deerflow_deferred_external_dispatch_tool__",
+            None,
+        )
+        is _DEFERRED_EXTERNAL_DISPATCH_TOOL_MARKER
         for attribute in ("coroutine", "func")
     )
 
@@ -309,6 +343,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             runtime_context = self._runtime_context(request)
             if _is_trusted_read_only_tool(request):
                 authorization_method = "before_read_only_tool_call"
+            elif _is_deferred_external_dispatch_tool(request):
+                authorization_method = "before_deferred_dispatch_tool_call"
             elif _is_trusted_idempotent_tool(
                 request,
             ) or _is_local_approval_staging_call(request):
@@ -359,4 +395,5 @@ __all__ = [
     "build_subagent_runtime_middlewares",
     "mark_trusted_read_only_tool",
     "mark_trusted_idempotent_tool",
+    "mark_deferred_external_dispatch_tool",
 ]

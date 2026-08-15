@@ -242,10 +242,12 @@ fallbacks.
 Text-model image inspection follows
 [`docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md`](docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md):
 `inspect_image` is a reserved, conditional Worker tool selected through
-`agent_runtime.vision_bridge.model_name`, never `config.yaml`. The current P1
-allowlist is deliberately fake-only; do not admit a real provider adapter
-without the documented P2 data-egress, tracing, settlement, and cancellation
-gates.
+`agent_runtime.vision_bridge.model_name`, never `config.yaml`. Real Bridge
+traffic is admitted only through the versioned
+`vision_openai_compatible_v1` profile: one HTTPS endpoint, exact Credential,
+fixed prompt/schema/request, bounded retry/response/concurrency, Worker abort,
+dispatch revalidation and tracing exclusion. Do not reuse a generic model
+adapter or add HTTP passthrough fields to widen this contract.
 
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required

@@ -80,6 +80,7 @@ const PROVIDER_ADAPTERS = [
   { value: "patched_stepfun", credential: true },
   { value: "mindie", credential: true },
   { value: "vllm", credential: true },
+  { value: "vision_openai_compatible_v1", credential: true },
   { value: "vision_bridge_fake", credential: false },
   { value: "claude_code", credential: false },
   { value: "codex_cli", credential: false },
@@ -363,6 +364,8 @@ function providerAdapterLabel(
       return "vLLM";
     case "vision_bridge_fake":
       return "Vision Bridge Fake (test only)";
+    case "vision_openai_compatible_v1":
+      return "Vision Bridge OpenAI-compatible v1";
     case "claude_code":
       return "Claude Code CLI";
     case "codex_cli":

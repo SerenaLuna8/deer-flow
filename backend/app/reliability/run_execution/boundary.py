@@ -173,6 +173,10 @@ class PrivateRunExecutionBoundary:
     async def before_idempotent_tool_call(self) -> None:
         await self._check("before_tool_call")
 
+    async def before_deferred_dispatch_tool_call(self) -> None:
+        # The exact external-call authority owns the durable ambiguity fence.
+        await self._check("before_tool_call")
+
     async def before_mcp_call(self) -> None:
         # Discovery/materialization is read-only. The exact remote dispatch
         # hook owns both quota consumption and the retry-safety fence.
@@ -190,6 +194,19 @@ class PrivateRunExecutionBoundary:
             "before_mcp_call",
             ambiguous_side_effect=True,
         )
+
+    async def before_vision_dispatch(self) -> None:
+        """Fence one non-idempotent third-party model request."""
+
+        await self._check(
+            "before_model_call",
+            ambiguous_side_effect=True,
+        )
+
+    async def after_vision_dispatch(self) -> None:
+        """Require current authority before exposing provider evidence."""
+
+        await self._check("before_model_call")
 
     async def before_sandbox_write(self) -> None:
         await self._check(

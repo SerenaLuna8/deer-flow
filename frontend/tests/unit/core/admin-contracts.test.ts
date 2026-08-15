@@ -90,7 +90,7 @@ function agentRuntimeSettings() {
 }
 
 describe("admin contracts", () => {
-  test("accepts only the credential-free P1 Vision Bridge fake adapter", () => {
+  test("accepts the credential-free Vision Bridge fake adapter", () => {
     const input = {
       logical_name: "small-vision-model",
       display_name: "Small Vision Model",
@@ -114,6 +114,52 @@ describe("admin contracts", () => {
       createAdminModelInputSchema.safeParse({
         ...input,
         settings: { base_url: "https://example.com" },
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts only the narrow credential-bound real Vision Bridge adapter", () => {
+    const input = {
+      logical_name: "small-vision-api",
+      display_name: "Small Vision API",
+      description: "Narrow OpenAI-compatible vision bridge",
+      provider_adapter: "vision_openai_compatible_v1",
+      provider_model: "small-vlm",
+      settings: { base_url: "https://vision.example.test/v1" },
+      supports_thinking: false,
+      supports_reasoning_effort: false,
+      supports_vision: true,
+      credential_id: "00000000-0000-4000-8000-000000000101",
+      credential_version_id: "00000000-0000-4000-8000-000000000102",
+      credential_env_key: "VISION_API_KEY",
+      sort_order: 0,
+      status: "active",
+    };
+
+    expect(createAdminModelInputSchema.parse(input).provider_adapter).toBe(
+      "vision_openai_compatible_v1",
+    );
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...input,
+        settings: { base_url: "http://vision.example.test/v1" },
+      }).success,
+    ).toBe(false);
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...input,
+        settings: {
+          base_url: "https://vision.example.test/v1",
+          max_retries: 4,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...input,
+        credential_id: null,
+        credential_version_id: null,
+        credential_env_key: null,
       }).success,
     ).toBe(false);
   });

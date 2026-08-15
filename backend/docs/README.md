@@ -23,7 +23,7 @@
 | [IM_CHANNEL_CONNECTIONS.md](./IM_CHANNEL_CONNECTIONS.md) | 项目 Channel Connection                     |
 | [MCP_SERVER.md](./MCP_SERVER.md)                         | MCP、Credential 和 Run snapshot             |
 | [APPLE_CONTAINER.md](./APPLE_CONTAINER.md)               | Apple Container Sandbox                     |
-| [TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) | 文本模型识图 Bridge 的 P1 实现边界、固定协议和 P2 门禁 |
+| [TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) | 文本模型识图 Bridge 的固定协议、真实 API 安全边界和生产验收门禁 |
 
 ## Agent harness
 

@@ -109,6 +109,7 @@ _PROVIDER_SETTING_FIELDS: Mapping[str, frozenset[str]] = {
     "patched_stepfun": _OPENAI_COMPATIBLE_FIELDS,
     "vllm": _OPENAI_COMPATIBLE_FIELDS | frozenset({"cumulative_stream_usage"}),
     "vision_bridge_fake": frozenset(),
+    "vision_openai_compatible_v1": frozenset({"base_url"}),
 }
 _ALL_SETTING_FIELDS = frozenset().union(*_PROVIDER_SETTING_FIELDS.values())
 
@@ -178,6 +179,10 @@ PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = {
     "vision_bridge_fake": ProviderAdapterSpec(
         "deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
         False,
+    ),
+    "vision_openai_compatible_v1": ProviderAdapterSpec(
+        "langchain_openai:ChatOpenAI",
+        True,
     ),
 }
 
@@ -402,6 +407,12 @@ def validate_model_settings(
         if any(type(key) is not str for key in value) or set(value) - allowed_fields:
             raise ValueError
         normalized = {key: _validate_setting_field(key, item) for key, item in value.items()}
+        if provider_adapter == "vision_openai_compatible_v1":
+            if set(normalized) != {"base_url"}:
+                raise ValueError
+            base_url = normalized["base_url"]
+            if not isinstance(base_url, str) or urlsplit(base_url).scheme != "https":
+                raise ValueError
         payload = json.dumps(
             normalized,
             allow_nan=False,

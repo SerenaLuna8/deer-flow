@@ -268,7 +268,7 @@ tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
 decrypted for the exact admitted model version at the execution boundary.
 
-#### Text-model Vision Bridge (P1)
+#### Text-model Vision Bridge
 
 `inspect_image` is a reserved conditional built-in tool. It is not listed under
 `tools:` or `tool_groups:` in `config.yaml`; declaring that name there fails
@@ -283,14 +283,39 @@ closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
 3. `timeout_seconds` is the single image-read-through-result deadline.
    `contract_version` is fixed to `vision.bridge.v1` and is not free-form.
 
-The current P1 compatibility allowlist contains only `vision_bridge_fake`. It
-accepts no provider settings or Credential and cannot perform network I/O. It
-exists to validate catalog, snapshot, Worker materialization, image authority,
-normalization, prompt/schema, and tool-result behavior. Real third-party API
-adapters remain rejected until the P2 endpoint, TLS/redirect/proxy, tracing,
-quota/usage settlement, cancellation, and data-egress gates in
-[TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) are
-implemented and approved.
+Two versioned adapters are accepted by `vision.bridge.v1`:
+
+- `vision_bridge_fake` accepts no settings or Credential and performs no
+  network I/O. Use it only for control-path verification.
+- `vision_openai_compatible_v1` requires an exact encrypted model API-key
+  Credential and exactly one setting, an HTTPS `base_url`. The Worker calls
+  `{base_url}/chat/completions` with a fixed Bearer header and never forwards
+  arbitrary headers, `extra_body`, provider retries, streaming or model-level
+  timeout overrides.
+
+For the real adapter, set `supports_vision=true` and the provider's visual
+model identifier. The endpoint must implement the OpenAI Chat Completions
+single-image content shape and native strict `json_schema` response format.
+The request contains only the normalized image, fixed `vision.prompt.v1`, the
+fixed mode task and `vision.evidence.v1`; paths, full chat history, Memory and
+other attachments are not sent.
+
+The one runtime-policy timeout covers file read, normalization, queueing,
+connection, one bounded retry, response buffering and validation. Requests are
+non-streaming, redirects and ambient proxies are disabled, response bytes and
+Run-level calls/bytes/pixels are bounded, and normalized token usage is added
+to the Run journal. The exact model and Credential are re-materialized before
+and after every remote dispatch. Revoking that Credential is the immediate
+egress kill switch for already admitted Runs.
+
+Because graph-level LangSmith/Langfuse handlers can observe tool arguments and
+OCR evidence, `vision_openai_compatible_v1` and external content tracing are
+currently mutually exclusive and fail closed. System model selection is the
+deployment-wide data-egress approval; there is no separate `enabled` flag or
+project grant. Complete provider policy, staging quality, rate-limit and cost
+acceptance before selecting the real adapter in production; fake tests are not
+evidence of provider behavior. See
+[TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md).
 
 Gateway, Worker, Scheduler, and Docker Compose do not receive the local
 bootstrap provider key as a process-wide environment block. Each Run records a secret-free,

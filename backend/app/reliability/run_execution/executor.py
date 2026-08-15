@@ -85,6 +85,9 @@ from app.reliability.run_execution.stream_authority import (
     LeaseAuthorizedRunEventStore,
     LeaseAuthorizedStreamBridge,
 )
+from app.reliability.run_execution.vision_dispatch import (
+    PrivateRunVisionDispatchAuthority,
+)
 from app.shared_assets.model_refs import resolve_model_ref
 from app.shared_assets.skill_builder_agent_runtime import (
     SkillBuilderAgentFactory,
@@ -103,6 +106,7 @@ from deerflow.config.app_config import (
 )
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.tracing_config import is_tracing_enabled
 from deerflow.error_codes import (
     PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
     MemoryAuthorityUnavailable,
@@ -140,6 +144,7 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 from deerflow.vision.compatibility import (
+    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
     is_vision_bridge_adapter_compatible,
 )
 
@@ -515,6 +520,7 @@ class RunAgentPrivateExecutor:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
             runtime_app_config = self._app_config
             runtime_policy = None
+            vision_model: ModelConfig | None = None
             delegate_model_names: dict[uuid.UUID, str] = {}
             if self._runtime_policy_materializer is not None:
                 try:
@@ -623,6 +629,8 @@ class RunAgentPrivateExecutor:
                                     "RUN_ASSET_STALE",
                                 )
                             runtime_models[auxiliary_model.name] = auxiliary_model
+                            if purpose == "vision":
+                                vision_model = auxiliary_model
                             if purpose == "title" and model_ref is None:
                                 title_bound_name = auxiliary_model.name
                 except asyncio.CancelledError:
@@ -646,6 +654,8 @@ class RunAgentPrivateExecutor:
                             ),
                         },
                     )
+                if vision_model is not None and vision_model.system_provider_adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER and is_tracing_enabled():
+                    raise PermanentExecutionError("RUN_POLICY_STALE")
             elif runtime_app_config.get_model_config(exact_model_name) is None:
                 # Compatibility path for isolated unit tests. Production
                 # composition always injects the PostgreSQL materializer.
@@ -727,6 +737,18 @@ class RunAgentPrivateExecutor:
             authority.bind_cancel_callback(boundary.request_local_cancel)
             if authority.cancel_requested:
                 boundary.request_local_cancel()
+            vision_dispatch_authority = (
+                PrivateRunVisionDispatchAuthority(
+                    boundary=boundary,
+                    materializer=self._model_materializer,
+                    project_id=execution.context.project_id,
+                    owner_user_id=str(execution.context.user_id),
+                    run_id=execution.run.run_id,
+                    expected_model=vision_model,
+                )
+                if (vision_model is not None and self._model_materializer is not None and vision_model.system_provider_adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER)
+                else None
+            )
 
             checkpointer = self._project_checkpointer.for_context(
                 execution.context,
@@ -811,6 +833,7 @@ class RunAgentPrivateExecutor:
                 private_agent_runtime=private_runtime,
                 host_execution_approval_port=(host_execution_approval_port),
                 channel_user_id=channel_user_id,
+                vision_dispatch_authority=vision_dispatch_authority,
             )
             owner_token = set_current_user(
                 SimpleNamespace(id=execution.run.owner_user_id),

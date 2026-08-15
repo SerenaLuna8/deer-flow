@@ -1,0 +1,173 @@
+"""Governance tests for the application-owned Vision dispatch authority."""
+
+from __future__ import annotations
+
+import uuid
+
+import pytest
+from pydantic import SecretStr
+
+from app.reliability.run_execution.vision_dispatch import (
+    PrivateRunVisionDispatchAuthority,
+)
+from deerflow.config.model_config import ModelConfig
+from deerflow.runtime.journal import RunJournal
+from deerflow.vision.dispatch import (
+    MAX_VISION_CALLS_PER_RUN,
+    MAX_VISION_NORMALIZED_BYTES_PER_RUN,
+    VisionDispatchDenied,
+)
+
+
+def _model(*, model: str = "small-vlm") -> ModelConfig:
+    value = ModelConfig(
+        name="vision-small-v1",
+        display_name="Vision small",
+        description="",
+        use="langchain_openai:ChatOpenAI",
+        model=model,
+        base_url="https://vision.example.test/v1",
+        api_key=SecretStr("secret-value"),
+        supports_vision=True,
+    )
+    value._system_model_config_version_id = uuid.UUID("00000000-0000-0000-0000-000000000101")
+    value._system_provider_adapter = "vision_openai_compatible_v1"
+    return value
+
+
+class _Materializer:
+    def __init__(self, model: ModelConfig) -> None:
+        self.model = model
+        self.calls = 0
+
+    async def materialize_snapshot(self, **_kwargs: object) -> ModelConfig:
+        self.calls += 1
+        return self.model
+
+
+class _Boundary:
+    def __init__(self) -> None:
+        self.before_calls = 0
+        self.after_calls = 0
+
+    async def before_vision_dispatch(self) -> None:
+        self.before_calls += 1
+
+    async def after_vision_dispatch(self) -> None:
+        self.after_calls += 1
+
+
+def _authority(
+    materializer: _Materializer,
+    boundary: _Boundary,
+) -> PrivateRunVisionDispatchAuthority:
+    return PrivateRunVisionDispatchAuthority(
+        boundary=boundary,
+        materializer=materializer,
+        project_id=uuid.uuid4(),
+        owner_user_id="owner",
+        run_id="run-1",
+        expected_model=_model(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_dispatch_revalidates_exact_model_before_and_after_http() -> None:
+    materializer = _Materializer(_model())
+    boundary = _Boundary()
+    authority = _authority(materializer, boundary)
+
+    await authority.before_dispatch(
+        normalized_bytes=100,
+        normalized_pixels=200,
+    )
+    await authority.after_dispatch()
+
+    assert materializer.calls == 2
+    assert boundary.before_calls == 1
+    assert boundary.after_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_dispatch_rejects_stale_exact_model_before_side_effect_fence() -> None:
+    materializer = _Materializer(_model(model="changed-vlm"))
+    boundary = _Boundary()
+    authority = _authority(materializer, boundary)
+
+    with pytest.raises(VisionDispatchDenied) as caught:
+        await authority.before_dispatch(
+            normalized_bytes=100,
+            normalized_pixels=200,
+        )
+
+    assert caught.value.code == "VISION_AUTH_FAILED"
+    assert boundary.before_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_enforces_per_run_calls_and_cumulative_bytes() -> None:
+    materializer = _Materializer(_model())
+    boundary = _Boundary()
+    authority = _authority(materializer, boundary)
+
+    for _ in range(MAX_VISION_CALLS_PER_RUN):
+        await authority.before_dispatch(
+            normalized_bytes=1,
+            normalized_pixels=1,
+        )
+    with pytest.raises(VisionDispatchDenied) as caught:
+        await authority.before_dispatch(
+            normalized_bytes=1,
+            normalized_pixels=1,
+        )
+    assert caught.value.code == "VISION_RATE_LIMITED"
+    assert boundary.before_calls == MAX_VISION_CALLS_PER_RUN
+
+    byte_authority = _authority(_Materializer(_model()), _Boundary())
+    with pytest.raises(VisionDispatchDenied) as caught:
+        await byte_authority.before_dispatch(
+            normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN + 1,
+            normalized_pixels=1,
+        )
+    assert caught.value.code == "VISION_RATE_LIMITED"
+
+
+def test_vision_usage_receipt_counts_auxiliary_call_without_content() -> None:
+    journal = RunJournal(
+        "run-1",
+        "thread-1",
+        object(),
+    )
+
+    journal.record_vision_usage(
+        source_id="vision:run-1:call-1",
+        model_name="vision-small-v1",
+        call_count=1,
+        input_tokens=31,
+        output_tokens=12,
+        usage_unknown=False,
+        request_dispatched=True,
+    )
+    # Exact duplicate receipts are ignored during retry/reconciliation.
+    journal.record_vision_usage(
+        source_id="vision:run-1:call-1",
+        model_name="vision-small-v1",
+        call_count=1,
+        input_tokens=31,
+        output_tokens=12,
+        usage_unknown=False,
+        request_dispatched=True,
+    )
+
+    completion = journal.get_completion_data()
+    assert completion["llm_call_count"] == 1
+    assert completion["total_input_tokens"] == 31
+    assert completion["total_output_tokens"] == 12
+    assert completion["middleware_tokens"] == 43
+    assert completion["token_usage_by_model"] == {
+        "vision-small-v1": {
+            "input_tokens": 31,
+            "output_tokens": 12,
+            "total_tokens": 43,
+        }
+    }

@@ -891,6 +891,54 @@ class RunJournal(BaseCallbackHandler):
 
             self._schedule_progress_flush()
 
+    def record_vision_usage(
+        self,
+        *,
+        source_id: str,
+        model_name: str,
+        call_count: int,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        usage_unknown: bool,
+        request_dispatched: bool,
+    ) -> None:
+        """Account one bounded Vision Bridge receipt without persisting content."""
+
+        if not self._track_tokens or not source_id or source_id in self._counted_external_source_ids or type(call_count) is not int or call_count < 1 or request_dispatched is not True:
+            return
+        self._counted_external_source_ids.add(source_id)
+        self._llm_call_count += call_count
+        input_tk = input_tokens if type(input_tokens) is int and input_tokens >= 0 else 0
+        output_tk = output_tokens if type(output_tokens) is int and output_tokens >= 0 else 0
+        total_tk = input_tk + output_tk
+        self._total_input_tokens += input_tk
+        self._total_output_tokens += output_tk
+        self._total_tokens += total_tk
+        self._middleware_tokens += total_tk
+        if total_tk > 0:
+            self._record_model_usage(
+                model_name,
+                input_tk,
+                output_tk,
+                total_tk,
+                0,
+            )
+        self._put(
+            event_type="vision.usage",
+            category="trace",
+            content={
+                "call_count": call_count,
+                "input_tokens": input_tokens if type(input_tokens) is int else None,
+                "output_tokens": output_tokens if type(output_tokens) is int else None,
+                "usage_unknown": usage_unknown is True,
+            },
+            metadata={
+                "caller": "middleware:vision_bridge",
+                "model_name": model_name,
+            },
+        )
+        self._schedule_progress_flush()
+
     def set_first_human_message(self, content: str) -> None:
         """Record the first human message for convenience fields."""
         self._first_human_msg = content[:2000] if content else None

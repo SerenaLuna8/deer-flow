@@ -479,6 +479,8 @@ def _build_runtime_context(
     memory_archive_context: object | None = None,
     host_execution_approval_port: object | None = None,
     channel_user_id: str | None = None,
+    server_abort_event: object | None = None,
+    vision_dispatch_authority: object | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -508,6 +510,8 @@ def _build_runtime_context(
         host_execution_approval_port=host_execution_approval_port,
         host_execution_agent_path=(("lead",) if host_execution_approval_port is not None else None),
         channel_user_id=channel_user_id,
+        server_abort_event=server_abort_event,
+        vision_dispatch_authority=vision_dispatch_authority,
     ).build(caller_context)
     if private_scope is not None and channel_user_id is None:
         # A private Run without verified IM identity must explicitly clear the
@@ -560,6 +564,7 @@ class RunContext:
     private_agent_runtime: PrivateAgentRuntime | None = field(default=None)
     host_execution_approval_port: object | None = field(default=None)
     channel_user_id: str | None = field(default=None)
+    vision_dispatch_authority: object | None = field(default=None)
 
 
 def _checkpoint_runtime_settings(
@@ -1015,6 +1020,8 @@ async def run_agent(
             memory_archive_context=ctx.memory_archive_context,
             host_execution_approval_port=ctx.host_execution_approval_port,
             channel_user_id=ctx.channel_user_id,
+            server_abort_event=record.abort_event,
+            vision_dispatch_authority=ctx.vision_dispatch_authority,
         )
         runtime_model_name = None
         prompt_bundle = None

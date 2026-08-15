@@ -20,6 +20,7 @@ export const adminModelProviderAdapterSchema = z.enum([
   "patched_openai",
   "patched_stepfun",
   "vision_bridge_fake",
+  "vision_openai_compatible_v1",
   "vllm",
 ]);
 
@@ -454,6 +455,7 @@ const PROVIDER_SETTING_FIELDS: Record<
     "when_thinking_enabled",
   ]),
   vision_bridge_fake: new Set(),
+  vision_openai_compatible_v1: new Set(["base_url"]),
   vllm: new Set([
     "base_url",
     "cumulative_stream_usage",
@@ -484,6 +486,25 @@ function validateProviderSettings(
         code: z.ZodIssueCode.custom,
         path: ["settings", key],
         message: "Setting is not supported by this provider adapter",
+      });
+    }
+  }
+  if (value.provider_adapter === "vision_openai_compatible_v1") {
+    const baseUrl = value.settings.base_url;
+    let valid = typeof baseUrl === "string";
+    if (valid) {
+      try {
+        valid = new URL(baseUrl as string).protocol === "https:";
+      } catch {
+        valid = false;
+      }
+    }
+    if (!valid || Object.keys(value.settings).length !== 1) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["settings", "base_url"],
+        message:
+          "Vision Bridge v1 requires exactly one HTTPS base_url setting",
       });
     }
   }

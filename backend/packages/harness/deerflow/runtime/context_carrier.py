@@ -57,6 +57,8 @@ class RuntimeContextCarrier:
     current_run_pre_existing_message_ids: frozenset[str] | None = None
     trace_id: str | None = None
     run_journal: object | None = None
+    server_abort_event: object | None = None
+    vision_dispatch_authority: object | None = None
     memory_archive_context: object | None = None
     host_execution_approval_port: object | None = None
     host_execution_agent_path: tuple[str, ...] | None = None
@@ -117,6 +119,14 @@ class RuntimeContextCarrier:
             ),
             (RuntimeContextKeys.TRACE_ID, self.trace_id),
             (RuntimeContextKeys.RUN_JOURNAL, self.run_journal),
+            (
+                RuntimeContextKeys.SERVER_ABORT_EVENT,
+                self.server_abort_event,
+            ),
+            (
+                RuntimeContextKeys.VISION_DISPATCH_AUTHORITY,
+                self.vision_dispatch_authority,
+            ),
             (
                 RuntimeContextKeys.MEMORY_ARCHIVE_CONTEXT,
                 self.memory_archive_context,

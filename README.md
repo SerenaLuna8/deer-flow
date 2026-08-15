@@ -124,7 +124,7 @@ make stop
 - `/projects/{project_slug}`：项目会话、资产、Memory、Automation 和设置。
 - `/admin`：仅 system admin 可访问的平台治理与运维页面。
 
-### 文本模型图片识别桥接（P1）
+### 文本模型图片识别桥接
 
 该能力不在 `config.yaml` 声明工具、模型或开关。System admin 先在
 `/admin/settings/models` 创建 active、`supports_vision=true` 且 Bridge-compatible
@@ -132,10 +132,19 @@ make stop
 后续 text-only project Run 启用，清空即关闭。原生视觉 lead model 继续使用现有
 `view_image`，不会同时注册 `inspect_image`。
 
-当前 checkout 只允许 `vision_bridge_fake`，它不接受 Endpoint、Credential 或 Provider
-settings，也不会外发图片，适合验证冻结、授权、图片规范化和工具结果链路。不得把它
-当作真实识图质量或第三方数据边界已经验收的证明。完整目标、固定提示词、证据 Schema
-和 P2 生产门禁见
+可选 adapter：
+
+- `vision_bridge_fake`：不接受 Endpoint/Credential，不联网，仅验证链路；
+- `vision_openai_compatible_v1`：要求一个加密 Credential 和唯一 HTTPS `base_url`，
+  固定调用 `{base_url}/chat/completions`。它不接受任意 headers、`extra_body`、重试、
+  stream 或 timeout 覆盖。
+
+真实 adapter 只发送规范化后的单张图片、固定 `vision.prompt.v1`、固定 mode 指令和
+`vision.evidence.v1` Schema，不发送完整对话或文件路径。Credential 撤销会阻断已准入
+Run 的下一次外发；启用 LangSmith/Langfuse 内容 tracing 时真实 Bridge 失败关闭。选择
+真实模型表示系统管理员已批准该部署中所有项目按此 Provider 数据边界外发；不存在第二个
+`enabled` 或项目 grant。生产启用前仍须完成供应商政策与真实 API 质量/成本验收。完整
+协议、固定提示词、证据 Schema 和验收门禁见
 [文本模型内部识图桥接方案](./backend/docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md)。
 
 ## Docker 与部署

@@ -1,4 +1,4 @@
-"""P1 ``inspect_image`` registration, provenance and tool-result behavior."""
+"""``inspect_image`` registration, provenance and tool-result behavior."""
 
 from __future__ import annotations
 
@@ -11,16 +11,27 @@ from types import SimpleNamespace
 
 import pytest
 from langchain.tools import tool
+from langchain_core.messages import ToolMessage
 from PIL import Image
 
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ToolErrorHandlingMiddleware,
+)
 from deerflow.agents.middlewares.tool_result_sanitization_middleware import (
     ToolResultSanitizationMiddleware,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.tools.builtins.inspect_image_tool import build_inspect_image_tool
 from deerflow.vision.client import VisionClientError
+from deerflow.vision.contracts import (
+    VisionEvidence,
+    VisionEvidenceItem,
+    VisionInvocationResult,
+    VisionUsageReceipt,
+)
 from deerflow.vision.provenance import is_vision_evidence_tool
 
 
@@ -181,6 +192,42 @@ def test_sanitizer_uses_registered_object_provenance_not_tool_name() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inspect_entry_uses_deferred_dispatch_authority_boundary() -> None:
+    inspect_image = build_inspect_image_tool(app_config=_runtime_config())
+    calls: list[str] = []
+
+    class Boundary:
+        async def before_deferred_dispatch_tool_call(self) -> None:
+            calls.append("deferred")
+
+        async def before_tool_call(self) -> None:
+            calls.append("generic-side-effect")
+
+    request = SimpleNamespace(
+        tool=inspect_image,
+        tool_call={"name": "inspect_image", "id": "call-boundary"},
+        runtime=SimpleNamespace(
+            context={RuntimeContextKeys.AUTHORIZATION_BOUNDARY: Boundary()},
+        ),
+    )
+
+    async def handler(_request: object) -> ToolMessage:
+        return ToolMessage(
+            content="ignored",
+            tool_call_id="call-boundary",
+            name="inspect_image",
+        )
+
+    result = await ToolErrorHandlingMiddleware().awrap_tool_call(
+        request,
+        handler,
+    )
+
+    assert result.content == "ignored"
+    assert calls == ["deferred"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("client_code", "expected_code"),
     [
@@ -298,5 +345,149 @@ async def test_cancelling_inspect_image_propagates_and_sets_abort_signal(
 
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert isinstance(captured["abort_signal"], Event)
+    assert captured["abort_signal"].is_set()
+
+
+@pytest.mark.asyncio
+async def test_real_inspect_dispatch_uses_authority_and_records_bounded_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.tools.builtins.inspect_image_tool as module
+
+    order: list[str] = []
+    recorded: dict[str, object] = {}
+
+    class Authority:
+        async def before_dispatch(self, **_kwargs: object) -> None:
+            order.append("before")
+
+        async def after_dispatch(self) -> None:
+            order.append("after")
+
+    class Journal:
+        def record_vision_usage(self, **kwargs: object) -> None:
+            recorded.update(kwargs)
+
+    class RealClient:
+        requires_external_dispatch = True
+
+        async def analyze(self, **_kwargs: object) -> VisionInvocationResult:
+            order.append("analyze")
+            return VisionInvocationResult(
+                evidence=VisionEvidence(
+                    summary="One blue image is visible.",
+                    evidence=[
+                        VisionEvidenceItem(
+                            kind="visual",
+                            text="The image is blue.",
+                            location="entire image",
+                        )
+                    ],
+                    uncertainty=[],
+                    partial=False,
+                ),
+                usage_receipt=VisionUsageReceipt(
+                    call_count=1,
+                    request_dispatched=True,
+                    input_tokens=31,
+                    output_tokens=12,
+                    usage_unknown=False,
+                ),
+            )
+
+    monkeypatch.setattr(module, "image_sandbox", lambda _runtime: _Sandbox(_png_bytes()))
+    monkeypatch.setattr(
+        module,
+        "current_private_scope",
+        lambda _runtime: SimpleNamespace(project_id="project"),
+    )
+    inspect_image = build_inspect_image_tool(
+        app_config=_runtime_config(),
+        client_factory=lambda _model, _contract: RealClient(),
+    )
+    context = {
+        "run_id": "run-1",
+        RuntimeContextKeys.VISION_DISPATCH_AUTHORITY: Authority(),
+        RuntimeContextKeys.SERVER_ABORT_EVENT: asyncio.Event(),
+        RuntimeContextKeys.RUN_JOURNAL: Journal(),
+    }
+
+    result = await inspect_image.coroutine(
+        runtime=SimpleNamespace(context=context),
+        image_path="/mnt/user-data/uploads/image.png",
+        mode="describe",
+        tool_call_id="call-real",
+    )
+
+    assert result.status == "success"
+    assert order == ["before", "analyze", "after"]
+    assert recorded == {
+        "source_id": "vision:run-1:call-real",
+        "model_name": "vision-small-v1",
+        "call_count": 1,
+        "input_tokens": 31,
+        "output_tokens": 12,
+        "usage_unknown": False,
+        "request_dispatched": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_server_abort_cancels_inflight_real_inspect_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import deerflow.tools.builtins.inspect_image_tool as module
+
+    started = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    class Authority:
+        async def before_dispatch(self, **_kwargs: object) -> None:
+            return None
+
+        async def after_dispatch(self) -> None:
+            raise AssertionError("aborted response must not settle")
+
+    class BlockingRealClient:
+        requires_external_dispatch = True
+
+        async def analyze(self, **kwargs: object) -> object:
+            captured["abort_signal"] = kwargs["abort_signal"]
+            started.set()
+            await asyncio.Future()
+            raise AssertionError("unreachable")
+
+    monkeypatch.setattr(module, "image_sandbox", lambda _runtime: _Sandbox(_png_bytes()))
+    monkeypatch.setattr(
+        module,
+        "current_private_scope",
+        lambda _runtime: SimpleNamespace(project_id="project"),
+    )
+    inspect_image = build_inspect_image_tool(
+        app_config=_runtime_config(),
+        client_factory=lambda _model, _contract: BlockingRealClient(),
+    )
+    server_abort = asyncio.Event()
+    task = asyncio.create_task(
+        inspect_image.coroutine(
+            runtime=SimpleNamespace(
+                context={
+                    "run_id": "run-1",
+                    RuntimeContextKeys.VISION_DISPATCH_AUTHORITY: Authority(),
+                    RuntimeContextKeys.SERVER_ABORT_EVENT: server_abort,
+                },
+            ),
+            image_path="/mnt/user-data/uploads/image.png",
+            mode="auto",
+            tool_call_id="call-abort",
+        )
+    )
+    await started.wait()
+    server_abort.set()
+    result = await task
+
+    assert result.status == "error"
+    assert json.loads(result.content)["code"] == "VISION_AUTH_FAILED"
     assert isinstance(captured["abort_signal"], Event)
     assert captured["abort_signal"].is_set()
