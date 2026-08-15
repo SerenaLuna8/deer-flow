@@ -34,6 +34,7 @@ import {
   PromptInputSubmit,
   PromptInputTextarea,
   PromptInputTools,
+  getPromptInputEnterAction,
   usePromptInputController,
   type PromptInputMessage,
 } from "@/components/ai-elements/prompt-input";
@@ -1483,17 +1484,18 @@ export function InputBox({
         return;
       }
 
-      if (event.key !== "Enter") {
-        return;
-      }
-
-      if (isIMEComposing(event, inlineSkillComposingRef.current)) {
+      const action = getPromptInputEnterAction({
+        key: event.key,
+        shiftKey: event.shiftKey,
+        isComposing: isIMEComposing(event, inlineSkillComposingRef.current),
+      });
+      if (action === "ignore") {
         return;
       }
 
       event.preventDefault();
 
-      if (event.shiftKey) {
+      if (action === "newline") {
         if (insertPlainTextAtSelection(event.currentTarget, "\n")) {
           updateInlineSkillTextInput(event.currentTarget);
         }

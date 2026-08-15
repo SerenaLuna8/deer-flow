@@ -879,6 +879,21 @@ export type PromptInputTextareaProps = ComponentProps<
   typeof InputGroupTextarea
 >;
 
+export type PromptInputEnterAction = "ignore" | "newline" | "submit";
+
+export function getPromptInputEnterAction({
+  key,
+  shiftKey,
+  isComposing,
+}: {
+  key: string;
+  shiftKey: boolean;
+  isComposing: boolean;
+}): PromptInputEnterAction {
+  if (key !== "Enter" || isComposing) return "ignore";
+  return shiftKey ? "newline" : "submit";
+}
+
 export const PromptInputTextarea = ({
   onChange,
   onKeyDown,
@@ -896,26 +911,26 @@ export const PromptInputTextarea = ({
     if (e.defaultPrevented) {
       return;
     }
-    if (e.key === "Enter") {
-      if (isIMEComposing(e, isComposing)) {
-        return;
-      }
-      if (e.shiftKey) {
-        return;
-      }
-      e.preventDefault();
-
-      // Check if the submit button is disabled before submitting
-      const form = e.currentTarget.form;
-      const submitButton = form?.querySelector(
-        'button[type="submit"]',
-      ) as HTMLButtonElement | null;
-      if (submitButton?.disabled) {
-        return;
-      }
-
-      form?.requestSubmit();
+    const action = getPromptInputEnterAction({
+      key: e.key,
+      shiftKey: e.shiftKey,
+      isComposing: isIMEComposing(e, isComposing),
+    });
+    if (action !== "submit") {
+      return;
     }
+    e.preventDefault();
+
+    // Check if the submit button is disabled before submitting
+    const form = e.currentTarget.form;
+    const submitButton = form?.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement | null;
+    if (submitButton?.disabled) {
+      return;
+    }
+
+    form?.requestSubmit();
   };
 
   const handlePaste: ClipboardEventHandler<HTMLTextAreaElement> = (event) => {

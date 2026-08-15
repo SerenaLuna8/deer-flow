@@ -93,7 +93,39 @@ function prepareSdkRequest(url: URL, init: RequestInit): RequestInit {
   return injectCsrfHeader(url, promotePrivateRunExecutionProfile(url, init));
 }
 
+function isAbortError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    Reflect.get(error, "name") === "AbortError"
+  );
+}
+
+/**
+ * Normalize browser abort failures for the LangGraph SDK retry boundary.
+ *
+ * The SDK currently classifies non-retryable aborts by the error message,
+ * while browsers expose the stable signal through ``error.name`` and use
+ * implementation-specific messages. Without normalization, cancelled history
+ * reads are retried in the SDK's bounded queue and can starve later reads.
+ */
+async function fetchProjectSdkRequest(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): Promise<Response> {
+  try {
+    return await globalThis.fetch(input, init);
+  } catch (error) {
+    if (!isAbortError(error)) throw error;
+    const normalized = new Error("AbortError");
+    normalized.name = "AbortError";
+    throw normalized;
+  }
+}
+
 type RunMetadataStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+const PROJECT_SDK_MAX_CONCURRENCY = 6;
 
 export function clearReconnectRun(
   threadId: string | null | undefined,
@@ -123,6 +155,10 @@ export function createProjectPrivateClient({
   const client = new LangGraphClient({
     apiUrl,
     onRequest: prepareSdkRequest,
+    callerOptions: {
+      fetch: fetchProjectSdkRequest,
+      maxConcurrency: PROJECT_SDK_MAX_CONCURRENCY,
+    },
   });
 
   const originalRunStream = client.runs.stream.bind(client.runs);

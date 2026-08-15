@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
+import { createProjectPrivateClient } from "@/core/api/api-client";
 import {
   createProjectThread,
   disposeProjectAPIClient,
@@ -17,6 +18,15 @@ function apiUrlOf(client: object): string {
   return String(Reflect.get(Reflect.get(client, "threads"), "apiUrl"));
 }
 
+function maxConcurrencyOf(client: object): number {
+  return Number(
+    Reflect.get(
+      Reflect.get(Reflect.get(client, "runs"), "asyncCaller"),
+      "maxConcurrency",
+    ),
+  );
+}
+
 afterEach(() => {
   disposeProjectAPIClient({ accountId: A, projectId: P1 });
   disposeProjectAPIClient({ accountId: A, projectId: P2 });
@@ -25,6 +35,26 @@ afterEach(() => {
 });
 
 describe("project private-work API client", () => {
+  test("does not retry browser-aborted SDK requests", async () => {
+    const browserAbort = Object.assign(
+      new Error("This operation was aborted"),
+      { name: "AbortError" },
+    );
+    const fetcher = rs.fn(async () => {
+      throw browserAbort;
+    });
+    rs.stubGlobal("fetch", fetcher);
+
+    const client = createProjectPrivateClient({
+      apiUrl: "http://localhost/project-private-work",
+    });
+    await expect(client.runs.list(P1)).rejects.toMatchObject({
+      name: "AbortError",
+      message: "AbortError",
+    });
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
   test("does not share a LangGraph client across accounts or projects", () => {
     const a1 = getProjectAPIClient({ accountId: A, projectId: P1 });
     const a2 = getProjectAPIClient({ accountId: A, projectId: P2 });
@@ -36,6 +66,7 @@ describe("project private-work API client", () => {
     expect(apiUrlOf(a1).endsWith(`/api/projects/${P1}/private-work`)).toBe(
       true,
     );
+    expect(maxConcurrencyOf(a1)).toBe(6);
   });
 
   test("builds only a strict UUID project base URL", () => {
