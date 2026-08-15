@@ -13,9 +13,10 @@ from PIL import Image
 
 from deerflow.config.model_config import ModelConfig
 from deerflow.vision.compatibility import (
-    VISION_BRIDGE_FAKE_ADAPTER,
-    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
-    is_vision_bridge_adapter_compatible,
+    VISION_BRIDGE_PROTOCOL_FAKE,
+    VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+    VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
+    resolve_materialized_vision_bridge_protocol,
 )
 from deerflow.vision.contracts import (
     VisionEvidence,
@@ -97,32 +98,45 @@ VisionClientFactory = Callable[[ModelConfig, str], VisionEvidenceClient]
 def build_vision_evidence_client(
     model_config: ModelConfig,
     contract_version: str,
+    *,
+    transient_gate_key: str | None = None,
 ) -> VisionEvidenceClient:
-    """Build only an explicitly compatible exact adapter/contract pair."""
+    """Build the controlled executor for the selected model's wire protocol."""
 
-    adapter = model_config.system_provider_adapter
-    if not model_config.supports_vision or not is_vision_bridge_adapter_compatible(
-        adapter,
+    protocol = resolve_materialized_vision_bridge_protocol(
+        model_config,
         contract_version,
-    ):
+    )
+    if not model_config.supports_vision or protocol is None:
         raise VisionClientError("VISION_CONFIGURATION_ERROR")
-    if adapter == VISION_BRIDGE_FAKE_ADAPTER:
+    if protocol == VISION_BRIDGE_PROTOCOL_FAKE:
         return FakeVisionEvidenceClient()
-    if adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER:
+    if protocol in {
+        VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+        VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
+    }:
         from deerflow.config import is_tracing_enabled
         from deerflow.vision.openai_compatible import (
             OpenAICompatibleVisionError,
             OpenAICompatibleVisionEvidenceClient,
+            OpenAIResponsesVisionEvidenceClient,
         )
 
         # Root graph callbacks can otherwise capture the image path, fixed
         # prompt, OCR and evidence.  Until selective tool redaction is proven,
         # fail closed rather than silently exporting that payload to a second
         # observability provider.
-        if is_tracing_enabled():
+        if transient_gate_key is None and is_tracing_enabled():
             raise VisionClientError("DATA_POLICY_BLOCKED")
         try:
-            return OpenAICompatibleVisionEvidenceClient(model_config)
+            if protocol == VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES:
+                client_type = OpenAIResponsesVisionEvidenceClient
+            else:
+                client_type = OpenAICompatibleVisionEvidenceClient
+            return client_type(
+                model_config,
+                transient_gate_key=transient_gate_key,
+            )
         except OpenAICompatibleVisionError as error:
             raise VisionClientError(error.code) from None
     raise VisionClientError("VISION_CONFIGURATION_ERROR")

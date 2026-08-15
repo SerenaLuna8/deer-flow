@@ -127,21 +127,25 @@ make stop
 ### 文本模型图片识别桥接
 
 该能力不在 `config.yaml` 声明工具、模型或开关。System admin 先在
-`/admin/settings/models` 创建 active、`supports_vision=true` 且 Bridge-compatible
-的视觉逻辑模型，再到 `/admin/settings/system` 的“图片识别桥接”选择该模型；选择即对
-后续 text-only project Run 启用，清空即关闭。原生视觉 lead model 继续使用现有
-`view_image`，不会同时注册 `inspect_image`。
+`/admin/settings/models` 创建 active、`supports_vision=true` 且协议受支持的视觉逻辑
+模型，再到 `/admin/settings/system` 的“图片识别桥接”选择该模型；选择即对后续
+text-only project Run 启用，清空即关闭。全新安装默认选择已内置的 GPT 5.6 Luna；原生
+视觉 lead model 继续使用现有 `view_image`，不会同时注册 `inspect_image`。
 
-可选 adapter：
+Bridge 不定义另一套厂商协议，而是使用所选模型的协议：
 
 - `vision_bridge_fake`：不接受 Endpoint/Credential，不联网，仅验证链路；
-- `vision_openai_compatible_v1`：要求一个加密 Credential 和唯一 HTTPS `base_url`，
-  固定调用 `{base_url}/chat/completions`。它不接受任意 headers、`extra_body`、重试、
-  stream 或 timeout 覆盖。
+- `openai`/`patched_openai` 且 `use_responses_api=true`：调用
+  `{base_url}/responses`；内置 GPT 5.6 Luna 使用该路径；
+- OpenAI-compatible adapter：调用 `{base_url}/chat/completions`；旧的
+  `vision_openai_compatible_v1` 仍作为窄 Chat Completions profile 保留。
+
+两种真实协议都要求加密 Credential 和明确 HTTPS `base_url`。Bridge 只复用模型的
+Endpoint、模型 ID、Credential 和协议选择；不会转发通用模型设置里的任意 headers、
+`extra_body`、重试、stream 或 timeout。
 
 管理端“测试连接”会用平台生成的无敏感 64×64 蓝色方块 PNG 走同一图片/strict Schema
-协议；仅支持普通文本 Chat Completions、但不支持图片或结构化输出的 Endpoint 不能通过
-该测试。
+协议；只支持文本、但不支持图片或结构化输出的 Endpoint 不能通过该测试。
 
 真实 adapter 只发送规范化后的单张图片、固定 `vision.prompt.v1`、固定 mode 指令和
 `vision.evidence.v1` Schema，不发送完整对话或文件路径。Credential 撤销会阻断已准入

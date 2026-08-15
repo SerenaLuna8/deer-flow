@@ -55,7 +55,7 @@ from deerflow.persistence.system_settings import (
 from deerflow.persistence.user.model import UserRow
 from deerflow.vision.compatibility import (
     VISION_BRIDGE_CONTRACT_V1,
-    is_vision_bridge_adapter_compatible,
+    resolve_vision_bridge_protocol,
 )
 
 _PURPOSE = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
@@ -155,6 +155,7 @@ def _snapshot_view(
         purpose=row.purpose,
         logical_name=row.logical_name,
         provider_adapter=version.provider_adapter,
+        provider_settings=dict(version.settings),
         model_config_id=uuid.UUID(str(row.model_config_id)),
         model_config_version_id=uuid.UUID(
             str(row.model_config_version_id),
@@ -293,10 +294,12 @@ class SystemModelCatalogService:
                         supports_vision=version.supports_vision,
                         supports_vision_bridge=(
                             version.supports_vision
-                            and is_vision_bridge_adapter_compatible(
+                            and resolve_vision_bridge_protocol(
                                 version.provider_adapter,
+                                version.settings,
                                 VISION_BRIDGE_CONTRACT_V1,
                             )
+                            is not None
                         ),
                         is_default=model.id == default_id,
                     )

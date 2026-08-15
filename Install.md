@@ -32,7 +32,7 @@ Consider the setup successful when all of the following are true:
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
 - For local setup, `make check` passed or reported no missing prerequisites, and `make install` completed successfully.
 - The user receives the exact next command to launch ActWeave.
-- `make setup-db` seeds active DeepSeek V4 Flash and DeepSeek V4 Pro models that share one encrypted Credential version, plus GPT 5.6 Luna with a separate encrypted OpenCode Credential; Flash remains the default, and a system administrator can manage the catalog at `/admin/settings/models`.
+- `make setup-db` seeds active DeepSeek V4 Flash and DeepSeek V4 Pro models that share one encrypted Credential version, plus GPT 5.6 Luna with a separate encrypted OpenCode Credential; Flash remains the default lead model, while the initial text-model Vision Bridge policy selects Luna through its configured Responses protocol. A system administrator can manage the model catalog at `/admin/settings/models` and the Bridge selection at `/admin/settings/system`.
 
 ## Steps
 

@@ -62,7 +62,7 @@ from deerflow.persistence.system_settings import (
 )
 from deerflow.persistence.user.model import UserRow
 from deerflow.vision.compatibility import (
-    is_vision_bridge_adapter_compatible,
+    resolve_vision_bridge_protocol,
 )
 
 _TARGET_NAMESPACE = uuid.UUID("4475fe37-f970-5820-9dcb-7db6c9585200")
@@ -252,6 +252,7 @@ class SystemRuntimePolicyService:
                             select(
                                 SystemModelConfigRow.logical_name,
                                 SystemModelConfigVersionRow.provider_adapter,
+                                SystemModelConfigVersionRow.settings,
                                 SystemModelConfigVersionRow.supports_vision,
                             )
                             .join(
@@ -279,9 +280,14 @@ class SystemRuntimePolicyService:
                     vision_ref = parsed_value.vision_bridge.model_name
                     if vision_ref is not None:
                         vision_model = active_by_name[vision_ref]
-                        if not vision_model.supports_vision or not is_vision_bridge_adapter_compatible(
-                            vision_model.provider_adapter,
-                            parsed_value.vision_bridge.contract_version,
+                        if (
+                            not vision_model.supports_vision
+                            or resolve_vision_bridge_protocol(
+                                vision_model.provider_adapter,
+                                vision_model.settings,
+                                parsed_value.vision_bridge.contract_version,
+                            )
+                            is None
                         ):
                             raise SystemRuntimePolicyInvalid(actor.request_id)
 

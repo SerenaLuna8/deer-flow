@@ -144,8 +144,8 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
 from deerflow.vision.compatibility import (
-    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
-    is_vision_bridge_adapter_compatible,
+    resolve_materialized_vision_bridge_protocol,
+    vision_bridge_protocol_requires_external_dispatch,
 )
 
 logger = logging.getLogger("app.reliability.execution")
@@ -521,6 +521,7 @@ class RunAgentPrivateExecutor:
             runtime_app_config = self._app_config
             runtime_policy = None
             vision_model: ModelConfig | None = None
+            vision_bridge_protocol: str | None = None
             delegate_model_names: dict[uuid.UUID, str] = {}
             if self._runtime_policy_materializer is not None:
                 try:
@@ -579,7 +580,7 @@ class RunAgentPrivateExecutor:
                             ),
                             ("memory", runtime_app_config.memory.model_name),
                         ]
-                        if not lead_model.supports_vision:
+                        if execution.runtime_kind == "chat" and not lead_model.supports_vision:
                             auxiliary_model_refs.append(
                                 (
                                     "vision",
@@ -613,16 +614,16 @@ class RunAgentPrivateExecutor:
                                 raise PermanentExecutionError(
                                     "RUN_ASSET_STALE",
                                 )
-                            if purpose == "vision" and (
-                                not auxiliary_model.supports_vision
-                                or not is_vision_bridge_adapter_compatible(
-                                    auxiliary_model.system_provider_adapter,
+                            if purpose == "vision":
+                                resolved_protocol = resolve_materialized_vision_bridge_protocol(
+                                    auxiliary_model,
                                     runtime_app_config.vision_bridge.contract_version,
                                 )
-                            ):
-                                raise PermanentExecutionError(
-                                    "RUN_ASSET_STALE",
-                                )
+                                if not auxiliary_model.supports_vision or resolved_protocol is None:
+                                    raise PermanentExecutionError(
+                                        "RUN_ASSET_STALE",
+                                    )
+                                vision_bridge_protocol = resolved_protocol
                             existing = runtime_models.get(auxiliary_model.name)
                             if existing is not None and existing != auxiliary_model:
                                 raise PermanentExecutionError(
@@ -654,7 +655,13 @@ class RunAgentPrivateExecutor:
                             ),
                         },
                     )
-                if vision_model is not None and vision_model.system_provider_adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER and is_tracing_enabled():
+                if (
+                    vision_model is not None
+                    and vision_bridge_protocol_requires_external_dispatch(
+                        vision_bridge_protocol,
+                    )
+                    and is_tracing_enabled()
+                ):
                     raise PermanentExecutionError("RUN_POLICY_STALE")
             elif runtime_app_config.get_model_config(exact_model_name) is None:
                 # Compatibility path for isolated unit tests. Production
@@ -746,7 +753,13 @@ class RunAgentPrivateExecutor:
                     run_id=execution.run.run_id,
                     expected_model=vision_model,
                 )
-                if (vision_model is not None and self._model_materializer is not None and vision_model.system_provider_adapter == VISION_OPENAI_COMPATIBLE_V1_ADAPTER)
+                if (
+                    vision_model is not None
+                    and self._model_materializer is not None
+                    and vision_bridge_protocol_requires_external_dispatch(
+                        vision_bridge_protocol,
+                    )
+                )
                 else None
             )
 

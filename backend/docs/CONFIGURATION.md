@@ -268,6 +268,19 @@ tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
 decrypted for the exact admitted model version at the execution boundary.
 
+The current wire-protocol families are:
+
+| Protocol | Model adapters |
+| --- | --- |
+| OpenAI-compatible Chat Completions | `openai` when Responses is not selected, `deepseek`, `mindie`, `vllm`, and the `patched_*` adapters |
+| OpenAI Responses | `openai` and `patched_openai` with `use_responses_api=true` |
+| Anthropic Messages | `anthropic` and `claude_code` |
+| Codex private Responses | `codex_cli`; this is not the public OpenAI Responses API |
+
+Vision, thinking, reasoning effort, tool calling and structured output are
+model capabilities layered on a protocol; an adapter name or
+`supports_vision=true` alone does not prove all of them.
+
 #### Text-model Vision Bridge
 
 `inspect_image` is a reserved conditional built-in tool. It is not listed under
@@ -275,32 +288,37 @@ decrypted for the exact admitted model version at the execution boundary.
 closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
 
 1. In `/admin/settings/models`, create an active logical model with
-   `supports_vision=true` and a Bridge-compatible adapter.
+   `supports_vision=true`, an exact encrypted Credential, an HTTPS `base_url`,
+   and a Bridge-supported wire protocol.
 2. In `/admin/settings/system`, open **Vision Bridge** and select that model.
    A non-null `agent_runtime.vision_bridge.model_name` enables later text-only
    project Runs; clearing it disables the bridge. There is no second `enabled`
-   flag and no project egress grant.
+   flag and no project egress grant. Fresh installations select the seeded
+   `gpt-5.6-luna` model by default.
 3. `timeout_seconds` is the single image-read-through-result deadline.
    `contract_version` is fixed to `vision.bridge.v1` and is not free-form.
 
-Two versioned adapters are accepted by `vision.bridge.v1`:
+`vision.bridge.v1` resolves the selected System Model's protocol:
 
 - `vision_bridge_fake` accepts no settings or Credential and performs no
   network I/O. Use it only for control-path verification.
-- `vision_openai_compatible_v1` requires an exact encrypted model API-key
-  Credential and exactly one setting, an HTTPS `base_url`. The Worker calls
-  `{base_url}/chat/completions` with a fixed Bearer header and never forwards
-  arbitrary headers, `extra_body`, provider retries, streaming or model-level
-  timeout overrides.
+- `openai` or `patched_openai` with `use_responses_api=true` calls
+  `{base_url}/responses`. The seeded GPT 5.6 Luna uses this profile.
+- OpenAI-compatible adapters without Responses selected call
+  `{base_url}/chat/completions`. The legacy narrow
+  `vision_openai_compatible_v1` adapter remains supported as an explicit Chat
+  Completions profile.
 
-For the real adapter, set `supports_vision=true` and the provider's visual
-model identifier. The endpoint must implement the OpenAI Chat Completions
-single-image content shape and native strict `json_schema` response format.
-The request contains only the normalized image, fixed `vision.prompt.v1`, the
-fixed mode task and `vision.evidence.v1`; paths, full chat history, Memory and
-other attachments are not sent.
+For a real model, set `supports_vision=true` and the provider's visual model
+identifier. Its endpoint must implement the selected protocol's single-image
+shape and native strict `json_schema` output. Bridge dispatch reads only the
+frozen endpoint, model ID, Credential and protocol selector from the model;
+generic retries, timeouts, streaming, headers and `extra_body` are ignored. The
+request contains only the normalized image, fixed `vision.prompt.v1`, fixed
+mode task and `vision.evidence.v1`; paths, full chat history, Memory and other
+attachments are not sent.
 
-The administrator **Test connection** action for this adapter sends only a
+The administrator **Test connection** action for a compatible visual model sends only a
 platform-generated 64x64 blue-square PNG through that same image/strict-schema
 profile. A plain text-compatible endpoint therefore cannot pass the probe while
 lacking the required visual or structured-output capability. The synthetic
@@ -315,7 +333,7 @@ and after every remote dispatch. Revoking that Credential is the immediate
 egress kill switch for already admitted Runs.
 
 Because graph-level LangSmith/Langfuse handlers can observe tool arguments and
-OCR evidence, `vision_openai_compatible_v1` and external content tracing are
+OCR evidence, every external Bridge protocol and external content tracing are
 currently mutually exclusive and fail closed. System model selection is the
 deployment-wide data-egress approval; there is no separate `enabled` flag or
 project grant. Complete provider policy, staging quality, rate-limit and cost

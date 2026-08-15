@@ -242,12 +242,14 @@ fallbacks.
 Text-model image inspection follows
 [`docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md`](docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md):
 `inspect_image` is a reserved, conditional Worker tool selected through
-`agent_runtime.vision_bridge.model_name`, never `config.yaml`. Real Bridge
-traffic is admitted only through the versioned
-`vision_openai_compatible_v1` profile: one HTTPS endpoint, exact Credential,
-fixed prompt/schema/request, bounded retry/response/concurrency, Worker abort,
-dispatch revalidation and tracing exclusion. Do not reuse a generic model
-adapter or add HTTP passthrough fields to widen this contract.
+`agent_runtime.vision_bridge.model_name`, never `config.yaml`. The selected
+System Model owns the wire protocol: current controlled executors support
+OpenAI-compatible Chat Completions and `openai`/`patched_openai` Responses
+models with an exact HTTPS `base_url`. Bridge execution still fixes the
+prompt/schema/body, ignores generic adapter retries/timeouts/extras, bounds
+response/concurrency, propagates Worker abort, revalidates dispatch authority,
+and excludes content tracing. Do not route image egress through the generic
+LangChain call path or add HTTP passthrough fields to widen this contract.
 
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required

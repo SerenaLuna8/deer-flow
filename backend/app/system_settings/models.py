@@ -137,6 +137,7 @@ class RunModelConfigSnapshotView:
     purpose: str
     logical_name: str
     provider_adapter: str
+    provider_settings: Mapping[str, object]
     model_config_id: uuid.UUID
     model_config_version_id: uuid.UUID
     payload_checksum: str

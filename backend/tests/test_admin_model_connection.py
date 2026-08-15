@@ -81,27 +81,38 @@ async def test_real_vision_connection_test_uses_synthetic_image_and_narrow_profi
     observed: dict[str, object] = {}
 
     class ProbeClient:
-        def __init__(self, model: object, *, transient_gate_key: str) -> None:
-            observed["model"] = model
-            observed["gate_key"] = transient_gate_key
-
         async def analyze(self, **kwargs: object) -> object:
             observed.update(kwargs)
             return object()
 
+    def client_factory(
+        model: object,
+        contract_version: str,
+        *,
+        transient_gate_key: str,
+    ) -> ProbeClient:
+        observed["model"] = model
+        observed["contract_version"] = contract_version
+        observed["gate_key"] = transient_gate_key
+        return ProbeClient()
+
     monkeypatch.setattr(
-        "app.gateway.system_model_callers.OpenAICompatibleVisionEvidenceClient",
-        ProbeClient,
+        "app.gateway.system_model_callers.build_vision_evidence_client",
+        client_factory,
     )
     model = SimpleNamespace(
         name="vision-probe",
-        system_provider_adapter="vision_openai_compatible_v1",
+        system_provider_adapter="openai",
+        supports_vision=True,
+        base_url="https://responses.example.test/v1",
+        use_responses_api=True,
     )
 
     connected = await ModelConnectionTester(_RuntimeConfig()).test(model)
 
     assert connected is True
     assert observed["model"] is model
+    assert observed["contract_version"] == "vision.bridge.v1"
     assert observed["gate_key"] == "admin-vision-connection-test"
     assert bytes(observed["image_bytes"]).startswith(b"\x89PNG\r\n\x1a\n")
     assert observed["mime_type"] == "image/png"

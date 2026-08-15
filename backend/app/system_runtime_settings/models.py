@@ -383,6 +383,7 @@ class LockedMemoryDocumentPolicy:
 
 
 CATALOG_DEFAULT_MODEL_REF = "default"
+DEFAULT_VISION_BRIDGE_MODEL_NAME = "gpt-5.6-luna"
 
 
 def auxiliary_model_snapshot_ref(
@@ -406,7 +407,11 @@ def auxiliary_model_snapshot_ref(
 
 def default_policy_value(section: RuntimePolicySection) -> RuntimePolicyValue:
     if section is RuntimePolicySection.AGENT_RUNTIME:
-        return AgentRuntimePolicyValue()
+        return AgentRuntimePolicyValue(
+            vision_bridge=VisionBridgePolicy(
+                model_name=DEFAULT_VISION_BRIDGE_MODEL_NAME,
+            ),
+        )
     if section is RuntimePolicySection.AUTH:
         return AuthPolicyValue()
     if section is RuntimePolicySection.AUTOMATIONS:
@@ -423,6 +428,7 @@ __all__ = [
     "AuthPolicyValue",
     "AutomationsPolicyValue",
     "CATALOG_DEFAULT_MODEL_REF",
+    "DEFAULT_VISION_BRIDGE_MODEL_NAME",
     "DEFAULT_MEMORY_DOCUMENT_SECTIONS",
     "LockedMemoryDocumentPolicy",
     "MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS",

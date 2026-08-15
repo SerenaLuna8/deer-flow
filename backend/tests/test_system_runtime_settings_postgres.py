@@ -165,6 +165,8 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         updated_value = default_policy_value(
             RuntimePolicySection.AGENT_RUNTIME,
         ).model_dump(mode="python")
+        # This isolated policy test intentionally has no System Model catalog.
+        updated_value["vision_bridge"]["model_name"] = None
         updated_value["max_recursion_limit"] = 77
         updated_value["memory"]["dream_interval_minutes"] = 45
         updated = await service.update_policy(

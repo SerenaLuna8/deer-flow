@@ -23,6 +23,11 @@ from deerflow.persistence.system_settings import (
     SystemModelConfigRow,
     SystemModelConfigVersionRow,
 )
+from deerflow.vision.compatibility import (
+    VISION_BRIDGE_CONTRACT_V1,
+    VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
+    resolve_vision_bridge_protocol,
+)
 
 
 @pytest.fixture()
@@ -71,6 +76,14 @@ def test_default_model_bootstrap_prepares_deepseek_and_opencode_models(
     assert material.models[-1].command.supports_thinking is True
     assert material.models[-1].command.supports_reasoning_effort is True
     assert material.models[-1].command.supports_vision is True
+    assert (
+        resolve_vision_bridge_protocol(
+            material.models[-1].command.provider_adapter,
+            material.models[-1].command.settings,
+            VISION_BRIDGE_CONTRACT_V1,
+        )
+        == VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES
+    )
     assert [credential.name for credential in material.credentials] == [
         "deepseek-v4-api-key",
         "opencode-api-key",

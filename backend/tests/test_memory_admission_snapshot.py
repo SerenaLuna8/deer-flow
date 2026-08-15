@@ -611,6 +611,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
             return SimpleNamespace(
                 logical_name=("vision-small-v1" if purpose == "vision" else "lead-model"),
                 provider_adapter=("vision_bridge_fake" if purpose == "vision" else "openai"),
+                provider_settings={},
                 supports_thinking=False,
                 supports_reasoning_effort=False,
                 supports_vision=purpose == "vision",

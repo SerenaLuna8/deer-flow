@@ -6,8 +6,11 @@ import pytest
 
 from app.system_runtime_settings.materializer import _materialize_exact
 from app.system_runtime_settings.models import (
+    DEFAULT_VISION_BRIDGE_MODEL_NAME,
     AgentRuntimePolicyValue,
+    RuntimePolicySection,
     VisionBridgePolicy,
+    default_policy_value,
 )
 from app.system_runtime_settings.validation import (
     LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
@@ -22,8 +25,11 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.vision.compatibility import (
     VISION_BRIDGE_CONTRACT_V1,
     VISION_BRIDGE_FAKE_ADAPTER,
+    VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+    VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
     VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
     is_vision_bridge_adapter_compatible,
+    resolve_vision_bridge_protocol,
 )
 
 
@@ -48,6 +54,13 @@ def test_policy_defaults_to_no_bridge_without_a_second_enablement_flag() -> None
         "timeout_seconds": 20,
         "contract_version": VISION_BRIDGE_CONTRACT_V1,
     }
+
+
+def test_fresh_install_policy_selects_the_existing_luna_model() -> None:
+    policy = default_policy_value(RuntimePolicySection.AGENT_RUNTIME)
+
+    assert isinstance(policy, AgentRuntimePolicyValue)
+    assert policy.vision_bridge.model_name == DEFAULT_VISION_BRIDGE_MODEL_NAME
 
 
 @pytest.mark.parametrize("field", ["enabled", "project_egress_grant"])
@@ -131,7 +144,7 @@ def test_runtime_overlay_materializes_bridge_but_yaml_rejects_it() -> None:
         )
 
 
-def test_compatibility_allowlist_admits_only_versioned_bridge_adapters() -> None:
+def test_compatibility_resolves_the_selected_models_protocol() -> None:
     assert is_vision_bridge_adapter_compatible(
         VISION_BRIDGE_FAKE_ADAPTER,
         VISION_BRIDGE_CONTRACT_V1,
@@ -140,9 +153,36 @@ def test_compatibility_allowlist_admits_only_versioned_bridge_adapters() -> None
         VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
         VISION_BRIDGE_CONTRACT_V1,
     )
-    assert not is_vision_bridge_adapter_compatible(
-        "openai",
-        VISION_BRIDGE_CONTRACT_V1,
+    assert (
+        resolve_vision_bridge_protocol(
+            "openai",
+            {
+                "base_url": "https://responses.example.test/v1",
+                "use_responses_api": True,
+                "max_retries": 9,
+            },
+            VISION_BRIDGE_CONTRACT_V1,
+        )
+        == VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES
+    )
+    assert (
+        resolve_vision_bridge_protocol(
+            "vllm",
+            {
+                "base_url": "https://vllm.example.test/v1",
+                "extra_body": {"ignored_by_bridge": True},
+            },
+            VISION_BRIDGE_CONTRACT_V1,
+        )
+        == VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS
+    )
+    assert (
+        resolve_vision_bridge_protocol(
+            "openai",
+            {"use_responses_api": True},
+            VISION_BRIDGE_CONTRACT_V1,
+        )
+        is None
     )
     assert not is_vision_bridge_adapter_compatible(
         VISION_BRIDGE_FAKE_ADAPTER,

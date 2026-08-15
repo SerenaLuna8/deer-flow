@@ -478,7 +478,8 @@ egress grant：
 
 1. 在系统模型目录 `/admin/settings/models` 创建或选择视觉模型。这里保存逻辑名、
    `provider_adapter`、`provider_model`、受限 Provider settings、`supports_vision=true` 和
-   Credential 版本引用；模型必须为 active，并通过 Bridge adapter compatibility 校验。
+   Credential 版本引用；模型必须为 active，并能从 adapter/settings 解析为 Bridge 已实现
+   的多模态协议。
 2. 在系统设置 `/admin/settings/system` 的“Agent 运行时 → Vision Bridge”中选择上述逻辑
    模型并设置 `timeout_seconds`。选择模型即对所有项目中符合能力条件的新 Run 自动
    生效；清空选择即停止向新 Run 提供 Bridge。`contract_version` 由代码支持列表控制，
@@ -495,19 +496,21 @@ Agent 定义或工具参数中添加视觉模型名/API Key 回退。
 ```json
 {
   "vision_bridge": {
-    "model_name": "vision-small-v1",
+    "model_name": "gpt-5.6-luna",
     "timeout_seconds": 20,
     "contract_version": "vision.bridge.v1"
   }
 }
 ```
 
-当前 checkout 已落地 P1 基础闭环和一个窄协议 P2 adapter：严格 `vision_bridge` policy、
+当前 checkout 已落地 P1 基础闭环和受控的 Chat Completions/Responses P2 执行器：严格 `vision_bridge` policy、
 `purpose="vision"` Run snapshot/Worker 物化、共享安全图片规范化、固定 prompt/Schema、
 条件内置 `inspect_image`、对象 provenance、inline-only 结果以及管理端模型过滤。
-`vision_bridge_fake` 继续只验证控制面和数据通路；`vision_openai_compatible_v1` 要求精确
-Credential 与唯一 HTTPS `base_url`，固定调用 `/chat/completions`，不复用通用 adapter 的
-任意 extras、headers、重试、stream 或 timeout。
+`vision_bridge_fake` 继续只验证控制面和数据通路。真实 Bridge 不再要求另一种专用模型
+协议：它从冻结的系统模型 adapter/settings 解析协议。`openai`/`patched_openai` 的
+`use_responses_api=true` 使用 `/responses`；其他已批准的 OpenAI-compatible adapter 使用
+`/chat/completions`。旧 `vision_openai_compatible_v1` 仅作为显式窄 Chat Completions
+profile 保留。
 
 真实 adapter 已实现单一绝对 deadline、最多一次可恢复错误重试、redirect/ambient proxy
 禁用、请求/响应上限、严格本地 Schema、每 Run 和每精确模型并发/累计预算、服务端取消、
@@ -516,8 +519,11 @@ Credential/精确 snapshot 前后复验、ambiguous-side-effect fence 以及 Run
 LangSmith/Langfuse 内容 tracing 与真实 Bridge 互斥并失败关闭，而不是假设
 `attach_tracing=false` 能隐藏工具参数和 OCR。
 
-通用 `openai`、Anthropic、vLLM 等 adapter 仍不能直接被 Bridge 选择。管理员不能使用
-旁路 YAML、环境变量或任意 HTTP passthrough 接入。供应商数据政策批准、真实 Credential
+通用模型只有在 `supports_vision=true`、有明确 HTTPS `base_url`、Credential 完整且协议
+执行器已实现时才能被 Bridge 选择；当前不支持 Anthropic Messages、Codex 私有 Responses
+等视觉协议。管理员不能使用旁路 YAML、环境变量或任意 HTTP passthrough 接入。Bridge
+只复用 endpoint、model、Credential 和协议选择，忽略通用 adapter 的 extras、headers、
+重试、stream 与 timeout。供应商数据政策批准、真实 Credential
 staging 质量/延迟/限流/成本评测以及生产验收仍是部署前 P3 门禁，mock/fake 测试不能
 替代这些外部证据。
 
@@ -535,6 +541,8 @@ class VisionBridgePolicy(_PolicyModel):
 交叉约束：
 
 - `model_name=null` 表示未配置 Bridge，新 Run 不冻结或物化 vision 模型；
+- 全新安装的初始 policy 显式选择已内置的 `gpt-5.6-luna`；上述字段级 `None` 默认仅用于
+  旧 payload 兼容、显式关闭和隔离测试，不能被 Worker 解释成隐式系统默认模型；
 - `model_name` 非空时自动启用 Bridge 资格检查，不再要求第二个布尔开关；
 - 目标模型必须在精确 catalog 版本中存在并声明 `supports_vision=true`；
 - timeout 是图片读取、规范化、排队、连接、Provider 响应和校验共享的总预算，不是
@@ -547,13 +555,13 @@ class VisionBridgePolicy(_PolicyModel):
   出现不可追踪的安全语义漂移。
 
 缺少 `vision_bridge` 的旧 policy payload 必须按 `model_name=null` 解析。管理员提交非空
-`model_name` 时，若模型不存在、非 active、非视觉或 adapter 不兼容，整个 policy 更新
+`model_name` 时，若模型不存在、非 active、非视觉或协议无法从 adapter/settings 解析，整个 policy 更新
 必须原子拒绝，不能保存半配置状态，也不能回退到系统默认模型。
 
 策略权威来源仍是 PostgreSQL。不得在 `config.yaml` 增加模型名、API Key 或 Endpoint
 回退。部署拥有的 HTTP/proxy 基础设施设置继续遵守现有配置边界。
 
-非空 Bridge 模型选择同时表示“平台具备这个视觉 adapter”以及“系统管理员统一批准所有
+非空 Bridge 模型选择同时表示“平台具备这个视觉协议执行器”以及“系统管理员统一批准所有
 项目按本契约外发受权图片”。这是一项部署级数据边界决策，必须由系统管理员执行并进入
 闭合审计；不能从模型参数、文件 metadata、项目设置或运行时全局变量推导。
 
@@ -569,7 +577,7 @@ class VisionBridgePolicy(_PolicyModel):
 1. lead model 明确 `supports_vision=false`；
 2. `vision_bridge.model_name` 已选择；
 3. 策略指定的视觉模型存在、有效且 `supports_vision=true`；
-4. `provider_adapter + contract_version` 通过 Bridge compatibility 校验。
+4. `provider_adapter + provider settings + contract_version` 能解析到已实现的 Bridge 协议。
 
 Gateway 必须把精确 System Runtime Policy revision 和视觉模型版本随 Run 准入冻结；
 Worker 在每次真正发出 HTTP 请求前重新验证 Credential、lease、项目/文件授权和 emergency
@@ -979,7 +987,7 @@ Audit metadata 继续遵守闭合 action/target/outcome 契约，不写内容、
 | tracing callbacks/redactor | 对 sensitive tool/model span 只记录内容无关 metadata，并隔离嵌套 callbacks |
 | RunJournal/usage settlement | 接收 server-only `VisionUsageReceipt`，按独立 caller 归因和结算 |
 | `backend/app/gateway/routers/admin_system_settings.py` 及 policy service | 在现有 `agent_runtime` CAS 契约中读写 `vision_bridge` |
-| 系统模型管理契约 | 复用 Provider/model/Credential/`supports_vision`；Bridge 选择器只接收 active 且 adapter-compatible 模型 |
+| 系统模型管理契约 | 复用 Provider/model/Credential/`supports_vision` 和模型协议设置；Bridge 选择器只接收 active 且协议可解析的模型 |
 | `frontend/src/core/admin-settings/system/types.ts` | 增加严格 `vision_bridge` Schema、默认值和模型引用校验 |
 | `frontend/src/components/admin/settings/admin-system-settings-page.tsx` | 增加“Vision Bridge”分组和 model/timeout 控件，无独立 enabled 开关 |
 | `backend/docs/CONFIGURATION.md` | 实现后记录正式配置和生效范围 |
@@ -1006,8 +1014,8 @@ parity 测试；不得通过手工 patch 或 stamp 数据库规避。
 
 ### P1：最小后端闭环
 
-- 增加默认 `model_name=null` 的 Runtime Policy；配置模型后自动对所有项目中符合能力
-  条件的新 Run 生效，不增加独立 enabled 开关或项目 grant；
+- 增加 Runtime Policy；全新安装默认选择内置 `gpt-5.6-luna`，配置或改选模型后自动对
+  所有项目中符合能力条件的新 Run 生效，不增加独立 enabled 开关或项目 grant；
 - 建立 System Policy 和视觉模型的 Run 冻结路径；P1 只允许不可配置为真实 Endpoint 的
   `fake` adapter；
 - 冻结和物化 `purpose="vision"` 模型；
@@ -1026,7 +1034,7 @@ P1 代码必须硬性阻止真实 Provider 配置。
 ### P2：真实 Provider 安全闭环
 
 - 完成平台统一数据外发批准、模型选择审计、emergency kill switch 和 dispatch 前复验；
-- 实现 VisionCallProfile、adapter compatibility、Endpoint/TLS/redirect/proxy 门禁；
+- 实现 VisionCallProfile、模型协议解析、Endpoint/TLS/redirect/proxy 门禁；
 - 接入 usage receipt、quota reserve/settlement、频率/并发限制和稳定错误；
 - 增加 sensitive tracing exclusion/redaction，并在 LangSmith/Langfuse 开启时验证；
 - 实现 abort authority 和 ambiguous-side-effect fence，验证 Run 取消、lease 失效、
@@ -1039,7 +1047,7 @@ P1 代码必须硬性阻止真实 Provider 配置。
 ### P3：灰度与生产验收
 
 - 在隔离 staging 完成验证后，由系统管理员选择 Bridge 模型，对生产部署内所有项目的
-  adapter-compatible text-only lead 统一生效；
+  protocol-compatible text-only lead 统一生效；
 - 使用真实付费 API 跑质量、p95/p99 延迟、429、费用和工具调用命中率评测；
 - 比较 text-only + bridge 与原生视觉模型的答案质量和失败模式；
 - 根据数据决定是否需要 current-image preflight、per-Run singleflight 或模式细分。
@@ -1057,9 +1065,9 @@ P1 代码必须硬性阻止真实 Provider 配置。
 - EXIF 方向、GPS 清理和规范化后摘要；
 - 输入 Schema 的额外字段和非法 mode；
 - 缺少 `vision_bridge` 的旧 policy 解析为 `model_name=null`；非空模型为非 active、
-  非视觉或不兼容 adapter 时更新原子失败；
+  非视觉或协议无法解析时更新原子失败；
 - `vision_bridge.enabled` 作为未知字段被前后端严格拒绝，管理端不渲染独立开关；
-- 管理端 Bridge 模型选择器只列 active、`supports_vision=true` 且 adapter-compatible 的
+- 管理端 Bridge 模型选择器只列 active、`supports_vision=true` 且协议可解析的
   catalog 项，不能把默认文本模型当作隐式回退；
 - `vision.prompt.v1` 及六个 mode 的 golden snapshot，未知 mode 必须在渲染前失败；
 - prompt renderer 不接受 caller suffix，且渲染结果不包含图片路径、文件名、对话、
@@ -1079,11 +1087,11 @@ P1 代码必须硬性阻止真实 Provider 配置。
 
 ### 17.2 集成测试
 
-- fake Vision API 捕获请求，证明只发送目标图片、逐字匹配的 `vision.prompt.v1`、固定
+- fake Provider 捕获 Chat Completions 和 Responses 请求，证明只发送目标图片、逐字匹配的 `vision.prompt.v1`、固定
   mode literal 和 Schema；
 - fake API 断言 Prompt 的 Provider role mapping 正确，user content 不含路径、自由文本
   question、主模型指令或完整对话；
-- text-only + 已选择有效模型/adapter 时，在所有项目 Run 中注册 `inspect_image`，不注册
+- text-only + 已选择有效模型/协议时，在所有项目 Run 中注册 `inspect_image`，不注册
   `view_image`；
 - native vision 注册 `view_image`，不注册 `inspect_image`，且不物化 vision auxiliary；
 - subagent、embedded client、Skill Builder 和其他专用图不获得 `inspect_image`；
@@ -1132,7 +1140,7 @@ P1 代码必须硬性阻止真实 Provider 配置。
 
 功能完成必须同时满足：
 
-1. `supports_vision=false` 且已选择 adapter-compatible Bridge 模型时，所有项目的新
+1. `supports_vision=false` 且已选择协议可解析的 Bridge 模型时，所有项目的新
    lead Run 都只获得 `inspect_image`；未选择模型时，Run 正常但没有 vision snapshot、
    工具或视觉外发。kill switch/Credential 撤销后，已准入 Run 的下一次 dispatch 也被
    阻断。
@@ -1166,8 +1174,9 @@ P1 代码必须硬性阻止真实 Provider 配置。
 
 ## 19. 发布与回滚
 
-- 第一阶段只部署能够解析新 policy 但默认 `model_name=null` 的代码；所有 Gateway 和
-  Worker 实例完成升级后，才允许持久化 Bridge 模型选择；
+- 第一阶段先部署能够解析新 policy 的代码；历史 policy 继续按冻结的
+  `model_name=null` 语义运行。所有 Gateway 和 Worker 实例完成升级后，才将现有部署的
+  policy 显式选择 `gpt-5.6-luna`；全新安装直接以 Luna 为初始选择；
 - Agent runtime policy 使用 `extra="forbid"`。一旦数据库写入新字段，旧代码可能无法
   解析，因此回滚前必须在新代码仍运行时恢复旧 schema 兼容值，或提供明确的 policy
   downgrade 转换；
@@ -1194,7 +1203,7 @@ P1 代码必须硬性阻止真实 Provider 配置。
 6. 视觉调用如何计入现有 quota/usage 和成本展示；
 7. text-only 模型主动调用工具的生产门槛，是否需要 current-image 强制 preflight；
 8. 平台统一外发批准的负责人、覆盖的数据分类和系统审计要求；
-9. approved Endpoint、redirect/proxy、tracing 与 adapter compatibility 清单；
+9. approved Endpoint、redirect/proxy、tracing 与模型协议兼容清单；
 10. 真实 API eval 数据集、Credential、执行环境和验收负责人。
 
 这些问题不会改变“受治理文件引用、冻结视觉模型、Worker 调用、严格证据 Schema、

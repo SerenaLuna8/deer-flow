@@ -109,7 +109,7 @@ from deerflow.persistence.shared_assets.agent_model import (
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow, McpServerVersionRow
 from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
 from deerflow.vision.compatibility import (
-    is_vision_bridge_adapter_compatible,
+    resolve_vision_bridge_protocol,
 )
 
 _FORBIDDEN_PERSISTED_KEY_PARTS = (
@@ -169,6 +169,7 @@ class AdmittedRunModelSnapshot(Protocol):
 
     logical_name: str
     provider_adapter: str
+    provider_settings: Mapping[str, object]
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
@@ -889,7 +890,7 @@ class RunSnapshotRepository:
                     ),
                     ("memory", locked_runtime_policy.value.memory.model_name),
                 ]
-                if not effective_profile.supports_vision:
+                if runtime_kind == "chat" and not effective_profile.supports_vision:
                     auxiliary_model_refs.append(
                         (
                             "vision",
@@ -917,10 +918,12 @@ class RunSnapshotRepository:
                             )
                             if purpose == "vision" and (
                                 not auxiliary_snapshot.supports_vision
-                                or not is_vision_bridge_adapter_compatible(
+                                or resolve_vision_bridge_protocol(
                                     auxiliary_snapshot.provider_adapter,
+                                    auxiliary_snapshot.provider_settings,
                                     locked_runtime_policy.value.vision_bridge.contract_version,
                                 )
+                                is None
                             ):
                                 raise SystemModelInvalid(context.request_id)
                         except SystemModelNotFound:

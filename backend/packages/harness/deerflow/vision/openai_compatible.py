@@ -94,7 +94,10 @@ def _model_gate(key: str) -> _BoundedModelGate:
         return gate
 
 
-def _validated_endpoint(base_url: object) -> str:
+def _validated_endpoint(
+    base_url: object,
+    resource: str = "chat/completions",
+) -> str:
     if type(base_url) is not str:
         raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
     value = base_url.strip()
@@ -115,7 +118,7 @@ def _validated_endpoint(base_url: object) -> str:
         _ = parsed.port
     except (TypeError, ValueError):
         raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR") from None
-    return f"{value.rstrip('/')}/chat/completions"
+    return f"{value.rstrip('/')}/{resource}"
 
 
 def _api_key(model_config: ModelConfig) -> SecretStr:
@@ -167,6 +170,58 @@ def _request_payload(
                 "strict": True,
                 "schema": _strict_response_schema(),
             },
+        },
+    }
+    body = json.dumps(
+        payload,
+        ensure_ascii=True,
+        allow_nan=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(body) > MAX_VISION_REQUEST_BYTES:
+        raise OpenAICompatibleVisionError("IMAGE_TOO_LARGE")
+    return body
+
+
+def _responses_request_payload(
+    *,
+    model: str,
+    image_bytes: bytes,
+    mime_type: str,
+    mode: VisionMode,
+) -> bytes:
+    encoded_image = base64.b64encode(image_bytes).decode("ascii")
+    payload = {
+        "model": model,
+        "instructions": render_vision_prompt_v1(mode),
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Analyze the attached image.",
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": f"data:{mime_type};base64,{encoded_image}",
+                        "detail": "high",
+                    },
+                ],
+            }
+        ],
+        "max_output_tokens": MAX_VISION_OUTPUT_TOKENS,
+        "stream": False,
+        # The bridge never requests provider-side persistence.  Provider data
+        # handling still remains subject to the configured third party's terms.
+        "store": False,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "vision_evidence_v1",
+                "strict": True,
+                "schema": _strict_response_schema(),
+            }
         },
     }
     body = json.dumps(
@@ -275,6 +330,18 @@ def _parse_usage(value: object) -> tuple[int | None, int | None, bool]:
     return prompt, completion, False
 
 
+def _parse_responses_usage(
+    value: object,
+) -> tuple[int | None, int | None, bool]:
+    if not isinstance(value, Mapping):
+        return None, None, True
+    input_tokens = value.get("input_tokens")
+    output_tokens = value.get("output_tokens")
+    if type(input_tokens) is not int or type(output_tokens) is not int or input_tokens < 0 or output_tokens < 0:
+        return None, None, True
+    return input_tokens, output_tokens, False
+
+
 def _parse_response(body: bytes) -> VisionInvocationResult:
     try:
         payload = json.loads(body)
@@ -325,10 +392,94 @@ def _parse_response(body: bytes) -> VisionInvocationResult:
         ) from None
 
 
+def _parse_responses_response(body: bytes) -> VisionInvocationResult:
+    try:
+        payload = json.loads(body)
+        if not isinstance(payload, Mapping):
+            raise ValueError
+        status = payload.get("status")
+        if status != "completed":
+            incomplete = payload.get("incomplete_details")
+            error = payload.get("error")
+            reason = incomplete.get("reason") if isinstance(incomplete, Mapping) else None
+            error_code = error.get("code") if isinstance(error, Mapping) else None
+            if reason == "content_filter" or error_code == "content_filter":
+                raise OpenAICompatibleVisionError(
+                    "VISION_CONTENT_BLOCKED",
+                    request_dispatched=True,
+                )
+            raise ValueError
+        if payload.get("error") is not None or payload.get("incomplete_details") is not None:
+            raise ValueError
+        output = payload.get("output")
+        if not isinstance(output, list):
+            raise ValueError
+        messages: list[Mapping[str, object]] = []
+        for item in output:
+            if not isinstance(item, Mapping):
+                raise ValueError
+            item_type = item.get("type")
+            if item_type == "reasoning":
+                continue
+            if item_type != "message":
+                raise ValueError
+            messages.append(item)
+        if len(messages) != 1:
+            raise ValueError
+        message = messages[0]
+        if message.get("role") != "assistant" or message.get("status") != "completed":
+            raise ValueError
+        content = message.get("content")
+        if not isinstance(content, list) or len(content) != 1:
+            raise ValueError
+        part = content[0]
+        if not isinstance(part, Mapping):
+            raise ValueError
+        if part.get("type") in {"refusal", "output_refusal"}:
+            raise OpenAICompatibleVisionError(
+                "VISION_CONTENT_BLOCKED",
+                request_dispatched=True,
+            )
+        if part.get("type") != "output_text" or type(part.get("text")) is not str:
+            raise ValueError
+        evidence_payload = json.loads(part["text"])
+        evidence = VisionEvidence.model_validate(evidence_payload)
+        input_tokens, output_tokens, usage_unknown = _parse_responses_usage(
+            payload.get("usage"),
+        )
+        evidence.canonical_json()
+        return VisionInvocationResult(
+            evidence=evidence,
+            usage_receipt=VisionUsageReceipt(
+                call_count=1,
+                request_dispatched=True,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                usage_unknown=usage_unknown,
+            ),
+        )
+    except OpenAICompatibleVisionError:
+        raise
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        ValidationError,
+    ):
+        raise OpenAICompatibleVisionError(
+            "VISION_SCHEMA_MISMATCH",
+            request_dispatched=True,
+        ) from None
+
+
 class OpenAICompatibleVisionEvidenceClient:
     """One exact, bounded ``/chat/completions`` Vision Bridge profile."""
 
     requires_external_dispatch: Final = True
+    _endpoint_resource = "chat/completions"
+    _request_builder = staticmethod(_request_payload)
+    _response_parser = staticmethod(_parse_response)
 
     def __init__(
         self,
@@ -337,7 +488,10 @@ class OpenAICompatibleVisionEvidenceClient:
         transport: httpx.AsyncBaseTransport | None = None,
         transient_gate_key: str | None = None,
     ) -> None:
-        self._endpoint = _validated_endpoint(getattr(model_config, "base_url", None))
+        self._endpoint = _validated_endpoint(
+            getattr(model_config, "base_url", None),
+            self._endpoint_resource,
+        )
         self._api_key = _api_key(model_config)
         self._model = model_config.model
         if type(self._model) is not str or not self._model:
@@ -360,7 +514,7 @@ class OpenAICompatibleVisionEvidenceClient:
     ) -> VisionInvocationResult:
         if abort_signal.is_set():
             raise OpenAICompatibleVisionError("VISION_DEADLINE_EXCEEDED")
-        body = _request_payload(
+        body = self._request_builder(
             model=self._model,
             image_bytes=image_bytes,
             mime_type=mime_type,
@@ -444,7 +598,7 @@ class OpenAICompatibleVisionEvidenceClient:
                                 "VISION_SCHEMA_MISMATCH",
                                 request_dispatched=True,
                             )
-                        result = _parse_response(response_body)
+                        result = self._response_parser(response_body)
                         return replace(
                             result,
                             usage_receipt=replace(
@@ -477,9 +631,20 @@ class OpenAICompatibleVisionEvidenceClient:
                 self._run_gate.release()
 
 
+class OpenAIResponsesVisionEvidenceClient(
+    OpenAICompatibleVisionEvidenceClient,
+):
+    """Bounded multimodal executor for a selected model's Responses protocol."""
+
+    _endpoint_resource = "responses"
+    _request_builder = staticmethod(_responses_request_payload)
+    _response_parser = staticmethod(_parse_responses_response)
+
+
 __all__ = [
     "MAX_VISION_REQUEST_BYTES",
     "MAX_VISION_RESPONSE_BYTES",
     "OpenAICompatibleVisionError",
     "OpenAICompatibleVisionEvidenceClient",
+    "OpenAIResponsesVisionEvidenceClient",
 ]

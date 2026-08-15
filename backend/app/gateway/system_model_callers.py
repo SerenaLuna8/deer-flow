@@ -12,9 +12,10 @@ from app.system_settings import SystemModelMaterializer
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.utils.oneshot_llm import run_oneshot_llm
-from deerflow.vision.compatibility import VISION_OPENAI_COMPATIBLE_V1_ADAPTER
-from deerflow.vision.openai_compatible import (
-    OpenAICompatibleVisionEvidenceClient,
+from deerflow.vision.client import build_vision_evidence_client
+from deerflow.vision.compatibility import (
+    VISION_BRIDGE_CONTRACT_V1,
+    resolve_materialized_vision_bridge_protocol,
 )
 
 # Platform-generated 64x64 blue-square PNG. It contains no user/project data
@@ -66,9 +67,17 @@ class ModelConnectionTester:
 
     async def test(self, model: ModelConfig) -> bool:
         try:
-            if getattr(model, "system_provider_adapter", None) == VISION_OPENAI_COMPATIBLE_V1_ADAPTER:
-                client = OpenAICompatibleVisionEvidenceClient(
+            if (
+                getattr(model, "supports_vision", False) is True
+                and resolve_materialized_vision_bridge_protocol(
                     model,
+                    VISION_BRIDGE_CONTRACT_V1,
+                )
+                is not None
+            ):
+                client = build_vision_evidence_client(
+                    model,
+                    VISION_BRIDGE_CONTRACT_V1,
                     transient_gate_key="admin-vision-connection-test",
                 )
                 deadline = time.monotonic() + self.timeout_seconds
