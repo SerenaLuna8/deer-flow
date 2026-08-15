@@ -10,6 +10,7 @@ import {
   ChevronDownIcon,
   DatabaseIcon,
   GaugeIcon,
+  ImageIcon,
   InfoIcon,
   MessageSquareIcon,
   RefreshCwIcon,
@@ -221,6 +222,29 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     zh: "单次 Run 最大执行步数",
     en: "Maximum steps per Run",
     unit: "步",
+  },
+  "agent_runtime.vision_bridge.model_name": {
+    zh: "文本模型图片识别模型",
+    en: "Vision Bridge model",
+    hintZh:
+      "选择后，为不支持图片的主文本模型提供 inspect_image 工具；留空即关闭，不会回退到系统默认模型。",
+    hintEn:
+      "Select a model to expose inspect_image to text-only lead models. Empty means off and never falls back to the system default model.",
+  },
+  "agent_runtime.vision_bridge.timeout_seconds": {
+    zh: "单次图片识别超时",
+    en: "Image inspection timeout",
+    unit: "秒",
+    hintZh: "从读取图片到返回结构化证据共用一个截止时间，范围 5–120 秒。",
+    hintEn:
+      "One deadline covers image reading through structured evidence (5–120 seconds).",
+  },
+  "agent_runtime.vision_bridge.contract_version": {
+    zh: "证据契约版本",
+    en: "Evidence contract version",
+    hintZh: "固定版本，由服务端和视觉模型适配器共同校验。",
+    hintEn:
+      "Fixed version validated by both the server and the vision adapter.",
   },
   "agent_runtime.subagents.max_total_per_run": {
     zh: "每个 Run 最多调用子 Agent",
@@ -754,6 +778,7 @@ export function formatSystemDefaultModelOption(
 function ModelField({
   activeModels,
   disabled = false,
+  emptyOptionLabel,
   modelsStatus,
   name,
   onChange,
@@ -761,6 +786,7 @@ function ModelField({
 }: {
   activeModels: Model[];
   disabled?: boolean;
+  emptyOptionLabel?: string;
   modelsStatus: ModelsStatus;
   name: string;
   onChange: (value: string | null) => void;
@@ -786,11 +812,12 @@ function ModelField({
         className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
       >
         <option value="">
-          {formatSystemDefaultModelOption(
-            labels.defaultModel,
-            defaultModel?.display_name,
-            locale,
-          )}
+          {emptyOptionLabel ??
+            formatSystemDefaultModelOption(
+              labels.defaultModel,
+              defaultModel?.display_name,
+              locale,
+            )}
         </option>
         {!available && value ? (
           <option value={value} disabled>
@@ -1362,6 +1389,15 @@ function agentRuntimeGroups(locale: Locale) {
       icon: BrainIcon,
     },
     {
+      value: "vision-bridge",
+      title: locale === "zh-CN" ? "图片识别桥接" : "Vision Bridge",
+      description:
+        locale === "zh-CN"
+          ? "为不支持图片的主文本模型提供受控的 inspect_image 工具。选择兼容模型即启用，留空即关闭。"
+          : "Give text-only lead models a governed inspect_image tool. Selecting a compatible model enables it; empty disables it.",
+      icon: ImageIcon,
+    },
+    {
       value: "tools",
       title: locale === "zh-CN" ? "工具输出" : "Tool output",
       description:
@@ -1766,6 +1802,39 @@ function AgentRuntimeEditor({
             onChange={(next) => update("tool_output.tool_overrides", next)}
           />
         </fieldset>
+      </RuntimeGroup>
+
+      <RuntimeGroup
+        activeValue={activeGroup}
+        value="vision-bridge"
+        title={group("vision-bridge").title}
+        description={group("vision-bridge").description}
+      >
+        <ModelField
+          name="agent_runtime.vision_bridge.model_name"
+          value={value.vision_bridge.model_name}
+          activeModels={activeModels.filter(
+            (model) => model.supports_vision_bridge,
+          )}
+          modelsStatus={modelsStatus}
+          emptyOptionLabel={locale === "zh-CN" ? "关闭" : "Off"}
+          onChange={(next) => update("vision_bridge.model_name", next)}
+        />
+        <NumberField
+          name="agent_runtime.vision_bridge.timeout_seconds"
+          value={value.vision_bridge.timeout_seconds}
+          min={5}
+          max={120}
+          disabled={value.vision_bridge.model_name === null}
+          onChange={(next) => update("vision_bridge.timeout_seconds", next)}
+        />
+        <FieldShell name="agent_runtime.vision_bridge.contract_version">
+          <Input
+            name="agent_runtime.vision_bridge.contract_version"
+            value={value.vision_bridge.contract_version}
+            readOnly
+          />
+        </FieldShell>
       </RuntimeGroup>
 
       <RuntimeGroup
@@ -2528,6 +2597,9 @@ export function AdminSystemSettingsStateView({
                   validateAgentRuntimeModelReferences(
                     value,
                     activeModels.map((model) => model.name),
+                    activeModels
+                      .filter((model) => model.supports_vision_bridge)
+                      .map((model) => model.name),
                   )
                 }
                 pending={pendingSection === "agent_runtime"}
@@ -2622,6 +2694,9 @@ function AuthorizedAdminSystemSettingsPage({
           const parsed = validateAgentRuntimeModelReferences(
             value,
             models.models.map((model) => model.name),
+            models.models
+              .filter((model) => model.supports_vision_bridge)
+              .map((model) => model.name),
           );
           result = await replaceSection.mutateAsync({
             section,

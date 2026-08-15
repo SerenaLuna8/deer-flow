@@ -110,6 +110,7 @@ class PublicSystemModelView:
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
+    supports_vision_bridge: bool
     is_default: bool
 
 

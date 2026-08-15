@@ -145,6 +145,7 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
             supports_thinking: false,
             supports_reasoning_effort: false,
             supports_vision: false,
+            supports_vision_bridge: false,
             is_default: true,
           },
         ],

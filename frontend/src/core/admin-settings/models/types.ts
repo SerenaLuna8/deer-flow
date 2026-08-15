@@ -19,6 +19,7 @@ export const adminModelProviderAdapterSchema = z.enum([
   "patched_minimax",
   "patched_openai",
   "patched_stepfun",
+  "vision_bridge_fake",
   "vllm",
 ]);
 
@@ -288,9 +289,11 @@ function validateCredentialBinding(
     });
     return;
   }
-  const credentialRequired = !["claude_code", "codex_cli"].includes(
-    value.provider_adapter,
-  );
+  const credentialRequired = ![
+    "claude_code",
+    "codex_cli",
+    "vision_bridge_fake",
+  ].includes(value.provider_adapter);
   if (
     (credentialRequired && present === 0) ||
     (!credentialRequired && present !== 0)
@@ -450,6 +453,7 @@ const PROVIDER_SETTING_FIELDS: Record<
     "when_thinking_disabled",
     "when_thinking_enabled",
   ]),
+  vision_bridge_fake: new Set(),
   vllm: new Set([
     "base_url",
     "cumulative_stream_usage",

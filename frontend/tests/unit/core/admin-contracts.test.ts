@@ -4,7 +4,11 @@ import {
   adminJobSchema,
   jobFiltersSchema,
 } from "@/core/admin-operations/types";
-import { agentRuntimeSettingsValueSchema } from "@/core/admin-settings/system/types";
+import { createAdminModelInputSchema } from "@/core/admin-settings/models/types";
+import {
+  agentRuntimeSettingsValueSchema,
+  validateAgentRuntimeModelReferences,
+} from "@/core/admin-settings/system/types";
 import { auditItemSchema } from "@/core/project-governance/audit";
 
 const JOB_TYPES = [
@@ -28,6 +32,11 @@ function agentRuntimeSettings() {
       hard_stop_threshold: 0.95,
     },
     max_recursion_limit: 100,
+    vision_bridge: {
+      model_name: null,
+      timeout_seconds: 20,
+      contract_version: "vision.bridge.v1",
+    },
     title: {
       enabled: true,
       max_words: 10,
@@ -81,6 +90,34 @@ function agentRuntimeSettings() {
 }
 
 describe("admin contracts", () => {
+  test("accepts only the credential-free P1 Vision Bridge fake adapter", () => {
+    const input = {
+      logical_name: "small-vision-model",
+      display_name: "Small Vision Model",
+      description: "P1 deterministic adapter",
+      provider_adapter: "vision_bridge_fake",
+      provider_model: "vision-bridge-fake-v1",
+      settings: {},
+      supports_thinking: false,
+      supports_reasoning_effort: false,
+      supports_vision: true,
+      credential_id: null,
+      credential_version_id: null,
+      credential_env_key: null,
+      sort_order: 0,
+      status: "active",
+    };
+    expect(createAdminModelInputSchema.parse(input).provider_adapter).toBe(
+      "vision_bridge_fake",
+    );
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...input,
+        settings: { base_url: "https://example.com" },
+      }).success,
+    ).toBe(false);
+  });
+
   test("accepts only the final frozen Memory policy", () => {
     const parsed = agentRuntimeSettingsValueSchema.parse(
       agentRuntimeSettings(),
@@ -134,6 +171,57 @@ describe("admin contracts", () => {
         memory: { ...agentRuntimeSettings().memory, episode_retention_days: 0 },
       }).success,
     ).toBe(true);
+  });
+
+  test("keeps Vision Bridge optional, strict, and compatibility-gated", () => {
+    const configured = {
+      ...agentRuntimeSettings(),
+      vision_bridge: {
+        ...agentRuntimeSettings().vision_bridge,
+        model_name: "small-vision-model",
+      },
+    };
+    expect(
+      validateAgentRuntimeModelReferences(
+        configured,
+        ["small-vision-model"],
+        ["small-vision-model"],
+      ).vision_bridge.model_name,
+    ).toBe("small-vision-model");
+    expect(() =>
+      validateAgentRuntimeModelReferences(
+        configured,
+        ["small-vision-model"],
+        [],
+      ),
+    ).toThrow("active compatible vision model");
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        vision_bridge: {
+          ...agentRuntimeSettings().vision_bridge,
+          enabled: true,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        vision_bridge: {
+          ...agentRuntimeSettings().vision_bridge,
+          egress_grant: true,
+        },
+      }).success,
+    ).toBe(false);
+    expect(
+      agentRuntimeSettingsValueSchema.safeParse({
+        ...agentRuntimeSettings(),
+        vision_bridge: {
+          ...agentRuntimeSettings().vision_bridge,
+          contract_version: "vision.bridge.v2",
+        },
+      }).success,
+    ).toBe(false);
   });
 
   test("accepts every persisted job type in rows and filters", () => {

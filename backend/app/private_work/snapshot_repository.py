@@ -108,6 +108,9 @@ from deerflow.persistence.shared_assets.agent_model import (
 )
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow, McpServerVersionRow
 from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
+from deerflow.vision.compatibility import (
+    is_vision_bridge_adapter_compatible,
+)
 
 _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "secret",
@@ -878,14 +881,21 @@ class RunSnapshotRepository:
                 except SystemModelStorageUnavailable:
                     raise PrivateWorkUnavailable(context.request_id) from None
             if locked_runtime_policy is not None:
-                auxiliary_model_refs = (
+                auxiliary_model_refs: list[tuple[str, str | None]] = [
                     ("title", locked_runtime_policy.value.title.model_name),
                     (
                         "summarization",
                         locked_runtime_policy.value.summarization.model_name,
                     ),
                     ("memory", locked_runtime_policy.value.memory.model_name),
-                )
+                ]
+                if not effective_profile.supports_vision:
+                    auxiliary_model_refs.append(
+                        (
+                            "vision",
+                            locked_runtime_policy.value.vision_bridge.model_name,
+                        )
+                    )
                 try:
                     for purpose, model_ref in auxiliary_model_refs:
                         snapshot_ref = auxiliary_model_snapshot_ref(
@@ -896,7 +906,7 @@ class RunSnapshotRepository:
                         if snapshot_ref is None:
                             continue
                         try:
-                            await self._model_catalog.admit_model_snapshot(
+                            auxiliary_snapshot = await self._model_catalog.admit_model_snapshot(
                                 session,
                                 project_id=context.project_id,
                                 owner_user_id=str(context.user_id),
@@ -905,6 +915,14 @@ class RunSnapshotRepository:
                                 purpose=purpose,
                                 model_ref=snapshot_ref,
                             )
+                            if purpose == "vision" and (
+                                not auxiliary_snapshot.supports_vision
+                                or not is_vision_bridge_adapter_compatible(
+                                    auxiliary_snapshot.provider_adapter,
+                                    locked_runtime_policy.value.vision_bridge.contract_version,
+                                )
+                            ):
+                                raise SystemModelInvalid(context.request_id)
                         except SystemModelNotFound:
                             if purpose == "title" and model_ref is None:
                                 continue

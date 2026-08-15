@@ -20,6 +20,7 @@ from app.system_runtime_settings.repository import (
 from app.system_runtime_settings.validation import (
     RuntimePolicyInvalid,
     canonical_policy_payload,
+    canonical_policy_payload_for_schema,
 )
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.system_runtime_settings import (
@@ -89,7 +90,11 @@ async def _validate_existing_catalog(
         rows = await repository.list_current()
         for policy, version in rows:
             section = RuntimePolicySection(policy.section)
-            canonical = canonical_policy_payload(section, dict(version.value))
+            canonical = canonical_policy_payload_for_schema(
+                section,
+                dict(version.value),
+                schema_version=int(version.schema_version),
+            )
             if (
                 policy.current_version_id != version.id
                 or int(policy.revision) != int(version.version_number)

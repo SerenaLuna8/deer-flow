@@ -139,6 +139,9 @@ from deerflow.runtime.user_context import (
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
+from deerflow.vision.compatibility import (
+    is_vision_bridge_adapter_compatible,
+)
 
 logger = logging.getLogger("app.reliability.execution")
 
@@ -562,14 +565,21 @@ class RunAgentPrivateExecutor:
                         runtime_models[delegated_model.name] = delegated_model
                         delegate_model_names[asset.version_id] = delegated_model.name
                     if runtime_policy is not None:
-                        auxiliary_model_refs = (
+                        auxiliary_model_refs: list[tuple[str, str | None]] = [
                             ("title", runtime_app_config.title.model_name),
                             (
                                 "summarization",
                                 runtime_app_config.summarization.model_name,
                             ),
                             ("memory", runtime_app_config.memory.model_name),
-                        )
+                        ]
+                        if not lead_model.supports_vision:
+                            auxiliary_model_refs.append(
+                                (
+                                    "vision",
+                                    runtime_app_config.vision_bridge.model_name,
+                                )
+                            )
                         for purpose, model_ref in auxiliary_model_refs:
                             snapshot_ref = auxiliary_model_snapshot_ref(
                                 purpose,
@@ -594,6 +604,16 @@ class RunAgentPrivateExecutor:
                                     "RUN_ASSET_STALE",
                                 ) from None
                             if model_ref is not None and auxiliary_model.name != model_ref:
+                                raise PermanentExecutionError(
+                                    "RUN_ASSET_STALE",
+                                )
+                            if purpose == "vision" and (
+                                not auxiliary_model.supports_vision
+                                or not is_vision_bridge_adapter_compatible(
+                                    auxiliary_model.system_provider_adapter,
+                                    runtime_app_config.vision_bridge.contract_version,
+                                )
+                            ):
                                 raise PermanentExecutionError(
                                     "RUN_ASSET_STALE",
                                 )

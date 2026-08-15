@@ -151,8 +151,10 @@ class ToolResultSanitizationMiddleware(AgentMiddleware[AgentState]):
 
     def _should_sanitize(self, request: ToolCallRequest) -> bool:
         from deerflow.tools.mcp_metadata import is_private_mcp_tool
+        from deerflow.vision.provenance import is_vision_evidence_tool
 
-        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES or is_private_mcp_tool(getattr(request, "tool", None)) or _is_registered_upload_read(request)
+        tool = getattr(request, "tool", None)
+        return request.tool_call.get("name") in _REMOTE_CONTENT_TOOL_NAMES or is_private_mcp_tool(tool) or is_vision_evidence_tool(tool) or _is_registered_upload_read(request)
 
     @override
     def wrap_tool_call(

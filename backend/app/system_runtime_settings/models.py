@@ -269,6 +269,19 @@ class SubagentPolicy(_PolicyModel):
     max_total_per_run: int = Field(default=6, ge=1, le=50)
 
 
+class VisionBridgePolicy(_PolicyModel):
+    """Frozen selection for the text-model Vision Bridge.
+
+    A non-null ``model_name`` is the enablement signal.  Provider, endpoint,
+    credential and prompt details remain outside this policy and are resolved
+    through the exact System Model snapshot admitted for the Run.
+    """
+
+    model_name: ModelName | None = None
+    timeout_seconds: int = Field(default=20, ge=5, le=120)
+    contract_version: Literal["vision.bridge.v1"] = "vision.bridge.v1"
+
+
 class AgentRuntimePolicyValue(_PolicyModel):
     token_usage: EnabledPolicy = Field(default_factory=EnabledPolicy)
     token_budget: TokenBudgetPolicy = Field(default_factory=TokenBudgetPolicy)
@@ -284,6 +297,7 @@ class AgentRuntimePolicyValue(_PolicyModel):
     read_before_write: EnabledPolicy = Field(default_factory=EnabledPolicy)
     safety_finish_reason: EnabledPolicy = Field(default_factory=EnabledPolicy)
     subagents: SubagentPolicy = Field(default_factory=SubagentPolicy)
+    vision_bridge: VisionBridgePolicy = Field(default_factory=VisionBridgePolicy)
 
 
 class AuthPolicyValue(_PolicyModel):
@@ -420,6 +434,7 @@ __all__ = [
     "RuntimePolicyUpdateResult",
     "RuntimePolicyValue",
     "RuntimePolicyView",
+    "VisionBridgePolicy",
     "LockedAgentRuntimePolicy",
     "auxiliary_model_snapshot_ref",
     "default_policy_value",

@@ -736,6 +736,18 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     raw_tools = get_available_tools(**tool_kwargs)
     private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
     candidate_tools = raw_tools + private_mcp_tools
+    if any(tool.name == "inspect_image" for tool in candidate_tools):
+        raise ValueError(
+            "Reserved platform tool name 'inspect_image' conflicts with a configured runtime tool",
+        )
+    if private_runtime is not None and not model_config.supports_vision and resolved_app_config.vision_bridge.model_name is not None:
+        from deerflow.tools.builtins.inspect_image_tool import (
+            build_inspect_image_tool,
+        )
+
+        candidate_tools.append(
+            build_inspect_image_tool(app_config=resolved_app_config),
+        )
     configured_tools = candidate_tools
     if non_interactive:
         configured_tools = [tool for tool in configured_tools if tool.name not in _NON_INTERACTIVE_DISABLED_TOOL_NAMES]

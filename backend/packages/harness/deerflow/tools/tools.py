@@ -18,6 +18,8 @@ from deerflow.tools.sync import make_sync_tool_wrapper
 
 logger = logging.getLogger(__name__)
 
+RESERVED_PLATFORM_TOOL_NAMES = frozenset({"inspect_image"})
+
 BUILTIN_TOOLS = [
     present_file_tool,
     ask_clarification_tool,
@@ -76,6 +78,11 @@ def get_available_tools(
     """
     config = app_config or get_app_config()
     tool_configs = [tool for tool in config.tools if groups is None or tool.group in groups]
+    reserved_config_names = {item.name for item in (*config.tools, *config.tool_groups) if item.name in RESERVED_PLATFORM_TOOL_NAMES}
+    if reserved_config_names:
+        raise ValueError(
+            "Reserved platform tool names cannot be declared in config: " + ",".join(sorted(reserved_config_names)),
+        )
 
     # Do not expose host bash by default when LocalSandboxProvider is active.
     if not is_host_bash_available(config):
@@ -160,6 +167,11 @@ def get_available_tools(
     # built-ins, MCP tools, and ACP tools.  Duplicate names cause the LLM to
     # receive ambiguous or concatenated function schemas (issue #1803).
     all_tools = [_ensure_sync_invocable_tool(t) for t in loaded_tools + builtin_tools + mcp_tools + acp_tools]
+    reserved_runtime_names = {tool.name for tool in all_tools if tool.name in RESERVED_PLATFORM_TOOL_NAMES}
+    if reserved_runtime_names:
+        raise ValueError(
+            "Reserved platform tool names cannot be supplied by configured, MCP, or ACP tools: " + ",".join(sorted(reserved_runtime_names)),
+        )
     seen_names: set[str] = set()
     unique_tools: list[BaseTool] = []
     for t in all_tools:

@@ -42,6 +42,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.vision_bridge_config import VisionBridgeConfig
 from deerflow.config.worker_config import WorkerConfig
 
 logger = logging.getLogger(__name__)
@@ -135,6 +136,9 @@ DATABASE_RUNTIME_POLICY_PATHS = frozenset(
         "tool_output.tool_overrides",
         "tool_search.auto_promote_top_k",
         "tool_search.enabled",
+        "vision_bridge.contract_version",
+        "vision_bridge.model_name",
+        "vision_bridge.timeout_seconds",
     }
 )
 
@@ -285,6 +289,10 @@ class AppConfig(BaseModel):
     tool_progress: ToolProgressConfig = Field(default_factory=ToolProgressConfig, description="Tool progress state machine middleware configuration")
     read_before_write: ReadBeforeWriteConfig = Field(default_factory=ReadBeforeWriteConfig, description="Read-before-write file gate middleware configuration")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
+    vision_bridge: VisionBridgeConfig = Field(
+        default_factory=VisionBridgeConfig,
+        description="Database-backed text-model Vision Bridge selection for this Run.",
+    )
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(

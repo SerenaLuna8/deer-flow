@@ -53,6 +53,10 @@ from deerflow.persistence.system_settings import (
     SystemModelConfigVersionRow,
 )
 from deerflow.persistence.user.model import UserRow
+from deerflow.vision.compatibility import (
+    VISION_BRIDGE_CONTRACT_V1,
+    is_vision_bridge_adapter_compatible,
+)
 
 _PURPOSE = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _MODEL_REF = re.compile(
@@ -287,6 +291,13 @@ class SystemModelCatalogService:
                         supports_thinking=version.supports_thinking,
                         supports_reasoning_effort=(version.supports_reasoning_effort),
                         supports_vision=version.supports_vision,
+                        supports_vision_bridge=(
+                            version.supports_vision
+                            and is_vision_bridge_adapter_compatible(
+                                version.provider_adapter,
+                                VISION_BRIDGE_CONTRACT_V1,
+                            )
+                        ),
                         is_default=model.id == default_id,
                     )
                     for model, version in rows

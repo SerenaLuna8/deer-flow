@@ -39,6 +39,7 @@ class ModelResponse(_StrictModel):
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
+    supports_vision_bridge: bool = False
     is_default: bool = False
 
 
@@ -61,6 +62,7 @@ def _public_response(model: PublicSystemModelView) -> ModelResponse:
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         supports_vision=model.supports_vision,
+        supports_vision_bridge=model.supports_vision_bridge,
         is_default=model.is_default,
     )
 

@@ -71,6 +71,7 @@ def _model(
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_thinking,
         supports_vision=False,
+        supports_vision_bridge=False,
         is_default=is_default,
     )
 

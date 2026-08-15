@@ -9,7 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
@@ -21,7 +21,8 @@ from app.system_runtime_settings.models import (
     RuntimePolicyValue,
 )
 
-RUNTIME_POLICY_SCHEMA_VERSION = 2
+LEGACY_RUNTIME_POLICY_SCHEMA_VERSION = 2
+RUNTIME_POLICY_SCHEMA_VERSION = 3
 MAX_RUNTIME_POLICY_BYTES = 32 * 1024
 _SECRET_KEY = re.compile(
     r"(?i)(?:^|[_-])(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|"
@@ -163,11 +164,57 @@ def canonical_policy_payload(
     )
 
 
+def canonical_policy_payload_for_schema(
+    section: RuntimePolicySection | str,
+    value: RuntimePolicyValue | Mapping[str, object],
+    *,
+    schema_version: int,
+) -> CanonicalRuntimePolicy:
+    """Canonicalize a stored payload using its declared schema version.
+
+    Runtime-policy rows are immutable and may already be frozen into Runs.
+    Schema v2 therefore remains readable.  Its Agent Runtime shape predates
+    ``vision_bridge``; parsing supplies the safe ``model_name=None`` default,
+    while checksum verification still uses the exact legacy JSON shape.
+    """
+
+    if schema_version == RUNTIME_POLICY_SCHEMA_VERSION:
+        return canonical_policy_payload(section, value)
+    if schema_version != LEGACY_RUNTIME_POLICY_SCHEMA_VERSION:
+        raise RuntimePolicyInvalid
+    try:
+        parsed_section = RuntimePolicySection(section)
+        raw = value.model_dump(mode="python") if isinstance(value, BaseModel) else dict(value)
+        if parsed_section is RuntimePolicySection.AGENT_RUNTIME and "vision_bridge" in raw:
+            raise RuntimePolicyInvalid
+        parsed = parse_policy_value(parsed_section, raw)
+        normalized = parsed.model_dump(mode="json")
+        if parsed_section is RuntimePolicySection.AGENT_RUNTIME:
+            normalized.pop("vision_bridge", None)
+        encoded = json.dumps(
+            normalized,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return CanonicalRuntimePolicy(
+            schema_version=LEGACY_RUNTIME_POLICY_SCHEMA_VERSION,
+            value=normalized,
+            checksum=hashlib.sha256(encoded).hexdigest(),
+        )
+    except RuntimePolicyInvalid:
+        raise
+    except (TypeError, ValueError, ValidationError):
+        raise RuntimePolicyInvalid from None
+
+
 __all__ = [
     "CanonicalRuntimePolicy",
     "MAX_RUNTIME_POLICY_BYTES",
+    "LEGACY_RUNTIME_POLICY_SCHEMA_VERSION",
     "RUNTIME_POLICY_SCHEMA_VERSION",
     "RuntimePolicyInvalid",
     "canonical_policy_payload",
+    "canonical_policy_payload_for_schema",
     "parse_policy_value",
 ]

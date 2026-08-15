@@ -239,6 +239,14 @@ Model definitions, runtime/auth/Memory/quota/Automation policy, and provider Cre
 PostgreSQL authority and must not be reintroduced as YAML or ambient-key
 fallbacks.
 
+Text-model image inspection follows
+[`docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md`](docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md):
+`inspect_image` is a reserved, conditional Worker tool selected through
+`agent_runtime.vision_bridge.model_name`, never `config.yaml`. The current P1
+allowlist is deliberately fake-only; do not admit a real provider adapter
+without the documented P2 data-egress, tracing, settlement, and cancellation
+gates.
+
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required
 `host_execution_approval` policy, PostgreSQL-owned Automation policy, and the

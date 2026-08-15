@@ -502,11 +502,17 @@ Agent 定义或工具参数中添加视觉模型名/API Key 回退。
 }
 ```
 
-本方案落地前，当前代码只有系统模型目录、通用 Agent Runtime Policy 框架和
-`supports_vision` 字段；尚无 `vision_bridge` policy 或 `inspect_image`。当前 policy
-使用 strict `extra="forbid"`；手工向管理 API 塞入
-`vision_bridge` 会被拒绝，而不是被忽略或触发注入。因此当前 checkout 没有可配置的新
-工具，也不会发生这条新增视觉外发。
+当前 checkout 已落地 P1 基础闭环：严格 `vision_bridge` policy、schema v2 兼容读取、
+`purpose="vision"` Run snapshot/Worker 物化、共享安全图片规范化、固定 prompt/Schema、
+条件内置 `inspect_image`、对象 provenance、inline-only 结果以及管理端模型过滤。P1 的
+唯一兼容 adapter 是不可配置 Endpoint/Credential 且不联网的 `vision_bridge_fake`；它只
+验证控制面和数据通路，不提供真实语义识图，也不会发生第三方视觉外发。
+
+真实 Provider、调用前外发授权复验、usage/quota settlement、敏感 tracing 排除、
+ambiguous-side-effect fence、provider retry/response cap 和 emergency kill switch 仍属于
+P2，当前代码通过 adapter/contract allowlist 硬性拒绝 OpenAI、Anthropic、vLLM 等真实
+Provider 被选为 Bridge。管理员现在可以配置并验证 P1 fake，但不能用旁路 YAML、环境
+变量或通用模型 adapter 提前接入真实 API。
 
 ### 10.2 Runtime Policy
 

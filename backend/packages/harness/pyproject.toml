@@ -30,6 +30,7 @@ dependencies = [
     "markdownify>=1.2.2",
     "markitdown[all,xlsx]>=0.0.1a2",
     "pydantic>=2.12.5",
+    "pillow>=12.0.0,<13.0",
     "pyyaml>=6.0.3",
     "readabilipy>=0.3.0",
     "tavily-python>=0.7.17",

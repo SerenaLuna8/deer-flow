@@ -79,6 +79,11 @@ function catalog(): SystemSettingsCatalog {
             hard_stop_threshold: 0.95,
           },
           max_recursion_limit: 100,
+          vision_bridge: {
+            model_name: null,
+            timeout_seconds: 20,
+            contract_version: "vision.bridge.v1",
+          },
           title: {
             enabled: true,
             max_words: 10,
@@ -220,6 +225,44 @@ describe("admin Memory document settings", () => {
     expect(html).toContain(
       "仅影响新建文档；已有文档继续使用创建时冻结的章节结构",
     );
+  });
+
+  test("renders Vision Bridge as model selection without an enable or grant switch", () => {
+    const data = catalog();
+    data.sections.agent_runtime.value.vision_bridge.model_name =
+      "small-vision-model";
+    const html = renderChinese(
+      <AdminSystemSettingsStateView
+        activeModels={[
+          {
+            name: "small-vision-model",
+            model: "small-vision-model",
+            display_name: "Small Vision Model",
+            description: "",
+            supports_thinking: false,
+            supports_reasoning_effort: false,
+            supports_vision: true,
+            supports_vision_bridge: true,
+            is_default: false,
+          },
+        ]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data }}
+      />,
+    );
+
+    expect(html).toContain('data-settings-destination="vision-bridge"');
+    expect(html).toContain('name="agent_runtime.vision_bridge.model_name"');
+    expect(html).toContain('value="small-vision-model" selected=""');
+    expect(html).toContain(">关闭</option>");
+    expect(html).not.toContain("egress_grant");
+    expect(html).not.toContain("agent_runtime.vision_bridge.enabled");
   });
 });
 

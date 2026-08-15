@@ -115,7 +115,12 @@ def _context() -> PrivateWorkContext:
     )
 
 
-def _policy(*, enabled: bool = True, max_tokens: int = 2_000):
+def _policy(
+    *,
+    enabled: bool = True,
+    max_tokens: int = 2_000,
+    vision_model_name: str | None = None,
+):
     return LockedAgentRuntimePolicy(
         policy_version_id=uuid.uuid4(),
         revision=4,
@@ -125,7 +130,8 @@ def _policy(*, enabled: bool = True, max_tokens: int = 2_000):
             memory={
                 "enabled": enabled,
                 "max_injection_tokens": max_tokens,
-            }
+            },
+            vision_bridge={"model_name": vision_model_name},
         ),
     )
 
@@ -594,7 +600,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
     class RuntimePolicy:
         async def lock_agent_runtime_for_admission(self, _session):
             events.append("policy")
-            return _policy()
+            return _policy(vision_model_name="vision-small-v1")
 
         async def admit_run_snapshot(self, _session, **_kwargs):
             events.append("policy_snapshot")
@@ -603,10 +609,11 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         async def admit_model_snapshot(self, _session, *, purpose, **_kwargs):
             events.append(f"model:{purpose}")
             return SimpleNamespace(
-                logical_name="lead-model",
+                logical_name=("vision-small-v1" if purpose == "vision" else "lead-model"),
+                provider_adapter=("vision_bridge_fake" if purpose == "vision" else "openai"),
                 supports_thinking=False,
                 supports_reasoning_effort=False,
-                supports_vision=False,
+                supports_vision=purpose == "vision",
             )
 
     monkeypatch.setattr(snapshot_module, "AsyncSession", Session)
@@ -688,6 +695,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         "policy_snapshot",
         "model:lead",
         "model:title",
+        "model:vision",
         "memory",
         "activity",
     ]
@@ -750,7 +758,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
 
     class RuntimePolicy:
         async def lock_agent_runtime_for_admission(self, _session):
-            return _policy()
+            return _policy(vision_model_name="vision-small-v1")
 
         async def admit_run_snapshot(self, _session, **_kwargs):
             return None
@@ -763,7 +771,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
                 provider_adapter="openai",
                 supports_thinking=False,
                 supports_reasoning_effort=False,
-                supports_vision=False,
+                supports_vision=purpose == "lead",
             )
 
     monkeypatch.setattr(snapshot_module, "AsyncSession", Session)
@@ -824,6 +832,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
 
     assert ("lead", "lead-model") in admitted
     assert ("title", "default") in admitted
+    assert not any(purpose == "vision" for purpose, _model in admitted)
 
 
 @pytest.mark.asyncio

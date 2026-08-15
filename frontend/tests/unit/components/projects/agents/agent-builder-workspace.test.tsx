@@ -92,6 +92,7 @@ const MODELS: Model[] = [
     supports_thinking: true,
     supports_reasoning_effort: true,
     supports_vision: true,
+    supports_vision_bridge: false,
     is_default: true,
   },
 ];

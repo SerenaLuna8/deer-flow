@@ -18,6 +18,14 @@ class ModelConfig(BaseModel):
     _system_model_config_version_id: uuid.UUID | None = PrivateAttr(
         default=None,
     )
+    _system_provider_adapter: str | None = PrivateAttr(default=None)
+
+    @property
+    def system_provider_adapter(self) -> str | None:
+        """Return the exact database adapter name without serializing it."""
+
+        return self._system_provider_adapter
+
     use_responses_api: bool | None = Field(
         default=None,
         description="Whether to route OpenAI ChatOpenAI calls through the /v1/responses API",

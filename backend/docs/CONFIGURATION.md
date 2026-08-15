@@ -261,12 +261,36 @@ After application startup, sign in as a system admin and use
    adapter requires authentication;
 5. activate the model and choose the catalog default.
 
-The adapter allowlist includes OpenAI, Anthropic, DeepSeek, MindIE, vLLM,
+The general model adapter allowlist includes OpenAI, Anthropic, DeepSeek, MindIE, vLLM,
 patched OpenAI-compatible adapters, Xiaomi MiMo, Claude Code, and Codex CLI.
 Arbitrary Python class paths are not accepted. Secret-bearing keys, headers,
 tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
 decrypted for the exact admitted model version at the execution boundary.
+
+#### Text-model Vision Bridge (P1)
+
+`inspect_image` is a reserved conditional built-in tool. It is not listed under
+`tools:` or `tool_groups:` in `config.yaml`; declaring that name there fails
+closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
+
+1. In `/admin/settings/models`, create an active logical model with
+   `supports_vision=true` and a Bridge-compatible adapter.
+2. In `/admin/settings/system`, open **Vision Bridge** and select that model.
+   A non-null `agent_runtime.vision_bridge.model_name` enables later text-only
+   project Runs; clearing it disables the bridge. There is no second `enabled`
+   flag and no project egress grant.
+3. `timeout_seconds` is the single image-read-through-result deadline.
+   `contract_version` is fixed to `vision.bridge.v1` and is not free-form.
+
+The current P1 compatibility allowlist contains only `vision_bridge_fake`. It
+accepts no provider settings or Credential and cannot perform network I/O. It
+exists to validate catalog, snapshot, Worker materialization, image authority,
+normalization, prompt/schema, and tool-result behavior. Real third-party API
+adapters remain rejected until the P2 endpoint, TLS/redirect/proxy, tracing,
+quota/usage settlement, cancellation, and data-egress gates in
+[TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) are
+implemented and approved.
 
 Gateway, Worker, Scheduler, and Docker Compose do not receive the local
 bootstrap provider key as a process-wide environment block. Each Run records a secret-free,

@@ -210,6 +210,13 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       token_usage: z.object({ enabled: z.boolean() }).strict(),
       token_budget: tokenBudgetSchema,
       max_recursion_limit: boundedInteger(1, 100_000),
+      vision_bridge: z
+        .object({
+          model_name: logicalModelNameSchema.nullable(),
+          timeout_seconds: boundedInteger(5, 120),
+          contract_version: z.literal("vision.bridge.v1"),
+        })
+        .strict(),
       title: z
         .object({
           enabled: z.boolean(),
@@ -594,6 +601,7 @@ export type SystemSettingsSectionValueMap = {
 export function validateAgentRuntimeModelReferences(
   value: unknown,
   activeModelNames: readonly string[],
+  visionBridgeModelNames: readonly string[] = [],
 ): AgentRuntimeSettingsValue {
   const parsed = agentRuntimeSettingsValueSchema.parse(value);
   const allowed = new Set(
@@ -609,6 +617,16 @@ export function validateAgentRuntimeModelReferences(
     throw new Error(
       "Every model setting must reference a current active model",
     );
+  }
+  if (parsed.vision_bridge.model_name !== null) {
+    const allowedVisionBridgeModels = new Set(
+      visionBridgeModelNames.map((name) => logicalModelNameSchema.parse(name)),
+    );
+    if (!allowedVisionBridgeModels.has(parsed.vision_bridge.model_name)) {
+      throw new Error(
+        "Vision Bridge must reference an active compatible vision model",
+      );
+    }
   }
   return parsed;
 }

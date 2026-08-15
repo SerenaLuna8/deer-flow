@@ -16,6 +16,7 @@ from app.system_runtime_settings.bootstrap import (
 )
 from app.system_runtime_settings.errors import (
     SystemRuntimePolicyConflict,
+    SystemRuntimePolicyInvalid,
     SystemRuntimePolicyUnavailable,
 )
 from app.system_runtime_settings.materializer import (
@@ -307,6 +308,138 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             snapshot.schema_version += 1
             with pytest.raises(DBAPIError):
                 await session.flush()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin_id = uuid.uuid4()
+    compatible_model_id = uuid.uuid4()
+    compatible_version_id = uuid.uuid4()
+    incompatible_model_id = uuid.uuid4()
+    incompatible_version_id = uuid.uuid4()
+    compatible_name = f"vision-bridge-{compatible_model_id.hex}"
+    incompatible_name = f"ordinary-vision-{incompatible_model_id.hex}"
+    try:
+        assert await bootstrap_system_runtime_policies(factory) == 1
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                    (id,email,system_role,created_at,needs_setup,token_version)
+                    VALUES (:id,:email,'system_admin',now(),false,0)"""
+                ),
+                {
+                    "id": str(admin_id),
+                    "email": f"{admin_id}@example.com",
+                },
+            )
+            for model_id, version_id, name, adapter, checksum in (
+                (
+                    compatible_model_id,
+                    compatible_version_id,
+                    compatible_name,
+                    "vision_bridge_fake",
+                    "d" * 64,
+                ),
+                (
+                    incompatible_model_id,
+                    incompatible_version_id,
+                    incompatible_name,
+                    "openai",
+                    "e" * 64,
+                ),
+            ):
+                await connection.execute(
+                    text(
+                        """INSERT INTO system_model_configs
+                        (id,logical_name,display_name,description,status,
+                         current_version_id,revision,sort_order,
+                         created_by_user_id,updated_by_user_id)
+                        VALUES (:id,:name,:name,'Vision Bridge policy test',
+                                'active',NULL,1,0,:owner,:owner)"""
+                    ),
+                    {
+                        "id": model_id,
+                        "name": name,
+                        "owner": str(admin_id),
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """INSERT INTO system_model_config_versions
+                        (id,model_config_id,version_number,provider_adapter,
+                         provider_model,settings,supports_thinking,
+                         supports_reasoning_effort,supports_vision,credential_id,
+                         credential_version_id,credential_env_key,payload_checksum,
+                         supersedes_version_id,created_by_user_id)
+                        VALUES (:version,:model,1,:adapter,:name,'{}'::jsonb,
+                                false,false,true,NULL,NULL,NULL,:checksum,NULL,:owner)"""
+                    ),
+                    {
+                        "version": version_id,
+                        "model": model_id,
+                        "adapter": adapter,
+                        "name": name,
+                        "checksum": checksum,
+                        "owner": str(admin_id),
+                    },
+                )
+                await connection.execute(
+                    text(
+                        """UPDATE system_model_configs
+                        SET current_version_id=:version WHERE id=:model"""
+                    ),
+                    {"version": version_id, "model": model_id},
+                )
+
+        audit = AuditService(factory, AuditHmacKeyring.from_environment())
+        service = SystemRuntimePolicyService(factory, audit)
+        context = resolve_system_audit_context(
+            SimpleNamespace(id=admin_id, system_role="system_admin"),
+            request_id=str(uuid.uuid4()),
+        )
+        base_value = default_policy_value(
+            RuntimePolicySection.AGENT_RUNTIME,
+        ).model_dump(mode="python")
+
+        incompatible_value = dict(base_value)
+        incompatible_value["vision_bridge"] = {
+            **base_value["vision_bridge"],
+            "model_name": incompatible_name,
+        }
+        with pytest.raises(SystemRuntimePolicyInvalid):
+            await service.update_policy(
+                context,
+                RuntimePolicySection.AGENT_RUNTIME,
+                expected_revision=1,
+                value=incompatible_value,
+            )
+
+        compatible_value = dict(base_value)
+        compatible_value["vision_bridge"] = {
+            **base_value["vision_bridge"],
+            "model_name": compatible_name,
+        }
+        updated = await service.update_policy(
+            context,
+            RuntimePolicySection.AGENT_RUNTIME,
+            expected_revision=1,
+            value=compatible_value,
+        )
+        assert updated.policy.revision == 2
+        assert updated.policy.value.vision_bridge.model_name == compatible_name
+        materialized = await SystemRuntimePolicyMaterializer(
+            factory,
+        ).materialize_revision(RuntimePolicySection.AGENT_RUNTIME, 2)
+        assert materialized.vision_bridge.model_name == compatible_name
+        assert materialized.vision_bridge.contract_version == "vision.bridge.v1"
     finally:
         await engine.dispose()
 

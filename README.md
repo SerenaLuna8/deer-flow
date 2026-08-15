@@ -24,6 +24,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
+- 文本 lead model 的受治理图片识别桥接基础闭环：按 Run 冻结辅助视觉模型，使用
+  `inspect_image` 返回结构化、不可信视觉证据；当前 P1 只允许不可联网的确定性 fake
+  adapter，真实第三方 API 仍需完成外发、调用和结算门禁。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
@@ -120,6 +123,20 @@ make stop
 - `/workspace`：账户级多项目工作区。
 - `/projects/{project_slug}`：项目会话、资产、Memory、Automation 和设置。
 - `/admin`：仅 system admin 可访问的平台治理与运维页面。
+
+### 文本模型图片识别桥接（P1）
+
+该能力不在 `config.yaml` 声明工具、模型或开关。System admin 先在
+`/admin/settings/models` 创建 active、`supports_vision=true` 且 Bridge-compatible
+的视觉逻辑模型，再到 `/admin/settings/system` 的“图片识别桥接”选择该模型；选择即对
+后续 text-only project Run 启用，清空即关闭。原生视觉 lead model 继续使用现有
+`view_image`，不会同时注册 `inspect_image`。
+
+当前 checkout 只允许 `vision_bridge_fake`，它不接受 Endpoint、Credential 或 Provider
+settings，也不会外发图片，适合验证冻结、授权、图片规范化和工具结果链路。不得把它
+当作真实识图质量或第三方数据边界已经验收的证明。完整目标、固定提示词、证据 Schema
+和 P2 生产门禁见
+[文本模型内部识图桥接方案](./backend/docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md)。
 
 ## Docker 与部署
 

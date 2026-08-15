@@ -1,124 +1,30 @@
 import hashlib
 from collections.abc import Mapping
 from pathlib import PurePosixPath
-from threading import Event
 from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.agents.thread_state import ThreadDataState
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX
-from deerflow.file_authority import require_private_file_authority
 from deerflow.private_scope import PrivateResourceScope
-from deerflow.sandbox.sandbox import PRIVATE_FILE_IO_CHUNK_SIZE, Sandbox
+from deerflow.sandbox.sandbox import Sandbox
 from deerflow.tools.types import Runtime
-
-_ALLOWED_IMAGE_VIRTUAL_ROOTS = (
-    f"{VIRTUAL_PATH_PREFIX}/workspace",
-    f"{VIRTUAL_PATH_PREFIX}/uploads",
-    f"{VIRTUAL_PATH_PREFIX}/outputs",
+from deerflow.vision.image_input import (
+    ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT,
+    EXTENSION_TO_MIME,
+    MAX_IMAGE_BYTES,
+    ImageTooLargeError,
+    detect_image_mime,
+    image_sandbox,
+    is_allowed_image_virtual_path,
+    read_bounded_image_bytes,
+    sanitize_image_error,
 )
-_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT = ", ".join(_ALLOWED_IMAGE_VIRTUAL_ROOTS)
-_MAX_IMAGE_BYTES = 20 * 1024 * 1024
-_EXTENSION_TO_MIME = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".webp": "image/webp",
-    ".gif": "image/gif",
-}
 
-
-class _ImageTooLargeError(ValueError):
-    pass
-
-
-def ensure_sandbox_initialized(runtime: Runtime) -> Sandbox:
-    """Lazy import avoids the sandbox-tools ↔ builtin-tools package cycle."""
-
-    from deerflow.sandbox.tools import ensure_sandbox_initialized as initialize
-
-    return initialize(runtime)
-
-
-def sandbox_from_runtime(runtime: Runtime) -> Sandbox:
-    """Lazy import avoids the sandbox-tools ↔ builtin-tools package cycle."""
-
-    from deerflow.sandbox.tools import sandbox_from_runtime as resolve
-
-    return resolve(runtime)
-
-
-def _is_allowed_image_virtual_path(image_path: str) -> bool:
-    return any(image_path == root or image_path.startswith(f"{root}/") for root in _ALLOWED_IMAGE_VIRTUAL_ROOTS)
-
-
-def _detect_image_mime(image_data: bytes) -> str | None:
-    if image_data.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if image_data.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if len(image_data) >= 12 and image_data.startswith(b"RIFF") and image_data[8:12] == b"WEBP":
-        return "image/webp"
-    if image_data.startswith((b"GIF87a", b"GIF89a")):
-        return "image/gif"
-    return None
-
-
-def _sanitize_image_error(error: Exception, thread_data: ThreadDataState | None) -> str:
-    from deerflow.sandbox.tools import mask_local_paths_in_output
-
-    return mask_local_paths_in_output(f"{type(error).__name__}: {error}", thread_data)
-
-
-def _read_bounded_image_bytes(
-    sandbox: Sandbox,
-    image_path: str,
-    *,
-    max_bytes: int | None = None,
-    cancel_event: Event | None = None,
-) -> bytes:
-    """Read one regular sandbox file through the secure, bounded authority API."""
-
-    limit = _MAX_IMAGE_BYTES if max_bytes is None else max_bytes
-    handle = sandbox.open_regular_file(image_path)
-    chunks: list[bytes] = []
-    total = 0
-    try:
-        while True:
-            if cancel_event is not None and cancel_event.is_set():
-                raise InterruptedError("Private image read was cancelled")
-            chunk = sandbox.read_regular_file(handle, PRIVATE_FILE_IO_CHUNK_SIZE)
-            if cancel_event is not None and cancel_event.is_set():
-                raise InterruptedError("Private image read was cancelled")
-            if not isinstance(chunk, bytes):
-                raise OSError("Private image reader returned invalid data")
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > limit:
-                raise _ImageTooLargeError
-            chunks.append(chunk)
-    finally:
-        sandbox.close_regular_file(handle)
-    return b"".join(chunks)
-
-
-def _image_sandbox(runtime: Runtime) -> Sandbox:
-    """Resolve the current sandbox without replacing a private Run lease."""
-
-    context = runtime.context or {}
-    authority = require_private_file_authority(context)
-    if authority is None:
-        return ensure_sandbox_initialized(runtime)
-
-    sandbox = sandbox_from_runtime(runtime)
-    authority_sandbox_id = getattr(authority, "sandbox_id", None)
-    if not isinstance(authority_sandbox_id, str) or not authority_sandbox_id or authority_sandbox_id != sandbox.id:
-        raise RuntimeError("Private file authority is unavailable")
-    return sandbox
+# Backward-compatible source name pinned by the repository guide constant test.
+# The shared image module is now the single value authority.
+_MAX_IMAGE_BYTES = MAX_IMAGE_BYTES
 
 
 def _run_bound_file_ref(
@@ -184,12 +90,12 @@ def view_image_tool(
 
     thread_data = get_thread_data(runtime)
 
-    if not _is_allowed_image_virtual_path(image_path):
+    if not is_allowed_image_virtual_path(image_path):
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Only image paths under {_ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} are allowed",
+                        f"Error: Only image paths under {ALLOWED_IMAGE_VIRTUAL_ROOTS_TEXT} are allowed",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -198,13 +104,13 @@ def view_image_tool(
 
     # Validate image extension
     extension = PurePosixPath(image_path).suffix.lower()
-    expected_mime_type = _EXTENSION_TO_MIME.get(extension)
+    expected_mime_type = EXTENSION_TO_MIME.get(extension)
     if expected_mime_type is None:
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Unsupported image format: {extension}. Supported formats: {', '.join(_EXTENSION_TO_MIME)}",
+                        f"Error: Unsupported image format: {extension}. Supported formats: {', '.join(EXTENSION_TO_MIME)}",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -212,15 +118,15 @@ def view_image_tool(
         )
 
     try:
-        sandbox = _image_sandbox(runtime)
-        image_data = _read_bounded_image_bytes(sandbox, image_path)
+        sandbox = image_sandbox(runtime)
+        image_data = read_bounded_image_bytes(sandbox, image_path)
         file_ref = _run_bound_file_ref(runtime, sandbox, image_path)
-    except _ImageTooLargeError:
+    except ImageTooLargeError:
         return Command(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error: Image file is too large. Maximum supported size is {_MAX_IMAGE_BYTES} bytes",
+                        f"Error: Image file is too large. Maximum supported size is {MAX_IMAGE_BYTES} bytes",
                         tool_call_id=tool_call_id,
                     )
                 ]
@@ -242,14 +148,14 @@ def view_image_tool(
             update={
                 "messages": [
                     ToolMessage(
-                        f"Error reading image file: {_sanitize_image_error(e, thread_data)}",
+                        f"Error reading image file: {sanitize_image_error(e, thread_data)}",
                         tool_call_id=tool_call_id,
                     )
                 ]
             },
         )
 
-    detected_mime_type = _detect_image_mime(image_data)
+    detected_mime_type = detect_image_mime(image_data)
     if detected_mime_type is None:
         return Command(
             update={"messages": [ToolMessage("Error: File contents do not match a supported image format", tool_call_id=tool_call_id)]},

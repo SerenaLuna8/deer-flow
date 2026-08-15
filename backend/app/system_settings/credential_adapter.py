@@ -122,6 +122,7 @@ class SystemModelCredentialAdapter:
             result._system_model_config_version_id = uuid.UUID(
                 str(material.version.id),
             )
+            result._system_provider_adapter = material.version.provider_adapter
             return result
         except (
             AttributeError,
@@ -221,7 +222,9 @@ class SystemModelCredentialAdapter:
             }
             if api_key is not None:
                 kwargs["api_key"] = api_key
-            return ModelConfig.model_validate(kwargs)
+            result = ModelConfig.model_validate(kwargs)
+            result._system_provider_adapter = command.provider_adapter
+            return result
         except (
             AttributeError,
             CredentialDecryptFailed,

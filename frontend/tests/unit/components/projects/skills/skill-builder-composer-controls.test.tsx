@@ -24,6 +24,7 @@ function model(overrides: Partial<Model> = {}): Model {
     supports_thinking: true,
     supports_reasoning_effort: true,
     supports_vision: false,
+    supports_vision_bridge: false,
     is_default: true,
     ...overrides,
   };

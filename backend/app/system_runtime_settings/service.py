@@ -49,14 +49,21 @@ from app.system_runtime_settings.repository import (
 from app.system_runtime_settings.validation import (
     RuntimePolicyInvalid,
     canonical_policy_payload,
+    canonical_policy_payload_for_schema,
     parse_policy_value,
 )
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
     SystemRuntimePolicyVersionRow,
 )
-from deerflow.persistence.system_settings import SystemModelConfigRow
+from deerflow.persistence.system_settings import (
+    SystemModelConfigRow,
+    SystemModelConfigVersionRow,
+)
 from deerflow.persistence.user.model import UserRow
+from deerflow.vision.compatibility import (
+    is_vision_bridge_adapter_compatible,
+)
 
 _TARGET_NAMESPACE = uuid.UUID("4475fe37-f970-5820-9dcb-7db6c9585200")
 _CONFLICT_CONSTRAINTS = frozenset(
@@ -93,7 +100,11 @@ def _view(
     version: SystemRuntimePolicyVersionRow,
     updated_at: datetime,
 ) -> RuntimePolicyView:
-    canonical = canonical_policy_payload(section, dict(version.value))
+    canonical = canonical_policy_payload_for_schema(
+        section,
+        dict(version.value),
+        schema_version=int(version.schema_version),
+    )
     if int(version.schema_version) != canonical.schema_version or version.payload_checksum != canonical.checksum or int(version.version_number) != policy_revision:
         raise SystemRuntimePolicyRepositoryInvariant
     return RuntimePolicyView(
@@ -117,6 +128,7 @@ def _model_refs(value: RuntimePolicyValue) -> frozenset[str]:
             value.input_polish.model_name,
             value.summarization.model_name,
             value.memory.model_name,
+            value.vision_bridge.model_name,
         )
         if ref is not None
     )
@@ -234,23 +246,44 @@ class SystemRuntimePolicyService:
 
             refs = _model_refs(parsed_value)
             if refs:
-                active_refs = frozenset(
+                active_models = tuple(
                     (
                         await repository.session.execute(
-                            select(SystemModelConfigRow.logical_name)
+                            select(
+                                SystemModelConfigRow.logical_name,
+                                SystemModelConfigVersionRow.provider_adapter,
+                                SystemModelConfigVersionRow.supports_vision,
+                            )
+                            .join(
+                                SystemModelConfigVersionRow,
+                                (SystemModelConfigVersionRow.model_config_id == SystemModelConfigRow.id) & (SystemModelConfigVersionRow.id == SystemModelConfigRow.current_version_id),
+                            )
                             .where(
                                 SystemModelConfigRow.status == "active",
                                 SystemModelConfigRow.logical_name.in_(refs),
                             )
                             .with_for_update(
                                 read=True,
-                                of=SystemModelConfigRow,
+                                of=(
+                                    SystemModelConfigRow,
+                                    SystemModelConfigVersionRow,
+                                ),
                             )
                         )
-                    ).scalars()
+                    ).all()
                 )
-                if active_refs != refs:
+                active_by_name = {row.logical_name: row for row in active_models}
+                if frozenset(active_by_name) != refs:
                     raise SystemRuntimePolicyInvalid(actor.request_id)
+                if isinstance(parsed_value, AgentRuntimePolicyValue):
+                    vision_ref = parsed_value.vision_bridge.model_name
+                    if vision_ref is not None:
+                        vision_model = active_by_name[vision_ref]
+                        if not vision_model.supports_vision or not is_vision_bridge_adapter_compatible(
+                            vision_model.provider_adapter,
+                            parsed_value.vision_bridge.contract_version,
+                        ):
+                            raise SystemRuntimePolicyInvalid(actor.request_id)
 
             now = datetime.now(UTC)
             next_revision = int(policy.revision) + 1
@@ -320,9 +353,10 @@ class SystemRuntimePolicyService:
                 RuntimePolicySection.AGENT_RUNTIME,
                 for_update=for_update,
             )
-            canonical = canonical_policy_payload(
+            canonical = canonical_policy_payload_for_schema(
                 RuntimePolicySection.AGENT_RUNTIME,
                 dict(version.value),
+                schema_version=int(version.schema_version),
             )
             value = parse_policy_value(
                 RuntimePolicySection.AGENT_RUNTIME,
@@ -375,9 +409,10 @@ class SystemRuntimePolicyService:
                 RuntimePolicySection.MEMORY_DOCUMENT,
                 for_update=True,
             )
-            canonical = canonical_policy_payload(
+            canonical = canonical_policy_payload_for_schema(
                 RuntimePolicySection.MEMORY_DOCUMENT,
                 dict(version.value),
+                schema_version=int(version.schema_version),
             )
             value = parse_policy_value(
                 RuntimePolicySection.MEMORY_DOCUMENT,

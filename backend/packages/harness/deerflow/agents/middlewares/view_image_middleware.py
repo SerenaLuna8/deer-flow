@@ -39,12 +39,12 @@ from deerflow.file_authority import (
 from deerflow.private_scope import PrivateResourceScope
 from deerflow.sandbox.exceptions import SandboxError
 from deerflow.sandbox.tools import sandbox_from_runtime
-from deerflow.tools.builtins.view_image_tool import (
-    _EXTENSION_TO_MIME,
-    _MAX_IMAGE_BYTES,
-    _detect_image_mime,
-    _is_allowed_image_virtual_path,
-    _read_bounded_image_bytes,
+from deerflow.vision.image_input import (
+    EXTENSION_TO_MIME,
+    MAX_IMAGE_BYTES,
+    detect_image_mime,
+    is_allowed_image_virtual_path,
+    read_bounded_image_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ logger = logging.getLogger(__name__)
 _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 _MAX_CURRENT_UPLOAD_IMAGES = 4
-_MAX_CURRENT_UPLOAD_TOTAL_BYTES = _MAX_IMAGE_BYTES
+_MAX_CURRENT_UPLOAD_TOTAL_BYTES = MAX_IMAGE_BYTES
 _CURRENT_UPLOAD_ERROR = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
 
 
@@ -277,11 +277,11 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             or not isinstance(mime_type, str)
             or not isinstance(expected_size, int)
             or isinstance(expected_size, bool)
-            or not 0 <= expected_size <= _MAX_IMAGE_BYTES
+            or not 0 <= expected_size <= MAX_IMAGE_BYTES
             or not isinstance(expected_sha256, str)
             or len(expected_sha256) != 64
             or file_ref.get("path") != image_path
-            or not _is_allowed_image_virtual_path(image_path)
+            or not is_allowed_image_virtual_path(image_path)
             or not ViewImageMiddleware._reference_matches_current_runtime(
                 runtime,
                 file_ref,
@@ -294,10 +294,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             sandbox = sandbox_from_runtime(runtime, state=state)
             if sandbox.id != file_ref.get("sandbox_id"):
                 return None
-            image_bytes = _read_bounded_image_bytes(
+            image_bytes = read_bounded_image_bytes(
                 sandbox,
                 image_path,
-                max_bytes=_MAX_IMAGE_BYTES,
+                max_bytes=MAX_IMAGE_BYTES,
                 cancel_event=cancel_event,
             )
         except SandboxError:
@@ -309,7 +309,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             )
             return None
 
-        if len(image_bytes) != expected_size or hashlib.sha256(image_bytes).hexdigest() != expected_sha256 or _detect_image_mime(image_bytes) != mime_type:
+        if len(image_bytes) != expected_size or hashlib.sha256(image_bytes).hexdigest() != expected_sha256 or detect_image_mime(image_bytes) != mime_type:
             return None
         encoded = base64.b64encode(image_bytes).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
@@ -460,7 +460,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
             image_path = self._current_upload_virtual_path(entry)
             extension = PurePosixPath(image_path).suffix.lower()
-            expected_mime = _EXTENSION_TO_MIME.get(extension)
+            expected_mime = EXTENSION_TO_MIME.get(extension)
             is_declared_image = isinstance(entry.media_type, str) and entry.media_type.startswith("image/")
             if expected_mime is None and not is_declared_image:
                 continue
@@ -469,7 +469,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 or entry.media_type != expected_mime
                 or not isinstance(entry.size, int)
                 or isinstance(entry.size, bool)
-                or not 0 < entry.size <= _MAX_IMAGE_BYTES
+                or not 0 < entry.size <= MAX_IMAGE_BYTES
                 or not isinstance(entry.sha256, str)
                 or len(entry.sha256) != 64
                 or any(character not in "0123456789abcdef" for character in entry.sha256)

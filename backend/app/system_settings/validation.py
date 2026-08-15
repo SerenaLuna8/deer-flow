@@ -108,6 +108,7 @@ _PROVIDER_SETTING_FIELDS: Mapping[str, frozenset[str]] = {
     "patched_openai": _OPENAI_COMPATIBLE_FIELDS | frozenset({"output_version", "use_responses_api"}),
     "patched_stepfun": _OPENAI_COMPATIBLE_FIELDS,
     "vllm": _OPENAI_COMPATIBLE_FIELDS | frozenset({"cumulative_stream_usage"}),
+    "vision_bridge_fake": frozenset(),
 }
 _ALL_SETTING_FIELDS = frozenset().union(*_PROVIDER_SETTING_FIELDS.values())
 
@@ -173,6 +174,10 @@ PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = {
     "vllm": ProviderAdapterSpec(
         "deerflow.models.vllm_provider:VllmChatModel",
         True,
+    ),
+    "vision_bridge_fake": ProviderAdapterSpec(
+        "deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
+        False,
     ),
 }
 
