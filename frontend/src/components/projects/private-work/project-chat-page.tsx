@@ -43,7 +43,7 @@ export function projectChatRouteScope(
       "private_work.approve_host_execution",
     ),
     canUpload: canRun,
-    canDelete: canRead,
+    canDelete: canCreate,
     canDeleteFiles: canRead,
     goalVisible: canRead,
     compactVisible: canRun,

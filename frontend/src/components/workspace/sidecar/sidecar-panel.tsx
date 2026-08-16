@@ -85,6 +85,9 @@ import {
   type AgentMode,
 } from "@/core/threads/agent-mode";
 import {
+  isProjectThreadDeleteConflict,
+  privateWorkThreadVersion,
+  projectThreadDeleteErrorMessage,
   useDeleteThread,
   useThreadMetadata,
   useThreadStream,
@@ -170,7 +173,11 @@ export function SidecarPanel({ className }: { className?: string }) {
   const { models, tokenUsageEnabled } = modelCatalog;
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [creatingThread, setCreatingThread] = useState(false);
-  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    threadId: string;
+    expectedVersion: number;
+  } | null>(null);
+  const deleteDialogOpen = deleteTarget !== null;
   const { mutateAsync: deleteThread, isPending: isDeleting } =
     useDeleteThread();
   const [queuedSubmit, setQueuedSubmit] = useState<QueuedSidecarSubmit | null>(
@@ -724,17 +731,26 @@ export function SidecarPanel({ className }: { className?: string }) {
   }, [sidecar]);
 
   const handleDelete = useCallback(async () => {
-    const threadId = sidecar.sidecarThreadId;
+    const target = deleteTarget;
+    const threadId = target?.threadId;
     const deleteIdentity = sidecar.captureIdentity();
     // Guard: the trash button only opens this dialog once a thread exists, so a
     // missing id here means the draft was cleared underneath us — just close.
     if (!threadId) {
       discardDraftAndClose();
-      setDeleteDialogOpen(false);
+      setDeleteTarget(null);
+      return;
+    }
+    if (sidecar.sidecarThreadId !== threadId) {
+      setDeleteTarget(null);
+      toast.error("侧边会话已发生变化，请重新确认删除。");
       return;
     }
     try {
-      await deleteThread({ threadId });
+      await deleteThread({
+        threadId,
+        expectedVersion: target.expectedVersion,
+      });
       sidecar.resetSidecar(deleteIdentity);
       queuedSubmitRef.current?.value.settlement.reject(
         sidecarAdmissionChangedError(
@@ -743,18 +759,21 @@ export function SidecarPanel({ className }: { className?: string }) {
       );
       queuedSubmitRef.current = null;
       setQueuedSubmit(null);
-      setDeleteDialogOpen(false);
+      setDeleteTarget(null);
       toast.success(t.sidecar.deleteSuccess);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : t.sidecar.deleteFailed,
-      );
+      if (isProjectThreadDeleteConflict(error)) {
+        setDeleteTarget(null);
+        await agentThreadMetadata.refetch();
+      }
+      toast.error(projectThreadDeleteErrorMessage(error));
     }
   }, [
     deleteThread,
+    deleteTarget,
     discardDraftAndClose,
+    agentThreadMetadata,
     sidecar,
-    t.sidecar.deleteFailed,
     t.sidecar.deleteSuccess,
   ]);
 
@@ -783,7 +802,18 @@ export function SidecarPanel({ className }: { className?: string }) {
               data-testid="sidecar-delete-button"
               size="icon-sm"
               variant="ghost"
-              onClick={() => setDeleteDialogOpen(true)}
+              onClick={() => {
+                const threadId = sidecar.sidecarThreadId;
+                const expectedVersion = agentThreadMetadata.data
+                  ? privateWorkThreadVersion(agentThreadMetadata.data)
+                  : null;
+                if (!threadId || expectedVersion == null) {
+                  toast.error("侧边会话状态信息已过期，刷新后请重新确认删除。");
+                  void agentThreadMetadata.refetch();
+                  return;
+                }
+                setDeleteTarget({ threadId, expectedVersion });
+              }}
             >
               <Trash2Icon />
             </Button>
@@ -940,7 +970,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           if (!open && isDeleting) {
             return;
           }
-          setDeleteDialogOpen(open);
+          if (!open) setDeleteTarget(null);
         }}
       >
         <DialogContent
@@ -963,7 +993,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setDeleteDialogOpen(false)}
+              onClick={() => setDeleteTarget(null)}
               disabled={isDeleting}
             >
               {t.common.cancel}

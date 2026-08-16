@@ -57,7 +57,11 @@ export {
 } from "./thread-cache";
 export {
   deleteThreadEverywhere,
+  deleteThreadWithSidecarCleanup,
   findSidecarThreadIdsForParent,
+  isProjectThreadDeleteConflict,
+  privateWorkThreadVersion,
+  projectThreadDeleteErrorMessage,
   useBranchThread,
   useDeleteThread,
   useRenameThread,

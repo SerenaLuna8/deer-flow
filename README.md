@@ -20,7 +20,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 ## 核心能力
 
 - 多账户、多项目工作区，包含成员、角色、邀请、配额、审计和通知。
-- 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。
+- 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。删除会话会
+  立即撤销该会话仍在运行的服务端执行权限并结束其 durable stream；已经发出的外部
+  操作无法由平台召回。
 - System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。

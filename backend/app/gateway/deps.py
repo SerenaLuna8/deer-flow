@@ -251,14 +251,36 @@ async def gateway_platform_runtime(
         project_quota_enforcer = ProjectQuotaEnforcer(quota_service)
         app.state.project_quota_service = quota_service
         app.state.project_quota_enforcer = project_quota_enforcer
+        from app.private_work.checkpoint_delete_recovery import checkpoint_delete_reconciler_runtime
         from app.private_work.checkpointer import ProjectScopedCheckpointer
+        from deerflow.runtime.events.store.db import DbRunEventStore
+
+        run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
+        app.state.private_run_event_store = DbRunEventStore(
+            sf,
+            run_event_notify_enabled=run_event_notify_enabled,
+        )
 
         app.state.project_scoped_checkpointer = ProjectScopedCheckpointer(
             app.state._raw_checkpointer,
             sf,
             quota=project_quota_enforcer,
             approval_audit=operational_audit_sink,
+            run_event_store=app.state.private_run_event_store,
         )
+        checkpoint_delete_reconciler = await stack.enter_async_context(
+            checkpoint_delete_reconciler_runtime(
+                app.state._raw_checkpointer,
+                sf,
+            )
+        )
+        app.state.checkpoint_delete_reconciler = checkpoint_delete_reconciler
+
+        async def clear_checkpoint_delete_reconciler_state() -> None:
+            if getattr(app.state, "checkpoint_delete_reconciler", None) is checkpoint_delete_reconciler:
+                del app.state.checkpoint_delete_reconciler
+
+        stack.push_async_callback(clear_checkpoint_delete_reconciler_state)
         from app.private_work.connection_service import ProjectConnectionService
         from app.private_work.execution_approval import (
             ExecutionApprovalService,
@@ -411,13 +433,6 @@ async def gateway_platform_runtime(
             audit=operational_audit_sink,
         )
 
-        from deerflow.runtime.events.store.db import DbRunEventStore
-
-        run_event_notify_enabled = config.worker.stream.run_event_notify_enabled
-        app.state.private_run_event_store = DbRunEventStore(
-            sf,
-            run_event_notify_enabled=run_event_notify_enabled,
-        )
         from app.private_work.chat_controls import ProjectChatControlService
 
         app.state.project_chat_control_service = ProjectChatControlService(

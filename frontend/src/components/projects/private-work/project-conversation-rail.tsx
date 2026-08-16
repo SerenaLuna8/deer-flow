@@ -31,6 +31,9 @@ import { PROJECT_PRIVATE_WORKSPACE } from "@/core/projects/features";
 import type { Project } from "@/core/projects/types";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 import {
+  isProjectThreadDeleteConflict,
+  privateWorkThreadVersion,
+  projectThreadDeleteErrorMessage,
   useDeleteThread,
   useInfiniteThreads,
   useRenameThread,
@@ -77,7 +80,7 @@ export function projectConversationPermissions(project: Project) {
     canCreate:
       project.capabilities.includes("private_work.create") &&
       project.capabilities.includes("shared_assets.execute"),
-    canDelete: project.capabilities.includes("private_work.read_own"),
+    canDelete: project.capabilities.includes("private_work.create"),
     canRename: project.capabilities.includes("private_work.create"),
   };
 }
@@ -335,27 +338,50 @@ export function ProjectConversationRail({ project }: { project: Project }) {
   const confirmDelete = async () => {
     const target = deleteTarget;
     if (!target || deleteThread.isPending) return;
+    const expectedVersion = privateWorkThreadVersion(target);
+    if (expectedVersion == null) {
+      setDeleteTarget(null);
+      toast.error("会话状态信息已过期，列表刷新后请重新确认删除。");
+      void threadsQuery.refetch();
+      return;
+    }
     const landingPath = projectThreadDeleteLandingPath(
       project.slug,
       activeThreadId,
       target.thread_id,
     );
+    let result;
     try {
-      await deleteThread.mutateAsync({
+      result = await deleteThread.mutateAsync({
         threadId: target.thread_id,
-        ...(landingPath
-          ? {
-              onRemoteDeleted: () => {
-                setMobileOpen(false);
-                router.replace(landingPath);
-              },
-            }
-          : {}),
+        expectedVersion,
       });
-      setDeleteTarget(null);
-      toast.success("对话已删除");
     } catch (error) {
-      toast.error(error instanceof Error ? error.message : "无法删除对话");
+      if (isProjectThreadDeleteConflict(error)) {
+        setDeleteTarget(null);
+        await threadsQuery.refetch();
+      }
+      toast.error(projectThreadDeleteErrorMessage(error));
+      return;
+    }
+
+    setDeleteTarget(null);
+    if (result.sidecarCleanupIncomplete) {
+      toast.warning("对话已删除，但关联侧边会话尚未完全清理。");
+    } else {
+      toast.success("对话已删除");
+    }
+
+    // Navigation is a local follow-up to a confirmed remote delete. Keep it
+    // outside the mutation so a routing problem cannot be reported as a failed
+    // server deletion.
+    if (landingPath) {
+      setMobileOpen(false);
+      try {
+        router.replace(landingPath);
+      } catch {
+        toast.warning("对话已删除，但页面跳转失败，请刷新页面。");
+      }
     }
   };
 

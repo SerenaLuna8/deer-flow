@@ -18,11 +18,13 @@ import {
 type ProjectClientLifecycle = {
   active: boolean;
   controller: AbortController;
+  deletedThreadIds: Set<string>;
 };
 
 type ProjectClientEntry = ProjectClientLifecycle & {
   client: LangGraphClient;
   reconnectStorage: RunMetadataStorage;
+  threadStreamControllers: Map<string, Set<AbortController>>;
 };
 
 const projectClients = new Map<string, ProjectClientEntry>();
@@ -300,16 +302,26 @@ export const PROJECT_RESPONSE_ERROR_CODES = [
 ] as const;
 export type ProjectResponseErrorCode =
   (typeof PROJECT_RESPONSE_ERROR_CODES)[number];
-const projectResponseErrorBodySchema = z.object({
-  detail: z.object({ code: z.enum(PROJECT_RESPONSE_ERROR_CODES) }),
-});
+const projectResponseErrorBodySchema = z
+  .object({
+    detail: z
+      .object({
+        code: z.string().trim().min(1),
+        message: z.string().trim().min(1),
+        request_id: z.string().trim().min(1),
+      })
+      .strict(),
+  })
+  .strict();
 
-class ProjectResponseError extends Error {
+export class ProjectResponseError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly response: Response,
-    readonly code: ProjectResponseErrorCode | null,
+    readonly code: string | null,
+    readonly requestId: string | null,
+    readonly serverMessage: string | null,
   ) {
     super(message);
     this.name = "ProjectResponseError";
@@ -424,22 +436,31 @@ async function readProjectResponse<T>(
   fallback: string,
 ): Promise<T> {
   if (!response.ok) {
-    const error: unknown = await response
-      .json()
-      .catch(() => ({ detail: fallback }));
-    const stableError = projectResponseErrorBodySchema.safeParse(error);
-    const detail =
-      typeof error === "object" && error !== null
-        ? Reflect.get(error, "detail")
-        : null;
-    throw new ProjectResponseError(
-      typeof detail === "string" ? detail : fallback,
-      response.status,
-      response,
-      stableError.success ? stableError.data.detail.code : null,
-    );
+    throw await readProjectResponseError(response, fallback);
   }
   return schema.parse(await response.json());
+}
+
+async function readProjectResponseError(
+  response: Response,
+  fallback: string,
+): Promise<ProjectResponseError> {
+  const error: unknown = await response
+    .json()
+    .catch(() => ({ detail: fallback }));
+  const stableError = projectResponseErrorBodySchema.safeParse(error);
+  const detail =
+    typeof error === "object" && error !== null
+      ? Reflect.get(error, "detail")
+      : null;
+  return new ProjectResponseError(
+    typeof detail === "string" ? detail : fallback,
+    response.status,
+    response,
+    stableError.success ? stableError.data.detail.code : null,
+    stableError.success ? stableError.data.detail.request_id : null,
+    stableError.success ? stableError.data.detail.message : null,
+  );
 }
 
 async function getPrivateThread(
@@ -467,6 +488,17 @@ async function currentThreadVersion(
 ): Promise<number> {
   const cached = versionCache(scope).get(threadId);
   if (cached != null) return cached;
+  await getPrivateThread(scope, threadId, signal);
+  const loaded = versionCache(scope).get(threadId);
+  if (loaded == null) throw new Error("Project thread version is unavailable");
+  return loaded;
+}
+
+async function refreshThreadVersion(
+  scope: ProjectClientScope,
+  threadId: string,
+  signal?: AbortSignal,
+): Promise<number> {
   await getPrivateThread(scope, threadId, signal);
   const loaded = versionCache(scope).get(threadId);
   if (loaded == null) throw new Error("Project thread version is unavailable");
@@ -503,6 +535,52 @@ async function renamePrivateThread(
     "Failed to rename project thread",
   );
   return mapPrivateThread(scope, value);
+}
+
+export async function deleteProjectThread(
+  scope: ProjectClientScope,
+  input: {
+    threadId: string;
+    expectedVersion: number;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  const parsedScope = projectClientScopeSchema.parse(scope);
+  const parsedThreadId = z.string().uuid().parse(input.threadId);
+  const expectedVersion = z
+    .number()
+    .int()
+    .positive()
+    .parse(input.expectedVersion);
+  const response = await fetchWithAuth(
+    `${projectPrivateWorkBaseURL(parsedScope.projectId)}/threads/${parsedThreadId}?expected_version=${expectedVersion}`,
+    { method: "DELETE", signal: input.signal },
+  );
+  if (!response.ok) {
+    const error = await readProjectResponseError(
+      response,
+      "Failed to delete project thread",
+    );
+    if (error.status === 404) {
+      // A scoped DELETE is idempotent from the browser's perspective. The row
+      // was already removed in another tab or is no longer visible in this
+      // exact scope, so discard the stale local projection without retrying.
+      versionCache(parsedScope).delete(parsedThreadId);
+      return;
+    }
+    if (error.status === 409) {
+      // Reconcile the cache for a new user confirmation, but never retry the
+      // irreversible DELETE with a version the user did not confirm.
+      try {
+        await refreshThreadVersion(parsedScope, parsedThreadId, input.signal);
+      } catch {
+        // Preserve the authoritative DELETE error. Query invalidation at the
+        // mutation boundary will still reconcile a removed/inaccessible row.
+      }
+    }
+    throw error;
+  }
+  versionCache(parsedScope).delete(parsedThreadId);
 }
 
 function installProjectThreadAdapter(
@@ -592,21 +670,11 @@ function installProjectThreadAdapter(
       parsedThreadId,
       options?.signal,
     );
-    const response = await fetchWithAuth(
-      `${projectPrivateWorkBaseURL(scope.projectId)}/threads/${parsedThreadId}?expected_version=${expectedVersion}`,
-      { method: "DELETE", signal: options?.signal },
-    );
-    if (!response.ok) {
-      const error = await response
-        .json()
-        .catch(() => ({ detail: "Failed to delete project thread" }));
-      throw new Error(
-        typeof error.detail === "string"
-          ? error.detail
-          : "Failed to delete project thread",
-      );
-    }
-    versionCache(scope).delete(parsedThreadId);
+    await deleteProjectThread(scope, {
+      threadId: parsedThreadId,
+      expectedVersion,
+      signal: options?.signal,
+    });
   }) as typeof client.threads.delete;
 }
 
@@ -694,7 +762,12 @@ function writeProjectStreamCursorState(
   state: ProjectStreamCursorState,
   lifecycle?: ProjectClientLifecycle,
 ): void {
-  if (lifecycle && !lifecycle.active) return;
+  if (
+    lifecycle &&
+    (!lifecycle.active || lifecycle.deletedThreadIds.has(threadId))
+  ) {
+    return;
+  }
   const key = projectStreamCursorStorageKey(scope, threadId);
   const current = readProjectStreamCursorState(scope, threadId);
   const next = advanceProjectStreamCursorState(current, state);
@@ -735,6 +808,39 @@ function isProjectClientEntryActive(entry: ProjectClientEntry): boolean {
   return entry.active && !entry.controller.signal.aborted;
 }
 
+function isProjectThreadRuntimeActive(
+  entry: ProjectClientEntry,
+  threadId: string,
+): boolean {
+  return (
+    isProjectClientEntryActive(entry) && !entry.deletedThreadIds.has(threadId)
+  );
+}
+
+function acquireProjectThreadStreamController(
+  entry: ProjectClientEntry,
+  threadId: string,
+): AbortController | null {
+  if (!isProjectThreadRuntimeActive(entry, threadId)) return null;
+  const controller = new AbortController();
+  const controllers = entry.threadStreamControllers.get(threadId) ?? new Set();
+  controllers.add(controller);
+  entry.threadStreamControllers.set(threadId, controllers);
+  return controller;
+}
+
+function releaseProjectThreadStreamController(
+  entry: ProjectClientEntry,
+  threadId: string,
+  controller: AbortController,
+): void {
+  const controllers = entry.threadStreamControllers.get(threadId);
+  controllers?.delete(controller);
+  if (controllers?.size === 0) {
+    entry.threadStreamControllers.delete(threadId);
+  }
+}
+
 function streamFrameRunId(frame: ProjectStreamFrame): string | null {
   if (frame.event !== "metadata") return null;
   if (typeof frame.data !== "object" || frame.data === null) return null;
@@ -761,129 +867,174 @@ function installProjectStreamAdapter(
   const originalRunStream = client.runs.stream.bind(client.runs);
   client.runs.stream = async function* (threadId, assistantId, payload) {
     if (!isProjectClientEntryActive(entry)) return;
+    const threadStreamController =
+      threadId == null
+        ? null
+        : acquireProjectThreadStreamController(entry, threadId);
+    if (threadId != null && threadStreamController === null) return;
     let runId = "";
     const payloadSignal =
       payload && typeof payload === "object"
         ? Reflect.get(payload, "signal")
         : undefined;
     const callerOnRunCreated = payload?.onRunCreated;
+    const scopeSignal = mergeProjectStreamSignals(
+      isAbortSignal(payloadSignal) ? payloadSignal : undefined,
+      entry.controller.signal,
+    );
     const selectedPayload = {
       ...(payload ?? {}),
-      signal: mergeProjectStreamSignals(
-        isAbortSignal(payloadSignal) ? payloadSignal : undefined,
-        entry.controller.signal,
-      ),
+      signal: threadStreamController
+        ? mergeProjectStreamSignals(scopeSignal, threadStreamController.signal)
+        : scopeSignal,
       onRunCreated(params: { run_id: string; thread_id?: string }) {
+        if (
+          threadId != null &&
+          !isProjectThreadRuntimeActive(entry, threadId)
+        ) {
+          return;
+        }
         runId = params.run_id;
         callerOnRunCreated?.(params);
       },
     };
-    if (threadId == null) {
+    try {
+      if (threadId == null) {
+        for await (const frame of originalRunStream(
+          threadId,
+          assistantId,
+          selectedPayload,
+        )) {
+          if (!isProjectClientEntryActive(entry)) return;
+          yield frame;
+        }
+        return;
+      }
+
+      let state = emptyProjectStreamCursorState();
+      let started = false;
+      let terminal = false;
+      let failureName: ProjectRunFailureCode | null = null;
       for await (const frame of originalRunStream(
         threadId,
         assistantId,
         selectedPayload,
       )) {
-        if (!isProjectClientEntryActive(entry)) return;
-        yield frame;
+        if (!isProjectThreadRuntimeActive(entry, threadId)) return;
+        const projectFrame: ProjectStreamFrame = frame;
+        runId = streamFrameRunId(projectFrame) ?? runId;
+        const decision = acceptProjectStreamFrame(state, projectFrame, runId);
+        if (!decision.accepted) continue;
+        state = decision.state;
+        started = true;
+        terminal ||= projectFrame.event === "end";
+        writeProjectStreamCursorState(scope, threadId, state, entry);
+        if (state.terminalRunId !== null) {
+          clearReconnectRun(threadId, state.terminalRunId, reconnectStorage);
+        }
+        if (projectFrame.event === "error") {
+          // Worker failures are persisted as a diagnostic error frame followed
+          // by the authoritative durable end frame. Exposing the first frame to
+          // LangGraph's StreamManager would stop consumption before that end.
+          failureName = projectStreamFailureName(projectFrame) ?? failureName;
+          continue;
+        }
+        yield projectStreamFrameForUI(frame, failureName);
       }
-      return;
+      assertDurableProjectStreamCompleted({
+        started,
+        terminal,
+        signal: selectedPayload.signal,
+        entry,
+      });
+    } finally {
+      if (threadId != null && threadStreamController) {
+        releaseProjectThreadStreamController(
+          entry,
+          threadId,
+          threadStreamController,
+        );
+      }
     }
-
-    let state = emptyProjectStreamCursorState();
-    let started = false;
-    let terminal = false;
-    let failureName: ProjectRunFailureCode | null = null;
-    for await (const frame of originalRunStream(
-      threadId,
-      assistantId,
-      selectedPayload,
-    )) {
-      if (!isProjectClientEntryActive(entry)) return;
-      const projectFrame: ProjectStreamFrame = frame;
-      runId = streamFrameRunId(projectFrame) ?? runId;
-      const decision = acceptProjectStreamFrame(state, projectFrame, runId);
-      if (!decision.accepted) continue;
-      state = decision.state;
-      started = true;
-      terminal ||= projectFrame.event === "end";
-      writeProjectStreamCursorState(scope, threadId, state, entry);
-      if (state.terminalRunId !== null) {
-        clearReconnectRun(threadId, state.terminalRunId, reconnectStorage);
-      }
-      if (projectFrame.event === "error") {
-        // Worker failures are persisted as a diagnostic error frame followed
-        // by the authoritative durable end frame. Exposing the first frame to
-        // LangGraph's StreamManager would stop consumption before that end.
-        failureName = projectStreamFailureName(projectFrame) ?? failureName;
-        continue;
-      }
-      yield projectStreamFrameForUI(frame, failureName);
-    }
-    assertDurableProjectStreamCompleted({
-      started,
-      terminal,
-      signal: selectedPayload.signal,
-      entry,
-    });
   } as typeof client.runs.stream;
 
   const originalJoinStream = client.runs.joinStream.bind(client.runs);
   client.runs.joinStream = async function* (threadId, runId, options) {
     if (!isProjectClientEntryActive(entry)) return;
+    const threadStreamController =
+      threadId == null
+        ? null
+        : acquireProjectThreadStreamController(entry, threadId);
+    if (threadId != null && threadStreamController === null) return;
     const callerSignal = isAbortSignal(options) ? options : options?.signal;
+    const scopeSignal = mergeProjectStreamSignals(
+      callerSignal,
+      entry.controller.signal,
+    );
     const selectedOptions = {
       ...(isAbortSignal(options) ? {} : options),
-      signal: mergeProjectStreamSignals(callerSignal, entry.controller.signal),
+      signal: threadStreamController
+        ? mergeProjectStreamSignals(scopeSignal, threadStreamController.signal)
+        : scopeSignal,
       // A newly mounted UI projection must rebuild the complete current Run.
       // Shared cursors are diagnostic only: an old invisible consumer may have
       // advanced one beyond frames the new UI has actually rendered.
       lastEventId: "0",
     };
-    if (threadId == null) {
+    try {
+      if (threadId == null) {
+        for await (const frame of originalJoinStream(
+          threadId,
+          runId,
+          selectedOptions,
+        )) {
+          if (!isProjectClientEntryActive(entry)) return;
+          yield frame;
+        }
+        return;
+      }
+
+      let state = emptyProjectStreamCursorState();
+      let started = false;
+      let terminal = false;
+      let failureName: ProjectRunFailureCode | null = null;
       for await (const frame of originalJoinStream(
         threadId,
         runId,
         selectedOptions,
       )) {
-        if (!isProjectClientEntryActive(entry)) return;
-        yield frame;
+        if (!isProjectThreadRuntimeActive(entry, threadId)) return;
+        const projectFrame: ProjectStreamFrame = frame;
+        const decision = acceptProjectStreamFrame(state, projectFrame, runId);
+        if (!decision.accepted) continue;
+        state = decision.state;
+        started = true;
+        terminal ||= projectFrame.event === "end";
+        writeProjectStreamCursorState(scope, threadId, state, entry);
+        if (state.terminalRunId === runId) {
+          clearReconnectRun(threadId, runId, reconnectStorage);
+        }
+        if (projectFrame.event === "error") {
+          failureName = projectStreamFailureName(projectFrame) ?? failureName;
+          continue;
+        }
+        yield projectStreamFrameForUI(frame, failureName);
       }
-      return;
+      assertDurableProjectStreamCompleted({
+        started,
+        terminal,
+        signal: selectedOptions.signal,
+        entry,
+      });
+    } finally {
+      if (threadId != null && threadStreamController) {
+        releaseProjectThreadStreamController(
+          entry,
+          threadId,
+          threadStreamController,
+        );
+      }
     }
-
-    let state = emptyProjectStreamCursorState();
-    let started = false;
-    let terminal = false;
-    let failureName: ProjectRunFailureCode | null = null;
-    for await (const frame of originalJoinStream(
-      threadId,
-      runId,
-      selectedOptions,
-    )) {
-      if (!isProjectClientEntryActive(entry)) return;
-      const projectFrame: ProjectStreamFrame = frame;
-      const decision = acceptProjectStreamFrame(state, projectFrame, runId);
-      if (!decision.accepted) continue;
-      state = decision.state;
-      started = true;
-      terminal ||= projectFrame.event === "end";
-      writeProjectStreamCursorState(scope, threadId, state, entry);
-      if (state.terminalRunId === runId) {
-        clearReconnectRun(threadId, runId, reconnectStorage);
-      }
-      if (projectFrame.event === "error") {
-        failureName = projectStreamFailureName(projectFrame) ?? failureName;
-        continue;
-      }
-      yield projectStreamFrameForUI(frame, failureName);
-    }
-    assertDurableProjectStreamCompleted({
-      started,
-      terminal,
-      signal: selectedOptions.signal,
-      entry,
-    });
   } as typeof client.runs.joinStream;
 }
 
@@ -895,22 +1046,24 @@ function createProjectReconnectStorage(
   const parsed = projectClientScopeSchema.parse(scope);
   const storage = () => storageOverride ?? browserSessionStorage();
   const ownedRunIds = new Map<`lg:stream:${string}`, string>();
-  const isActive = () => !lifecycle || lifecycle.active;
+  const isActive = (key: `lg:stream:${string}`) =>
+    (!lifecycle || lifecycle.active) &&
+    !lifecycle?.deletedThreadIds.has(key.slice("lg:stream:".length));
   return {
     getItem(key) {
-      if (!isActive()) return null;
+      if (!isActive(key)) return null;
       const value =
         storage()?.getItem(projectReconnectKey(parsed, key)) ?? null;
       if (value !== null) ownedRunIds.set(key, value);
       return value;
     },
     setItem(key, value) {
-      if (!isActive()) return;
+      if (!isActive(key)) return;
       storage()?.setItem(projectReconnectKey(parsed, key), value);
       ownedRunIds.set(key, value);
     },
     removeItem(key) {
-      if (!isActive()) return;
+      if (!isActive(key)) return;
       const ownedRunId = ownedRunIds.get(key);
       if (ownedRunId === undefined) return;
       const selectedStorage = storage();
@@ -930,6 +1083,43 @@ export function projectReconnectStorage(
   const parsed = projectClientScopeSchema.parse(scope);
   const entry = projectClients.get(scopeKey(parsed));
   return createProjectReconnectStorage(parsed, storageOverride, entry);
+}
+
+export function clearProjectThreadRuntimeState(
+  scope: ProjectClientScope,
+  threadId: string,
+): void {
+  const parsed = projectClientScopeSchema.parse(scope);
+  const selectedThreadId = z.string().uuid().parse(threadId);
+  const key = scopeKey(parsed);
+  const cursorKey = projectStreamCursorStorageKey(parsed, selectedThreadId);
+  const reconnectKey = projectReconnectKey(
+    parsed,
+    `lg:stream:${selectedThreadId}`,
+  );
+
+  projectThreadVersions.get(key)?.delete(selectedThreadId);
+  projectStreamCursorStates.delete(cursorKey);
+
+  const entry = projectClients.get(key);
+  if (entry) {
+    // Mark first so already-resolved frames and stale reconnect owners cannot
+    // repopulate state between the authoritative delete and request abort.
+    entry.deletedThreadIds.add(selectedThreadId);
+    entry.threadStreamControllers
+      .get(selectedThreadId)
+      ?.forEach((controller) => controller.abort());
+    entry.threadStreamControllers.delete(selectedThreadId);
+  }
+
+  try {
+    const storage = browserSessionStorage();
+    storage?.removeItem(cursorKey);
+    storage?.removeItem(reconnectKey);
+  } catch {
+    // The runtime tombstone and exact stream abort remain authoritative even
+    // when browser storage is unavailable.
+  }
 }
 
 export function clearProjectReconnectStorage(scope: ProjectClientScope): void {
@@ -973,6 +1163,7 @@ export function getProjectAPIClient(
     const lifecycle: ProjectClientLifecycle = {
       active: true,
       controller: new AbortController(),
+      deletedThreadIds: new Set(),
     };
     const reconnectStorage = createProjectReconnectStorage(
       parsed,
@@ -985,6 +1176,7 @@ export function getProjectAPIClient(
     entry = Object.assign(lifecycle, {
       client,
       reconnectStorage,
+      threadStreamControllers: new Map(),
     });
     installProjectThreadAdapter(client, parsed);
     installProjectStreamAdapter(client, parsed, entry);

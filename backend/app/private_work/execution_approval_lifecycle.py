@@ -148,11 +148,21 @@ class ApprovalRunDependency:
 
 
 @dataclass(frozen=True, slots=True)
+class ApprovalJobDependency:
+    """An exact Job coordinate not necessarily mirrored by ``Run.job_id``."""
+
+    owner_user_id: str
+    run_id: str
+    job_id: uuid.UUID
+
+
+@dataclass(frozen=True, slots=True)
 class LockedExecutionApprovalRows:
     rows: tuple[ExecutionApprovalRequestRow, ...]
     claimed_absolute_deadlines: dict[uuid.UUID, datetime]
     jobs: Mapping[uuid.UUID, JobRow]
     runs: Mapping[str, RunRow]
+    active_attempts: Mapping[uuid.UUID, tuple[JobAttemptRow, ...]]
 
 
 def cancel_locked_execution_approval_continuation(
@@ -252,8 +262,10 @@ async def lock_execution_approval_private_rows(
     approval_id: uuid.UUID | None = None,
     active_only: bool = False,
     extra_run_dependencies: tuple[ApprovalRunDependency, ...] = (),
+    extra_job_dependencies: tuple[ApprovalJobDependency, ...] = (),
+    lock_active_attempts: bool = False,
 ) -> LockedExecutionApprovalRows:
-    """Lock Job -> Run -> approval for one exact private-data boundary.
+    """Lock Job -> Run -> optional active attempt -> approval for one boundary.
 
     The initial approval query is authority-free discovery of server-owned FK
     coordinates. Command stage/claim/completion first lock their Job and Run,
@@ -342,6 +354,11 @@ async def lock_execution_approval_private_rows(
                 dependency.owner_user_id,
                 dependency.run_id,
             )
+    for dependency in extra_job_dependencies:
+        job_coordinates[dependency.job_id] = (
+            dependency.owner_user_id,
+            dependency.run_id,
+        )
 
     actual_jobs: dict[uuid.UUID, tuple[str, str]] = {}
     locked_job_rows: dict[uuid.UUID, JobRow] = {}
@@ -394,12 +411,42 @@ async def lock_execution_approval_private_rows(
         if actual_runs != run_coordinates:
             raise ExecutionApprovalPrivateLifecycleConflict()
 
+    # For force-revocation callers, an unresolved attempt is live execution
+    # authority even if a stale or
+    # partially settled Job row is already terminal. Lock every exact Job's
+    # outcome=NULL attempt so thread deletion cannot leave that authority
+    # behind when its Run still needs revocation/finalization.
+    attempt_job_rows = tuple(locked_job_rows.values()) if lock_active_attempts else ()
+    active_attempts: dict[uuid.UUID, tuple[JobAttemptRow, ...]] = {}
+    if attempt_job_rows:
+        locked_attempt_rows = tuple(
+            (
+                await session.execute(
+                    sa.select(JobAttemptRow)
+                    .where(
+                        JobAttemptRow.job_id.in_(
+                            tuple(row.id for row in attempt_job_rows),
+                        ),
+                        JobAttemptRow.outcome.is_(None),
+                    )
+                    .order_by(
+                        JobAttemptRow.job_id,
+                        JobAttemptRow.attempt_number,
+                    )
+                    .with_for_update(of=JobAttemptRow)
+                    .execution_options(populate_existing=True)
+                )
+            ).scalars()
+        )
+        active_attempts = {job.id: tuple(attempt for attempt in locked_attempt_rows if attempt.job_id == job.id) for job in attempt_job_rows}
+
     if not discovered:
         return LockedExecutionApprovalRows(
             (),
             {},
             locked_job_rows,
             locked_run_rows,
+            active_attempts,
         )
     approval_ids = tuple(row.id for row in discovered)
     locked_approvals = tuple(
@@ -441,6 +488,7 @@ async def lock_execution_approval_private_rows(
         {row.id: claimed_execution_absolute_deadline(row) for row in locked_approvals if row.status == "claimed"},
         locked_job_rows,
         locked_run_rows,
+        active_attempts,
     )
 
 
@@ -726,7 +774,7 @@ async def reconcile_locked_execution_approval_and_continuation(
     """Expire an approval and synchronously close its unleased continuation.
 
     All callers must use ``lock_execution_approval_private_rows`` first so the
-    canonical Job -> Run -> approval lock order is preserved. This wrapper is
+    canonical Job -> Run -> active attempt -> approval lock order is preserved. This wrapper is
     shared by ordinary Run admission and approval APIs; otherwise either path
     could expire the row while leaving an affinity-orphaned queued Job alive.
     """

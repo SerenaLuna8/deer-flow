@@ -56,7 +56,7 @@ export function ProjectThreadDeleteDialog({
         <DialogHeader>
           <DialogTitle>删除对话？</DialogTitle>
           <DialogDescription>
-            “{title}”及其关联的侧边对话将被删除。此操作无法撤销。
+            {`“${title}”及其关联的侧边对话将被删除。若会话仍在运行，删除会立即停止本次运行；已经发出的外部操作可能无法撤回。此操作无法撤销。`}
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>

@@ -16,7 +16,12 @@ from support.private_thread_seed import seed_private_thread_database
 from app.private_work import checkpointer as checkpointer_module
 from app.private_work import retention_purge as retention_purge_module
 from app.private_work.checkpointer import ProjectScopedCheckpointer
-from app.private_work.errors import PrivateWorkConflict
+from app.private_work.context import PrivateWorkContext
+from app.private_work.errors import (
+    PrivateWorkConflict,
+    PrivateWorkForbidden,
+    PrivateWorkUnavailable,
+)
 from app.private_work.execution_approval import (
     HostExecutionProviderPolicySnapshot,
     WorkerHostExecutionApprovalPort,
@@ -48,6 +53,8 @@ from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
 )
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import LeaseLost
@@ -66,6 +73,12 @@ from deerflow.persistence.private_work.model import (
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime.events.models import (
+    StreamFrame,
+    StreamLeaseProof,
+    StreamWriteLeaseLost,
+)
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.host_execution_approval import (
     HostExecutionOutcome,
     HostExecutionPlan,
@@ -129,6 +142,36 @@ class _Quota:
 
     async def release_file(self, *args, **kwargs) -> None:
         del args, kwargs
+
+
+class _TrackingQuota(_Quota):
+    def __init__(self) -> None:
+        self.released_runs: list[str] = []
+
+    async def release_concurrent_run(
+        self,
+        session,
+        scope,
+        *,
+        run_id,
+        **kwargs,
+    ) -> None:
+        del session, scope, kwargs
+        self.released_runs.append(run_id)
+
+
+class _TrackingAutomationReconciler:
+    def __init__(self) -> None:
+        self.completed_runs: list[str] = []
+
+    async def handle_run_completion(self, record) -> None:
+        self.completed_runs.append(record.run_id)
+
+
+class _FailingAutomationReconciler:
+    async def handle_run_completion(self, record) -> None:
+        del record
+        raise RuntimeError("automation reconciliation failed")
 
 
 class _RetentionAudit:
@@ -832,9 +875,1073 @@ async def test_thread_delete_removes_terminal_approval_pair_and_keeps_audit(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_thread_delete_rejects_recent_claim_with_expired_db_lease(
+async def test_thread_delete_converges_expired_retry_safe_requested_continuation(
     migrated_postgres_database_url: str,
-    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    approval_audit = _ApprovalAudit()
+    raw = _RawCheckpointSaver()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            approval, receipt = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status="finished",
+                command="python expired-safe-cancel.py",
+            )
+            expired_at = datetime.now(UTC) - timedelta(seconds=1)
+            cancel_requested_at = expired_at - timedelta(seconds=1)
+            continuation.job.lease_expires_at = expired_at
+            continuation.job.cancel_requested_at = cancel_requested_at
+            continuation.job.cancel_reason = "approval_thread_deleted"
+            continuation.run.execution_lease_expires_at = expired_at
+            continuation.run.cancel_requested_at = cancel_requested_at
+            continuation.run.cancel_reason = "approval_thread_deleted"
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_job = await session.get(JobRow, continuation.job.id)
+            persisted_run = await session.get(RunRow, continuation.run.run_id)
+            persisted_attempt = await session.get(
+                JobAttemptRow,
+                continuation.attempt.id,
+            )
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_job is not None
+            assert persisted_job.status == "cancelled"
+            assert persisted_job.lease_owner_id is None
+            assert persisted_job.lease_token_hash is None
+            assert persisted_job.lease_expires_at is None
+            assert persisted_job.completed_at is not None
+            assert persisted_run is not None
+            assert persisted_run.status == "interrupted"
+            assert persisted_run.execution_lease_token_hash is None
+            assert persisted_run.execution_lease_expires_at is None
+            assert persisted_attempt is not None
+            assert persisted_attempt.outcome == "cancelled"
+            assert persisted_attempt.finished_at is not None
+            assert persisted_thread is not None
+            assert persisted_thread.deleted_at is not None
+            assert await session.get(ExecutionApprovalRequestRow, approval.id) is None
+            assert receipt is not None
+            assert await session.get(ExecutionApprovalResultReceiptRow, receipt.id) is None
+        assert approval_audit.run_terminals == [continuation.run.run_id]
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("retry_safety", ["safe", "unknown"])
+async def test_thread_delete_revokes_live_or_unsafe_continuation(
+    migrated_postgres_database_url: str,
+    retry_safety: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status="finished",
+                command="python retained-cancel.py",
+            )
+            cancel_requested_at = datetime.now(UTC) - timedelta(seconds=2)
+            continuation.job.cancel_requested_at = cancel_requested_at
+            continuation.job.cancel_reason = "approval_thread_deleted"
+            continuation.job.retry_safety = retry_safety
+            continuation.run.cancel_requested_at = cancel_requested_at
+            continuation.run.cancel_reason = "approval_thread_deleted"
+            if retry_safety == "unknown":
+                expired_at = datetime.now(UTC) - timedelta(seconds=1)
+                continuation.job.lease_expires_at = expired_at
+                continuation.run.execution_lease_expires_at = expired_at
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_job = await session.get(JobRow, continuation.job.id)
+            persisted_run = await session.get(RunRow, continuation.run.run_id)
+            persisted_attempt = await session.get(
+                JobAttemptRow,
+                continuation.attempt.id,
+            )
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_job is not None and persisted_job.status == "cancelled"
+            assert persisted_job.lease_token_hash is None
+            assert persisted_run is not None and persisted_run.status == "interrupted"
+            assert persisted_run.execution_lease_token_hash is None
+            assert persisted_attempt is not None and persisted_attempt.outcome == "cancelled"
+            assert persisted_thread is not None and persisted_thread.deleted_at is not None
+        assert approval_audit.run_terminals == [continuation.run.run_id]
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "job_status",
+    ["queued", "leased", "running", "retry_wait"],
+)
+async def test_thread_delete_revokes_ordinary_active_run_without_approval(
+    migrated_postgres_database_url: str,
+    job_status: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    quota = _TrackingQuota()
+    reconciler = _TrackingAutomationReconciler()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            active = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            active.job.retry_safety = "unknown"
+            active.job.status = job_status
+            if job_status in {"queued", "retry_wait"}:
+                active.job.lease_owner_id = None
+                active.job.lease_token_hash = None
+                active.job.lease_expires_at = None
+                active.job.heartbeat_at = None
+                active.run.status = "pending"
+                active.run.execution_lease_token_hash = None
+                active.run.execution_lease_expires_at = None
+                active.run.execution_heartbeat_at = None
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=quota,
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = reconciler
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_job = await session.get(JobRow, active.job.id)
+            persisted_run = await session.get(RunRow, active.run.run_id)
+            persisted_attempt = await session.get(JobAttemptRow, active.attempt.id)
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_job is not None and persisted_job.status == "cancelled"
+            assert persisted_job.retry_safety == "unknown"
+            assert persisted_job.lease_token_hash is None
+            assert persisted_run is not None and persisted_run.status == "interrupted"
+            assert persisted_run.execution_lease_token_hash is None
+            assert persisted_attempt is not None and persisted_attempt.outcome == "cancelled"
+            assert persisted_thread is not None and persisted_thread.deleted_at is not None
+        async with seed.factory() as session, session.begin():
+            with pytest.raises(PrivateRunExecutionLeaseLost):
+                await PrivateRunRepository(session).assert_execution_active(
+                    scope=seed.owner_a.resource_scope,
+                    run_id=active.run.run_id,
+                    job_id=active.job.id,
+                    lease_token=f"lease:{active.run.run_id}",
+                )
+        assert approval_audit.run_terminals == [active.run.run_id]
+        assert quota.released_runs == [active.run.run_id]
+        assert reconciler.completed_runs == [active.run.run_id]
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_revokes_reverse_job_when_run_job_id_is_null_and_closes_stream(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    audit = _ApprovalAudit()
+    quota = _TrackingQuota()
+    reconciler = _TrackingAutomationReconciler()
+    events = DbRunEventStore(seed.factory, run_event_notify_enabled=False)
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            active = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            active.run.job_id = None
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=quota,
+            approval_audit=audit,
+            run_event_store=events,
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = reconciler
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            job = await session.get(JobRow, active.job.id)
+            run = await session.get(RunRow, active.run.run_id)
+            attempt = await session.get(JobAttemptRow, active.attempt.id)
+            terminal = await events.get_stream_terminal(
+                session,
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                run_id=active.run.run_id,
+            )
+            assert job is not None and job.status == "cancelled"
+            assert job.lease_token_hash is None
+            assert run is not None and run.job_id is None
+            assert run.status == "interrupted"
+            assert run.execution_lease_token_hash is None
+            assert attempt is not None and attempt.outcome == "cancelled"
+            assert terminal is not None and terminal.terminal is True
+            assert terminal.event == "end"
+            assert terminal.data == {"status": "interrupted"}
+
+        async with seed.factory() as session, session.begin():
+            with pytest.raises(StreamWriteLeaseLost):
+                await events.append_stream_frame(
+                    session,
+                    scope=seed.owner_a.resource_scope,
+                    thread_id=thread_id,
+                    run_id=active.run.run_id,
+                    frame=StreamFrame(event="values", data={"status": "late"}),
+                    lease=StreamLeaseProof(
+                        job_id=active.job.id,
+                        lease_token=f"lease:{active.run.run_id}",
+                    ),
+                )
+
+        await saver.adelete_thread(thread_id, expected_version=1)
+        assert audit.run_terminals == [active.run.run_id]
+        assert quota.released_runs == [active.run.run_id]
+        assert reconciler.completed_runs == [active.run.run_id]
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_terminal_stream_failure_rolls_back_tombstone_and_revocation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+
+    class _FailingTerminalStore(DbRunEventStore):
+        async def ensure_settled_stream_terminal(self, *args, **kwargs):
+            del args, kwargs
+            raise RuntimeError("injected terminal write failure")
+
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            active = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=_ApprovalAudit(),
+            run_event_store=_FailingTerminalStore(seed.factory),
+        ).for_context(seed.owner_a)
+        with pytest.raises(PrivateWorkUnavailable):
+            await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            job = await session.get(JobRow, active.job.id)
+            run = await session.get(RunRow, active.run.run_id)
+            attempt = await session.get(JobAttemptRow, active.attempt.id)
+            thread = await session.get(ThreadMetaRow, thread_id)
+            assert job is not None and job.status == "running"
+            assert job.lease_token_hash is not None
+            assert run is not None and run.status == "running"
+            assert run.execution_lease_token_hash is not None
+            assert attempt is not None and attempt.outcome is None
+            assert thread is not None and thread.deleted_at is None
+        assert raw.deleted_threads == []
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_status", "attempt_outcome", "expected_run_status", "expected_stream"),
+    [
+        ("succeeded", "succeeded", "success", "completed"),
+        ("failed", "failed", "error", "error"),
+        ("cancelled", "cancelled", "interrupted", "interrupted"),
+    ],
+)
+async def test_thread_delete_converges_active_run_from_terminal_projected_job(
+    migrated_postgres_database_url: str,
+    job_status: str,
+    attempt_outcome: str,
+    expected_run_status: str,
+    expected_stream: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    audit = _ApprovalAudit()
+    quota = _TrackingQuota()
+    reconciler = _TrackingAutomationReconciler()
+    events = DbRunEventStore(seed.factory, run_event_notify_enabled=False)
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            inconsistent = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            now = datetime.now(UTC)
+            inconsistent.job.status = job_status
+            inconsistent.job.completed_at = now
+            inconsistent.job.lease_owner_id = None
+            inconsistent.job.lease_token_hash = None
+            inconsistent.job.lease_expires_at = None
+            inconsistent.job.heartbeat_at = None
+            inconsistent.job.public_error_code = "PROVIDER_ERROR" if job_status == "failed" else None
+            inconsistent.job.cancel_reason = "user_cancelled" if job_status == "cancelled" else None
+            inconsistent.attempt.outcome = attempt_outcome
+            inconsistent.attempt.finished_at = now
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=quota,
+            approval_audit=audit,
+            run_event_store=events,
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = reconciler
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            job = await session.get(JobRow, inconsistent.job.id)
+            run = await session.get(RunRow, inconsistent.run.run_id)
+            terminal = await events.get_stream_terminal(
+                session,
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                run_id=inconsistent.run.run_id,
+            )
+            assert job is not None and job.status == job_status
+            assert run is not None and run.status == expected_run_status
+            assert run.execution_lease_token_hash is None
+            assert terminal is not None
+            assert terminal.data == {"status": expected_stream}
+
+        expected_audit = [inconsistent.run.run_id] if expected_run_status == "interrupted" else []
+        assert audit.run_terminals == expected_audit
+        assert quota.released_runs == [inconsistent.run.run_id]
+        assert reconciler.completed_runs == [inconsistent.run.run_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_projected_terminal_job_wins_over_active_reverse_job(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    audit = _ApprovalAudit()
+    quota = _TrackingQuota()
+    reconciler = _TrackingAutomationReconciler()
+    events = DbRunEventStore(seed.factory, run_event_notify_enabled=False)
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            primary = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            now = datetime.now(UTC)
+            primary.job.status = "succeeded"
+            primary.job.completed_at = now
+            primary.job.lease_owner_id = None
+            primary.job.lease_token_hash = None
+            primary.job.lease_expires_at = None
+            primary.job.heartbeat_at = None
+            primary.attempt.outcome = "succeeded"
+            primary.attempt.finished_at = now
+
+            reverse_token = f"reverse:{primary.run.run_id}"
+            reverse_hash = hashlib.sha256(reverse_token.encode()).hexdigest()
+            reverse_job = JobRow(
+                job_type="private_run",
+                project_id=seed.owner_a.project_id,
+                owner_user_id=str(seed.owner_a.user_id),
+                run_id=primary.run.run_id,
+                origin_trace_id=primary.run.origin_trace_id,
+                idempotency_key=hashlib.sha256(
+                    f"reverse-job:{primary.run.run_id}".encode(),
+                ).hexdigest(),
+                status="running",
+                max_attempts=3,
+                attempt_count=1,
+                lease_owner_id=worker_id,
+                lease_token_hash=reverse_hash,
+                lease_expires_at=now + timedelta(minutes=5),
+                heartbeat_at=now,
+                retry_safety="safe",
+                started_at=now,
+            )
+            session.add(reverse_job)
+            await session.flush()
+            reverse_attempt = JobAttemptRow(
+                job_id=reverse_job.id,
+                attempt_number=1,
+                worker_id=worker_id,
+                lease_token_hash=reverse_hash,
+                started_at=now,
+                heartbeat_at=now,
+            )
+            session.add(reverse_attempt)
+            await session.flush()
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=quota,
+            approval_audit=audit,
+            run_event_store=events,
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = reconciler
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            projected = await session.get(JobRow, primary.job.id)
+            reverse = await session.get(JobRow, reverse_job.id)
+            attempt = await session.get(JobAttemptRow, reverse_attempt.id)
+            run = await session.get(RunRow, primary.run.run_id)
+            terminal = await events.get_stream_terminal(
+                session,
+                scope=seed.owner_a.resource_scope,
+                thread_id=thread_id,
+                run_id=primary.run.run_id,
+            )
+            assert projected is not None and projected.status == "succeeded"
+            assert reverse is not None and reverse.status == "cancelled"
+            assert reverse.lease_token_hash is None
+            assert attempt is not None and attempt.outcome == "cancelled"
+            assert run is not None and run.status == "success"
+            assert terminal is not None
+            assert terminal.data == {"status": "completed"}
+
+        assert audit.run_terminals == []
+        assert quota.released_runs == [primary.run.run_id]
+        assert reconciler.completed_runs == [primary.run.run_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_automation_reconcile_failure_does_not_skip_raw_cleanup(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            active = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=_ApprovalAudit(),
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = _FailingAutomationReconciler()
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_run = await session.get(RunRow, active.run.run_id)
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_run is not None and persisted_run.status == "interrupted"
+            assert persisted_thread is not None
+            assert persisted_thread.deleted_at is not None
+            assert persisted_thread.checkpoint_delete_status == "complete"
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_revokes_terminal_run_finalization_without_duplicate_settlement(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    quota = _TrackingQuota()
+    reconciler = _TrackingAutomationReconciler()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            terminal = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            now = datetime.now(UTC)
+            lease_hash = hashlib.sha256(
+                f"finalizing:{terminal.run.run_id}".encode(),
+            ).hexdigest()
+            terminal.run.finalization_status = "finalizing"
+            terminal.run.execution_lease_token_hash = lease_hash
+            terminal.run.execution_lease_expires_at = now + timedelta(minutes=5)
+            terminal.run.execution_heartbeat_at = now
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=quota,
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        saver._automation_reconciler = reconciler
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_run = await session.get(RunRow, terminal.run.run_id)
+            assert persisted_run is not None
+            assert persisted_run.status == "success"
+            assert persisted_run.finalization_status == "failed"
+            assert persisted_run.execution_lease_token_hash is None
+            assert persisted_run.execution_lease_expires_at is None
+            assert persisted_run.execution_heartbeat_at is None
+            assert persisted_run.authorization_cancel_requested_at is not None
+            assert persisted_run.authorization_cancel_reason == "thread_deleted"
+        assert approval_audit.run_terminals == []
+        assert quota.released_runs == []
+        assert reconciler.completed_runs == []
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_settles_unresolved_attempt_for_terminal_job_and_run(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            inconsistent = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            inconsistent.attempt.outcome = None
+            inconsistent.attempt.finished_at = None
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_job = await session.get(JobRow, inconsistent.job.id)
+            persisted_run = await session.get(RunRow, inconsistent.run.run_id)
+            persisted_attempt = await session.get(
+                JobAttemptRow,
+                inconsistent.attempt.id,
+            )
+            assert persisted_job is not None and persisted_job.status == "succeeded"
+            assert persisted_run is not None and persisted_run.status == "success"
+            assert persisted_attempt is not None
+            assert persisted_attempt.outcome == "cancelled"
+            assert persisted_attempt.finished_at is not None
+        assert approval_audit.run_terminals == []
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_force_cancel_is_exact_thread_scoped(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        target_thread_id = str(uuid.uuid4())
+        other_thread_id = str(uuid.uuid4())
+        await _add_thread(
+            seed,
+            owner=seed.owner_a,
+            thread_id=target_thread_id,
+        )
+        await _add_thread(
+            seed,
+            owner=seed.owner_a,
+            thread_id=other_thread_id,
+        )
+        async with seed.factory() as session, session.begin():
+            target = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=target_thread_id,
+                terminal=False,
+            )
+            other = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=other_thread_id,
+                terminal=False,
+            )
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(target_thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            target_job = await session.get(JobRow, target.job.id)
+            target_run = await session.get(RunRow, target.run.run_id)
+            target_attempt = await session.get(JobAttemptRow, target.attempt.id)
+            other_job = await session.get(JobRow, other.job.id)
+            other_run = await session.get(RunRow, other.run.run_id)
+            other_attempt = await session.get(JobAttemptRow, other.attempt.id)
+            other_thread = await session.get(ThreadMetaRow, other_thread_id)
+            assert target_job is not None and target_job.status == "cancelled"
+            assert target_run is not None and target_run.status == "interrupted"
+            assert target_attempt is not None and target_attempt.outcome == "cancelled"
+            assert other_job is not None and other_job.status == "running"
+            assert other_job.lease_token_hash is not None
+            assert other_run is not None and other_run.status == "running"
+            assert other_run.execution_lease_token_hash is not None
+            assert other_attempt is not None and other_attempt.outcome is None
+            assert other_thread is not None and other_thread.deleted_at is None
+        assert approval_audit.run_terminals == [target.run.run_id]
+        assert raw.deleted_threads == [target_thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_reverse_job_discovery_is_project_owner_and_thread_scoped(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    other_project_seed = await seed_private_thread_database(
+        migrated_postgres_database_url,
+    )
+    raw = _RawCheckpointSaver()
+    try:
+        worker_id = await _add_worker(seed)
+        target_thread_id = str(uuid.uuid4())
+        other_thread_id = str(uuid.uuid4())
+        other_owner_thread_id = str(uuid.uuid4())
+        other_project_thread_id = str(uuid.uuid4())
+        await _add_thread(
+            seed,
+            owner=seed.owner_a,
+            thread_id=target_thread_id,
+        )
+        await _add_thread(
+            seed,
+            owner=seed.owner_a,
+            thread_id=other_thread_id,
+        )
+        await _add_thread(
+            seed,
+            owner=seed.owner_b,
+            thread_id=other_owner_thread_id,
+        )
+
+        cross_project_membership_id = uuid.uuid4()
+        async with seed.factory() as session, session.begin():
+            session.add(
+                ProjectMembershipRow(
+                    id=cross_project_membership_id,
+                    project_id=other_project_seed.owner_a.project_id,
+                    user_id=str(seed.owner_a.user_id),
+                    role="admin",
+                    status="active",
+                    version=1,
+                )
+            )
+        cross_project_owner = PrivateWorkContext.from_project(
+            ProjectContext(
+                user_id=seed.owner_a.user_id,
+                project_id=other_project_seed.owner_a.project_id,
+                membership_id=cross_project_membership_id,
+                role=ProjectRole.ADMIN,
+                capabilities=capabilities_for(ProjectRole.ADMIN),
+                membership_version=1,
+                request_id="req-cross-project-owner-a",
+            )
+        )
+        await _add_thread(
+            other_project_seed,
+            owner=cross_project_owner,
+            thread_id=other_project_thread_id,
+        )
+
+        async with seed.factory() as session, session.begin():
+            target = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=target_thread_id,
+                terminal=False,
+            )
+            target.run.job_id = None
+            same_owner_other_thread = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=other_thread_id,
+                terminal=False,
+            )
+            other_owner = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_b,
+                worker_id=worker_id,
+                thread_id=other_owner_thread_id,
+                terminal=False,
+            )
+            same_owner_other_project = await _add_run_job(
+                session,
+                seed=other_project_seed,
+                owner=cross_project_owner,
+                worker_id=worker_id,
+                thread_id=other_project_thread_id,
+                terminal=False,
+            )
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=_ApprovalAudit(),
+            run_event_store=DbRunEventStore(
+                seed.factory,
+                run_event_notify_enabled=False,
+            ),
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(target_thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            rows = {
+                "target_job": await session.get(JobRow, target.job.id),
+                "target_run": await session.get(RunRow, target.run.run_id),
+                "other_thread_job": await session.get(
+                    JobRow,
+                    same_owner_other_thread.job.id,
+                ),
+                "other_thread_run": await session.get(
+                    RunRow,
+                    same_owner_other_thread.run.run_id,
+                ),
+                "other_owner_job": await session.get(JobRow, other_owner.job.id),
+                "other_owner_run": await session.get(
+                    RunRow,
+                    other_owner.run.run_id,
+                ),
+                "other_project_job": await session.get(
+                    JobRow,
+                    same_owner_other_project.job.id,
+                ),
+                "other_project_run": await session.get(
+                    RunRow,
+                    same_owner_other_project.run.run_id,
+                ),
+            }
+            assert rows["target_job"].status == "cancelled"
+            assert rows["target_run"].status == "interrupted"
+            for key in (
+                "other_thread_job",
+                "other_owner_job",
+                "other_project_job",
+            ):
+                assert rows[key].status == "running"
+                assert rows[key].lease_token_hash is not None
+            for key in (
+                "other_thread_run",
+                "other_owner_run",
+                "other_project_run",
+            ):
+                assert rows[key].status == "running"
+                assert rows[key].execution_lease_token_hash is not None
+        assert raw.deleted_threads == [target_thread_id]
+    finally:
+        await seed.engine.dispose()
+        await other_project_seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("approval_status", "spawn_authorized", "expected_terminal"),
+    [
+        ("staged", False, "cancelled"),
+        ("pending", False, "cancelled"),
+        ("approved", False, "cancelled"),
+        ("claimed", False, "cancelled"),
+        ("claimed", True, "unknown"),
+    ],
+)
+async def test_thread_delete_terminalizes_every_active_approval_state(
+    migrated_postgres_database_url: str,
+    approval_status: str,
+    spawn_authorized: bool,
+    expected_terminal: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    approval_audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=approval_status not in {"staged", "pending"},
+            )
+            continuation = None
+            if approval_status in {"approved", "claimed"}:
+                continuation = await _add_run_job(
+                    session,
+                    seed=seed,
+                    owner=seed.owner_a,
+                    worker_id=worker_id,
+                    thread_id=thread_id,
+                    terminal=False,
+                )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status=approval_status,
+                command=f"python delete-{approval_status}.py",
+            )
+            if spawn_authorized:
+                approval.spawn_authorized_at = approval.claimed_at
+            await _add_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation=continuation,
+                status=("deferred" if continuation is None else "assigned"),
+            )
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=approval_audit,
+        ).for_context(seed.owner_a)
+        await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_thread is not None and persisted_thread.deleted_at is not None
+            assert await session.get(ExecutionApprovalRequestRow, approval.id) is None
+            assert (
+                await session.get(
+                    ExecutionApprovalOutputDeliveryObligationRow,
+                    approval.id,
+                )
+                is None
+            )
+        assert approval_audit.terminals == [
+            (source.run.run_id, expected_terminal),
+        ]
+        active = source if continuation is None else continuation
+        assert approval_audit.run_terminals == [active.run.run_id]
+        assert raw.deleted_threads == [thread_id]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_requires_private_work_create_capability(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    raw = _RawCheckpointSaver()
+    try:
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            membership = await session.get(
+                ProjectMembershipRow,
+                seed.owner_a.membership_id,
+            )
+            assert membership is not None
+            membership.role = "viewer"
+
+        saver = ProjectScopedCheckpointer(
+            raw,
+            seed.factory,
+            quota=_Quota(),
+            approval_audit=_ApprovalAudit(),
+        ).for_context(seed.owner_a)
+        with pytest.raises(PrivateWorkForbidden):
+            await saver.adelete_thread(thread_id, expected_version=1)
+
+        async with seed.factory() as session:
+            persisted_thread = await session.get(ThreadMetaRow, thread_id)
+            assert persisted_thread is not None
+            assert persisted_thread.deleted_at is None
+        assert raw.deleted_threads == []
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_thread_delete_revokes_recent_claim_with_expired_db_lease(
+    migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     approval_audit = _ApprovalAudit()
@@ -879,20 +1986,22 @@ async def test_thread_delete_rejects_recent_claim_with_expired_db_lease(
             quota=_Quota(),
             approval_audit=approval_audit,
         ).for_context(seed.owner_a)
-        monkeypatch.setattr(
-            "app.private_work.checkpointer.datetime",
-            _HostClockOneDayAhead,
-        )
-        with pytest.raises(PrivateWorkConflict):
-            await saver.adelete_thread(thread_id, expected_version=1)
+        await saver.adelete_thread(thread_id, expected_version=1)
 
         async with seed.factory() as session:
             retained = await session.get(ExecutionApprovalRequestRow, approval.id)
+            job = await session.get(JobRow, continuation.job.id)
+            run = await session.get(RunRow, continuation.run.run_id)
+            attempt = await session.get(JobAttemptRow, continuation.attempt.id)
             thread = await session.get(ThreadMetaRow, thread_id)
-            assert retained is not None and retained.status == "claimed"
-            assert thread is not None and thread.deleted_at is None
-        assert approval_audit.terminals == []
-        assert raw.deleted_threads == []
+            assert retained is None
+            assert job is not None and job.status == "cancelled"
+            assert run is not None and run.status == "interrupted"
+            assert attempt is not None and attempt.outcome == "cancelled"
+            assert thread is not None and thread.deleted_at is not None
+        assert approval_audit.terminals == [(source.run.run_id, "cancelled")]
+        assert approval_audit.run_terminals == [continuation.run.run_id]
+        assert raw.deleted_threads == [thread_id]
     finally:
         await seed.engine.dispose()
 
@@ -1274,7 +2383,7 @@ async def test_retention_commit_revalidates_lease_after_scope_lock_wait(
     "cleanup_kind",
     ["run_delete", "thread_delete", "retention"],
 )
-async def test_completion_prefix_prevents_cleanup_deadlock_and_preserves_receipt(
+async def test_completion_prefix_serializes_cleanup_without_deadlock(
     migrated_postgres_database_url: str,
     cleanup_kind: str,
 ) -> None:
@@ -1386,7 +2495,7 @@ async def test_completion_prefix_prevents_cleanup_deadlock_and_preserves_receipt
                 approval_audit=_ApprovalAudit(),
             ).for_context(seed.owner_a)
             cleanup_task = asyncio.create_task(saver.adelete_thread(thread_id, expected_version=1))
-            expected_error = PrivateWorkConflict
+            expected_error = None
         else:
 
             async def purge_after_prefix() -> None:
@@ -1415,8 +2524,11 @@ async def test_completion_prefix_prevents_cleanup_deadlock_and_preserves_receipt
         await asyncio.sleep(0.05)
         release_completion.set()
         await asyncio.wait_for(completion_task, timeout=5)
-        with pytest.raises(expected_error):
+        if expected_error is None:
             await asyncio.wait_for(cleanup_task, timeout=5)
+        else:
+            with pytest.raises(expected_error):
+                await asyncio.wait_for(cleanup_task, timeout=5)
 
         async with seed.factory() as session:
             persisted = await session.get(
@@ -1428,12 +2540,19 @@ async def test_completion_prefix_prevents_cleanup_deadlock_and_preserves_receipt
                     ExecutionApprovalResultReceiptRow.approval_id == approval.id,
                 )
             )
-            assert persisted is not None and persisted.status == "finished"
-            assert receipt is not None
-            assert receipt.result_private_json["stdout"] == ("completed-before-cleanup")
             if cleanup_kind == "thread_delete":
                 thread = await session.get(ThreadMetaRow, thread_id)
-                assert thread is not None and thread.deleted_at is None
+                continuation_job = await session.get(JobRow, continuation.job.id)
+                continuation_run = await session.get(RunRow, continuation.run.run_id)
+                assert persisted is None
+                assert receipt is None
+                assert thread is not None and thread.deleted_at is not None
+                assert continuation_job is not None and continuation_job.status == "cancelled"
+                assert continuation_run is not None and continuation_run.status == "interrupted"
+            else:
+                assert persisted is not None and persisted.status == "finished"
+                assert receipt is not None
+                assert receipt.result_private_json["stdout"] == ("completed-before-cleanup")
     finally:
         release_completion.set()
         await seed.engine.dispose()

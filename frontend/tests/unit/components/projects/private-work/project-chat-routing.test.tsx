@@ -1,6 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 
 import { projectChatRouteScope } from "@/components/projects/private-work/project-chat-page";
+import { projectConversationPermissions } from "@/components/projects/private-work/project-conversation-rail";
 import { projectThreadDeleteLandingPath } from "@/components/projects/private-work/project-thread-delete-dialog";
 import type { Project } from "@/core/projects/types";
 
@@ -41,6 +42,20 @@ describe("project chat routing", () => {
 
     expect(scope.canRun).toBe(true);
     expect(scope.canApproveHostExecution).toBe(false);
+  });
+
+  test("does not offer destructive thread deletion with read-only access", () => {
+    const project = {
+      capabilities: ["private_work.read_own"],
+    } as Project;
+
+    expect(projectConversationPermissions(project).canDelete).toBe(false);
+    expect(
+      projectChatRouteScope({
+        slug: "viewer",
+        capabilities: project.capabilities,
+      }).canDelete,
+    ).toBe(false);
   });
 
   test("returns to the server-backed chat list only after deleting the active thread", () => {

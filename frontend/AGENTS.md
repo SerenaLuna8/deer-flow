@@ -123,6 +123,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
   prove that the new UI rendered those frames.
 - Scope disposal aborts the stream and prevents late state writes. Compare-and-
   remove reconnect metadata so an old consumer cannot erase a newer Run.
+- A successful Thread DELETE immediately tears down only that exact
+  account/project/thread runtime and query subtree. Late stream callbacks may
+  not recreate its cursor, reconnect owner, version, or cached projection; a
+  failed DELETE must not tear down local state.
 - Preserve LangGraph stream-handle property descriptors; do not object-spread a
   handle with lazy getters.
 - Thread/Run/file catalogs must page to completion with strict schemas, abort

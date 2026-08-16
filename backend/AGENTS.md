@@ -230,6 +230,11 @@ or downgrade an application database.
   forbidden. Audit and committed usage ledgers are append-only.
 - Retention deletes exact project/owner dependencies in documented order; it
   never broadens scope or cascades through retained governance references.
+- Private Thread deletion is an exact project/owner force-revocation boundary:
+  it terminalizes matching Run/Job/Attempt and approval authority before the
+  tombstone commits. Raw checkpoint removal is idempotent recovery work fenced
+  to the exact tombstone generation; it must never make a committed logical
+  deletion appear to fail or touch a recreated same-ID Thread.
 
 ### Configuration
 

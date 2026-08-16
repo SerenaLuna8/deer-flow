@@ -2374,7 +2374,7 @@ export const enUS: Translations = {
     close: "Close side chat",
     delete: "Delete side chat",
     deleteConfirm:
-      "Are you sure you want to delete this side chat? This action cannot be undone. To simply hide it, use the side chat toggle in the header instead.",
+      "Are you sure you want to delete this side chat? If it is still running, deletion stops the run immediately; external actions already sent may not be reversible. This action cannot be undone. To simply hide it, use the side chat toggle in the header instead.",
     deleteSuccess: "Side chat deleted",
     deleteFailed: "Failed to delete side chat.",
     addToConversation: "Add to conversation",

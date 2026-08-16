@@ -3,10 +3,12 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 import { createProjectPrivateClient } from "@/core/api/api-client";
 import {
   createProjectThread,
+  deleteProjectThread,
   disposeProjectAPIClient,
   getProjectAPIClient,
   projectPrivateWorkBaseURL,
 } from "@/core/private-work/api-client";
+import type { ProjectResponseError } from "@/core/private-work/api-client";
 import { projectClientScopeSchema } from "@/core/private-work/types";
 
 const A = "11111111-1111-4111-8111-111111111111";
@@ -25,6 +27,11 @@ function maxConcurrencyOf(client: object): number {
       "maxConcurrency",
     ),
   );
+}
+
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  return input instanceof URL ? input.href : input.url;
 }
 
 afterEach(() => {
@@ -119,5 +126,109 @@ describe("project private-work API client", () => {
 
     const init = fetcher.mock.calls[0]![1]!;
     expect(new Headers(init.headers).get("X-CSRF-Token")).toBe("project-token");
+  });
+
+  test("refreshes the CAS version for delete and preserves structured gateway errors", async () => {
+    const fetcher = rs.fn(async (input: RequestInfo | URL) => {
+      const url = requestUrl(input);
+      if (url.endsWith(`/threads/${P1}`)) {
+        return new Response(
+          JSON.stringify({
+            thread_id: P1,
+            agent_asset_id: P2,
+            agent_scope: "project",
+            display_name: "Fresh thread",
+            status: "idle",
+            metadata: {},
+            version: 7,
+            created_at: "2026-07-21T06:00:00Z",
+            updated_at: "2026-07-21T06:00:00Z",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes(`/threads/${P1}?expected_version=7`)) {
+        return new Response(
+          JSON.stringify({
+            detail: {
+              code: "PRIVATE_WORK_CONFLICT",
+              message: "Private work conflict.",
+              request_id: "request-delete-1",
+            },
+          }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+    rs.stubGlobal("fetch", fetcher);
+
+    await expect(
+      deleteProjectThread(
+        { accountId: A, projectId: P1 },
+        { threadId: P1, expectedVersion: 7 },
+      ),
+    ).rejects.toMatchObject({
+      name: "ProjectResponseError",
+      status: 409,
+      code: "PRIVATE_WORK_CONFLICT",
+      requestId: "request-delete-1",
+      serverMessage: "Private work conflict.",
+    } satisfies Partial<ProjectResponseError>);
+
+    expect(fetcher).toHaveBeenCalledTimes(2);
+    expect(requestUrl(fetcher.mock.calls[0]![0])).toContain(
+      `/threads/${P1}?expected_version=7`,
+    );
+    expect(requestUrl(fetcher.mock.calls[1]![0])).toMatch(
+      new RegExp(`/threads/${P1}$`),
+    );
+  });
+
+  test("treats a scoped delete 404 as idempotent but preserves 403", async () => {
+    const fetcher = rs
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: "PRIVATE_WORK_NOT_FOUND",
+              message: "Private work not found.",
+              request_id: "request-delete-gone",
+            },
+          }),
+          { status: 404, headers: { "Content-Type": "application/json" } },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            detail: {
+              code: "PRIVATE_WORK_FORBIDDEN",
+              message: "Private work forbidden.",
+              request_id: "request-delete-forbidden",
+            },
+          }),
+          { status: 403, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+    rs.stubGlobal("fetch", fetcher);
+
+    await expect(
+      deleteProjectThread(
+        { accountId: A, projectId: P1 },
+        { threadId: P1, expectedVersion: 1 },
+      ),
+    ).resolves.toBeUndefined();
+    await expect(
+      deleteProjectThread(
+        { accountId: A, projectId: P1 },
+        { threadId: P1, expectedVersion: 1 },
+      ),
+    ).rejects.toMatchObject({
+      status: 403,
+      code: "PRIVATE_WORK_FORBIDDEN",
+      requestId: "request-delete-forbidden",
+    } satisfies Partial<ProjectResponseError>);
   });
 });

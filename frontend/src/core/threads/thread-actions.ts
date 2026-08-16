@@ -1,11 +1,16 @@
 import type { Run } from "@langchain/langgraph-sdk";
 import {
   type InfiniteData,
+  type QueryClient,
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 
+import {
+  clearProjectThreadRuntimeState,
+  deleteProjectThread,
+} from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
 import type { ProjectPrivateWorkScope } from "../private-work/types";
 import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
@@ -16,6 +21,7 @@ import {
   threadContextUsageQueryKey,
   type ThreadContextUsageResponse,
 } from "./context-usage";
+import { removeDeletedThreadCaches } from "./thread-cache";
 import {
   filterInfiniteThreadsCache,
   INFINITE_THREADS_QUERY_KEY_PREFIX,
@@ -24,13 +30,6 @@ import {
 import { scopedThreadQueryKey } from "./thread-query-key";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type { AgentThread, ThreadTokenUsageResponse } from "./types";
-
-type ThreadDeleteClient = {
-  threads: {
-    delete: (threadId: string) => Promise<unknown>;
-    search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
-  };
-};
 
 type ThreadSidecarSearchClient = {
   threads: {
@@ -57,6 +56,43 @@ function getHttpStatus(error: unknown): number | undefined {
   }
 
   return undefined;
+}
+
+function getErrorString(error: unknown, key: string): string | undefined {
+  if (typeof error !== "object" || error === null) return undefined;
+  const value = Reflect.get(error, key);
+  return typeof value === "string" && value.trim() ? value : undefined;
+}
+
+export function projectThreadDeleteErrorMessage(error: unknown): string {
+  const status = getHttpStatus(error);
+  const code = getErrorString(error, "code");
+  const requestId =
+    getErrorString(error, "requestId") ?? getErrorString(error, "request_id");
+
+  let message: string;
+  if (status === 409 || code === "PRIVATE_WORK_CONFLICT") {
+    message = "会话状态已在确认后发生变化，已刷新最新状态，请重新确认删除。";
+  } else if (status === 403 || code === "PRIVATE_WORK_FORBIDDEN") {
+    message = "你没有权限删除这个会话。";
+  } else if (status === 404 || code === "PRIVATE_WORK_NOT_FOUND") {
+    message = "这个会话已不存在，会话列表已刷新。";
+  } else if (status === 503 || code === "PRIVATE_WORK_UNAVAILABLE") {
+    message = "删除服务暂时不可用，请稍后重试。";
+  } else if (status === 422 || code === "PRIVATE_WORK_INVALID") {
+    message = "删除请求无效，会话状态已刷新，请重新确认。";
+  } else {
+    message = "删除会话失败，请稍后重试。";
+  }
+
+  return requestId ? `${message}（请求编号：${requestId}）` : message;
+}
+
+export function isProjectThreadDeleteConflict(error: unknown): boolean {
+  return (
+    getHttpStatus(error) === 409 ||
+    getErrorString(error, "code") === "PRIVATE_WORK_CONFLICT"
+  );
 }
 
 function isThreadMissingError(error: unknown): boolean {
@@ -233,155 +269,283 @@ export function useRunDetail(
 }
 
 export async function deleteThreadEverywhere(
-  apiClient: ThreadDeleteClient,
   threadId: string,
-  _privateWork: ProjectPrivateWorkScope,
+  privateWork: ProjectPrivateWorkScope,
+  expectedVersion: number,
+  deleteRequest: typeof deleteProjectThread = deleteProjectThread,
+  onDeleted?: (deletedThreadId: string) => Promise<void> | void,
 ) {
-  await apiClient.threads.delete(threadId);
+  await deleteRequest(privateWork.scope, { threadId, expectedVersion });
+  try {
+    await onDeleted?.(threadId);
+  } catch {
+    // The server-side tombstone is already authoritative. A best-effort local
+    // teardown failure must not turn a successful irreversible DELETE into a
+    // false failure response.
+  }
 }
 
-export async function findSidecarThreadIdsForParent(
+export function privateWorkThreadVersion(
+  thread: Pick<AgentThread, "metadata">,
+): number | null {
+  const value = thread.metadata?.private_work_version;
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0
+    ? value
+    : null;
+}
+
+type DiscoveredSidecarThread = Readonly<{
+  threadId: string;
+  expectedVersion: number;
+}>;
+
+type SidecarThreadDiscovery = Readonly<{
+  threads: DiscoveredSidecarThread[];
+  allThreadIds: string[];
+  incomplete: boolean;
+}>;
+
+const SIDECAR_SEARCH_PAGE_LIMIT = 100;
+const SIDECAR_SEARCH_MAX_PAGES = 1_000;
+
+async function findSidecarThreadsForParent(
   apiClient: ThreadSidecarSearchClient,
   parentThreadId: string,
-) {
-  const threadIds: string[] = [];
-  const limit = 100;
+): Promise<SidecarThreadDiscovery> {
+  const threads: DiscoveredSidecarThread[] = [];
+  const allThreadIds: string[] = [];
+  const seenThreadIds = new Set<string>();
+  let incomplete = false;
   let offset = 0;
 
-  while (true) {
+  for (let page = 0; page < SIDECAR_SEARCH_MAX_PAGES; page += 1) {
     const response = await apiClient.threads.search({
       metadata: {
         [SIDECAR_METADATA_KEY]: true,
         parent_thread_id: parentThreadId,
       },
-      limit,
+      limit: SIDECAR_SEARCH_PAGE_LIMIT,
       offset,
       sortBy: "updated_at",
       sortOrder: "desc",
       select: ["thread_id", "metadata"],
     });
 
+    let pageAdvanced = false;
     for (const thread of response) {
+      if (seenThreadIds.has(thread.thread_id)) continue;
+      seenThreadIds.add(thread.thread_id);
+      pageAdvanced = true;
       if (
         isSidecarThread(thread) &&
         thread.metadata?.parent_thread_id === parentThreadId
       ) {
-        threadIds.push(thread.thread_id);
+        allThreadIds.push(thread.thread_id);
+        const expectedVersion = privateWorkThreadVersion(thread);
+        if (expectedVersion == null) {
+          incomplete = true;
+        } else {
+          threads.push({ threadId: thread.thread_id, expectedVersion });
+        }
       }
     }
 
-    if (response.length < limit) {
-      break;
+    if (response.length < SIDECAR_SEARCH_PAGE_LIMIT) {
+      return { threads, allThreadIds, incomplete };
+    }
+    if (!pageAdvanced) {
+      throw new Error("Sidecar thread pagination made no progress.");
+    }
+    if (!Number.isSafeInteger(offset + response.length)) {
+      throw new Error("Sidecar thread pagination exceeded the offset limit.");
     }
     offset += response.length;
   }
 
-  return threadIds;
+  throw new Error("Sidecar thread pagination exceeded the page limit.");
 }
 
-async function deleteSidecarThreadsForParent(
-  apiClient: ThreadDeleteClient,
+export async function findSidecarThreadIdsForParent(
+  apiClient: ThreadSidecarSearchClient,
   parentThreadId: string,
-  privateWork: ProjectPrivateWorkScope,
 ) {
-  let sidecarThreadIds: string[];
-  try {
-    sidecarThreadIds = await findSidecarThreadIdsForParent(
-      apiClient,
-      parentThreadId,
-    );
-  } catch (err) {
-    console.warn(
-      `Failed to look up sidecar threads for parent ${parentThreadId}; skipping cascade cleanup. Orphaned sidecar threads may remain.`,
-      err,
-    );
-    return [];
-  }
+  const discovery = await findSidecarThreadsForParent(
+    apiClient,
+    parentThreadId,
+  );
+  return discovery.allThreadIds;
+}
 
+type SidecarThreadCleanupResult = Readonly<{
+  deletedSidecarThreadIds: string[];
+  sidecarCleanupIncomplete: boolean;
+}>;
+
+async function deleteDiscoveredSidecarThreads(
+  sidecarThreads: DiscoveredSidecarThread[],
+  privateWork: ProjectPrivateWorkScope,
+  deleteRequest: typeof deleteProjectThread,
+  onDeleted?: (deletedThreadId: string) => Promise<void> | void,
+): Promise<SidecarThreadCleanupResult> {
   const results = await Promise.allSettled(
-    sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId, privateWork),
+    sidecarThreads.map(({ threadId, expectedVersion }) =>
+      deleteThreadEverywhere(
+        threadId,
+        privateWork,
+        expectedVersion,
+        deleteRequest,
+        onDeleted,
+      ),
     ),
   );
 
-  const failedDeletions = results
-    .map((result, index) =>
-      result.status === "rejected"
-        ? { threadId: sidecarThreadIds[index], reason: result.reason }
-        : null,
-    )
-    .filter((entry): entry is { threadId: string; reason: unknown } =>
-      Boolean(entry),
-    );
+  const failedDeletionCount = results.filter(
+    (result) => result.status === "rejected",
+  ).length;
 
-  if (failedDeletions.length > 0) {
-    console.warn(
-      `Failed to delete ${failedDeletions.length} sidecar thread(s) for parent ${parentThreadId}; orphaned sidecar threads may remain.`,
-      failedDeletions,
-    );
+  return {
+    deletedSidecarThreadIds: sidecarThreads.flatMap((thread, index) =>
+      results[index]?.status === "fulfilled" ? [thread.threadId] : [],
+    ),
+    sidecarCleanupIncomplete: failedDeletionCount > 0,
+  };
+}
+
+export async function deleteThreadWithSidecarCleanup(
+  apiClient: ThreadSidecarSearchClient,
+  threadId: string,
+  privateWork: ProjectPrivateWorkScope,
+  expectedVersion: number,
+  deleteRequest: typeof deleteProjectThread = deleteProjectThread,
+  onDeleted?: (deletedThreadId: string) => Promise<void> | void,
+): Promise<SidecarThreadCleanupResult> {
+  let discovery: SidecarThreadDiscovery | null = null;
+  try {
+    // Discovery is read-only and may happen first, but the parent is always the
+    // first destructive operation. A rejected parent delete therefore leaves
+    // every associated sidecar untouched.
+    discovery = await findSidecarThreadsForParent(apiClient, threadId);
+  } catch {
+    // The parent delete can still succeed. Surface the incomplete cleanup to
+    // the caller instead of silently claiming a complete cascade.
   }
 
-  return sidecarThreadIds.filter((_, index) => {
-    return results[index]?.status === "fulfilled";
-  });
+  await deleteThreadEverywhere(
+    threadId,
+    privateWork,
+    expectedVersion,
+    deleteRequest,
+    onDeleted,
+  );
+
+  if (discovery == null) {
+    return {
+      deletedSidecarThreadIds: [],
+      sidecarCleanupIncomplete: true,
+    };
+  }
+  const cleanup = await deleteDiscoveredSidecarThreads(
+    discovery.threads,
+    privateWork,
+    deleteRequest,
+    onDeleted,
+  );
+  return {
+    ...cleanup,
+    sidecarCleanupIncomplete:
+      discovery.incomplete || cleanup.sidecarCleanupIncomplete,
+  };
+}
+
+function removeDeletedThreadsFromCatalogCaches(
+  queryClient: QueryClient,
+  scope: ProjectPrivateWorkScope["scope"],
+  deletedThreadIds: ReadonlySet<string>,
+): void {
+  queryClient.setQueriesData(
+    {
+      queryKey: scopedThreadQueryKey(scope, "threads", "search"),
+      exact: false,
+    },
+    (oldData: Array<AgentThread> | undefined) => {
+      if (oldData == null) return oldData;
+      return oldData.filter(
+        (thread) => !deletedThreadIds.has(thread.thread_id),
+      );
+    },
+  );
+  queryClient.setQueriesData(
+    {
+      queryKey: scopedThreadQueryKey(
+        scope,
+        ...INFINITE_THREADS_QUERY_KEY_PREFIX,
+      ),
+      exact: false,
+    },
+    (oldData: InfiniteData<AgentThread[]> | undefined) =>
+      filterInfiniteThreadsCache(
+        oldData,
+        (thread) => !deletedThreadIds.has(thread.thread_id),
+      ),
+  );
 }
 
 export function useDeleteThread(explicitPrivateWork?: ProjectPrivateWorkScope) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
   const queryClient = useQueryClient();
-  const apiClient = privateWork.client as ThreadDeleteClient;
+  const apiClient = privateWork.client as ThreadSidecarSearchClient;
   return useMutation({
     mutationFn: async ({
       threadId,
-      onRemoteDeleted,
+      expectedVersion,
     }: {
       threadId: string;
-      onRemoteDeleted?: () => void;
+      expectedVersion: number;
     }) => {
-      const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
+      return deleteThreadWithSidecarCleanup(
         apiClient,
         threadId,
         privateWork,
+        expectedVersion,
+        deleteProjectThread,
+        async (deletedThreadId) => {
+          clearProjectThreadRuntimeState(privateWork.scope, deletedThreadId);
+          await removeDeletedThreadCaches(
+            queryClient,
+            deletedThreadId,
+            privateWork.scope,
+          );
+          removeDeletedThreadsFromCatalogCaches(
+            queryClient,
+            privateWork.scope,
+            new Set([deletedThreadId]),
+          );
+        },
       );
-      await deleteThreadEverywhere(apiClient, threadId, privateWork);
-      onRemoteDeleted?.();
-      return deletedSidecarThreadIds;
     },
-    onSuccess(deletedSidecarThreadIds, { threadId }) {
-      const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
-      queryClient.setQueriesData(
-        {
-          queryKey: scopedThreadQueryKey(
-            privateWork.scope,
-            "threads",
-            "search",
-          ),
-          exact: false,
-        },
-        (oldData: Array<AgentThread> | undefined) => {
-          if (oldData == null) {
-            return oldData;
-          }
-          return oldData.filter((t) => !deletedThreadIds.has(t.thread_id));
-        },
-      );
-      queryClient.setQueriesData(
-        {
-          queryKey: scopedThreadQueryKey(
-            privateWork.scope,
-            ...INFINITE_THREADS_QUERY_KEY_PREFIX,
-          ),
-          exact: false,
-        },
-        (oldData: InfiniteData<AgentThread[]> | undefined) =>
-          filterInfiniteThreadsCache(
-            oldData,
-            (t) => !deletedThreadIds.has(t.thread_id),
-          ),
+    onSuccess(result, { threadId }) {
+      const deletedThreadIds = new Set([
+        threadId,
+        ...result.deletedSidecarThreadIds,
+      ]);
+      removeDeletedThreadsFromCatalogCaches(
+        queryClient,
+        privateWork.scope,
+        deletedThreadIds,
       );
     },
 
-    onSettled() {
+    onSettled(_data, error, { threadId }) {
+      if (error) {
+        void queryClient.invalidateQueries({
+          queryKey: scopedThreadQueryKey(
+            privateWork.scope,
+            "thread",
+            "metadata",
+            threadId,
+          ),
+        });
+      }
       void queryClient.invalidateQueries({
         queryKey: scopedThreadQueryKey(privateWork.scope, "threads", "search"),
       });

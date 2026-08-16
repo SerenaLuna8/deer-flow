@@ -1,5 +1,6 @@
 import type { InfiniteData, QueryClient } from "@tanstack/react-query";
 
+import { privateWorkRoot } from "../private-work/query-keys";
 import type { ProjectClientScope } from "../private-work/types";
 
 import { threadContextUsageQueryKey } from "./context-usage";
@@ -7,6 +8,32 @@ import { INFINITE_THREADS_QUERY_KEY_PREFIX } from "./thread-lists";
 import { scopedThreadQueryKey } from "./thread-query-key";
 import { threadTokenUsageQueryKey } from "./token-usage";
 import type { AgentThread } from "./types";
+
+function isExactScopedThreadQuery(
+  queryKey: readonly unknown[],
+  scope: ProjectClientScope,
+  threadId: string,
+): boolean {
+  const root = privateWorkRoot(scope);
+  if (
+    queryKey.length <= root.length ||
+    !root.every((segment, index) => queryKey[index] === segment)
+  ) {
+    return false;
+  }
+  return queryKey.slice(root.length).some((segment) => segment === threadId);
+}
+
+export async function removeDeletedThreadCaches(
+  queryClient: QueryClient,
+  threadId: string,
+  scope: ProjectClientScope,
+): Promise<void> {
+  const predicate = (query: { queryKey: readonly unknown[] }) =>
+    isExactScopedThreadQuery(query.queryKey, scope, threadId);
+  await queryClient.cancelQueries({ predicate });
+  queryClient.removeQueries({ predicate });
+}
 
 export function upsertThreadInSearchCache(
   queryClient: QueryClient,

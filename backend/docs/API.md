@@ -9,7 +9,7 @@ Gateway 只公开认证账户、项目和平台管理 API。除公开认证入�
 | `/api/v1/auth/*` | account | 登录、登出、账户和 OAuth |
 | `/api/projects` | account | 项目列表与创建 |
 | `/api/projects/{project_id}` | project | 项目详情、成员、readiness 和资产 binding |
-| `/api/projects/{project_id}/private-work/threads` | project + owner | Thread 搜索、创建、更新、删除 |
+| `/api/projects/{project_id}/private-work/threads` | project + owner | Thread 搜索、创建、更新、删除；删除使用确认版本 CAS，并在 tombstone 前强制终结该 Thread 的 Run/Job/Attempt、审批与 durable stream |
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/runs` | project + owner | private Run admission、stream、feed；feedback 使用 GET/PUT/DELETE，POST 仅保留弃用兼容 |
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/execution-approvals/active` and `/{approval_id}` | project + owner | Local host command active/by-id 状态；terminal 请求通过 by-id 恢复 |
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{source_run_id}/execution-approvals/{approval_id}/decision` | project + owner | `allow_once` / `deny` CAS 决策；命令 authority 始终来自服务端冻结计划 |

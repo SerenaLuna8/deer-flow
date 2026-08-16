@@ -183,18 +183,19 @@ async def run_worker(
                 make_checkpointer(config),
             )
             store = await stack.enter_async_context(make_store(config))
+            run_event_store = DbRunEventStore(
+                session_factory,
+                run_event_notify_enabled=run_event_notify_enabled,
+            )
             project_checkpointer = ProjectScopedCheckpointer(
                 raw_checkpointer,
                 session_factory,
                 quota=quota_enforcer,
+                run_event_store=run_event_store,
             )
             model_materializer = SystemModelMaterializer(session_factory)
             runtime_policy_materializer = SystemRuntimePolicyMaterializer(
                 session_factory,
-            )
-            run_event_store = DbRunEventStore(
-                session_factory,
-                run_event_notify_enabled=run_event_notify_enabled,
             )
             executor = RunAgentPrivateExecutor(
                 session_factory,

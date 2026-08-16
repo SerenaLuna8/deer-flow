@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -37,6 +37,18 @@ class PrivateThreadRecord:
     version: int
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointDeleteCandidate:
+    """Content-free coordinates for idempotent raw checkpoint cleanup."""
+
+    thread_id: str
+    project_id: uuid.UUID
+    owner_user_id: str
+    thread_kind: Literal["chat", "skill_builder"]
+    created_at: datetime
+    deleted_at: datetime
 
 
 _UNSET = object()
@@ -153,6 +165,31 @@ class PrivateThreadRepository:
                 thread_id,
                 thread_kind=thread_kind,
             )
+        )
+        if lock:
+            statement = statement.with_for_update(of=ThreadMetaRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        return None if row is None else self._record(row)
+
+    async def get_deleted(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        thread_id: str,
+        lock: bool = False,
+        thread_kind: str = "chat",
+    ) -> PrivateThreadRecord | None:
+        """Return an exact scoped tombstone without exposing it to normal reads."""
+
+        project_id, owner_user_id = self._coordinates(scope)
+        if thread_kind not in {"chat", "skill_builder"}:
+            raise PrivateWorkConflict("unknown")
+        statement = select(ThreadMetaRow).where(
+            ThreadMetaRow.thread_id == thread_id,
+            ThreadMetaRow.project_id == project_id,
+            ThreadMetaRow.owner_user_id == owner_user_id,
+            ThreadMetaRow.thread_kind == thread_kind,
+            ThreadMetaRow.deleted_at.is_not(None),
         )
         if lock:
             statement = statement.with_for_update(of=ThreadMetaRow)
@@ -321,8 +358,17 @@ class PrivateThreadRepository:
         scope: PrivateResourceScope,
         thread_id: str,
         status: str,
-    ) -> None:
+        thread_kind: str | None = None,
+    ) -> bool:
+        if status not in {"complete", "retry_required"}:
+            raise PrivateWorkConflict("unknown")
+        if thread_kind is not None and thread_kind not in {
+            "chat",
+            "skill_builder",
+        }:
+            raise PrivateWorkConflict("unknown")
         project_id, owner_user_id = self._coordinates(scope)
+        target_statuses = ("pending", "retry_required")
         statement = (
             update(ThreadMetaRow)
             .where(
@@ -330,13 +376,85 @@ class PrivateThreadRepository:
                 ThreadMetaRow.project_id == project_id,
                 ThreadMetaRow.owner_user_id == owner_user_id,
                 ThreadMetaRow.deleted_at.is_not(None),
+                ThreadMetaRow.checkpoint_delete_status.in_(target_statuses),
             )
             .values(
                 checkpoint_delete_status=status,
-                updated_at=datetime.now(UTC),
+                updated_at=func.clock_timestamp(),
             )
+            .returning(ThreadMetaRow.thread_id)
         )
-        await self.session.execute(statement)
+        if thread_kind is not None:
+            statement = statement.where(ThreadMetaRow.thread_kind == thread_kind)
+        return (await self.session.execute(statement)).scalar_one_or_none() is not None
+
+    async def list_checkpoint_delete_candidates(
+        self,
+        *,
+        limit: int,
+    ) -> tuple[CheckpointDeleteCandidate, ...]:
+        """Select durable cleanup work without holding locks across raw I/O."""
+
+        if not 1 <= limit <= 1000:
+            raise PrivateWorkConflict("unknown")
+        rows = (
+            (
+                await self.session.execute(
+                    select(ThreadMetaRow)
+                    .where(
+                        ThreadMetaRow.deleted_at.is_not(None),
+                        ThreadMetaRow.checkpoint_delete_status.in_(
+                            ("pending", "retry_required"),
+                        ),
+                    )
+                    .order_by(
+                        ThreadMetaRow.updated_at,
+                        ThreadMetaRow.thread_id,
+                    )
+                    .limit(limit)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return tuple(
+            CheckpointDeleteCandidate(
+                thread_id=row.thread_id,
+                project_id=row.project_id,
+                owner_user_id=row.owner_user_id,
+                thread_kind=row.thread_kind,
+                created_at=row.created_at,
+                deleted_at=row.deleted_at,
+            )
+            for row in rows
+            if row.deleted_at is not None
+        )
+
+    async def lock_checkpoint_delete_candidate(
+        self,
+        candidate: CheckpointDeleteCandidate,
+    ) -> bool:
+        """Fence raw cleanup to the exact still-pending tombstone generation."""
+
+        row = (
+            await self.session.execute(
+                select(ThreadMetaRow.thread_id)
+                .where(
+                    ThreadMetaRow.thread_id == candidate.thread_id,
+                    ThreadMetaRow.project_id == candidate.project_id,
+                    ThreadMetaRow.owner_user_id == candidate.owner_user_id,
+                    ThreadMetaRow.thread_kind == candidate.thread_kind,
+                    ThreadMetaRow.created_at == candidate.created_at,
+                    ThreadMetaRow.deleted_at == candidate.deleted_at,
+                    ThreadMetaRow.checkpoint_delete_status.in_(
+                        ("pending", "retry_required"),
+                    ),
+                )
+                .with_for_update(of=ThreadMetaRow)
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        return row is not None
 
     async def purge_compensated_create(
         self,

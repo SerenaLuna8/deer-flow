@@ -4,6 +4,7 @@ import {
   acceptProjectStreamFrame,
   advanceProjectStreamCursorState,
   clearProjectReconnectStorage,
+  clearProjectThreadRuntimeState,
   disposeProjectAPIClient,
   emptyProjectStreamCursorState,
   getProjectAPIClient,
@@ -24,6 +25,11 @@ const SCOPE = {
   projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
 };
 const THREAD_ID = "22222222-2222-4222-8222-222222222222";
+const OTHER_THREAD_ID = "33333333-3333-4333-8333-333333333333";
+const OTHER_SCOPE = {
+  accountId: SCOPE.accountId,
+  projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+};
 
 function makeSessionStorage() {
   const values = new Map<string, string>();
@@ -40,7 +46,9 @@ function makeSessionStorage() {
 
 afterEach(() => {
   clearProjectReconnectStorage(SCOPE);
+  clearProjectReconnectStorage(OTHER_SCOPE);
   disposeProjectAPIClient(SCOPE);
+  disposeProjectAPIClient(OTHER_SCOPE);
   rs.unstubAllGlobals();
 });
 
@@ -78,6 +86,107 @@ describe("private stream reconnect", () => {
     expect(current.getItem(key)).toBe("run-new");
     current.removeItem(key);
     expect(current.getItem(key)).toBeNull();
+  });
+
+  test("deleted-thread teardown aborts and blocks only that thread runtime", async () => {
+    const storage = makeSessionStorage();
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+
+    let targetSignal: AbortSignal | undefined;
+    let otherSignal: AbortSignal | undefined;
+    let markTargetStarted!: () => void;
+    let markOtherStarted!: () => void;
+    const targetStarted = new Promise<void>((resolve) => {
+      markTargetStarted = resolve;
+    });
+    const otherStarted = new Promise<void>((resolve) => {
+      markOtherStarted = resolve;
+    });
+    const pendingResponse = (signal: AbortSignal | null | undefined) =>
+      new Promise<Response>((_resolve, reject) => {
+        signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      });
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(async (input: string | URL, init?: RequestInit) => {
+        const url = input.toString();
+        if (url.includes(THREAD_ID)) {
+          targetSignal = init?.signal ?? undefined;
+          markTargetStarted();
+          return await pendingResponse(targetSignal);
+        }
+        if (url.includes(OTHER_THREAD_ID)) {
+          otherSignal = init?.signal ?? undefined;
+          markOtherStarted();
+          return await pendingResponse(otherSignal);
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      }),
+    );
+
+    const client = getProjectAPIClient(SCOPE);
+    getProjectAPIClient(OTHER_SCOPE);
+    const targetReconnect = projectReconnectStorage(SCOPE);
+    const otherProjectReconnect = projectReconnectStorage(OTHER_SCOPE);
+    const targetReconnectKey = `lg:stream:${THREAD_ID}` as const;
+    const otherThreadReconnectKey = `lg:stream:${OTHER_THREAD_ID}` as const;
+    targetReconnect.setItem(targetReconnectKey, "run-target");
+    targetReconnect.setItem(otherThreadReconnectKey, "run-other");
+    otherProjectReconnect.setItem(targetReconnectKey, "run-other-project");
+    storage.setItem(
+      projectStreamCursorStorageKey(SCOPE, THREAD_ID),
+      JSON.stringify({ lastEventId: "9", terminalRunId: null }),
+    );
+    storage.setItem(
+      projectStreamCursorStorageKey(SCOPE, OTHER_THREAD_ID),
+      JSON.stringify({ lastEventId: "8", terminalRunId: null }),
+    );
+    storage.setItem(
+      projectStreamCursorStorageKey(OTHER_SCOPE, THREAD_ID),
+      JSON.stringify({ lastEventId: "7", terminalRunId: null }),
+    );
+
+    const targetJoin = client.runs
+      .joinStream(THREAD_ID, "run-target")
+      .next()
+      .catch((error: unknown) => error);
+    const otherJoin = client.runs
+      .joinStream(OTHER_THREAD_ID, "run-other")
+      .next()
+      .catch((error: unknown) => error);
+    await Promise.all([targetStarted, otherStarted]);
+
+    clearProjectThreadRuntimeState(SCOPE, THREAD_ID);
+
+    expect(targetSignal?.aborted).toBe(true);
+    expect(otherSignal?.aborted).toBe(false);
+    expect(targetReconnect.getItem(targetReconnectKey)).toBeNull();
+    targetReconnect.setItem(targetReconnectKey, "run-late");
+    expect(targetReconnect.getItem(targetReconnectKey)).toBeNull();
+    expect(targetReconnect.getItem(otherThreadReconnectKey)).toBe("run-other");
+    expect(otherProjectReconnect.getItem(targetReconnectKey)).toBe(
+      "run-other-project",
+    );
+    expect(
+      storage.getItem(projectStreamCursorStorageKey(SCOPE, THREAD_ID)),
+    ).toBeNull();
+    expect(
+      storage.getItem(projectStreamCursorStorageKey(SCOPE, OTHER_THREAD_ID)),
+    ).not.toBeNull();
+    expect(
+      storage.getItem(projectStreamCursorStorageKey(OTHER_SCOPE, THREAD_ID)),
+    ).not.toBeNull();
+
+    await targetJoin;
+    disposeProjectAPIClient(SCOPE);
+    await otherJoin;
   });
 
   test("scope disposal aborts a join and ignores its late frame", async () => {

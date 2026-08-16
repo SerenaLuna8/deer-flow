@@ -2246,7 +2246,7 @@ export const zhCN: Translations = {
     close: "关闭侧边对话",
     delete: "删除侧边对话",
     deleteConfirm:
-      "确定要删除该侧边对话吗？此操作不可撤销。如果只是想隐藏，请使用顶部的侧边对话开关。",
+      "确定要删除该侧边对话吗？若会话仍在运行，删除会立即停止本次运行；已经发出的外部操作可能无法撤回。此操作不可撤销。如果只是想隐藏，请使用顶部的侧边对话开关。",
     deleteSuccess: "侧边对话已删除",
     deleteFailed: "删除侧边对话失败。",
     addToConversation: "添加到对话",
