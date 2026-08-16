@@ -34,13 +34,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { PromptInputFilePart } from "@/core/uploads";
+import type {
+  AttachmentUploadStatus,
+  PromptInputFilePart,
+} from "@/core/uploads";
 import { splitUnsupportedUploadFiles } from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
 import {
   ArrowUpIcon,
+  CheckIcon,
+  CircleAlertIcon,
   ImageIcon,
   Loader2Icon,
   MicIcon,
@@ -294,11 +299,19 @@ export const usePromptInputAttachments = () => {
 export type PromptInputAttachmentProps = HTMLAttributes<HTMLDivElement> & {
   data: PromptInputFilePart & { id: string };
   className?: string;
+  onRemove?: (data: PromptInputFilePart & { id: string }) => boolean | void;
+  removable?: boolean;
+  uploadStatus?: AttachmentUploadStatus;
+  uploadStatusLabel?: string;
 };
 
 export function PromptInputAttachment({
   data,
   className,
+  onRemove,
+  removable = true,
+  uploadStatus,
+  uploadStatusLabel,
   ...props
 }: PromptInputAttachmentProps) {
   const attachments = usePromptInputAttachments();
@@ -319,6 +332,7 @@ export function PromptInputAttachment({
             "group border-border hover:bg-accent hover:text-accent-foreground dark:hover:bg-accent/50 relative flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-1.5 text-sm font-medium transition-all select-none",
             className,
           )}
+          data-upload-status={uploadStatus}
           key={data.id}
           {...props}
         >
@@ -340,9 +354,17 @@ export function PromptInputAttachment({
             </div>
             <Button
               aria-label="Remove attachment"
-              className="absolute inset-0 size-5 cursor-pointer rounded p-0 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 [&>svg]:size-2.5"
+              className={cn(
+                "absolute inset-0 size-5 rounded p-0 opacity-0 transition-opacity [&>svg]:size-2.5",
+                removable
+                  ? "cursor-pointer group-hover:pointer-events-auto group-hover:opacity-100"
+                  : "hidden",
+              )}
+              disabled={!removable}
               onClick={(e) => {
                 e.stopPropagation();
+                if (!removable) return;
+                if (onRemove?.(data) === false) return;
                 attachments.remove(data.id);
               }}
               type="button"
@@ -354,6 +376,27 @@ export function PromptInputAttachment({
           </div>
 
           <span className="flex-1 truncate">{attachmentLabel}</span>
+          {uploadStatus && (
+            <span
+              aria-label={uploadStatusLabel ?? uploadStatus}
+              className={cn(
+                "flex size-4 shrink-0 items-center justify-center",
+                uploadStatus === "ready" && "text-emerald-600",
+                uploadStatus === "error" && "text-destructive",
+                uploadStatus === "uploading" && "text-muted-foreground",
+              )}
+              role="status"
+              title={uploadStatusLabel ?? uploadStatus}
+            >
+              {uploadStatus === "uploading" ? (
+                <Loader2Icon className="size-3 animate-spin" />
+              ) : uploadStatus === "ready" ? (
+                <CheckIcon className="size-3" />
+              ) : (
+                <CircleAlertIcon className="size-3" />
+              )}
+            </span>
+          )}
         </div>
       </HoverCardTrigger>
       <PromptInputHoverCardContent className="w-auto p-2">

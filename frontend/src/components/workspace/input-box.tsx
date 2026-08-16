@@ -69,8 +69,11 @@ import { textOfMessage } from "@/core/threads/utils";
 import {
   formatUploadSize,
   splitUnsupportedUploadFiles,
+  uploadFailureMessage,
   useUploadLimits,
   validateUploadLimits,
+  type AttachmentUploadStatus,
+  type PromptInputFilePart,
   type UploadLimitViolation,
 } from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
@@ -147,6 +150,9 @@ export function InputBox({
   compactCommandEnabled = true,
   memoryRoutePath,
   uploadsEnabled = true,
+  attachmentUploadStatuses,
+  onDiscardAttachment,
+  onPrepareAttachments,
   followupSuggestionsEnabled = true,
   onSubmit,
   onStop,
@@ -202,6 +208,12 @@ export function InputBox({
   compactCommandEnabled?: boolean;
   memoryRoutePath?: string;
   uploadsEnabled?: boolean;
+  attachmentUploadStatuses?: Readonly<Record<string, AttachmentUploadStatus>>;
+  onDiscardAttachment?: (threadId: string, clientId: string) => boolean;
+  onPrepareAttachments?: (
+    threadId: string,
+    files: PromptInputFilePart[],
+  ) => Promise<void>;
   followupSuggestionsEnabled?: boolean;
   onSubmit?: (
     message: PromptInputMessage,
@@ -249,6 +261,7 @@ export function InputBox({
   const promptRootRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const inlineSkillTextRef = useRef<HTMLSpanElement | null>(null);
+  const attachmentPreuploadSignatureRef = useRef<string | null>(null);
   const inlineSkillComposingRef = useRef(false);
   const latestCheckpointContinuationRef = useRef(
     createLatestCheckpointContinuationState(),
@@ -418,10 +431,16 @@ export function InputBox({
         ? [{ id: attachment.id, file: attachment.file }]
         : [],
     );
+    const projectStorageFiles = new Set(
+      attachmentEntries.flatMap((entry) =>
+        attachmentUploadStatuses?.[entry.id] === "ready" ? [] : [entry.file],
+      ),
+    );
     const validation = validateUploadLimits(
       [],
       attachmentEntries.map(({ file }) => file),
       uploadLimits,
+      { projectStorageFiles },
     );
     if (validation.rejected.length === 0) {
       return;
@@ -429,16 +448,95 @@ export function InputBox({
 
     const rejected = new Set(validation.rejected);
     for (const entry of attachmentEntries) {
-      if (rejected.has(entry.file)) {
+      if (
+        rejected.has(entry.file) &&
+        (onDiscardAttachment?.(threadId, entry.id) ?? true)
+      ) {
         removeAttachment(entry.id);
       }
     }
     reportUploadLimitViolations(validation.violations);
   }, [
     attachmentParts,
+    attachmentUploadStatuses,
+    onDiscardAttachment,
     removeAttachment,
     reportUploadLimitViolations,
+    threadId,
     uploadLimits,
+  ]);
+
+  useEffect(() => {
+    if (
+      !uploadsEnabled ||
+      !threadExists ||
+      isMock ||
+      !onPrepareAttachments ||
+      attachmentParts.length === 0
+    ) {
+      return;
+    }
+
+    const rejected = uploadLimits
+      ? new Set(
+          validateUploadLimits(
+            [],
+            attachmentParts.flatMap((attachment) =>
+              attachment.file instanceof File ? [attachment.file] : [],
+            ),
+            uploadLimits,
+            {
+              projectStorageFiles: new Set(
+                attachmentParts.flatMap((attachment) =>
+                  attachment.file instanceof File &&
+                  attachmentUploadStatuses?.[attachment.id] !== "ready"
+                    ? [attachment.file]
+                    : [],
+                ),
+              ),
+            },
+          ).rejected,
+        )
+      : new Set<File>();
+    const files = attachmentParts.flatMap(({ id, ...attachment }) =>
+      attachment.file instanceof File && !rejected.has(attachment.file)
+        ? [{ ...attachment, clientId: id }]
+        : [],
+    );
+    if (files.length === 0) return;
+
+    const signature = `${privateWork.scope.accountId}:${privateWork.scope.projectId}:${threadId}:${attachmentParts
+      .map((attachment) => attachment.id)
+      .join(",")}`;
+    if (attachmentPreuploadSignatureRef.current === signature) return;
+    attachmentPreuploadSignatureRef.current = signature;
+
+    void onPrepareAttachments(threadId, files).catch((error: unknown) => {
+      if (isAbortError(error)) return;
+      toast.error(
+        uploadFailureMessage(error, {
+          tooLarge: t.uploads.serverTooLarge,
+          storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+          preflightRejected: t.uploads.preflightRejected,
+          fallback: t.uploads.uploadFailed,
+        }),
+      );
+    });
+  }, [
+    attachmentParts,
+    attachmentUploadStatuses,
+    isMock,
+    onPrepareAttachments,
+    privateWork.scope.accountId,
+    privateWork.scope.projectId,
+    t.uploads.preflightRejected,
+    t.uploads.serverTooLarge,
+    t.uploads.storageQuotaExceeded,
+    t.uploads.uploadFailed,
+    threadExists,
+    threadId,
+    uploadLimits,
+    uploadsEnabled,
   ]);
 
   const modelSelection = useMemo(
@@ -810,10 +908,23 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
-      const files = message.files.flatMap((file) =>
-        file.file instanceof File ? [file.file] : [],
+      const fileEntries = message.files.flatMap((filePart) =>
+        filePart.file instanceof File
+          ? [{ clientId: filePart.clientId, file: filePart.file }]
+          : [],
       );
-      const uploadValidation = validateUploadLimits([], files, uploadLimits);
+      const files = fileEntries.map(({ file }) => file);
+      const projectStorageFiles = new Set(
+        fileEntries.flatMap((entry) =>
+          entry.clientId &&
+          attachmentUploadStatuses?.[entry.clientId] === "ready"
+            ? []
+            : [entry.file],
+        ),
+      );
+      const uploadValidation = validateUploadLimits([], files, uploadLimits, {
+        projectStorageFiles,
+      });
       if (uploadValidation.violations.length > 0) {
         reportUploadLimitViolations(uploadValidation.violations);
         return Promise.reject(new Error("Attachment limits exceeded."));
@@ -902,6 +1013,7 @@ export function InputBox({
       return submit();
     },
     [
+      attachmentUploadStatuses,
       context,
       draftKey,
       onContextChange,
@@ -1763,7 +1875,23 @@ export function InputBox({
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
-                <PromptInputAttachment data={attachment} />
+                <PromptInputAttachment
+                  data={attachment}
+                  removable={!composerLocked}
+                  onRemove={() =>
+                    onDiscardAttachment?.(threadId, attachment.id)
+                  }
+                  uploadStatus={attachmentUploadStatuses?.[attachment.id]}
+                  uploadStatusLabel={
+                    attachmentUploadStatuses?.[attachment.id] === "uploading"
+                      ? t.uploads.uploading
+                      : attachmentUploadStatuses?.[attachment.id] === "ready"
+                        ? t.uploads.ready
+                        : attachmentUploadStatuses?.[attachment.id] === "error"
+                          ? t.uploads.uploadFailed
+                          : undefined
+                  }
+                />
               </div>
             )}
           </PromptInputAttachments>

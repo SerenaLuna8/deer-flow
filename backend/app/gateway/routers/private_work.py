@@ -411,6 +411,7 @@ class PrivateFileResponse(StrictPrivateWorkResponse):
 
 class PrivateFileDeleteResponse(StrictPrivateWorkResponse):
     success: bool
+    deleted: bool
 
 
 class PrivateUploadProjectStorageResponse(StrictPrivateWorkResponse):
@@ -1512,17 +1513,19 @@ async def delete_private_file(
     thread_id: uuid.UUID,
     request: Request,
     file_id: uuid.UUID = Query(),
+    only_if_unreferenced: bool = Query(default=False),
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateFileDeleteResponse:
     try:
-        await _file_service(request, context.request_id).delete_ready(
+        deleted = await _file_service(request, context.request_id).delete_ready(
             context,
             thread_id=str(thread_id),
             file_id=file_id,
+            only_if_unreferenced=only_if_unreferenced,
         )
     except PrivateWorkError as error:
         _raise_http(error)
-    return PrivateFileDeleteResponse(success=True)
+    return PrivateFileDeleteResponse(success=True, deleted=deleted is not None)
 
 
 @router.get("/threads/{thread_id}/files/{file_id}")

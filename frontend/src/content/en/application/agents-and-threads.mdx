@@ -107,6 +107,11 @@ PostgreSQL drivers are default dependencies. A standalone `checkpointer` configu
 
 ### Thread data storage
 
+When you select, paste, or drop an attachment into a persisted thread, ActWeave
+starts uploading it in the background while you continue typing. Sending waits
+only for any unfinished portion and reuses the ready upload; it does not upload
+the same attachment a second time.
+
 Working files produced during a thread (uploads, intermediate files, output artifacts) are stored under:
 
 ```

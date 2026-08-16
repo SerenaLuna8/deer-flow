@@ -35,8 +35,15 @@ import { useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
 import { parseSubtaskTerminalEvent } from "../tasks/subtask-result";
-import type { UploadedFileInfo } from "../uploads";
+import type {
+  AttachmentUploadCandidate,
+  AttachmentUploadStatus,
+  PromptInputFilePart,
+  UploadedFileInfo,
+} from "../uploads";
 import {
+  AttachmentUploadCoordinator,
+  deleteUploadedFile,
   promptInputFilePartToFile,
   uploadFailureMessage,
   uploadFiles,
@@ -81,14 +88,9 @@ import {
   buildThreadSubmitMessages,
   createMessageSendAttempt,
   createRunAdmissionLatch,
-  createUploadedAttachmentRefCache,
-  forgetUploadedAttachmentRefs,
   isCurrentMessageSendAttempt,
   isCurrentThreadCallback,
   monitorRunAdmissionLifecycle,
-  planAttachmentUploadRetry,
-  rememberUploadedAttachmentRef,
-  retainUploadedAttachmentRefs,
   shouldIgnoreMetadataLessStreamError,
   shouldIgnoreAttributedThreadCallback,
   staleMessageSendError,
@@ -137,12 +139,48 @@ export type ThreadStreamOptions = {
 
 type PendingMessageAdmission = {
   threadId: string;
+  uploadStatusScopeKey: string;
   attempt: MessageSendAttempt;
-  latch: RunAdmissionLatch;
+  serverAdmission: RunAdmissionLatch;
+  composerAdmission: RunAdmissionLatch;
   optimisticMessages: Message[];
-  uploadedClientIds: Array<string | undefined>;
+  uploadedClientIds: string[];
   onSent?: () => void;
 };
+
+type AttachmentUploadClaim = {
+  threadId: string;
+  coordinatorScopeKey: string;
+  clientIds: string[];
+  cleanup: (uploaded: UploadedFileInfo) => void;
+};
+
+function attachmentUploadCoordinatorScopeKey(
+  accountId: string,
+  projectId: string,
+  threadId: string,
+): string {
+  return JSON.stringify([accountId, projectId, threadId]);
+}
+
+async function preparePromptAttachments(
+  fileParts: readonly PromptInputFilePart[],
+  fallbackClientId: (index: number) => string,
+): Promise<AttachmentUploadCandidate[]> {
+  const prepared = await Promise.all(
+    fileParts.map(async (filePart, index) => ({
+      clientId: filePart.clientId ?? fallbackClientId(index),
+      file: await promptInputFilePartToFile(filePart),
+    })),
+  );
+  const failedConversions = prepared.filter(({ file }) => file === null).length;
+  if (failedConversions > 0) {
+    throw new Error(
+      `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
+    );
+  }
+  return prepared as AttachmentUploadCandidate[];
+}
 
 type RegeneratePrepareResponse = {
   input: Partial<AgentThreadState>;
@@ -263,6 +301,7 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const uploadScopeKey = `${privateWork.scope.accountId}:${privateWork.scope.projectId}`;
   const { t } = useI18n();
   const { models: executionModels } = useModels({ enabled: !isMock });
   const executionModelSelection = useMemo(
@@ -303,6 +342,8 @@ export function useThreadStream({
   const currentViewThreadId = displayThreadId ?? threadId ?? null;
   const currentViewThreadIdRef = useRef(currentViewThreadId);
   currentViewThreadIdRef.current = currentViewThreadId;
+  const currentUploadStatusScopeKeyRef = useRef(uploadScopeKey);
+  currentUploadStatusScopeKeyRef.current = uploadScopeKey;
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
@@ -317,6 +358,17 @@ export function useThreadStream({
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
   const [isUploading, setIsUploading] = useState(false);
+  const [attachmentUploadStatusState, setAttachmentUploadStatusState] =
+    useState<
+      Record<
+        string,
+        {
+          scopeKey: string;
+          threadId: string;
+          status: AttachmentUploadStatus;
+        }
+      >
+    >({});
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
   // Ref to track current thread ID across async callbacks without causing re-renders,
@@ -332,9 +384,42 @@ export function useThreadStream({
   const preparedReplayAttemptRef = useRef<PreparedReplayAttempt | null>(null);
   const messageSendGenerationRef = useRef(0);
   const activeMessageSendRef = useRef<MessageSendAttempt | null>(null);
-  const uploadedAttachmentRefsRef = useRef(createUploadedAttachmentRefCache());
+  const [attachmentUploadCoordinator] = useState(
+    () => new AttachmentUploadCoordinator(),
+  );
+  const cleanupUploadedAttachment = useCallback(
+    (targetThreadId: string, uploaded: UploadedFileInfo) => {
+      if (!uploaded.id) return;
+      void deleteUploadedFile(
+        targetThreadId,
+        uploaded.id,
+        privateWork,
+        undefined,
+        { onlyIfUnreferenced: true },
+      ).catch((error: unknown) => {
+        console.error("Failed to clean up an unused attachment upload.", error);
+        if (privateWork.isActive?.() ?? true) {
+          toast.error(t.uploads.cleanupFailed);
+        }
+      });
+    },
+    [privateWork, t.uploads.cleanupFailed],
+  );
+  const preuploadControllerRef = useRef<{
+    statusScopeKey: string;
+    coordinatorScopeKey: string;
+    threadId: string;
+    controller: AbortController;
+    cleanup: (uploaded: UploadedFileInfo) => void;
+  } | null>(null);
+  const attachmentUploadClaimsRef = useRef<
+    Map<MessageSendAttempt, AttachmentUploadClaim>
+  >(new Map());
   const pendingMessageAdmissionRef = useRef<PendingMessageAdmission | null>(
     null,
+  );
+  const detachedMessageAdmissionsRef = useRef<Set<PendingMessageAdmission>>(
+    new Set(),
   );
   const attachedContinuationRunIdsRef = useRef<Set<string>>(new Set());
   const [ignoredReplayHistoryError, setIgnoredReplayHistoryError] = useState<{
@@ -466,6 +551,31 @@ export function useThreadStream({
     [],
   );
 
+  const releaseAttachmentUploadClaim = useCallback(
+    (attempt: MessageSendAttempt) => {
+      const claim = attachmentUploadClaimsRef.current.get(attempt);
+      if (!claim) return;
+      attachmentUploadClaimsRef.current.delete(attempt);
+      attachmentUploadCoordinator.release(
+        claim.coordinatorScopeKey,
+        claim.clientIds,
+      );
+    },
+    [attachmentUploadCoordinator],
+  );
+  const consumeAttachmentUploadClaim = useCallback(
+    (attempt: MessageSendAttempt) => {
+      const claim = attachmentUploadClaimsRef.current.get(attempt);
+      if (!claim) return;
+      attachmentUploadClaimsRef.current.delete(attempt);
+      attachmentUploadCoordinator.consume(
+        claim.coordinatorScopeKey,
+        claim.clientIds,
+      );
+    },
+    [attachmentUploadCoordinator],
+  );
+
   const thread = useStream<AgentThreadState>({
     client: privateWork.client,
     assistantId: "lead_agent",
@@ -475,6 +585,14 @@ export function useThreadStream({
     throttle: true,
     onCreated(meta) {
       if (!streamOwnerMountedRef.current) return;
+      const pendingScope = pendingMessageAdmissionRef.current;
+      if (
+        pendingScope?.threadId === meta.thread_id &&
+        pendingScope.uploadStatusScopeKey !==
+          currentUploadStatusScopeKeyRef.current
+      ) {
+        return;
+      }
       // A submit started for a previously viewed thread may finish after the
       // hook has switched. It must not bind that old stream back into the new
       // projection or notify the new composer.
@@ -495,14 +613,24 @@ export function useThreadStream({
       const pendingAdmission = pendingMessageAdmissionRef.current;
       if (
         pendingAdmission?.threadId === meta.thread_id &&
+        pendingAdmission.uploadStatusScopeKey ===
+          currentUploadStatusScopeKeyRef.current &&
         pendingAdmission.attempt === activeMessageSendRef.current &&
-        pendingAdmission.latch.isPending()
+        pendingAdmission.serverAdmission.isPending()
       ) {
         pendingMessageAdmissionRef.current = null;
-        forgetUploadedAttachmentRefs(
-          uploadedAttachmentRefsRef.current,
-          meta.thread_id,
-          pendingAdmission.uploadedClientIds,
+        pendingAdmission.serverAdmission.admit();
+        consumeAttachmentUploadClaim(pendingAdmission.attempt);
+        const consumedClientIds = new Set(pendingAdmission.uploadedClientIds);
+        setAttachmentUploadStatusState((current) =>
+          Object.fromEntries(
+            Object.entries(current).filter(
+              ([clientId, entry]) =>
+                entry.scopeKey !== pendingAdmission.uploadStatusScopeKey ||
+                entry.threadId !== meta.thread_id ||
+                !consumedClientIds.has(clientId),
+            ),
+          ),
         );
         setLiveMessagesThreadId(meta.thread_id);
         if (pendingAdmission.optimisticMessages.length > 0) {
@@ -513,8 +641,10 @@ export function useThreadStream({
         // in this same React batch so the accepted user turn replaces, rather
         // than duplicates, its recoverable draft and attachments.
         setIsUploading(false);
-        admitRunAndNotify(pendingAdmission.latch, pendingAdmission.onSent, () =>
-          listeners.current.onSend?.(meta.thread_id),
+        admitRunAndNotify(
+          pendingAdmission.composerAdmission,
+          pendingAdmission.onSent,
+          () => listeners.current.onSend?.(meta.thread_id),
         );
       }
       const now = new Date().toISOString();
@@ -1014,13 +1144,50 @@ export function useThreadStream({
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
+    const effectThreadId = threadId ?? null;
+    const detachedAdmissions = detachedMessageAdmissionsRef.current;
+    const resetAttemptUploads = (attempt: MessageSendAttempt | null) => {
+      if (!attempt) return;
+      const claim = attachmentUploadClaimsRef.current.get(attempt);
+      if (claim) {
+        attachmentUploadCoordinator.resetScope(
+          claim.coordinatorScopeKey,
+          claim.cleanup,
+        );
+      }
+    };
+    const stalePreupload = preuploadControllerRef.current;
+    if (
+      stalePreupload &&
+      (stalePreupload.statusScopeKey !== uploadScopeKey ||
+        stalePreupload.threadId !== effectThreadId)
+    ) {
+      stalePreupload.controller.abort();
+      attachmentUploadCoordinator.resetScope(
+        stalePreupload.coordinatorScopeKey,
+        stalePreupload.cleanup,
+      );
+      preuploadControllerRef.current = null;
+    }
+    setAttachmentUploadStatusState((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([, entry]) =>
+            entry.scopeKey === uploadScopeKey &&
+            entry.threadId === effectThreadId,
+        ),
+      ),
+    );
     messageSendGenerationRef.current += 1;
-    activeMessageSendRef.current?.abortController.abort();
+    const activeAttempt = activeMessageSendRef.current;
+    activeAttempt?.abortController.abort();
+    resetAttemptUploads(activeAttempt);
     activeMessageSendRef.current = null;
     const pendingAdmission = pendingMessageAdmissionRef.current;
-    if (pendingAdmission?.latch.isPending()) {
+    if (pendingAdmission?.serverAdmission.isPending()) {
       pendingMessageAdmissionRef.current = null;
-      pendingAdmission.latch.reject(
+      detachedAdmissions.add(pendingAdmission);
+      pendingAdmission.composerAdmission.reject(
         new Error("The active thread changed before the Run was admitted."),
       );
     }
@@ -1043,22 +1210,37 @@ export function useThreadStream({
     setIsUploading(false);
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
-    const effectThreadId = threadId ?? null;
     return () => {
       messageSendGenerationRef.current += 1;
       const activeAttempt = activeMessageSendRef.current;
       if (activeAttempt?.threadId === effectThreadId) {
         activeAttempt.abortController.abort();
+        resetAttemptUploads(activeAttempt);
         activeMessageSendRef.current = null;
         sendInFlightRef.current = false;
       }
       const pending = pendingMessageAdmissionRef.current;
       if (pending?.threadId === effectThreadId) {
         pendingMessageAdmissionRef.current = null;
-        pending.latch.reject(staleMessageSendError());
+        detachedAdmissions.add(pending);
+        pending.composerAdmission.reject(staleMessageSendError());
+      }
+      if (effectThreadId) {
+        const preupload = preuploadControllerRef.current;
+        if (
+          preupload?.statusScopeKey === uploadScopeKey &&
+          preupload.threadId === effectThreadId
+        ) {
+          preupload.controller.abort();
+          attachmentUploadCoordinator.resetScope(
+            preupload.coordinatorScopeKey,
+            preupload.cleanup,
+          );
+          preuploadControllerRef.current = null;
+        }
       }
     };
-  }, [threadId]);
+  }, [attachmentUploadCoordinator, threadId, uploadScopeKey]);
 
   // Release archive-buffer entries once the canonical history state has absorbed
   // them, so the synchronous bridge stays transient and never resurrects a
@@ -1134,6 +1316,181 @@ export function useThreadStream({
     optimisticMessageCount,
   ]);
 
+  const updateAttachmentUploadStatus = useCallback(
+    (
+      statusThreadId: string,
+      clientId: string,
+      status: AttachmentUploadStatus,
+    ) => {
+      setAttachmentUploadStatusState((current) => {
+        const previous = current[clientId];
+        if (
+          previous?.scopeKey === uploadScopeKey &&
+          previous.threadId === statusThreadId &&
+          previous.status === status
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          [clientId]: {
+            scopeKey: uploadScopeKey,
+            threadId: statusThreadId,
+            status,
+          },
+        };
+      });
+    },
+    [uploadScopeKey],
+  );
+
+  const ensureAttachmentCandidates = useCallback(
+    async ({
+      targetThreadId,
+      coordinatorScopeKey,
+      candidates,
+      retryPendingFailure,
+      signal,
+    }: {
+      targetThreadId: string;
+      coordinatorScopeKey: string;
+      candidates: AttachmentUploadCandidate[];
+      retryPendingFailure: boolean;
+      signal?: AbortSignal;
+    }) =>
+      attachmentUploadCoordinator.ensure({
+        scopeKey: coordinatorScopeKey,
+        candidates,
+        retryPendingFailure,
+        signal,
+        onStatusChange: (clientId, status) =>
+          updateAttachmentUploadStatus(targetThreadId, clientId, status),
+        upload: async (files, onFileUploaded) => {
+          // View and private-work teardown abort the waiter, not this POST. The
+          // Gateway's ready-file finalization is cancellation-safe, so the
+          // response must return with its opaque id before abandoned-upload
+          // cleanup can safely DELETE it from the exact old scope.
+          await uploadFiles(
+            targetThreadId,
+            files,
+            privateWork,
+            undefined,
+            (uploaded, _file, index) => onFileUploaded(uploaded, index),
+          );
+        },
+      }),
+    [attachmentUploadCoordinator, privateWork, updateAttachmentUploadStatus],
+  );
+
+  const prepareAttachments = useCallback(
+    async (targetThreadId: string, fileParts: PromptInputFilePart[]) => {
+      if (fileParts.length === 0) return;
+      if (
+        targetThreadId !== currentViewThreadIdRef.current ||
+        uploadScopeKey !== currentUploadStatusScopeKeyRef.current ||
+        privateWork.isActive?.() === false
+      ) {
+        throw staleMessageSendError();
+      }
+      const cacheableParts = fileParts.filter(
+        (filePart): filePart is PromptInputFilePart & { clientId: string } =>
+          typeof filePart.clientId === "string" && filePart.clientId.length > 0,
+      );
+      if (cacheableParts.length === 0) return;
+
+      const prepared = await preparePromptAttachments(
+        cacheableParts,
+        (index) => `preupload-${index}`,
+      );
+      if (
+        targetThreadId !== currentViewThreadIdRef.current ||
+        uploadScopeKey !== currentUploadStatusScopeKeyRef.current ||
+        privateWork.isActive?.() === false
+      ) {
+        return;
+      }
+
+      const coordinatorScopeKey = attachmentUploadCoordinatorScopeKey(
+        privateWork.scope.accountId,
+        privateWork.scope.projectId,
+        targetThreadId,
+      );
+
+      let preupload = preuploadControllerRef.current;
+      if (
+        preupload?.statusScopeKey !== uploadScopeKey ||
+        preupload.threadId !== targetThreadId ||
+        preupload.controller.signal.aborted
+      ) {
+        preupload?.controller.abort();
+        preupload = {
+          statusScopeKey: uploadScopeKey,
+          coordinatorScopeKey,
+          threadId: targetThreadId,
+          controller: new AbortController(),
+          cleanup: (uploaded) =>
+            cleanupUploadedAttachment(targetThreadId, uploaded),
+        };
+        preuploadControllerRef.current = preupload;
+      }
+      await ensureAttachmentCandidates({
+        targetThreadId,
+        coordinatorScopeKey,
+        candidates: prepared,
+        retryPendingFailure: false,
+        signal: preupload.controller.signal,
+      });
+    },
+    [
+      cleanupUploadedAttachment,
+      ensureAttachmentCandidates,
+      privateWork,
+      uploadScopeKey,
+    ],
+  );
+
+  const discardAttachment = useCallback(
+    (targetThreadId: string, clientId: string) => {
+      if (
+        targetThreadId !== currentViewThreadIdRef.current ||
+        uploadScopeKey !== currentUploadStatusScopeKeyRef.current ||
+        privateWork.isActive?.() === false
+      ) {
+        return false;
+      }
+      const coordinatorScopeKey = attachmentUploadCoordinatorScopeKey(
+        privateWork.scope.accountId,
+        privateWork.scope.projectId,
+        targetThreadId,
+      );
+      const discarded = attachmentUploadCoordinator.discard(
+        coordinatorScopeKey,
+        clientId,
+        (uploaded) => cleanupUploadedAttachment(targetThreadId, uploaded),
+      );
+      if (!discarded) return false;
+      setAttachmentUploadStatusState((current) => {
+        const entry = current[clientId];
+        if (
+          entry?.scopeKey !== uploadScopeKey ||
+          entry.threadId !== targetThreadId
+        ) {
+          return current;
+        }
+        const next = { ...current };
+        delete next[clientId];
+        return next;
+      });
+      return true;
+    },
+    [
+      attachmentUploadCoordinator,
+      cleanupUploadedAttachment,
+      privateWork,
+      uploadScopeKey,
+    ],
+  );
+
   const sendMessage = useCallback(
     async (
       threadId: string,
@@ -1144,12 +1501,27 @@ export function useThreadStream({
       if (sendInFlightRef.current) {
         throw new Error("A message submission is already in progress.");
       }
+      if (
+        [...detachedMessageAdmissionsRef.current].some(
+          (candidate) =>
+            candidate.threadId === threadId &&
+            candidate.uploadStatusScopeKey === uploadScopeKey &&
+            candidate.serverAdmission.isPending(),
+        )
+      ) {
+        throw new Error(
+          "The previous message submission is still settling for this thread.",
+        );
+      }
       const attempt = createMessageSendAttempt(
         messageSendGenerationRef.current + 1,
         threadId,
       );
       messageSendGenerationRef.current = attempt.generation;
-      if (threadId !== currentViewThreadIdRef.current) {
+      if (
+        threadId !== currentViewThreadIdRef.current ||
+        uploadScopeKey !== currentUploadStatusScopeKeyRef.current
+      ) {
         attempt.abortController.abort();
         throw staleMessageSendError();
       }
@@ -1159,14 +1531,21 @@ export function useThreadStream({
       const text = message.text.trim();
       const humanMessageId = `human-${crypto.randomUUID()}`;
       let uploadedFileInfo: UploadedFileInfo[] = [];
+      let uploadedClientIds: string[] = [];
       let lifecycleStarted = false;
+      const uploadCoordinatorScopeKey = attachmentUploadCoordinatorScopeKey(
+        privateWork.scope.accountId,
+        privateWork.scope.projectId,
+        threadId,
+      );
       const requireCurrentAttempt = () => {
         if (
           !isCurrentMessageSendAttempt(
             activeMessageSendRef.current,
             attempt,
             currentViewThreadIdRef.current,
-          )
+          ) ||
+          uploadScopeKey !== currentUploadStatusScopeKeyRef.current
         ) {
           throw staleMessageSendError();
         }
@@ -1177,77 +1556,40 @@ export function useThreadStream({
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            const converted = await Promise.all(
-              message.files.map(async (filePart, index) => ({
-                filePart,
-                index,
-                file: await promptInputFilePartToFile(filePart),
-              })),
+            uploadedClientIds = message.files.map(
+              (filePart, index) =>
+                filePart.clientId ?? `send-${attempt.generation}-${index}`,
             );
-            requireCurrentAttempt();
-            const failedConversions = converted.filter(
-              ({ file }) => file === null,
-            ).length;
-
-            if (failedConversions > 0) {
+            if (
+              !attachmentUploadCoordinator.claim(
+                uploadCoordinatorScopeKey,
+                uploadedClientIds,
+              )
+            ) {
               throw new Error(
-                `Failed to prepare ${failedConversions} attachment(s) for upload. Please retry.`,
+                "An attachment is already being submitted or was removed.",
               );
             }
-
-            const attachmentClientIds = converted.map(
-              ({ filePart }) => filePart.clientId,
-            );
-            retainUploadedAttachmentRefs(
-              uploadedAttachmentRefsRef.current,
+            attachmentUploadClaimsRef.current.set(attempt, {
               threadId,
-              attachmentClientIds,
+              coordinatorScopeKey: uploadCoordinatorScopeKey,
+              clientIds: uploadedClientIds,
+              cleanup: (uploaded) =>
+                cleanupUploadedAttachment(threadId, uploaded),
+            });
+            const prepared = await preparePromptAttachments(
+              message.files,
+              (index) => uploadedClientIds[index]!,
             );
-            const retryPlan = planAttachmentUploadRetry(
-              uploadedAttachmentRefsRef.current,
-              threadId,
-              attachmentClientIds,
-            );
-            const resolvedUploads = retryPlan.resolved;
-            const missingIndexSet = new Set(retryPlan.missingIndexes);
-            const missing = converted.filter(({ index }) =>
-              missingIndexSet.has(index),
-            );
-
-            if (missing.length > 0) {
-              await runPrivateWorkAbortable(
-                privateWork,
-                async (privateWorkSignal) => {
-                  const signal = privateWorkSignal
-                    ? AbortSignal.any([
-                        privateWorkSignal,
-                        attempt.abortController.signal,
-                      ])
-                    : attempt.abortController.signal;
-                  await uploadFiles(
-                    threadId,
-                    missing.map(({ file }) => file!),
-                    privateWork,
-                    signal,
-                    (uploaded, _file, missingIndex) => {
-                      const entry = missing[missingIndex]!;
-                      resolvedUploads[entry.index] = uploaded;
-                      rememberUploadedAttachmentRef(
-                        uploadedAttachmentRefsRef.current,
-                        threadId,
-                        entry.filePart.clientId,
-                        uploaded,
-                      );
-                    },
-                  );
-                },
-              );
-            }
             requireCurrentAttempt();
-            if (resolvedUploads.some((uploaded) => !uploaded)) {
-              throw new Error("An uploaded attachment reference is missing.");
-            }
-            uploadedFileInfo = resolvedUploads as UploadedFileInfo[];
+            uploadedFileInfo = await ensureAttachmentCandidates({
+              targetThreadId: threadId,
+              coordinatorScopeKey: uploadCoordinatorScopeKey,
+              candidates: prepared,
+              retryPendingFailure: true,
+              signal: attempt.abortController.signal,
+            });
+            requireCurrentAttempt();
           } catch (error) {
             if (
               isCurrentMessageSendAttempt(
@@ -1285,14 +1627,25 @@ export function useThreadStream({
         });
         const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
         const visibleHumanMessage = submitMessages.at(-1);
-        const admission = createRunAdmissionLatch();
+        const serverAdmission = createRunAdmissionLatch();
+        // This latch is an internal state gate. Lifecycle callbacks observe its
+        // state, while this handler prevents a rejected gate from surfacing as
+        // an unhandled Promise rejection.
+        void serverAdmission.promise.catch(() => undefined);
+        const composerAdmission = createRunAdmissionLatch();
+        // `thread.submit()` may throw synchronously before control reaches the
+        // await below. Observe the latch immediately so that rejection still
+        // follows the outer send promise without becoming unhandled.
+        void composerAdmission.promise.catch(() => undefined);
         const pendingAdmission: PendingMessageAdmission = {
           threadId,
+          uploadStatusScopeKey: uploadScopeKey,
           attempt,
-          latch: admission,
+          serverAdmission,
+          composerAdmission,
           optimisticMessages:
             !hideFromUI && visibleHumanMessage ? [visibleHumanMessage] : [],
-          uploadedClientIds: message.files.map((file) => file.clientId),
+          uploadedClientIds,
           onSent: options?.onSent,
         };
 
@@ -1333,9 +1686,15 @@ export function useThreadStream({
         );
         lifecycleStarted = true;
         void monitorRunAdmissionLifecycle({
-          admission,
+          admission: serverAdmission,
           lifecycle,
           onAdmissionFailure: (error) => {
+            detachedMessageAdmissionsRef.current.delete(pendingAdmission);
+            // The Gateway serializes this conditional discard against Run
+            // admission on the Thread lock. It deletes rejected inputs and
+            // retains files already frozen into an admitted Run snapshot.
+            releaseAttachmentUploadClaim(attempt);
+            pendingAdmission.composerAdmission.reject(error);
             if (pendingMessageAdmissionRef.current === pendingAdmission) {
               pendingMessageAdmissionRef.current = null;
               setIsUploading(false);
@@ -1360,6 +1719,11 @@ export function useThreadStream({
             }
           },
           onSettled: () => {
+            detachedMessageAdmissionsRef.current.delete(pendingAdmission);
+            // A view change can intentionally detach the local admission latch
+            // before the server lifecycle settles. If no definitive admission
+            // failure released the claim, preserve the server file as consumed.
+            consumeAttachmentUploadClaim(attempt);
             if (activeMessageSendRef.current === attempt) {
               activeMessageSendRef.current = null;
               sendInFlightRef.current = false;
@@ -1369,7 +1733,7 @@ export function useThreadStream({
 
         // `thread.submit()` settles at the Run terminal. The composer instead
         // waits only for `useStream.onCreated`, the durable admission boundary.
-        await admission.promise;
+        await composerAdmission.promise;
         void queryClient.invalidateQueries({
           queryKey: scopedThreadQueryKey(
             privateWork.scope,
@@ -1384,14 +1748,18 @@ export function useThreadStream({
           ),
         });
       } catch (error) {
+        if (!lifecycleStarted) {
+          releaseAttachmentUploadClaim(attempt);
+        }
         if (activeMessageSendRef.current === attempt) {
           const pendingAdmission = pendingMessageAdmissionRef.current;
           if (
             pendingAdmission?.attempt === attempt &&
-            pendingAdmission.latch.isPending()
+            pendingAdmission.serverAdmission.isPending()
           ) {
             pendingMessageAdmissionRef.current = null;
-            pendingAdmission.latch.reject(error);
+            pendingAdmission.serverAdmission.reject(error);
+            pendingAdmission.composerAdmission.reject(error);
           }
           setOptimisticMessages([]);
           setOptimisticThreadId(null);
@@ -1415,11 +1783,17 @@ export function useThreadStream({
       t.conversation.outputDeliveryIncompleteDescription,
       t.conversation.runFailedDescription,
       context,
+      attachmentUploadCoordinator,
+      cleanupUploadedAttachment,
+      consumeAttachmentUploadClaim,
+      ensureAttachmentCandidates,
       executionProfile,
       queryClient,
       humanMessageCount,
       persistedMessages,
       privateWork,
+      releaseAttachmentUploadClaim,
+      uploadScopeKey,
     ],
   );
 
@@ -1446,7 +1820,13 @@ export function useThreadStream({
           threadId,
           sendInFlight: sendInFlightRef.current,
           isThreadLoading: thread.isThreadLoading,
-        })
+        }) ||
+        [...detachedMessageAdmissionsRef.current].some(
+          (candidate) =>
+            candidate.threadId === threadId &&
+            candidate.uploadStatusScopeKey === uploadScopeKey &&
+            candidate.serverAdmission.isPending(),
+        )
       ) {
         return false;
       }
@@ -1592,6 +1972,7 @@ export function useThreadStream({
       privateWork,
       queryClient,
       thread,
+      uploadScopeKey,
     ],
   );
 
@@ -1766,12 +2147,29 @@ export function useThreadStream({
     explicitActiveRunId,
     historyRuns,
   );
+  const attachmentUploadStatuses = useMemo(() => {
+    const statuses: Record<string, AttachmentUploadStatus> = {};
+    for (const [clientId, entry] of Object.entries(
+      attachmentUploadStatusState,
+    )) {
+      if (
+        entry.scopeKey === uploadScopeKey &&
+        entry.threadId === currentViewThreadId
+      ) {
+        statuses[clientId] = entry.status;
+      }
+    }
+    return statuses;
+  }, [attachmentUploadStatusState, currentViewThreadId, uploadScopeKey]);
 
   return {
     thread: mergedThread,
     boundThreadId: onStreamThreadId ?? null,
     pendingUsageMessages,
     attachRun,
+    prepareAttachments,
+    discardAttachment,
+    attachmentUploadStatuses,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,

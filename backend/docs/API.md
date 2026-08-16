@@ -16,7 +16,7 @@ Gateway 只公开认证账户、项目和平台管理 API。除公开认证入�
 | `/api/projects/{project_id}/private-work/threads/{thread_id}/uploads` | project + owner | upload、list 和 delete；Viewer 可删除自己的 ready upload/workspace/output，但不能创建或转换文件 |
 | `/api/projects/{project_id}/private-work/artifacts/{artifact_id}` | project + owner | Run artifact 下载 |
 | `/api/projects/{project_id}/memory` | project + owner | Memory 查询、导入、更新和清理 |
-| `/api/projects/{project_id}/connections` | project + owner | IM connection/OAuth/inbound execution |
+| `/api/projects/{project_id}/connections` | project + owner | 仅 `project.channels.manage` 可访问的 IM connection/OAuth 兼容接口；owner 只作为入站 private-work 路由坐标 |
 | `/api/projects/{project_id}/automations` | project + owner | Automation definition、occurrence 和手动触发 |
 | `/api/projects/{project_id}/usage` | project | 配额策略与用量 |
 | `/api/projects/{project_id}/audit` | project | 脱敏审计查询 |

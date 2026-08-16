@@ -22,7 +22,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - 多账户、多项目工作区，包含成员、角色、邀请、配额、审计和通知。
 - 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。删除会话会
   立即撤销该会话仍在运行的服务端执行权限并结束其 durable stream；已经发出的外部
-  操作无法由平台召回。
+  操作无法由平台召回。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
+  消息时复用同一上传结果，不会重复上传。
 - System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
@@ -32,6 +33,19 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
+
+项目菜单按服务端下发的 capability 分层，而不是仅按角色名称在浏览器中推断：
+
+| 项目角色 | 项目菜单             | 主要边界                             |
+| -------- | -------------------- | ------------------------------------ |
+| Admin    | 工作、能力、项目管理 | 项目治理、成员、凭证、审计及资产发布 |
+| Editor   | 工作、能力           | 运行工作，并创建或编辑项目资产 Draft |
+| Runner   | 工作                 | 运行工作；不进入资产管理工作台       |
+| Viewer   | 工作（只读）         | 查看自己的既有工作；不能创建或运行   |
+
+“工作”包含会话、Automation 和 Memory；渠道连接属于“项目管理”，只对具备
+`project.channels.manage` 的项目管理员显示。Runner 为执行选择 Agent 时保留必要的服务端
+资产读取，但 Agent/Skill/MCP 管理页面及所有写操作仍按编辑或治理 capability 拒绝。
 
 ## 运行架构
 
@@ -146,6 +160,8 @@ MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 GPT 5.6 Luna；原生视觉 lead model 继续使用现有 `view_image`，不会同时注册
 `inspect_image`。该 bootstrap 默认值不替代供应商数据政策审批；生产部署尚未批准外发
 时，须在接收项目 Run 前清空选择。
+全新安装把单次 `inspect_image` 端到端截止时间初始化为 60 秒；管理员可在 5–120 秒内
+调整，更新只会冻结到之后新建的 Run。
 
 Bridge 不解析或重写厂商协议。`inspect_image` 通过唯一 `ModelRuntime` 向所选模型发送标准
 LangChain 多模态 content block；OpenAI、Anthropic、DeepSeek、vLLM 或其他已支持

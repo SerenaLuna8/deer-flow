@@ -63,6 +63,10 @@ export type UploadRequestOptions = Pick<
   "apiBaseURL" | "scope"
 >;
 
+export type DeleteUploadedFileOptions = {
+  onlyIfUnreferenced?: boolean;
+};
+
 const privateUploadedFileSchema = z
   .object({
     id: z.string().uuid(),
@@ -299,17 +303,22 @@ export async function listUploadedFiles(
 }
 
 /**
- * Delete an uploaded file
+ * Delete an uploaded file. Composer cleanup can request a conditional discard;
+ * the Gateway then retains files already frozen into a Run input snapshot.
  */
 export async function deleteUploadedFile(
   threadId: string,
   filename: string,
   options: UploadRequestOptions,
   signal?: AbortSignal,
-): Promise<{ success: boolean; message: string }> {
+  deleteOptions: DeleteUploadedFileOptions = {},
+): Promise<{ success: boolean; deleted: boolean; message: string }> {
   signal?.throwIfAborted();
+  const conditionalQuery = deleteOptions.onlyIfUnreferenced
+    ? "&only_if_unreferenced=true"
+    : "";
   const response = await fetch(
-    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads?file_id=${encodeURIComponent(filename)}`,
+    `${uploadAPIBaseURL(options)}/threads/${encodeURIComponent(threadId)}/uploads?file_id=${encodeURIComponent(filename)}${conditionalQuery}`,
     { method: "DELETE", signal },
   );
   signal?.throwIfAborted();
@@ -318,7 +327,13 @@ export async function deleteUploadedFile(
     throw await readUploadError(response, "Failed to delete file");
   }
 
-  const result = (await response.json()) as { success: boolean };
+  const result = (await response.json()) as {
+    success: boolean;
+    deleted: boolean;
+  };
   signal?.throwIfAborted();
-  return { ...result, message: "File deleted" };
+  return {
+    ...result,
+    message: result.deleted ? "File deleted" : "File retained by a message",
+  };
 }

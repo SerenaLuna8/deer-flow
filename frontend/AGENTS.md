@@ -84,6 +84,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
   server-issued capabilities and never derives them from system or project roles.
 - System role and project membership role are separate domains. A route/layout
   gate improves UX but does not replace scoped API authorization.
+- Project navigation groups follow issued capabilities: owner-private Memory
+  remains under Work; Connections is project-admin configuration guarded by
+  `project.channels.manage`; the Agent/Skill/MCP capability workspace requires
+  `shared_assets.edit` or binding-management authority; each Project Management
+  destination requires its exact governance capability. Runner-side execution
+  reads remain available to chat/Automation and are not authoring access.
 - Use the canonical account UUID returned by Gateway for identity and cache keys;
   never key authority by email, route slug, or display name.
 - Authentication distinguishes `authenticated`, `unauthenticated`, and
@@ -169,6 +175,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
   claiming the local selection was accepted.
 - Upload messages carry opaque ready-file IDs and safe metadata, not browser-made
   image data URLs. Vision admission and file integrity remain Worker authority.
+- A persisted Thread composer eagerly uploads accepted attachments on selection,
+  paste, or drop. Background upload must not lock text editing; Send waits for and
+  reuses the exact thread/client pending or ready upload instead of starting a
+  duplicate request. Thread and private-work scope transitions detach local
+  ownership and clean up late ready results in their exact original scope.
 - `present_files` is the explicit published-file boundary. Workspace previews
   and live file-tool state do not by themselves prove durable delivery.
 

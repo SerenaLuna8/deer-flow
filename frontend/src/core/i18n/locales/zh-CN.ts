@@ -2394,6 +2394,7 @@ export const zhCN: Translations = {
   uploads: {
     uploading: "上传中...",
     uploadingFiles: "文件上传中，请稍候...",
+    ready: "已上传，可发送",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
       `添加附件（最多 ${maxFiles} 个，单文件不超过 ${maxFileSize}，总计不超过 ${maxTotalSize}）。支持常规文件类型；macOS .app 应先压缩。`,
     filesTooLarge: (files: string, maxFileSize: string) =>
@@ -2409,6 +2410,7 @@ export const zhCN: Translations = {
       "项目存储配额已被其他操作占用或耗尽，请删除文件或联系项目管理员。",
     preflightRejected: "上传前校验未通过，请根据附件限制调整文件。",
     uploadFailed: "文件上传失败，请稍后重试。",
+    cleanupFailed: "未使用的已上传文件删除失败，请刷新文件列表后重试。",
   },
 
   subtasks: {

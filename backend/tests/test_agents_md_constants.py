@@ -33,6 +33,9 @@ from deerflow.config.subagents_config import (
     MIN_CONCURRENT_SUBAGENT_CALLS,
     MIN_TOTAL_SUBAGENTS_PER_RUN,
 )
+from deerflow.config.vision_bridge_config import (
+    DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
+)
 from deerflow.config.worker_config import WorkerStreamConfig
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
 from deerflow.persistence.private_work.memory_document_repository import (
@@ -149,6 +152,11 @@ DOCUMENTED_CONSTANTS = (
         pattern=r"unique images with a (\d+) MiB per-image",
         expected=str(_MAX_IMAGE_BYTES // MIB),
         source="deerflow.tools.builtins.view_image_tool._MAX_IMAGE_BYTES",
+    ),
+    DocumentedConstant(
+        pattern=r"`inspect_image` end-to-end deadline at (\d+) seconds",
+        expected=str(DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS),
+        source="deerflow.config.vision_bridge_config.DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS",
     ),
     DocumentedConstant(
         pattern=r"`skills\.read_evidence_ttl_calls` subsequent lead model calls \(default (\d+)",

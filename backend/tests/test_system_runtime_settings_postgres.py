@@ -199,6 +199,8 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
         assert locked_v1.policy_version_id != locked_v2.policy_version_id
         assert locked_v1.revision == 1
         assert locked_v2.revision == 2
+        assert locked_v1.value.vision_bridge.timeout_seconds == 60
+        assert locked_v2.value.vision_bridge.timeout_seconds == 60
         assert locked_v1.value.max_recursion_limit == 1_000
         assert locked_v2.value.max_recursion_limit == 77
         assert locked_v1.value.memory.dream_interval_minutes == 120

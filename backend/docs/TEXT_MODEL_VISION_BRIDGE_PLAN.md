@@ -507,7 +507,7 @@ Agent 定义或工具参数中添加视觉模型 UUID/API Key 回退。
 {
   "vision_bridge": {
     "model_name": "065a9345-6bb3-5407-a27c-e31fa2a0bac1",
-    "timeout_seconds": 20,
+    "timeout_seconds": 60,
     "contract_version": "vision.bridge.v1"
   }
 }
@@ -547,7 +547,7 @@ staging 质量/延迟/限流评测以及生产验收仍是部署前 P3 门禁，
 ```python
 class VisionBridgePolicy(_PolicyModel):
     model_name: ModelName | None = None
-    timeout_seconds: int = Field(default=20, ge=5, le=120)
+    timeout_seconds: int = Field(default=60, ge=5, le=120)
     contract_version: Literal["vision.bridge.v1"] = "vision.bridge.v1"
 ```
 

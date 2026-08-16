@@ -2525,6 +2525,7 @@ export const enUS: Translations = {
   uploads: {
     uploading: "Uploading...",
     uploadingFiles: "Uploading files, please wait...",
+    ready: "Ready to send",
     limitsHint: (maxFiles: number, maxFileSize: string, maxTotalSize: string) =>
       `Add attachments (up to ${maxFiles} files, ${maxFileSize} each, ${maxTotalSize} total). Most regular file types are supported; compress macOS .app bundles first.`,
     filesTooLarge: (files: string, maxFileSize: string) =>
@@ -2542,6 +2543,8 @@ export const enUS: Translations = {
     preflightRejected:
       "Upload preflight failed. Adjust the files to match the attachment limits.",
     uploadFailed: "File upload failed. Please try again.",
+    cleanupFailed:
+      "An unused uploaded file could not be removed. Refresh the file list and try again.",
   },
 
   subtasks: {

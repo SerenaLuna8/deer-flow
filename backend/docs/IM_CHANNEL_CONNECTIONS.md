@@ -1,6 +1,6 @@
 # IM Channel Connections
 
-ActWeave supports project-and-owner-scoped IM channel bindings for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. Each project can own one current instance of each provider. Personal chats use the existing owner-scoped `/connect` flow. A project may also bind a group to one Agent; the backend model is provider-neutral, while the current group-binding UI and adapter flow support Feishu only.
+ActWeave supports project-admin-managed IM channel instances for Telegram, Slack, Discord, Feishu/Lark, DingTalk, WeChat, and WeCom. Each project can own one current instance of each provider. A project may bind a group to one Agent; the backend model is provider-neutral, while the current group-binding UI and adapter flow support Feishu only. Owner-attributed connection rows remain a runtime routing primitive, not a member-facing personal configuration surface.
 
 No public IP, OAuth callback URL, or provider webhook is required in this implementation.
 
@@ -56,7 +56,7 @@ The project instance API is:
 - `POST /api/projects/{project_id}/channel-instances/{provider}/disable`
 - `DELETE /api/projects/{project_id}/channel-instances/{provider}`
 
-All project members may read bounded status. Only a project Admin with `project.channels.manage` may configure, rotate, enable, disable, or delete an instance. Existing deployment-level `channels.*` entries remain an explicit compatibility fallback only when a project has no database-backed instance for that provider; new UI configuration never writes provider Secrets to `config.yaml` or a local plaintext runtime file.
+Only a project Admin with `project.channels.manage` may read bounded status or configure, rotate, enable, disable, or delete an instance. Existing deployment-level `channels.*` entries remain an explicit compatibility fallback only when a project has no database-backed instance for that provider; new UI configuration never writes provider Secrets to `config.yaml` or a local plaintext runtime file.
 
 Every executable inbound message requires a connected PostgreSQL row and the
 project inbound dispatcher. `channel_connections.*` affects only discovery of
@@ -66,37 +66,46 @@ persistence/runtime dependencies and unbound, frozen, or revoked connections
 fail closed before a Thread Run is admitted. There is no legacy open-bot or
 auth-disabled execution bypass.
 
-## Personal Connect Flow
+## Owner-attributed Connect Compatibility Flow
 
-A project-aware client begins a binding with
+The project UI does not expose a member-facing personal connection control. An
+authenticated project Admin may still begin an owner-attributed compatibility
+binding with
 `POST /api/projects/{project_id}/connections/{provider}/connect`, supplying the
 selected Agent asset reference. The response contains the one-time code (and a
 Telegram deep link when applicable). List and disconnect use
 `GET /api/projects/{project_id}/connections` and
 `DELETE /api/projects/{project_id}/connections/{connection_id}`.
+Every endpoint and callback revalidation requires `project.channels.manage`.
+The persisted owner remains an exact inbound private-work routing coordinate;
+it does not make this a member configuration page.
 
 Telegram:
 
-- The frontend creates a short one-time code.
-- The Connect button opens `https://t.me/<bot_username>?start=<code>`.
+- The Admin-only compatibility API creates a short one-time code.
+- An authorized administrative client may open
+  `https://t.me/<bot_username>?start=<code>`.
 - The existing Telegram long-polling worker receives `/start <code>` and binds that Telegram chat/user to the selected ActWeave project and owner.
 
 Slack:
 
-- The frontend creates a short one-time code.
-- The UI shows `Send /connect <code> to the ActWeave Slack bot.`
+- The Admin-only compatibility API creates a short one-time code.
+- An authorized administrative client may instruct the Admin to send
+  `/connect <code>` to the ActWeave Slack bot.
 - The existing Slack Socket Mode worker receives the message and binds the Slack user/team to the selected ActWeave project and owner.
 
 Discord:
 
-- The frontend creates a short one-time code.
-- The UI shows `Send /connect <code> to the ActWeave Discord bot.`
+- The Admin-only compatibility API creates a short one-time code.
+- An authorized administrative client may instruct the Admin to send
+  `/connect <code>` to the ActWeave Discord bot.
 - The existing Discord Gateway worker receives the message and binds the Discord user/guild to the selected ActWeave project and owner.
 
 Feishu/Lark, DingTalk, WeChat, and WeCom:
 
-- The frontend creates a short one-time code.
-- The UI shows `Send /connect <code> to the ActWeave <Provider> bot.`
+- The Admin-only compatibility API creates a short one-time code.
+- An authorized administrative client may instruct the Admin to send
+  `/connect <code>` to the ActWeave provider bot.
 - The already-running long-connection or polling worker receives the message and binds the platform identity to the selected ActWeave project and owner.
 
 Codes use 128 bits of randomness, expire after 10 minutes, and are single-use.
@@ -113,7 +122,7 @@ Feishu 群绑定由具有 `project.channels.manage` 权限的项目 Admin 发起
 
 绑定后，群成员直接向机器人发送消息，无需 ActWeave 账号，也无需执行个人 `/connect`。每个飞书 sender 映射为项目内独立的伪名 `channel_guest` owner；同一 sender 在同群同话题中复用自己的 Thread，不同 sender 即使回复同一话题也使用不同 owner、Thread、Memory、文件和 Run 范围。群聊不形成共享上下文。
 
-`channel_guest` 不可登录，不进入公开成员列表、人类账号计数或成员配额对账；其 Thread 也不出现在已登录成员的普通网页会话菜单。Admin 的群绑定列表不返回聊天正文、Thread/Run 内容或原始平台标识。个人 `p2p /connect` 流程保持不变。
+`channel_guest` 不可登录，不进入公开成员列表、人类账号计数或成员配额对账；其 Thread 也不出现在已登录成员的普通网页会话菜单。Admin 的群绑定列表不返回聊天正文、Thread/Run 内容或原始平台标识。带 owner 归属的 `p2p /connect` 兼容流程也仅限项目 Admin，且不作为成员个人配置入口暴露。
 
 The project group-binding API is:
 
@@ -159,7 +168,7 @@ Nullable `channel_instance_id` rows exist only for the explicit deployment-confi
 - Stored per-connection credentials use the `channel_credentials` encryption
   path. If stored credential material cannot be decrypted, ActWeave treats it
   as unavailable instead of using corrupt secrets.
-- `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Personal Connect Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, is single-use, and is shown only in the initiating user's browser (never echoed back to chat). Treat connect codes like one-time passwords and do not forward them.
+- `allowed_users` is **not** a bind-time defense. Because connect codes are processed before the allowlist (see Owner-attributed Connect Compatibility Flow), anyone who possesses a valid code can consume it — not only allowlisted users. Bind security therefore rests entirely on the code's confidentiality: it is 128-bit random, expires after 10 minutes, and is single-use. An authorized administrative client must treat the code like a one-time password, avoid persistence or logs, and never forward it.
 - An external identity — `(provider, external account, workspace/team/guild)` — has at most one active owner. The most recent successful bind wins: connecting an identity that another ActWeave user already holds transfers ownership and revokes the previous owner's binding (and its stored credentials). This is enforced at the database layer, so two users racing to bind the same identity cannot both end up connected.
 - Deployment-level compatibility provider tokens may remain in `channels.*`; project UI configuration stores its Secrets only in encrypted project Credentials.
 - This implementation does not add public provider callback or webhook routes.

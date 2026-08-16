@@ -3,7 +3,7 @@ import { beforeEach, expect, test, rs } from "@rstest/core";
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 
 import { fetch as fetchWithAuth } from "@/core/api/fetcher";
-import { uploadFiles } from "@/core/uploads/api";
+import { deleteUploadedFile, uploadFiles } from "@/core/uploads/api";
 
 const mockedFetch = rs.mocked(fetchWithAuth);
 
@@ -79,4 +79,32 @@ test("reports each completed upload before a later file fails", async () => {
 
   expect(completed).toEqual(["8f31eef3-0662-42c5-809c-3bbbe2c663af"]);
   expect(mockedFetch).toHaveBeenCalledTimes(3);
+});
+
+test("requests a conditional discard for an eager upload", async () => {
+  mockedFetch.mockResolvedValueOnce(
+    jsonResponse(200, { success: true, deleted: false }),
+  );
+
+  await expect(
+    deleteUploadedFile(
+      "11111111-1111-4111-8111-111111111111",
+      "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+      {
+        apiBaseURL:
+          "/api/projects/22222222-2222-4222-8222-222222222222/private-work",
+        scope: {
+          accountId: "33333333-3333-4333-8333-333333333333",
+          projectId: "22222222-2222-4222-8222-222222222222",
+        },
+      },
+      undefined,
+      { onlyIfUnreferenced: true },
+    ),
+  ).resolves.toMatchObject({ success: true, deleted: false });
+
+  expect(mockedFetch).toHaveBeenCalledWith(
+    "/api/projects/22222222-2222-4222-8222-222222222222/private-work/threads/11111111-1111-4111-8111-111111111111/uploads?file_id=8f31eef3-0662-42c5-809c-3bbbe2c663af&only_if_unreferenced=true",
+    { method: "DELETE", signal: undefined },
+  );
 });

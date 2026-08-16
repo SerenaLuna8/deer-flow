@@ -40,6 +40,7 @@ import {
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
+import { canOpenProjectCapabilitiesWorkspace } from "@/core/projects/capabilities";
 import {
   PROJECT_AUTOMATION,
   PROJECT_PRIVATE_WORKSPACE,
@@ -111,20 +112,12 @@ export function projectNavigationItems(
       privateWorkReady ? "ready" : undefined,
     );
   if (privateWorkEnabled) {
-    items.push(
-      {
-        href: `${base}/chats`,
-        icon: MessagesSquareIcon,
-        label: "会话",
-        section: "work",
-      },
-      {
-        href: `${base}/connections`,
-        icon: CableIcon,
-        label: "渠道连接",
-        section: "management",
-      },
-    );
+    items.push({
+      href: `${base}/chats`,
+      icon: MessagesSquareIcon,
+      label: "会话",
+      section: "work",
+    });
   }
   if (
     projectAutomationEntryEnabled(
@@ -142,7 +135,10 @@ export function projectNavigationItems(
       section: "work",
     });
   }
-  if (project.capabilities.includes("shared_assets.read")) {
+  const capabilityWorkspaceVisible = canOpenProjectCapabilitiesWorkspace(
+    project.capabilities,
+  );
+  if (capabilityWorkspaceVisible) {
     items.push(
       {
         href: `${base}/agents`,
@@ -173,7 +169,19 @@ export function projectNavigationItems(
       icon: BrainCircuitIcon,
       i18nKey: "memory",
       label: "Memory",
-      section: "capabilities",
+      section: "work",
+    });
+  }
+  if (
+    !staticWebsiteOnly &&
+    privateWorkFeatureEnabled &&
+    project.capabilities.includes("project.channels.manage")
+  ) {
+    items.push({
+      href: `${base}/connections`,
+      icon: CableIcon,
+      label: "渠道连接",
+      section: "management",
     });
   }
   if (project.capabilities.includes("mcp.credentials.approve")) {

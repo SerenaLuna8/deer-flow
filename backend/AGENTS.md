@@ -82,6 +82,9 @@ import `app.*`.
   `ProjectContext`. `system_admin` is not project membership.
 - Owner-private work uses a server-issued `PrivateWorkContext`. Every private
   query and composite relation binds `project_id + owner_user_id`.
+- Project channel configuration, group bindings, and owner-attributed channel
+  connection state require `project.channels.manage`; member private-work
+  capabilities never grant access to the project Connections surface or API.
 - Never accept project, owner, membership, capability, Run snapshot, Credential
   grant, Job, lease, or internal runtime authority from request metadata,
   model/tool arguments, or ambient globals.
@@ -169,6 +172,9 @@ or downgrade an application database.
 - Current-message files and images are admitted from server file authority.
   Worker retry revalidates the frozen metadata; missing or changed attachments
   fail closed rather than degrading silently.
+- Conditional composer cleanup takes the same Thread lock as Run admission. It
+  retains uploads present in any frozen current-upload snapshot, while admission
+  rejects the whole request if any selected upload is no longer ready.
 
 ### Assets, Skills, MCP, and Agents
 
@@ -336,6 +342,7 @@ source constant changes, update this section and the owning detailed document.
 - Project Skill archives remain limited to 100 MiB and 16384 regular files; the
   archive-create routes have a scoped 160 MiB wire limit.
 - Current-message vision injects at most four unique images with a 20 MiB per-image limit.
+- Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
 - Verified Skill reads remain active for `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12).
 - SNIP free-prose task continuity bounded to 2,000 characters and tagged fact lines bounded to 1,000 characters; the packaged prompt raises a declared output cap below 4,096 tokens.
 - `worker.stream.text_delta_flush_ms`, default 75ms, controls text coalescing.

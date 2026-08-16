@@ -36,6 +36,28 @@ const AGENT: ExecutableProjectAgent = {
 };
 
 describe("Agent lifecycle translations", () => {
+  test("keeps blocked Agent remediation inside the editor workspace", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="en-US">
+        <AgentSelectorDialog
+          open
+          agents={[]}
+          blockedSystemAgents={[AGENT]}
+          canAuthorProjectAgent={false}
+          agentsPath="/projects/alpha/agents?intent=start_chat"
+          isCreating={false}
+          onOpenChange={() => undefined}
+          onSelect={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("Contact project editor");
+    expect(html).not.toContain(
+      'href="/projects/alpha/agents?intent=start_chat"',
+    );
+  });
+
   test("renders key en-US lifecycle surfaces without Chinese fallback copy", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="en-US">

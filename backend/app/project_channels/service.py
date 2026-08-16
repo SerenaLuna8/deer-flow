@@ -153,6 +153,8 @@ class ProjectChannelInstanceService:
         self,
         context: ProjectContext,
     ) -> tuple[ProjectChannelInstanceView, ...]:
+        self._require_manage(context)
+
         async def operation(session: AsyncSession):
             credentials = self._credential_repository_factory(session)
             await credentials.lock_project(context)

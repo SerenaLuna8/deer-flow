@@ -568,27 +568,21 @@ export function AgentSelectorDialog({
               </div>
             )}
             <McpBlockedAgentsNotice agents={blockedRuntimeAgents} />
-            {(canAuthorProjectAgent ||
-              blockedSystemAgents.length > 0 ||
-              blockedRuntimeAgents.length > 0) &&
-              agentsPath && (
-                <Button asChild variant="outline" className="w-full">
-                  <Link href={agentsPath}>
-                    {blockedSystemAgents.length > 0 ||
-                    blockedRuntimeAgents.length > 0
-                      ? copy.configure
-                      : copy.createProjectAgent}
-                  </Link>
-                </Button>
-              )}
-            {systemAgents.length === 0 &&
-              blockedSystemAgents.length === 0 &&
-              blockedRuntimeAgents.length === 0 &&
-              !canAuthorProjectAgent && (
-                <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                  {copy.contactEditor}
-                </p>
-              )}
+            {canAuthorProjectAgent && agentsPath && (
+              <Button asChild variant="outline" className="w-full">
+                <Link href={agentsPath}>
+                  {blockedSystemAgents.length > 0 ||
+                  blockedRuntimeAgents.length > 0
+                    ? copy.configure
+                    : copy.createProjectAgent}
+                </Link>
+              </Button>
+            )}
+            {systemAgents.length === 0 && !canAuthorProjectAgent && (
+              <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
+                {copy.contactEditor}
+              </p>
+            )}
           </div>
         )}
       </div>

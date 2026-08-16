@@ -22,6 +22,7 @@ from app.system_runtime_settings.validation import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.config.vision_bridge_config import VisionBridgeConfig
 
 VISION_BRIDGE_CONTRACT_V1 = "vision.bridge.v1"
 
@@ -46,9 +47,10 @@ def test_policy_defaults_to_no_bridge_without_a_second_enablement_flag() -> None
     }
     assert policy.vision_bridge.model_dump(mode="json") == {
         "model_name": None,
-        "timeout_seconds": 20,
+        "timeout_seconds": 60,
         "contract_version": VISION_BRIDGE_CONTRACT_V1,
     }
+    assert VisionBridgeConfig().timeout_seconds == 60
 
 
 def test_fresh_install_policy_selects_the_existing_luna_model() -> None:
@@ -56,6 +58,7 @@ def test_fresh_install_policy_selects_the_existing_luna_model() -> None:
 
     assert isinstance(policy, AgentRuntimePolicyValue)
     assert policy.vision_bridge.model_name == DEFAULT_VISION_BRIDGE_MODEL_NAME
+    assert policy.vision_bridge.timeout_seconds == 60
 
 
 def test_policy_accepts_canonical_uuid_refs_and_rejects_legacy_names() -> None:
@@ -119,7 +122,7 @@ def test_new_policy_payload_uses_schema_v3_and_includes_bridge() -> None:
     assert canonical.schema_version == RUNTIME_POLICY_SCHEMA_VERSION == 3
     assert canonical.value["vision_bridge"] == {
         "model_name": None,
-        "timeout_seconds": 20,
+        "timeout_seconds": 60,
         "contract_version": VISION_BRIDGE_CONTRACT_V1,
     }
 

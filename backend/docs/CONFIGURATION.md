@@ -309,7 +309,8 @@ closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
    `gpt-5.6-luna` model by default. This bootstrap value is not evidence of an
    organization's provider-policy approval; clear it before accepting project
    Runs in a production deployment whose data-egress review is incomplete.
-3. `timeout_seconds` is the single image-read-through-result deadline.
+3. `timeout_seconds` is the single image-read-through-result deadline; fresh
+   installations default it to 60 seconds.
    `contract_version` remains fixed to `vision.bridge.v1` for existing Runtime
    Policy and Run snapshot compatibility. It is a platform control-contract
    version, not a Provider wire-protocol selector.

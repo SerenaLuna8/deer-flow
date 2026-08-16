@@ -2168,6 +2168,7 @@ export interface Translations {
   uploads: {
     uploading: string;
     uploadingFiles: string;
+    ready: string;
     limitsHint: (
       maxFiles: number,
       maxFileSize: string,
@@ -2181,6 +2182,7 @@ export interface Translations {
     storageQuotaExceeded: string;
     preflightRejected: string;
     uploadFailed: string;
+    cleanupFailed: string;
   };
 
   // Subtasks

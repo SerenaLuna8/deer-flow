@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from postgres_utils import RedactedURL, replace_database
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.projects.errors import ProjectBootstrapFailed
@@ -857,6 +858,17 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
     try:
         async with engine.connect() as connection:
             assert await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+            vision_timeout_seconds = await connection.scalar(
+                text(
+                    """SELECT (version.value->'vision_bridge'->>'timeout_seconds')::integer
+                    FROM system_runtime_policies AS policy
+                    JOIN system_runtime_policy_versions AS version
+                      ON version.section = policy.section
+                     AND version.id = policy.current_version_id
+                    WHERE policy.section = 'agent_runtime'"""
+                )
+            )
+            assert vision_timeout_seconds == 60
     finally:
         await engine.dispose()
 

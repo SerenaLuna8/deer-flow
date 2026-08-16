@@ -21,6 +21,9 @@ from pydantic import (
     model_validator,
 )
 
+from deerflow.config.vision_bridge_config import (
+    DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
+)
 from deerflow.vision.dispatch import (
     VISION_TOOL_FREQUENCY_HARD_STOP,
     VISION_TOOL_FREQUENCY_WARN,
@@ -290,7 +293,11 @@ class VisionBridgePolicy(_PolicyModel):
     """
 
     model_name: ModelName | None = None
-    timeout_seconds: int = Field(default=20, ge=5, le=120)
+    timeout_seconds: int = Field(
+        default=DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS,
+        ge=5,
+        le=120,
+    )
     contract_version: Literal["vision.bridge.v1"] = "vision.bridge.v1"
 
 

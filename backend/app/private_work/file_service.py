@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
-from sqlalchemy import delete, insert, literal, select
+from sqlalchemy import cast, delete, insert, literal, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -33,6 +34,7 @@ from app.private_work.file_paths import (
     validate_private_media_type,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.sandbox_files import RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG
 from app.private_work.thread_repository import PrivateThreadRepository
 from app.projects.capabilities import Capability
 from app.projects.quota_summary import load_project_quota_summary
@@ -49,6 +51,7 @@ from deerflow.persistence.private_work.file_repository import (
 )
 from deerflow.persistence.private_work.model import PrivateFileChunkRow, PrivateFileRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -62,6 +65,39 @@ PRIVATE_DEFAULT_MAX_FILES = PRIVATE_UPLOAD_DEFAULTS.max_files
 PRIVATE_DEFAULT_MAX_FILE_SIZE = PRIVATE_UPLOAD_DEFAULTS.max_file_size
 PRIVATE_DEFAULT_MAX_TOTAL_SIZE = PRIVATE_UPLOAD_DEFAULTS.max_total_size
 USER_DELETABLE_PRIVATE_FILE_KINDS = frozenset({"upload", "workspace", "output"})
+
+
+async def _run_snapshot_references_upload(
+    session: AsyncSession,
+    scope: PrivateResourceScope,
+    *,
+    thread_id: str,
+    file_id: uuid.UUID,
+) -> bool:
+    """Return whether an immutable Run input owns this upload reference."""
+
+    try:
+        project_id = uuid.UUID(scope.project_id)
+        owner_user_id = str(uuid.UUID(scope.owner_user_id))
+    except (TypeError, ValueError):
+        return True
+    referenced_run_id = await session.scalar(
+        select(RunRow.run_id)
+        .where(
+            RunRow.project_id == project_id,
+            RunRow.owner_user_id == owner_user_id,
+            RunRow.thread_id == thread_id,
+            cast(RunRow.kwargs_json, JSONB).contains(
+                {
+                    RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG: [
+                        {"file_id": str(file_id)},
+                    ]
+                }
+            ),
+        )
+        .limit(1)
+    )
+    return referenced_run_id is not None
 
 
 def require_user_deletable_private_file_kind(kind: str, request_id: str) -> None:
@@ -736,8 +772,9 @@ class PrivateFileService:
         *,
         thread_id: str,
         file_id: uuid.UUID,
-    ) -> PrivateFileRecord:
-        """Physically delete one user-owned ready file and release its quota."""
+        only_if_unreferenced: bool = False,
+    ) -> PrivateFileRecord | None:
+        """Delete one ready file, optionally retaining frozen Run inputs."""
 
         context = require_issued_private_work_context(context)
         try:
@@ -749,6 +786,33 @@ class PrivateFileService:
                     lock=True,
                 )
                 repository = PrivateFileRepository(session)
+                if only_if_unreferenced:
+                    thread = await PrivateThreadRepository(session).get(
+                        scope=context.resource_scope,
+                        thread_id=thread_id,
+                        lock=True,
+                    )
+                    if thread is None:
+                        raise PrivateFileConflict
+                    candidate = await repository.get(
+                        scope=context.resource_scope,
+                        thread_id=thread_id,
+                        file_id=file_id,
+                        lock=True,
+                    )
+                    if candidate is None or candidate.status != "ready":
+                        raise PrivateFileConflict
+                    require_user_deletable_private_file_kind(
+                        candidate.kind,
+                        context.request_id,
+                    )
+                    if await _run_snapshot_references_upload(
+                        session,
+                        context.resource_scope,
+                        thread_id=thread_id,
+                        file_id=file_id,
+                    ):
+                        return None
                 deleted = await repository.delete_ready(
                     scope=context.resource_scope,
                     thread_id=thread_id,

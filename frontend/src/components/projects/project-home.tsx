@@ -7,6 +7,7 @@ import {
 import Link from "next/link";
 import type { ReactNode } from "react";
 
+import { canOpenProjectCapabilitiesWorkspace } from "@/core/projects/capabilities";
 import type { Project } from "@/core/projects/types";
 
 import { ProjectHeader } from "./project-header";
@@ -54,7 +55,7 @@ export function ProjectHome({
       <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
         {tokenUsageSection}
         {usageDimensionsSection}
-        {project.capabilities.includes("shared_assets.read") && (
+        {canOpenProjectCapabilitiesWorkspace(project.capabilities) && (
           <section>
             <div className="mb-4">
               <h2 className="text-xl font-semibold">共享资产</h2>

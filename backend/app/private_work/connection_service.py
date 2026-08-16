@@ -45,7 +45,7 @@ ProjectContextResolver = Callable[..., Awaitable[ProjectContext]]
 
 
 class ProjectConnectionService:
-    """Project/owner-scoped application boundary for IM connections."""
+    """Project-admin boundary for owner-attributed IM connection state."""
 
     def __init__(
         self,
@@ -166,7 +166,10 @@ class ProjectConnectionService:
         *,
         channel_instance_id: str | None,
     ) -> ProjectConnectionChallenge:
-        context = await self._require(context, Capability.PRIVATE_WORK_CREATE)
+        context = await self._require(
+            context,
+            Capability.PROJECT_CHANNELS_MANAGE,
+        )
         provider = self._required_text(provider, context.request_id)
         agent_id = self._canonical_uuid(agent_asset_id, context.request_id)
         agent_scope = self._required_text(agent_scope, context.request_id)
@@ -232,7 +235,7 @@ class ProjectConnectionService:
                 await self._revalidator.require(
                     session,
                     private_context,
-                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.PROJECT_CHANNELS_MANAGE,
                 )
         except PrivateWorkError:
             raise
@@ -313,7 +316,10 @@ class ProjectConnectionService:
             raise self._repository_error(context.request_id, exc) from None
 
     async def list(self, context: PrivateWorkContext) -> list[dict[str, Any]]:
-        context = await self._require(context, Capability.PRIVATE_WORK_READ_OWN)
+        context = await self._require(
+            context,
+            Capability.PROJECT_CHANNELS_MANAGE,
+        )
         try:
             return await self._repository.list_connections(context.resource_scope)
         except Exception as exc:
@@ -324,7 +330,10 @@ class ProjectConnectionService:
         context: PrivateWorkContext,
         connection_id: str,
     ) -> None:
-        context = await self._require(context, Capability.PRIVATE_WORK_CREATE)
+        context = await self._require(
+            context,
+            Capability.PROJECT_CHANNELS_MANAGE,
+        )
         connection_id = self._required_text(connection_id, context.request_id)
         try:
             disconnected = await self._repository.disconnect_connection(

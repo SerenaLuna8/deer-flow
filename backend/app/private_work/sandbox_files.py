@@ -226,7 +226,7 @@ async def admit_current_upload_snapshot(
     thread_id: str,
     run_kwargs: object,
 ) -> tuple[CurrentUploadSnapshotEntry, ...]:
-    """Lock and freeze the authorized subset of current-message file claims."""
+    """Lock and freeze every authorized current-message file claim."""
 
     repository = PrivateFileRepository(session)
     entries: list[CurrentUploadSnapshotEntry] = []
@@ -238,7 +238,11 @@ async def admit_current_upload_snapshot(
             lock=True,
         )
         if record is None or record.status != "ready" or record.kind != "upload":
-            continue
+            # Current-message attachments are an all-or-nothing admission
+            # boundary. A concurrent conditional draft cleanup may have
+            # deleted this file while holding the same Thread lock; silently
+            # omitting it would admit a message without its attachment.
+            raise CurrentUploadSnapshotInvalid
         entries.append(
             CurrentUploadSnapshotEntry(
                 file_id=str(record.id),

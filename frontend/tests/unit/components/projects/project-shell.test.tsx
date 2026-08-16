@@ -6,6 +6,7 @@ rs.mock("next/navigation", () => ({
   usePathname: () => "/projects/alpha/agents",
 }));
 
+import { ProjectHome } from "@/components/projects/project-home";
 import {
   isProjectNavigationItemActive,
   projectNavigationItems,
@@ -41,6 +42,39 @@ const adminProject: Project = {
   request_id: "trace",
 };
 
+const runnerProject: Project = {
+  ...adminProject,
+  role: "runner",
+  capabilities: [
+    "project.read",
+    "project.enter",
+    "project.pin",
+    "private_work.create",
+    "private_work.read_own",
+    "automation.manage_own",
+    "shared_assets.read",
+    "shared_assets.execute",
+  ],
+};
+
+const editorProject: Project = {
+  ...runnerProject,
+  role: "editor",
+  capabilities: [...runnerProject.capabilities, "shared_assets.edit"],
+};
+
+const viewerProject: Project = {
+  ...runnerProject,
+  role: "viewer",
+  capabilities: [
+    "project.read",
+    "project.enter",
+    "project.pin",
+    "private_work.read_own",
+    "shared_assets.read",
+  ],
+};
+
 function renderShell(project: Project) {
   return renderToStaticMarkup(
     <I18nProvider initialLocale="en-US">
@@ -64,6 +98,80 @@ function renderShell(project: Project) {
 }
 
 describe("project shell navigation", () => {
+  test("exposes project menu sections by the member's effective authority", () => {
+    const runnerItems = projectNavigationItems(
+      runnerProject,
+      true,
+      true,
+      true,
+      true,
+    );
+    const editorItems = projectNavigationItems(
+      editorProject,
+      true,
+      true,
+      true,
+      true,
+    );
+    const adminItems = projectNavigationItems(
+      adminProject,
+      true,
+      true,
+      true,
+      true,
+    );
+    const viewerItems = projectNavigationItems(
+      viewerProject,
+      true,
+      true,
+      true,
+      true,
+    );
+
+    expect(new Set(runnerItems.map((item) => item.section))).toEqual(
+      new Set([null, "work"]),
+    );
+    expect(
+      runnerItems
+        .filter((item) => item.section === "work")
+        .map((item) => item.label),
+    ).toEqual(["会话", "Automations", "Memory"]);
+    expect(new Set(viewerItems.map((item) => item.section))).toEqual(
+      new Set([null, "work"]),
+    );
+    expect(new Set(editorItems.map((item) => item.section))).toEqual(
+      new Set([null, "work", "capabilities"]),
+    );
+    expect(
+      editorItems
+        .filter((item) => item.section === "capabilities")
+        .map((item) => item.label),
+    ).toEqual(["Agent", "Skill", "MCP"]);
+    expect(new Set(adminItems.map((item) => item.section))).toEqual(
+      new Set([null, "work", "capabilities", "management"]),
+    );
+    expect(
+      adminItems
+        .filter((item) => item.section === "management")
+        .map((item) => item.label),
+    ).toContain("渠道连接");
+    for (const items of [runnerItems, editorItems, viewerItems]) {
+      expect(items.map((item) => item.label)).not.toContain("渠道连接");
+    }
+  });
+
+  test("keeps capability management cards out of runner and viewer overviews", () => {
+    expect(
+      renderToStaticMarkup(<ProjectHome project={runnerProject} />),
+    ).not.toContain("共享资产");
+    expect(
+      renderToStaticMarkup(<ProjectHome project={viewerProject} />),
+    ).not.toContain("共享资产");
+    expect(
+      renderToStaticMarkup(<ProjectHome project={editorProject} />),
+    ).toContain("共享资产");
+  });
+
   test("keeps overview standalone and groups project governance destinations", () => {
     const items = projectNavigationItems(
       adminProject,
@@ -74,16 +182,19 @@ describe("project shell navigation", () => {
     );
 
     expect(items.find((item) => item.label === "项目概览")?.section).toBeNull();
-    expect(items.find((item) => item.label === "Memory")?.section).toBe(
-      "capabilities",
-    );
+    expect(items.find((item) => item.label === "Memory")?.section).toBe("work");
     expect(
       items
         .filter((item) => item.section === "capabilities")
         .map((item) => item.label),
-    ).toEqual(["Agent", "Skill", "MCP", "Memory"]);
+    ).toEqual(["Agent", "Skill", "MCP"]);
     expect(items).toEqual(
       expect.arrayContaining([
+        expect.objectContaining({
+          href: "/projects/alpha/connections",
+          label: "渠道连接",
+          section: "management",
+        }),
         expect.objectContaining({
           href: "/projects/alpha/credentials",
           label: "项目凭证",
@@ -104,7 +215,7 @@ describe("project shell navigation", () => {
     expect(items.map((item) => item.label)).not.toContain("项目成员");
   });
 
-  test("gates all project private-work destinations with readiness", () => {
+  test("gates member work with readiness without hiding channel governance", () => {
     const readyItems = projectNavigationItems(
       adminProject,
       true,
@@ -139,13 +250,15 @@ describe("project shell navigation", () => {
       false,
       false,
     ).map((item) => item.label);
-    for (const label of ["会话", "渠道连接", "Memory"]) {
+    for (const label of ["会话", "Memory"]) {
       expect(notReadyLabels).not.toContain(label);
       expect(featureDisabledLabels).not.toContain(label);
     }
+    expect(notReadyLabels).toContain("渠道连接");
+    expect(featureDisabledLabels).not.toContain("渠道连接");
   });
 
-  test("renders implemented asset destinations from shared_assets.read", () => {
+  test("renders implemented asset destinations from authoring authority", () => {
     const html = renderShell(adminProject);
 
     expect(html).toContain("md:grid-cols-[15rem_minmax(0,1fr)]");
@@ -230,6 +343,13 @@ describe("project shell navigation", () => {
         "shared_assets.read",
       ] as Project["capabilities"],
     };
+    const sharedAssetEditor = {
+      ...sharedAssetReader,
+      capabilities: [
+        ...sharedAssetReader.capabilities,
+        "shared_assets.edit",
+      ] as Project["capabilities"],
+    };
     const memberManager = {
       ...adminProject,
       role: "viewer" as const,
@@ -245,12 +365,23 @@ describe("project shell navigation", () => {
         "mcp.credentials.approve",
       ] as Project["capabilities"],
     };
+    const channelManager = {
+      ...roleOnlyAdmin,
+      role: "viewer" as const,
+      capabilities: [
+        ...roleOnlyAdmin.capabilities,
+        "project.channels.manage",
+      ] as Project["capabilities"],
+    };
 
     expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
     expect(renderShell(capabilityViewer)).toContain("项目设置");
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("渠道连接");
+    expect(renderShell(channelManager)).toContain("渠道连接");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
-    expect(renderShell(sharedAssetReader)).toContain("Agent");
+    expect(renderShell(sharedAssetReader)).not.toContain("Agent");
+    expect(renderShell(sharedAssetEditor)).toContain("Agent");
     expect(renderShell(sharedAssetReader)).not.toContain("项目凭证");
     expect(renderShell(memberManager)).toContain("项目设置");
     expect(renderShell(memberManager)).not.toContain("项目成员");

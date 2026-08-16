@@ -3,7 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import { isVisibleProjectChannelProvider } from "@/components/projects/private-work/project-connections-page";
 
 describe("project connections channel visibility", () => {
-  test("keeps only Feishu visible in the member Connections UI", () => {
+  test("keeps only Feishu visible in project channel management", () => {
     expect(isVisibleProjectChannelProvider("feishu")).toBe(true);
     expect(isVisibleProjectChannelProvider("slack")).toBe(false);
     expect(isVisibleProjectChannelProvider("telegram")).toBe(false);

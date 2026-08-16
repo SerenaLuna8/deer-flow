@@ -3,6 +3,7 @@
  */
 
 export * from "./api";
+export * from "./attachment-upload-coordinator";
 export * from "./errors";
 export * from "./file-validation";
 export * from "./hooks";

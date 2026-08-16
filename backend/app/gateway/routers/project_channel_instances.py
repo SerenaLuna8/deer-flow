@@ -109,6 +109,7 @@ async def list_project_channel_instances(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service=Depends(get_project_channel_instance_service),
 ) -> ProjectChannelInstancesResponse:
+    _require_manage(context)
     try:
         rows = await service.list(context)
         return ProjectChannelInstancesResponse(instances=[_response(row) for row in rows])

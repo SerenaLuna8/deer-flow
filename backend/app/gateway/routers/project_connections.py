@@ -26,7 +26,13 @@ from app.gateway.private_work_schemas import PrivateWorkRoute
 from app.private_work.connection_service import ProjectConnectionService
 from app.private_work.context import PrivateWorkContext
 from app.private_work.error_mapping import private_work_http_exception
-from app.private_work.errors import PrivateWorkError, PrivateWorkNotFound, PrivateWorkUnavailable
+from app.private_work.errors import (
+    PrivateWorkError,
+    PrivateWorkForbidden,
+    PrivateWorkNotFound,
+    PrivateWorkUnavailable,
+)
+from app.projects.capabilities import Capability
 from deerflow.config.app_config import get_app_config
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -55,6 +61,13 @@ router = APIRouter(
     route_class=PrivateWorkRoute,
     dependencies=[Depends(require_project_private_open)],
 )
+
+
+def _require_project_channel_management(context: PrivateWorkContext) -> None:
+    if Capability.PROJECT_CHANNELS_MANAGE not in context.capabilities:
+        raise private_work_http_exception(
+            PrivateWorkForbidden(context.request_id),
+        )
 
 
 def _service(request: Request) -> ProjectConnectionService:
@@ -272,6 +285,7 @@ async def list_project_connection_providers(
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> ProjectConnectionProvidersResponse:
+    _require_project_channel_management(context)
     config, channels = await _provider_config(request)
     try:
         connections = await _service(request).list(context)
@@ -334,6 +348,7 @@ async def list_project_connections(
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> ProjectConnectionsResponse:
+    _require_project_channel_management(context)
     try:
         rows = await _service(request).list(context)
     except PrivateWorkError as exc:
@@ -363,6 +378,7 @@ async def begin_project_connection(
     body: ProjectConnectRequest,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> ProjectConnectResponse:
+    _require_project_channel_management(context)
     config, channel_instance_id, public_config = await _ready_provider(
         request,
         provider,
@@ -406,6 +422,7 @@ async def disconnect_project_connection(
     connection_id: str,
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> Response:
+    _require_project_channel_management(context)
     try:
         await _service(request).disconnect(context, connection_id)
     except PrivateWorkError as exc:

@@ -380,6 +380,24 @@ def test_persisted_current_upload_snapshot_is_strict_and_required_for_referenced
     with pytest.raises(CurrentUploadSnapshotInvalid):
         required_current_upload_snapshot_from_run_kwargs(malformed_snapshot)
 
+    legacy_authorized_subset = {
+        **kwargs,
+        "input": {
+            "messages": [
+                {
+                    "type": "human",
+                    "additional_kwargs": {
+                        "files": [
+                            {"file_id": str(entry.file_id)},
+                            {"file_id": str(uuid.uuid4())},
+                        ],
+                    },
+                }
+            ]
+        },
+    }
+    assert required_current_upload_snapshot_from_run_kwargs(legacy_authorized_subset) == snapshot
+
 
 def test_run_idempotency_ignores_only_the_server_owned_current_upload_snapshot() -> None:
     entry = _entry()
@@ -462,7 +480,7 @@ def test_worker_rejects_referenced_upload_without_server_snapshot_as_permanent()
 
 
 @pytest.mark.asyncio
-async def test_admission_freezes_only_server_authorized_ready_upload_metadata(
+async def test_admission_rejects_when_any_current_upload_is_not_authorized_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     allowed = _entry()
@@ -533,19 +551,28 @@ async def test_admission_freezes_only_server_authorized_ready_upload_metadata(
     }
     monkeypatch.setattr(sandbox_module, "PrivateFileRepository", _Repository)
 
-    frozen = await admit_current_upload_snapshot(
-        fake_session,
-        scope=private_scope,
-        thread_id="thread-1",
-        run_kwargs=run_kwargs,
-    )
+    with pytest.raises(CurrentUploadSnapshotInvalid):
+        await admit_current_upload_snapshot(
+            fake_session,
+            scope=private_scope,
+            thread_id="thread-1",
+            run_kwargs=run_kwargs,
+        )
 
-    assert frozen == (_snapshot_entry(allowed),)
     assert calls == [
         (missing_id, True),
-        (allowed.file_id, True),
-        (wrong_kind.file_id, True),
     ]
+
+    calls.clear()
+    run_kwargs["input"]["messages"][0]["additional_kwargs"]["files"] = [{"file_id": str(wrong_kind.file_id)}]
+    with pytest.raises(CurrentUploadSnapshotInvalid):
+        await admit_current_upload_snapshot(
+            fake_session,
+            scope=private_scope,
+            thread_id="thread-1",
+            run_kwargs=run_kwargs,
+        )
+    assert calls == [(wrong_kind.file_id, True)]
 
 
 @pytest.mark.asyncio

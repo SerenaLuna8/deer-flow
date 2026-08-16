@@ -200,6 +200,9 @@ export function ScopedChatPage({
     thread,
     pendingUsageMessages,
     attachRun,
+    prepareAttachments,
+    discardAttachment,
+    attachmentUploadStatuses,
     sendMessage,
     regenerateMessage,
     editAndRegenerateMessage,
@@ -928,6 +931,9 @@ export function ScopedChatPage({
                           : undefined
                       }
                       uploadsEnabled={scope.canUpload}
+                      attachmentUploadStatuses={attachmentUploadStatuses}
+                      onDiscardAttachment={discardAttachment}
+                      onPrepareAttachments={prepareAttachments}
                       followupSuggestionsEnabled={
                         scope.followupSuggestionsEnabled !== false
                       }

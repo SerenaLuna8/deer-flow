@@ -53,6 +53,16 @@ export interface UploadLimitValidationResult {
   violations: UploadLimitViolation[];
 }
 
+export type UploadLimitValidationOptions = {
+  /**
+   * Files that still need new Project storage. Omit to count every accepted
+   * file. Eager uploads that are already ready remain subject to the message
+   * count and size limits, but must not be charged against remaining storage a
+   * second time.
+   */
+  projectStorageFiles?: ReadonlySet<File>;
+};
+
 /**
  * Validate files against the same per-request limits enforced by the gateway.
  * Existing files keep priority and incoming files are accepted in selection order.
@@ -61,6 +71,7 @@ export function validateUploadLimits(
   existingFiles: File[],
   incomingFiles: File[] | FileList,
   limits?: UploadLimits,
+  options: UploadLimitValidationOptions = {},
 ): UploadLimitValidationResult {
   const incoming = Array.from(incomingFiles);
   if (!limits) {
@@ -69,6 +80,13 @@ export function validateUploadLimits(
 
   let fileCount = existingFiles.length;
   let totalSize = existingFiles.reduce((total, file) => total + file.size, 0);
+  let projectStorageSize = existingFiles.reduce(
+    (total, file) =>
+      options.projectStorageFiles?.has(file) === false
+        ? total
+        : total + file.size,
+    0,
+  );
   const accepted: File[] = [];
   const rejectedByCode: Record<UploadLimitViolationCode, File[]> = {
     max_file_size: [],
@@ -90,7 +108,12 @@ export function validateUploadLimits(
       rejectedByCode.max_total_size.push(file);
       continue;
     }
-    if (totalSize + file.size > limits.project_storage.remaining_bytes) {
+    const needsProjectStorage =
+      options.projectStorageFiles?.has(file) !== false;
+    if (
+      needsProjectStorage &&
+      projectStorageSize + file.size > limits.project_storage.remaining_bytes
+    ) {
       rejectedByCode.project_storage_remaining.push(file);
       continue;
     }
@@ -98,6 +121,7 @@ export function validateUploadLimits(
     accepted.push(file);
     fileCount += 1;
     totalSize += file.size;
+    if (needsProjectStorage) projectStorageSize += file.size;
   }
 
   const limitByCode: Record<UploadLimitViolationCode, number> = {
