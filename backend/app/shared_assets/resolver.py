@@ -42,6 +42,7 @@ from app.shared_assets.internal_assets import (
 from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -1117,6 +1118,7 @@ class ProjectAssetResolver:
                 )
             )
             or not isinstance(version.tool_groups, list)
+            or (version.model_ref != DEFAULT_MODEL_REF and exact_model_ref(version.model_ref) is None)
         ):
             raise AssetResolutionUnavailable(context.request_id)
         payload = AgentPayload(

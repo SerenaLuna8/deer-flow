@@ -117,7 +117,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `initial_schema`. Fresh setup runs that schema directly
+the current marker is `model_catalog_simplify`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -238,6 +238,11 @@ repository-root `config.yaml`. Infrastructure settings are restart-required.
 Model definitions, runtime/auth/Memory/quota/Automation policy, and provider Credentials are
 PostgreSQL authority and must not be reintroduced as YAML or ambient-key
 fallbacks.
+
+The authorable System Model adapter allowlist is intentionally narrow. Retired
+adapter rows may remain admin-readable for remediation, but they must not be
+reactivated, made default, exposed in the public model catalog, or admitted to a
+new Run snapshot.
 
 Text-model image inspection follows
 [`docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md`](docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md):

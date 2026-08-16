@@ -173,7 +173,7 @@ tools:
   - use: deerflow.community.groundroute.tools:web_search_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
-GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper、Brave、Exa、Tavily、Firecrawl、Perplexity）。为每个查询路由到满足质量门槛的最低成本引擎，并在引擎故障时自动切换。定价采用收益分成模式，您可保留约一半的缓存节省。
+GroundRoute 是一个元搜索层：一个 API 接入六个搜索引擎（Serper、Brave、Exa、Tavily、Firecrawl、Perplexity）。它会在合格引擎之间路由，并在引擎故障时自动切换。
 
 需要 [GroundRoute](https://groundroute.ai) API Key。同时支持 `web_fetch`。
 

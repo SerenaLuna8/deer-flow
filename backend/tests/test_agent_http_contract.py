@@ -30,6 +30,7 @@ _ASSET_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
 _VERSION_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 _SKILL_VERSION_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 _MCP_VERSION_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
+_MODEL_REF = "88888888-8888-4888-8888-888888888888"
 _REQUEST_ID = "agent-http-contract"
 _NOW = datetime(2026, 8, 13, 9, 0, tzinfo=UTC)
 
@@ -75,7 +76,7 @@ def _version(*, workflow_status: WorkflowStatus) -> AgentVersionView:
         soul="Be careful and explicit.",
         identity="Release coordinator",
         user_context="The user owns the release decision.",
-        model_ref="primary",
+        model_ref=_MODEL_REF,
         model_settings=AgentModelSettings(
             temperature=0.2,
             max_tokens=4096,
@@ -102,7 +103,7 @@ def _complete_request() -> dict[str, object]:
         "soul": "Be careful and explicit.",
         "identity": "Release coordinator",
         "user_context": "The user owns the release decision.",
-        "model_ref": "primary",
+        "model_ref": _MODEL_REF,
         "model_settings": {
             "temperature": 0.2,
             "max_tokens": 4096,
@@ -227,7 +228,7 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
             "soul": "Be careful and explicit.",
             "identity": "Release coordinator",
             "user_context": "The user owns the release decision.",
-            "model_ref": "primary",
+            "model_ref": _MODEL_REF,
             "model_settings": {
                 "temperature": 0.2,
                 "max_tokens": 4096,
@@ -255,7 +256,7 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
                 soul="Be careful and explicit.",
                 identity="Release coordinator",
                 user_context="The user owns the release decision.",
-                model_ref="primary",
+                model_ref=_MODEL_REF,
                 model_settings=AgentModelSettings(
                     temperature=0.2,
                     max_tokens=4096,
@@ -326,6 +327,6 @@ async def test_admin_project_agent_create_uses_the_same_complete_contract() -> N
         slug="release-agent",
         display_name="Release Agent",
     )
-    assert payload.model_ref == "primary"
+    assert payload.model_ref == _MODEL_REF
     assert payload.skill_version_ids == (_SKILL_VERSION_ID,)
     assert payload.mcp_version_ids == (_MCP_VERSION_ID,)

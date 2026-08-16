@@ -419,8 +419,9 @@ def build_runtime_middlewares(
     # untrusted-content entry point: remote tool results (web_fetch /
     # web_search) get the same framework/injection-tag neutralization. It sits
     # inner of ToolOutputBudgetMiddleware (listed after it) so it neutralizes
-    # the raw tool output first; the budget wrapper then truncates the already
-    # neutralized text.
+    # the raw tool output first; the budget wrapper then applies its generic
+    # budget to neutralized text or preserves a strict, independently bounded
+    # canonical Vision result.
     outer_wrappers: list[AgentMiddleware] = []
     if include_security_wrappers:
         from deerflow.agents.middlewares.input_sanitization_middleware import (
@@ -448,7 +449,7 @@ def build_runtime_middlewares(
                     layer_id="tool_output_budget",
                     phase=MiddlewarePhase.UNTRUSTED_CONTENT,
                     slot=20,
-                    why="Budgeting wraps sanitized remote tool output.",
+                    why=("Budgeting wraps sanitized remote tool output and preserves independently bounded canonical Vision JSON."),
                 ),
                 _layer(
                     ToolResultSanitizationMiddleware(),
@@ -512,6 +513,7 @@ def build_runtime_middlewares(
         )
 
     host_execution_batch_barrier: AgentMiddleware | None = None
+    host_execution_approval_pause: AgentMiddleware | None = None
     if include_security_wrappers and app_config is not None:
         from deerflow.sandbox.security import (
             HostBashExecutionMode,
@@ -520,6 +522,7 @@ def build_runtime_middlewares(
 
         if resolve_host_bash_execution_mode(app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED:
             from deerflow.agents.middlewares.host_execution_batch_barrier_middleware import (
+                HostExecutionApprovalPauseMiddleware,
                 HostExecutionBatchBarrierMiddleware,
             )
 
@@ -531,6 +534,14 @@ def build_runtime_middlewares(
                 why=("Approval-capable tool batches are serialized before any ToolNode sibling can start."),
             )
             tail.append(host_execution_batch_barrier)
+            host_execution_approval_pause = _layer(
+                HostExecutionApprovalPauseMiddleware(),
+                layer_id="host_execution_approval_pause",
+                phase=MiddlewarePhase.TOOL_CALL_BOUNDARY,
+                slot=6,
+                why=("A staged approval exits before the next model call, after the ToolNode checkpoint."),
+            )
+            tail.append(host_execution_approval_pause)
 
     if include_security_wrappers and guardrail_middleware is None:
         from deerflow.guardrails.middleware import GuardrailMiddleware
@@ -633,6 +644,7 @@ def build_runtime_middlewares(
                 name="private tool-call boundary",
                 registration_order=(
                     host_execution_batch_barrier,
+                    host_execution_approval_pause,
                     sandbox_audit_middleware,
                     read_before_write_middleware,
                     tool_progress_middleware,
@@ -646,6 +658,13 @@ def build_runtime_middlewares(
     validate_middleware_dispatch_constraints(
         middlewares,
         (
+            MiddlewareDispatchConstraint(
+                name="tool output budget wraps result sanitization",
+                hook=MiddlewareHook.WRAP_TOOL_CALL,
+                first="tool_output_budget",
+                then="tool_result_sanitization",
+                why=("Vision evidence must be structurally sanitized and re-bounded before generic output budgeting observes it."),
+            ),
             MiddlewareDispatchConstraint(
                 name="tool progress wraps tool error handling",
                 hook=MiddlewareHook.WRAP_TOOL_CALL,

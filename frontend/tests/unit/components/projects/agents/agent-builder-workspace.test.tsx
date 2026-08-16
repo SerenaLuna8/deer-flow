@@ -11,6 +11,7 @@ import { I18nProvider } from "@/core/i18n/context";
 import type { Model } from "@/core/models/types";
 
 const TIMESTAMP = "2026-08-07T00:00:00Z";
+const MODEL_ID = "00000000-0000-4000-8000-000000000204";
 
 function renderAgentUi(node: React.ReactNode) {
   return renderToStaticMarkup(
@@ -85,10 +86,9 @@ function clarificationSession(): AgentBuilderSession {
 
 const MODELS: Model[] = [
   {
-    name: "gpt-5.6-luna",
-    model: "gpt-5.6-luna",
+    name: MODEL_ID,
+    model: MODEL_ID,
     display_name: "GPT-5.6 Luna",
-    description: "通用模型",
     supports_thinking: true,
     supports_reasoning_effort: true,
     supports_vision: true,
@@ -104,7 +104,7 @@ describe("Agent Builder workspace", () => {
         session={clarificationSession()}
         composerText=""
         models={MODELS}
-        selectedGenerationModelName="gpt-5.6-luna"
+        selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending={false}
         commitPending={false}
@@ -178,7 +178,7 @@ describe("Agent Builder workspace", () => {
         models={MODELS}
         modelsLoading={false}
         modelsError={null}
-        selectedGenerationModelName="gpt-5.6-luna"
+        selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending={false}
         commitPending={false}
@@ -205,12 +205,14 @@ describe("Agent Builder workspace", () => {
 
     expect(html).toContain('aria-label="选择创建 Agent 的对话模型"');
     expect(html).toContain("GPT-5.6 Luna");
+    expect(html).not.toContain(MODEL_ID);
   });
 
   test("keeps the created Agent runtime model read-only in the blueprint", () => {
     const html = renderAgentUi(
       <AgentBuilderBlueprintReview
         blueprint={blueprint()}
+        models={MODELS}
         canAuthor
         editing={false}
         pending={false}
@@ -230,7 +232,9 @@ describe("Agent Builder workspace", () => {
       />,
     );
 
-    expect(html).toContain("default");
+    expect(html).toContain("GPT-5.6 Luna");
+    expect(html).not.toContain(">default<");
+    expect(html).not.toContain(MODEL_ID);
     expect(html).not.toContain('aria-label="选择 Agent 模型"');
   });
 });

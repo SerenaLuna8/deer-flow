@@ -22,6 +22,7 @@ from pydantic import (
     model_validator,
 )
 
+from app.shared_assets.model_refs import exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.utils.oneshot_llm import run_oneshot_llm
@@ -40,9 +41,6 @@ MAX_SKILL_DESIGN_ATTACHMENT_BYTES = 256 * 1024
 MAX_SKILL_DESIGN_ATTACHMENTS_TOTAL_BYTES = 512 * 1024
 SKILL_DESIGN_REASONING_EFFORTS = frozenset({"none", "low", "medium", "high"})
 
-_EXECUTION_MODEL_NAME_PATTERN = re.compile(
-    r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\Z",
-)
 _ATTACHMENT_NAME_FORBIDDEN = re.compile(r"[\x00-\x1f/\\:*?\"<>|]")
 
 _SECRET_PATTERNS = (
@@ -572,7 +570,7 @@ class SkillDesignGenerationService:
                 "SKILL_DESIGN_INVALID_INPUT",
                 "Skill design generation input is invalid.",
             )
-        if model_name is not None and (not isinstance(model_name, str) or _EXECUTION_MODEL_NAME_PATTERN.fullmatch(model_name) is None):
+        if model_name is not None and exact_model_ref(model_name) is None:
             raise SkillDesignGenerationInvalid(
                 "SKILL_DESIGN_INVALID_INPUT",
                 "Skill design model selection is invalid.",

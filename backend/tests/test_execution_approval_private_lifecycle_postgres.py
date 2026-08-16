@@ -6,12 +6,15 @@ import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from support.private_thread_seed import seed_private_thread_database
 
+from app.private_work import checkpointer as checkpointer_module
+from app.private_work import retention_purge as retention_purge_module
 from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.errors import PrivateWorkConflict
 from app.private_work.execution_approval import (
@@ -25,6 +28,10 @@ from app.private_work.execution_approval_lifecycle import (
     CLAIMED_EXECUTION_SETTLEMENT_GRACE_SECONDS,
     lock_execution_approval_private_rows,
     reconcile_locked_execution_approval,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.private_work.privacy_center import PrivacyCenterService
 from app.private_work.retention_jobs import project_retention_key
@@ -46,11 +53,16 @@ from app.worker.retention import RetentionPurgeJobHandler
 from app.worker.service import LeaseLost
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.execution_approvals import (
+    ExecutionApprovalOutputDeliveryObligationRow,
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository, JobScope
+from deerflow.persistence.private_work.model import (
+    PrivateArtifactRow,
+    PrivateFileRow,
+)
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -362,6 +374,7 @@ async def _add_approval(
         continuation_job_id=(None if continuation is None else continuation.job.id),
         execution_job_attempt_id=(None if not claimed or continuation is None else continuation.attempt.id),
         claimed_at=(None if not claimed else created_at + timedelta(seconds=10)),
+        spawn_authorized_at=(created_at + timedelta(seconds=15) if status == "finished" else None),
         expires_at=created_at + timedelta(minutes=10),
         terminal_at=(created_at + timedelta(seconds=20) if terminal else None),
         created_at=created_at,
@@ -409,6 +422,94 @@ async def _add_approval(
         session.add(receipt)
         await session.flush()
     return row, receipt
+
+
+async def _add_output_delivery_obligation(
+    session,
+    *,
+    approval: ExecutionApprovalRequestRow,
+    continuation: _RunJob | None,
+    status: str,
+) -> ExecutionApprovalOutputDeliveryObligationRow:
+    now = datetime.now(UTC)
+    assigned = status != "deferred"
+    has_intent = status in {"intent_recorded", "delivered"}
+    payload = {
+        "schema_version": 1,
+        "logical_paths": ["outputs/cancel-path.txt"],
+    }
+    artifact_id = None
+    if status == "delivered":
+        assert continuation is not None
+        file_row = PrivateFileRow(
+            project_id=approval.project_id,
+            owner_user_id=approval.owner_user_id,
+            thread_id=approval.thread_id,
+            kind="output",
+            logical_path="outputs/cancel-path.txt",
+            media_type="text/plain",
+            size=1,
+            sha256="9" * 64,
+            status="ready",
+            version=1,
+            created_by_run_id=continuation.run.run_id,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(file_row)
+        await session.flush()
+        artifact = PrivateArtifactRow(
+            project_id=approval.project_id,
+            owner_user_id=approval.owner_user_id,
+            thread_id=approval.thread_id,
+            run_id=continuation.run.run_id,
+            file_id=file_row.id,
+            display_name="cancel-path.txt",
+            media_type="text/plain",
+            artifact_metadata={"logical_path": "outputs/cancel-path.txt"},
+            created_at=now,
+        )
+        session.add(artifact)
+        await session.flush()
+        artifact_id = artifact.id
+    obligation_values = {
+        "approval_id": approval.id,
+        "project_id": approval.project_id,
+        "owner_user_id": approval.owner_user_id,
+        "thread_id": approval.thread_id,
+        "mode": "any_one",
+        "status": status,
+        "continuation_run_id": (continuation.run.run_id if assigned and continuation is not None else None),
+        "continuation_job_id": (continuation.job.id if assigned and continuation is not None else None),
+        "satisfied_artifact_id": artifact_id,
+        "version": 1,
+        "assigned_at": now if assigned else None,
+        "intent_recorded_at": now if has_intent else None,
+        "terminal_at": now if status == "delivered" else None,
+        "created_at": now,
+        "updated_at": now,
+    }
+    if has_intent:
+        obligation_values.update(
+            {
+                "intent_tool_call_id": "call-present",
+                "intent_digest": hashlib.sha256(
+                    json.dumps(
+                        payload,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                ).hexdigest(),
+                "intent_private_json": payload,
+            }
+        )
+    obligation = ExecutionApprovalOutputDeliveryObligationRow(
+        **obligation_values,
+    )
+    session.add(obligation)
+    await session.flush()
+    return obligation
 
 
 def _claimed_execution_port(
@@ -639,18 +740,22 @@ async def test_unknown_completion_uses_database_clock_before_releasing_claim_gat
                 status="claimed",
                 command="python unknown-before-deadline.py",
             )
+            # This test isolates DB-clock settlement rather than frozen-plan
+            # materialization; seed the durable pre-spawn prerequisite.
+            approval.spawn_authorized_at = approval.claimed_at
 
         monkeypatch.setattr(
             "app.private_work.execution_approval._now",
             lambda: datetime.now(UTC) + timedelta(days=1),
         )
-        await _claimed_execution_port(
+        completion_port = _claimed_execution_port(
             seed,
             thread_id=thread_id,
             continuation=continuation,
             approval=approval,
             audit=approval_audit,
-        ).complete_host_execution(
+        )
+        await completion_port.complete_host_execution(
             str(approval.id),
             HostExecutionOutcome(
                 status="unknown",
@@ -844,6 +949,7 @@ async def test_private_lifecycle_final_lock_refreshes_cached_finished_row(
                     with_for_update=True,
                 )
                 assert fresh is not None
+                fresh.spawn_authorized_at = fresh.claimed_at
                 fresh.status = "finished"
                 fresh.version += 1
                 fresh.terminal_at = finished_at
@@ -1213,6 +1319,9 @@ async def test_completion_prefix_prevents_cleanup_deadlock_and_preserves_receipt
                 status="claimed",
                 command="python concurrent-completion.py",
             )
+            # The lock-order test uses a minimal command fixture. Seed the
+            # already-proven spawn marker; CAS behavior has a dedicated test.
+            approval.spawn_authorized_at = approval.claimed_at
 
         lease_token = f"lease:{continuation.run.run_id}"
         claim = JobClaim(
@@ -1366,6 +1475,7 @@ async def test_completion_persists_receipt_after_membership_has_left(
                 status="claimed",
                 command="python finish-after-removal.py",
             )
+            approval.spawn_authorized_at = approval.claimed_at
             membership = await session.scalar(
                 sa.select(ProjectMembershipRow)
                 .where(
@@ -1727,6 +1837,94 @@ async def test_final_spawn_authorization_rejects_capability_downgrade(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_final_spawn_authorization_is_a_durable_one_shot_cas(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status="claimed",
+                command="python one-shot.py",
+            )
+            (
+                approval.command_private_json,
+                approval.command_digest,
+            ) = _valid_private_envelope("python one-shot.py")
+            approval.claimed_at = datetime.now(UTC)
+            approval.updated_at = approval.claimed_at
+
+        port = _claimed_execution_port(
+            seed,
+            thread_id=thread_id,
+            continuation=continuation,
+            approval=approval,
+        )
+        for unauthorized_outcome in (
+            HostExecutionOutcome(
+                status="finished",
+                exit_code=0,
+                result_text="must not persist",
+            ),
+            HostExecutionOutcome(
+                status="unknown",
+                reason_code="must_not_persist",
+            ),
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match="spawn was not durably authorized",
+            ):
+                await port.complete_host_execution(
+                    str(approval.id),
+                    unauthorized_outcome,
+                )
+        first, second = await asyncio.gather(
+            port.authorize_claimed_host_execution_spawn(str(approval.id)),
+            port.authorize_claimed_host_execution_spawn(str(approval.id)),
+        )
+        assert sum(value is not None for value in (first, second)) == 1
+        positive = first if first is not None else second
+        assert positive is not None and positive > 0
+
+        async with seed.factory() as session:
+            persisted = await session.get(
+                ExecutionApprovalRequestRow,
+                approval.id,
+            )
+            assert persisted is not None
+            assert persisted.status == "claimed"
+            assert persisted.spawn_authorized_at is not None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_final_spawn_authorization_rejects_expired_preparation_window(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -2058,4 +2256,327 @@ async def test_claim_rechecks_ttl_after_asset_closure_before_side_effect_mark(
             assert job is not None and job.retry_safety == "safe"
     finally:
         release_closure.set()
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entrypoint", "obligation_status"),
+    [
+        ("thread", "deferred"),
+        ("run", "assigned"),
+        ("retention", "intent_recorded"),
+    ],
+)
+async def test_direct_cancel_entrypoints_close_active_output_obligations(
+    migrated_postgres_database_url: str,
+    entrypoint: str,
+    obligation_status: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = None
+            if obligation_status != "deferred":
+                continuation = await _add_run_job(
+                    session,
+                    seed=seed,
+                    owner=seed.owner_a,
+                    worker_id=worker_id,
+                    thread_id=thread_id,
+                    terminal=False,
+                )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status=("pending" if obligation_status == "deferred" else "approved"),
+                command=f"python {entrypoint}.py",
+            )
+            await _add_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation=continuation,
+                status=obligation_status,
+            )
+            approval_id = approval.id
+
+        saver = object.__new__(checkpointer_module._ScopedCheckpointSaver)
+        saver._approval_audit = audit
+        saver._context = seed.owner_a
+        run_service = object.__new__(PrivateRunService)
+        run_service._approval_audit = audit
+        async with seed.factory() as session, session.begin():
+            now = datetime.now(UTC)
+            row = await session.get(
+                ExecutionApprovalRequestRow,
+                approval_id,
+                with_for_update=True,
+            )
+            assert row is not None
+            if entrypoint == "thread":
+                await saver._cancel_thread_execution_approval(
+                    session,
+                    row,
+                    now=now,
+                )
+            elif entrypoint == "run":
+                await run_service._cancel_execution_approval(
+                    session,
+                    seed.owner_a,
+                    row,
+                    now=now,
+                )
+            else:
+                await retention_purge_module._cancel_retention_approval(
+                    session,
+                    row,
+                    now=now,
+                    request_id=seed.owner_a.request_id,
+                    audit=audit,
+                )
+
+        async with seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                approval_id,
+            )
+            assert approval is not None and approval.status == "cancelled"
+            assert obligation is not None
+            assert obligation.status == "cancelled"
+            assert obligation.terminal_at is not None
+            assert obligation.version == 2
+        assert audit.terminals == [(source.run.run_id, "cancelled")]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_direct_cancel_without_output_obligation_remains_valid(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=None,
+                status="pending",
+                command="python no-obligation.py",
+            )
+            approval_id = approval.id
+
+        run_service = object.__new__(PrivateRunService)
+        run_service._approval_audit = audit
+        async with seed.factory() as session, session.begin():
+            row = await session.get(
+                ExecutionApprovalRequestRow,
+                approval_id,
+                with_for_update=True,
+            )
+            assert row is not None
+            await run_service._cancel_execution_approval(
+                session,
+                seed.owner_a,
+                row,
+                now=datetime.now(UTC),
+            )
+
+        async with seed.factory() as session:
+            row = await session.get(ExecutionApprovalRequestRow, approval_id)
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                approval_id,
+            )
+            assert row is not None and row.status == "cancelled"
+            assert obligation is None
+        assert audit.terminals == [(source.run.run_id, "cancelled")]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_output_obligation_terminal_transition_rejects_scope_mismatch(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status="approved",
+                command="python wrong-scope.py",
+            )
+            await _add_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation=continuation,
+                status="assigned",
+            )
+            approval_id = approval.id
+
+        with pytest.raises(OutputDeliveryObligationConflict):
+            async with seed.factory() as session, session.begin():
+                row = await session.get(
+                    ExecutionApprovalRequestRow,
+                    approval_id,
+                    with_for_update=True,
+                )
+                assert row is not None
+                await transition_output_delivery_obligation_for_approval_terminal(
+                    session,
+                    approval=SimpleNamespace(
+                        id=row.id,
+                        project_id=row.project_id,
+                        owner_user_id=str(seed.owner_b.user_id),
+                        thread_id=row.thread_id,
+                    ),
+                    approval_status="cancelled",
+                    now=datetime.now(UTC),
+                )
+
+        async with seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                approval_id,
+            )
+            assert obligation is not None and obligation.status == "assigned"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_retention_catch_does_not_cancel_already_delivered_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    audit = _ApprovalAudit()
+    try:
+        worker_id = await _add_worker(seed)
+        thread_id = str(uuid.uuid4())
+        await _add_thread(seed, owner=seed.owner_a, thread_id=thread_id)
+        async with seed.factory() as session, session.begin():
+            source = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=True,
+            )
+            continuation = await _add_run_job(
+                session,
+                seed=seed,
+                owner=seed.owner_a,
+                worker_id=worker_id,
+                thread_id=thread_id,
+                terminal=False,
+            )
+            approval, _ = await _add_approval(
+                session,
+                owner=seed.owner_a,
+                thread_id=thread_id,
+                source=source,
+                continuation=continuation,
+                status="approved",
+                command="python already-delivered.py",
+            )
+            await _add_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation=continuation,
+                status="delivered",
+            )
+            approval_id = approval.id
+
+        async with seed.factory() as session, session.begin():
+            row = await session.get(
+                ExecutionApprovalRequestRow,
+                approval_id,
+                with_for_update=True,
+            )
+            assert row is not None
+            with pytest.raises(RetentionExecutionApprovalActive):
+                await retention_purge_module._cancel_retention_approval(
+                    session,
+                    row,
+                    now=datetime.now(UTC),
+                    request_id=seed.owner_a.request_id,
+                    audit=audit,
+                )
+
+        async with seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                approval_id,
+            )
+            assert approval is not None and approval.status == "approved"
+            assert obligation is not None and obligation.status == "delivered"
+            assert obligation.satisfied_artifact_id is not None
+        assert audit.terminals == []
+    finally:
         await seed.engine.dispose()

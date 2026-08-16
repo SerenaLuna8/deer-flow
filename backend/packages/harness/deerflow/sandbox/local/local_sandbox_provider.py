@@ -38,8 +38,8 @@ _ACP_WORKSPACE_VIRTUAL_PREFIX = "/mnt/acp-workspace"
 # PathMapping and a set of agent-written paths used for reverse resolve), but
 # in a long-running gateway the number of distinct thread_ids is unbounded.
 # When the cap is exceeded the least-recently-used entry is dropped; the next
-# ``acquire(thread_id)`` for that thread simply rebuilds the sandbox at the
-# cost of losing its accumulated ``_agent_written_paths`` (read_file falls
+# ``acquire(thread_id)`` for that thread simply rebuilds the sandbox without
+# its accumulated ``_agent_written_paths`` (read_file falls
 # back to no reverse resolution, which is the same behaviour as a fresh run).
 DEFAULT_MAX_CACHED_THREAD_SANDBOXES = 256
 
@@ -155,7 +155,7 @@ class LocalSandboxProvider(SandboxProvider):
                     # the host machine, but for ``make up`` it is the
                     # ``deer-flow-gateway`` container, so any host path that
                     # isn't bind-mounted into the gateway image will be missing
-                    # here. Skipping silently makes this a high-cost-to-debug
+                    # here. Skipping silently makes this a difficult-to-debug
                     # silent failure (sandbox skill / tool reads an empty dir
                     # instead of the configured mount), so escalate to ERROR
                     # and include actionable guidance. See #3244.

@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 import sqlalchemy as sa
 from sqlalchemy.exc import DBAPIError, IntegrityError
@@ -40,12 +40,29 @@ from app.private_work.execution_approval_lifecycle import (
     lock_execution_approval_private_rows,
     reconcile_locked_execution_approval,
     reconcile_locked_execution_approval_and_continuation,
+    staged_approval_has_exact_suspension_marker,
 )
 from app.private_work.execution_profile import RequestedRunExecutionProfile
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    assign_output_delivery_obligation,
+    deliver_output_obligation_in_session,
+    load_output_delivery_obligation_for_continuation,
+    record_output_delivery_intent_in_session,
+    restore_output_delivery_intent_paths_in_session,
+    seal_source_output_delivery_obligation,
+    transition_output_delivery_obligation_for_approval_terminal,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_admission import (
     PrivateRunAdmissionServerContext,
     PrivateRunAdmissionService,
+)
+from app.private_work.run_metadata import (
+    RunHostExecutionSuspension,
+    RunHostExecutionSuspensionInvalid,
+    run_host_execution_suspension,
+    with_run_host_execution_suspension,
 )
 from app.private_work.run_repository import (
     PrivateRunCreate,
@@ -585,7 +602,6 @@ async def _asset_closure(
     model_snapshot_values = tuple(
         (
             row.purpose,
-            row.logical_name,
             str(row.model_config_id),
             str(row.model_config_version_id),
             row.payload_checksum,
@@ -642,6 +658,7 @@ class WorkerHostExecutionApprovalPort(
         execution_domain: HostExecutionDomainSnapshot | None = None,
         continuation_approval_id: str | None = None,
         audit: HostExecutionApprovalAuditPort | None = None,
+        retry_safety_boundary: object | None = None,
     ) -> None:
         if claim.run_id is None or claim.scope.owner_user_id is None:
             raise ValueError("private Run claim is required")
@@ -676,6 +693,7 @@ class WorkerHostExecutionApprovalPort(
         self._continuation_approval_id = uuid.UUID(continuation_approval_id) if continuation_approval_id is not None else None
         self._continuation_consumed = False
         self._audit = audit or NoopHostExecutionApprovalAudit()
+        self._retry_safety_boundary = retry_safety_boundary
 
     def prepare_host_execution_environment(self) -> dict[str, str] | None:
         """Freeze and verify the sanitized Local environment for one spawn."""
@@ -687,6 +705,340 @@ class WorkerHostExecutionApprovalPort(
         if host_execution_environment_fingerprint(prepared) != execution_domain.environment_fingerprint:
             return None
         return prepared
+
+    async def seal_suspended_approval_marker(
+        self,
+        approval_id: str,
+    ) -> None:
+        """Persist checkpoint-safe suspension proof before stream terminal."""
+
+        try:
+            normalized_approval_id = uuid.UUID(approval_id)
+        except (AttributeError, TypeError, ValueError):
+            raise RuntimeError(
+                "host execution suspension marker is invalid",
+            ) from None
+        try:
+            async with self._factory() as session, session.begin():
+                await PrivateWorkRevalidator().require(
+                    session,
+                    self._context,
+                    Capability.PRIVATE_WORK_CREATE,
+                    Capability.PRIVATE_WORK_APPROVE_HOST_EXECUTION,
+                    lock=True,
+                )
+                await self._lock_thread_scope_shell(session)
+                run_repository = PrivateRunRepository(session)
+                cancelled = await run_repository.assert_execution_active(
+                    scope=self._context.resource_scope,
+                    run_id=self._claim.run_id or "",
+                    job_id=self._claim.job_id,
+                    lease_token=self._claim.lease_token,
+                )
+                if cancelled:
+                    raise PrivateRunExecutionLeaseLost
+                run = await session.scalar(
+                    sa.select(RunRow)
+                    .where(
+                        RunRow.project_id == self._context.project_id,
+                        RunRow.owner_user_id == str(self._context.user_id),
+                        RunRow.thread_id == self._thread_id,
+                        RunRow.run_id == self._claim.run_id,
+                        RunRow.job_id == self._claim.job_id,
+                        RunRow.status == "running",
+                    )
+                    .with_for_update(of=RunRow)
+                    .execution_options(populate_existing=True)
+                )
+                approval = await session.scalar(
+                    sa.select(ExecutionApprovalRequestRow)
+                    .where(
+                        ExecutionApprovalRequestRow.id == normalized_approval_id,
+                        ExecutionApprovalRequestRow.project_id == self._context.project_id,
+                        ExecutionApprovalRequestRow.owner_user_id == str(self._context.user_id),
+                        ExecutionApprovalRequestRow.thread_id == self._thread_id,
+                        ExecutionApprovalRequestRow.source_run_id == self._claim.run_id,
+                        ExecutionApprovalRequestRow.source_job_id == self._claim.job_id,
+                        ExecutionApprovalRequestRow.source_job_attempt_id == self._claim.attempt_id,
+                        ExecutionApprovalRequestRow.status == "staged",
+                    )
+                    .with_for_update(of=ExecutionApprovalRequestRow)
+                    .execution_options(populate_existing=True)
+                )
+                if run is None or approval is None:
+                    raise PrivateRunExecutionLeaseLost
+                marker_at = await _database_now(session)
+                cancelled = await run_repository.assert_execution_active(
+                    scope=self._context.resource_scope,
+                    run_id=self._claim.run_id or "",
+                    job_id=self._claim.job_id,
+                    lease_token=self._claim.lease_token,
+                    now=marker_at,
+                )
+                if cancelled:
+                    raise PrivateRunExecutionLeaseLost
+                run.metadata_json = with_run_host_execution_suspension(
+                    run.metadata_json,
+                    suspension=RunHostExecutionSuspension(
+                        approval_id=normalized_approval_id,
+                        source_job_id=uuid.UUID(str(self._claim.job_id)),
+                        producing_attempt_id=uuid.UUID(
+                            str(self._claim.attempt_id),
+                        ),
+                    ),
+                )
+                run.updated_at = marker_at
+                await session.flush()
+        except (
+            DBAPIError,
+            IntegrityError,
+            PrivateRunExecutionLeaseLost,
+            RunHostExecutionSuspensionInvalid,
+        ) as error:
+            raise RuntimeError(
+                "host execution suspension marker was not persisted",
+            ) from error
+
+    async def _lock_output_delivery_continuation(
+        self,
+        session: AsyncSession,
+    ) -> tuple[ExecutionApprovalRequestRow, datetime]:
+        approval_id = self._continuation_approval_id
+        if approval_id is None:
+            raise OutputDeliveryObligationConflict()
+        await PrivateWorkRevalidator().require(
+            session,
+            self._context,
+            Capability.PRIVATE_WORK_CREATE,
+            lock=True,
+        )
+        await self._lock_thread_scope_shell(session)
+        locked = await lock_execution_approval_private_rows(
+            session,
+            project_id=self._context.project_id,
+            owner_user_id=str(self._context.user_id),
+            thread_id=self._thread_id,
+            approval_id=approval_id,
+        )
+        if len(locked.rows) != 1:
+            raise OutputDeliveryObligationConflict()
+        approval = locked.rows[0]
+        if approval.continuation_run_id != self._claim.run_id or approval.continuation_job_id != self._claim.job_id or approval.decision != "allow_once":
+            raise OutputDeliveryObligationConflict()
+        now = await _database_now(session)
+        cancelled = await PrivateRunRepository(session).assert_execution_active(
+            scope=self._context.resource_scope,
+            run_id=self._claim.run_id or "",
+            job_id=self._claim.job_id,
+            lease_token=self._claim.lease_token,
+            now=now,
+        )
+        if cancelled:
+            raise OutputDeliveryObligationConflict()
+        return approval, now
+
+    async def record_output_delivery_intent(
+        self,
+        paths: tuple[str, ...],
+        tool_call_id: str,
+    ) -> None:
+        """Persist a continuation's exact ``present_files`` intent."""
+
+        if self._continuation_approval_id is None:
+            return
+        try:
+            async with self._factory() as session, session.begin():
+                approval, now = await self._lock_output_delivery_continuation(
+                    session,
+                )
+                await record_output_delivery_intent_in_session(
+                    session,
+                    approval=approval,
+                    continuation_run_id=self._claim.run_id or "",
+                    continuation_job_id=self._claim.job_id,
+                    presented_paths=paths,
+                    tool_call_id=tool_call_id,
+                    now=now,
+                )
+        except OutputDeliveryObligationConflict:
+            raise ValueError("output delivery intent is unavailable") from None
+        except (IntegrityError, DBAPIError) as error:
+            raise RuntimeError(
+                "output delivery intent was not persisted",
+            ) from error
+
+    async def output_delivery_status(
+        self,
+    ) -> Literal[
+        "not_required",
+        "assigned",
+        "intent_recorded",
+        "delivered",
+        "cancelled",
+        "blocked_unknown",
+        "failed",
+    ]:
+        """Return the exact continuation's durable delivery state."""
+
+        if self._continuation_approval_id is None:
+            return "not_required"
+        try:
+            async with self._factory() as session, session.begin():
+                approval, _now = await self._lock_output_delivery_continuation(
+                    session,
+                )
+                obligation = await load_output_delivery_obligation_for_continuation(
+                    session,
+                    approval=approval,
+                    continuation_run_id=self._claim.run_id or "",
+                    continuation_job_id=self._claim.job_id,
+                    lock=True,
+                )
+                if obligation is None:
+                    return "not_required"
+                return cast(
+                    Literal[
+                        "assigned",
+                        "intent_recorded",
+                        "delivered",
+                        "cancelled",
+                        "blocked_unknown",
+                        "failed",
+                    ],
+                    obligation.status,
+                )
+        except OutputDeliveryObligationConflict:
+            raise RuntimeError("output delivery status is unavailable") from None
+        except DBAPIError as error:
+            raise RuntimeError(
+                "output delivery status was not read",
+            ) from error
+
+    async def output_delivery_requirement_paths(self) -> tuple[str, ...]:
+        """Return bounded server-owned candidate paths for the hidden receipt."""
+
+        if self._continuation_approval_id is None:
+            return ()
+        try:
+            async with self._factory() as session, session.begin():
+                approval, _now = await self._lock_output_delivery_continuation(
+                    session,
+                )
+                obligation = await load_output_delivery_obligation_for_continuation(
+                    session,
+                    approval=approval,
+                    continuation_run_id=self._claim.run_id or "",
+                    continuation_job_id=self._claim.job_id,
+                )
+                if obligation is None or obligation.status in {
+                    "delivered",
+                    "cancelled",
+                    "blocked_unknown",
+                    "failed",
+                }:
+                    return ()
+                return tuple(f"/mnt/user-data/{candidate.logical_path}" for candidate in obligation.candidates[:256])
+        except OutputDeliveryObligationConflict:
+            raise RuntimeError(
+                "output delivery requirement is unavailable",
+            ) from None
+        except DBAPIError as error:
+            raise RuntimeError(
+                "output delivery requirement was not read",
+            ) from error
+
+    async def restore_output_delivery_intent_paths(self) -> tuple[str, ...]:
+        """Restore exact committed presentation paths for Worker recovery."""
+
+        if self._continuation_approval_id is None:
+            return ()
+        try:
+            async with self._factory() as session, session.begin():
+                approval, _now = await self._lock_output_delivery_continuation(
+                    session,
+                )
+                return await restore_output_delivery_intent_paths_in_session(
+                    session,
+                    approval=approval,
+                    continuation_run_id=self._claim.run_id or "",
+                    continuation_job_id=self._claim.job_id,
+                )
+        except OutputDeliveryObligationConflict:
+            raise RuntimeError("output delivery intent is unavailable") from None
+        except DBAPIError as error:
+            raise RuntimeError(
+                "output delivery intent was not read",
+            ) from error
+
+    async def deliver_output_obligation_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        artifact_id: uuid.UUID,
+        logical_path: str,
+    ) -> bool:
+        """Satisfy this continuation's obligation in the Artifact transaction.
+
+        ``PrivateFileFinalizer`` has already revalidated and locked the exact
+        Job/Run lease in this transaction. Bind the update to this port's
+        server-owned approval coordinate as well; no model or browser field can
+        select a different obligation.
+        """
+
+        approval_id = self._continuation_approval_id
+        continuation_run_id = self._claim.run_id
+        if approval_id is None:
+            return False
+        if continuation_run_id is None:
+            raise RuntimeError("output delivery continuation is unavailable")
+        try:
+            now = await _database_now(session)
+            cancelled = await PrivateRunRepository(
+                session,
+            ).assert_execution_active(
+                scope=self._context.resource_scope,
+                run_id=continuation_run_id,
+                job_id=self._claim.job_id,
+                lease_token=self._claim.lease_token,
+                now=now,
+            )
+            if cancelled:
+                raise OutputDeliveryObligationConflict()
+            return await deliver_output_obligation_in_session(
+                session,
+                approval_id=approval_id,
+                project_id=self._context.project_id,
+                owner_user_id=str(self._context.user_id),
+                thread_id=self._thread_id,
+                continuation_run_id=continuation_run_id,
+                logical_path=logical_path,
+                artifact_id=artifact_id,
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise RuntimeError(
+                "output delivery obligation is inconsistent",
+            ) from None
+
+    @staticmethod
+    async def _transition_output_delivery_terminal(
+        session: AsyncSession,
+        row: ExecutionApprovalRequestRow,
+        *,
+        status: str,
+        now: datetime,
+    ) -> None:
+        try:
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status=status,
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise RuntimeError(
+                "output delivery obligation is inconsistent",
+            ) from None
 
     async def _lock_thread_scope_shell(
         self,
@@ -828,6 +1180,12 @@ class WorkerHostExecutionApprovalPort(
                             existing.version += 1
                             existing.terminal_at = created_at
                             existing.updated_at = created_at
+                            await self._transition_output_delivery_terminal(
+                                session,
+                                existing,
+                                status="cancelled",
+                                now=created_at,
+                            )
                             await self._audit.host_execution_approval_terminal(
                                 session,
                                 project_id=existing.project_id,
@@ -852,6 +1210,12 @@ class WorkerHostExecutionApprovalPort(
                             existing.version += 1
                             existing.terminal_at = created_at
                             existing.updated_at = created_at
+                            await self._transition_output_delivery_terminal(
+                                session,
+                                existing,
+                                status="cancelled",
+                                now=created_at,
+                            )
                             await self._audit.host_execution_approval_terminal(
                                 session,
                                 project_id=existing.project_id,
@@ -1022,6 +1386,12 @@ class WorkerHostExecutionApprovalPort(
                         row.version += 1
                         row.terminal_at = claimed_at
                         row.updated_at = claimed_at
+                        await self._transition_output_delivery_terminal(
+                            session,
+                            row,
+                            status="cancelled",
+                            now=claimed_at,
+                        )
                         await self._audit.host_execution_approval_terminal(
                             session,
                             project_id=row.project_id,
@@ -1083,6 +1453,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = claimed_at
                     row.updated_at = claimed_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="expired",
+                        now=claimed_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1099,6 +1475,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = claimed_at
                     row.updated_at = claimed_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="cancelled",
+                        now=claimed_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1115,6 +1497,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = claimed_at
                     row.updated_at = claimed_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="cancelled",
+                        now=claimed_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1137,6 +1525,18 @@ class WorkerHostExecutionApprovalPort(
                     return HostExecutionFrozenClaim.denied(
                         "approval_continuation_mismatch",
                     )
+                try:
+                    await assign_output_delivery_obligation(
+                        session,
+                        approval=row,
+                        continuation_run_id=self._claim.run_id or "",
+                        continuation_job_id=self._claim.job_id,
+                        now=claimed_at,
+                    )
+                except OutputDeliveryObligationConflict:
+                    raise RuntimeError(
+                        "output delivery obligation is inconsistent",
+                    ) from None
                 source_closure = await _asset_closure(
                     session,
                     project_id=self._context.project_id,
@@ -1154,6 +1554,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = claimed_at
                     row.updated_at = claimed_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="cancelled",
+                        now=claimed_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1182,6 +1588,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = claim_authorized_at
                     row.updated_at = claim_authorized_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="expired",
+                        now=claim_authorized_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1334,6 +1746,12 @@ class WorkerHostExecutionApprovalPort(
                 ).scalar_one_or_none()
                 if row is None or row.claimed_at is None:
                     return None
+                if row.spawn_authorized_at is not None:
+                    # The first committed authorization is a one-shot CAS.
+                    # Even if the callback acknowledgement was lost before
+                    # process creation, this frozen command cannot receive a
+                    # second positive spawn decision.
+                    return None
                 try:
                     _plan, persisted_policy, persisted_domain = _frozen_plan_from_row(row)
                 except (TypeError, ValueError):
@@ -1367,7 +1785,13 @@ class WorkerHostExecutionApprovalPort(
                     run.execution_lease_expires_at.astimezone(UTC),
                 )
                 remaining_seconds = (launch_deadline - authorized_at).total_seconds()
-                return remaining_seconds if remaining_seconds > 0 else None
+                if remaining_seconds <= 0:
+                    return None
+                row.spawn_authorized_at = authorized_at
+                row.version += 1
+                row.updated_at = authorized_at
+                await session.flush()
+                return remaining_seconds
         except (
             DBAPIError,
             PrivateRunExecutionLeaseLost,
@@ -1429,6 +1853,45 @@ class WorkerHostExecutionApprovalPort(
         approval_id: str,
         outcome: HostExecutionOutcome,
     ) -> None:
+        await self._complete_host_execution(
+            approval_id,
+            outcome,
+            mark_retry_safe=True,
+        )
+
+    async def complete_host_execution_with_retry_safety_fence(
+        self,
+        approval_id: str,
+        outcome: HostExecutionOutcome,
+        retry_safety_fence: object,
+    ) -> None:
+        """Commit one receipt and resolve only its exact host-spawn fence."""
+
+        resolver = getattr(
+            self._retry_safety_boundary,
+            "resolve_sandbox_exec_fence_transaction",
+            None,
+        )
+        if not callable(resolver):
+            raise RuntimeError("host execution retry-safety boundary is unavailable")
+        async with resolver(retry_safety_fence) as mark_retry_safe:
+            if type(mark_retry_safe) is not bool:
+                raise RuntimeError("host execution retry-safety boundary is invalid")
+            await self._complete_host_execution(
+                approval_id,
+                outcome,
+                mark_retry_safe=mark_retry_safe,
+            )
+
+    async def _complete_host_execution(
+        self,
+        approval_id: str,
+        outcome: HostExecutionOutcome,
+        *,
+        mark_retry_safe: bool,
+    ) -> None:
+        if type(mark_retry_safe) is not bool:
+            raise TypeError("mark_retry_safe must be a boolean")
         try:
             parsed_id = uuid.UUID(approval_id)
         except (TypeError, ValueError) as error:
@@ -1471,12 +1934,19 @@ class WorkerHostExecutionApprovalPort(
                         raise RuntimeError(
                             "host execution completion conflicts with receipt",
                         )
-                    if job.retry_safety != "safe":
+                    if mark_retry_safe and job.retry_safety != "safe":
                         job.retry_safety = "safe"
                         job.updated_at = completed_at
                     return
                 if row.status != "claimed" or existing_receipt is not None:
                     raise RuntimeError("host execution is not claim-completable")
+                if outcome.status in {"finished", "unknown"} and row.spawn_authorized_at is None:
+                    # A finished or indeterminate process outcome is only
+                    # credible after the final pre-spawn authority CAS
+                    # committed. launch_failed remains valid before that gate.
+                    raise RuntimeError(
+                        "host execution spawn was not durably authorized",
+                    )
                 if outcome.status == "unknown":
                     # The runner can report unknown after process creation if
                     # it cannot prove termination. Keep the claimed gate until
@@ -1488,6 +1958,12 @@ class WorkerHostExecutionApprovalPort(
                     row.version += 1
                     row.terminal_at = completed_at
                     row.updated_at = completed_at
+                    await self._transition_output_delivery_terminal(
+                        session,
+                        row,
+                        status="unknown",
+                        now=completed_at,
+                    )
                     await self._audit.host_execution_approval_terminal(
                         session,
                         project_id=row.project_id,
@@ -1518,8 +1994,9 @@ class WorkerHostExecutionApprovalPort(
                 row.version += 1
                 row.terminal_at = completed_at
                 row.updated_at = completed_at
-                job.retry_safety = "safe"
-                job.updated_at = completed_at
+                if mark_retry_safe:
+                    job.retry_safety = "safe"
+                    job.updated_at = completed_at
                 await self._audit.host_execution_approval_terminal(
                     session,
                     project_id=row.project_id,
@@ -1540,13 +2017,32 @@ async def settle_staged_execution_approvals(
     *,
     claim: JobClaim,
     succeeded: bool,
+    suspended_approval_id: str | None,
     request_ttl_seconds: int,
+    durable_terminal_replay: bool = False,
     audit: HostExecutionApprovalAuditPort | None = None,
 ) -> None:
-    """Activate staged requests only after their source Run succeeds."""
+    """Seal and activate the exact approval named by a suspended success."""
 
+    if type(durable_terminal_replay) is not bool:
+        raise ExecutionApprovalPrivateLifecycleConflict()
     if claim.run_id is None or claim.scope.owner_user_id is None:
+        if suspended_approval_id is not None:
+            raise ExecutionApprovalPrivateLifecycleConflict()
         return
+    suspended_id: uuid.UUID | None = None
+    if suspended_approval_id is not None:
+        try:
+            suspended_id = uuid.UUID(suspended_approval_id)
+        except (TypeError, ValueError):
+            raise ExecutionApprovalPrivateLifecycleConflict() from None
+    if durable_terminal_replay and suspended_id is not None:
+        recovered_id = await recover_staged_execution_approval_id(
+            session,
+            claim=claim,
+        )
+        if recovered_id != str(suspended_id):
+            raise ExecutionApprovalPrivateLifecycleConflict()
     rows = tuple(
         (
             await session.execute(
@@ -1563,10 +2059,46 @@ async def settle_staged_execution_approvals(
             )
         ).scalars()
     )
+    source_run = await session.scalar(
+        sa.select(RunRow)
+        .where(
+            RunRow.project_id == claim.scope.project_id,
+            RunRow.owner_user_id == claim.scope.owner_user_id,
+            RunRow.run_id == claim.run_id,
+            RunRow.job_id == claim.job_id,
+        )
+        .with_for_update(of=RunRow)
+        .execution_options(populate_existing=True)
+    )
+    if source_run is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    sealed_rows = tuple(row for row in rows if staged_approval_has_exact_suspension_marker(row, source_run))
+    if sealed_rows and (not succeeded or suspended_id is None or len(sealed_rows) != 1 or sealed_rows[0].id != suspended_id):
+        # The marker is a checkpoint-safe durable success proof.  A later
+        # stream ACK/error/cancel cannot reinterpret that exact source result
+        # as failure; roll back so the recovery path can repair its terminal.
+        raise ExecutionApprovalPrivateLifecycleConflict()
     settled_at = await _database_now(session)
     approval_audit = audit or NoopHostExecutionApprovalAudit()
+    if succeeded:
+        # A live result must name this exact attempt's staged request. Durable
+        # terminal replay may name its earlier producing attempt only after the
+        # server-only Run marker above re-proves that exact coordinate.
+        if suspended_id is not None and (len(rows) != 1 or rows[0].id != suspended_id or (rows[0].source_job_attempt_id != claim.attempt_id and not durable_terminal_replay)):
+            raise ExecutionApprovalPrivateLifecycleConflict()
+    elif suspended_id is not None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
     for row in rows:
-        available = succeeded and row.source_job_attempt_id == claim.attempt_id
+        available = succeeded and suspended_id == row.id and (row.source_job_attempt_id == claim.attempt_id or durable_terminal_replay)
+        if available:
+            try:
+                await seal_source_output_delivery_obligation(
+                    session,
+                    approval=row,
+                    now=settled_at,
+                )
+            except OutputDeliveryObligationConflict:
+                raise ExecutionApprovalPrivateLifecycleConflict() from None
         row.status = "pending" if available else "cancelled"
         row.version += 1
         row.expires_at = settled_at + timedelta(seconds=request_ttl_seconds)
@@ -1581,6 +2113,15 @@ async def settle_staged_execution_approvals(
                 occurred_at=settled_at,
             )
         else:
+            try:
+                await transition_output_delivery_obligation_for_approval_terminal(
+                    session,
+                    approval=row,
+                    approval_status="cancelled",
+                    now=settled_at,
+                )
+            except OutputDeliveryObligationConflict:
+                raise ExecutionApprovalPrivateLifecycleConflict() from None
             await approval_audit.host_execution_approval_terminal(
                 session,
                 project_id=row.project_id,
@@ -1589,6 +2130,62 @@ async def settle_staged_execution_approvals(
                 request_id=claim.origin_trace_id,
                 occurred_at=settled_at,
             )
+
+
+async def recover_staged_execution_approval_id(
+    session: AsyncSession,
+    *,
+    claim: JobClaim,
+) -> str | None:
+    """Recover typed suspension authority after durable-terminal replay.
+
+    The public stream terminal intentionally contains no approval coordinate.
+    Recovery therefore verifies the server-only Run marker written immediately
+    before that terminal against the exact staged approval and its producing
+    JobAttempt. Browser and stream metadata never select an approval.
+    """
+
+    if claim.run_id is None or claim.scope.owner_user_id is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    run = await session.scalar(
+        sa.select(RunRow)
+        .where(
+            RunRow.project_id == claim.scope.project_id,
+            RunRow.owner_user_id == claim.scope.owner_user_id,
+            RunRow.run_id == claim.run_id,
+            RunRow.job_id == claim.job_id,
+        )
+        .with_for_update(of=RunRow)
+        .execution_options(populate_existing=True)
+    )
+    if run is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    try:
+        marker = run_host_execution_suspension(run.metadata_json)
+    except RunHostExecutionSuspensionInvalid:
+        raise ExecutionApprovalPrivateLifecycleConflict() from None
+    if marker is None:
+        return None
+    if marker.source_job_id != claim.job_id:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    approval = await session.scalar(
+        sa.select(ExecutionApprovalRequestRow)
+        .where(
+            ExecutionApprovalRequestRow.id == marker.approval_id,
+            ExecutionApprovalRequestRow.project_id == claim.scope.project_id,
+            ExecutionApprovalRequestRow.owner_user_id == claim.scope.owner_user_id,
+            ExecutionApprovalRequestRow.thread_id == run.thread_id,
+            ExecutionApprovalRequestRow.source_run_id == claim.run_id,
+            ExecutionApprovalRequestRow.source_job_id == claim.job_id,
+            ExecutionApprovalRequestRow.source_job_attempt_id == marker.producing_attempt_id,
+            ExecutionApprovalRequestRow.status == "staged",
+        )
+        .with_for_update(of=ExecutionApprovalRequestRow)
+        .execution_options(populate_existing=True)
+    )
+    if approval is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    return str(approval.id)
 
 
 class ExecutionApprovalService:
@@ -1680,7 +2277,7 @@ class ExecutionApprovalService:
         *,
         now: datetime,
     ) -> ExecutionApprovalProjection:
-        if row is None:
+        if row is None or row.status == "staged":
             return ExecutionApprovalProjection(1, now, None)
         try:
             plan, _policy, execution_domain = _frozen_plan_from_row(row)
@@ -1696,12 +2293,11 @@ class ExecutionApprovalService:
             )
             if run is not None:
                 continuation = {"run_id": run.run_id, "status": run.status}
-        public_status = "pending" if row.status == "staged" else row.status
         approval: dict[str, object] = {
             "approval_id": str(row.id),
             "source_run_id": row.source_run_id,
             "source_tool_call_id": row.tool_call_id,
-            "status": public_status,
+            "status": row.status,
             "version": str(row.version),
             "execution_domain": {
                 "label": execution_domain.public_label,
@@ -1720,7 +2316,7 @@ class ExecutionApprovalService:
             "can_decide": (row.status == "pending" and Capability.PRIVATE_WORK_APPROVE_HOST_EXECUTION in context.capabilities),
             "continuation_run": continuation,
         }
-        if row.status in {"staged", "pending"}:
+        if row.status == "pending":
             approval.update(
                 {
                     "decision_expires_at": row.expires_at.isoformat(),
@@ -1812,7 +2408,7 @@ class ExecutionApprovalService:
                         locked=locked,
                         now=now,
                     )
-                    if row.status not in {"staged", "pending", "approved", "claimed"}:
+                    if row.status not in {"pending", "approved", "claimed"}:
                         row = None
                 return await self._project(session, context, row, now=now)
         except PrivateWorkError:
@@ -2005,6 +2601,17 @@ class ExecutionApprovalService:
                         row.terminal_at = decided_at
                         row.version += 1
                         row.updated_at = decided_at
+                        try:
+                            await transition_output_delivery_obligation_for_approval_terminal(
+                                session,
+                                approval=row,
+                                approval_status="denied",
+                                now=decided_at,
+                            )
+                        except OutputDeliveryObligationConflict:
+                            raise ExecutionApprovalConflict(
+                                context.request_id,
+                            ) from None
                         await self._audit.host_execution_approval_decided(
                             session,
                             context,
@@ -2158,5 +2765,6 @@ __all__ = [
     "ExecutionApprovalService",
     "HostExecutionProviderPolicySnapshot",
     "WorkerHostExecutionApprovalPort",
+    "recover_staged_execution_approval_id",
     "settle_staged_execution_approvals",
 ]

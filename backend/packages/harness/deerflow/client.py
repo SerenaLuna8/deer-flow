@@ -1026,7 +1026,7 @@ class DeerFlowClient:
             The accumulated text of the last AI message, or empty string
             if no AI text was produced.
         """
-        # Per-id delta lists joined once at the end — avoids the O(n²) cost
+        # Per-id delta lists joined once at the end — avoids the O(n²) overhead
         # of repeated ``str + str`` on a growing buffer for long responses.
         chunks: dict[str, list[str]] = {}
         last_id: str = ""
@@ -1063,7 +1063,6 @@ class DeerFlowClient:
                     # selector projection: provider identifiers are admin-only.
                     "model": model.name,
                     "display_name": (model.display_name if isinstance(model.display_name, str) else model.name),
-                    "description": (model.description if isinstance(model.description, str) else ""),
                     "supports_thinking": (getattr(model, "supports_thinking", False) is True),
                     "supports_reasoning_effort": (
                         getattr(
@@ -1099,7 +1098,6 @@ class DeerFlowClient:
             "name": model.name,
             "model": model.name,
             "display_name": (model.display_name if isinstance(model.display_name, str) else model.name),
-            "description": (model.description if isinstance(model.description, str) else ""),
             "supports_thinking": (getattr(model, "supports_thinking", False) is True),
             "supports_reasoning_effort": (getattr(model, "supports_reasoning_effort", False) is True),
             "supports_vision": (getattr(model, "supports_vision", False) is True),

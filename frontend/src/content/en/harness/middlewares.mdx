@@ -88,7 +88,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # system default model; set a logical name to pin one
+  model_name: null # system default model; set a model UUID to pin one
 ```
 
 ---
@@ -103,7 +103,7 @@ When plan mode is active, maintains a structured task list visible to the user. 
 
 ### TokenUsageMiddleware
 
-Tracks LLM token consumption per model call and logs it at the `info` level. Useful for monitoring costs and understanding where tokens are going in long tasks.
+Tracks LLM token consumption per model call and logs it at the `info` level. Useful for understanding where tokens are going in long tasks.
 
 **Configuration**: `token_usage:` section in `config.yaml`.
 
@@ -165,7 +165,7 @@ summarization:
   enabled: true
 
   # Model to use for summarization (null = use default model)
-  # A lightweight model like gpt-4o-mini is recommended to reduce cost.
+  # A lightweight model like gpt-4o-mini is recommended to reduce latency and resource use.
   model_name: null
 
   # Trigger conditions — summarization runs when ANY threshold is met

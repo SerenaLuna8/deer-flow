@@ -105,6 +105,7 @@ describe("Agent author and publisher governance", () => {
           user_context: "# USER",
           model_settings: {},
         }}
+        models={[]}
         canAuthor
         editing={false}
         pending={false}

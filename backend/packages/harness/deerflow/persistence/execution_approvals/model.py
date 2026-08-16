@@ -39,6 +39,18 @@ EXECUTION_APPROVAL_STATUSES = frozenset(
 )
 EXECUTION_APPROVAL_ACTIVE_STATUSES = frozenset({"staged", "pending", "approved", "claimed"})
 EXECUTION_APPROVAL_KINDS = frozenset({"local_bash"})
+EXECUTION_APPROVAL_OUTPUT_DELIVERY_MODES = frozenset({"any_one"})
+EXECUTION_APPROVAL_OUTPUT_DELIVERY_STATUSES = frozenset(
+    {
+        "deferred",
+        "assigned",
+        "intent_recorded",
+        "delivered",
+        "cancelled",
+        "blocked_unknown",
+        "failed",
+    }
+)
 
 
 def _now() -> datetime:
@@ -104,6 +116,11 @@ class ExecutionApprovalRequestRow(Base):
         nullable=False,
         default=_now,
         server_default=text("now()"),
+    )
+    # This was added by the first post-baseline migration. Keep it last so
+    # ORM create_all/fresh SQL and upgraded PostgreSQL catalogs share ordinals.
+    spawn_authorized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
     )
 
     __table_args__ = (
@@ -295,6 +312,15 @@ class ExecutionApprovalRequestRow(Base):
             name="ck_execution_approval_requests_terminal_shape",
         ),
         CheckConstraint(
+            "(status != 'finished' OR spawn_authorized_at IS NOT NULL) AND "
+            "(spawn_authorized_at IS NULL OR "
+            "(status IN ('claimed', 'finished', 'launch_failed', 'unknown', "
+            "'cancelled') AND execution_job_attempt_id IS NOT NULL "
+            "AND claimed_at IS NOT NULL AND spawn_authorized_at >= claimed_at "
+            "AND (terminal_at IS NULL OR spawn_authorized_at <= terminal_at)))",
+            name="ck_execution_approval_requests_spawn_authorization",
+        ),
+        CheckConstraint(
             "expires_at > created_at AND updated_at >= created_at AND (decided_at IS NULL OR decided_at >= created_at) AND (claimed_at IS NULL OR claimed_at >= created_at) AND (terminal_at IS NULL OR terminal_at >= created_at)",
             name="ck_execution_approval_requests_timestamps",
         ),
@@ -327,6 +353,277 @@ class ExecutionApprovalRequestRow(Base):
             "status",
             "expires_at",
             "id",
+        ),
+    )
+
+
+class ExecutionApprovalOutputDeliveryObligationRow(Base):
+    """One private output-delivery obligation bound to an approval."""
+
+    __tablename__ = "execution_approval_output_delivery_obligations"
+
+    approval_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="any_one",
+        server_default="any_one",
+    )
+    status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        default="deferred",
+        server_default="deferred",
+    )
+    continuation_run_id: Mapped[str | None] = mapped_column(String(64))
+    continuation_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    intent_tool_call_id: Mapped[str | None] = mapped_column(String(128))
+    intent_digest: Mapped[str | None] = mapped_column(CHAR(64))
+    intent_private_json: Mapped[dict | None] = mapped_column(JSON)
+    satisfied_artifact_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    version: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=1,
+        server_default=text("1"),
+    )
+    assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    intent_recorded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
+    terminal_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "approval_id",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            name="uq_ea_output_delivery_obligations_private_scope",
+        ),
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_ea_output_delivery_obligations_project",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["owner_user_id"],
+            ["users.id"],
+            name="fk_ea_output_delivery_obligations_owner",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id"],
+            ["project_memberships.project_id", "project_memberships.user_id"],
+            name="fk_ea_output_delivery_obligations_membership",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id"],
+            [
+                "threads_meta.project_id",
+                "threads_meta.owner_user_id",
+                "threads_meta.thread_id",
+            ],
+            name="fk_ea_output_delivery_obligations_private_thread",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["approval_id", "project_id", "owner_user_id", "thread_id"],
+            [
+                "execution_approval_requests.id",
+                "execution_approval_requests.project_id",
+                "execution_approval_requests.owner_user_id",
+                "execution_approval_requests.thread_id",
+            ],
+            name="fk_ea_output_delivery_obligations_approval",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "continuation_run_id"],
+            [
+                "runs.project_id",
+                "runs.owner_user_id",
+                "runs.thread_id",
+                "runs.run_id",
+            ],
+            name="fk_ea_output_delivery_obligations_continuation_run",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "continuation_job_id",
+                "project_id",
+                "owner_user_id",
+                "continuation_run_id",
+            ],
+            ["jobs.id", "jobs.project_id", "jobs.owner_user_id", "jobs.run_id"],
+            name="fk_ea_output_delivery_obligations_continuation_job",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "project_id",
+                "owner_user_id",
+                "thread_id",
+                "continuation_run_id",
+                "satisfied_artifact_id",
+            ],
+            [
+                "artifacts.project_id",
+                "artifacts.owner_user_id",
+                "artifacts.thread_id",
+                "artifacts.run_id",
+                "artifacts.id",
+            ],
+            name="fk_ea_output_delivery_obligations_satisfied_artifact",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "mode IN ('any_one')",
+            name="ck_ea_output_delivery_obligations_mode",
+        ),
+        CheckConstraint(
+            "status IN ('deferred', 'assigned', 'intent_recorded', 'delivered', 'cancelled', 'blocked_unknown', 'failed')",
+            name="ck_ea_output_delivery_obligations_status",
+        ),
+        CheckConstraint(
+            "(continuation_run_id IS NULL) = (continuation_job_id IS NULL) AND (continuation_run_id IS NULL) = (assigned_at IS NULL)",
+            name="ck_ea_output_delivery_obligations_assignment_shape",
+        ),
+        CheckConstraint(
+            "(intent_tool_call_id IS NULL AND intent_digest IS NULL "
+            "AND intent_private_json IS NULL AND intent_recorded_at IS NULL) "
+            "OR (intent_tool_call_id IS NOT NULL "
+            "AND intent_tool_call_id <> '' "
+            "AND intent_tool_call_id = btrim(intent_tool_call_id) "
+            "AND intent_digest ~ '^[0-9a-f]{64}$' "
+            "AND json_typeof(intent_private_json) = 'object' "
+            "AND octet_length(intent_private_json::text) <= 1048576 "
+            "AND intent_recorded_at IS NOT NULL)",
+            name="ck_ea_output_delivery_obligations_intent_shape",
+        ),
+        CheckConstraint(
+            "(status = 'deferred' AND continuation_run_id IS NULL "
+            "AND intent_tool_call_id IS NULL AND satisfied_artifact_id IS NULL "
+            "AND terminal_at IS NULL) "
+            "OR (status = 'assigned' AND continuation_run_id IS NOT NULL "
+            "AND intent_tool_call_id IS NULL AND satisfied_artifact_id IS NULL "
+            "AND terminal_at IS NULL) "
+            "OR (status = 'intent_recorded' AND continuation_run_id IS NOT NULL "
+            "AND intent_tool_call_id IS NOT NULL AND satisfied_artifact_id IS NULL "
+            "AND terminal_at IS NULL) "
+            "OR (status = 'delivered' AND continuation_run_id IS NOT NULL "
+            "AND intent_tool_call_id IS NOT NULL AND satisfied_artifact_id IS NOT NULL "
+            "AND terminal_at IS NOT NULL) "
+            "OR (status = 'cancelled' AND satisfied_artifact_id IS NULL "
+            "AND terminal_at IS NOT NULL) "
+            "OR (status IN ('blocked_unknown', 'failed') "
+            "AND continuation_run_id IS NOT NULL "
+            "AND satisfied_artifact_id IS NULL AND terminal_at IS NOT NULL)",
+            name="ck_ea_output_delivery_obligations_lifecycle_shape",
+        ),
+        CheckConstraint(
+            "version >= 1",
+            name="ck_ea_output_delivery_obligations_version",
+        ),
+        CheckConstraint(
+            "updated_at >= created_at "
+            "AND (assigned_at IS NULL OR assigned_at >= created_at) "
+            "AND (intent_recorded_at IS NULL OR "
+            "intent_recorded_at >= assigned_at) "
+            "AND (terminal_at IS NULL OR terminal_at >= "
+            "COALESCE(intent_recorded_at, assigned_at, created_at))",
+            name="ck_ea_output_delivery_obligations_timestamps",
+        ),
+        Index(
+            "ix_ea_output_delivery_obligations_private_status",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            "status",
+            "updated_at",
+        ),
+    )
+
+
+class ExecutionApprovalOutputDeliveryCandidateRow(Base):
+    """One exact durable output eligible to satisfy an approval obligation."""
+
+    __tablename__ = "execution_approval_output_delivery_candidates"
+
+    approval_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    file_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    logical_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    file_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "approval_id",
+            "logical_path",
+            name="uq_ea_output_delivery_candidates_path",
+        ),
+        ForeignKeyConstraint(
+            ["approval_id", "project_id", "owner_user_id", "thread_id"],
+            [
+                "execution_approval_output_delivery_obligations.approval_id",
+                "execution_approval_output_delivery_obligations.project_id",
+                "execution_approval_output_delivery_obligations.owner_user_id",
+                "execution_approval_output_delivery_obligations.thread_id",
+            ],
+            name="fk_ea_output_delivery_candidates_obligation",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "thread_id", "file_id"],
+            ["files.project_id", "files.owner_user_id", "files.thread_id", "files.id"],
+            name="fk_ea_output_delivery_candidates_private_file",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "logical_path LIKE 'outputs/%' AND logical_path <> 'outputs/' AND logical_path !~ '(^|/)\\.\\.(/|$)' AND logical_path !~ '^[A-Za-z]:'",
+            name="ck_ea_output_delivery_candidates_path",
+        ),
+        CheckConstraint(
+            "file_version >= 1",
+            name="ck_ea_output_delivery_candidates_version",
+        ),
+        CheckConstraint(
+            "sha256 ~ '^[0-9a-f]{64}$'",
+            name="ck_ea_output_delivery_candidates_sha256",
+        ),
+        Index(
+            "ix_ea_output_delivery_candidates_private",
+            "project_id",
+            "owner_user_id",
+            "thread_id",
+            "approval_id",
         ),
     )
 

@@ -160,11 +160,13 @@ class PrivateFileFinalizer:
         limits: PrivateFileFinalizationLimits | None = None,
         quota: PrivateFileFinalizationQuotaPort | None = None,
         audit: PrivateFileFinalizationAuditPort | None = None,
+        output_delivery_port: object | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._limits = limits or PrivateFileFinalizationLimits()
         self._quota = quota or _NoopPrivateFileFinalizationQuota()
         self._audit = audit
+        self._output_delivery_port = output_delivery_port
         self._revalidator = PrivateWorkRevalidator()
 
     @staticmethod
@@ -594,25 +596,81 @@ class PrivateFileFinalizer:
             unchanged_paths = sorted(after_paths - set(changed_by_path))
             after_ready.update({path: current_by_path[path] for path in unchanged_paths if path in current_by_path})
 
+            existing_artifact_rows = (
+                (
+                    await session.execute(
+                        select(PrivateArtifactRow)
+                        .where(
+                            PrivateArtifactRow.project_id == run_scope.context.project_id,
+                            PrivateArtifactRow.owner_user_id == str(run_scope.context.user_id),
+                            PrivateArtifactRow.thread_id == run_scope.thread_id,
+                            PrivateArtifactRow.run_id == run_scope.run_id,
+                            PrivateArtifactRow.deleted_at.is_(None),
+                        )
+                        .order_by(
+                            PrivateArtifactRow.created_at,
+                            PrivateArtifactRow.id,
+                        )
+                        .with_for_update(of=PrivateArtifactRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            existing_artifacts: dict[tuple[str, uuid.UUID], PrivateArtifactRow] = {}
+            for existing in existing_artifact_rows:
+                metadata = existing.artifact_metadata
+                logical_path = metadata.get("logical_path") if isinstance(metadata, dict) else None
+                if isinstance(logical_path, str):
+                    existing_artifacts.setdefault(
+                        (logical_path, existing.file_id),
+                        existing,
+                    )
+
             artifacts: list[PrivateArtifactRow] = []
+            created_artifact_count = 0
             for logical_path in presented_logical_paths:
                 file_row = after_ready.get(logical_path)
                 if file_row is None:
                     raise PrivateWorkUnavailable(run_scope.context.request_id)
-                artifact = PrivateArtifactRow(
-                    id=uuid.uuid4(),
-                    project_id=run_scope.context.project_id,
-                    owner_user_id=str(run_scope.context.user_id),
-                    thread_id=run_scope.thread_id,
-                    run_id=run_scope.run_id,
-                    file_id=file_row.id,
-                    display_name=PurePosixPath(logical_path).name,
-                    media_type=file_row.media_type,
-                    artifact_metadata={"logical_path": logical_path},
-                    created_at=now,
+                artifact = existing_artifacts.get(
+                    (logical_path, file_row.id),
                 )
-                session.add(artifact)
+                if artifact is None:
+                    artifact = PrivateArtifactRow(
+                        id=uuid.uuid4(),
+                        project_id=run_scope.context.project_id,
+                        owner_user_id=str(run_scope.context.user_id),
+                        thread_id=run_scope.thread_id,
+                        run_id=run_scope.run_id,
+                        file_id=file_row.id,
+                        display_name=PurePosixPath(logical_path).name,
+                        media_type=file_row.media_type,
+                        artifact_metadata={"logical_path": logical_path},
+                        created_at=now,
+                    )
+                    session.add(artifact)
+                    existing_artifacts[(logical_path, file_row.id)] = artifact
+                    created_artifact_count += 1
                 artifacts.append(artifact)
+
+                # The obligation FK must only be updated after the Artifact is
+                # a real row in this same transaction. This gives the helper an
+                # exact DB object to revalidate and avoids relying on eventual
+                # unit-of-work ordering for a pending Artifact.
+                await session.flush()
+
+                delivery = getattr(
+                    self._output_delivery_port,
+                    "deliver_output_obligation_in_session",
+                    None,
+                )
+                if callable(delivery):
+                    await delivery(
+                        session,
+                        artifact_id=artifact.id,
+                        logical_path=logical_path,
+                    )
 
             run.finalization_status = "complete"
             run.updated_at = now
@@ -632,7 +690,7 @@ class PrivateFileFinalizer:
                     created_count=sum(path not in before for path in changed_by_path),
                     modified_count=sum(path in before for path in changed_by_path),
                     deleted_count=len(deleted_paths),
-                    artifact_count=len(artifacts),
+                    artifact_count=created_artifact_count,
                     committed_bytes=sum(item.size for item in staged),
                 )
             await session.flush()

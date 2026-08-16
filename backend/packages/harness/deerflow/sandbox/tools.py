@@ -27,7 +27,6 @@ from deerflow.runtime.host_execution_approval import (
     HOST_EXECUTION_MAX_TOOL_CALL_ID_BYTES,
     HostExecutionApprovalPort,
     HostExecutionChannelIdentityMode,
-    HostExecutionOutcome,
     HostExecutionPlan,
 )
 from deerflow.runtime.secret_context import (
@@ -1847,103 +1846,6 @@ def _prepare_local_host_execution(
     )
 
 
-def _execute_prepared_local_host_command(
-    runtime: Runtime,
-    plan: HostExecutionPlan,
-    max_chars: int,
-) -> tuple[str, int, str, str]:
-    """Spawn exactly one already-approved Local process launch."""
-
-    context = getattr(runtime, "context", None)
-    injected_env = read_active_secrets(context) or None
-    github_env = _github_env_from_runtime(runtime)
-    if github_env:
-        injected_env = {**(injected_env or {}), **github_env}
-    sandbox = ensure_sandbox_initialized(runtime)
-    if not is_local_sandbox(runtime):
-        raise SandboxRuntimeError("Approved host execution requires LocalSandboxProvider")
-    execute_prepared = getattr(sandbox, "execute_prepared_command_result", None)
-    if not callable(execute_prepared):
-        raise SandboxRuntimeError("Local sandbox cannot execute a frozen command")
-    result = execute_prepared(
-        plan.effective_command,
-        shell=plan.shell,
-        env=injected_env,
-        timeout=plan.timeout_seconds,
-    )
-    exit_code = getattr(result, "exit_code", None)
-    output = getattr(result, "output", None)
-    stdout = getattr(result, "stdout", None)
-    stderr = getattr(result, "stderr", None)
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        raise SandboxRuntimeError("Local command returned no authoritative exit code")
-    if not all(isinstance(value, str) for value in (output, stdout, stderr)):
-        raise SandboxRuntimeError("Local command returned invalid structured output")
-
-    thread_data = get_thread_data(runtime)
-
-    def scrub(value: str) -> str:
-        return _truncate_bash_output(
-            mask_secret_values(
-                mask_local_paths_in_output(value, thread_data),
-                injected_env,
-            ),
-            max_chars,
-        )
-
-    return scrub(output), exit_code, scrub(stdout), scrub(stderr)
-
-
-async def _runtime_with_fresh_skill_secrets(
-    runtime: Runtime,
-) -> tuple[Runtime, dict | None]:
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict) or "private_scope" not in context:
-        return runtime, None
-    provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY)
-    if not callable(provider):
-        return runtime, None
-
-    call_context = dict(context)
-    call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
-    requested = active_provider_secret_request(call_context)
-    fresh_scoped = await provider(requested) if requested else {}
-    try:
-        active = resolve_provider_active_secrets(call_context, fresh_scoped)
-    finally:
-        if isinstance(fresh_scoped, dict):
-            for values in fresh_scoped.values():
-                if isinstance(values, dict):
-                    values.clear()
-            fresh_scoped.clear()
-    if active:
-        call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
-    call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
-    return _RuntimeContextOverlay(runtime, call_context), call_context
-
-
-def _clear_fresh_skill_runtime(call_context: dict | None) -> None:
-    if call_context is None:
-        return
-    call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
-    active = call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
-    if isinstance(active, dict):
-        active.clear()
-
-
-async def _complete_host_execution(
-    port: HostExecutionApprovalPort,
-    approval_id: str,
-    outcome: HostExecutionOutcome,
-) -> None:
-    try:
-        await port.complete_host_execution(approval_id, outcome)
-    except Exception as error:
-        raise RuntimeError(
-            "Host execution completion could not be persisted",
-        ) from error
-
-
 async def _approval_required_bash(
     runtime: Runtime,
     description: str,
@@ -2002,64 +1904,7 @@ async def _approval_required_bash(
             },
         )
         return Command(update={"messages": [message]}, goto=END)
-
-    approval_id = decision.approval_id
-    if not isinstance(approval_id, str) or not approval_id:
-        return "Error: Host execution approval returned an invalid decision"
-
-    from deerflow.sandbox.sandbox import check_authorization_boundary
-
-    try:
-        await check_authorization_boundary(
-            getattr(runtime, "context", None),
-            "before_sandbox_exec",
-        )
-        call_runtime, call_context = await _runtime_with_fresh_skill_secrets(
-            runtime,
-        )
-    except Exception:
-        await _complete_host_execution(
-            port,
-            approval_id,
-            HostExecutionOutcome(
-                status="launch_failed",
-                reason_code="pre_spawn_authorization_failed",
-            ),
-        )
-        return "Error: Approved host execution failed before process launch"
-
-    try:
-        output, exit_code, stdout, stderr = await asyncio.to_thread(
-            _execute_prepared_local_host_command,
-            call_runtime,
-            plan,
-            max_chars,
-        )
-    except Exception:
-        await _complete_host_execution(
-            port,
-            approval_id,
-            HostExecutionOutcome(
-                status="unknown",
-                reason_code="process_outcome_unknown",
-            ),
-        )
-        return "Error: Approved host execution outcome is unknown"
-    finally:
-        _clear_fresh_skill_runtime(call_context)
-
-    await _complete_host_execution(
-        port,
-        approval_id,
-        HostExecutionOutcome(
-            status="finished",
-            exit_code=exit_code,
-            stdout=stdout,
-            stderr=stderr,
-            result_text=output,
-        ),
-    )
-    return output
+    return "Error: Host execution approval returned an invalid decision"
 
 
 @tool("bash", parse_docstring=True)

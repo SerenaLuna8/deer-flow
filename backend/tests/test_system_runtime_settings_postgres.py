@@ -326,8 +326,8 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
     compatible_version_id = uuid.uuid4()
     incompatible_model_id = uuid.uuid4()
     incompatible_version_id = uuid.uuid4()
-    compatible_name = f"vision-bridge-{compatible_model_id.hex}"
-    incompatible_name = f"ordinary-vision-{incompatible_model_id.hex}"
+    compatible_name = str(compatible_model_id)
+    incompatible_name = str(incompatible_model_id)
     try:
         assert await bootstrap_system_runtime_policies(factory) == 1
         async with engine.begin() as connection:
@@ -361,11 +361,11 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
                 await connection.execute(
                     text(
                         """INSERT INTO system_model_configs
-                        (id,logical_name,display_name,description,status,
-                         current_version_id,revision,sort_order,
+                        (id,display_name,status,
+                         current_version_id,revision,
                          created_by_user_id,updated_by_user_id)
-                        VALUES (:id,:name,:name,'Vision Bridge policy test',
-                                'active',NULL,1,0,:owner,:owner)"""
+                        VALUES (:id,:name,'active',NULL,1,
+                                :owner,:owner)"""
                     ),
                     {
                         "id": model_id,

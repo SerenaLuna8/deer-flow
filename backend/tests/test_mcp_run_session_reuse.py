@@ -391,7 +391,7 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
                 if isinstance(method, str):
                     methods[method] += 1
                     if method == "initialize":
-                        # Make handshake cost deterministic enough to preserve
+                        # Make handshake overhead deterministic enough to preserve
                         # a comparison record without relying on real network.
                         await asyncio.sleep(0.02)
         except (TypeError, ValueError):
@@ -496,7 +496,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
 ) -> None:
     """Pin admission, PostgreSQL revalidation, proxy dispatch, and Run cleanup."""
     from sqlalchemy import text
-    from support.private_thread_seed import seed_private_thread_database
+    from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
 
     from app.private_work.asset_runtime import PrivateAgentRuntime, PrivateAssetRuntime
     from app.private_work.authorization import PrivateRunAuthorizationService
@@ -585,7 +585,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
         AgentPayload(
             description="",
             soul="mcp run agent",
-            model_ref="test-model",
+            model_ref=TEST_MODEL_REF,
             tool_groups=(),
             skill_version_ids=(),
             mcp_version_ids=(mcp_version_id,),
@@ -644,12 +644,13 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                     """INSERT INTO agent_versions
                     (id,agent_id,version_number,workflow_status,description,soul,
                      model_ref,tool_groups,payload_checksum,created_by_user_id)
-                    VALUES (:id,:agent_id,1,'draft','','mcp run agent','test-model',
+                    VALUES (:id,:agent_id,1,'draft','','mcp run agent',:model_ref,
                             '[]'::jsonb,:checksum,:owner)"""
                 ),
                 {
                     "id": agent_version_id,
                     "agent_id": agent_id,
+                    "model_ref": TEST_MODEL_REF,
                     "checksum": agent_checksum,
                     "owner": str(seed.owner_a.user_id),
                 },

@@ -8,10 +8,9 @@ from typing import Protocol
 
 from app.reliability.run_execution.ports import SystemModelMaterializationPort
 from deerflow.config.model_config import ModelConfig
+from deerflow.vision.contracts import VisionUsageReceipt
 from deerflow.vision.dispatch import (
-    MAX_VISION_CALLS_PER_RUN,
-    MAX_VISION_NORMALIZED_BYTES_PER_RUN,
-    MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
+    VisionDispatchAttempt,
     VisionDispatchDenied,
 )
 
@@ -27,7 +26,12 @@ def _exact_model_identity(model: ModelConfig) -> tuple[object, ...]:
 
 
 class _VisionBoundaryPort(Protocol):
-    async def before_vision_dispatch(self) -> None: ...
+    async def before_vision_dispatch(
+        self,
+        *,
+        normalized_bytes: int,
+        normalized_pixels: int,
+    ) -> None: ...
 
     async def after_vision_dispatch(self) -> None: ...
 
@@ -51,10 +55,8 @@ class PrivateRunVisionDispatchAuthority:
         self._owner_user_id = owner_user_id
         self._run_id = run_id
         self._expected_identity = _exact_model_identity(expected_model)
-        self._budget_lock = asyncio.Lock()
-        self._call_count = 0
-        self._normalized_bytes = 0
-        self._normalized_pixels = 0
+        self._attempt_lock = asyncio.Lock()
+        self._open_attempts: set[VisionDispatchAttempt] = set()
 
     async def _revalidate_model(self) -> None:
         try:
@@ -69,26 +71,46 @@ class PrivateRunVisionDispatchAuthority:
         if _exact_model_identity(current) != self._expected_identity:
             raise VisionDispatchDenied
 
-    async def before_dispatch(
+    async def before_attempt(
         self,
         *,
         normalized_bytes: int,
         normalized_pixels: int,
-    ) -> None:
+    ) -> VisionDispatchAttempt:
         if type(normalized_bytes) is not int or normalized_bytes < 1 or type(normalized_pixels) is not int or normalized_pixels < 1:
             raise VisionDispatchDenied("VISION_CONFIGURATION_ERROR")
-        async with self._budget_lock:
-            if self._call_count + 1 > MAX_VISION_CALLS_PER_RUN or self._normalized_bytes + normalized_bytes > MAX_VISION_NORMALIZED_BYTES_PER_RUN or self._normalized_pixels + normalized_pixels > MAX_VISION_NORMALIZED_PIXELS_PER_RUN:
-                raise VisionDispatchDenied("VISION_RATE_LIMITED")
-            await self._revalidate_model()
-            # This is the first point at which bytes can leave the Worker.  The
-            # durable ambiguity fence therefore belongs here, not at tool entry.
-            await self._boundary.before_vision_dispatch()
-            self._call_count += 1
-            self._normalized_bytes += normalized_bytes
-            self._normalized_pixels += normalized_pixels
+        await self._revalidate_model()
+        # This is the first point at which bytes can leave the Worker. The
+        # durable Run aggregate and ambiguity fence commit here, not at tool
+        # entry and not in process-local counters.
+        await self._boundary.before_vision_dispatch(
+            normalized_bytes=normalized_bytes,
+            normalized_pixels=normalized_pixels,
+        )
+        async with self._attempt_lock:
+            attempt = VisionDispatchAttempt()
+            self._open_attempts.add(attempt)
+            return attempt
 
-    async def after_dispatch(self) -> None:
+    async def after_attempt(
+        self,
+        *,
+        attempt: VisionDispatchAttempt,
+        usage_receipt: VisionUsageReceipt,
+        error_code: str | None,
+    ) -> None:
+        if (
+            not isinstance(attempt, VisionDispatchAttempt)
+            or not isinstance(usage_receipt, VisionUsageReceipt)
+            or usage_receipt.call_count not in {0, 1}
+            or usage_receipt.request_dispatched is not (usage_receipt.call_count == 1)
+            or (error_code is not None and (type(error_code) is not str or not error_code))
+        ):
+            raise VisionDispatchDenied("VISION_CONFIGURATION_ERROR")
+        async with self._attempt_lock:
+            if attempt not in self._open_attempts:
+                raise VisionDispatchDenied("VISION_CONFIGURATION_ERROR")
+            self._open_attempts.remove(attempt)
         # Credential revocation is the emergency stop authority.  A response
         # produced after revocation is not returned to the lead model.
         await self._revalidate_model()

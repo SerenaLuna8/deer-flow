@@ -79,7 +79,7 @@ def _validated_replay_database_url(
 
 
 def install_replay_model_adapter() -> None:
-    """Point the credential-free ``codex_cli`` test model at ReplayChatModel.
+    """Point the credential-free ``vision_bridge_fake`` test model at ReplayChatModel.
 
     The override lives only in replay Gateway/Worker processes. The database
     still contains a supported, credential-free provider adapter, so the test
@@ -87,7 +87,7 @@ def install_replay_model_adapter() -> None:
     """
     from app.system_settings import validation
 
-    validation.PROVIDER_ADAPTERS["codex_cli"] = validation.ProviderAdapterSpec(
+    validation.PROVIDER_ADAPTERS["vision_bridge_fake"] = validation.ProviderAdapterSpec(
         "replay_provider:ReplayChatModel",
         False,
     )
@@ -157,23 +157,21 @@ async def prepare_replay_runtime_catalog(
         )
         model_catalog = SystemModelCatalogService(session_factory)
         catalog = await model_catalog.list_models(audit_context)
-        matches = tuple(item for item in catalog.items if item.logical_name == "scenario-model")
+        matches = tuple(item for item in catalog.items if item.display_name == "Scenario Model" and item.current_version.provider_adapter == "vision_bridge_fake" and item.current_version.provider_model == "replay")
         if len(matches) > 1:
             raise RuntimeError("replay scenario model catalog is ambiguous")
         if matches:
             model = matches[0]
             version = model.current_version
-            if model.status != "active" or version.provider_adapter != "codex_cli" or version.provider_model != "replay" or version.settings or not version.supports_thinking or version.credential_id is not None:
+            if model.status != "active" or version.provider_adapter != "vision_bridge_fake" or version.provider_model != "replay" or version.settings or not version.supports_thinking or version.credential_id is not None:
                 raise RuntimeError("existing scenario-model is not replay-compatible")
         else:
             model = await model_catalog.create_model(
                 audit_context,
                 CreateSystemModel(
-                    logical_name="scenario-model",
                     display_name="Scenario Model",
-                    description="Deterministic record/replay test model",
                     status="active",
-                    provider_adapter="codex_cli",
+                    provider_adapter="vision_bridge_fake",
                     provider_model="replay",
                     settings={},
                     supports_thinking=True,

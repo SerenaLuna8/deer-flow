@@ -1,7 +1,8 @@
-"""Initial public schema represented by the complete full_schema.sql snapshot.
+"""Root revision for databases installed from the initial public snapshot.
 
-No-op by design: fresh installs execute the snapshot and stamp this root
-revision directly. All pre-release schema work is folded into this baseline.
+No-op by design: the historical initial snapshot already contained this
+catalog. Fresh installs execute the current ``full_schema.sql`` and stamp the
+current chain head; databases at this root advance through later revisions.
 Downgrade is fail-closed.
 """
 
@@ -14,7 +15,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """The initial catalog comes from full_schema.sql; nothing to apply."""
+    """The historical initial catalog already exists; nothing to apply."""
 
 
 def downgrade() -> None:

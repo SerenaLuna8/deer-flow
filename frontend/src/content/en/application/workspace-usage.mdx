@@ -21,7 +21,7 @@ To start a new thread, click **New Thread** in the sidebar or use the keyboard s
 
 ## Selecting a model
 
-Use the model picker in the input bar to choose which active logical model to
+Use the model picker in the input bar to choose which active model to
 use for the current request. Platform administrators manage this list in
 **Admin → System Settings → Models**; ordinary users see only safe selector
 metadata, not provider settings or Credential references.
@@ -96,10 +96,9 @@ This means the header total and the visible per-turn totals do **not** need to
 add up exactly. The header is a thread ledger; the per-turn view is a rendering
 of the messages you can currently see.
 
-These totals may also differ from your provider's billing page. Common reasons
-include retries, failed requests, cached input tokens, reasoning tokens,
-provider-specific billing rules, and internal calls that do not appear as normal
-chat messages.
+Retried requests, failed requests, cached input tokens, reasoning tokens, and
+internal calls that do not appear as normal chat messages can all affect the
+token scope represented by each view.
 
 Project administrators with usage access can also see a project-wide Token usage
 line chart on the **project overview**. It groups settled Runs from all project

@@ -11,6 +11,8 @@ import {
 } from "@/core/agent-builder";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
+import { resolveModelDisplayName } from "@/core/models/presentation";
+import type { Model } from "@/core/models/types";
 
 export function agentBuilderBlueprintValidationMessage(
   blueprint: AgentBuilderBlueprint,
@@ -33,6 +35,7 @@ export function agentBuilderBlueprintValidationMessage(
 
 export function AgentBuilderBlueprintReview({
   blueprint,
+  models,
   canAuthor,
   editing,
   pending,
@@ -53,6 +56,7 @@ export function AgentBuilderBlueprintReview({
   onCreate,
 }: {
   blueprint: AgentBuilderBlueprint;
+  models: readonly Model[];
   canAuthor: boolean;
   editing: boolean;
   pending: boolean;
@@ -78,6 +82,9 @@ export function AgentBuilderBlueprintReview({
     blueprint,
     copy.validation,
   );
+  const modelDisplayName =
+    resolveModelDisplayName(blueprint.model_ref, models) ??
+    t.conversation.agentModelUnavailableTitle;
   const effectiveEditing = editing && canAuthor;
 
   return (
@@ -115,7 +122,7 @@ export function AgentBuilderBlueprintReview({
         </div>
         <div className="bg-muted/25 rounded-xl p-3">
           <p className="text-muted-foreground text-xs">{copy.model}</p>
-          <p className="mt-1 font-mono text-sm">{blueprint.model_ref}</p>
+          <p className="mt-1 text-sm font-medium">{modelDisplayName}</p>
         </div>
         <div className="bg-muted/25 rounded-xl p-3">
           <p className="text-muted-foreground text-xs">{copy.capabilities}</p>

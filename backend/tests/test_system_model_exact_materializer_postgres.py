@@ -41,14 +41,13 @@ async def test_exact_model_materializer_uses_frozen_version_without_run_snapshot
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,current_version_id,
-                     revision,sort_order,created_by_user_id,updated_by_user_id)
-                    VALUES (:id,:name,'Exact model','exact materializer test','active',
-                            NULL,2,0,:owner,:owner)"""
+                    (id,display_name,status,current_version_id,
+                     revision,created_by_user_id,updated_by_user_id)
+                    VALUES (:id,'Exact model','active',NULL,2,
+                            :owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": f"exact-{model_id.hex}",
                     "owner": str(owner_id),
                 },
             )
@@ -70,7 +69,7 @@ async def test_exact_model_materializer_uses_frozen_version_without_run_snapshot
                          supports_reasoning_effort,supports_vision,credential_id,
                          credential_version_id,credential_env_key,payload_checksum,
                          supersedes_version_id,created_by_user_id)
-                        VALUES (:id,:model,:number,'codex_cli',:provider_model,
+                        VALUES (:id,:model,:number,'vision_bridge_fake',:provider_model,
                                 '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                                 :checksum,:supersedes,:owner)"""
                     ),

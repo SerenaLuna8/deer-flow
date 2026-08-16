@@ -601,13 +601,12 @@ def test_approval_result_enforces_pending_artifact_shape() -> None:
         source_tool_call_id="call-1",
     )
     assert HostExecutionApprovalResult.pending(artifact).status == "pending"
-    assert HostExecutionApprovalResult.approved("approval-1").status == "approved"
     assert HostExecutionApprovalResult.denied("policy_denied").status == "denied"
 
     with pytest.raises(ValueError, match="pending result requires"):
         HostExecutionApprovalResult(status="pending")
-    with pytest.raises(ValueError, match="only pending"):
-        HostExecutionApprovalResult(status="approved", artifact=artifact)
+    with pytest.raises(ValueError, match="unsupported"):
+        HostExecutionApprovalResult(status="approved", artifact=artifact)  # type: ignore[arg-type]
 
 
 def test_worker_runtime_installs_opaque_port_and_lead_agent_path() -> None:
@@ -870,11 +869,17 @@ async def test_local_bash_plan_freezes_trusted_channel_identity(
 
 
 @pytest.mark.asyncio
-async def test_local_bash_approved_plan_executes_once(
+async def test_local_bash_rejects_forged_inline_approval_without_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sandbox = _RecordingLocalSandbox()
-    port = _FakeApprovalPort(HostExecutionApprovalResult.approved("approval-1"))
+    port = _FakeApprovalPort(
+        SimpleNamespace(  # type: ignore[arg-type]
+            status="approved",
+            approval_id="approval-1",
+            artifact=None,
+        ),
+    )
     runtime = _runtime(
         _sandbox_config(approval_mode="approval_required"),
         sandbox,
@@ -903,13 +908,9 @@ async def test_local_bash_approved_plan_executes_once(
         command="python /mnt/user-data/workspace/count.py",
     )
 
-    assert result == "ok"
-    assert len(sandbox.executed) == 1
-    assert sandbox.executed[0][0] == port.plans[0].effective_command
-    assert len(port.completions) == 1
-    assert port.completions[0][0] == "approval-1"
-    assert port.completions[0][1].status == "finished"
-    assert port.completions[0][1].exit_code == 0
+    assert result == "Error: Host execution approval returned an invalid decision"
+    assert sandbox.executed == []
+    assert port.completions == []
 
 
 @pytest.mark.asyncio
@@ -1066,62 +1067,3 @@ async def test_local_bash_rejects_secret_plaintext_before_staging(
     assert result == "Error: Host command contains secret plaintext and cannot be staged"
     assert port.plans == []
     assert sandbox.executed == []
-
-
-@pytest.mark.asyncio
-async def test_completion_failure_never_respawns_the_approved_command(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sandbox = _RecordingLocalSandbox()
-
-    class FailingCompletionPort(_FakeApprovalPort):
-        def __init__(self) -> None:
-            super().__init__(
-                HostExecutionApprovalResult.approved("approval-1"),
-            )
-            self.completion_attempts = 0
-
-        async def complete_host_execution(
-            self,
-            approval_id: str,
-            outcome: object,
-        ) -> None:
-            del approval_id, outcome
-            self.completion_attempts += 1
-            raise RuntimeError("receipt unavailable")
-
-    port = FailingCompletionPort()
-    runtime = _runtime(
-        _sandbox_config(approval_mode="approval_required"),
-        sandbox,
-        port,
-    )
-
-    async def initialized(_runtime: object) -> _RecordingLocalSandbox:
-        return sandbox
-
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
-        initialized,
-    )
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_sandbox_initialized",
-        lambda _runtime: sandbox,
-    )
-    monkeypatch.setattr(
-        "deerflow.sandbox.tools.ensure_thread_directories_exist",
-        lambda _runtime: None,
-    )
-
-    with pytest.raises(
-        RuntimeError,
-        match="completion could not be persisted",
-    ):
-        await bash_tool.coroutine(
-            runtime=runtime,
-            description="run once",
-            command="printf ok",
-        )
-
-    assert len(sandbox.executed) == 1
-    assert port.completion_attempts == 1

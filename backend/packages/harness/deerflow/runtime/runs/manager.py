@@ -92,6 +92,9 @@ class RunRecord:
     last_ai_message: str | None = None
     first_human_message: str | None = None
     finalizing: bool = False
+    # Server-only checkpoint anchor copied into app-owned terminal settlement.
+    # Never derive this from public Run metadata or browser input.
+    suspended_approval_id: str | None = None
     status_write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False, compare=False)
 
 

@@ -14,6 +14,8 @@ from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.models import AgentPayload
 from deerflow.runtime.private_scope import PrivateResourceScope
 
+TEST_MODEL_REF = "f605d8f9-0ec1-53f1-9b1f-4287626b1e12"
+
 
 @dataclass(frozen=True)
 class PrivateThreadSeed:
@@ -69,7 +71,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         AgentPayload(
             description="",
             soul="thread agent",
-            model_ref="test-model",
+            model_ref=TEST_MODEL_REF,
             tool_groups=(),
             skill_version_ids=(),
             mcp_version_ids=(),
@@ -142,12 +144,13 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
                 """INSERT INTO agent_versions
                 (id,agent_id,version_number,workflow_status,description,soul,
                  model_ref,tool_groups,payload_checksum,created_by_user_id)
-                VALUES (:id,:agent_id,1,'published','','thread agent','test-model',
+                VALUES (:id,:agent_id,1,'published','','thread agent',:model_ref,
                         '[]'::jsonb,:checksum,:owner)"""
             ),
             {
                 "id": project_agent_version_id,
                 "agent_id": project_agent_id,
+                "model_ref": TEST_MODEL_REF,
                 "checksum": project_agent_checksum,
                 "owner": str(owner_a_id),
             },

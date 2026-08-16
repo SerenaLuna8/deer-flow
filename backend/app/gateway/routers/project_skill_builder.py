@@ -103,7 +103,15 @@ class SkillDesignAttachmentRequest(_StrictModel):
 class SkillDesignMessageTurnRequest(_StrictModel):
     kind: Literal["message"]
     message: str
-    model_name: str | None = None
+    model_name: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    )
     reasoning_effort: SkillDesignReasoningEffort | None = None
     attachments: list[SkillDesignAttachmentRequest] = Field(
         default_factory=list,
@@ -124,7 +132,15 @@ class SkillDesignClarificationResponseRequest(_StrictModel):
 class SkillDesignClarificationTurnRequest(_StrictModel):
     kind: Literal["clarification"]
     response: SkillDesignClarificationResponseRequest
-    model_name: str | None = None
+    model_name: str | None = Field(
+        default=None,
+        min_length=36,
+        max_length=36,
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    )
     reasoning_effort: SkillDesignReasoningEffort | None = None
 
 
@@ -666,7 +682,7 @@ def require_admissible_execution_options(
     selected: PublicSystemModelView | None = None
     if model_name is not None:
         selected = next(
-            (model for model in models if model.logical_name == model_name),
+            (model for model in models if model.model_ref == model_name),
             None,
         )
         if selected is None:

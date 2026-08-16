@@ -246,11 +246,12 @@ class SystemRuntimePolicyService:
 
             refs = _model_refs(parsed_value)
             if refs:
+                model_ids = tuple(uuid.UUID(ref) for ref in refs)
                 active_models = tuple(
                     (
                         await repository.session.execute(
                             select(
-                                SystemModelConfigRow.logical_name,
+                                SystemModelConfigRow.id,
                                 SystemModelConfigVersionRow.provider_adapter,
                                 SystemModelConfigVersionRow.settings,
                                 SystemModelConfigVersionRow.supports_vision,
@@ -261,7 +262,7 @@ class SystemRuntimePolicyService:
                             )
                             .where(
                                 SystemModelConfigRow.status == "active",
-                                SystemModelConfigRow.logical_name.in_(refs),
+                                SystemModelConfigRow.id.in_(model_ids),
                             )
                             .with_for_update(
                                 read=True,
@@ -273,13 +274,13 @@ class SystemRuntimePolicyService:
                         )
                     ).all()
                 )
-                active_by_name = {row.logical_name: row for row in active_models}
-                if frozenset(active_by_name) != refs:
+                active_by_ref = {str(row.id): row for row in active_models}
+                if frozenset(active_by_ref) != refs:
                     raise SystemRuntimePolicyInvalid(actor.request_id)
                 if isinstance(parsed_value, AgentRuntimePolicyValue):
                     vision_ref = parsed_value.vision_bridge.model_name
                     if vision_ref is not None:
-                        vision_model = active_by_name[vision_ref]
+                        vision_model = active_by_ref[vision_ref]
                         if (
                             not vision_model.supports_vision
                             or resolve_vision_bridge_protocol(

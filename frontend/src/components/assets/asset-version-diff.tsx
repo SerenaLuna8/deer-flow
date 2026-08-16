@@ -1,5 +1,7 @@
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
+import { resolveModelDisplayName } from "@/core/models/presentation";
+import type { Model } from "@/core/models/types";
 import type { AssetVersion } from "@/core/shared-assets";
 
 type DiffRow = {
@@ -35,6 +37,8 @@ function describe(
   statuses: StatusCopy,
   separator: string,
   includeAgentDocuments: boolean,
+  models: readonly Model[],
+  unavailableModelLabel: string,
 ): Record<string, string> {
   const common = {
     [copy.payloadChecksum]: value(
@@ -42,11 +46,14 @@ function describe(
     ),
   };
   if ("agent_id" in version) {
+    const modelLabel =
+      resolveModelDisplayName(version.model_ref, models) ??
+      unavailableModelLabel;
     return {
       ...common,
       [copy.description]: value(version.description),
       [copy.payloadSchemaVersion]: String(version.payload_schema_version),
-      [copy.model]: `${value(version.model_ref)}\n${jsonObject(version.model_settings)}`,
+      [copy.model]: `${modelLabel}\n${jsonObject(version.model_settings)}`,
       [copy.toolGroups]: list(version.tool_groups, separator),
       [copy.skillVersions]: list(version.skill_version_ids, separator),
       [copy.mcpVersions]: list(version.mcp_version_ids, separator),
@@ -114,9 +121,19 @@ function diffRows(
   statuses: StatusCopy,
   separator: string,
   includeAgentDocuments: boolean,
+  models: readonly Model[],
+  unavailableModelLabel: string,
 ): DiffRow[] {
   const before = previous
-    ? describe(previous, copy, statuses, separator, includeAgentDocuments)
+    ? describe(
+        previous,
+        copy,
+        statuses,
+        separator,
+        includeAgentDocuments,
+        models,
+        unavailableModelLabel,
+      )
     : {};
   const after = describe(
     current,
@@ -124,6 +141,8 @@ function diffRows(
     statuses,
     separator,
     includeAgentDocuments,
+    models,
+    unavailableModelLabel,
   );
   return Object.entries(after)
     .filter(([key, currentValue]) => before[key] !== currentValue)
@@ -138,10 +157,12 @@ export function AssetVersionDiff({
   previous = null,
   current,
   includeAgentDocuments = false,
+  models,
 }: {
   previous?: AssetVersion | null;
   current: AssetVersion;
   includeAgentDocuments?: boolean;
+  models: readonly Model[];
 }) {
   const { locale, t } = useI18n();
   const isMcp = "mcp_server_id" in current;
@@ -152,6 +173,8 @@ export function AssetVersionDiff({
     t.adminAssets.status,
     locale === "zh-CN" ? "、" : ", ",
     includeAgentDocuments,
+    models,
+    t.adminSystemSettings.fields.unavailableModel,
   );
   if (rows.length === 0) {
     return (

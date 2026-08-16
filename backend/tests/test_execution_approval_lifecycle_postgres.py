@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -28,20 +29,37 @@ from app.private_work.execution_approval import (
     ExecutionApprovalService,
     HostExecutionProviderPolicySnapshot,
     WorkerHostExecutionApprovalPort,
+    recover_staged_execution_approval_id,
     settle_staged_execution_approvals,
 )
 from app.private_work.execution_approval_audit import (
     NoopHostExecutionApprovalAudit,
 )
 from app.private_work.execution_approval_lifecycle import (
+    ExecutionApprovalPrivateLifecycleConflict,
+    claimed_execution_absolute_deadline,
     lock_and_reconcile_active_execution_approval,
+    reconcile_locked_execution_approval,
+)
+from app.private_work.file_finalizer import (
+    PrivateFileFinalizer,
+    _AfterFile,
+    _StagedFile,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    assign_output_delivery_obligation,
+    settle_continuation_output_delivery,
 )
 from app.private_work.run_admission import PrivateRunAdmissionService
+from app.private_work.run_metadata import RUN_HOST_EXECUTION_SUSPENSION_KEY
 from app.private_work.run_repository import (
     PrivateRunCreate,
     PrivateRunExecutionLeaseLost,
     PrivateRunRepository,
 )
+from app.private_work.run_service import PrivateRunService
+from app.private_work.sandbox_files import PrivateFileRunScope
 from app.private_work.thread_repository import (
     PrivateThreadRepository,
     ThreadAgentRef,
@@ -51,11 +69,18 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.jobs import PrivateRunJobRepository
 from app.reliability.owner_refs import AuditHmacKeyring
+from app.reliability.run_execution.boundary import PrivateRunExecutionBoundary
+from app.reliability.run_execution.contracts import AgentExecutionResult
+from app.reliability.run_execution.handler import PrivateRunJobHandler
 from app.reliability.run_execution.settlement import PrivateRunJobTerminalPort
+from app.worker.service import LeaseLost
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.file_authority import AuthorityManifest, AuthorityManifestEntry
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.execution_approvals import (
+    ExecutionApprovalOutputDeliveryCandidateRow,
+    ExecutionApprovalOutputDeliveryObligationRow,
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
@@ -67,7 +92,12 @@ from deerflow.persistence.jobs.sql import (
     JobScope,
     JobTerminalEvent,
 )
-from deerflow.persistence.private_work import RunAssetVersionRow
+from deerflow.persistence.private_work import (
+    PrivateArtifactRow,
+    PrivateFileRow,
+    RunAssetVersionRow,
+)
+from deerflow.persistence.private_work.file_repository import PrivateFileRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
@@ -83,11 +113,16 @@ from deerflow.persistence.system_settings import (
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
+from deerflow.runtime.events.models import StreamFrame, StreamLeaseProof
+from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.host_execution_approval import (
     HostExecutionOutcome,
     HostExecutionPlan,
 )
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
+from deerflow.runtime.host_execution_runner import (
+    execute_frozen_host_execution_continuation,
+)
 
 
 async def _running_job(
@@ -100,6 +135,7 @@ async def _running_job(
     worker_id: uuid.UUID,
     run_id: str,
     lease_token: str,
+    model_ref: str,
     execution_domain_affinity: str | None = None,
 ) -> tuple[JobRow, JobAttemptRow]:
     now = datetime.now(UTC)
@@ -111,7 +147,7 @@ async def _running_job(
         assistant_id=str(agent_id),
         owner_user_id=owner_user_id,
         status="running",
-        model_name="test-model",
+        model_name=model_ref,
         multitask_strategy="reject",
         metadata_json={},
         kwargs_json={},
@@ -347,8 +383,1045 @@ async def _settle_clock_scenario_pending(scenario) -> None:
             session,
             claim=scenario.claim,
             succeeded=True,
+            suspended_approval_id=str(scenario.approval_id),
             request_ttl_seconds=300,
         )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_durable_success_recovers_only_exact_attempt_staged_approval(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            assert (
+                await recover_staged_execution_approval_id(
+                    session,
+                    claim=scenario.claim,
+                )
+                is None
+            )
+
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+
+        async with scenario.seed.factory() as session, session.begin():
+            assert await recover_staged_execution_approval_id(
+                session,
+                claim=scenario.claim,
+            ) == str(scenario.approval_id)
+
+            wrong_attempt = replace(
+                scenario.claim,
+                attempt_id=uuid.uuid4(),
+            )
+            assert await recover_staged_execution_approval_id(
+                session,
+                claim=wrong_attempt,
+            ) == str(scenario.approval_id)
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_durable_success_attempt_takeover_activates_marker_without_rerun(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/takeover.txt",
+                sha256="8" * 64,
+            )
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+        async with scenario.seed.factory() as session, session.begin():
+            await DbRunEventStore(
+                scenario.seed.factory,
+                run_event_notify_enabled=False,
+            ).append_stream_frame(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+                frame=StreamFrame.end(status="completed"),
+                lease=StreamLeaseProof(
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                ),
+            )
+
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            takeover_claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert takeover_claim is not None
+            assert takeover_claim.job_id == scenario.claim.job_id
+            assert takeover_claim.attempt_id != scenario.claim.attempt_id
+            assert await jobs.mark_running(
+                takeover_claim.job_id,
+                lease_token=takeover_claim.lease_token,
+            )
+
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+        )
+        settlement = await handler._handle_with_trace(
+            takeover_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None and obligation.status == "deferred"
+            assert run is not None and run.status == "success"
+            assert job is not None and job.status == "succeeded"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_marker_before_stream_terminal_repairs_success_without_graph_rerun(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+
+    class _ExecutorMustNotRun:
+        async def execute(self, *_args, **_kwargs):
+            raise AssertionError("recovery must not invoke the Agent graph")
+
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/pre-terminal-crash.txt",
+                sha256="a" * 64,
+            )
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            takeover_claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert takeover_claim is not None
+            assert takeover_claim.job_id == scenario.claim.job_id
+            assert takeover_claim.attempt_id != scenario.claim.attempt_id
+            assert await jobs.mark_running(
+                takeover_claim.job_id,
+                lease_token=takeover_claim.lease_token,
+            )
+
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=_ExecutorMustNotRun(),
+        )._handle_with_trace(
+            takeover_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            terminal = await DbRunEventStore(
+                scenario.seed.factory,
+                run_event_notify_enabled=False,
+            ).get_stream_terminal(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+            )
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None and obligation.status == "deferred"
+            assert run is not None and run.status == "success"
+            assert job is not None and job.status == "succeeded"
+            assert terminal is not None
+            assert terminal.data["status"] == "completed"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "stale_marker",
+    ["wrong_producing_attempt", "terminal_approval"],
+)
+async def test_suspension_marker_mismatch_fails_closed(
+    migrated_postgres_database_url: str,
+    stale_marker: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+        async with scenario.seed.factory() as session, session.begin():
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert run is not None and approval is not None
+            if stale_marker == "wrong_producing_attempt":
+                metadata = dict(run.metadata_json)
+                marker = dict(metadata[RUN_HOST_EXECUTION_SUSPENSION_KEY])
+                marker["producing_attempt_id"] = str(uuid.uuid4())
+                metadata[RUN_HOST_EXECUTION_SUSPENSION_KEY] = marker
+                run.metadata_json = metadata
+            else:
+                terminal_at = datetime.now(UTC)
+                approval.status = "cancelled"
+                approval.version += 1
+                approval.terminal_at = terminal_at
+                approval.updated_at = terminal_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            with pytest.raises(ExecutionApprovalPrivateLifecycleConflict):
+                await recover_staged_execution_approval_id(
+                    session,
+                    claim=scenario.claim,
+                )
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_publish_end_failure_after_marker_repairs_success_in_settlement(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+
+    class _PublishEndFailure:
+        async def execute(self, *_args, **_kwargs):
+            await scenario.port.seal_suspended_approval_marker(
+                str(scenario.approval_id),
+            )
+            raise RuntimeError("durable publish_end acknowledgement was lost")
+
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/publish-ack-failure.txt",
+                sha256="b" * 64,
+            )
+        authority = SimpleNamespace(
+            bind_heartbeat_callback=lambda _callback: None,
+            cancel_requested=False,
+        )
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=_PublishEndFailure(),
+        )._handle_with_trace(
+            scenario.claim,
+            authority,
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            terminal = await DbRunEventStore(
+                scenario.seed.factory,
+                run_event_notify_enabled=False,
+            ).get_stream_terminal(
+                session,
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                run_id=scenario.source_run_id,
+            )
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None and obligation.status == "deferred"
+            assert run is not None and run.status == "success"
+            assert job is not None and job.status == "succeeded"
+            assert terminal is not None and terminal.data["status"] == "completed"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_public_cancel_after_marker_rolls_back_then_repairs_success(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/cancel-race.txt",
+                sha256="c" * 64,
+            )
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+        with pytest.raises(PrivateWorkConflict):
+            await PrivateRunService(scenario.seed.factory).cancel(
+                scenario.seed.owner_a,
+                scenario.thread_id,
+                scenario.source_run_id,
+            )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            assert approval is not None and approval.status == "staged"
+            assert run is not None and run.cancel_requested_at is None
+            assert job is not None and job.cancel_requested_at is None
+
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+        )._handle_with_trace(
+            scenario.claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None and obligation.status == "deferred"
+            assert run is not None and run.status == "success"
+            assert job is not None and job.status == "succeeded"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_lazy_reconcile_preserves_marker_for_takeover_recovery(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/reconcile-race.txt",
+                sha256="d" * 64,
+            )
+        await scenario.port.seal_suspended_approval_marker(
+            str(scenario.approval_id),
+        )
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(
+                JobRow,
+                scenario.claim.job_id,
+                with_for_update=True,
+            )
+            run = await session.get(
+                RunRow,
+                scenario.source_run_id,
+                with_for_update=True,
+            )
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None and approval is not None
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+            await reconcile_locked_execution_approval(
+                session,
+                approval,
+                now=datetime.now(UTC),
+            )
+            assert approval.status == "staged"
+
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            takeover_claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+            )
+            assert takeover_claim is not None
+            assert takeover_claim.job_id == scenario.claim.job_id
+            assert takeover_claim.attempt_id != scenario.claim.attempt_id
+            assert await jobs.mark_running(
+                takeover_claim.job_id,
+                lease_token=takeover_claim.lease_token,
+            )
+
+        settlement = await PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+        )._handle_with_trace(
+            takeover_claim,
+            SimpleNamespace(),
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, scenario.source_run_id)
+            job = await session.get(JobRow, scenario.claim.job_id)
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None and obligation.status == "deferred"
+            assert run is not None and run.status == "success"
+            assert job is not None and job.status == "succeeded"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+async def _add_source_output(
+    session,
+    scenario,
+    *,
+    logical_path: str,
+    sha256: str,
+) -> PrivateFileRow:
+    row = PrivateFileRow(
+        project_id=scenario.seed.owner_a.project_id,
+        owner_user_id=str(scenario.seed.owner_a.user_id),
+        thread_id=scenario.thread_id,
+        kind="output",
+        logical_path=logical_path,
+        media_type="text/plain",
+        size=1,
+        sha256=sha256,
+        status="ready",
+        version=1,
+        created_by_run_id=scenario.source_run_id,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def _prepare_assigned_output_obligation(database_url: str):
+    scenario = await _prepare_clock_scenario(database_url)
+    hooks = _ApprovalLifecycleHooks()
+    async with scenario.seed.factory() as session, session.begin():
+        await _add_source_output(
+            session,
+            scenario,
+            logical_path="outputs/required.txt",
+            sha256="7" * 64,
+        )
+    await _settle_clock_scenario_pending(scenario)
+    projection = await ExecutionApprovalService(
+        scenario.seed.factory,
+        admission=_QueuedAffinityContinuationAdmission(
+            scenario.seed.factory,
+            hooks=hooks,
+        ),
+        provider_policy=_provider_policy(),
+        quota=hooks,
+        run_audit=hooks,
+    ).decide(
+        scenario.seed.owner_a,
+        thread_id=scenario.thread_id,
+        source_run_id=scenario.source_run_id,
+        approval_id=scenario.approval_id,
+        decision="allow_once",
+        expected_version=2,
+        idempotency_key=uuid.uuid4(),
+    )
+    assert projection.approval is not None
+    continuation = projection.approval["continuation_run"]
+    assert isinstance(continuation, dict)
+    continuation_run_id = continuation["run_id"]
+    async with scenario.seed.factory() as session:
+        continuation_run = await session.get(RunRow, continuation_run_id)
+        assert continuation_run is not None
+        assert continuation_run.job_id is not None
+        continuation_job_id = continuation_run.job_id
+    return SimpleNamespace(
+        scenario=scenario,
+        hooks=hooks,
+        continuation_run_id=continuation_run_id,
+        continuation_job_id=continuation_job_id,
+    )
+
+
+async def _claim_assigned_output_obligation(prepared):
+    scenario = prepared.scenario
+    async with scenario.seed.factory() as session, session.begin():
+        jobs = JobRepository(session)
+        claim = await jobs.claim_next(
+            worker_id=scenario.worker_id,
+            capabilities=frozenset({"private_run"}),
+            lease_seconds=300,
+            execution_domain_affinity=_execution_domain().affinity,
+        )
+        assert claim is not None
+        assert claim.job_id == prepared.continuation_job_id
+        assert await jobs.mark_running(
+            claim.job_id,
+            lease_token=claim.lease_token,
+        )
+        await PrivateRunRepository(session).begin_execution(
+            scope=scenario.seed.owner_a_scope,
+            run_id=prepared.continuation_run_id,
+            job_id=claim.job_id,
+            lease_token=claim.lease_token,
+            origin_trace_id=claim.origin_trace_id,
+        )
+        approval = await session.get(
+            ExecutionApprovalRequestRow,
+            scenario.approval_id,
+            with_for_update=True,
+        )
+        job = await session.get(JobRow, claim.job_id, with_for_update=True)
+        assert approval is not None and approval.status == "approved"
+        assert job is not None
+        claimed_at = datetime.now(UTC)
+        approval.status = "claimed"
+        approval.execution_job_attempt_id = claim.attempt_id
+        approval.claimed_at = claimed_at
+        approval.version += 1
+        approval.updated_at = claimed_at
+        job.retry_safety = "unknown"
+        job.updated_at = claimed_at
+    return claim
+
+
+async def _claimed_output_delivery_runtime(prepared):
+    claim = await _claim_assigned_output_obligation(prepared)
+    scenario = prepared.scenario
+    boundary = PrivateRunExecutionBoundary(
+        scenario.seed.factory,
+        context=scenario.seed.owner_a,
+        claim=claim,
+    )
+    port = WorkerHostExecutionApprovalPort(
+        scenario.seed.factory,
+        context=scenario.seed.owner_a,
+        claim=claim,
+        thread_id=scenario.thread_id,
+        request_ttl_seconds=300,
+        provider_policy=_provider_policy(),
+        execution_domain=_execution_domain(),
+        continuation_approval_id=str(scenario.approval_id),
+        retry_safety_boundary=boundary,
+    )
+    return claim, boundary, port
+
+
+async def _authorize_claimed_spawn(
+    port: WorkerHostExecutionApprovalPort,
+    approval_id: uuid.UUID,
+) -> None:
+    remaining = await port.authorize_claimed_host_execution_spawn(
+        str(approval_id),
+    )
+    assert remaining is not None and remaining > 0
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("receipt_status", ["finished", "launch_failed"])
+async def test_host_receipt_resolves_only_spawn_fence_and_transient_failure_retries(
+    migrated_postgres_database_url: str,
+    receipt_status: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        claim, boundary, port = await _claimed_output_delivery_runtime(prepared)
+        fence = await boundary.before_sandbox_exec()
+        outcome = (
+            HostExecutionOutcome(
+                status="finished",
+                exit_code=0,
+                result_text="durable receipt",
+            )
+            if receipt_status == "finished"
+            else HostExecutionOutcome(
+                status="launch_failed",
+                reason_code="pre_spawn_authorization_failed",
+            )
+        )
+        if receipt_status == "finished":
+            await _authorize_claimed_spawn(port, scenario.approval_id)
+        await port.complete_host_execution_with_retry_safety_fence(
+            str(scenario.approval_id),
+            outcome,
+            fence,
+        )
+        assert boundary.ambiguous_side_effect is False
+
+        async with scenario.seed.factory() as session, session.begin():
+            settled = await PrivateRunRepository(
+                session,
+                jobs=JobRepository(
+                    session,
+                    owner_ref_hasher=lambda _owner: JobOwnerRef(
+                        "test",
+                        "0" * 64,
+                    ),
+                    terminal_port=PrivateRunJobTerminalPort(),
+                ),
+            ).settle_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=prepared.continuation_run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+                outcome="failed",
+                public_error_code="PRIVATE_RUN_EXECUTION_FAILED",
+                ambiguous_side_effect=boundary.ambiguous_side_effect,
+                retryable_failure=True,
+                retry_initial_seconds=2,
+                retry_max_seconds=300,
+            )
+            assert settled.run.status == "pending"
+
+        async with scenario.seed.factory() as session:
+            job = await session.get(JobRow, claim.job_id)
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            assert job is not None
+            assert job.status == "retry_wait"
+            assert job.retry_safety == "safe"
+            assert approval is not None and approval.status == receipt_status
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_fence_position", ["before_receipt", "after_receipt"])
+async def test_host_receipt_never_clears_another_unresolved_side_effect(
+    migrated_postgres_database_url: str,
+    other_fence_position: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        claim, boundary, port = await _claimed_output_delivery_runtime(prepared)
+        if other_fence_position == "before_receipt":
+            await boundary.before_sandbox_write()
+        spawn_fence = await boundary.before_sandbox_exec()
+        await _authorize_claimed_spawn(port, scenario.approval_id)
+        await port.complete_host_execution_with_retry_safety_fence(
+            str(scenario.approval_id),
+            HostExecutionOutcome(
+                status="finished",
+                exit_code=0,
+                result_text="durable receipt",
+            ),
+            spawn_fence,
+        )
+        if other_fence_position == "after_receipt":
+            await boundary.before_sandbox_write()
+        assert boundary.ambiguous_side_effect is True
+
+        async with scenario.seed.factory() as session, session.begin():
+            settled = await PrivateRunRepository(
+                session,
+                jobs=JobRepository(
+                    session,
+                    owner_ref_hasher=lambda _owner: JobOwnerRef(
+                        "test",
+                        "0" * 64,
+                    ),
+                    terminal_port=PrivateRunJobTerminalPort(),
+                ),
+            ).settle_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=prepared.continuation_run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+                outcome="failed",
+                public_error_code="SIDE_EFFECT_STATE_UNKNOWN",
+                ambiguous_side_effect=True,
+                retryable_failure=True,
+                retry_initial_seconds=2,
+                retry_max_seconds=300,
+            )
+            assert settled.run.status == "error"
+
+        async with scenario.seed.factory() as session:
+            job = await session.get(JobRow, claim.job_id)
+            assert job is not None
+            assert job.status == "dead"
+            assert job.retry_safety == "unknown"
+            assert job.public_error_code == "SIDE_EFFECT_STATE_UNKNOWN"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delivery_state", ["intent_recorded", "delivered"])
+async def test_receipt_and_output_delivery_survive_lease_loss_without_respawn(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    delivery_state: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        first_claim, boundary, port = await _claimed_output_delivery_runtime(
+            prepared,
+        )
+        spawn_fence = await boundary.before_sandbox_exec()
+        await _authorize_claimed_spawn(port, scenario.approval_id)
+        await port.complete_host_execution_with_retry_safety_fence(
+            str(scenario.approval_id),
+            HostExecutionOutcome(
+                status="finished",
+                exit_code=0,
+                result_text="durable receipt",
+            ),
+            spawn_fence,
+        )
+        required_path = "/mnt/user-data/outputs/required.txt"
+        await port.record_output_delivery_intent(
+            (required_path,),
+            tool_call_id="present-before-crash",
+        )
+        if delivery_state == "delivered":
+            async with scenario.seed.factory() as session, session.begin():
+                candidate = await session.scalar(
+                    sa.select(PrivateFileRow).where(
+                        PrivateFileRow.project_id == scenario.seed.owner_a.project_id,
+                        PrivateFileRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                        PrivateFileRow.thread_id == scenario.thread_id,
+                        PrivateFileRow.logical_path == "outputs/required.txt",
+                        PrivateFileRow.status == "ready",
+                    ),
+                )
+                assert candidate is not None
+                artifact = PrivateArtifactRow(
+                    project_id=scenario.seed.owner_a.project_id,
+                    owner_user_id=str(scenario.seed.owner_a.user_id),
+                    thread_id=scenario.thread_id,
+                    run_id=prepared.continuation_run_id,
+                    file_id=candidate.id,
+                    display_name="required.txt",
+                    media_type="text/plain",
+                    artifact_metadata={"logical_path": "outputs/required.txt"},
+                )
+                session.add(artifact)
+                await session.flush()
+                assert await port.deliver_output_obligation_in_session(
+                    session,
+                    artifact_id=artifact.id,
+                    logical_path="outputs/required.txt",
+                )
+
+        assert await port.output_delivery_status() == delivery_state
+        expired_at = datetime.now(UTC) - timedelta(seconds=1)
+        async with scenario.seed.factory() as session, session.begin():
+            job = await session.get(JobRow, first_claim.job_id, with_for_update=True)
+            run = await session.get(
+                RunRow,
+                prepared.continuation_run_id,
+                with_for_update=True,
+            )
+            assert job is not None and run is not None
+            assert job.retry_safety == "safe"
+            job.lease_expires_at = expired_at
+            run.execution_lease_expires_at = expired_at
+
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            replay_claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+                execution_domain_affinity=_execution_domain().affinity,
+            )
+            assert replay_claim is not None
+            assert replay_claim.job_id == first_claim.job_id
+            assert replay_claim.attempt_id != first_claim.attempt_id
+            assert await jobs.mark_running(
+                replay_claim.job_id,
+                lease_token=replay_claim.lease_token,
+            )
+            await PrivateRunRepository(session).begin_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=prepared.continuation_run_id,
+                job_id=replay_claim.job_id,
+                lease_token=replay_claim.lease_token,
+                origin_trace_id=replay_claim.origin_trace_id,
+            )
+
+        replay_port = WorkerHostExecutionApprovalPort(
+            scenario.seed.factory,
+            context=scenario.seed.owner_a,
+            claim=replay_claim,
+            thread_id=scenario.thread_id,
+            request_ttl_seconds=300,
+            provider_policy=_provider_policy(),
+            execution_domain=_execution_domain(),
+            continuation_approval_id=str(scenario.approval_id),
+        )
+
+        def provider_must_not_be_read() -> object:
+            raise AssertionError("receipt replay must never access a sandbox")
+
+        monkeypatch.setattr(
+            "deerflow.runtime.host_execution_runner.get_sandbox_provider",
+            provider_must_not_be_read,
+        )
+        app_config = AppConfig(
+            sandbox=SandboxConfig(
+                use="deerflow.sandbox.local:LocalSandboxProvider",
+                allow_host_bash=False,
+                host_execution_approval={
+                    "mode": "approval_required",
+                    "execution_domain_id": "mac-primary",
+                },
+                bash_command_timeout=60,
+            ),
+        )
+        replay_input = await execute_frozen_host_execution_continuation(
+            approval_port=replay_port,
+            app_config=app_config,
+            runtime_context={
+                "thread_id": scenario.thread_id,
+                "run_id": prepared.continuation_run_id,
+            },
+            file_authority=None,
+            graph_input={"messages": []},
+            continuation_required=True,
+        )
+        assert "durable receipt" in replay_input["messages"][0]["content"]
+        if delivery_state == "intent_recorded":
+            assert required_path in replay_input["messages"][0]["content"]
+        else:
+            assert "must call present_files" not in replay_input["messages"][0]["content"]
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_public_cancel_atomically_closes_queued_continuation_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        await PrivateRunService(
+            scenario.seed.factory,
+            quota=prepared.hooks,
+            audit=prepared.hooks,
+        ).cancel(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            prepared.continuation_run_id,
+        )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            continuation_run = await session.get(
+                RunRow,
+                prepared.continuation_run_id,
+            )
+            continuation_job = await session.get(
+                JobRow,
+                prepared.continuation_job_id,
+            )
+            assert approval is not None and approval.status == "cancelled"
+            assert obligation is not None and obligation.status == "cancelled"
+            assert continuation_run is not None
+            assert continuation_run.status == "interrupted"
+            assert continuation_job is not None
+            assert continuation_job.status == "cancelled"
+        assert prepared.hooks.cancel_requested_runs == [
+            prepared.continuation_run_id,
+        ]
+        assert prepared.hooks.released_runs == [prepared.continuation_run_id]
+        assert prepared.hooks.terminal_runs == [prepared.continuation_run_id]
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_public_cancel_closes_approved_obligation_behind_leased_job(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            claim = await JobRepository(session).claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+                execution_domain_affinity=_execution_domain().affinity,
+            )
+            assert claim is not None
+            assert claim.job_id == prepared.continuation_job_id
+
+        await PrivateRunService(
+            scenario.seed.factory,
+            quota=prepared.hooks,
+            audit=prepared.hooks,
+        ).cancel(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+            prepared.continuation_run_id,
+        )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            continuation_run = await session.get(
+                RunRow,
+                prepared.continuation_run_id,
+            )
+            continuation_job = await session.get(
+                JobRow,
+                prepared.continuation_job_id,
+            )
+            assert approval is not None and approval.status == "cancelled"
+            assert obligation is not None and obligation.status == "cancelled"
+            assert continuation_run is not None
+            assert continuation_run.status == "pending"
+            assert continuation_run.cancel_requested_at is not None
+            assert continuation_job is not None
+            assert continuation_job.status == "leased"
+            assert continuation_job.cancel_requested_at is not None
+        assert prepared.hooks.cancel_requested_runs == [
+            prepared.continuation_run_id,
+        ]
+        assert prepared.hooks.released_runs == []
+        assert prepared.hooks.terminal_runs == []
+    finally:
+        await scenario.seed.engine.dispose()
 
 
 @pytest.mark.postgres
@@ -598,6 +1671,7 @@ async def test_settle_staged_uses_clock_after_approval_lock_wait(
                     session,
                     claim=scenario.claim,
                     succeeded=True,
+                    suspended_approval_id=str(scenario.approval_id),
                     request_ttl_seconds=10,
                 )
 
@@ -647,6 +1721,7 @@ async def test_source_settlement_rejects_lease_expired_during_job_lock_wait(
                     session,
                     claim=scenario.claim,
                     succeeded=True,
+                    suspended_approval_id=str(scenario.approval_id),
                     request_ttl_seconds=300,
                 )
 
@@ -680,6 +1755,1116 @@ async def test_source_settlement_rejects_lease_expired_during_job_lock_wait(
             source_run = await session.get(RunRow, scenario.source_run_id)
             assert approval is not None and approval.status == "staged"
             assert source_run is not None and source_run.status == "running"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_source_suspension_seals_unpresented_output_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            first = await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/first.txt",
+                sha256="1" * 64,
+            )
+            second = await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/second.txt",
+                sha256="2" * 64,
+            )
+            await PrivateRunRepository(session).settle_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=scenario.source_run_id,
+                job_id=scenario.claim.job_id,
+                lease_token=scenario.claim.lease_token,
+                outcome="succeeded",
+            )
+            await settle_staged_execution_approvals(
+                session,
+                claim=scenario.claim,
+                succeeded=True,
+                suspended_approval_id=str(scenario.approval_id),
+                request_ttl_seconds=300,
+            )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            candidates = tuple(
+                (
+                    await session.scalars(
+                        sa.select(
+                            ExecutionApprovalOutputDeliveryCandidateRow,
+                        )
+                        .where(
+                            ExecutionApprovalOutputDeliveryCandidateRow.approval_id == scenario.approval_id,
+                        )
+                        .order_by(
+                            ExecutionApprovalOutputDeliveryCandidateRow.logical_path,
+                        )
+                    )
+                ).all()
+            )
+            assert approval is not None and approval.status == "pending"
+            assert obligation is not None
+            assert obligation.status == "deferred"
+            assert obligation.mode == "any_one"
+            assert obligation.continuation_run_id is None
+            assert [candidate.file_id for candidate in candidates] == [
+                first.id,
+                second.id,
+            ]
+            assert [candidate.sha256 for candidate in candidates] == [
+                "1" * 64,
+                "2" * 64,
+            ]
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_source_suspension_needs_no_obligation_after_source_artifact(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            output = await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/already-presented.txt",
+                sha256="3" * 64,
+            )
+            session.add(
+                PrivateArtifactRow(
+                    project_id=scenario.seed.owner_a.project_id,
+                    owner_user_id=str(scenario.seed.owner_a.user_id),
+                    thread_id=scenario.thread_id,
+                    run_id=scenario.source_run_id,
+                    file_id=output.id,
+                    display_name="already-presented.txt",
+                    media_type="text/plain",
+                    artifact_metadata={
+                        "logical_path": "outputs/already-presented.txt",
+                    },
+                )
+            )
+            await PrivateRunRepository(session).settle_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=scenario.source_run_id,
+                job_id=scenario.claim.job_id,
+                lease_token=scenario.claim.lease_token,
+                outcome="succeeded",
+            )
+            await settle_staged_execution_approvals(
+                session,
+                claim=scenario.claim,
+                succeeded=True,
+                suspended_approval_id=str(scenario.approval_id),
+                request_ttl_seconds=300,
+            )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert approval is not None and approval.status == "pending"
+            assert obligation is None
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_continuation_intent_restore_and_artifact_delivery_are_idempotent(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    hooks = _ApprovalLifecycleHooks()
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/candidate.txt",
+                sha256="5" * 64,
+            )
+        await _settle_clock_scenario_pending(scenario)
+        projection = await ExecutionApprovalService(
+            scenario.seed.factory,
+            admission=_QueuedAffinityContinuationAdmission(
+                scenario.seed.factory,
+                hooks=hooks,
+            ),
+            provider_policy=_provider_policy(),
+            quota=hooks,
+            run_audit=hooks,
+        ).decide(
+            scenario.seed.owner_a,
+            thread_id=scenario.thread_id,
+            source_run_id=scenario.source_run_id,
+            approval_id=scenario.approval_id,
+            decision="allow_once",
+            expected_version=2,
+            idempotency_key=uuid.uuid4(),
+        )
+        assert projection.approval is not None
+        continuation_run_id = projection.approval["continuation_run"]["run_id"]
+
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            continuation_claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+                execution_domain_affinity=_execution_domain().affinity,
+            )
+            assert continuation_claim is not None
+            assert continuation_claim.run_id == continuation_run_id
+            assert await jobs.mark_running(
+                continuation_claim.job_id,
+                lease_token=continuation_claim.lease_token,
+            )
+            await PrivateRunRepository(session).begin_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=continuation_run_id,
+                job_id=continuation_claim.job_id,
+                lease_token=continuation_claim.lease_token,
+                origin_trace_id=continuation_claim.origin_trace_id,
+            )
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None
+            await assign_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation_run_id=continuation_run_id,
+                continuation_job_id=continuation_claim.job_id,
+                now=datetime.now(UTC),
+            )
+
+        port = WorkerHostExecutionApprovalPort(
+            scenario.seed.factory,
+            context=scenario.seed.owner_a,
+            claim=continuation_claim,
+            thread_id=scenario.thread_id,
+            request_ttl_seconds=300,
+            provider_policy=_provider_policy(),
+            execution_domain=_execution_domain(),
+            continuation_approval_id=str(scenario.approval_id),
+        )
+        candidate_path = "/mnt/user-data/outputs/candidate.txt"
+        extra_path = "/mnt/user-data/outputs/extra.txt"
+        await port.record_output_delivery_intent(
+            (candidate_path, extra_path),
+            tool_call_id="present-continuation-1",
+        )
+        await port.record_output_delivery_intent(
+            (extra_path, candidate_path),
+            tool_call_id="present-continuation-1",
+        )
+        await port.record_output_delivery_intent(
+            (candidate_path, extra_path),
+            tool_call_id="present-continuation-replay",
+        )
+        with pytest.raises(ValueError, match="output delivery intent is unavailable"):
+            await port.record_output_delivery_intent(
+                (candidate_path,),
+                tool_call_id="present-continuation-1",
+            )
+        with pytest.raises(ValueError, match="output delivery intent is unavailable"):
+            await port.record_output_delivery_intent(
+                (candidate_path,),
+                tool_call_id="present-continuation-conflict",
+            )
+        assert await port.output_delivery_status() == "intent_recorded"
+        assert await port.restore_output_delivery_intent_paths() == (
+            candidate_path,
+            extra_path,
+        )
+        assert await port.output_delivery_requirement_paths() == (candidate_path,)
+
+        extra_file_id = uuid.uuid4()
+        async with scenario.seed.factory() as session, session.begin():
+            await PrivateFileRepository(session).stage(
+                scope=scenario.seed.owner_a_scope,
+                thread_id=scenario.thread_id,
+                kind="output",
+                logical_path=(f"outputs/.deerflow-staging-{extra_file_id.hex}"),
+                media_type="text/plain",
+                created_by_run_id=continuation_run_id,
+                file_id=extra_file_id,
+            )
+            ready_files = tuple(
+                (
+                    await session.scalars(
+                        sa.select(PrivateFileRow)
+                        .where(
+                            PrivateFileRow.project_id == scenario.seed.owner_a.project_id,
+                            PrivateFileRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                            PrivateFileRow.thread_id == scenario.thread_id,
+                            PrivateFileRow.status == "ready",
+                        )
+                        .order_by(
+                            PrivateFileRow.logical_path,
+                            PrivateFileRow.id,
+                        ),
+                    )
+                ).all(),
+            )
+            run = await session.get(
+                RunRow,
+                continuation_run_id,
+                with_for_update=True,
+            )
+            assert run is not None
+            run.finalization_status = "finalizing"
+
+        manifest = AuthorityManifest(
+            entries=tuple(
+                AuthorityManifestEntry(
+                    file_id=row.id,
+                    logical_path=row.logical_path,
+                    kind=row.kind,
+                    media_type=row.media_type,
+                    size=row.size,
+                    sha256=row.sha256,
+                    version=row.version,
+                )
+                for row in ready_files
+            ),
+            run_id=continuation_run_id,
+        )
+        after_files = tuple(
+            _AfterFile(
+                logical_path=row.logical_path,
+                virtual_path=f"/mnt/user-data/{row.logical_path}",
+                kind=row.kind,
+                size=row.size,
+                media_type=row.media_type,
+            )
+            for row in ready_files
+        ) + (
+            _AfterFile(
+                logical_path="outputs/extra.txt",
+                virtual_path="/mnt/user-data/outputs/extra.txt",
+                kind="output",
+                size=1,
+                media_type="text/plain",
+            ),
+        )
+        staged_extra = _StagedFile(
+            id=extra_file_id,
+            after=after_files[-1],
+            size=1,
+            sha256="6" * 64,
+        )
+
+        class _FinalizationQuotaProbe:
+            def __init__(self) -> None:
+                self.reservations: list[tuple[uuid.UUID, int]] = []
+                self.releases: list[tuple[uuid.UUID, int]] = []
+
+            async def reserve_file(
+                self,
+                _session,
+                _context,
+                *,
+                file_id: uuid.UUID,
+                size: int,
+            ) -> None:
+                self.reservations.append((file_id, size))
+
+            async def release_file(
+                self,
+                _session,
+                _scope,
+                *,
+                file_id: uuid.UUID,
+                size: int,
+                request_id: str,
+            ) -> None:
+                del request_id
+                self.releases.append((file_id, size))
+
+        quota_probe = _FinalizationQuotaProbe()
+        finalization_boundary = PrivateRunExecutionBoundary(
+            scenario.seed.factory,
+            context=scenario.seed.owner_a,
+            claim=continuation_claim,
+        )
+        run_scope = PrivateFileRunScope(
+            scenario.seed.owner_a,
+            thread_id=scenario.thread_id,
+            run_id=continuation_run_id,
+            authorization_boundary=finalization_boundary,
+        )
+        finalizer = PrivateFileFinalizer(
+            scenario.seed.factory,
+            quota=quota_probe,
+            output_delivery_port=port,
+        )
+        presented_logical_paths = (
+            "outputs/candidate.txt",
+            "outputs/extra.txt",
+        )
+        first_finalization = await finalizer._commit(
+            run_scope,
+            manifest,
+            after_files,
+            (staged_extra,),
+            presented_logical_paths,
+        )
+        first_artifact_ids = tuple(artifact.id for artifact in first_finalization.artifacts)
+        candidate_artifact = next(artifact for artifact in first_finalization.artifacts if artifact.metadata["logical_path"] == "outputs/candidate.txt")
+        assert finalization_boundary.ambiguous_side_effect is False
+
+        assert quota_probe.reservations == [(extra_file_id, 1)]
+        assert quota_probe.releases == []
+
+        # Simulate commit ACK loss after file promotion, Artifact delivery, and
+        # quota reservation commit. A new Worker rebuilds its manifest from DB
+        # authority, then must reuse every durable object without a new quota
+        # mutation.
+        async with scenario.seed.factory() as session, session.begin():
+            replay_ready_files = tuple(
+                (
+                    await session.scalars(
+                        sa.select(PrivateFileRow)
+                        .where(
+                            PrivateFileRow.project_id == scenario.seed.owner_a.project_id,
+                            PrivateFileRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                            PrivateFileRow.thread_id == scenario.thread_id,
+                            PrivateFileRow.status == "ready",
+                        )
+                        .order_by(
+                            PrivateFileRow.logical_path,
+                            PrivateFileRow.id,
+                        ),
+                    )
+                ).all(),
+            )
+            run = await session.get(
+                RunRow,
+                continuation_run_id,
+                with_for_update=True,
+            )
+            assert run is not None
+            run.finalization_status = "finalizing"
+        replay_manifest = AuthorityManifest(
+            entries=tuple(
+                AuthorityManifestEntry(
+                    file_id=row.id,
+                    logical_path=row.logical_path,
+                    kind=row.kind,
+                    media_type=row.media_type,
+                    size=row.size,
+                    sha256=row.sha256,
+                    version=row.version,
+                )
+                for row in replay_ready_files
+            ),
+            run_id=continuation_run_id,
+        )
+        replay_after_files = tuple(
+            _AfterFile(
+                logical_path=row.logical_path,
+                virtual_path=f"/mnt/user-data/{row.logical_path}",
+                kind=row.kind,
+                size=row.size,
+                media_type=row.media_type,
+            )
+            for row in replay_ready_files
+        )
+        replayed_finalization = await finalizer._commit(
+            run_scope,
+            replay_manifest,
+            replay_after_files,
+            (),
+            presented_logical_paths,
+        )
+        assert tuple(artifact.id for artifact in replayed_finalization.artifacts) == first_artifact_ids
+        assert finalization_boundary.ambiguous_side_effect is False
+        assert quota_probe.reservations == [(extra_file_id, 1)]
+        assert quota_probe.releases == []
+
+        assert await port.output_delivery_status() == "delivered"
+        assert await port.output_delivery_requirement_paths() == ()
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert obligation is not None
+            assert obligation.status == "delivered"
+            assert obligation.satisfied_artifact_id == candidate_artifact.id
+            artifact_count = await session.scalar(
+                sa.select(sa.func.count())
+                .select_from(PrivateArtifactRow)
+                .where(
+                    PrivateArtifactRow.project_id == scenario.seed.owner_a.project_id,
+                    PrivateArtifactRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                    PrivateArtifactRow.thread_id == scenario.thread_id,
+                    PrivateArtifactRow.run_id == continuation_run_id,
+                    PrivateArtifactRow.deleted_at.is_(None),
+                ),
+            )
+            assert artifact_count == 2
+            promoted_extra = tuple(
+                (
+                    await session.scalars(
+                        sa.select(PrivateFileRow).where(
+                            PrivateFileRow.project_id == scenario.seed.owner_a.project_id,
+                            PrivateFileRow.owner_user_id == str(scenario.seed.owner_a.user_id),
+                            PrivateFileRow.thread_id == scenario.thread_id,
+                            PrivateFileRow.logical_path == "outputs/extra.txt",
+                            PrivateFileRow.status == "ready",
+                        ),
+                    )
+                ).all(),
+            )
+            assert len(promoted_extra) == 1
+            assert promoted_extra[0].id == extra_file_id
+            job = await session.get(JobRow, continuation_claim.job_id)
+            assert job is not None and job.retry_safety == "safe"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_typed_suspension_coordinate_mismatch_rolls_back_source_settlement(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        with pytest.raises(ExecutionApprovalPrivateLifecycleConflict):
+            async with scenario.seed.factory() as session, session.begin():
+                await PrivateRunRepository(session).settle_execution(
+                    scope=scenario.seed.owner_a_scope,
+                    run_id=scenario.source_run_id,
+                    job_id=scenario.claim.job_id,
+                    lease_token=scenario.claim.lease_token,
+                    outcome="succeeded",
+                )
+                await settle_staged_execution_approvals(
+                    session,
+                    claim=scenario.claim,
+                    succeeded=True,
+                    suspended_approval_id=str(uuid.uuid4()),
+                    request_ttl_seconds=300,
+                )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            source_run = await session.get(RunRow, scenario.source_run_id)
+            assert approval is not None and approval.status == "staged"
+            assert source_run is not None and source_run.status == "running"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_deny_cancels_deferred_output_delivery_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    hooks = _ApprovalLifecycleHooks()
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/denied.txt",
+                sha256="4" * 64,
+            )
+        await _settle_clock_scenario_pending(scenario)
+        projection = await ExecutionApprovalService(
+            scenario.seed.factory,
+            admission=_NeverContinuationAdmission(),
+            provider_policy=_provider_policy(),
+            quota=hooks,
+            run_audit=hooks,
+        ).decide(
+            scenario.seed.owner_a,
+            thread_id=scenario.thread_id,
+            source_run_id=scenario.source_run_id,
+            approval_id=scenario.approval_id,
+            decision="deny",
+            expected_version=2,
+            idempotency_key=uuid.uuid4(),
+        )
+        assert projection.approval is not None
+        assert projection.approval["status"] == "denied"
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert obligation is not None
+            assert obligation.status == "cancelled"
+            assert obligation.terminal_at is not None
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_pending_expiry_cancels_output_delivery_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    hooks = _ApprovalLifecycleHooks()
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/expired.txt",
+                sha256="8" * 64,
+            )
+        await _settle_clock_scenario_pending(scenario)
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None
+            approval.expires_at = approval.created_at + timedelta(microseconds=1)
+
+        projection = await ExecutionApprovalService(
+            scenario.seed.factory,
+            admission=_NeverContinuationAdmission(),
+            provider_policy=_provider_policy(),
+            quota=hooks,
+            run_audit=hooks,
+        ).active(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+        )
+        assert projection.approval is None
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert obligation is not None
+            assert obligation.status == "cancelled"
+            assert obligation.terminal_at is not None
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_approved_expiry_cancels_queued_continuation_and_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None and approval.status == "approved"
+            approval.expires_at = approval.created_at + timedelta(microseconds=1)
+
+        projection = await ExecutionApprovalService(
+            scenario.seed.factory,
+            admission=_NeverContinuationAdmission(),
+            provider_policy=_provider_policy(),
+            quota=prepared.hooks,
+            run_audit=prepared.hooks,
+        ).active(
+            scenario.seed.owner_a,
+            scenario.thread_id,
+        )
+        assert projection.approval is None
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            continuation_run = await session.get(
+                RunRow,
+                prepared.continuation_run_id,
+            )
+            continuation_job = await session.get(
+                JobRow,
+                prepared.continuation_job_id,
+            )
+            assert obligation is not None and obligation.status == "cancelled"
+            assert continuation_run is not None
+            assert continuation_run.status == "interrupted"
+            assert continuation_job is not None
+            assert continuation_job.status == "cancelled"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_claimed_unknown_blocks_output_delivery_obligation(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+                execution_domain_affinity=_execution_domain().affinity,
+            )
+            assert claim is not None
+            assert claim.job_id == prepared.continuation_job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            await PrivateRunRepository(session).begin_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=prepared.continuation_run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+                origin_trace_id=claim.origin_trace_id,
+            )
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None
+            claimed_at = max(
+                approval.created_at + timedelta(seconds=1),
+                datetime.now(UTC),
+            )
+            approval.status = "claimed"
+            approval.execution_job_attempt_id = claim.attempt_id
+            approval.claimed_at = claimed_at
+            approval.updated_at = claimed_at
+            approval.version += 1
+            job = await session.get(JobRow, claim.job_id)
+            run = await session.get(RunRow, prepared.continuation_run_id)
+            assert job is not None and run is not None
+            job.retry_safety = "unknown"
+            job.lease_expires_at = claimed_at + timedelta(seconds=1)
+            run.execution_lease_expires_at = claimed_at + timedelta(seconds=1)
+
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None
+            await reconcile_locked_execution_approval(
+                session,
+                approval,
+                now=claimed_at + timedelta(seconds=91),
+            )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert approval is not None and approval.status == "unknown"
+            assert obligation is not None
+            assert obligation.status == "blocked_unknown"
+            assert obligation.terminal_at is not None
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("settled_status", "expected_status"),
+    [("error", "failed"), ("interrupted", "cancelled")],
+)
+async def test_continuation_terminal_converges_output_delivery_obligation(
+    migrated_postgres_database_url: str,
+    settled_status: str,
+    expected_status: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            await settle_continuation_output_delivery(
+                session,
+                approval_id_value=str(scenario.approval_id),
+                project_id=scenario.seed.owner_a.project_id,
+                owner_user_id=str(scenario.seed.owner_a.user_id),
+                thread_id=scenario.thread_id,
+                continuation_run_id=prepared.continuation_run_id,
+                continuation_job_id=prepared.continuation_job_id,
+                settled_status=settled_status,
+                now=datetime.now(UTC),
+            )
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert obligation is not None
+            assert obligation.status == expected_status
+            assert obligation.terminal_at is not None
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_continuation_success_rejects_incomplete_output_delivery(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        with pytest.raises(OutputDeliveryObligationConflict):
+            async with scenario.seed.factory() as session, session.begin():
+                await settle_continuation_output_delivery(
+                    session,
+                    approval_id_value=str(scenario.approval_id),
+                    project_id=scenario.seed.owner_a.project_id,
+                    owner_user_id=str(scenario.seed.owner_a.user_id),
+                    thread_id=scenario.thread_id,
+                    continuation_run_id=prepared.continuation_run_id,
+                    continuation_job_id=prepared.continuation_job_id,
+                    settled_status="success",
+                    now=datetime.now(UTC),
+                )
+        async with scenario.seed.factory() as session:
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert obligation is not None and obligation.status == "assigned"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_handler_rolls_back_success_with_incomplete_output_delivery(
+    migrated_postgres_database_url: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            jobs = JobRepository(session)
+            claim = await jobs.claim_next(
+                worker_id=scenario.worker_id,
+                capabilities=frozenset({"private_run"}),
+                lease_seconds=300,
+                execution_domain_affinity=_execution_domain().affinity,
+            )
+            assert claim is not None
+            assert claim.job_id == prepared.continuation_job_id
+            assert await jobs.mark_running(
+                claim.job_id,
+                lease_token=claim.lease_token,
+            )
+            await PrivateRunRepository(session).begin_execution(
+                scope=scenario.seed.owner_a_scope,
+                run_id=prepared.continuation_run_id,
+                job_id=claim.job_id,
+                lease_token=claim.lease_token,
+                origin_trace_id=claim.origin_trace_id,
+            )
+
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+        )
+        settlement = handler._settlement(
+            claim,
+            AgentExecutionResult.succeeded(),
+            scope=scenario.seed.owner_a_scope,
+        )
+        with pytest.raises(LeaseLost):
+            await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            continuation_run = await session.get(
+                RunRow,
+                prepared.continuation_run_id,
+            )
+            continuation_job = await session.get(
+                JobRow,
+                prepared.continuation_job_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert continuation_run is not None
+            assert continuation_run.status == "running"
+            assert continuation_job is not None
+            assert continuation_job.status == "running"
+            assert obligation is not None and obligation.status == "assigned"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("result", "ambiguous_side_effect"),
+    [
+        (
+            AgentExecutionResult.failed(
+                "AGENT_EXECUTION_FAILED",
+                retryable=False,
+            ),
+            True,
+        ),
+        (
+            AgentExecutionResult.failed(
+                "MODEL_OUTPUT_LIMIT",
+                retryable=False,
+            ),
+            False,
+        ),
+        (AgentExecutionResult.cancelled(), False),
+    ],
+)
+async def test_handler_claimed_terminal_keeps_obligation_blocked_unknown(
+    migrated_postgres_database_url: str,
+    result: AgentExecutionResult,
+    ambiguous_side_effect: bool,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        claim = await _claim_assigned_output_obligation(prepared)
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+            job_repository_builder=lambda session: JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    "test",
+                    "0" * 64,
+                ),
+                terminal_port=PrivateRunJobTerminalPort(),
+            ),
+        )
+        settlement = handler._settlement(
+            claim,
+            result,
+            scope=scenario.seed.owner_a_scope,
+            ambiguous_side_effect=ambiguous_side_effect,
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert approval is not None and approval.status == "claimed"
+            assert obligation is not None
+            assert obligation.status == "blocked_unknown"
+            await reconcile_locked_execution_approval(
+                session,
+                approval,
+                now=claimed_execution_absolute_deadline(approval) + timedelta(microseconds=1),
+            )
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            assert approval is not None and approval.status == "unknown"
+            assert obligation is not None
+            assert obligation.status == "blocked_unknown"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "execution_status",
+    ["finished", "launch_failed"],
+)
+async def test_handler_dead_settlement_fails_finished_delivery_obligation(
+    migrated_postgres_database_url: str,
+    execution_status: str,
+) -> None:
+    prepared = await _prepare_assigned_output_obligation(
+        migrated_postgres_database_url,
+    )
+    scenario = prepared.scenario
+    try:
+        claim = await _claim_assigned_output_obligation(prepared)
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            job = await session.get(JobRow, claim.job_id, with_for_update=True)
+            assert approval is not None and approval.status == "claimed"
+            assert job is not None
+            completed_at = datetime.now(UTC)
+            if execution_status == "finished":
+                approval.spawn_authorized_at = approval.claimed_at
+            approval.status = execution_status
+            approval.version += 1
+            approval.terminal_at = completed_at
+            approval.updated_at = completed_at
+            job.retry_safety = "safe"
+            job.updated_at = completed_at
+        handler = PrivateRunJobHandler(
+            scenario.seed.factory,
+            executor=SimpleNamespace(),
+            job_repository_builder=lambda session: JobRepository(
+                session,
+                owner_ref_hasher=lambda _owner: JobOwnerRef(
+                    "test",
+                    "0" * 64,
+                ),
+                terminal_port=PrivateRunJobTerminalPort(),
+            ),
+        )
+        settlement = handler._settlement(
+            claim,
+            AgentExecutionResult.failed(
+                "AGENT_EXECUTION_FAILED",
+                retryable=False,
+            ),
+            scope=scenario.seed.owner_a_scope,
+        )
+        await settlement.commit()
+
+        async with scenario.seed.factory() as session:
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+            )
+            obligation = await session.get(
+                ExecutionApprovalOutputDeliveryObligationRow,
+                scenario.approval_id,
+            )
+            run = await session.get(RunRow, prepared.continuation_run_id)
+            job = await session.get(JobRow, prepared.continuation_job_id)
+            assert approval is not None
+            assert approval.status == execution_status
+            assert obligation is not None and obligation.status == "failed"
+            assert run is not None and run.status == "error"
+            assert job is not None and job.status == "dead"
+    finally:
+        await scenario.seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_approval_delete_cascades_obligation_but_preserves_candidate_file(
+    migrated_postgres_database_url: str,
+) -> None:
+    scenario = await _prepare_clock_scenario(migrated_postgres_database_url)
+    try:
+        async with scenario.seed.factory() as session, session.begin():
+            candidate = await _add_source_output(
+                session,
+                scenario,
+                logical_path="outputs/retained.txt",
+                sha256="9" * 64,
+            )
+            candidate_id = candidate.id
+        await _settle_clock_scenario_pending(scenario)
+        async with scenario.seed.factory() as session, session.begin():
+            approval = await session.get(
+                ExecutionApprovalRequestRow,
+                scenario.approval_id,
+                with_for_update=True,
+            )
+            assert approval is not None
+            await session.delete(approval)
+
+        async with scenario.seed.factory() as session:
+            assert (
+                await session.get(
+                    ExecutionApprovalOutputDeliveryObligationRow,
+                    scenario.approval_id,
+                )
+                is None
+            )
+            assert (
+                await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(ExecutionApprovalOutputDeliveryCandidateRow)
+                    .where(
+                        ExecutionApprovalOutputDeliveryCandidateRow.approval_id == scenario.approval_id,
+                    )
+                )
+                == 0
+            )
+            retained = await session.get(PrivateFileRow, candidate_id)
+            assert retained is not None and retained.status == "ready"
     finally:
         await scenario.seed.engine.dispose()
 
@@ -862,6 +3047,15 @@ class _QueuedAffinityContinuationAdmission:
         affinity = server_context.host_execution_domain_affinity
         approval_id = server_context.host_execution_approval_id
         assert affinity is not None and approval_id is not None
+        request = replace(
+            request,
+            kwargs={
+                **request.kwargs,
+                "host_execution_approval_id": str(approval_id),
+                "host_execution_decision_digest": (server_context.host_execution_decision_digest),
+                "host_execution_domain_affinity": affinity,
+            },
+        )
         async with self._factory() as session, session.begin():
             approval = await session.get(
                 ExecutionApprovalRequestRow,
@@ -889,7 +3083,15 @@ class _QueuedAffinityContinuationAdmission:
             approval.continuation_run_id = run.run_id
             approval.continuation_job_id = job.job_id
             approval.version += 1
-            approval.updated_at = datetime.now(UTC)
+            linked_at = datetime.now(UTC)
+            approval.updated_at = linked_at
+            await assign_output_delivery_obligation(
+                session,
+                approval=approval,
+                continuation_run_id=run.run_id,
+                continuation_job_id=job.job_id,
+                now=linked_at,
+            )
             await self._hooks.reserve_concurrent_run(session, context, run)
             await self._hooks.run_admitted(session, context, run, job)
             return SimpleNamespace(run=run, job=job)
@@ -1173,6 +3375,7 @@ async def test_real_run_admission_atomically_expires_abandoned_approval(
                 session,
                 claim=claim,
                 succeeded=True,
+                suspended_approval_id=str(approval_id),
                 request_ttl_seconds=300,
                 audit=worker_audit,
             )
@@ -1204,7 +3407,6 @@ async def test_real_run_admission_atomically_expires_abandoned_approval(
             assert pending.status == "pending"
             assert pending.decision is None
 
-        expired_at = datetime.now(UTC)
         async with seed.factory() as session, session.begin():
             abandoned = await session.get(
                 ExecutionApprovalRequestRow,
@@ -1212,8 +3414,10 @@ async def test_real_run_admission_atomically_expires_abandoned_approval(
                 with_for_update=True,
             )
             assert abandoned is not None and abandoned.status == "pending"
+            # Stay inside the database timestamp constraint while making the
+            # expiry unambiguously older than the later decision transaction.
+            expired_at = abandoned.created_at + timedelta(microseconds=1)
             abandoned.expires_at = expired_at
-            abandoned.updated_at = expired_at
 
         expired_projection = await ExecutionApprovalService(
             seed.factory,
@@ -1454,6 +3658,7 @@ async def test_source_retry_conflict_cancels_staged_approval_before_settlement(
                 session,
                 claim=claim_b,
                 succeeded=True,
+                suspended_approval_id=None,
                 request_ttl_seconds=300,
             )
 
@@ -1576,6 +3781,7 @@ async def test_wrong_affinity_continuation_is_unclaimable_and_ttl_cleanup_releas
                 session,
                 claim=source_claim,
                 succeeded=True,
+                suspended_approval_id=str(approval_id),
                 request_ttl_seconds=300,
             )
 
@@ -1623,9 +3829,10 @@ async def test_wrong_affinity_continuation_is_unclaimable_and_ttl_cleanup_releas
                 ).affinity,
             )
             assert wrong_claim is None
-            expired_at = datetime.now(UTC)
+            # Stay inside the database timestamp constraint while making the
+            # expiry unambiguously older than the later admission transaction.
+            expired_at = approval.created_at + timedelta(microseconds=1)
             approval.expires_at = expired_at
-            approval.updated_at = expired_at
 
         replacement_run_id = str(uuid.uuid4())
         replacement = await admission.admit(
@@ -1740,6 +3947,7 @@ class _AtomicContinuationAdmission:
                     worker_id=self._worker_id,
                     run_id=request.run_id,
                     lease_token=self.lease_token,
+                    model_ref=str(self._model_config_id),
                     execution_domain_affinity=(server_context.host_execution_domain_affinity),
                 )
                 session.add(
@@ -1764,7 +3972,6 @@ class _AtomicContinuationAdmission:
                         thread_id=thread_id,
                         run_id=request.run_id,
                         purpose="chat",
-                        logical_name="test-model",
                         model_config_id=self._model_config_id,
                         model_config_version_id=self._model_config_version_id,
                         payload_checksum=self._model_payload_checksum,
@@ -1897,7 +4104,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     workflow_status="published",
                     description="",
                     soul="test",
-                    model_ref="test-model",
+                    model_ref=str(model_config_id),
                     model_settings={},
                     tool_groups=[],
                     payload_checksum="a" * 64,
@@ -1907,13 +4114,10 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             await session.flush()
             model_config = SystemModelConfigRow(
                 id=model_config_id,
-                logical_name="test-model",
                 display_name="Test model",
-                description="",
                 status="active",
                 current_version_id=None,
                 revision=1,
-                sort_order=0,
                 created_by_user_id=str(owner_id),
                 updated_by_user_id=str(owner_id),
             )
@@ -2003,6 +4207,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 worker_id=worker_id,
                 run_id=source_run_id,
                 lease_token=source_token,
+                model_ref=str(model_config_id),
             )
             session.add(
                 RunAssetVersionRow(
@@ -2026,7 +4231,6 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     thread_id=thread_id,
                     run_id=source_run_id,
                     purpose="chat",
-                    logical_name="test-model",
                     model_config_id=model_config_id,
                     model_config_version_id=model_config_version_id,
                     payload_checksum=model_payload_checksum,
@@ -2106,10 +4310,14 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             quota=_ApprovalLifecycleHooks(),
             run_audit=_ApprovalLifecycleHooks(),
         )
-        staged_projection = await staged_reader.active(context, thread_id)
-        assert staged_projection.approval is not None
-        assert staged_projection.approval["status"] == "pending"
-        assert staged_projection.approval["can_decide"] is False
+        staged_active_projection = await staged_reader.active(context, thread_id)
+        staged_by_id_projection = await staged_reader.get(
+            context,
+            thread_id,
+            approval_id,
+        )
+        assert staged_active_projection.approval is None
+        assert staged_by_id_projection.approval is None
 
         async with factory() as session, session.begin():
             row = await session.get(ExecutionApprovalRequestRow, approval_id)
@@ -2118,11 +4326,23 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 session,
                 claim=source_claim,
                 succeeded=True,
+                suspended_approval_id=str(approval_id),
                 request_ttl_seconds=300,
             )
             source_run = await session.get(RunRow, source_run_id)
             assert source_run is not None
             source_run.status = "success"
+
+        pending_active_projection = await staged_reader.active(context, thread_id)
+        pending_by_id_projection = await staged_reader.get(
+            context,
+            thread_id,
+            approval_id,
+        )
+        assert pending_active_projection.approval is not None
+        assert pending_active_projection.approval["status"] == "pending"
+        assert pending_active_projection.approval["can_decide"] is True
+        assert pending_by_id_projection.approval == pending_active_projection.approval
 
         admission = _AtomicContinuationAdmission(
             factory,
@@ -2298,6 +4518,10 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             return
         assert frozen.status == "claimed"
         assert frozen.plan == source_plan
+        spawn_window = await continuation_port.authorize_claimed_host_execution_spawn(
+            str(approval_id),
+        )
+        assert spawn_window is not None and spawn_window > 0
         failing_completion_port = WorkerHostExecutionApprovalPort(
             factory,
             context=context,
@@ -2393,6 +4617,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 session,
                 claim=continuation_claim,
                 succeeded=True,
+                suspended_approval_id=str(next_approval_id),
                 request_ttl_seconds=300,
             )
             continuation_run = await session.get(RunRow, continuation_run_id)
@@ -2526,9 +4751,9 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             )
             assert next_row is not None and next_row.status == "unknown"
 
-        # A command staged during a real Job that subsequently dies is
-        # terminalized in the same transaction as the Run.  Its by-id shape
-        # remains pollable while the source Job is still live.
+        # A command staged during a real Job that subsequently dies is hidden
+        # while the source Job is live, then becomes visible by id only after
+        # terminalization in the same transaction as the Run.
         revived_until = datetime.now(UTC) + timedelta(minutes=5)
         async with factory() as session, session.begin():
             claimed_job = await session.get(JobRow, crash_job.id)
@@ -2552,14 +4777,12 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
         terminal_staged = await crash_port.request_host_execution(terminal_plan)
         assert terminal_staged.approval_id is not None
         terminal_approval_id = uuid.UUID(terminal_staged.approval_id)
-        pollable = await service.get(
+        hidden_staged = await service.get(
             context,
             thread_id,
             terminal_approval_id,
         )
-        assert pollable.approval is not None
-        assert pollable.approval["status"] == "pending"
-        assert pollable.approval["can_decide"] is False
+        assert hidden_staged.approval is None
 
         terminal_at = datetime.now(UTC)
         async with factory() as session, session.begin():
@@ -2593,6 +4816,14 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             assert terminal_row.status == "cancelled"
             assert terminal_row.terminal_at == terminal_at
             assert terminal_run is not None and terminal_run.status == "error"
+
+        cancelled_projection = await service.get(
+            context,
+            thread_id,
+            terminal_approval_id,
+        )
+        assert cancelled_projection.approval is not None
+        assert cancelled_projection.approval["status"] == "cancelled"
 
         # The same terminal hook also closes a continuation that died before
         # claim, while preserving ambiguity once a claim could have spawned

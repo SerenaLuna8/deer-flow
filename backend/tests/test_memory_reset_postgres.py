@@ -248,13 +248,10 @@ async def _add_test_model(
     checksum = hashlib.sha256(version_id.bytes).hexdigest()
     model = SystemModelConfigRow(
         id=model_id,
-        logical_name=f"memory-reset-{model_id.hex}",
         display_name="Memory reset PostgreSQL model",
-        description="Memory reset PostgreSQL test",
         status="active",
         current_version_id=None,
         revision=1,
-        sort_order=0,
         created_by_user_id=owner_user_id,
         updated_by_user_id=owner_user_id,
     )
@@ -265,7 +262,7 @@ async def _add_test_model(
             id=version_id,
             model_config_id=model_id,
             version_number=1,
-            provider_adapter="codex_cli",
+            provider_adapter="vision_bridge_fake",
             provider_model="memory-reset-test",
             settings={},
             supports_thinking=False,

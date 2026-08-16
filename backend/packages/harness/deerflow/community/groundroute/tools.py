@@ -2,10 +2,8 @@
 
 GroundRoute (https://groundroute.ai) is a meta search layer: one API in front of
 six search engines (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). It routes
-each query to the cheapest engine that clears a quality bar and caches repeats, so
-high-volume research runs keep working when one engine is down and pay no more than
-going to a single engine direct. Pricing is gain-share: the caller keeps about half
-of any cache savings.
+queries across eligible engines, caches repeats, and fails over when an engine is
+unavailable.
 
 This module is self-contained (httpx only, no GroundRoute SDK). The /v1/search
 request and response mapping mirrors the GroundRoute MCP server and the verified

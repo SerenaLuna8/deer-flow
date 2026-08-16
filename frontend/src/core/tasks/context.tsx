@@ -84,7 +84,11 @@ export function useUpdateSubtask() {
       }
       current[task.id] = next;
 
-      if (becameTerminal || task.statusSource === "tool_result") {
+      if (
+        becameTerminal ||
+        task.statusSource === "tool_result" ||
+        task.statusSource === "execution_approval"
+      ) {
         // Defer the render to the after-render effect so a terminal-only update
         // does not loop with MessageList's same-render pending write.
         shouldNotifyAfterRenderRef.current = true;

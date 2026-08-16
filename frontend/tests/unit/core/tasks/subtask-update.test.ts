@@ -42,4 +42,27 @@ describe("computeNextSubtask", () => {
     expect(transition.becameTerminal).toBe(true);
     expect(transition.changed).toBe(true);
   });
+
+  test("does not let the replayed inferred task call overwrite an approval-owned state", () => {
+    const approvalOwned: Subtask = {
+      ...pendingToolResult,
+      statusSource: "execution_approval",
+      executionApproval: {
+        approvalId: "11111111-1111-4111-8111-111111111111",
+        status: "pending",
+      },
+    };
+
+    const transition = computeNextSubtask(approvalOwned, {
+      id: approvalOwned.id,
+      status: "in_progress",
+      statusSource: "inferred",
+      subagent_type: approvalOwned.subagent_type,
+      description: approvalOwned.description,
+      prompt: approvalOwned.prompt,
+    });
+
+    expect(transition.next).toBe(approvalOwned);
+    expect(transition.changed).toBe(false);
+  });
 });

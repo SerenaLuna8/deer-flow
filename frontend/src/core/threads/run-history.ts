@@ -1,8 +1,11 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 
 import {
+  isOutputDeliveryIncompleteError,
   isModelOutputLimitError,
   MODEL_OUTPUT_LIMIT,
+  OUTPUT_DELIVERY_INCOMPLETE,
+  type ProjectRunFailureCode,
 } from "../private-work/api-client";
 import {
   compareEventSequences,
@@ -108,22 +111,29 @@ export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
 
 export function latestRunFailureCode(
   runs: Run[] | undefined,
-): typeof MODEL_OUTPUT_LIMIT | null {
+): ProjectRunFailureCode | null {
   const latestRun = runs?.[0];
   if (!latestRunHasTerminalFailure(runs) || !latestRun) {
     return null;
   }
-  return isModelOutputLimitError(Reflect.get(latestRun, "error"))
-    ? MODEL_OUTPUT_LIMIT
+  const error = Reflect.get(latestRun, "error");
+  if (isModelOutputLimitError(error)) {
+    return MODEL_OUTPUT_LIMIT;
+  }
+  return isOutputDeliveryIncompleteError(error)
+    ? OUTPUT_DELIVERY_INCOMPLETE
     : null;
 }
 
 export function resolveRunFailureCode(
   streamError: unknown,
   runs: Run[] | undefined,
-): typeof MODEL_OUTPUT_LIMIT | null {
-  return isModelOutputLimitError(streamError)
-    ? MODEL_OUTPUT_LIMIT
+): ProjectRunFailureCode | null {
+  if (isModelOutputLimitError(streamError)) {
+    return MODEL_OUTPUT_LIMIT;
+  }
+  return isOutputDeliveryIncompleteError(streamError)
+    ? OUTPUT_DELIVERY_INCOMPLETE
     : latestRunFailureCode(runs);
 }
 

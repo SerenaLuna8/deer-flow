@@ -168,17 +168,17 @@ async def _environment(database_url: str, *, with_model: bool = False):
 async def _seed_default_model(seed: PrivateThreadSeed) -> None:
     model_id = uuid.uuid4()
     version_id = uuid.uuid4()
-    logical_name = f"builder-rev-{model_id.hex}"
+    provider_model = f"builder-rev-{model_id.hex}"
     async with seed.engine.begin() as connection:
         await connection.execute(
             sa.text(
                 """INSERT INTO system_model_configs
-                (id,logical_name,display_name,description,status,current_version_id,
-                 revision,sort_order,created_by_user_id,updated_by_user_id)
-                VALUES (:id,:name,'Builder revision model','Builder revision model','active',
-                        NULL,1,0,:owner,:owner)"""
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,updated_by_user_id)
+                VALUES (:id,'Builder revision model','active',NULL,1,
+                        :owner,:owner)"""
             ),
-            {"id": model_id, "name": logical_name, "owner": str(seed.owner_a.user_id)},
+            {"id": model_id, "owner": str(seed.owner_a.user_id)},
         )
         await connection.execute(
             sa.text(
@@ -188,13 +188,13 @@ async def _seed_default_model(seed: PrivateThreadSeed) -> None:
                  supports_vision,credential_id,credential_version_id,
                  credential_env_key,payload_checksum,supersedes_version_id,
                  created_by_user_id)
-                VALUES (:id,:model,1,'codex_cli',:name,'{}'::jsonb,false,false,
+                VALUES (:id,:model,1,'vision_bridge_fake',:name,'{}'::jsonb,false,false,
                         false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
             ),
             {
                 "id": version_id,
                 "model": model_id,
-                "name": logical_name,
+                "name": provider_model,
                 "checksum": "b" * 64,
                 "owner": str(seed.owner_a.user_id),
             },

@@ -710,6 +710,29 @@ class RunAgentPrivateExecutor:
                 if isinstance(skill_container_path, str) and skill_root is not None
                 else ()
             )
+            continuation_approval_id = execution.run.kwargs.get(
+                "host_execution_approval_id",
+            )
+            host_execution_approval_port = (
+                WorkerHostExecutionApprovalPort(
+                    self._factory,
+                    context=execution.context,
+                    claim=claim,
+                    thread_id=execution.run.thread_id,
+                    request_ttl_seconds=(runtime_app_config.sandbox.host_execution_approval.request_ttl_seconds),
+                    provider_policy=(
+                        HostExecutionProviderPolicySnapshot.from_app_config(
+                            runtime_app_config,
+                        )
+                    ),
+                    execution_domain=self._host_execution_domain,
+                    continuation_approval_id=(continuation_approval_id if isinstance(continuation_approval_id, str) else None),
+                    audit=self._execution_approval_audit,
+                    retry_safety_boundary=boundary,
+                )
+                if execution.runtime_kind == "chat"
+                else None
+            )
             if execution.runtime_kind == "chat":
                 file_authority = PrivateRunFileAuthority(
                     PrivateFileRunScope(
@@ -723,9 +746,11 @@ class RunAgentPrivateExecutor:
                         self._factory,
                         quota=self._quota,
                         audit=self._file_finalization_audit,
+                        output_delivery_port=host_execution_approval_port,
                     ),
                     mounts=mounts,
                     current_upload_snapshot=current_upload_snapshot,
+                    output_delivery_port=host_execution_approval_port,
                 )
             run_manager = RunManager()
             record = await run_manager.register_persisted(
@@ -783,28 +808,6 @@ class RunAgentPrivateExecutor:
                     namespace=DEFAULT_PRIVATE_MEMORY_NAMESPACE,
                     memory_config=runtime_app_config.memory,
                     audit=self._file_finalization_audit,
-                )
-                if execution.runtime_kind == "chat"
-                else None
-            )
-            continuation_approval_id = execution.run.kwargs.get(
-                "host_execution_approval_id",
-            )
-            host_execution_approval_port = (
-                WorkerHostExecutionApprovalPort(
-                    self._factory,
-                    context=execution.context,
-                    claim=claim,
-                    thread_id=execution.run.thread_id,
-                    request_ttl_seconds=(runtime_app_config.sandbox.host_execution_approval.request_ttl_seconds),
-                    provider_policy=(
-                        HostExecutionProviderPolicySnapshot.from_app_config(
-                            runtime_app_config,
-                        )
-                    ),
-                    execution_domain=self._host_execution_domain,
-                    continuation_approval_id=(continuation_approval_id if isinstance(continuation_approval_id, str) else None),
-                    audit=self._execution_approval_audit,
                 )
                 if execution.runtime_kind == "chat"
                 else None
@@ -876,7 +879,15 @@ class RunAgentPrivateExecutor:
                         scope=execution.context.resource_scope,
                         thread_id=execution.run.thread_id,
                         terminal_status=lambda: str(record.status),
-                        terminal_error_code=lambda: PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value if record.error == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value else None,
+                        terminal_error_code=lambda: (
+                            record.error
+                            if record.error
+                            in {
+                                PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                                PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+                            }
+                            else None
+                        ),
                     ),
                     run_manager,
                     record,
@@ -908,6 +919,7 @@ class RunAgentPrivateExecutor:
             if record.status is RunStatus.success:
                 return AgentExecutionResult.succeeded(
                     attempt_usage=attempt_usage,
+                    suspended_approval_id=record.suspended_approval_id,
                 )
             if record.status is RunStatus.interrupted:
                 return AgentExecutionResult.cancelled(
@@ -916,6 +928,12 @@ class RunAgentPrivateExecutor:
             if record.status is RunStatus.error and record.error == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value:
                 return AgentExecutionResult.failed(
                     PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                    retryable=False,
+                    attempt_usage=attempt_usage,
+                )
+            if record.status is RunStatus.error and record.error == PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value:
+                return AgentExecutionResult.failed(
+                    PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
                     retryable=False,
                     attempt_usage=attempt_usage,
                 )

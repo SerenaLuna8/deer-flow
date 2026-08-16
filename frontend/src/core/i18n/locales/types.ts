@@ -1110,11 +1110,7 @@ export interface Translations {
       environmentKey: string;
       status: string;
       version: string;
-      versionMeta: (
-        versionNumber: number,
-        revision: number,
-        sortOrder: number,
-      ) => string;
+      versionMeta: (versionNumber: number, revision: number) => string;
       capabilities: string;
       noCapabilities: string;
       thinking: string;
@@ -1145,26 +1141,21 @@ export interface Translations {
       description: string;
       basicInformation: string;
       basicDescription: string;
-      logicalName: string;
       displayName: string;
       displayNamePlaceholder: string;
       providerAdapter: string;
+      retiredProviderAdapter: string;
+      retiredProviderAdapterHint: string;
       providerModel: string;
       status: string;
       active: string;
       suspended: string;
-      modelDescription: string;
-      modelDescriptionPlaceholder: string;
-      sortOrder: string;
-      sortOrderHint: string;
       capabilities: string;
       capabilitiesAndRuntime: string;
-      capabilitiesDescription: string;
       supportsThinking: string;
       supportsReasoningEffort: string;
       supportsVision: string;
       commonProviderSettings: string;
-      commonProviderSettingsDescription: string;
       baseUrl: string;
       baseUrlHint: string;
       temperature: string;
@@ -1172,7 +1163,6 @@ export interface Translations {
       requestTimeout: string;
       maxRetries: string;
       credentialBinding: string;
-      credentialBindingDescription: string;
       systemCredential: string;
       credentialsUnavailableHint: string;
       credentialSelectionHint: string;
@@ -1198,7 +1188,6 @@ export interface Translations {
       maxTokens: string;
       requestTimeout: string;
       maxRetries: string;
-      sortOrder: string;
       advancedJsonInvalid: string;
       advancedJsonObject: string;
       advancedJsonUnsafe: string;
@@ -2017,10 +2006,12 @@ export interface Translations {
     modelOutputLimitDescription: string;
     modelOutputLimitRetry: string;
     modelOutputLimitRetrying: string;
+    outputDeliveryIncompleteTitle: string;
+    outputDeliveryIncompleteDescription: string;
     agentModelUnavailableTitle: string;
     agentModelUnavailableDescription: string;
     runExecutionProfile: (
-      modelName: string,
+      modelDisplayName: string,
       modeName: string,
       supportsVision: boolean,
     ) => string;

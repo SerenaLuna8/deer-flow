@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
-from support.private_thread_seed import seed_private_thread_database
+from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
 
 import app.private_work.snapshot_repository as snapshot_module
 from app.personalization.repository import AccountPersonalizationRepository
@@ -52,6 +52,10 @@ from deerflow.persistence.private_work.memory_document_model import (
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+
+LEAD_MODEL_REF = "00000000-0000-4000-8000-000000000305"
+VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
+CATALOG_DEFAULT_MODEL_REF = "00000000-0000-4000-8000-000000000307"
 
 
 class _Result:
@@ -600,7 +604,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
     class RuntimePolicy:
         async def lock_agent_runtime_for_admission(self, _session):
             events.append("policy")
-            return _policy(vision_model_name="vision-small-v1")
+            return _policy(vision_model_name=VISION_MODEL_REF)
 
         async def admit_run_snapshot(self, _session, **_kwargs):
             events.append("policy_snapshot")
@@ -609,7 +613,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         async def admit_model_snapshot(self, _session, *, purpose, **_kwargs):
             events.append(f"model:{purpose}")
             return SimpleNamespace(
-                logical_name=("vision-small-v1" if purpose == "vision" else "lead-model"),
+                model_ref=(VISION_MODEL_REF if purpose == "vision" else LEAD_MODEL_REF),
                 provider_adapter=("vision_bridge_fake" if purpose == "vision" else "openai"),
                 provider_settings={},
                 supports_thinking=False,
@@ -671,7 +675,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         payload=AgentPayload(
             description="",
             soul="",
-            model_ref="lead-model",
+            model_ref=LEAD_MODEL_REF,
             tool_groups=(),
             skill_version_ids=(),
             mcp_version_ids=(),
@@ -759,7 +763,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
 
     class RuntimePolicy:
         async def lock_agent_runtime_for_admission(self, _session):
-            return _policy(vision_model_name="vision-small-v1")
+            return _policy(vision_model_name=VISION_MODEL_REF)
 
         async def admit_run_snapshot(self, _session, **_kwargs):
             return None
@@ -768,7 +772,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
         async def admit_model_snapshot(self, _session, *, purpose, model_ref, **_kwargs):
             admitted.append((purpose, model_ref))
             return SimpleNamespace(
-                logical_name="catalog-default" if model_ref == "default" else model_ref,
+                model_ref=(CATALOG_DEFAULT_MODEL_REF if model_ref == "default" else model_ref),
                 provider_adapter="openai",
                 supports_thinking=False,
                 supports_reasoning_effort=False,
@@ -816,7 +820,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
         payload=AgentPayload(
             description="",
             soul="",
-            model_ref="lead-model",
+            model_ref=LEAD_MODEL_REF,
             tool_groups=(),
             skill_version_ids=(),
             mcp_version_ids=(),
@@ -831,7 +835,7 @@ async def test_run_admission_freezes_catalog_default_title_model(
         agent,
     )
 
-    assert ("lead", "lead-model") in admitted
+    assert ("lead", LEAD_MODEL_REF) in admitted
     assert ("title", "default") in admitted
     assert not any(purpose == "vision" for purpose, _model in admitted)
 
@@ -875,7 +879,7 @@ async def test_postgres_snapshot_stays_frozen_and_reset_removes_it(
                     assistant_id=str(seed.project_agent_id),
                     owner_user_id=scope.owner_user_id,
                     status="pending",
-                    model_name="test-model",
+                    model_name=TEST_MODEL_REF,
                     multitask_strategy="reject",
                     metadata_json={},
                     kwargs_json={},

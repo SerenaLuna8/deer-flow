@@ -43,6 +43,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
 
 NOW = datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC)
 SECTIONS_POLICY_VERSION_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+DREAM_MODEL_REF = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 
 def _creation_policy(
@@ -168,7 +169,7 @@ def _runtime():
     policy = AgentRuntimePolicyValue(
         memory=MemoryPolicy(
             enabled=True,
-            model_name="dream-model",
+            model_name=DREAM_MODEL_REF,
             dream_interval_minutes=45,
             max_injection_tokens=3_000,
         )
@@ -395,7 +396,7 @@ async def test_platform_runtime_freezes_one_locked_policy_pointer_and_model_vers
     assert calls == [
         (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
         (session, "memory_document", True),
-        (session, "dream-model", False),
+        (session, DREAM_MODEL_REF, False),
     ]
 
 
@@ -442,7 +443,7 @@ async def test_platform_runtime_does_not_read_current_document_policy_for_existi
     assert creation_policy is None
     assert calls == [
         (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
-        (session, "dream-model", False),
+        (session, DREAM_MODEL_REF, False),
     ]
 
 

@@ -2,6 +2,7 @@ import {
   CheckCircleIcon,
   ChevronUp,
   ClipboardListIcon,
+  Clock3Icon,
   Loader2Icon,
   SparklesIcon,
   WrenchIcon,
@@ -54,9 +55,14 @@ export function SubtaskCard({
   const [collapsed, setCollapsed] = useState(true);
   const task = useSubtask(taskId)!;
   const { models, tokenUsageEnabled } = useModels();
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(
-    task.status === "in_progress",
-  );
+  const approvalStatus = task.executionApproval?.status;
+  const approvalIsPaused =
+    approvalStatus === "pending" || approvalStatus === "approved";
+  const visuallyRunning = task.status === "in_progress" && !approvalIsPaused;
+  const approvalStatusLabel = approvalStatus
+    ? t.executionApproval.statuses[approvalStatus]
+    : undefined;
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(visuallyRunning);
   const updateSubtask = useUpdateSubtask();
   const privateWork = useProjectPrivateWorkScope();
   const modelLabel = resolveSubtaskModelLabel(task.modelName, models);
@@ -112,22 +118,21 @@ export function SubtaskCard({
       return <CheckCircleIcon className="size-3" />;
     } else if (task.status === "failed") {
       return <XCircleIcon className="size-3 text-red-500" />;
+    } else if (approvalIsPaused) {
+      return <Clock3Icon className="size-3" />;
     } else if (task.status === "in_progress") {
       return <Loader2Icon className="size-3 animate-spin" />;
     }
-  }, [task.status]);
+  }, [approvalIsPaused, task.status]);
   return (
     <ChainOfThought
       className={cn("relative w-full gap-2 rounded-lg border py-0", className)}
       open={!collapsed}
     >
       <div
-        className={cn(
-          "ambilight z-[-1]",
-          task.status === "in_progress" ? "enabled" : "",
-        )}
+        className={cn("ambilight z-[-1]", visuallyRunning ? "enabled" : "")}
       ></div>
-      {task.status === "in_progress" && (
+      {visuallyRunning && (
         <>
           <ShineBorder
             borderWidth={1.5}
@@ -146,7 +151,7 @@ export function SubtaskCard({
               <ChainOfThoughtStep
                 className="font-normal"
                 label={
-                  task.status === "in_progress" ? (
+                  visuallyRunning ? (
                     <Shimmer duration={3} spread={3}>
                       {task.description}
                     </Shimmer>
@@ -182,11 +187,11 @@ export function SubtaskCard({
                       className="max-w-[420px] truncate pb-1"
                       uniqueKey={task.latestMessage?.id ?? ""}
                     >
-                      {task.status === "in_progress" &&
+                      {visuallyRunning &&
                       task.latestMessage &&
                       hasToolCalls(task.latestMessage)
                         ? explainLastToolCall(task.latestMessage, t)
-                        : t.subtasks[task.status]}
+                        : (approvalStatusLabel ?? t.subtasks[task.status])}
                     </FlipDisplay>
                   </div>
                 )}
@@ -215,7 +220,7 @@ export function SubtaskCard({
           )}
           {displaySteps.map((step, i) => {
             const isLastWhileRunning =
-              task.status === "in_progress" && i === displaySteps.length - 1;
+              visuallyRunning && i === displaySteps.length - 1;
             const icon = isLastWhileRunning ? (
               <Loader2Icon className="size-4 animate-spin" />
             ) : step.kind === "tool" ? (
@@ -266,7 +271,7 @@ export function SubtaskCard({
             <ChainOfThoughtStep
               label={
                 <div className="text-red-500">
-                  {task.error ?? t.subtasks.failed}
+                  {approvalStatusLabel ?? task.error ?? t.subtasks.failed}
                 </div>
               }
               icon={<XCircleIcon className="size-4 text-red-500" />}

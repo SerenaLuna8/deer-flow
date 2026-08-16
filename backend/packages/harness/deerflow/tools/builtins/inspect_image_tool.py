@@ -6,12 +6,14 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from threading import Event
 from typing import Annotated
 
-from langchain.tools import BaseTool, InjectedToolCallId, tool
+from langchain.tools import BaseTool, InjectedToolCallId
 from langchain_core.messages import ToolMessage
+from langchain_core.tools import StructuredTool
+from pydantic import ConfigDict
 
 from deerflow.agents.middlewares.tool_error_handling_middleware import (
     mark_deferred_external_dispatch_tool,
@@ -31,6 +33,7 @@ from deerflow.vision.client import (
 from deerflow.vision.contracts import (
     InspectImageInput,
     VisionErrorResult,
+    VisionUsageReceipt,
 )
 from deerflow.vision.dispatch import VisionDispatchDenied
 from deerflow.vision.image_input import (
@@ -68,9 +71,32 @@ _ERROR_MESSAGES = {
 }
 
 
+class _InspectImageInvocation(InspectImageInput):
+    """Complete internal schema after LangGraph injects trusted tool fields."""
+
+    model_config = ConfigDict(
+        arbitrary_types_allowed=True,
+        extra="forbid",
+        frozen=True,
+        strict=True,
+    )
+
+    runtime: Runtime
+    tool_call_id: Annotated[str, InjectedToolCallId]
+
+
+class _InspectImageStructuredTool(StructuredTool):
+    """Use the strict public schema while validating the complete invocation."""
+
+    @property
+    def tool_call_schema(self) -> type[InspectImageInput]:
+        return InspectImageInput
+
+
 def _error_message(code: str, tool_call_id: str) -> ToolMessage:
     safe_code = code if code in _ERROR_MESSAGES else "VISION_UNAVAILABLE"
     result = VisionErrorResult(
+        ok=False,
         code=safe_code,
         message=_ERROR_MESSAGES[safe_code],
     )
@@ -109,17 +135,6 @@ async def _run_blocking_before_deadline(
     except TimeoutError:
         cancel_event.set()
         raise
-
-
-async def _call_async_before_deadline(
-    operation: Callable[[], Awaitable[object]],
-    *,
-    deadline_monotonic: float,
-) -> object:
-    remaining = deadline_monotonic - time.monotonic()
-    if remaining <= 0:
-        raise TimeoutError
-    return await asyncio.wait_for(operation(), timeout=remaining)
 
 
 async def _analyze_with_server_abort(
@@ -209,10 +224,6 @@ def build_inspect_image_tool(
         getattr(client, "requires_external_dispatch", False),
     )
 
-    @tool(
-        INSPECT_IMAGE_TOOL_NAME,
-        args_schema=InspectImageInput,
-    )
     async def inspect_image(
         runtime: Runtime,
         image_path: str,
@@ -233,6 +244,25 @@ def build_inspect_image_tool(
         deadline = time.monotonic() + bridge.timeout_seconds
         context: dict[str, object] = {}
         dispatch_authority: object | None = None
+        latest_usage_receipt: VisionUsageReceipt | None = None
+
+        def observe_usage(receipt: VisionUsageReceipt) -> None:
+            nonlocal latest_usage_receipt
+            latest_usage_receipt = receipt
+
+        def record_receipt(receipt: VisionUsageReceipt) -> None:
+            if context and receipt.request_dispatched:
+                _record_usage(
+                    context,
+                    source_id=(f"vision:{context.get('run_id', '')}:{tool_call_id}"),
+                    model_name=model_config.name,
+                    call_count=receipt.call_count,
+                    input_tokens=receipt.input_tokens,
+                    output_tokens=receipt.output_tokens,
+                    usage_unknown=receipt.usage_unknown,
+                    request_dispatched=True,
+                )
+
         try:
             context = runtime.context
             if current_private_scope(runtime) is None or not isinstance(context, dict) or not isinstance(context.get("run_id"), str) or not context["run_id"] or not is_allowed_image_virtual_path(image_path):
@@ -266,20 +296,12 @@ def build_inspect_image_tool(
                 dispatch_authority = context.get(
                     RuntimeContextKeys.VISION_DISPATCH_AUTHORITY,
                 )
-                before_dispatch = getattr(
-                    dispatch_authority,
-                    "before_dispatch",
-                    None,
-                )
-                if not callable(before_dispatch):
+                if not callable(
+                    getattr(dispatch_authority, "before_attempt", None),
+                ) or not callable(
+                    getattr(dispatch_authority, "after_attempt", None),
+                ):
                     raise VisionClientError("VISION_CONFIGURATION_ERROR")
-                await _call_async_before_deadline(
-                    lambda: before_dispatch(
-                        normalized_bytes=len(normalized.data),
-                        normalized_pixels=normalized.width * normalized.height,
-                    ),
-                    deadline_monotonic=deadline,
-                )
             result = await _analyze_with_server_abort(
                 client.analyze(
                     image_bytes=normalized.data,
@@ -287,6 +309,9 @@ def build_inspect_image_tool(
                     mode=mode,
                     deadline_monotonic=deadline,
                     abort_signal=cancel_event,
+                    dispatch_authority=(dispatch_authority if requires_external_dispatch else None),
+                    normalized_pixels=normalized.width * normalized.height,
+                    usage_observer=(observe_usage if requires_external_dispatch else None),
                 ),
                 server_abort_event=context.get(
                     RuntimeContextKeys.SERVER_ABORT_EVENT,
@@ -296,18 +321,6 @@ def build_inspect_image_tool(
             )
             if not hasattr(result, "usage_receipt") or not hasattr(result, "evidence"):
                 raise VisionClientError("VISION_SCHEMA_MISMATCH")
-            if requires_external_dispatch:
-                after_dispatch = getattr(
-                    dispatch_authority,
-                    "after_dispatch",
-                    None,
-                )
-                if not callable(after_dispatch):
-                    raise VisionClientError("VISION_CONFIGURATION_ERROR")
-                await _call_async_before_deadline(
-                    after_dispatch,
-                    deadline_monotonic=deadline,
-                )
             receipt = result.usage_receipt
             _record_usage(
                 context,
@@ -319,6 +332,7 @@ def build_inspect_image_tool(
                 usage_unknown=receipt.usage_unknown,
                 request_dispatched=receipt.request_dispatched,
             )
+            latest_usage_receipt = None
             content = result.evidence.canonical_json()
             return ToolMessage(
                 content=content,
@@ -332,6 +346,8 @@ def build_inspect_image_tool(
             )
         except asyncio.CancelledError:
             cancel_event.set()
+            if latest_usage_receipt is not None:
+                record_receipt(latest_usage_receipt)
             raise
         except ImageTooLargeError:
             code = "IMAGE_TOO_LARGE"
@@ -340,39 +356,9 @@ def build_inspect_image_tool(
         except VisionDispatchDenied as error:
             code = error.code
         except OpenAICompatibleVisionError as error:
-            if error.request_dispatched and dispatch_authority is not None:
-                after_dispatch = getattr(
-                    dispatch_authority,
-                    "after_dispatch",
-                    None,
-                )
-                if not callable(after_dispatch):
-                    code = "VISION_CONFIGURATION_ERROR"
-                else:
-                    try:
-                        await _call_async_before_deadline(
-                            after_dispatch,
-                            deadline_monotonic=deadline,
-                        )
-                    except VisionDispatchDenied as denied:
-                        code = denied.code
-                    except TimeoutError:
-                        code = "VISION_DEADLINE_EXCEEDED"
-                    else:
-                        code = error.code
-            else:
-                code = error.code
-            if error.request_dispatched and context:
-                _record_usage(
-                    context,
-                    source_id=f"vision:{context.get('run_id', '')}:{tool_call_id}",
-                    model_name=model_config.name,
-                    call_count=max(error.call_count, 1),
-                    input_tokens=None,
-                    output_tokens=None,
-                    usage_unknown=True,
-                    request_dispatched=True,
-                )
+            code = error.code
+            if error.usage_receipt is not None:
+                latest_usage_receipt = error.usage_receipt
         except VisionClientError as error:
             code = error.code
         except (TimeoutError, InterruptedError):
@@ -381,6 +367,8 @@ def build_inspect_image_tool(
             code = "IMAGE_UNAVAILABLE"
         except ValueError as error:
             code = "VISION_RESPONSE_TOO_LARGE" if str(error) == "VISION_RESPONSE_TOO_LARGE" else "VISION_SCHEMA_MISMATCH"
+        if latest_usage_receipt is not None:
+            record_receipt(latest_usage_receipt)
         logger.info(
             "vision_bridge_call_failed code=%s contract=%s",
             code,
@@ -388,9 +376,14 @@ def build_inspect_image_tool(
         )
         return _error_message(code, tool_call_id)
 
+    registered_tool = _InspectImageStructuredTool.from_function(
+        coroutine=inspect_image,
+        name=INSPECT_IMAGE_TOOL_NAME,
+        args_schema=_InspectImageInvocation,
+    )
     return mark_deferred_external_dispatch_tool(
         mark_inline_only_tool_output(
-            mark_vision_evidence_tool(inspect_image),
+            mark_vision_evidence_tool(registered_tool),
         ),
     )
 

@@ -58,7 +58,7 @@ async def prepare_replay_agent(
             AgentPayload(
                 description="Deterministic gateway replay",
                 soul="Use the exact project tools to complete the request.",
-                model_ref="scenario-model",
+                model_ref="default",
                 tool_groups=("file:read", "file:write"),
                 skill_version_ids=(),
                 mcp_version_ids=(),

@@ -131,7 +131,14 @@ def _is_trusted_read_only_tool(request: ToolCallRequest) -> bool:
 
 
 def _is_trusted_idempotent_tool(request: ToolCallRequest) -> bool:
+    from deerflow.tools.builtins.present_file_tool import present_file_tool
+
     tool = getattr(request, "tool", None)
+    if tool is present_file_tool:
+        # Private present_files persists an exact Run/tool-call intent and the
+        # finalizer reuses the exact active Artifact. Re-entry cannot dispatch
+        # externally or create a second delivery obligation.
+        return True
     return any(
         getattr(
             getattr(tool, attribute, None),

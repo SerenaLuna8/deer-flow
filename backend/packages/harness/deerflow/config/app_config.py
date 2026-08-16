@@ -248,7 +248,7 @@ class AppConfig(BaseModel):
     max_recursion_limit: int = Field(
         default=1000,
         ge=1,
-        description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps (LLM cost / DoS).",
+        description="Hard server-side ceiling for a client-supplied run recursion_limit. Client values above this are clamped; prevents runaway LangGraph super-steps and denial of service.",
     )
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
     sandbox: SandboxConfig = Field(

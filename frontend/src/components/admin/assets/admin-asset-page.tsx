@@ -56,6 +56,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
+import { useModels } from "@/core/models/hooks";
+import { resolveModelDisplayName } from "@/core/models/presentation";
+import type { Model } from "@/core/models/types";
 import {
   adminAssetKey,
   adminAssetVersionsKey,
@@ -278,8 +281,19 @@ function formatByteCount(bytes: number) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function VersionDetail({ version }: { version: AssetVersion }) {
+function VersionDetail({
+  version,
+  models,
+}: {
+  version: AssetVersion;
+  models: readonly Model[];
+}) {
   const { t } = useI18n();
+  const modelDisplayName =
+    "agent_id" in version
+      ? (resolveModelDisplayName(version.model_ref, models) ??
+        t.adminSystemSettings.fields.unavailableModel)
+      : undefined;
 
   return (
     <div
@@ -313,7 +327,8 @@ function VersionDetail({ version }: { version: AssetVersion }) {
           />
           <AdminTechnicalValue
             label={t.adminAssets.diff.model}
-            value={version.model_ref}
+            value={modelDisplayName}
+            valueClassName="font-sans font-medium"
           />
           <AdminTechnicalValue
             label={t.adminAssets.diff.toolGroups}
@@ -490,6 +505,9 @@ export function VersionTimeline({
   onConfigureCredentialGrants?: (version: McpVersion) => void;
 }) {
   const { locale, t } = useI18n();
+  const { models } = useModels({
+    enabled: versions.some((version) => "agent_id" in version),
+  });
   const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
     () =>
       versions.find((version) => version.id === currentVersionId)?.id ??
@@ -549,7 +567,7 @@ export function VersionTimeline({
             {t.adminAssets.version.configureGrants}
           </Button>
         ) : null}
-        <VersionDetail version={version} />
+        <VersionDetail version={version} models={models} />
       </div>
     );
   }
@@ -619,7 +637,7 @@ export function VersionTimeline({
                 {t.adminAssets.version.configureGrants}
               </Button>
             ) : null}
-            <VersionDetail version={selectedVersion} />
+            <VersionDetail version={selectedVersion} models={models} />
           </div>
         ) : null}
       </div>

@@ -8,7 +8,9 @@ import {
   emptyProjectStreamCursorState,
   getProjectAPIClient,
   isModelOutputLimitError,
+  isOutputDeliveryIncompleteError,
   MODEL_OUTPUT_LIMIT,
+  OUTPUT_DELIVERY_INCOMPLETE,
   PROJECT_STREAM_INCOMPLETE,
   projectReconnectStorage,
   projectStreamFrameForUI,
@@ -691,6 +693,18 @@ describe("private stream reconnect", () => {
       data: { status: "completed" },
     };
     expect(projectStreamFrameForUI(completed)).toBe(completed);
+
+    const suspendedForApproval = {
+      id: "11",
+      event: "end",
+      data: {
+        status: "success",
+        suspended_approval_id: "33333333-3333-4333-8333-333333333333",
+      },
+    };
+    expect(projectStreamFrameForUI(suspendedForApproval)).toBe(
+      suspendedForApproval,
+    );
   });
 
   test("preserves only the stable model output-limit name until the durable terminal", () => {
@@ -740,6 +754,57 @@ describe("private stream reconnect", () => {
     expect(isModelOutputLimitError({ name: MODEL_OUTPUT_LIMIT })).toBe(true);
     expect(isModelOutputLimitError(new Error(MODEL_OUTPUT_LIMIT))).toBe(true);
     expect(isModelOutputLimitError({ name: "other" })).toBe(false);
+  });
+
+  test("preserves the stable output-delivery failure until the durable terminal", () => {
+    const diagnostic = {
+      id: "8",
+      event: "error",
+      data: {
+        name: OUTPUT_DELIVERY_INCOMPLETE,
+        message: "safe public detail",
+      },
+    };
+
+    expect(projectStreamFailureName(diagnostic)).toBe(
+      OUTPUT_DELIVERY_INCOMPLETE,
+    );
+    expect(
+      projectStreamFrameForUI(
+        { id: "9", event: "end", data: { status: "error" } },
+        projectStreamFailureName(diagnostic),
+      ),
+    ).toEqual({
+      id: "9",
+      event: "error",
+      data: {
+        error: OUTPUT_DELIVERY_INCOMPLETE,
+        message: OUTPUT_DELIVERY_INCOMPLETE,
+      },
+    });
+    expect(
+      projectStreamFrameForUI({
+        id: "10",
+        event: "end",
+        data: {
+          status: "error",
+          error_code: OUTPUT_DELIVERY_INCOMPLETE,
+        },
+      }),
+    ).toEqual({
+      id: "10",
+      event: "error",
+      data: {
+        error: OUTPUT_DELIVERY_INCOMPLETE,
+        message: OUTPUT_DELIVERY_INCOMPLETE,
+      },
+    });
+    expect(
+      isOutputDeliveryIncompleteError({
+        error_code: OUTPUT_DELIVERY_INCOMPLETE,
+      }),
+    ).toBe(true);
+    expect(isOutputDeliveryIncompleteError({ name: "other" })).toBe(false);
   });
 
   test("carries a live output-limit diagnostic through its durable terminal", async () => {

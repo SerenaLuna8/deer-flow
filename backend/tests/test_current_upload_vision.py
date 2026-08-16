@@ -607,6 +607,59 @@ async def test_worker_restore_fails_closed_when_admitted_current_upload_drifts(
         await authority.release()
 
 
+@pytest.mark.asyncio
+async def test_worker_restore_rehydrates_persisted_presentation_intent() -> None:
+    project = ProjectContext(
+        user_id=uuid.uuid4(),
+        project_id=uuid.uuid4(),
+        membership_id=uuid.uuid4(),
+        role=ProjectRole.ADMIN,
+        capabilities=capabilities_for(ProjectRole.ADMIN),
+        membership_version=1,
+        request_id="request-1",
+    )
+    captured_paths: tuple[str, ...] | None = None
+
+    class Finalizer:
+        async def finalize(
+            self,
+            _run_scope: PrivateFileRunScope,
+            _manifest: AuthorityManifest,
+            _sandbox: object,
+            *,
+            presented_paths: tuple[str, ...],
+        ) -> object:
+            nonlocal captured_paths
+            captured_paths = presented_paths
+            return object()
+
+    class OutputDeliveryPort:
+        async def restore_output_delivery_intent_paths(
+            self,
+        ) -> tuple[str, ...]:
+            return ("/mnt/user-data/outputs/report.txt",)
+
+    authority = PrivateRunFileAuthority(
+        PrivateFileRunScope(
+            PrivateWorkContext.from_project(project),
+            thread_id="thread-1",
+            run_id="run-1",
+        ),
+        _Projection(AuthorityManifest(entries=(), run_id="run-1")),
+        Finalizer(),
+        provider=_Provider(_Sandbox({})),
+        output_delivery_port=OutputDeliveryPort(),
+    )
+
+    try:
+        await authority.restore()
+        await authority.finalize()
+    finally:
+        await authority.release()
+
+    assert captured_paths == ("/mnt/user-data/outputs/report.txt",)
+
+
 def test_upload_middleware_records_only_server_visible_current_file_ids() -> None:
     allowed_id = str(uuid.uuid4())
     forged_id = str(uuid.uuid4())

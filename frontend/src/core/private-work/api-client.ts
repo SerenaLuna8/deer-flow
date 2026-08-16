@@ -54,6 +54,11 @@ export type ProjectStreamFrameDecision = {
 export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
 export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
 export const MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT";
+export const OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE";
+
+export type ProjectRunFailureCode =
+  | typeof MODEL_OUTPUT_LIMIT
+  | typeof OUTPUT_DELIVERY_INCOMPLETE;
 
 const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "error",
@@ -63,7 +68,7 @@ const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
 
 export function projectStreamFailureName(
   frame: ProjectStreamFrame,
-): typeof MODEL_OUTPUT_LIMIT | null {
+): ProjectRunFailureCode | null {
   if (
     (frame.event !== "error" && frame.event !== "end") ||
     typeof frame.data !== "object" ||
@@ -74,39 +79,57 @@ export function projectStreamFailureName(
   const name = Reflect.get(frame.data, "name");
   const legacyError = Reflect.get(frame.data, "error");
   const errorCode = Reflect.get(frame.data, "error_code");
-  return name === MODEL_OUTPUT_LIMIT ||
-    legacyError === MODEL_OUTPUT_LIMIT ||
-    errorCode === MODEL_OUTPUT_LIMIT
-    ? MODEL_OUTPUT_LIMIT
-    : null;
+  for (const failureCode of [
+    MODEL_OUTPUT_LIMIT,
+    OUTPUT_DELIVERY_INCOMPLETE,
+  ] as const) {
+    if (
+      name === failureCode ||
+      legacyError === failureCode ||
+      errorCode === failureCode
+    ) {
+      return failureCode;
+    }
+  }
+  return null;
 }
 
-export function isModelOutputLimitError(error: unknown): boolean {
-  if (error === MODEL_OUTPUT_LIMIT) {
+function isProjectRunFailureCode(
+  error: unknown,
+  failureCode: ProjectRunFailureCode,
+): boolean {
+  if (error === failureCode) {
     return true;
   }
   if (typeof error !== "object" || error === null) {
     return false;
   }
   if (
-    Reflect.get(error, "name") === MODEL_OUTPUT_LIMIT ||
-    Reflect.get(error, "message") === MODEL_OUTPUT_LIMIT ||
-    Reflect.get(error, "error_code") === MODEL_OUTPUT_LIMIT
+    Reflect.get(error, "name") === failureCode ||
+    Reflect.get(error, "message") === failureCode ||
+    Reflect.get(error, "error_code") === failureCode
   ) {
     return true;
   }
   const nestedError = Reflect.get(error, "error");
   return (
-    nestedError === MODEL_OUTPUT_LIMIT ||
+    nestedError === failureCode ||
     (nestedError instanceof Error &&
-      (nestedError.name === MODEL_OUTPUT_LIMIT ||
-        nestedError.message === MODEL_OUTPUT_LIMIT))
+      (nestedError.name === failureCode || nestedError.message === failureCode))
   );
+}
+
+export function isModelOutputLimitError(error: unknown): boolean {
+  return isProjectRunFailureCode(error, MODEL_OUTPUT_LIMIT);
+}
+
+export function isOutputDeliveryIncompleteError(error: unknown): boolean {
+  return isProjectRunFailureCode(error, OUTPUT_DELIVERY_INCOMPLETE);
 }
 
 export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
   frame: T,
-  precedingFailureName: typeof MODEL_OUTPUT_LIMIT | null = null,
+  precedingFailureName: ProjectRunFailureCode | null = null,
 ): T {
   if (frame.event !== "end" || typeof frame.data !== "object" || !frame.data) {
     return frame;
@@ -770,7 +793,7 @@ function installProjectStreamAdapter(
     let state = emptyProjectStreamCursorState();
     let started = false;
     let terminal = false;
-    let failureName: typeof MODEL_OUTPUT_LIMIT | null = null;
+    let failureName: ProjectRunFailureCode | null = null;
     for await (const frame of originalRunStream(
       threadId,
       assistantId,
@@ -832,7 +855,7 @@ function installProjectStreamAdapter(
     let state = emptyProjectStreamCursorState();
     let started = false;
     let terminal = false;
-    let failureName: typeof MODEL_OUTPUT_LIMIT | null = null;
+    let failureName: ProjectRunFailureCode | null = null;
     for await (const frame of originalJoinStream(
       threadId,
       runId,

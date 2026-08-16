@@ -1,4 +1,5 @@
 import { formatTokenCount, type TokenUsage } from "@/core/messages/usage";
+import { resolveModelDisplayName } from "@/core/models/presentation";
 import type { Model } from "@/core/models/types";
 
 export function resolveSubtaskModelLabel(
@@ -8,9 +9,7 @@ export function resolveSubtaskModelLabel(
   if (!modelName) {
     return undefined;
   }
-  return (
-    models.find((model) => model.name === modelName)?.display_name ?? modelName
-  );
+  return resolveModelDisplayName(modelName, models);
 }
 
 export function formatSubtaskTokenUsage(

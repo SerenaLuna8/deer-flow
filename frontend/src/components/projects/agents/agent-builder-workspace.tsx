@@ -347,6 +347,7 @@ export function AgentBuilderConversationView({
             {blueprintDraft ? (
               <AgentBuilderBlueprintReview
                 blueprint={blueprintDraft}
+                models={models}
                 canAuthor={canAuthor}
                 editing={blueprintEditing}
                 pending={mutationPending}
@@ -468,12 +469,11 @@ export function AgentBuilderConversationView({
                             <ModelSelectorName>
                               {model.display_name}
                             </ModelSelectorName>
-                            <span className="text-muted-foreground truncate text-xs">
-                              {model.name}
-                              {model.is_default
-                                ? ` · ${t.agents.common.defaultSuffix}`
-                                : ""}
-                            </span>
+                            {model.is_default ? (
+                              <span className="text-muted-foreground truncate text-xs">
+                                {t.agents.common.defaultSuffix}
+                              </span>
+                            ) : null}
                           </div>
                           {model.name === selectedGenerationModelName ? (
                             <CheckIcon aria-hidden className="ml-auto size-4" />

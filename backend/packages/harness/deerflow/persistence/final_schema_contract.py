@@ -103,32 +103,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=86,
-        digest="6391510d9969596d293a7b886436203cb97a53e09e28cf6f6e3d595d268bdb06",
+        count=88,
+        digest="298fda9873260893925b11aa7782b91b5d3fef63b4c74b91933ca27437605a17",
     ),
     "columns": CatalogInvariant(
-        count=1079,
-        digest="bb58a210af5095699231b7d2849ae8a42db97462eedfe789785eb2b5528cdaf3",
+        count=1103,
+        digest="ed00bfacf3836e7318dc9b6dba86fd224aabc0811ceec6d62e5acce7f9274674",
     ),
     "table_comments": CatalogInvariant(
-        count=87,
-        digest="6c2538480170283ca68966578a286829f1156f68b8322c66f3099a68581350d6",
+        count=89,
+        digest="ea2aaa5c8fd166c1082707e52f50029869b0cde3a69c5e0a649f37267e9406d7",
     ),
     "column_comments": CatalogInvariant(
-        count=1080,
-        digest="e9a0e4a62abe689d3ad95306c8be9b7b03858550e249f42b79822752052665d7",
+        count=1104,
+        digest="4bc15fac8b77369ff27d887d1e5282202354b05d57fe13bffdb6361b7181a90d",
     ),
     "sequences": CatalogInvariant(
         count=2,
         digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=804,
-        digest="8b5e997d78985d6b5afa3f56022643615619174aeffdc908ff4d6da807dbcf59",
+        count=828,
+        digest="778e31ffa070a0be463235689a1d17e34aa992ba6a38840eeb4db050dab14ff0",
     ),
     "indexes": CatalogInvariant(
-        count=306,
-        digest="106be3886fce817e41a119bd78ea35881089a2fabe8f76542c34da1d708f0697",
+        count=311,
+        digest="c14a69be31d596fff6b37363ed50057ebfc70f9945194fd267a520f92739c10d",
     ),
     "functions": CatalogInvariant(
         count=21,
@@ -183,7 +183,9 @@ _CATALOG_QUERIES = {
         ORDER BY c.relname
     """,
     "columns": """
-        SELECT c.relname, a.attnum, a.attname,
+        SELECT c.relname,
+               row_number() OVER (PARTITION BY c.relname ORDER BY a.attnum),
+               a.attname,
                pg_catalog.format_type(a.atttypid, a.atttypmod),
                a.attnotnull, a.attidentity::text, a.attgenerated::text,
                COALESCE(coll.collname, ''),
@@ -208,7 +210,9 @@ _CATALOG_QUERIES = {
         ORDER BY c.relname
     """,
     "column_comments": """
-        SELECT c.relname, a.attnum, a.attname,
+        SELECT c.relname,
+               row_number() OVER (PARTITION BY c.relname ORDER BY a.attnum),
+               a.attname,
                COALESCE(col_description(c.oid, a.attnum), '')
         FROM pg_attribute a
         JOIN pg_class c ON c.oid=a.attrelid
@@ -238,6 +242,7 @@ _CATALOG_QUERIES = {
         JOIN pg_namespace n ON n.oid=c.relnamespace
         WHERE n.nspname=current_schema()
           AND c.relname = ANY(CAST(:app_tables AS text[]))
+          AND con.contype <> 'n'
         ORDER BY c.relname, con.conname
     """,
     "indexes": """

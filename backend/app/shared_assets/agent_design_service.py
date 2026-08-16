@@ -59,6 +59,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
 )
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import AgentModelSettings, AgentPayload
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
@@ -67,14 +68,10 @@ from deerflow.persistence.shared_assets import (
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _CAPABILITY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
-_GENERATION_MODEL_REF_PATTERN = re.compile(
-    r"(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)\Z",
-)
 _PUBLIC_ERROR_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _MAX_IDEMPOTENCY_KEY_CHARS = 255
 _MAX_MESSAGE_CHARS = 4_000
 _MAX_DESCRIPTION_CHARS = 4_000
-_MAX_MODEL_REF_CHARS = 255
 _MAX_TOOL_GROUPS = 50
 _CLARIFICATION_SET_KIND = "agent_design_clarification_set"
 _DEFAULT_STALE_GENERATING_SECONDS = DEFAULT_GENERATION_TIMEOUT_SECONDS + 60.0
@@ -87,7 +84,7 @@ _CONFLICT_CONSTRAINTS = frozenset(
     }
 )
 
-DEFAULT_AGENT_MODEL_REF = "default"
+DEFAULT_AGENT_MODEL_REF = DEFAULT_MODEL_REF
 DEFAULT_AGENT_TOOL_GROUPS: tuple[str, ...] = (
     "web",
     "file:read",
@@ -1342,7 +1339,7 @@ class AgentDesignService:
             command.idempotency_key,
         )
         generation_model_ref = command.generation_model_ref
-        if generation_model_ref is not None and (not isinstance(generation_model_ref, str) or _GENERATION_MODEL_REF_PATTERN.fullmatch(generation_model_ref) is None):
+        if generation_model_ref is not None and generation_model_ref != DEFAULT_AGENT_MODEL_REF and exact_model_ref(generation_model_ref) is None:
             raise AssetValidationFailed(context.request_id)
         turn = command.input
         if isinstance(turn, AgentDesignMessageTurn):
@@ -1495,7 +1492,7 @@ class AgentDesignService:
             not description
             or len(description) > _MAX_DESCRIPTION_CHARS
             or not model_ref
-            or len(model_ref) > _MAX_MODEL_REF_CHARS
+            or (model_ref != DEFAULT_AGENT_MODEL_REF and exact_model_ref(model_ref) is None)
             or not tool_groups
             or len(tool_groups) > _MAX_TOOL_GROUPS
             or any(not isinstance(group, str) or _CAPABILITY_PATTERN.fullmatch(group) is None for group in tool_groups)
@@ -1795,7 +1792,7 @@ class AgentDesignService:
         if raw is None:
             raise AssetValidationFailed("unknown")
         try:
-            return AgentDesignBlueprint(
+            blueprint = AgentDesignBlueprint(
                 description=str(raw["description"]),
                 model_ref=str(raw["model_ref"]),
                 tool_groups=tuple(str(item) for item in raw["tool_groups"]),
@@ -1807,6 +1804,9 @@ class AgentDesignService:
                 user_context=str(raw["user_context"]),
                 model_settings=AgentModelSettings.model_validate(raw.get("model_settings", {})),
             )
+            if blueprint.model_ref != DEFAULT_AGENT_MODEL_REF and exact_model_ref(blueprint.model_ref) is None:
+                raise ValueError
+            return blueprint
         except (KeyError, TypeError, ValueError):
             raise AssetValidationFailed("unknown") from None
 

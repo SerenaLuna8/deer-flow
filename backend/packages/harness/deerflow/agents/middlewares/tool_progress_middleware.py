@@ -100,7 +100,7 @@ class ToolPhaseState:
 def word_set(content: str) -> frozenset[str]:
     """Extract lowercase words of length >= 3 for Jaccard similarity.
 
-    Content is capped at _MAX_CONTENT_FOR_WORDSET chars to bound memory and CPU cost on
+    Content is capped at _MAX_CONTENT_FOR_WORDSET chars to bound memory and CPU overhead on
     large tool results (e.g. web pages).  Tail content beyond the cap is omitted from the
     set, which is acceptable because duplicate-detection is a heuristic, not a guarantee.
     """

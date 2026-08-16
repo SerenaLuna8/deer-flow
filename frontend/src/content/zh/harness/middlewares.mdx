@@ -88,7 +88,7 @@ title:
   enabled: true
   max_words: 6
   max_chars: 60
-  model_name: null # 系统默认模型；也可指定逻辑模型名
+  model_name: null # 系统默认模型；也可指定系统模型 UUID
 ```
 
 ---
@@ -103,7 +103,7 @@ title:
 
 ### TokenUsageMiddleware
 
-追踪每次模型调用的 LLM token 消耗，并以 `info` 级别记录。对于监控成本和了解长时序任务中 token 的使用位置很有帮助。
+追踪每次模型调用的 LLM token 消耗，并以 `info` 级别记录。对于了解长时序任务中 token 的使用位置很有帮助。
 
 **配置**：`config.yaml` 中的 `token_usage:` 部分。
 

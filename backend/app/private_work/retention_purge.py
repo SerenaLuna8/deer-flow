@@ -21,6 +21,11 @@ from app.private_work.execution_approval_lifecycle import (
     cancel_locked_execution_approval_continuation,
     lock_execution_approval_private_rows,
     reconcile_locked_execution_approval,
+    reject_sealed_staged_approval_terminalization,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.quotas.integration import ProjectQuotaEnforcer
 from deerflow.persistence.execution_approvals import (
@@ -489,6 +494,22 @@ async def _cancel_retention_approval(
 ) -> None:
     if row.status not in EXECUTION_APPROVAL_ACTIVE_STATUSES:
         return
+    try:
+        await reject_sealed_staged_approval_terminalization(
+            session,
+            row,
+        )
+        await transition_output_delivery_obligation_for_approval_terminal(
+            session,
+            approval=row,
+            approval_status="cancelled",
+            now=now,
+        )
+    except (
+        ExecutionApprovalPrivateLifecycleConflict,
+        OutputDeliveryObligationConflict,
+    ):
+        raise RetentionExecutionApprovalActive() from None
     row.status = "cancelled"
     row.version += 1
     row.terminal_at = now

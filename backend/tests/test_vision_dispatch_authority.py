@@ -12,16 +12,21 @@ from app.reliability.run_execution.vision_dispatch import (
 )
 from deerflow.config.model_config import ModelConfig
 from deerflow.runtime.journal import RunJournal
+from deerflow.vision.contracts import VisionUsageReceipt
 from deerflow.vision.dispatch import (
     MAX_VISION_CALLS_PER_RUN,
     MAX_VISION_NORMALIZED_BYTES_PER_RUN,
+    MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
+    VisionDispatchAttempt,
     VisionDispatchDenied,
 )
+
+VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
 
 
 def _model(*, model: str = "small-vlm") -> ModelConfig:
     value = ModelConfig(
-        name="vision-small-v1",
+        name=VISION_MODEL_REF,
         display_name="Vision small",
         description="",
         use="langchain_openai:ChatOpenAI",
@@ -49,9 +54,20 @@ class _Boundary:
     def __init__(self) -> None:
         self.before_calls = 0
         self.after_calls = 0
+        self.normalized_bytes = 0
+        self.normalized_pixels = 0
 
-    async def before_vision_dispatch(self) -> None:
+    async def before_vision_dispatch(
+        self,
+        *,
+        normalized_bytes: int,
+        normalized_pixels: int,
+    ) -> None:
+        if self.before_calls + 1 > MAX_VISION_CALLS_PER_RUN or self.normalized_bytes + normalized_bytes > MAX_VISION_NORMALIZED_BYTES_PER_RUN or self.normalized_pixels + normalized_pixels > MAX_VISION_NORMALIZED_PIXELS_PER_RUN:
+            raise VisionDispatchDenied("VISION_RATE_LIMITED")
         self.before_calls += 1
+        self.normalized_bytes += normalized_bytes
+        self.normalized_pixels += normalized_pixels
 
     async def after_vision_dispatch(self) -> None:
         self.after_calls += 1
@@ -77,11 +93,22 @@ async def test_dispatch_revalidates_exact_model_before_and_after_http() -> None:
     boundary = _Boundary()
     authority = _authority(materializer, boundary)
 
-    await authority.before_dispatch(
+    attempt = await authority.before_attempt(
         normalized_bytes=100,
         normalized_pixels=200,
     )
-    await authority.after_dispatch()
+    assert isinstance(attempt, VisionDispatchAttempt)
+    await authority.after_attempt(
+        attempt=attempt,
+        usage_receipt=VisionUsageReceipt(
+            call_count=1,
+            request_dispatched=True,
+            input_tokens=3,
+            output_tokens=2,
+            usage_unknown=False,
+        ),
+        error_code=None,
+    )
 
     assert materializer.calls == 2
     assert boundary.before_calls == 1
@@ -95,7 +122,7 @@ async def test_dispatch_rejects_stale_exact_model_before_side_effect_fence() -> 
     authority = _authority(materializer, boundary)
 
     with pytest.raises(VisionDispatchDenied) as caught:
-        await authority.before_dispatch(
+        await authority.before_attempt(
             normalized_bytes=100,
             normalized_pixels=200,
         )
@@ -105,31 +132,74 @@ async def test_dispatch_rejects_stale_exact_model_before_side_effect_fence() -> 
 
 
 @pytest.mark.asyncio
-async def test_dispatch_enforces_per_run_calls_and_cumulative_bytes() -> None:
+async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
     materializer = _Materializer(_model())
     boundary = _Boundary()
     authority = _authority(materializer, boundary)
 
     for _ in range(MAX_VISION_CALLS_PER_RUN):
-        await authority.before_dispatch(
+        await authority.before_attempt(
             normalized_bytes=1,
             normalized_pixels=1,
         )
     with pytest.raises(VisionDispatchDenied) as caught:
-        await authority.before_dispatch(
+        await authority.before_attempt(
             normalized_bytes=1,
             normalized_pixels=1,
         )
     assert caught.value.code == "VISION_RATE_LIMITED"
     assert boundary.before_calls == MAX_VISION_CALLS_PER_RUN
 
-    byte_authority = _authority(_Materializer(_model()), _Boundary())
+    # Reconstructing the process-local authority must not reset the boundary.
+    reconstructed = _authority(_Materializer(_model()), boundary)
     with pytest.raises(VisionDispatchDenied) as caught:
-        await byte_authority.before_dispatch(
+        await reconstructed.before_attempt(
+            normalized_bytes=1,
+            normalized_pixels=1,
+        )
+    assert caught.value.code == "VISION_RATE_LIMITED"
+
+    byte_boundary = _Boundary()
+    byte_authority = _authority(_Materializer(_model()), byte_boundary)
+    with pytest.raises(VisionDispatchDenied) as caught:
+        await byte_authority.before_attempt(
             normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN + 1,
             normalized_pixels=1,
         )
     assert caught.value.code == "VISION_RATE_LIMITED"
+    assert byte_boundary.before_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_dispatch_attempt_receipt_is_opaque_and_single_use() -> None:
+    materializer = _Materializer(_model())
+    boundary = _Boundary()
+    authority = _authority(materializer, boundary)
+    attempt = await authority.before_attempt(
+        normalized_bytes=100,
+        normalized_pixels=200,
+    )
+    receipt = VisionUsageReceipt(
+        call_count=0,
+        request_dispatched=False,
+        usage_unknown=False,
+    )
+
+    await authority.after_attempt(
+        attempt=attempt,
+        usage_receipt=receipt,
+        error_code="VISION_UNAVAILABLE",
+    )
+    with pytest.raises(VisionDispatchDenied) as caught:
+        await authority.after_attempt(
+            attempt=attempt,
+            usage_receipt=receipt,
+            error_code="VISION_UNAVAILABLE",
+        )
+
+    assert caught.value.code == "VISION_CONFIGURATION_ERROR"
+    assert materializer.calls == 2
+    assert boundary.after_calls == 1
 
 
 def test_vision_usage_receipt_counts_auxiliary_call_without_content() -> None:
@@ -141,7 +211,7 @@ def test_vision_usage_receipt_counts_auxiliary_call_without_content() -> None:
 
     journal.record_vision_usage(
         source_id="vision:run-1:call-1",
-        model_name="vision-small-v1",
+        model_name=VISION_MODEL_REF,
         call_count=1,
         input_tokens=31,
         output_tokens=12,
@@ -151,7 +221,7 @@ def test_vision_usage_receipt_counts_auxiliary_call_without_content() -> None:
     # Exact duplicate receipts are ignored during retry/reconciliation.
     journal.record_vision_usage(
         source_id="vision:run-1:call-1",
-        model_name="vision-small-v1",
+        model_name=VISION_MODEL_REF,
         call_count=1,
         input_tokens=31,
         output_tokens=12,
@@ -165,7 +235,7 @@ def test_vision_usage_receipt_counts_auxiliary_call_without_content() -> None:
     assert completion["total_output_tokens"] == 12
     assert completion["middleware_tokens"] == 43
     assert completion["token_usage_by_model"] == {
-        "vision-small-v1": {
+        VISION_MODEL_REF: {
             "input_tokens": 31,
             "output_tokens": 12,
             "total_tokens": 43,

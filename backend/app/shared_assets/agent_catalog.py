@@ -15,6 +15,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFailed
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
@@ -116,7 +117,7 @@ class AgentCatalogValidator:
         tool_groups: Sequence[str],
     ) -> None:
         safe_request_id = request_id if isinstance(request_id, str) else "unknown"
-        if not isinstance(model_ref, str) or not model_ref or model_ref.strip() != model_ref:
+        if model_ref != DEFAULT_MODEL_REF and exact_model_ref(model_ref) is None:
             raise AssetValidationFailed(safe_request_id)
         try:
             groups = tuple(tool_groups)

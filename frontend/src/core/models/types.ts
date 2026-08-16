@@ -2,10 +2,9 @@ import { z } from "zod";
 
 export const modelSchema = z
   .object({
-    name: z.string().min(1),
-    model: z.string().min(1),
+    name: z.string().uuid(),
+    model: z.string().uuid(),
     display_name: z.string().min(1),
-    description: z.string(),
     supports_thinking: z.boolean(),
     supports_reasoning_effort: z.boolean(),
     supports_vision: z.boolean(),
@@ -15,7 +14,7 @@ export const modelSchema = z
   .strict()
   .refine((model) => model.model === model.name, {
     path: ["model"],
-    message: "Public model alias must equal its logical name",
+    message: "Public model alias must equal its model ID",
   });
 
 export const tokenUsageSettingsSchema = z

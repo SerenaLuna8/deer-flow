@@ -35,6 +35,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
+import { useModels } from "@/core/models/hooks";
 import type { Capability } from "@/core/projects/types";
 import {
   useChangeProjectAssetStatus,
@@ -710,6 +711,7 @@ export function ProjectAssetDetailSheet({
   ) => ReactNode;
 }) {
   const { t } = useI18n();
+  const { models } = useModels({ enabled: open && kind === "agents" });
   const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
   const editableMcpConfigurationEnabled =
     projectMcpEditableConfigurationEnabled(open, kind, item);
@@ -1531,6 +1533,7 @@ export function ProjectAssetDetailSheet({
                               previous={previousAgentVersion}
                               current={selectedAgentVersion}
                               includeAgentDocuments
+                              models={models}
                             />
                           </div>
                         </details>

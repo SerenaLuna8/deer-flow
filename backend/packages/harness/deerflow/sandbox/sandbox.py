@@ -2,7 +2,7 @@ import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from langgraph.errors import GraphBubbleUp
 
@@ -50,6 +50,14 @@ class AuthorizationRevoked(GraphBubbleUp):
         super().__init__(AUTHORIZATION_REVOKED_REASON)
 
 
+class AuthorizationBoundaryFenceUncertain(AuthorizationRevoked):
+    """A boundary failed after creating one exact local ambiguity fence."""
+
+    def __init__(self, fence: object) -> None:
+        super().__init__()
+        self.fence = fence
+
+
 class AuthorizationBoundary(Protocol):
     """App-supplied run authorization checks; the harness stays app-agnostic."""
 
@@ -69,7 +77,9 @@ class AuthorizationBoundary(Protocol):
 
     async def before_sandbox_write(self) -> None: ...
 
-    async def before_sandbox_exec(self) -> None: ...
+    async def before_sandbox_exec(self) -> object | None: ...
+
+    def resolve_sandbox_exec_fence(self, fence: object) -> None: ...
 
     async def before_checkpoint_read(self) -> None: ...
 
@@ -81,11 +91,11 @@ class AuthorizationBoundary(Protocol):
 async def check_authorization_boundary(
     runtime_context: object | None,
     operation: str,
-) -> None:
+) -> object | None:
     """Call a trusted boundary when present; legacy runs remain a no-op."""
 
     if not isinstance(runtime_context, Mapping):
-        return
+        return None
     boundary = runtime_context.get("__authorization_boundary")
     method = getattr(boundary, operation, None)
     if not callable(method) and operation in {
@@ -95,13 +105,34 @@ async def check_authorization_boundary(
     }:
         method = getattr(boundary, "before_tool_call", None)
     if callable(method):
-        await method()
-        return
+        return await method()
     checker = runtime_context.get("__authorization_checker")
     if callable(checker):
         result = checker()
         if isinstance(result, Awaitable):
-            await result
+            return await result
+        return result
+    return None
+
+
+async def resolve_authorization_boundary_fence(
+    runtime_context: object | None,
+    operation: str,
+    fence: object | None,
+) -> None:
+    """Resolve one trusted in-process fence after durable evidence commits."""
+
+    if fence is None:
+        return
+    if not isinstance(runtime_context, Mapping):
+        raise RuntimeError("authorization boundary is unavailable")
+    boundary = runtime_context.get("__authorization_boundary")
+    method = getattr(boundary, operation, None)
+    if not callable(method):
+        raise RuntimeError("authorization fence resolver is unavailable")
+    result: Any = method(fence)
+    if isinstance(result, Awaitable):
+        await result
 
 
 def _validate_extra_env(extra_env: dict[str, str] | None) -> None:

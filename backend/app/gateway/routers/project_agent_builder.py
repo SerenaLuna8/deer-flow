@@ -83,7 +83,14 @@ class AgentDesignClarificationTurnRequest(_StrictModel):
 
 class AgentDesignBlueprintRequest(_StrictModel):
     description: str
-    model_ref: str
+    model_ref: str = Field(
+        min_length=7,
+        max_length=36,
+        pattern=(
+            r"^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})$"
+        ),
+    )
     tool_groups: list[str]
     skill_version_ids: list[uuid.UUID]
     mcp_version_ids: list[uuid.UUID]
@@ -108,9 +115,12 @@ class AgentDesignTurnRequest(_StrictModel):
     idempotency_key: str
     generation_model_ref: str | None = Field(
         default=None,
-        min_length=1,
-        max_length=128,
-        pattern=r"^(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)$",
+        min_length=7,
+        max_length=36,
+        pattern=(
+            r"^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})$"
+        ),
     )
 
 

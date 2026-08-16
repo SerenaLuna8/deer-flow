@@ -24,12 +24,18 @@ from deerflow.runtime.host_execution_approval import (
     HostExecutionContinuationPort,
     HostExecutionFrozenClaim,
     HostExecutionOutcome,
+    HostExecutionOutputDeliveryPort,
+    HostExecutionRetrySafetyFencePort,
 )
 from deerflow.sandbox.local.local_sandbox import (
     LocalProcessSpawnAuthorizationFailed,
     LocalProcessSpawnDeadlineExpired,
 )
-from deerflow.sandbox.sandbox import check_authorization_boundary
+from deerflow.sandbox.sandbox import (
+    AuthorizationBoundaryFenceUncertain,
+    check_authorization_boundary,
+    resolve_authorization_boundary_fence,
+)
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sandbox.security import (
     HostBashExecutionMode,
@@ -75,15 +81,74 @@ async def _complete_or_raise(
     port: HostExecutionContinuationPort,
     approval_id: str,
     outcome: HostExecutionOutcome,
+    *,
+    runtime_context: Mapping[str, Any] | None = None,
+    retry_safety_fence: object | None = None,
 ) -> None:
     try:
-        await port.complete_host_execution(approval_id, outcome)
+        if (
+            outcome.status in {"finished", "launch_failed"}
+            and retry_safety_fence is not None
+            and isinstance(
+                port,
+                HostExecutionRetrySafetyFencePort,
+            )
+        ):
+            await port.complete_host_execution_with_retry_safety_fence(
+                approval_id,
+                outcome,
+                retry_safety_fence,
+            )
+            retry_safety_fence = None
+        else:
+            await port.complete_host_execution(approval_id, outcome)
     except Exception as error:
         # The app adapter marks the claimed execution unknown on its own
         # persistence failure.  Never return to a path that could spawn again.
         raise HostExecutionContinuationError(
             "Host execution completion could not be persisted",
         ) from error
+    if outcome.status in {"finished", "launch_failed"}:
+        try:
+            await resolve_authorization_boundary_fence(
+                runtime_context,
+                "resolve_sandbox_exec_fence",
+                retry_safety_fence,
+            )
+        except Exception as error:
+            # The durable receipt prevents another spawn, but an unresolved
+            # local fence must still fail closed rather than erasing a newer
+            # or unrelated ambiguous side effect.
+            raise HostExecutionContinuationError(
+                "Host execution retry-safety fence could not be resolved",
+            ) from error
+
+
+async def _output_delivery_requirement_paths(
+    port: HostExecutionContinuationPort,
+) -> tuple[str, ...]:
+    if not isinstance(port, HostExecutionOutputDeliveryPort):
+        return ()
+    try:
+        paths = await port.output_delivery_requirement_paths()
+    except Exception as error:
+        raise HostExecutionContinuationError(
+            "Output delivery requirement could not be loaded",
+        ) from error
+    if type(paths) is not tuple or len(paths) > 256:
+        raise HostExecutionContinuationError(
+            "Output delivery requirement is invalid",
+        )
+    if any(not _valid_output_delivery_path(path) for path in paths):
+        raise HostExecutionContinuationError(
+            "Output delivery requirement is invalid",
+        )
+    return tuple(dict.fromkeys(paths))
+
+
+def _valid_output_delivery_path(path: object) -> bool:
+    prefix = "/mnt/user-data/outputs/"
+    return bool(type(path) is str and path.startswith(prefix) and len(path) > len(prefix) and "\\" not in path and "//" not in path and all(part not in {"", ".", ".."} for part in path.split("/")[4:]))
 
 
 async def _settle_before_spawn_failure(
@@ -93,6 +158,8 @@ async def _settle_before_spawn_failure(
     source_tool_call_id: str,
     agent_path: tuple[str, ...],
     reason_code: str,
+    runtime_context: Mapping[str, Any] | None = None,
+    retry_safety_fence: object | None = None,
 ) -> dict[str, object]:
     await _complete_or_raise(
         port,
@@ -101,12 +168,16 @@ async def _settle_before_spawn_failure(
             status="launch_failed",
             reason_code=reason_code,
         ),
+        runtime_context=runtime_context,
+        retry_safety_fence=retry_safety_fence,
     )
+    required_output_paths = await _output_delivery_requirement_paths(port)
     return _hidden_failure_input(
         approval_id=approval_id,
         source_tool_call_id=source_tool_call_id,
         agent_path=agent_path,
         reason_code=reason_code,
+        required_output_paths=required_output_paths,
     )
 
 
@@ -117,6 +188,7 @@ def _hidden_result_input(
     agent_path: tuple[str, ...],
     exit_code: int,
     result_text: str,
+    required_output_paths: tuple[str, ...] = (),
 ) -> dict[str, object]:
     model_receipt = json.dumps(
         {
@@ -129,11 +201,14 @@ def _hidden_result_input(
         sort_keys=True,
         separators=(",", ":"),
     )
+    delivery_instruction = _output_delivery_instruction(
+        required_output_paths,
+    )
     return {
         "messages": [
             {
                 "type": "human",
-                "content": (f"The exact host command approved by the user has already been executed once by the Worker. Do not execute or retry that command. Continue from this trusted result:\n{model_receipt}"),
+                "content": (f"The exact host command approved by the user has already been executed once by the Worker. Do not execute or retry that command. Continue from this trusted result:\n{model_receipt}{delivery_instruction}"),
                 "additional_kwargs": {
                     "hide_from_ui": True,
                     "host_execution_continuation": {
@@ -143,6 +218,7 @@ def _hidden_result_input(
                         "agent_path": list(agent_path),
                         "status": "finished",
                         "exit_code": exit_code,
+                        "required_output_paths": list(required_output_paths),
                     },
                 },
             }
@@ -156,12 +232,23 @@ def _hidden_failure_input(
     source_tool_call_id: str,
     agent_path: tuple[str, ...],
     reason_code: str,
+    required_output_paths: tuple[str, ...] = (),
 ) -> dict[str, object]:
+    delivery_instruction = _output_delivery_instruction(
+        required_output_paths,
+    )
+    message = " ".join(
+        (
+            "The exact host command approved by the user was not launched.",
+            "The approval has been consumed and must not be executed or retried.",
+            f"Explain this trusted failure result to the user: {reason_code}",
+        )
+    )
     return {
         "messages": [
             {
                 "type": "human",
-                "content": (f"The exact host command approved by the user was not launched. The approval has been consumed and must not be executed or retried. Explain this trusted failure result to the user: {reason_code}"),
+                "content": f"{message}{delivery_instruction}",
                 "additional_kwargs": {
                     "hide_from_ui": True,
                     "host_execution_continuation": {
@@ -171,6 +258,7 @@ def _hidden_failure_input(
                         "agent_path": list(agent_path),
                         "status": "launch_failed",
                         "reason_code": reason_code,
+                        "required_output_paths": list(required_output_paths),
                     },
                 },
             }
@@ -178,7 +266,30 @@ def _hidden_failure_input(
     }
 
 
-def _replay_result_input(claim: HostExecutionFrozenClaim) -> dict[str, object]:
+def _output_delivery_instruction(
+    required_output_paths: tuple[str, ...],
+) -> str:
+    if not required_output_paths:
+        return ""
+    encoded = json.dumps(
+        list(required_output_paths),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return "\n" + " ".join(
+        (
+            "Before your final response, you must call present_files with at least one of these server-owned pending output paths:",
+            f"{encoded}.",
+            "This delivery requirement does not authorize rerunning the command.",
+        )
+    )
+
+
+def _replay_result_input(
+    claim: HostExecutionFrozenClaim,
+    *,
+    required_output_paths: tuple[str, ...] = (),
+) -> dict[str, object]:
     approval_id = claim.approval_id
     plan = claim.plan
     outcome = claim.outcome
@@ -192,6 +303,7 @@ def _replay_result_input(claim: HostExecutionFrozenClaim) -> dict[str, object]:
             source_tool_call_id=plan.source_tool_call_id,
             agent_path=plan.agent_path,
             reason_code=outcome.reason_code or "launch_failed",
+            required_output_paths=required_output_paths,
         )
     if outcome.status != "finished" or outcome.exit_code is None:
         raise HostExecutionContinuationError(
@@ -210,6 +322,7 @@ def _replay_result_input(claim: HostExecutionFrozenClaim) -> dict[str, object]:
         agent_path=plan.agent_path,
         exit_code=outcome.exit_code,
         result_text=result_text,
+        required_output_paths=required_output_paths,
     )
 
 
@@ -302,7 +415,13 @@ async def execute_frozen_host_execution_continuation(
     if claim.status == "replay":
         # A prior attempt durably completed before it crashed or lost its
         # stream. Receipt replay is input-only and must never touch a provider.
-        return _replay_result_input(claim)
+        required_output_paths = await _output_delivery_requirement_paths(
+            approval_port,
+        )
+        return _replay_result_input(
+            claim,
+            required_output_paths=required_output_paths,
+        )
 
     approval_id = claim.approval_id
     frozen = claim.plan
@@ -436,10 +555,21 @@ async def execute_frozen_host_execution_continuation(
             reason_code="host_environment_drift",
         )
 
+    retry_safety_fence: object | None = None
     try:
-        await check_authorization_boundary(
+        retry_safety_fence = await check_authorization_boundary(
             runtime_context,
             "before_sandbox_exec",
+        )
+    except AuthorizationBoundaryFenceUncertain as error:
+        return await _settle_before_spawn_failure(
+            approval_port,
+            approval_id,
+            source_tool_call_id=frozen.source_tool_call_id,
+            agent_path=frozen.agent_path,
+            reason_code="pre_spawn_authorization_failed",
+            runtime_context=runtime_context,
+            retry_safety_fence=error.fence,
         )
     except Exception:
         return await _settle_before_spawn_failure(
@@ -448,6 +578,8 @@ async def execute_frozen_host_execution_continuation(
             source_tool_call_id=frozen.source_tool_call_id,
             agent_path=frozen.agent_path,
             reason_code="pre_spawn_authorization_failed",
+            runtime_context=runtime_context,
+            retry_safety_fence=retry_safety_fence,
         )
 
     if not isinstance(
@@ -460,6 +592,8 @@ async def execute_frozen_host_execution_continuation(
             source_tool_call_id=frozen.source_tool_call_id,
             agent_path=frozen.agent_path,
             reason_code="pre_spawn_authorization_failed",
+            runtime_context=runtime_context,
+            retry_safety_fence=retry_safety_fence,
         )
     owner_loop = asyncio.get_running_loop()
 
@@ -515,6 +649,8 @@ async def execute_frozen_host_execution_continuation(
             source_tool_call_id=frozen.source_tool_call_id,
             agent_path=frozen.agent_path,
             reason_code="pre_spawn_authorization_failed",
+            runtime_context=runtime_context,
+            retry_safety_fence=retry_safety_fence,
         )
     except Exception as error:
         await _complete_or_raise(
@@ -524,6 +660,8 @@ async def execute_frozen_host_execution_continuation(
                 status="unknown",
                 reason_code="process_outcome_unknown",
             ),
+            runtime_context=runtime_context,
+            retry_safety_fence=retry_safety_fence,
         )
         raise HostExecutionContinuationError(
             "Approved host execution outcome is unknown",
@@ -539,6 +677,11 @@ async def execute_frozen_host_execution_continuation(
             stderr=stderr,
             result_text=output,
         ),
+        runtime_context=runtime_context,
+        retry_safety_fence=retry_safety_fence,
+    )
+    required_output_paths = await _output_delivery_requirement_paths(
+        approval_port,
     )
     return _hidden_result_input(
         approval_id=approval_id,
@@ -546,6 +689,7 @@ async def execute_frozen_host_execution_continuation(
         agent_path=frozen.agent_path,
         exit_code=exit_code,
         result_text=output,
+        required_output_paths=required_output_paths,
     )
 
 

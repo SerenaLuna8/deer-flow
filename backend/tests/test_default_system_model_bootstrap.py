@@ -52,15 +52,21 @@ def test_default_model_bootstrap_prepares_deepseek_and_opencode_models(
 ) -> None:
     material = prepare_default_system_model_bootstrap()
 
-    assert [entry.command.logical_name for entry in material.models] == [
-        "deepseek-v4-flash",
-        "deepseek-v4",
-        "gpt-5.6-luna",
+    assert [entry.command.display_name for entry in material.models] == [
+        "DeepSeek V4 Flash",
+        "DeepSeek V4 Pro",
+        "GPT 5.6 Luna",
     ]
+    assert len({entry.model_id for entry in material.models}) == len(material.models)
     assert [entry.command.provider_model for entry in material.models] == [
         "deepseek-v4-flash",
         "deepseek-v4-pro",
         "gpt-5.6-luna",
+    ]
+    assert [entry.command.provider_adapter for entry in material.models] == [
+        "patched_deepseek",
+        "patched_deepseek",
+        "openai",
     ]
     assert [entry.command.settings["max_tokens"] for entry in material.models if entry.command.provider_adapter == "patched_deepseek"] == [51_200, 51_200]
     assert material.default_model_id == DEFAULT_MODEL_ID
@@ -140,8 +146,8 @@ async def test_default_model_bootstrap_persists_flash_as_default(
                 (
                     await session.execute(
                         select(SystemModelConfigRow).order_by(
-                            SystemModelConfigRow.sort_order,
-                            SystemModelConfigRow.logical_name,
+                            SystemModelConfigRow.created_at.desc(),
+                            SystemModelConfigRow.id.desc(),
                         )
                     )
                 ).scalars()
@@ -171,16 +177,17 @@ async def test_default_model_bootstrap_persists_flash_as_default(
 
         assert state is not None
         assert state.default_model_config_id == DEFAULT_MODEL_ID
-        assert [model.logical_name for model in models] == [
-            "deepseek-v4-flash",
-            "deepseek-v4",
-            "gpt-5.6-luna",
-        ]
+        assert {model.id: model.display_name for model in models} == {entry.model_id: entry.command.display_name for entry in material.models}
         assert {version.provider_model for version in versions} == {
             "deepseek-v4-flash",
             "deepseek-v4-pro",
             "gpt-5.6-luna",
         }
+        assert [version.provider_adapter for version in versions] == [
+            "patched_deepseek",
+            "patched_deepseek",
+            "openai",
+        ]
         assert {version.provider_model: version.settings["max_tokens"] for version in versions if version.provider_adapter == "patched_deepseek"} == {
             "deepseek-v4-flash": 51_200,
             "deepseek-v4-pro": 51_200,

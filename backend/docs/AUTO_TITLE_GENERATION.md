@@ -21,7 +21,7 @@
 - `enabled`：是否启用自动标题。
 - `max_words`：提供给标题 prompt 的目标词数。
 - `max_chars`：最终标题长度上限。
-- `model_name`：可选逻辑模型名；`null` 表示使用系统默认模型。
+- `model_name`：可选系统模型 UUID；`null` 表示使用系统默认模型。
 - `prompt_template`：部署侧自定义 prompt，必须兼容当前配置模型要求。
 
 配置变更边界以 [`CONFIGURATION.md`](./CONFIGURATION.md) 和 `config.example.yaml` 为准。

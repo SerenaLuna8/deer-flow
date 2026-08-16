@@ -11,11 +11,16 @@ rs.mock("@tanstack/react-query", () => ({
 }));
 
 import {
+  EXECUTION_APPROVAL_POLL_INTERVAL_MS,
+  executionApprovalByIdRefetchInterval,
   resolveObservedExecutionApprovalAnchor,
   shouldTrackPersistedExecutionApproval,
   useThreadExecutionApproval,
 } from "@/core/execution-approvals/hooks";
-import { executionApprovalProjectionSchema } from "@/core/execution-approvals/schemas";
+import {
+  executionApprovalProjectionSchema,
+  type ExecutionApprovalProjection,
+} from "@/core/execution-approvals/schemas";
 import type { PrivateWorkAccess } from "@/core/private-work/types";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
@@ -59,6 +64,23 @@ const terminal = executionApprovalProjectionSchema.parse({
   result_summary_code: "PROCESS_EXITED",
 });
 
+const pending = executionApprovalProjectionSchema.parse({
+  ...common,
+  status: "pending",
+  version: "1",
+  can_decide: true,
+  decision_expires_at: "2026-08-14T16:20:00Z",
+  remaining_ttl_seconds: 300,
+});
+
+const deniedDeliveryPending = executionApprovalProjectionSchema.parse({
+  ...common,
+  status: "denied",
+  version: "2",
+  decision_at: NOW,
+  denial_delivery_status: "pending",
+});
+
 const mockedUseQuery = rs.mocked(useQuery);
 
 describe("useThreadExecutionApproval", () => {
@@ -66,7 +88,44 @@ describe("useThreadExecutionApproval", () => {
     rs.clearAllMocks();
   });
 
-  test("recovers a terminal card by persisted ToolMessage id after active becomes null", () => {
+  test("polls missing and active projections but stops for terminal and error states", () => {
+    const response = (approval: ExecutionApprovalProjection | null) => ({
+      schema_version: 1 as const,
+      server_time: NOW,
+      approval,
+    });
+
+    expect(
+      executionApprovalByIdRefetchInterval({
+        state: { status: "success", data: response(null) },
+      }),
+    ).toBe(EXECUTION_APPROVAL_POLL_INTERVAL_MS);
+    expect(
+      executionApprovalByIdRefetchInterval({
+        state: { status: "success", data: response(pending) },
+      }),
+    ).toBe(EXECUTION_APPROVAL_POLL_INTERVAL_MS);
+    expect(
+      executionApprovalByIdRefetchInterval({
+        state: {
+          status: "success",
+          data: response(deniedDeliveryPending),
+        },
+      }),
+    ).toBe(EXECUTION_APPROVAL_POLL_INTERVAL_MS);
+    expect(
+      executionApprovalByIdRefetchInterval({
+        state: { status: "success", data: response(terminal) },
+      }),
+    ).toBe(false);
+    expect(
+      executionApprovalByIdRefetchInterval({
+        state: { status: "error", data: response(pending) },
+      }),
+    ).toBe(false);
+  });
+
+  test("recovers a terminal projection by persisted ToolMessage id after active becomes null", () => {
     mockedUseQuery
       .mockReturnValueOnce({
         data: { schema_version: 1, server_time: NOW, approval: null },
@@ -83,7 +142,41 @@ describe("useThreadExecutionApproval", () => {
 
     expect(result.observedApprovalId).toBe(APPROVAL_ID);
     expect(result.approval?.status).toBe("finished");
+    expect(result.isPreparing).toBe(false);
     expect(mockedUseQuery.mock.calls[1]?.[0].queryKey).toContain(APPROVAL_ID);
+  });
+
+  test.each([
+    {
+      label: "is still loading",
+      byId: { data: undefined, isPending: true, isSuccess: false },
+    },
+    {
+      label: "temporarily returns a null projection",
+      byId: {
+        data: { schema_version: 1, server_time: NOW, approval: null },
+        isPending: false,
+        isSuccess: true,
+      },
+    },
+  ])("keeps a persisted approval preparing while by-id $label", ({ byId }) => {
+    mockedUseQuery
+      .mockReturnValueOnce({
+        data: { schema_version: 1, server_time: NOW, approval: null },
+        isPending: false,
+        isSuccess: true,
+      } as never)
+      .mockReturnValueOnce(byId as never);
+
+    const result = useThreadExecutionApproval({
+      privateWork,
+      threadId: "thread-1",
+      persistedApprovalId: APPROVAL_ID,
+    });
+
+    expect(result.observedApprovalId).toBe(APPROVAL_ID);
+    expect(result.approval).toBeNull();
+    expect(result.isPreparing).toBe(true);
   });
 
   test("retains the first active id while active briefly becomes null", () => {

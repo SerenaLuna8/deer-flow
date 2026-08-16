@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from sqlalchemy import or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +31,7 @@ from app.shared_assets.bootstrap.catalog import (
 )
 from app.shared_assets.bootstrap.skill_archive import load_skill_archive
 from app.shared_assets.errors import AssetValidationFailed
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import AgentPayload, SkillArchiveFile
 from app.shared_assets.skill_service import (
     _analyze_skill_files,
@@ -72,10 +73,17 @@ class _AgentPayload(BaseModel):
 
     description: str = ""
     soul: str = Field(min_length=1)
-    model_ref: str = Field(min_length=1, max_length=255)
+    model_ref: str = Field(min_length=7, max_length=36)
     tool_groups: tuple[str, ...] = ()
     skill_source_keys: tuple[str, ...] = ()
     mcp_source_keys: tuple[str, ...] = ()
+
+    @field_validator("model_ref")
+    @classmethod
+    def validate_model_ref(cls, value: str) -> str:
+        if value != DEFAULT_MODEL_REF and exact_model_ref(value) is None:
+            raise ValueError("model_ref must be default or a canonical UUID")
+        return value
 
 
 class _McpSlotPayload(BaseModel):

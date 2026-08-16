@@ -126,14 +126,13 @@ async def _seed_model_version(seed: PrivateThreadSeed) -> uuid.UUID:
         await connection.execute(
             text(
                 """INSERT INTO system_model_configs
-                (id,logical_name,display_name,description,status,current_version_id,
-                 revision,sort_order,created_by_user_id,updated_by_user_id)
-                VALUES (:id,:name,'SNIP test model','receipt test','active',
-                        NULL,1,0,:owner,:owner)"""
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,updated_by_user_id)
+                VALUES (:id,'SNIP test model','active',
+                        NULL,1,:owner,:owner)"""
             ),
             {
                 "id": model_id,
-                "name": f"snip-{model_id.hex}",
                 "owner": str(seed.owner_a.user_id),
             },
         )
@@ -145,7 +144,7 @@ async def _seed_model_version(seed: PrivateThreadSeed) -> uuid.UUID:
                  supports_reasoning_effort,supports_vision,credential_id,
                  credential_version_id,credential_env_key,payload_checksum,
                  supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'codex_cli','snip-test','{}'::jsonb,
+                VALUES (:id,:model,1,'vision_bridge_fake','snip-test','{}'::jsonb,
                         false,false,false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
             ),
             {

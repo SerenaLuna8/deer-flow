@@ -724,13 +724,13 @@ export const zhCN: Translations = {
       suspended: "已暂停",
       updatedAt: (formattedDate) => `更新于 ${formattedDate}`,
       updatedAtColumn: "更新时间",
-      providerModel: "提供方模型",
+      providerModel: "模型 ID",
       credential: "凭据",
       environmentKey: "环境变量键",
       status: "状态",
       version: "版本",
-      versionMeta: (versionNumber, revision, sortOrder) =>
-        `配置 v${versionNumber} · 修订 ${revision} · 排序 ${sortOrder}`,
+      versionMeta: (versionNumber, revision) =>
+        `配置 v${versionNumber} · 修订 ${revision}`,
       capabilities: "模型能力",
       noCapabilities: "无",
       thinking: "深度思考",
@@ -761,28 +761,23 @@ export const zhCN: Translations = {
       description:
         "提供方参数会作为模型配置保存；凭据仅保存已存在版本的引用，不在这里录入密钥。",
       basicInformation: "基础信息",
-      basicDescription: "定义稳定逻辑名称、提供方映射和目录展示信息。",
-      logicalName: "逻辑名称",
+      basicDescription: "定义提供方映射和目录展示信息。",
       displayName: "显示名称",
       displayNamePlaceholder: "分析模型 Pro",
       providerAdapter: "提供方适配器",
-      providerModel: "提供方模型",
+      retiredProviderAdapter: "已停止支持",
+      retiredProviderAdapterHint:
+        "请先改选受支持的提供方适配器，再保存或测试连通性。",
+      providerModel: "模型 ID",
       status: "状态",
       active: "启用",
       suspended: "暂停",
-      modelDescription: "说明",
-      modelDescriptionPlaceholder: "适用场景与使用建议",
-      sortOrder: "排序值",
-      sortOrderHint: "数值越小越靠前；创建时默认 0。",
       capabilities: "模型能力",
       capabilitiesAndRuntime: "模型能力与运行参数",
-      capabilitiesDescription: "这些能力决定对话界面可提供的输入与推理控制项。",
       supportsThinking: "支持深度思考",
       supportsReasoningEffort: "支持推理强度",
       supportsVision: "支持视觉输入",
       commonProviderSettings: "运行参数",
-      commonProviderSettingsDescription:
-        "仅保存经过白名单校验的请求参数，不保存任何密钥。",
       baseUrl: "基础 URL",
       baseUrlHint: "提供方 API 的基础地址，不包含具体模型路径。",
       temperature: "温度",
@@ -790,8 +785,6 @@ export const zhCN: Translations = {
       requestTimeout: "请求超时（秒）",
       maxRetries: "最大重试次数",
       credentialBinding: "凭据绑定",
-      credentialBindingDescription:
-        "只绑定系统凭据的精确版本；密钥值不会进入页面缓存。",
       systemCredential: "系统凭据",
       credentialsUnavailableHint: "凭据元数据暂不可用，不能更改绑定。",
       credentialSelectionHint: "保存时绑定所选凭据的当前版本，不读取凭据值。",
@@ -819,11 +812,10 @@ export const zhCN: Translations = {
       maxTokens: "最大生成长度",
       requestTimeout: "请求超时",
       maxRetries: "重试次数",
-      sortOrder: "排序值",
       advancedJsonInvalid: "高级 JSON 格式不正确",
       advancedJsonObject: "高级 JSON 必须是对象",
       advancedJsonUnsafe: "高级 JSON 只能包含支持的安全字段和精确类型",
-      invalidForm: "请检查必填项、模型名称和凭据绑定",
+      invalidForm: "请检查必填项、显示名称、模型 ID 和凭据绑定",
       invalidConfiguration: "模型配置格式不正确",
     },
     actionErrors: {
@@ -2229,11 +2221,14 @@ export const zhCN: Translations = {
     modelOutputLimitDescription: "模型达到单次输出上限，当前回复未完成。",
     modelOutputLimitRetry: "关闭深度思考后重试",
     modelOutputLimitRetrying: "正在重试…",
+    outputDeliveryIncompleteTitle: "结果文件未完成交付",
+    outputDeliveryIncompleteDescription:
+      "需要交付的结果文件已经生成，但没有发布到当前对话。重新发送可能重复执行已经完成的命令，请先检查运行记录。",
     agentModelUnavailableTitle: "Agent 模型不可用",
     agentModelUnavailableDescription:
       "无法解析 Agent 配置的模型。请检查其启用绑定、已发布版本和模型目录中的启用状态后重试。",
-    runExecutionProfile: (modelName, modeName, supportsVision) =>
-      `实际执行：${modelName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
+    runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
+      `实际执行：${modelDisplayName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
   },
 
   // Chats
@@ -2436,7 +2431,7 @@ export const zhCN: Translations = {
     unavailable:
       "暂无 Token 用量。只有模型成功返回且供应商提供 usage_metadata 时才会显示。",
     unavailableShort: "未返回用量",
-    note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，可能与平台账单页不完全一致。",
+    note: "顶部总量优先使用后端持久化的线程用量；当当前回复仍在流式返回时，还会叠加可见的进行中用量。每轮和调试用量只来自当前可见消息，因此统计范围可能不同。",
     presets: {
       off: "关闭",
       summary: "总览",

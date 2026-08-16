@@ -42,6 +42,11 @@ from app.private_work.execution_approval_lifecycle import (
     cancel_locked_execution_approval_continuation,
     lock_execution_approval_private_rows,
     reconcile_locked_execution_approval,
+    reject_sealed_staged_approval_terminalization,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.thread_repository import PrivateThreadRepository
@@ -744,6 +749,22 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             raise PrivateWorkUnavailable(self._context.request_id)
         if row.status not in EXECUTION_APPROVAL_ACTIVE_STATUSES:
             return
+        try:
+            await reject_sealed_staged_approval_terminalization(
+                session,
+                row,
+            )
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status="cancelled",
+                now=now,
+            )
+        except (
+            ExecutionApprovalPrivateLifecycleConflict,
+            OutputDeliveryObligationConflict,
+        ):
+            raise PrivateWorkConflict(self._context.request_id) from None
         row.status = "cancelled"
         row.version += 1
         row.terminal_at = now

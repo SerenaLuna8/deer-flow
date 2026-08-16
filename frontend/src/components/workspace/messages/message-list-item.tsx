@@ -135,7 +135,7 @@ export function MessageListItem({
       from={isHuman ? "user" : "assistant"}
     >
       <MessageContent
-        className={isHuman ? "w-fit" : "w-full"}
+        className={isHuman ? "w-fit max-w-[88%] sm:max-w-[75%]" : "w-full"}
         message={message}
         isLoading={isLoading}
         threadId={threadId}
@@ -380,6 +380,7 @@ function MessageContent_({
     // through marked's recursive blockquote lexer, so render it verbatim.
     return (
       <div
+        data-message-content-role="user"
         className={cn(
           "ml-auto flex max-w-full min-w-0 flex-col gap-2",
           className,
@@ -450,7 +451,10 @@ function MessageContent_({
   }
 
   return (
-    <AIElementMessageContent className={className}>
+    <AIElementMessageContent
+      className={className}
+      data-message-content-role="assistant"
+    >
       {filesList}
       {showReasoning && reasoningContent && (
         <ThinkingDisclosure

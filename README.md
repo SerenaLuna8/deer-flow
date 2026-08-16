@@ -24,9 +24,9 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
-- 文本 lead model 的受治理图片识别桥接基础闭环：按 Run 冻结辅助视觉模型，使用
-  `inspect_image` 返回结构化、不可信视觉证据；当前 P1 只允许不可联网的确定性 fake
-  adapter，真实第三方 API 仍需完成外发、调用和结算门禁。
+- 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
+  `inspect_image` 返回结构化、不可信视觉证据；支持确定性 fake、受控的
+  OpenAI-compatible Chat Completions 与 Responses 协议。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
@@ -90,8 +90,8 @@ make setup-db
 make check-db
 ```
 
-- `make setup-db` 只初始化空目标库，并把完整快照记录为首个正式 revision
-  `initial_schema`。
+- `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
+  `model_catalog_simplify`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本必须先备份，再通过 `make upgrade-db` 显式升级。
@@ -124,13 +124,23 @@ make stop
 - `/projects/{project_slug}`：项目会话、资产、Memory、Automation 和设置。
 - `/admin`：仅 system admin 可访问的平台治理与运维页面。
 
+### 系统模型适配器
+
+管理端当前可创建 OpenAI、OpenAI 兼容增强、Anthropic、DeepSeek、DeepSeek
+兼容增强、vLLM，以及受控 Vision Bridge 模型。MiMo、MiniMax、StepFun、MindIE、
+Claude Code CLI 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或
+准入新 Run；已有历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只
+初始化 `patched_deepseek` 和 `openai` 模型配置。
+
 ### 文本模型图片识别桥接
 
 该能力不在 `config.yaml` 声明工具、模型或开关。System admin 先在
-`/admin/settings/models` 创建 active、`supports_vision=true` 且协议受支持的视觉逻辑
-模型，再到 `/admin/settings/system` 的“图片识别桥接”选择该模型；选择即对后续
-text-only project Run 启用，清空即关闭。全新安装默认选择已内置的 GPT 5.6 Luna；原生
-视觉 lead model 继续使用现有 `view_image`，不会同时注册 `inspect_image`。
+`/admin/settings/models` 检查内置模型或创建 active、`supports_vision=true` 且协议受支持
+的视觉模型，再到 `/admin/settings/system` 的“图片识别桥接”确认或选择该模型；
+非空选择即对后续 text-only project Run 启用，清空即关闭。全新安装默认选择已内置的
+GPT 5.6 Luna；原生
+视觉 lead model 继续使用现有 `view_image`，不会同时注册 `inspect_image`。该 bootstrap
+默认值不替代供应商数据政策审批；生产部署尚未批准外发时，须在接收项目 Run 前清空选择。
 
 Bridge 不定义另一套厂商协议，而是使用所选模型的协议：
 
@@ -148,10 +158,11 @@ Endpoint、模型 ID、Credential 和协议选择；不会转发通用模型设�
 协议；只支持文本、但不支持图片或结构化输出的 Endpoint 不能通过该测试。
 
 真实 adapter 只发送规范化后的单张图片、固定 `vision.prompt.v1`、固定 mode 指令和
-`vision.evidence.v1` Schema，不发送完整对话或文件路径。Credential 撤销会阻断已准入
-Run 的下一次外发；启用 LangSmith/Langfuse 内容 tracing 时真实 Bridge 失败关闭。选择
-真实模型表示系统管理员已批准该部署中所有项目按此 Provider 数据边界外发；不存在第二个
-`enabled` 或项目 grant。生产启用前仍须完成供应商政策与真实 API 质量/成本验收。完整
+`vision.evidence.v1` Schema，不发送完整对话或文件路径。暂停所选系统模型或撤销其
+Credential，都会阻断已准入 Run 的下一次外发；启用 LangSmith/Langfuse 内容 tracing
+时真实 Bridge 失败关闭。生产环境确认或选择真实模型，表示系统管理员已批准该部署中所有
+项目按此 Provider 数据边界外发；不存在第二个 `enabled` 或项目 grant。生产启用前仍须
+完成供应商政策与真实 API 质量、延迟和限流验收。完整
 协议、固定提示词、证据 Schema 和验收门禁见
 [文本模型内部识图桥接方案](./backend/docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md)。
 

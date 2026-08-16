@@ -1,6 +1,7 @@
 import uuid
+from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class ModelConfig(BaseModel):
@@ -19,6 +20,15 @@ class ModelConfig(BaseModel):
         default=None,
     )
     _system_provider_adapter: str | None = PrivateAttr(default=None)
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_pricing_metadata(cls, value: object) -> object:
+        """Model definitions carry capabilities and usage, never money metadata."""
+
+        if isinstance(value, Mapping) and "pricing" in value:
+            raise ValueError("model pricing metadata is not supported")
+        return value
 
     @property
     def system_provider_adapter(self) -> str | None:

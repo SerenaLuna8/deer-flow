@@ -167,7 +167,7 @@ class RunSnapshotAssetStale(Exception):
 class AdmittedRunModelSnapshot(Protocol):
     """Minimum secret-free result required by Run admission."""
 
-    logical_name: str
+    model_ref: str
     provider_adapter: str
     provider_settings: Mapping[str, object]
     supports_thinking: bool
@@ -735,14 +735,14 @@ class RunSnapshotRepository:
             lead_agent.payload.model_ref,
             request.execution_profile,
         )
-        exact_model_name = (
+        exact_model_ref = (
             self._model_ref_resolver.resolve(
                 effective_lead_model_ref,
             )
             if self._model_catalog is None
             else None
         )
-        if self._model_catalog is None and exact_model_name is None:
+        if self._model_catalog is None and exact_model_ref is None:
             raise RunSnapshotAssetStale
         if self._model_catalog is None and resolved_closure is not None:
             if any(self._model_ref_resolver.resolve(agent.payload.model_ref) is None for agent in resolved_closure.delegated_agents):
@@ -770,7 +770,7 @@ class RunSnapshotRepository:
             assistant_id=str(lead_agent.asset_id),
             status="pending",
             multitask_strategy="reject",
-            model_name=exact_model_name,
+            model_name=exact_model_ref,
             kwargs=admitted_run_kwargs,
         )
         (
@@ -842,7 +842,7 @@ class RunSnapshotRepository:
                 raise RunSnapshotAssetStale from None
             except SystemModelStorageUnavailable:
                 raise PrivateWorkUnavailable(context.request_id) from None
-            exact_model_name = model_snapshot.logical_name
+            exact_model_ref = model_snapshot.model_ref
             sampling_overrides = lead_agent.payload.model_settings.sampling_overrides()
             if sampling_overrides:
                 try:
@@ -854,7 +854,7 @@ class RunSnapshotRepository:
                     raise RunExecutionProfileUnsupported from None
             effective_profile = resolve_admitted_run_execution_profile(
                 requested=request.execution_profile,
-                logical_name=model_snapshot.logical_name,
+                model_ref=model_snapshot.model_ref,
                 supports_thinking=model_snapshot.supports_thinking,
                 supports_reasoning_effort=(model_snapshot.supports_reasoning_effort),
                 supports_vision=model_snapshot.supports_vision,
@@ -948,7 +948,7 @@ class RunSnapshotRepository:
             ).update_admitted_execution_profile(
                 scope=context.resource_scope,
                 run_id=run.run_id,
-                model_name=exact_model_name,
+                model_name=exact_model_ref,
                 kwargs=admitted_kwargs,
             ):
                 raise RunSnapshotAssetStale

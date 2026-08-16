@@ -164,6 +164,20 @@ class PrivateFileLifecycle:
                     presented_outputs.add(logical_path)
         return not produced_outputs.isdisjoint(presented_outputs)
 
+    async def output_delivery_status(self) -> str:
+        """Read the server-owned continuation obligation after finalization."""
+
+        authority = self.authority
+        if authority is None:
+            return "not_required"
+        reader = getattr(authority, "output_delivery_status", None)
+        if not callable(reader):
+            return "not_required"
+        status = await reader()
+        if not isinstance(status, str):
+            raise RuntimeError("Private output delivery authority is unavailable")
+        return status
+
     async def join_cleanup(
         self,
         operation: Callable[[], Awaitable[Any]],

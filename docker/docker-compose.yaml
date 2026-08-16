@@ -89,7 +89,6 @@ services:
 
       # CLI auth dirs are never mounted into Gateway. The opt-in
       # docker-compose.cli-auth.yaml overlay adds them read-only only to Worker.
-      # Prefer a narrowly scoped environment token when possible.
     working_dir: /app
     environment:
       - CI=true

@@ -196,7 +196,7 @@ async def test_migrating_grants_repoints_system_models_at_the_rotated_version(
             assert await session.get(SystemModelConfigVersionRow, original.id) is not None
 
         materialized = await SystemModelMaterializer(factory).materialize_active(
-            "gpt-5.6-luna",
+            str(GPT_5_6_LUNA_MODEL_ID),
         )
         assert materialized.api_key is not None
         assert materialized.api_key.get_secret_value() == ROTATED_SECRET
@@ -298,13 +298,10 @@ async def test_migration_fails_closed_on_a_model_whose_checksum_does_not_describ
             session.add(
                 SystemModelConfigRow(
                     id=rogue_model_id,
-                    logical_name=f"rogue-{rogue_model_id.hex}",
                     display_name="Rogue model",
-                    description="checksum drift",
                     status="suspended",
                     current_version_id=None,
                     revision=1,
-                    sort_order=99,
                     created_by_user_id=str(actor.user_id),
                     updated_by_user_id=str(actor.user_id),
                 )

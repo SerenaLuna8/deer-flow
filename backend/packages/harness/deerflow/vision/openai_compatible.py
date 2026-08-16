@@ -15,7 +15,7 @@ import math
 import secrets
 import time
 import weakref
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
@@ -31,6 +31,11 @@ from deerflow.vision.contracts import (
     VisionEvidence,
     VisionInvocationResult,
     VisionUsageReceipt,
+)
+from deerflow.vision.dispatch import (
+    VisionDispatchAttempt,
+    VisionDispatchAuthority,
+    VisionDispatchDenied,
 )
 from deerflow.vision.prompt import VisionMode, render_vision_prompt_v1
 
@@ -76,10 +81,18 @@ class OpenAICompatibleVisionError(RuntimeError):
         *,
         request_dispatched: bool = False,
         call_count: int = 0,
+        usage_receipt: VisionUsageReceipt | None = None,
     ) -> None:
+        if usage_receipt is None and (request_dispatched or call_count > 0):
+            usage_receipt = VisionUsageReceipt(
+                call_count=max(call_count, 1 if request_dispatched else 0),
+                request_dispatched=request_dispatched,
+                usage_unknown=request_dispatched,
+            )
         self.code = code
-        self.request_dispatched = request_dispatched
-        self.call_count = call_count
+        self.usage_receipt = usage_receipt
+        self.request_dispatched = usage_receipt.request_dispatched if usage_receipt is not None else request_dispatched
+        self.call_count = usage_receipt.call_count if usage_receipt is not None else call_count
         super().__init__(code)
 
 
@@ -342,6 +355,86 @@ def _parse_responses_usage(
     return input_tokens, output_tokens, False
 
 
+class _UsageAccumulator:
+    """Aggregate normalized receipts without pretending partial usage is exact."""
+
+    def __init__(self) -> None:
+        self._attempt_count = 0
+        self._call_count = 0
+        self._request_dispatched = False
+        self._input_tokens = 0
+        self._output_tokens = 0
+        self._known_usage_count = 0
+        self._usage_unknown = False
+
+    def add(self, receipt: VisionUsageReceipt) -> None:
+        self._attempt_count += 1
+        self._call_count += receipt.call_count
+        self._request_dispatched = self._request_dispatched or receipt.request_dispatched
+        if receipt.input_tokens is not None and receipt.output_tokens is not None:
+            self._input_tokens += receipt.input_tokens
+            self._output_tokens += receipt.output_tokens
+            self._known_usage_count += 1
+        if receipt.request_dispatched and receipt.usage_unknown:
+            self._usage_unknown = True
+
+    def receipt(self) -> VisionUsageReceipt:
+        return VisionUsageReceipt(
+            call_count=self._call_count,
+            request_dispatched=self._request_dispatched,
+            input_tokens=(self._input_tokens if self._known_usage_count > 0 else None),
+            output_tokens=(self._output_tokens if self._known_usage_count > 0 else None),
+            usage_unknown=self._usage_unknown,
+        )
+
+    @property
+    def has_attempts(self) -> bool:
+        return self._attempt_count > 0
+
+
+def _usage_receipt_from_body(
+    body: bytes | None,
+    *,
+    parser: object,
+) -> VisionUsageReceipt:
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    usage_unknown = True
+    if body is not None and callable(parser):
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, Mapping):
+                input_tokens, output_tokens, usage_unknown = parser(
+                    payload.get("usage"),
+                )
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return VisionUsageReceipt(
+        call_count=1,
+        request_dispatched=True,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        usage_unknown=usage_unknown,
+    )
+
+
+def _undispatched_attempt_receipt() -> VisionUsageReceipt:
+    return VisionUsageReceipt(
+        call_count=0,
+        request_dispatched=False,
+        usage_unknown=False,
+    )
+
+
+async def _bounded_error_response_bytes(response: httpx.Response) -> bytes | None:
+    """Best-effort bounded body read that never overrides an HTTP error class."""
+
+    try:
+        return await _bounded_response_bytes(response)
+    except OpenAICompatibleVisionError:
+        return None
+
+
 def _parse_response(body: bytes) -> VisionInvocationResult:
     try:
         payload = json.loads(body)
@@ -362,7 +455,14 @@ def _parse_response(body: bytes) -> VisionInvocationResult:
         if finish_reason != "stop":
             raise ValueError
         message = choice.get("message")
-        if not isinstance(message, Mapping) or type(message.get("content")) is not str:
+        if not isinstance(message, Mapping) or message.get("role") != "assistant":
+            raise ValueError
+        if message.get("refusal") is not None:
+            raise OpenAICompatibleVisionError(
+                "VISION_CONTENT_BLOCKED",
+                request_dispatched=True,
+            )
+        if message.get("tool_calls") is not None or message.get("function_call") is not None or type(message.get("content")) is not str:
             raise ValueError
         evidence_payload = json.loads(message["content"])
         evidence = VisionEvidence.model_validate(evidence_payload)
@@ -423,6 +523,12 @@ def _parse_responses_response(body: bytes) -> VisionInvocationResult:
                 continue
             if item_type != "message":
                 raise ValueError
+            content = item.get("content")
+            if isinstance(content, list) and any(isinstance(part, Mapping) and part.get("type") in {"refusal", "output_refusal"} for part in content):
+                raise OpenAICompatibleVisionError(
+                    "VISION_CONTENT_BLOCKED",
+                    request_dispatched=True,
+                )
             messages.append(item)
         if len(messages) != 1:
             raise ValueError
@@ -480,6 +586,7 @@ class OpenAICompatibleVisionEvidenceClient:
     _endpoint_resource = "chat/completions"
     _request_builder = staticmethod(_request_payload)
     _response_parser = staticmethod(_parse_response)
+    _usage_parser = staticmethod(_parse_usage)
 
     def __init__(
         self,
@@ -500,6 +607,7 @@ class OpenAICompatibleVisionEvidenceClient:
         if version_id is None and (type(transient_gate_key) is not str or not transient_gate_key):
             raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
         self._gate_key = str(version_id) if version_id is not None else transient_gate_key
+        self._allows_unguarded_transient_probe = transient_gate_key is not None
         self._run_gate = asyncio.Semaphore(1)
         self._transport = transport
 
@@ -511,9 +619,17 @@ class OpenAICompatibleVisionEvidenceClient:
         mode: VisionMode,
         deadline_monotonic: float,
         abort_signal: Event,
+        dispatch_authority: VisionDispatchAuthority | None = None,
+        normalized_pixels: int | None = None,
+        usage_observer: Callable[[VisionUsageReceipt], None] | None = None,
     ) -> VisionInvocationResult:
         if abort_signal.is_set():
             raise OpenAICompatibleVisionError("VISION_DEADLINE_EXCEEDED")
+        if dispatch_authority is None:
+            if not self._allows_unguarded_transient_probe:
+                raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
+        elif type(normalized_pixels) is not int or normalized_pixels < 1 or not callable(getattr(dispatch_authority, "before_attempt", None)) or not callable(getattr(dispatch_authority, "after_attempt", None)):
+            raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
         body = self._request_builder(
             model=self._model,
             image_bytes=image_bytes,
@@ -523,8 +639,60 @@ class OpenAICompatibleVisionEvidenceClient:
         global_gate = _model_gate(self._gate_key)
         acquired_run = False
         acquired_global = False
-        dispatched = False
-        dispatched_calls = 0
+        usage = _UsageAccumulator()
+
+        async def begin_attempt() -> VisionDispatchAttempt | None:
+            if dispatch_authority is None:
+                return None
+            try:
+                attempt = await dispatch_authority.before_attempt(
+                    normalized_bytes=len(image_bytes),
+                    normalized_pixels=normalized_pixels,
+                )
+            except VisionDispatchDenied as error:
+                if usage.has_attempts:
+                    raise OpenAICompatibleVisionError(
+                        error.code,
+                        usage_receipt=usage.receipt(),
+                    ) from None
+                raise
+            if not isinstance(attempt, VisionDispatchAttempt):
+                raise OpenAICompatibleVisionError("VISION_CONFIGURATION_ERROR")
+            return attempt
+
+        async def finish_attempt(
+            attempt: VisionDispatchAttempt | None,
+            receipt: VisionUsageReceipt,
+            error_code: str | None,
+        ) -> None:
+            usage.add(receipt)
+            if usage_observer is not None:
+                usage_observer(usage.receipt())
+            if dispatch_authority is None:
+                return
+            if attempt is None:
+                raise OpenAICompatibleVisionError(
+                    "VISION_CONFIGURATION_ERROR",
+                    usage_receipt=usage.receipt(),
+                )
+            try:
+                await dispatch_authority.after_attempt(
+                    attempt=attempt,
+                    usage_receipt=receipt,
+                    error_code=error_code,
+                )
+            except VisionDispatchDenied as error:
+                raise OpenAICompatibleVisionError(
+                    error.code,
+                    usage_receipt=usage.receipt(),
+                ) from None
+
+        def provider_error(code: str) -> OpenAICompatibleVisionError:
+            return OpenAICompatibleVisionError(
+                code,
+                usage_receipt=usage.receipt() if usage.has_attempts else None,
+            )
+
         try:
             remaining = deadline_monotonic - time.monotonic()
             if remaining <= 0:
@@ -540,24 +708,25 @@ class OpenAICompatibleVisionEvidenceClient:
                     follow_redirects=False,
                     trust_env=False,
                 ) as client:
-                    for attempt in range(2):
+                    for attempt_index in range(2):
                         if abort_signal.is_set():
-                            raise OpenAICompatibleVisionError(
-                                "VISION_DEADLINE_EXCEEDED",
-                                request_dispatched=dispatched,
-                            )
+                            raise provider_error("VISION_DEADLINE_EXCEEDED")
                         remaining = deadline_monotonic - time.monotonic()
                         if remaining <= 0:
-                            raise OpenAICompatibleVisionError(
+                            raise provider_error("VISION_DEADLINE_EXCEEDED")
+                        attempt = await begin_attempt()
+                        if abort_signal.is_set():
+                            await finish_attempt(
+                                attempt,
+                                _undispatched_attempt_receipt(),
                                 "VISION_DEADLINE_EXCEEDED",
-                                request_dispatched=dispatched,
                             )
+                            raise provider_error("VISION_DEADLINE_EXCEEDED")
                         response: httpx.Response | None = None
+                        response_body: bytes | None = None
                         try:
-                            attempt_budget = remaining if attempt > 0 else max(0.1, remaining / 2)
+                            attempt_budget = remaining if attempt_index > 0 else max(0.1, remaining / 2)
                             async with asyncio.timeout(attempt_budget):
-                                dispatched_calls += 1
-                                dispatched = True
                                 async with client.stream(
                                     "POST",
                                     self._endpoint,
@@ -569,60 +738,148 @@ class OpenAICompatibleVisionEvidenceClient:
                                     content=body,
                                     timeout=httpx.Timeout(attempt_budget),
                                 ) as response:
-                                    response_body = await _bounded_response_bytes(response)
-                        except (httpx.TransportError, TimeoutError):
-                            if attempt == 0:
-                                delay = _retry_delay(None, attempt)
+                                    if 200 <= response.status_code < 300:
+                                        response_body = await _bounded_response_bytes(
+                                            response,
+                                        )
+                                    else:
+                                        response_body = await _bounded_error_response_bytes(
+                                            response,
+                                        )
+                        except asyncio.CancelledError:
+                            receipt = VisionUsageReceipt(
+                                call_count=1,
+                                request_dispatched=True,
+                                usage_unknown=True,
+                            )
+                            try:
+                                await asyncio.shield(
+                                    finish_attempt(
+                                        attempt,
+                                        receipt,
+                                        "VISION_DEADLINE_EXCEEDED",
+                                    ),
+                                )
+                            except Exception:
+                                pass
+                            raise
+                        except (httpx.ConnectError, httpx.ConnectTimeout):
+                            await finish_attempt(
+                                attempt,
+                                _undispatched_attempt_receipt(),
+                                "VISION_UNAVAILABLE",
+                            )
+                            if attempt_index == 0:
+                                delay = _retry_delay(None, attempt_index)
                                 if time.monotonic() + delay >= deadline_monotonic:
-                                    break
+                                    raise provider_error("VISION_UNAVAILABLE")
                                 await asyncio.sleep(delay)
                                 continue
-                            raise OpenAICompatibleVisionError(
+                            raise provider_error("VISION_UNAVAILABLE") from None
+                        except (httpx.TransportError, TimeoutError):
+                            await finish_attempt(
+                                attempt,
+                                VisionUsageReceipt(
+                                    call_count=1,
+                                    request_dispatched=True,
+                                    usage_unknown=True,
+                                ),
                                 "VISION_UNAVAILABLE",
-                                request_dispatched=dispatched,
-                            ) from None
-                        if response.status_code in _RETRYABLE_STATUS_CODES and attempt == 0:
-                            delay = _retry_delay(response, attempt)
-                            if time.monotonic() + delay >= deadline_monotonic:
-                                break
-                            await asyncio.sleep(delay)
-                            continue
-                        if response.status_code < 200 or response.status_code >= 300:
-                            raise OpenAICompatibleVisionError(
-                                _status_error(response.status_code),
-                                request_dispatched=True,
                             )
+                            raise provider_error("VISION_UNAVAILABLE") from None
+                        except OpenAICompatibleVisionError as error:
+                            await finish_attempt(
+                                attempt,
+                                VisionUsageReceipt(
+                                    call_count=1,
+                                    request_dispatched=True,
+                                    usage_unknown=True,
+                                ),
+                                error.code,
+                            )
+                            raise provider_error(error.code) from None
+
+                        if response is None:
+                            await finish_attempt(
+                                attempt,
+                                VisionUsageReceipt(
+                                    call_count=1,
+                                    request_dispatched=True,
+                                    usage_unknown=True,
+                                ),
+                                "VISION_UNAVAILABLE",
+                            )
+                            raise provider_error("VISION_UNAVAILABLE")
+
+                        if response.status_code < 200 or response.status_code >= 300:
+                            error_code = _status_error(response.status_code)
+                            await finish_attempt(
+                                attempt,
+                                _usage_receipt_from_body(
+                                    response_body,
+                                    parser=self._usage_parser,
+                                ),
+                                error_code,
+                            )
+                            if response.status_code in _RETRYABLE_STATUS_CODES and attempt_index == 0:
+                                delay = _retry_delay(response, attempt_index)
+                                if time.monotonic() + delay >= deadline_monotonic:
+                                    raise provider_error(error_code)
+                                await asyncio.sleep(delay)
+                                continue
+                            raise provider_error(error_code)
+
                         content_type = response.headers.get("content-type", "")
                         if content_type.split(";", 1)[0].strip().lower() != "application/json":
-                            raise OpenAICompatibleVisionError(
+                            await finish_attempt(
+                                attempt,
+                                _usage_receipt_from_body(
+                                    response_body,
+                                    parser=self._usage_parser,
+                                ),
                                 "VISION_SCHEMA_MISMATCH",
-                                request_dispatched=True,
                             )
-                        result = self._response_parser(response_body)
+                            raise provider_error("VISION_SCHEMA_MISMATCH")
+                        if response_body is None:
+                            await finish_attempt(
+                                attempt,
+                                VisionUsageReceipt(
+                                    call_count=1,
+                                    request_dispatched=True,
+                                    usage_unknown=True,
+                                ),
+                                "VISION_SCHEMA_MISMATCH",
+                            )
+                            raise provider_error("VISION_SCHEMA_MISMATCH")
+                        try:
+                            result = self._response_parser(response_body)
+                        except OpenAICompatibleVisionError as error:
+                            await finish_attempt(
+                                attempt,
+                                _usage_receipt_from_body(
+                                    response_body,
+                                    parser=self._usage_parser,
+                                ),
+                                error.code,
+                            )
+                            raise provider_error(error.code) from None
+                        await finish_attempt(
+                            attempt,
+                            result.usage_receipt,
+                            None,
+                        )
                         return replace(
                             result,
-                            usage_receipt=replace(
-                                result.usage_receipt,
-                                call_count=dispatched_calls,
-                            ),
+                            usage_receipt=usage.receipt(),
                         )
-                raise OpenAICompatibleVisionError(
+                raise provider_error(
                     "VISION_DEADLINE_EXCEEDED" if time.monotonic() >= deadline_monotonic else "VISION_UNAVAILABLE",
-                    request_dispatched=dispatched,
                 )
-        except OpenAICompatibleVisionError as error:
-            if dispatched_calls > 0 and error.call_count != dispatched_calls:
-                raise OpenAICompatibleVisionError(
-                    error.code,
-                    request_dispatched=True,
-                    call_count=dispatched_calls,
-                ) from None
+        except (OpenAICompatibleVisionError, VisionDispatchDenied):
             raise
         except TimeoutError:
-            raise OpenAICompatibleVisionError(
+            raise provider_error(
                 "VISION_DEADLINE_EXCEEDED",
-                request_dispatched=dispatched,
-                call_count=dispatched_calls,
             ) from None
         finally:
             if acquired_global:
@@ -639,6 +896,7 @@ class OpenAIResponsesVisionEvidenceClient(
     _endpoint_resource = "responses"
     _request_builder = staticmethod(_responses_request_payload)
     _response_parser = staticmethod(_parse_responses_response)
+    _usage_parser = staticmethod(_parse_responses_usage)
 
 
 __all__ = [

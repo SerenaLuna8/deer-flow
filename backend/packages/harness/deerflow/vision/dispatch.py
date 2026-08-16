@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Final, Protocol
+
+from deerflow.vision.contracts import VisionUsageReceipt
 
 MAX_VISION_CALLS_PER_RUN: Final = 8
 MAX_VISION_NORMALIZED_BYTES_PER_RUN: Final = 40 * 1024 * 1024
 MAX_VISION_NORMALIZED_PIXELS_PER_RUN: Final = 80_000_000
+# LoopDetectionMiddleware evaluates a proposed tool call before ToolNode runs
+# it. Blocking proposal N+1 therefore permits exactly the same eight calls as
+# the authoritative dispatch counter while also governing the non-dispatching
+# fake adapter.
+VISION_TOOL_FREQUENCY_WARN: Final = 6
+VISION_TOOL_FREQUENCY_HARD_STOP: Final = MAX_VISION_CALLS_PER_RUN + 1
 
 
 class VisionDispatchDenied(RuntimeError):
@@ -17,21 +26,37 @@ class VisionDispatchDenied(RuntimeError):
         super().__init__(code)
 
 
+@dataclass(frozen=True, slots=True)
+class VisionDispatchAttempt:
+    """Opaque server-owned handle for one governed provider attempt."""
+
+    _token: object = field(default_factory=object, repr=False)
+
+
 class VisionDispatchAuthority(Protocol):
-    async def before_dispatch(
+    async def before_attempt(
         self,
         *,
         normalized_bytes: int,
         normalized_pixels: int,
-    ) -> None: ...
+    ) -> VisionDispatchAttempt: ...
 
-    async def after_dispatch(self) -> None: ...
+    async def after_attempt(
+        self,
+        *,
+        attempt: VisionDispatchAttempt,
+        usage_receipt: VisionUsageReceipt,
+        error_code: str | None,
+    ) -> None: ...
 
 
 __all__ = [
     "MAX_VISION_CALLS_PER_RUN",
     "MAX_VISION_NORMALIZED_BYTES_PER_RUN",
     "MAX_VISION_NORMALIZED_PIXELS_PER_RUN",
+    "VISION_TOOL_FREQUENCY_HARD_STOP",
+    "VISION_TOOL_FREQUENCY_WARN",
+    "VisionDispatchAttempt",
     "VisionDispatchAuthority",
     "VisionDispatchDenied",
 ]

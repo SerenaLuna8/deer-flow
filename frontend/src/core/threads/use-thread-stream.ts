@@ -22,6 +22,7 @@ import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import {
   isModelOutputLimitError,
+  isOutputDeliveryIncompleteError,
   isProjectRunTerminalFailure,
 } from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
@@ -699,9 +700,11 @@ export function useThreadStream({
         toast.error(
           isModelOutputLimitError(error)
             ? t.conversation.modelOutputLimitDescription
-            : isProjectRunTerminalFailure(error)
-              ? t.conversation.runFailedDescription
-              : getStreamErrorMessage(error),
+            : isOutputDeliveryIncompleteError(error)
+              ? t.conversation.outputDeliveryIncompleteDescription
+              : isProjectRunTerminalFailure(error)
+                ? t.conversation.runFailedDescription
+                : getStreamErrorMessage(error),
         );
       }
       pendingUsageBaselineMessageIdsRef.current = new Set(

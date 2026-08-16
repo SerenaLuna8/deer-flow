@@ -1201,7 +1201,6 @@ class TestGetModel:
             "name": "test-model",
             "model": "test-model",
             "display_name": "Test Model",
-            "description": "A test model",
             "supports_thinking": True,
             "supports_reasoning_effort": True,
             "supports_vision": False,

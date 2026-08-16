@@ -47,7 +47,7 @@ class SubagentTokenCollector(BaseCallbackHandler):
                     total_tk = input_tk + output_tk
                 if total_tk <= 0:
                     continue
-                # Prompt-cache hits (needed for cache-aware cost accounting)
+                # Prompt-cache hits are retained in token usage accounting.
                 details = usage_dict.get("input_token_details") or {}
                 cache_read_tk = 0
                 if isinstance(details, Mapping):

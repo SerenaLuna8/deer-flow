@@ -21,9 +21,7 @@ from deerflow.persistence.system_settings import (
 
 @dataclass(frozen=True, slots=True)
 class CreateSystemModel:
-    logical_name: str
     display_name: str
-    description: str
     status: str
     provider_adapter: str
     provider_model: str
@@ -34,13 +32,11 @@ class CreateSystemModel:
     credential_id: uuid.UUID | None
     credential_version_id: uuid.UUID | None
     credential_env_key: str | None
-    sort_order: int = 0
 
 
 @dataclass(frozen=True, slots=True)
 class UpdateSystemModel:
     display_name: str
-    description: str
     provider_adapter: str
     provider_model: str
     settings: Mapping[str, object]
@@ -50,7 +46,6 @@ class UpdateSystemModel:
     credential_id: uuid.UUID | None
     credential_version_id: uuid.UUID | None
     credential_env_key: str | None
-    sort_order: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +55,7 @@ class SystemModelConnectionCheck:
     provider_adapter: str
     provider_model: str
     settings: Mapping[str, object]
+    supports_vision: bool
     credential_id: uuid.UUID | None
     credential_version_id: uuid.UUID | None
     credential_env_key: str | None
@@ -88,13 +84,10 @@ class SystemModelVersionView:
 @dataclass(frozen=True, slots=True)
 class SystemModelView:
     id: uuid.UUID
-    logical_name: str
     display_name: str
-    description: str
     status: str
     current_version_id: uuid.UUID
     revision: int
-    sort_order: int
     current_version: SystemModelVersionView
     created_by_user_id: str
     updated_by_user_id: str
@@ -104,9 +97,8 @@ class SystemModelView:
 
 @dataclass(frozen=True, slots=True)
 class PublicSystemModelView:
-    logical_name: str
+    model_ref: str
     display_name: str
-    description: str
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
@@ -135,7 +127,7 @@ class RunModelConfigSnapshotView:
     thread_id: str
     run_id: str
     purpose: str
-    logical_name: str
+    model_ref: str
     provider_adapter: str
     provider_settings: Mapping[str, object]
     model_config_id: uuid.UUID

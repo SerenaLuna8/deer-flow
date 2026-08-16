@@ -36,6 +36,8 @@ from deerflow.persistence.private_work.memory_document_repository import (
     memory_document_unified_diff,
 )
 
+DREAM_MODEL_REF = "66666666-6666-4666-8666-666666666666"
+
 
 class _Transaction:
     def __init__(self, session: _Session) -> None:
@@ -117,7 +119,7 @@ class _ModelMaterializer:
 
     async def materialize_exact(self, **kwargs):
         self.exact.append(kwargs)
-        return SimpleNamespace(name="dream-model")
+        return SimpleNamespace(name=DREAM_MODEL_REF)
 
 
 class _CurrentModelRepository:
@@ -135,7 +137,7 @@ class _CurrentModelRepository:
     async def resolve_active_model(self, model_ref, *, load_envelope: bool):
         if self.error is not None:
             raise self.error
-        assert model_ref == "dream-model"
+        assert model_ref == DREAM_MODEL_REF
         assert load_envelope is False
         return SimpleNamespace(
             model=SimpleNamespace(id=self.work.model_config_id),
@@ -329,7 +331,7 @@ def _handler(
     policy = AgentRuntimePolicyValue(
         memory=MemoryPolicy(
             enabled=True,
-            model_name="dream-model",
+            model_name=DREAM_MODEL_REF,
             dream_interval_minutes=120,
             max_injection_tokens=2_000,
         )
@@ -1075,7 +1077,7 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
     policy = AgentRuntimePolicyValue(
         memory=MemoryPolicy(
             enabled=True,
-            model_name="dream-model",
+            model_name=DREAM_MODEL_REF,
             dream_interval_minutes=120,
             max_injection_tokens=2_000,
         )

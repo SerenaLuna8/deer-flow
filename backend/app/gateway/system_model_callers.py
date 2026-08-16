@@ -67,14 +67,13 @@ class ModelConnectionTester:
 
     async def test(self, model: ModelConfig) -> bool:
         try:
-            if (
-                getattr(model, "supports_vision", False) is True
-                and resolve_materialized_vision_bridge_protocol(
+            if getattr(model, "supports_vision", False) is True:
+                protocol = resolve_materialized_vision_bridge_protocol(
                     model,
                     VISION_BRIDGE_CONTRACT_V1,
                 )
-                is not None
-            ):
+                if protocol is None:
+                    return False
                 client = build_vision_evidence_client(
                     model,
                     VISION_BRIDGE_CONTRACT_V1,

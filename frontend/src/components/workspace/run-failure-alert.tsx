@@ -5,7 +5,11 @@ import { useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
-import { MODEL_OUTPUT_LIMIT } from "@/core/private-work/api-client";
+import {
+  MODEL_OUTPUT_LIMIT,
+  OUTPUT_DELIVERY_INCOMPLETE,
+  type ProjectRunFailureCode,
+} from "@/core/private-work/api-client";
 
 export function canRetryModelOutputLimit({
   canRun,
@@ -28,13 +32,14 @@ export function RunFailureAlert({
   retryDisabled = false,
   onRetryWithoutThinking,
 }: {
-  failureCode: typeof MODEL_OUTPUT_LIMIT | null;
+  failureCode: ProjectRunFailureCode | null;
   retryDisabled?: boolean;
   onRetryWithoutThinking?: () => boolean | Promise<boolean>;
 }) {
   const { t } = useI18n();
   const [retrying, setRetrying] = useState(false);
   const isModelOutputLimit = failureCode === MODEL_OUTPUT_LIMIT;
+  const isOutputDeliveryIncomplete = failureCode === OUTPUT_DELIVERY_INCOMPLETE;
 
   return (
     <Alert
@@ -46,13 +51,17 @@ export function RunFailureAlert({
       <AlertTitle>
         {isModelOutputLimit
           ? t.conversation.modelOutputLimitTitle
-          : t.conversation.runFailedTitle}
+          : isOutputDeliveryIncomplete
+            ? t.conversation.outputDeliveryIncompleteTitle
+            : t.conversation.runFailedTitle}
       </AlertTitle>
       <AlertDescription className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
         <span>
           {isModelOutputLimit
             ? t.conversation.modelOutputLimitDescription
-            : t.conversation.runFailedDescription}
+            : isOutputDeliveryIncomplete
+              ? t.conversation.outputDeliveryIncompleteDescription
+              : t.conversation.runFailedDescription}
         </span>
         {isModelOutputLimit && (
           <Button

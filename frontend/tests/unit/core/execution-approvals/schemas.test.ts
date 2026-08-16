@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   executionApprovalBlocksSending,
   executionApprovalContinuationRunId,
+  executionApprovalDecisionSurface,
   executionApprovalNeedsAdmissionRecovery,
   executionApprovalDecisionInputSchema,
   executionApprovalProjectionSchema,
@@ -169,6 +170,16 @@ describe("execution approval schemas", () => {
       ),
     ).toEqual([true, true, true, false, false, false, false, false, false]);
     expect(executionApprovalBlocksSending(null)).toBe(false);
+  });
+
+  test("exposes only pending approval state on the decision surface", () => {
+    expect(executionApprovalDecisionSurface(parsedStatuses[0])).toBe(
+      parsedStatuses[0],
+    );
+    expect(
+      parsedStatuses.slice(1).map(executionApprovalDecisionSurface),
+    ).toEqual([null, null, null, null, null, null, null, null]);
+    expect(executionApprovalDecisionSurface(null)).toBeNull();
   });
 
   test("selects only pending or running continuation Runs for attachment", () => {

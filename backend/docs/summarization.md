@@ -62,7 +62,7 @@ summarization:
 #### `model_name`
 - **Type**: String or null
 - **Default**: `null` (uses default model)
-- **Description**: Model to use for generating summaries. Recommended to use a lightweight, cost-effective model like `gpt-4o-mini` or equivalent.
+- **Description**: Model to use for generating summaries. A lightweight, low-latency model such as `gpt-4o-mini` or equivalent is recommended.
 
 #### `trigger`
 - **Type**: Single `ContextSize` or list of `ContextSize` objects
@@ -218,13 +218,13 @@ The middleware intelligently preserves message context:
 
 ### Model Selection
 
-- **Recommended**: Use a lightweight, cost-effective model for summaries
+- **Recommended**: Use a lightweight, low-latency model for summaries
   - Examples: `gpt-4o-mini`, `claude-haiku`, or equivalent
   - Summaries don't require the most powerful models
-  - Significant cost savings on high-volume applications
+  - Lower resource use on high-volume applications
 
 - **Default**: If `model_name` is `null`, uses the default model
-  - May be more expensive but ensures consistency
+  - Uses the same model as the main flow, which can simplify operational consistency
   - Good for simple setups
 
 ### Optimization Tips
@@ -247,7 +247,7 @@ The middleware intelligently preserves message context:
 
 3. **Trim strategically**: Limit tokens sent to summarization model
    ```yaml
-   trim_tokens_to_summarize: 4000  # Prevents expensive summarization calls
+   trim_tokens_to_summarize: 4000  # Bounds summarization input size
    ```
 
 4. **Monitor and iterate**: Track summary quality and adjust configuration
@@ -331,7 +331,7 @@ summarization:
 ```yaml
 summarization:
   enabled: true
-  model_name: gpt-4o-mini  # Lightweight model for cost efficiency
+  model_name: gpt-4o-mini  # Lightweight model for lower latency
   trigger:
     - type: tokens
       value: 6000

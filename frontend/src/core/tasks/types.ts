@@ -1,10 +1,22 @@
 import type { AIMessage } from "@langchain/langgraph-sdk";
 
+import type { ExecutionApprovalStatus } from "../execution-approvals/schemas";
 import type { TokenUsage } from "../messages/usage";
 
 import type { SubtaskStep } from "./steps";
 
-export type SubtaskStatusSource = "inferred" | "custom_event" | "tool_result";
+export type SubtaskStatusSource =
+  | "inferred"
+  | "custom_event"
+  | "tool_result"
+  | "execution_approval";
+
+export interface SubtaskExecutionApprovalState {
+  approvalId: string;
+  status: ExecutionApprovalStatus;
+  exitCode?: number;
+  reasonCode?: string;
+}
 
 export interface Subtask {
   id: string;
@@ -16,6 +28,8 @@ export interface Subtask {
    * tool call from overwriting a terminal result.
    */
   statusSource?: SubtaskStatusSource;
+  /** Presentation state for a delegated Local-host approval. */
+  executionApproval?: SubtaskExecutionApprovalState;
   subagent_type: string;
   description: string;
   /** Effective ActWeave model selected for this delegated run. */

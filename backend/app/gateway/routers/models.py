@@ -29,13 +29,12 @@ class _StrictModel(BaseModel):
 class ModelResponse(_StrictModel):
     """Safe selector metadata; provider configuration is admin-only."""
 
-    name: str = Field(..., description="Stable logical model name")
+    name: str = Field(..., description="Stable system model UUID")
     model: str = Field(
         ...,
-        description="Compatibility alias equal to the logical model name",
+        description="Compatibility alias equal to the system model UUID",
     )
     display_name: str
-    description: str
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
@@ -54,11 +53,10 @@ class ModelsListResponse(_StrictModel):
 
 def _public_response(model: PublicSystemModelView) -> ModelResponse:
     return ModelResponse(
-        name=model.logical_name,
+        name=model.model_ref,
         # Never expose the provider model identifier through this endpoint.
-        model=model.logical_name,
+        model=model.model_ref,
         display_name=model.display_name,
-        description=model.description,
         supports_thinking=model.supports_thinking,
         supports_reasoning_effort=model.supports_reasoning_effort,
         supports_vision=model.supports_vision,
@@ -117,7 +115,7 @@ async def get_model(
     del _user
     try:
         selected = next(
-            (model for model in await service.list_available_models() if model.logical_name == model_name),
+            (model for model in await service.list_available_models() if model.model_ref == model_name),
             None,
         )
     except SystemModelStorageUnavailable:

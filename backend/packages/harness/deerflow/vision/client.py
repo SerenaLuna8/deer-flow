@@ -24,6 +24,7 @@ from deerflow.vision.contracts import (
     VisionInvocationResult,
     VisionUsageReceipt,
 )
+from deerflow.vision.dispatch import VisionDispatchAuthority
 from deerflow.vision.prompt import VisionMode, render_vision_prompt_v1
 
 
@@ -46,6 +47,9 @@ class VisionEvidenceClient(Protocol):
         mode: VisionMode,
         deadline_monotonic: float,
         abort_signal: Event,
+        dispatch_authority: VisionDispatchAuthority | None = None,
+        normalized_pixels: int | None = None,
+        usage_observer: Callable[[VisionUsageReceipt], None] | None = None,
     ) -> VisionInvocationResult: ...
 
 
@@ -62,7 +66,11 @@ class FakeVisionEvidenceClient:
         mode: VisionMode,
         deadline_monotonic: float,
         abort_signal: Event,
+        dispatch_authority: VisionDispatchAuthority | None = None,
+        normalized_pixels: int | None = None,
+        usage_observer: Callable[[VisionUsageReceipt], None] | None = None,
     ) -> VisionInvocationResult:
+        del dispatch_authority, normalized_pixels, usage_observer
         render_vision_prompt_v1(mode)
         if abort_signal.is_set() or time.monotonic() >= deadline_monotonic:
             raise VisionClientError("VISION_DEADLINE_EXCEEDED")
@@ -74,6 +82,9 @@ class FakeVisionEvidenceClient:
             raise VisionClientError("UNSUPPORTED_MEDIA") from None
         return VisionInvocationResult(
             evidence=VisionEvidence(
+                ok=True,
+                content_type="untrusted_image_evidence",
+                schema_version="vision.evidence.v1",
                 summary=(f"The P1 fake Vision Bridge accepted one normalized {width} by {height} image."),
                 evidence=[
                     VisionEvidenceItem(

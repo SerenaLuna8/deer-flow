@@ -18,9 +18,6 @@ from app.system_settings.models import (
 )
 
 _MAX_SETTINGS_BYTES = 32 * 1024
-_MAX_DESCRIPTION_CHARS = 4_000
-_MAX_BIGINT = 2**63 - 1
-_LOGICAL_NAME = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\Z")
 _ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PROVIDER_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}\Z")
 _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
@@ -72,41 +69,10 @@ _PROVIDER_SETTING_FIELDS: Mapping[str, frozenset[str]] = {
             "when_thinking_enabled",
         }
     ),
-    "claude_code": frozenset(
-        {
-            "auto_thinking_budget",
-            "base_url",
-            "default_request_timeout",
-            "enable_prompt_caching",
-            "max_retries",
-            "max_tokens",
-            "prompt_cache_size",
-            "request_timeout",
-            "retry_max_attempts",
-            "temperature",
-            "thinking",
-            "timeout",
-            "when_thinking_disabled",
-            "when_thinking_enabled",
-        }
-    ),
-    "codex_cli": frozenset({"reasoning_effort", "retry_max_attempts"}),
     "deepseek": _OPENAI_COMPATIBLE_FIELDS,
-    "mindie": _OPENAI_COMPATIBLE_FIELDS
-    | frozenset(
-        {
-            "connect_timeout",
-            "pool_timeout",
-            "read_timeout",
-            "write_timeout",
-        }
-    ),
     "openai": _OPENAI_COMPATIBLE_FIELDS | frozenset({"output_version", "use_responses_api"}),
     "patched_deepseek": _OPENAI_COMPATIBLE_FIELDS,
-    "patched_mimo": _OPENAI_COMPATIBLE_FIELDS,
-    "patched_minimax": _OPENAI_COMPATIBLE_FIELDS,
     "patched_openai": _OPENAI_COMPATIBLE_FIELDS | frozenset({"output_version", "use_responses_api"}),
-    "patched_stepfun": _OPENAI_COMPATIBLE_FIELDS,
     "vllm": _OPENAI_COMPATIBLE_FIELDS | frozenset({"cumulative_stream_usage"}),
     "vision_bridge_fake": frozenset(),
     "vision_openai_compatible_v1": frozenset({"base_url"}),
@@ -132,20 +98,8 @@ PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = {
         "langchain_anthropic:ChatAnthropic",
         True,
     ),
-    "claude_code": ProviderAdapterSpec(
-        "deerflow.models.claude_provider:ClaudeChatModel",
-        False,
-    ),
-    "codex_cli": ProviderAdapterSpec(
-        "deerflow.models.openai_codex_provider:CodexChatModel",
-        False,
-    ),
     "deepseek": ProviderAdapterSpec(
         "langchain_deepseek:ChatDeepSeek",
-        True,
-    ),
-    "mindie": ProviderAdapterSpec(
-        "deerflow.models.mindie_provider:MindIEChatModel",
         True,
     ),
     "openai": ProviderAdapterSpec(
@@ -156,20 +110,8 @@ PROVIDER_ADAPTERS: Mapping[str, ProviderAdapterSpec] = {
         "deerflow.models.patched_deepseek:PatchedChatDeepSeek",
         True,
     ),
-    "patched_mimo": ProviderAdapterSpec(
-        "deerflow.models.patched_mimo:PatchedChatMiMo",
-        True,
-    ),
-    "patched_minimax": ProviderAdapterSpec(
-        "deerflow.models.patched_minimax:PatchedChatMiniMax",
-        True,
-    ),
     "patched_openai": ProviderAdapterSpec(
         "deerflow.models.patched_openai:PatchedChatOpenAI",
-        True,
-    ),
-    "patched_stepfun": ProviderAdapterSpec(
-        "deerflow.models.patched_stepfun:PatchedChatStepFun",
         True,
     ),
     "vllm": ProviderAdapterSpec(
@@ -339,20 +281,14 @@ def _validate_setting_field(key: str, value: object) -> object:
     if key == "base_url":
         return _validate_base_url(value)
     if key in {
-        "connect_timeout",
         "default_request_timeout",
-        "pool_timeout",
-        "read_timeout",
         "request_timeout",
         "stream_chunk_timeout",
         "timeout",
-        "write_timeout",
     }:
         return _validate_number(value, minimum=0.1, maximum=3_600)
     if key == "max_retries":
         return _validate_number(value, minimum=0, maximum=20, integer=True)
-    if key == "retry_max_attempts":
-        return _validate_number(value, minimum=1, maximum=20, integer=True)
     if key == "max_tokens":
         return _validate_number(
             value,
@@ -360,8 +296,6 @@ def _validate_setting_field(key: str, value: object) -> object:
             maximum=2_000_000,
             integer=True,
         )
-    if key == "prompt_cache_size":
-        return _validate_number(value, minimum=0, maximum=100, integer=True)
     if key == "temperature":
         return _validate_number(value, minimum=-2, maximum=2)
     if key == "reasoning_effort":
@@ -374,12 +308,7 @@ def _validate_setting_field(key: str, value: object) -> object:
         return _validate_thinking_transition(value, enabled=True)
     if key == "when_thinking_disabled":
         return _validate_thinking_transition(value, enabled=False)
-    if key in {
-        "auto_thinking_budget",
-        "cumulative_stream_usage",
-        "enable_prompt_caching",
-        "use_responses_api",
-    }:
+    if key in {"cumulative_stream_usage", "use_responses_api"}:
         if type(value) is not bool:
             raise ValueError
         return value
@@ -442,6 +371,12 @@ def provider_class_path(provider_adapter: str) -> str:
         raise ModelSettingsInvalid() from None
 
 
+def is_provider_adapter_supported(provider_adapter: object) -> bool:
+    """Return whether an adapter may be selected for current model work."""
+
+    return type(provider_adapter) is str and provider_adapter in PROVIDER_ADAPTERS
+
+
 def provider_credential_required(provider_adapter: str) -> bool:
     try:
         if type(provider_adapter) is not str:
@@ -480,7 +415,6 @@ def _validate_credential_group(
 def _validate_version_fields(
     *,
     display_name: object,
-    description: object,
     provider_adapter: object,
     provider_model: object,
     settings: object,
@@ -490,7 +424,6 @@ def _validate_version_fields(
     credential_id: object,
     credential_version_id: object,
     credential_env_key: object,
-    sort_order: object,
 ) -> dict[str, object]:
     try:
         if (
@@ -500,8 +433,6 @@ def _validate_version_fields(
             or type(supports_thinking) is not bool
             or type(supports_reasoning_effort) is not bool
             or type(supports_vision) is not bool
-            or type(sort_order) is not int
-            or not 0 <= sort_order <= _MAX_BIGINT
         ):
             raise ValueError
         normalized_credential = _validate_credential_group(
@@ -515,11 +446,6 @@ def _validate_version_fields(
             max_chars=120,
             required=True,
         )
-        description = _validate_public_text(
-            description,
-            max_chars=_MAX_DESCRIPTION_CHARS,
-            required=False,
-        )
         provider_model = _validate_public_text(
             provider_model,
             max_chars=255,
@@ -529,7 +455,6 @@ def _validate_version_fields(
             raise ValueError
         return {
             "display_name": display_name,
-            "description": description,
             "provider_adapter": provider_adapter,
             "provider_model": provider_model,
             "settings": validate_model_settings(
@@ -542,7 +467,6 @@ def _validate_version_fields(
             "credential_id": normalized_credential[0],
             "credential_version_id": normalized_credential[1],
             "credential_env_key": normalized_credential[2],
-            "sort_order": sort_order,
         }
     except (AttributeError, TypeError, ValueError):
         raise ModelSettingsInvalid() from None
@@ -554,12 +478,10 @@ def validate_create_system_model(
     try:
         if not isinstance(command, CreateSystemModel):
             raise ValueError
-        logical_name = command.logical_name.strip().lower()
-        if _LOGICAL_NAME.fullmatch(logical_name) is None or _has_secret_like_value(logical_name) or command.status not in {"active", "suspended"}:
+        if command.status not in {"active", "suspended"}:
             raise ValueError
         values = _validate_version_fields(
             display_name=command.display_name,
-            description=command.description,
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
             settings=command.settings,
@@ -569,11 +491,9 @@ def validate_create_system_model(
             credential_id=command.credential_id,
             credential_version_id=command.credential_version_id,
             credential_env_key=command.credential_env_key,
-            sort_order=command.sort_order,
         )
         return replace(
             command,
-            logical_name=logical_name,
             **values,
         )
     except (AttributeError, TypeError, ValueError):
@@ -590,7 +510,6 @@ def validate_update_system_model(
             command,
             **_validate_version_fields(
                 display_name=command.display_name,
-                description=command.description,
                 provider_adapter=command.provider_adapter,
                 provider_model=command.provider_model,
                 settings=command.settings,
@@ -600,7 +519,6 @@ def validate_update_system_model(
                 credential_id=command.credential_id,
                 credential_version_id=command.credential_version_id,
                 credential_env_key=command.credential_env_key,
-                sort_order=command.sort_order,
             ),
         )
     except (AttributeError, TypeError, ValueError):
@@ -617,23 +535,22 @@ def validate_system_model_connection_test(
             raise ValueError
         values = _validate_version_fields(
             display_name="Connection test",
-            description="",
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
             settings=command.settings,
             supports_thinking=False,
             supports_reasoning_effort=False,
-            supports_vision=False,
+            supports_vision=command.supports_vision,
             credential_id=command.credential_id,
             credential_version_id=command.credential_version_id,
             credential_env_key=command.credential_env_key,
-            sort_order=0,
         )
         return replace(
             command,
             provider_adapter=values["provider_adapter"],
             provider_model=values["provider_model"],
             settings=values["settings"],
+            supports_vision=values["supports_vision"],
             credential_id=values["credential_id"],
             credential_version_id=values["credential_version_id"],
             credential_env_key=values["credential_env_key"],
@@ -689,6 +606,7 @@ __all__ = [
     "PROVIDER_ADAPTERS",
     "ProviderAdapterSpec",
     "canonical_model_payload_checksum",
+    "is_provider_adapter_supported",
     "provider_class_path",
     "provider_credential_required",
     "validate_create_system_model",

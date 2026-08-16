@@ -16,6 +16,7 @@ from app.audit.models import (
     SystemAuditContext,
     is_issued_system_audit_context,
 )
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.errors import (
     SystemModelAdministrationRequired,
     SystemModelConflict,
@@ -43,6 +44,7 @@ from app.system_settings.repository import (
 from app.system_settings.validation import (
     ModelSettingsInvalid,
     canonical_model_payload_checksum,
+    is_provider_adapter_supported,
     validate_create_system_model,
     validate_system_model_connection_test,
     validate_update_system_model,
@@ -59,17 +61,17 @@ from deerflow.vision.compatibility import (
 )
 
 _PURPOSE = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
-_MODEL_REF = re.compile(
-    r"(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)\Z",
-)
 _CONFLICT_CONSTRAINTS = frozenset(
     {
         "pk_run_model_config_snapshots",
         "uq_system_model_config_versions_number",
-        "uq_system_model_configs_logical_name",
     }
 )
 _T = TypeVar("_T")
+
+
+def _is_admissible_model_ref(value: object) -> bool:
+    return type(value) is str and (value == DEFAULT_MODEL_REF or exact_model_ref(value) is not None)
 
 
 def _constraint_name(exc: BaseException) -> str | None:
@@ -128,13 +130,10 @@ def _model_view(
         raise SystemModelRepositoryInvariant
     return SystemModelView(
         id=uuid.UUID(str(row.id)),
-        logical_name=row.logical_name,
         display_name=row.display_name,
-        description=row.description,
         status=row.status,
         current_version_id=uuid.UUID(str(row.current_version_id)),
         revision=int(row.revision),
-        sort_order=int(row.sort_order),
         current_version=_version_view(version),
         created_by_user_id=row.created_by_user_id,
         updated_by_user_id=row.updated_by_user_id,
@@ -153,7 +152,7 @@ def _snapshot_view(
         thread_id=row.thread_id,
         run_id=row.run_id,
         purpose=row.purpose,
-        logical_name=row.logical_name,
+        model_ref=str(uuid.UUID(str(row.model_config_id))),
         provider_adapter=version.provider_adapter,
         provider_settings=dict(version.settings),
         model_config_id=uuid.UUID(str(row.model_config_id)),
@@ -272,23 +271,23 @@ class SystemModelCatalogService:
                 repository = SystemModelRepository(session)
                 state = await repository.catalog_state()
                 default_id = state.default_model_config_id
-                rows = await repository.list_models(active_only=True)
+                rows = tuple(
+                    (model, version)
+                    for model, version in await repository.list_models(
+                        active_only=True,
+                    )
+                    if is_provider_adapter_supported(version.provider_adapter)
+                )
                 rows = tuple(
                     sorted(
                         rows,
-                        key=lambda item: (
-                            item[0].id != default_id,
-                            item[0].sort_order,
-                            item[0].logical_name,
-                            item[0].id,
-                        ),
+                        key=lambda item: item[0].id != default_id,
                     ),
                 )
                 return tuple(
                     PublicSystemModelView(
-                        logical_name=model.logical_name,
+                        model_ref=str(uuid.UUID(str(model.id))),
                         display_name=model.display_name,
-                        description=model.description,
                         supports_thinking=version.supports_thinking,
                         supports_reasoning_effort=(version.supports_reasoning_effort),
                         supports_vision=version.supports_vision,
@@ -335,12 +334,9 @@ class SystemModelCatalogService:
             )
             model = SystemModelConfigRow(
                 id=model_id,
-                logical_name=command.logical_name,
                 display_name=command.display_name,
-                description=command.description,
                 status=command.status,
                 revision=1,
-                sort_order=command.sort_order,
                 created_by_user_id=str(actor.user_id),
                 updated_by_user_id=str(actor.user_id),
             )
@@ -466,8 +462,6 @@ class SystemModelCatalogService:
             )
             await repository.add_version(model, version)
             model.display_name = command.display_name
-            model.description = command.description
-            model.sort_order = command.sort_order
             model.revision += 1
             model.updated_by_user_id = str(actor.user_id)
             state.revision += 1
@@ -500,6 +494,10 @@ class SystemModelCatalogService:
             if model.revision != expected_revision or model.status == status:
                 raise SystemModelConflict(actor.request_id)
             version = await repository.current_version(model)
+            if status == "active" and not is_provider_adapter_supported(
+                version.provider_adapter,
+            ):
+                raise SystemModelInvalid(actor.request_id)
             model.status = status
             model.revision += 1
             model.updated_by_user_id = str(actor.user_id)
@@ -535,6 +533,9 @@ class SystemModelCatalogService:
             model = await repository.lock_model(model_config_id)
             if model is None or model.status != "active":
                 raise SystemModelNotFound(actor.request_id)
+            version = await repository.current_version(model)
+            if not is_provider_adapter_supported(version.provider_adapter):
+                raise SystemModelInvalid(actor.request_id)
             if state.default_model_config_id != model.id:
                 state.default_model_config_id = model.id
                 state.revision += 1
@@ -574,8 +575,7 @@ class SystemModelCatalogService:
             or not run_id
             or type(purpose) is not str
             or _PURPOSE.fullmatch(purpose) is None
-            or type(model_ref) is not str
-            or _MODEL_REF.fullmatch(model_ref) is None
+            or not _is_admissible_model_ref(model_ref)
         ):
             raise SystemModelInvalid(request_id)
         canonical_project_id = uuid.UUID(str(project_id))
@@ -585,7 +585,9 @@ class SystemModelCatalogService:
                 model_ref,
                 load_envelope=False,
             )
-            if material is None:
+            if material is None or not is_provider_adapter_supported(
+                material.version.provider_adapter,
+            ):
                 raise SystemModelNotFound(request_id)
             existing = await repository.existing_snapshot(
                 project_id=project_id,
@@ -597,7 +599,6 @@ class SystemModelCatalogService:
             if existing is not None:
                 if (
                     existing.thread_id != thread_id
-                    or existing.logical_name != material.model.logical_name
                     or existing.model_config_id != material.model.id
                     or existing.model_config_version_id != version.id
                     or existing.payload_checksum != version.payload_checksum
@@ -613,7 +614,6 @@ class SystemModelCatalogService:
                 thread_id=thread_id,
                 run_id=run_id,
                 purpose=purpose,
-                logical_name=material.model.logical_name,
                 model_config_id=material.model.id,
                 model_config_version_id=version.id,
                 payload_checksum=version.payload_checksum,

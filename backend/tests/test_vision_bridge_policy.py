@@ -32,6 +32,8 @@ from deerflow.vision.compatibility import (
     resolve_vision_bridge_protocol,
 )
 
+VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
+
 
 def _app_config() -> AppConfig:
     return AppConfig(
@@ -61,6 +63,16 @@ def test_fresh_install_policy_selects_the_existing_luna_model() -> None:
 
     assert isinstance(policy, AgentRuntimePolicyValue)
     assert policy.vision_bridge.model_name == DEFAULT_VISION_BRIDGE_MODEL_NAME
+
+
+def test_policy_accepts_canonical_uuid_refs_and_rejects_legacy_names() -> None:
+    uuid_v7_ref = "01890f4e-7b6d-7000-8000-000000000001"
+
+    assert VisionBridgePolicy(model_name=uuid_v7_ref).model_name == uuid_v7_ref
+    with pytest.raises(ValueError):
+        VisionBridgePolicy(model_name="gpt-5.6-luna")
+    with pytest.raises(ValueError):
+        VisionBridgePolicy(model_name=uuid_v7_ref.upper())
 
 
 @pytest.mark.parametrize("field", ["enabled", "project_egress_grant"])
@@ -123,14 +135,14 @@ def test_runtime_overlay_materializes_bridge_but_yaml_rejects_it() -> None:
     runtime = _app_config().with_runtime_policy(
         {
             "vision_bridge": {
-                "model_name": "vision-small-v1",
+                "model_name": VISION_MODEL_REF,
                 "timeout_seconds": 25,
                 "contract_version": VISION_BRIDGE_CONTRACT_V1,
             }
         }
     )
 
-    assert runtime.vision_bridge.model_name == "vision-small-v1"
+    assert runtime.vision_bridge.model_name == VISION_MODEL_REF
     assert runtime.vision_bridge.timeout_seconds == 25
     with pytest.raises(ValueError, match="LEGACY_CONFIG_REMOVED"):
         AppConfig.model_validate(
@@ -138,7 +150,7 @@ def test_runtime_overlay_materializes_bridge_but_yaml_rejects_it() -> None:
                 "sandbox": {
                     "use": "deerflow.sandbox.local:LocalSandboxProvider",
                 },
-                "vision_bridge": {"model_name": "vision-small-v1"},
+                "vision_bridge": {"model_name": VISION_MODEL_REF},
             },
             context={"config_source": "yaml"},
         )

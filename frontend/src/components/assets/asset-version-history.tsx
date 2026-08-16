@@ -10,6 +10,7 @@ import {
 } from "@/components/projects/assets/mcp-approval-dialog";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { useModels } from "@/core/models/hooks";
 import type {
   AssetListKind,
   AssetScope,
@@ -89,6 +90,7 @@ export function AssetVersionHistory({
   onRetryApprovalCredentials?: () => void;
 }) {
   const { locale, t } = useI18n();
+  const { models } = useModels({ enabled: kind === "agents" });
   const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
     null,
   );
@@ -216,6 +218,7 @@ export function AssetVersionHistory({
               <AssetVersionDiff
                 previous={isMcp ? null : (displayedVersions[index + 1] ?? null)}
                 current={version}
+                models={models}
               />
             </div>
           );

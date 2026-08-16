@@ -22,9 +22,8 @@ This middleware runs in wrap_model_call — before the handler flattens the two
 conversation state (checkpoint) is unchanged, so middleware that scans history
 by marker (e.g. is_dynamic_context_reminder) keeps working.
 
-Note: Mirrors the per-request coalescing already done for Claude in
-claude_provider._coalesce_system_messages but at a provider-agnostic layer so
-every backend benefits from a single fix instead of per-provider patches.
+Keeping this behavior at the provider-agnostic middleware layer lets every
+backend share one implementation instead of accumulating provider patches.
 """
 
 from collections.abc import Awaitable, Callable

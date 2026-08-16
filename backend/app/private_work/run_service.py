@@ -32,6 +32,12 @@ from app.private_work.execution_approval_lifecycle import (
     cancel_locked_execution_approval_continuation,
     lock_execution_approval_private_rows,
     reconcile_locked_execution_approval,
+    reject_sealed_staged_approval_terminalization,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    settle_continuation_output_delivery,
+    transition_output_delivery_obligation_for_approval_terminal,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
 from app.private_work.run_repository import (
@@ -275,6 +281,22 @@ class PrivateRunService:
     ) -> None:
         if row.status not in EXECUTION_APPROVAL_ACTIVE_STATUSES:
             return
+        try:
+            await reject_sealed_staged_approval_terminalization(
+                session,
+                row,
+            )
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status="cancelled",
+                now=now,
+            )
+        except (
+            ExecutionApprovalPrivateLifecycleConflict,
+            OutputDeliveryObligationConflict,
+        ):
+            raise PrivateRunConflict from None
         row.status = "cancelled"
         row.version += 1
         row.terminal_at = now
@@ -593,13 +615,68 @@ class PrivateRunService:
                     raise PrivateWorkNotFound(context.request_id)
                 if record.job_id is None:
                     raise PrivateWorkConflict(context.request_id)
+
+                # Freeze every approval dependency behind the target Job/Run
+                # before requesting cancellation.  This keeps public cancel on
+                # the same Job -> Run -> approval -> obligation lock order as
+                # Worker claim/completion, so an approved continuation cannot
+                # launch between the Run cancellation and approval convergence.
+                try:
+                    locked_approvals = await lock_execution_approval_private_rows(
+                        session,
+                        project_id=context.project_id,
+                        owner_user_id=str(context.user_id),
+                        thread_id=thread_id,
+                        related_run_id=run_id,
+                        extra_run_dependencies=(
+                            ApprovalRunDependency(
+                                owner_user_id=str(context.user_id),
+                                thread_id=thread_id,
+                                run_id=run_id,
+                                job_id=record.job_id,
+                            ),
+                        ),
+                    )
+                except ExecutionApprovalPrivateLifecycleConflict:
+                    raise PrivateRunConflict from None
+                cancelled_at = await session.scalar(
+                    sa.select(sa.func.clock_timestamp()),
+                )
+                if not isinstance(cancelled_at, datetime) or cancelled_at.tzinfo is None:
+                    raise PrivateRunConflict
+                cancelled_at = cancelled_at.astimezone(UTC)
                 cancel_result = await repository.request_cancel(
                     scope=context.resource_scope,
                     thread_id=thread_id,
                     run_id=run_id,
                     job_id=record.job_id,
                     reason=reason,
+                    now=cancelled_at,
                 )
+                for approval in locked_approvals.rows:
+                    if approval.status in {"staged", "pending", "approved"}:
+                        await self._cancel_execution_approval(
+                            session,
+                            context,
+                            approval,
+                            now=cancelled_at,
+                        )
+                        continue
+                    if approval.status in {"finished", "launch_failed"} and approval.continuation_run_id == run_id and approval.continuation_job_id == record.job_id:
+                        try:
+                            await settle_continuation_output_delivery(
+                                session,
+                                approval_id_value=str(approval.id),
+                                project_id=context.project_id,
+                                owner_user_id=str(context.user_id),
+                                thread_id=thread_id,
+                                continuation_run_id=run_id,
+                                continuation_job_id=record.job_id,
+                                settled_status="interrupted",
+                                now=cancelled_at,
+                            )
+                        except OutputDeliveryObligationConflict:
+                            raise PrivateRunConflict from None
                 if cancel_result != "terminal":
                     await self._audit.run_cancel_requested(
                         session,

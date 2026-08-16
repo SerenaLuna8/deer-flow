@@ -16,6 +16,15 @@ from app.private_work.execution_approval_audit import (
     HostExecutionApprovalAuditPort,
     NoopHostExecutionApprovalAudit,
 )
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    settle_continuation_output_delivery,
+    transition_output_delivery_obligation_for_approval_terminal,
+)
+from app.private_work.run_metadata import (
+    RunHostExecutionSuspensionInvalid,
+    run_host_execution_suspension,
+)
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
@@ -31,6 +40,68 @@ CLAIMED_EXECUTION_SETTLEMENT_GRACE_SECONDS = 30
 
 class ExecutionApprovalPrivateLifecycleConflict(RuntimeError):
     """Approval dependency coordinates changed or are internally incomplete."""
+
+
+def staged_approval_has_exact_suspension_marker(
+    approval: ExecutionApprovalRequestRow,
+    source_run: RunRow,
+) -> bool:
+    """Return whether a staged approval owns this Run's durable success proof.
+
+    Presence with any other coordinate is corruption, not absence.  Callers
+    must fail their whole transaction rather than using a mismatched marker to
+    cancel, expire, or otherwise terminalize a different approval.
+    """
+
+    try:
+        marker = run_host_execution_suspension(source_run.metadata_json)
+    except RunHostExecutionSuspensionInvalid:
+        raise ExecutionApprovalPrivateLifecycleConflict() from None
+    if marker is None:
+        return False
+    try:
+        exact = (
+            approval.status == "staged"
+            and marker.approval_id == uuid.UUID(str(approval.id))
+            and marker.source_job_id == uuid.UUID(str(approval.source_job_id))
+            and marker.producing_attempt_id == uuid.UUID(str(approval.source_job_attempt_id))
+            and uuid.UUID(str(source_run.project_id)) == uuid.UUID(str(approval.project_id))
+            and source_run.owner_user_id == approval.owner_user_id
+            and source_run.thread_id == approval.thread_id
+            and source_run.run_id == approval.source_run_id
+            and uuid.UUID(str(source_run.job_id)) == uuid.UUID(str(approval.source_job_id))
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise ExecutionApprovalPrivateLifecycleConflict() from None
+    if not exact:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    return True
+
+
+async def reject_sealed_staged_approval_terminalization(
+    session: AsyncSession,
+    approval: ExecutionApprovalRequestRow,
+) -> None:
+    """Fail a cleanup transaction that would erase a sealed source success."""
+
+    if approval.status != "staged":
+        return
+    source_run = await session.scalar(
+        sa.select(RunRow)
+        .where(
+            RunRow.project_id == approval.project_id,
+            RunRow.owner_user_id == approval.owner_user_id,
+            RunRow.thread_id == approval.thread_id,
+            RunRow.run_id == approval.source_run_id,
+            RunRow.job_id == approval.source_job_id,
+        )
+        .with_for_update(of=RunRow)
+        .execution_options(populate_existing=True)
+    )
+    if source_run is None:
+        raise ExecutionApprovalPrivateLifecycleConflict()
+    if staged_approval_has_exact_suspension_marker(approval, source_run):
+        raise ExecutionApprovalPrivateLifecycleConflict()
 
 
 class ExecutionApprovalContinuationQuotaPort(Protocol):
@@ -421,6 +492,15 @@ async def reconcile_locked_execution_approval(
     approval_audit = audit or NoopHostExecutionApprovalAudit()
     if row.status in {"pending", "approved"} and row.expires_at <= now:
         _terminalize(row, status="expired", now=now)
+        try:
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status="expired",
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise ExecutionApprovalPrivateLifecycleConflict() from None
         await approval_audit.host_execution_approval_terminal(
             session,
             project_id=row.project_id,
@@ -454,6 +534,11 @@ async def reconcile_locked_execution_approval(
                 JobAttemptRow.job_id == row.source_job_id,
             )
         )
+        if source_run is not None and staged_approval_has_exact_suspension_marker(row, source_run):
+            # Checkpoint-safe success already won this race.  A lease timeout
+            # may trigger takeover, but cannot turn the sealed source result
+            # into cancellation before that attempt repairs the terminal.
+            return
         if not _has_live_execution_lease(
             source_job,
             source_run,
@@ -461,6 +546,15 @@ async def reconcile_locked_execution_approval(
             now=now,
         ):
             _terminalize(row, status="cancelled", now=now)
+            try:
+                await transition_output_delivery_obligation_for_approval_terminal(
+                    session,
+                    approval=row,
+                    approval_status="cancelled",
+                    now=now,
+                )
+            except OutputDeliveryObligationConflict:
+                raise ExecutionApprovalPrivateLifecycleConflict() from None
             await approval_audit.host_execution_approval_terminal(
                 session,
                 project_id=row.project_id,
@@ -515,6 +609,15 @@ async def reconcile_locked_execution_approval(
             now=now,
         ):
             _terminalize(row, status="cancelled", now=now)
+            try:
+                await transition_output_delivery_obligation_for_approval_terminal(
+                    session,
+                    approval=row,
+                    approval_status="cancelled",
+                    now=now,
+                )
+            except OutputDeliveryObligationConflict:
+                raise ExecutionApprovalPrivateLifecycleConflict() from None
             await approval_audit.host_execution_approval_terminal(
                 session,
                 project_id=row.project_id,
@@ -546,6 +649,15 @@ async def reconcile_locked_execution_approval(
         # Completion commits the receipt and terminal approval state together.
         # A partial pair or an incomplete claim is therefore ambiguous.
         _terminalize(row, status="unknown", now=now)
+        try:
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status="unknown",
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise ExecutionApprovalPrivateLifecycleConflict() from None
         await approval_audit.host_execution_approval_terminal(
             session,
             project_id=row.project_id,
@@ -581,6 +693,15 @@ async def reconcile_locked_execution_approval(
     )
     if not _has_live_execution_lease(job, run, attempt, now=now):
         _terminalize(row, status="unknown", now=now)
+        try:
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status="unknown",
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise ExecutionApprovalPrivateLifecycleConflict() from None
         await approval_audit.host_execution_approval_terminal(
             session,
             project_id=row.project_id,
@@ -694,6 +815,7 @@ async def converge_execution_approvals_for_terminal_job(
     owner_user_id: str,
     run_id: str,
     job_id: uuid.UUID,
+    terminal_job_status: Literal["cancelled", "dead"],
     now: datetime,
     request_id: str | None = None,
     audit: HostExecutionApprovalAuditPort | None = None,
@@ -715,7 +837,14 @@ async def converge_execution_approvals_for_terminal_job(
                     sa.and_(
                         ExecutionApprovalRequestRow.continuation_run_id == run_id,
                         ExecutionApprovalRequestRow.continuation_job_id == job_id,
-                        ExecutionApprovalRequestRow.status.in_(("approved", "claimed")),
+                        ExecutionApprovalRequestRow.status.in_(
+                            (
+                                "approved",
+                                "claimed",
+                                "finished",
+                                "launch_failed",
+                            )
+                        ),
                     ),
                 ),
             )
@@ -725,12 +854,57 @@ async def converge_execution_approvals_for_terminal_job(
     ).all()
     approval_audit = audit or NoopHostExecutionApprovalAudit()
     for row in rows:
+        if row.status == "staged":
+            source_run = await session.scalar(
+                sa.select(RunRow)
+                .where(
+                    RunRow.project_id == row.project_id,
+                    RunRow.owner_user_id == row.owner_user_id,
+                    RunRow.thread_id == row.thread_id,
+                    RunRow.run_id == row.source_run_id,
+                    RunRow.job_id == row.source_job_id,
+                )
+                .with_for_update(of=RunRow)
+                .execution_options(populate_existing=True)
+            )
+            if source_run is None:
+                raise ExecutionApprovalPrivateLifecycleConflict()
+            if staged_approval_has_exact_suspension_marker(row, source_run):
+                # A terminal Job callback cannot erase a success proof that
+                # committed first.  Roll back terminalization so a takeover
+                # can settle the source and repair its stream atomically.
+                raise ExecutionApprovalPrivateLifecycleConflict()
+        if row.status in {"finished", "launch_failed"}:
+            try:
+                await settle_continuation_output_delivery(
+                    session,
+                    approval_id_value=str(row.id),
+                    project_id=project_id,
+                    owner_user_id=owner_user_id,
+                    thread_id=row.thread_id,
+                    continuation_run_id=run_id,
+                    continuation_job_id=job_id,
+                    settled_status=("interrupted" if terminal_job_status == "cancelled" else "error"),
+                    now=now,
+                )
+            except OutputDeliveryObligationConflict:
+                raise ExecutionApprovalPrivateLifecycleConflict() from None
+            continue
         # Before a claim, no process launch is possible.  After a claim, a
         # dead/cancelled Job cannot prove whether the host process launched.
         if row.status == "claimed" and now < claimed_execution_absolute_deadline(row):
             continue
         status = "unknown" if row.status == "claimed" else "cancelled"
         _terminalize(row, status=status, now=now)
+        try:
+            await transition_output_delivery_obligation_for_approval_terminal(
+                session,
+                approval=row,
+                approval_status=status,
+                now=now,
+            )
+        except OutputDeliveryObligationConflict:
+            raise ExecutionApprovalPrivateLifecycleConflict() from None
         await approval_audit.host_execution_approval_terminal(
             session,
             project_id=row.project_id,
@@ -754,4 +928,6 @@ __all__ = [
     "lock_and_reconcile_active_execution_approval",
     "reconcile_locked_execution_approval",
     "reconcile_locked_execution_approval_and_continuation",
+    "reject_sealed_staged_approval_terminalization",
+    "staged_approval_has_exact_suspension_marker",
 ]

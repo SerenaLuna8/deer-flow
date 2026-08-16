@@ -16,10 +16,8 @@ from sqlalchemy import (
     Index,
     SmallInteger,
     String,
-    Text,
     UniqueConstraint,
     Uuid,
-    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -89,7 +87,7 @@ class SystemModelCatalogStateRow(Base):
 
 
 class SystemModelConfigRow(Base):
-    """Mutable logical identity and current immutable-version pointer."""
+    """Stable model identity, display metadata, and current version pointer."""
 
     __tablename__ = "system_model_configs"
 
@@ -98,14 +96,7 @@ class SystemModelConfigRow(Base):
         primary_key=True,
         default=uuid.uuid4,
     )
-    logical_name: Mapped[str] = mapped_column(String(128), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
-    description: Mapped[str] = mapped_column(
-        Text,
-        nullable=False,
-        default="",
-        server_default=text("''"),
-    )
     status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -121,12 +112,6 @@ class SystemModelConfigRow(Base):
         nullable=False,
         default=1,
         server_default=text("1"),
-    )
-    sort_order: Mapped[int] = mapped_column(
-        BigInteger,
-        nullable=False,
-        default=0,
-        server_default=text("0"),
     )
     created_by_user_id: Mapped[str] = mapped_column(
         String(36),
@@ -161,10 +146,6 @@ class SystemModelConfigRow(Base):
             "revision >= 1",
             name="ck_system_model_configs_revision",
         ),
-        CheckConstraint(
-            "sort_order >= 0",
-            name="ck_system_model_configs_sort_order",
-        ),
         UniqueConstraint(
             "id",
             "current_version_id",
@@ -181,15 +162,10 @@ class SystemModelConfigRow(Base):
             use_alter=True,
         ),
         Index(
-            "uq_system_model_configs_logical_name",
-            func.lower(logical_name),
-            unique=True,
-        ),
-        Index(
-            "ix_system_model_configs_status_order",
+            "ix_system_model_configs_status_created",
             status,
-            sort_order,
-            id,
+            created_at.desc(),
+            id.desc(),
         ),
     )
 
@@ -343,7 +319,6 @@ class RunModelConfigSnapshotRow(Base):
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     purpose: Mapped[str] = mapped_column(String(64), primary_key=True)
-    logical_name: Mapped[str] = mapped_column(String(128), nullable=False)
     model_config_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     model_config_version_id: Mapped[uuid.UUID] = mapped_column(
         Uuid,

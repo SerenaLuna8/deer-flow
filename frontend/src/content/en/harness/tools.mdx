@@ -179,7 +179,7 @@ tools:
   - use: deerflow.community.groundroute.tools:web_search_tool
     api_key: $GROUNDROUTE_API_KEY
 ```
-GroundRoute is a meta search layer: one API in front of six engines (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). Routes each query to the cheapest engine that clears a quality bar and fails over if one is down. Pricing is gain-share, you keep about half of any cache savings.
+GroundRoute is a meta search layer: one API in front of six engines (Serper, Brave, Exa, Tavily, Firecrawl, Perplexity). It routes across eligible engines and fails over if one is down.
 
 Requires a [GroundRoute](https://groundroute.ai) API key. Also supports `web_fetch`.
 

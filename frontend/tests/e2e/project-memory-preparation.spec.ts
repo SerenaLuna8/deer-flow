@@ -7,6 +7,7 @@ const ACCOUNT_ID = "90000000-0000-4000-8000-000000000001";
 const PROJECT_ID = "10000000-0000-4000-8000-000000000001";
 const THREAD_ID = "20000000-0000-4000-8000-000000000001";
 const AGENT_ID = "30000000-0000-4000-8000-000000000001";
+const MODEL_ID = "30000000-0000-4000-8000-000000000002";
 const FIRST_PREPARATION_JOB_ID = "40000000-0000-4000-8000-000000000001";
 const SECOND_PREPARATION_JOB_ID = "40000000-0000-4000-8000-000000000002";
 const DREAM_JOB_ID = "50000000-0000-4000-8000-000000000001";
@@ -138,10 +139,9 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
       return json(route, {
         models: [
           {
-            name: "mock-model",
-            model: "mock-model",
+            name: MODEL_ID,
+            model: MODEL_ID,
             display_name: "Mock model",
-            description: "Deterministic browser-test model",
             supports_thinking: false,
             supports_reasoning_effort: false,
             supports_vision: false,

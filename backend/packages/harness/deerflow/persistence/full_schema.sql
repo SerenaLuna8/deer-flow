@@ -1264,6 +1264,7 @@ CREATE TABLE execution_approval_requests (
     terminal_at TIMESTAMP WITH TIME ZONE,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    spawn_authorized_at TIMESTAMP WITH TIME ZONE,
     PRIMARY KEY (id),
     CONSTRAINT uq_execution_approval_requests_private_scope UNIQUE (id, project_id, owner_user_id, thread_id),
     CONSTRAINT uq_execution_approval_requests_source_tool UNIQUE (project_id, owner_user_id, source_run_id, tool_call_id),
@@ -1291,6 +1292,7 @@ CREATE TABLE execution_approval_requests (
     CONSTRAINT ck_execution_approval_requests_status_decision CHECK ((status IN ('staged', 'pending') AND decision IS NULL) OR (status = 'denied' AND decision = 'deny') OR (status IN ('approved', 'claimed', 'finished', 'launch_failed', 'unknown') AND decision = 'allow_once') OR (status = 'expired' AND (decision IS NULL OR decision = 'allow_once')) OR (status = 'cancelled' AND (decision IS NULL OR decision = 'allow_once'))),
     CONSTRAINT ck_execution_approval_requests_execution_shape CHECK ((continuation_run_id IS NULL) = (continuation_job_id IS NULL) AND (execution_job_attempt_id IS NULL) = (claimed_at IS NULL) AND (execution_job_attempt_id IS NULL OR continuation_job_id IS NOT NULL) AND (status IN ('staged', 'pending', 'denied') AND continuation_job_id IS NULL AND execution_job_attempt_id IS NULL OR status = 'approved' AND execution_job_attempt_id IS NULL OR status IN ('claimed', 'finished', 'launch_failed', 'unknown') AND continuation_job_id IS NOT NULL AND execution_job_attempt_id IS NOT NULL OR status = 'expired' AND execution_job_attempt_id IS NULL OR status = 'cancelled')),
     CONSTRAINT ck_execution_approval_requests_terminal_shape CHECK ((status IN ('staged', 'pending', 'approved', 'claimed') AND terminal_at IS NULL) OR (status IN ('finished', 'launch_failed', 'unknown', 'denied', 'expired', 'cancelled') AND terminal_at IS NOT NULL)),
+    CONSTRAINT ck_execution_approval_requests_spawn_authorization CHECK ((status != 'finished' OR spawn_authorized_at IS NOT NULL) AND (spawn_authorized_at IS NULL OR (status IN ('claimed', 'finished', 'launch_failed', 'unknown', 'cancelled') AND execution_job_attempt_id IS NOT NULL AND claimed_at IS NOT NULL AND spawn_authorized_at >= claimed_at AND (terminal_at IS NULL OR spawn_authorized_at <= terminal_at)))),
     CONSTRAINT ck_execution_approval_requests_timestamps CHECK (expires_at > created_at AND updated_at >= created_at AND (decided_at IS NULL OR decided_at >= created_at) AND (claimed_at IS NULL OR claimed_at >= created_at) AND (terminal_at IS NULL OR terminal_at >= created_at))
 );
 
@@ -1713,6 +1715,67 @@ CREATE TABLE artifacts (
 );
 
 CREATE INDEX ix_artifacts_private_active ON artifacts (project_id, owner_user_id, thread_id, created_at) WHERE deleted_at IS NULL;
+
+CREATE TABLE execution_approval_output_delivery_obligations (
+    approval_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    mode VARCHAR(16) DEFAULT 'any_one' NOT NULL,
+    status VARCHAR(24) DEFAULT 'deferred' NOT NULL,
+    continuation_run_id VARCHAR(64),
+    continuation_job_id UUID,
+    intent_tool_call_id VARCHAR(128),
+    intent_digest CHAR(64),
+    intent_private_json JSON,
+    satisfied_artifact_id UUID,
+    version BIGINT DEFAULT 1 NOT NULL,
+    assigned_at TIMESTAMP WITH TIME ZONE,
+    intent_recorded_at TIMESTAMP WITH TIME ZONE,
+    terminal_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (approval_id),
+    CONSTRAINT uq_ea_output_delivery_obligations_private_scope UNIQUE (approval_id, project_id, owner_user_id, thread_id),
+    CONSTRAINT fk_ea_output_delivery_obligations_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ea_output_delivery_obligations_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ea_output_delivery_obligations_membership FOREIGN KEY(project_id, owner_user_id) REFERENCES project_memberships (project_id, user_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ea_output_delivery_obligations_private_thread FOREIGN KEY(project_id, owner_user_id, thread_id) REFERENCES threads_meta (project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_ea_output_delivery_obligations_approval FOREIGN KEY(approval_id, project_id, owner_user_id, thread_id) REFERENCES execution_approval_requests (id, project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_ea_output_delivery_obligations_continuation_run FOREIGN KEY(project_id, owner_user_id, thread_id, continuation_run_id) REFERENCES runs (project_id, owner_user_id, thread_id, run_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ea_output_delivery_obligations_continuation_job FOREIGN KEY(continuation_job_id, project_id, owner_user_id, continuation_run_id) REFERENCES jobs (id, project_id, owner_user_id, run_id) ON DELETE RESTRICT,
+    CONSTRAINT fk_ea_output_delivery_obligations_satisfied_artifact FOREIGN KEY(project_id, owner_user_id, thread_id, continuation_run_id, satisfied_artifact_id) REFERENCES artifacts (project_id, owner_user_id, thread_id, run_id, id) ON DELETE RESTRICT,
+    CONSTRAINT ck_ea_output_delivery_obligations_mode CHECK (mode IN ('any_one')),
+    CONSTRAINT ck_ea_output_delivery_obligations_status CHECK (status IN ('deferred', 'assigned', 'intent_recorded', 'delivered', 'cancelled', 'blocked_unknown', 'failed')),
+    CONSTRAINT ck_ea_output_delivery_obligations_assignment_shape CHECK ((continuation_run_id IS NULL) = (continuation_job_id IS NULL) AND (continuation_run_id IS NULL) = (assigned_at IS NULL)),
+    CONSTRAINT ck_ea_output_delivery_obligations_intent_shape CHECK ((intent_tool_call_id IS NULL AND intent_digest IS NULL AND intent_private_json IS NULL AND intent_recorded_at IS NULL) OR (intent_tool_call_id IS NOT NULL AND intent_tool_call_id <> '' AND intent_tool_call_id = btrim(intent_tool_call_id) AND intent_digest ~ '^[0-9a-f]{64}$' AND json_typeof(intent_private_json) = 'object' AND octet_length(intent_private_json::text) <= 1048576 AND intent_recorded_at IS NOT NULL)),
+    CONSTRAINT ck_ea_output_delivery_obligations_lifecycle_shape CHECK ((status = 'deferred' AND continuation_run_id IS NULL AND intent_tool_call_id IS NULL AND satisfied_artifact_id IS NULL AND terminal_at IS NULL) OR (status = 'assigned' AND continuation_run_id IS NOT NULL AND intent_tool_call_id IS NULL AND satisfied_artifact_id IS NULL AND terminal_at IS NULL) OR (status = 'intent_recorded' AND continuation_run_id IS NOT NULL AND intent_tool_call_id IS NOT NULL AND satisfied_artifact_id IS NULL AND terminal_at IS NULL) OR (status = 'delivered' AND continuation_run_id IS NOT NULL AND intent_tool_call_id IS NOT NULL AND satisfied_artifact_id IS NOT NULL AND terminal_at IS NOT NULL) OR (status = 'cancelled' AND satisfied_artifact_id IS NULL AND terminal_at IS NOT NULL) OR (status IN ('blocked_unknown', 'failed') AND continuation_run_id IS NOT NULL AND satisfied_artifact_id IS NULL AND terminal_at IS NOT NULL)),
+    CONSTRAINT ck_ea_output_delivery_obligations_version CHECK (version >= 1),
+    CONSTRAINT ck_ea_output_delivery_obligations_timestamps CHECK (updated_at >= created_at AND (assigned_at IS NULL OR assigned_at >= created_at) AND (intent_recorded_at IS NULL OR intent_recorded_at >= assigned_at) AND (terminal_at IS NULL OR terminal_at >= COALESCE(intent_recorded_at, assigned_at, created_at)))
+);
+
+CREATE INDEX ix_ea_output_delivery_obligations_private_status ON execution_approval_output_delivery_obligations (project_id, owner_user_id, thread_id, status, updated_at);
+
+CREATE TABLE execution_approval_output_delivery_candidates (
+    approval_id UUID NOT NULL,
+    file_id UUID NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    thread_id VARCHAR(64) NOT NULL,
+    logical_path VARCHAR(1024) NOT NULL,
+    file_version BIGINT NOT NULL,
+    sha256 CHAR(64) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (approval_id, file_id),
+    CONSTRAINT uq_ea_output_delivery_candidates_path UNIQUE (approval_id, logical_path),
+    CONSTRAINT fk_ea_output_delivery_candidates_obligation FOREIGN KEY(approval_id, project_id, owner_user_id, thread_id) REFERENCES execution_approval_output_delivery_obligations (approval_id, project_id, owner_user_id, thread_id) ON DELETE CASCADE,
+    CONSTRAINT fk_ea_output_delivery_candidates_private_file FOREIGN KEY(project_id, owner_user_id, thread_id, file_id) REFERENCES files (project_id, owner_user_id, thread_id, id) ON DELETE RESTRICT,
+    CONSTRAINT ck_ea_output_delivery_candidates_path CHECK (logical_path LIKE 'outputs/%' AND logical_path <> 'outputs/' AND logical_path !~ '(^|/)\.\.(/|$)' AND logical_path !~ '^[A-Za-z]:'),
+    CONSTRAINT ck_ea_output_delivery_candidates_version CHECK (file_version >= 1),
+    CONSTRAINT ck_ea_output_delivery_candidates_sha256 CHECK (sha256 ~ '^[0-9a-f]{64}$')
+);
+
+CREATE INDEX ix_ea_output_delivery_candidates_private ON execution_approval_output_delivery_candidates (project_id, owner_user_id, thread_id, approval_id);
 
 CREATE TABLE credential_grants (
     id UUID NOT NULL,
@@ -2865,13 +2928,10 @@ CREATE TABLE system_model_catalog_state (
 
 CREATE TABLE system_model_configs (
     id UUID NOT NULL,
-    logical_name VARCHAR(128) NOT NULL,
     display_name VARCHAR(120) NOT NULL,
-    description TEXT DEFAULT '' NOT NULL,
     status VARCHAR(16) DEFAULT 'suspended' NOT NULL,
     current_version_id UUID,
     revision BIGINT DEFAULT 1 NOT NULL,
-    sort_order BIGINT DEFAULT 0 NOT NULL,
     created_by_user_id VARCHAR(36) NOT NULL,
     updated_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -2879,15 +2939,12 @@ CREATE TABLE system_model_configs (
     PRIMARY KEY (id),
     CONSTRAINT ck_system_model_configs_status CHECK (status IN ('active', 'suspended')),
     CONSTRAINT ck_system_model_configs_revision CHECK (revision >= 1),
-    CONSTRAINT ck_system_model_configs_sort_order CHECK (sort_order >= 0),
     CONSTRAINT uq_system_model_configs_id_current_version UNIQUE (id, current_version_id),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     FOREIGN KEY(updated_by_user_id) REFERENCES users (id) ON DELETE RESTRICT
 );
 
-CREATE INDEX ix_system_model_configs_status_order ON system_model_configs (status, sort_order, id);
-
-CREATE UNIQUE INDEX uq_system_model_configs_logical_name ON system_model_configs (lower(logical_name));
+CREATE INDEX ix_system_model_configs_status_created ON system_model_configs (status, created_at DESC, id DESC);
 
 CREATE TABLE system_model_config_versions (
     id UUID NOT NULL,
@@ -2934,7 +2991,6 @@ CREATE TABLE run_model_config_snapshots (
     thread_id VARCHAR(64) NOT NULL,
     run_id VARCHAR(64) NOT NULL,
     purpose VARCHAR(64) NOT NULL,
-    logical_name VARCHAR(128) NOT NULL,
     model_config_id UUID NOT NULL,
     model_config_version_id UUID NOT NULL,
     payload_checksum CHAR(64) NOT NULL,
@@ -3418,7 +3474,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 87 static tables and 1080 columns.
+-- Coverage: 89 static tables and 1104 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -4102,6 +4158,7 @@ COMMENT ON COLUMN execution_approval_requests.expires_at IS '执行审批请求�
 COMMENT ON COLUMN execution_approval_requests.terminal_at IS '执行审批请求：审批请求进入终态的时间。';
 COMMENT ON COLUMN execution_approval_requests.created_at IS '执行审批请求：记录创建时间。';
 COMMENT ON COLUMN execution_approval_requests.updated_at IS '执行审批请求：记录最近更新时间。';
+COMMENT ON COLUMN execution_approval_requests.spawn_authorized_at IS '执行审批请求：一次性进程创建授权提交时间。';
 
 COMMENT ON TABLE execution_approval_result_receipts IS '保存一次已审批本机命令的有界私有执行结果。';
 COMMENT ON COLUMN execution_approval_result_receipts.id IS '执行审批结果回执：主键标识。';
@@ -4321,6 +4378,37 @@ COMMENT ON COLUMN artifacts.artifact_metadata IS '运行制品：制品的结构
 COMMENT ON COLUMN artifacts.created_at IS '运行制品：记录创建时间。';
 COMMENT ON COLUMN artifacts.deleted_at IS '运行制品：记录删除时间。';
 
+COMMENT ON TABLE execution_approval_output_delivery_obligations IS '保存审批暂停后必须由续接运行完成的私有输出交付义务。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.approval_id IS '审批输出交付义务：执行审批请求标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.project_id IS '审批输出交付义务：所属项目标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.owner_user_id IS '审批输出交付义务：私有数据所有者的用户标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.thread_id IS '审批输出交付义务：线程标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.mode IS '审批输出交付义务：履约模式。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.status IS '审批输出交付义务：生命周期状态。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.continuation_run_id IS '审批输出交付义务：审批通过后续接运行的标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.continuation_job_id IS '审批输出交付义务：审批通过后续接任务的标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.intent_tool_call_id IS '审批输出交付义务：记录输出交付意图的工具调用标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.intent_digest IS '审批输出交付义务：规范化私有输出交付意图的内容摘要。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.intent_private_json IS '审批输出交付义务：仅限授权边界读取的规范化输出交付意图 JSON（最多 1 MiB）。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.satisfied_artifact_id IS '审批输出交付义务：满足输出交付义务的运行制品标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.version IS '审批输出交付义务：记录版本号。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.assigned_at IS '审批输出交付义务：输出交付义务分配给续接运行的时间。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.intent_recorded_at IS '审批输出交付义务：输出交付意图持久化的时间。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.terminal_at IS '审批输出交付义务：输出交付义务进入终态的时间。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.created_at IS '审批输出交付义务：记录创建时间。';
+COMMENT ON COLUMN execution_approval_output_delivery_obligations.updated_at IS '审批输出交付义务：记录最近更新时间。';
+
+COMMENT ON TABLE execution_approval_output_delivery_candidates IS '冻结可满足审批输出交付义务的私有文件身份与版本。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.approval_id IS '审批输出交付候选：执行审批请求标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.file_id IS '审批输出交付候选：文件标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.project_id IS '审批输出交付候选：所属项目标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.owner_user_id IS '审批输出交付候选：私有数据所有者的用户标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.thread_id IS '审批输出交付候选：线程标识。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.logical_path IS '审批输出交付候选：文件在项目中的逻辑路径。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.file_version IS '审批输出交付候选：候选文件的冻结版本号。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.sha256 IS '审批输出交付候选：内容的 SHA-256 摘要。';
+COMMENT ON COLUMN execution_approval_output_delivery_candidates.created_at IS '审批输出交付候选：记录创建时间。';
+
 COMMENT ON TABLE credential_grants IS '保存项目凭据向智能体或 MCP 目标的授权。';
 COMMENT ON COLUMN credential_grants.id IS '凭据授权：主键标识。';
 COMMENT ON COLUMN credential_grants.mcp_server_version_id IS '凭据授权：MCP服务版本标识。';
@@ -4474,15 +4562,12 @@ COMMENT ON COLUMN system_model_catalog_state.updated_by_user_id IS '系统模型
 COMMENT ON COLUMN system_model_catalog_state.created_at IS '系统模型目录状态：记录创建时间。';
 COMMENT ON COLUMN system_model_catalog_state.updated_at IS '系统模型目录状态：记录最近更新时间。';
 
-COMMENT ON TABLE system_model_configs IS '保存系统模型配置的逻辑身份和当前版本指针。';
+COMMENT ON TABLE system_model_configs IS '保存系统模型配置的稳定标识、展示名称和当前版本指针。';
 COMMENT ON COLUMN system_model_configs.id IS '系统模型配置：主键标识。';
-COMMENT ON COLUMN system_model_configs.logical_name IS '系统模型配置：逻辑名称。';
 COMMENT ON COLUMN system_model_configs.display_name IS '系统模型配置：展示名称。';
-COMMENT ON COLUMN system_model_configs.description IS '系统模型配置：用途描述。';
 COMMENT ON COLUMN system_model_configs.status IS '系统模型配置：生命周期状态。';
 COMMENT ON COLUMN system_model_configs.current_version_id IS '系统模型配置：当前版本标识。';
 COMMENT ON COLUMN system_model_configs.revision IS '系统模型配置：配置修订号。';
-COMMENT ON COLUMN system_model_configs.sort_order IS '系统模型配置：排序顺序。';
 COMMENT ON COLUMN system_model_configs.created_by_user_id IS '系统模型配置：创建操作的用户标识。';
 COMMENT ON COLUMN system_model_configs.updated_by_user_id IS '系统模型配置：最近更新操作的用户标识。';
 COMMENT ON COLUMN system_model_configs.created_at IS '系统模型配置：记录创建时间。';
@@ -4512,7 +4597,6 @@ COMMENT ON COLUMN run_model_config_snapshots.owner_user_id IS '运行模型配�
 COMMENT ON COLUMN run_model_config_snapshots.thread_id IS '运行模型配置快照：线程标识。';
 COMMENT ON COLUMN run_model_config_snapshots.run_id IS '运行模型配置快照：运行标识。';
 COMMENT ON COLUMN run_model_config_snapshots.purpose IS '运行模型配置快照：用途。';
-COMMENT ON COLUMN run_model_config_snapshots.logical_name IS '运行模型配置快照：逻辑名称。';
 COMMENT ON COLUMN run_model_config_snapshots.model_config_id IS '运行模型配置快照：模型配置标识。';
 COMMENT ON COLUMN run_model_config_snapshots.model_config_version_id IS '运行模型配置快照：模型配置版本标识。';
 COMMENT ON COLUMN run_model_config_snapshots.payload_checksum IS '运行模型配置快照：载荷内容校验和。';
@@ -4684,6 +4768,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('initial_schema');
+INSERT INTO alembic_version (version_num) VALUES ('model_catalog_simplify');
 
 COMMIT;

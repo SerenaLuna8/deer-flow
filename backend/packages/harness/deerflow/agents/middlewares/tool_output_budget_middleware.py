@@ -112,6 +112,41 @@ def _message_text(content: Any) -> str | None:
     return None
 
 
+def _is_bounded_vision_tool_message(message: ToolMessage) -> bool:
+    """Recognize a server-stamped, strict Vision result with its own budget.
+
+    ``inspect_image`` cannot be externalized because its evidence is private,
+    inline-only structured data. Its sanitizer validates and, when escaping
+    expands strings, semantically compacts the complete object to the Vision
+    byte ceiling. Reapplying a generic character slice here would corrupt that
+    JSON contract. Name alone is deliberately insufficient provenance.
+    """
+
+    from deerflow.vision.contracts import (
+        MAX_EVIDENCE_JSON_BYTES,
+        VisionErrorResult,
+        VisionEvidence,
+    )
+
+    if message.name != "inspect_image" or not isinstance(message.content, str):
+        return False
+    if len(message.content.encode("utf-8")) > MAX_EVIDENCE_JSON_BYTES:
+        return False
+    metadata = message.additional_kwargs or {}
+    try:
+        if message.status == "error":
+            if metadata.get("content_type") != "untrusted_image_evidence_error":
+                return False
+            error = VisionErrorResult.model_validate_json(message.content)
+            return metadata.get("error_code") == error.code
+        if metadata.get("content_type") != "untrusted_image_evidence" or metadata.get("schema_version") != "vision.evidence.v1":
+            return False
+        evidence = VisionEvidence.model_validate_json(message.content)
+        return evidence.canonical_json() == message.content
+    except (TypeError, ValueError):
+        return False
+
+
 def _snap_to_line_boundary(text: str, pos: int) -> int:
     """Return *pos* or the nearest preceding newline+1, whichever is closer.
 
@@ -578,6 +613,8 @@ def _patch_tool_message(
 ) -> ToolMessage:
     """Apply budget to a single ToolMessage. Returns the original if unchanged."""
     tool_name = msg.name or "unknown"
+    if _is_bounded_vision_tool_message(msg):
+        return msg
     if tool_name in config.exempt_tools:
         return msg
 
@@ -622,6 +659,8 @@ def _effective_trigger(tool_name: str, config: ToolOutputConfig) -> int:
 
 def _tool_message_over_budget(msg: ToolMessage, config: ToolOutputConfig) -> bool:
     """Cheap, per-tool-aware check: is this ToolMessage non-exempt and over its trigger?"""
+    if _is_bounded_vision_tool_message(msg):
+        return False
     if (msg.name or "") in config.exempt_tools:
         return False
     trigger = _effective_trigger(msg.name or "", config)

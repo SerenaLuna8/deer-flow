@@ -20,10 +20,12 @@ from deerflow.vision.openai_compatible import (
 )
 from deerflow.vision.prompt import VISION_SYSTEM_PROMPT_V1
 
+RESPONSES_MODEL_REF = "00000000-0000-4000-8000-000000000301"
+
 
 def _model() -> ModelConfig:
     model = ModelConfig(
-        name="gpt-5.6-luna",
+        name=RESPONSES_MODEL_REF,
         display_name="GPT 5.6 Luna",
         description="",
         use="langchain_openai:ChatOpenAI",
@@ -45,6 +47,9 @@ def _model() -> ModelConfig:
 def _evidence() -> dict[str, object]:
     return json.loads(
         VisionEvidence(
+            ok=True,
+            content_type="untrusted_image_evidence",
+            schema_version="vision.evidence.v1",
             summary="A blue square is visible.",
             evidence=[
                 VisionEvidenceItem(
@@ -101,6 +106,7 @@ async def test_responses_client_uses_selected_models_protocol_and_fixed_contract
     client = OpenAIResponsesVisionEvidenceClient(
         _model(),
         transport=httpx.MockTransport(handler),
+        transient_gate_key="vision-responses-test",
     )
     result = await client.analyze(
         image_bytes=b"normalized-image",
@@ -164,7 +170,7 @@ async def test_responses_client_rejects_refusal_and_incomplete_response() -> Non
             "error": None,
             "incomplete_details": {"reason": "max_output_tokens"},
             "output": [],
-            "usage": None,
+            "usage": {"input_tokens": 11, "output_tokens": 4},
         },
     ]
 
@@ -174,6 +180,7 @@ async def test_responses_client_rejects_refusal_and_incomplete_response() -> Non
     client = OpenAIResponsesVisionEvidenceClient(
         _model(),
         transport=httpx.MockTransport(handler),
+        transient_gate_key="vision-responses-test",
     )
     with pytest.raises(OpenAICompatibleVisionError) as refusal:
         await client.analyze(
@@ -194,9 +201,107 @@ async def test_responses_client_rejects_refusal_and_incomplete_response() -> Non
             abort_signal=Event(),
         )
     assert incomplete.value.code == "VISION_SCHEMA_MISMATCH"
+    assert incomplete.value.usage_receipt is not None
+    assert incomplete.value.usage_receipt.input_tokens == 11
+    assert incomplete.value.usage_receipt.output_tokens == 4
+    assert incomplete.value.usage_receipt.usage_unknown is False
 
 
-def test_client_factory_routes_using_selected_models_responses_setting() -> None:
-    client = build_vision_evidence_client(_model(), "vision.bridge.v1")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_patch", "expected_code"),
+    [
+        ({"role": "user"}, "VISION_SCHEMA_MISMATCH"),
+        ({"status": "incomplete"}, "VISION_SCHEMA_MISMATCH"),
+    ],
+)
+async def test_responses_message_fails_closed_for_wrong_role_or_incomplete(
+    message_patch: dict[str, object],
+    expected_code: str,
+) -> None:
+    payload = _success_payload()
+    output = payload["output"]
+    assert isinstance(output, list)
+    message = output[1]
+    assert isinstance(message, dict)
+    message.update(message_patch)
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    client = OpenAIResponsesVisionEvidenceClient(
+        _model(),
+        transport=httpx.MockTransport(handler),
+        transient_gate_key="vision-responses-test",
+    )
+    with pytest.raises(OpenAICompatibleVisionError) as caught:
+        await client.analyze(
+            image_bytes=b"image",
+            mime_type="image/png",
+            mode="auto",
+            deadline_monotonic=time.monotonic() + 2,
+            abort_signal=Event(),
+        )
+
+    assert caught.value.code == expected_code
+
+
+@pytest.mark.asyncio
+async def test_responses_rejects_tool_output_and_refusal_even_with_valid_text() -> None:
+    with_tool = _success_payload()
+    tool_output = with_tool["output"]
+    assert isinstance(tool_output, list)
+    tool_output.insert(
+        1,
+        {"type": "function_call", "name": "unsafe", "arguments": "{}"},
+    )
+
+    with_refusal = _success_payload()
+    refusal_output = with_refusal["output"]
+    assert isinstance(refusal_output, list)
+    refusal_message = refusal_output[1]
+    assert isinstance(refusal_message, dict)
+    refusal_content = refusal_message["content"]
+    assert isinstance(refusal_content, list)
+    refusal_content.insert(0, {"type": "refusal", "refusal": "blocked"})
+    payloads = [with_tool, with_refusal]
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payloads.pop(0))
+
+    client = OpenAIResponsesVisionEvidenceClient(
+        _model(),
+        transport=httpx.MockTransport(handler),
+        transient_gate_key="vision-responses-test",
+    )
+    with pytest.raises(OpenAICompatibleVisionError) as tool_call:
+        await client.analyze(
+            image_bytes=b"image",
+            mime_type="image/png",
+            mode="auto",
+            deadline_monotonic=time.monotonic() + 2,
+            abort_signal=Event(),
+        )
+    assert tool_call.value.code == "VISION_SCHEMA_MISMATCH"
+
+    with pytest.raises(OpenAICompatibleVisionError) as refusal:
+        await client.analyze(
+            image_bytes=b"image",
+            mime_type="image/png",
+            mode="auto",
+            deadline_monotonic=time.monotonic() + 2,
+            abort_signal=Event(),
+        )
+    assert refusal.value.code == "VISION_CONTENT_BLOCKED"
+
+
+@pytest.mark.parametrize("provider_adapter", ["openai", "patched_openai"])
+def test_client_factory_routes_supported_adapters_to_responses(
+    provider_adapter: str,
+) -> None:
+    model = _model()
+    model._system_provider_adapter = provider_adapter
+
+    client = build_vision_evidence_client(model, "vision.bridge.v1")
 
     assert isinstance(client, OpenAIResponsesVisionEvidenceClient)

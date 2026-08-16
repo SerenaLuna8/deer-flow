@@ -253,8 +253,8 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         provider_detail = " ".join(_extract_provider_error_values(exc)).lower()
         if _matches_any(provider_detail, _QUOTA_PATTERNS):
             return False, "quota"
-        # The supported Codex CLI provider can surface the raw httpx status
-        # exception instead of a provider-SDK exception. Authenticate only
+        # A provider client can surface the raw httpx status exception instead
+        # of a provider-SDK exception. Authenticate only
         # from that concrete structured response; arbitrary local exceptions
         # with status-like attributes or auth-looking text remain generic.
         if isinstance(exc, HTTPStatusError) and exc.response.status_code in {401, 403}:

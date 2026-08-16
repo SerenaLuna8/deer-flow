@@ -711,6 +711,8 @@ def test_recall_tool_is_async_only_and_named_for_loop_detection() -> None:
         "web_fetch": (6, 10),
         "web_search": (6, 10),
         "recall_memory": (6, 10),
+        # The ninth proposed call is stripped, so at most eight calls execute.
+        "inspect_image": (6, 9),
     }
     assert {name: (override.warn, override.hard_limit) for name, override in config_overrides.items()} == expected
     assert {name: (override.warn, override.hard_limit) for name, override in policy_overrides.items()} == expected

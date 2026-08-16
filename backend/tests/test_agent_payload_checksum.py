@@ -12,6 +12,8 @@ from app.shared_assets.agent_payload_checksum import (
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.models import AgentModelSettings, AgentPayload
 
+_MODEL_REF = "88888888-8888-4888-8888-888888888891"
+
 
 def _payload(
     *,
@@ -21,7 +23,7 @@ def _payload(
     return AgentPayload(
         description="描述",
         soul="soul",
-        model_ref="model-a",
+        model_ref=_MODEL_REF,
         tool_groups=("file:read", "task"),
         skill_version_ids=(uuid.UUID("11111111-1111-1111-1111-111111111111"),),
         mcp_version_ids=(uuid.UUID("22222222-2222-2222-2222-222222222222"),),
@@ -38,11 +40,11 @@ def _payload(
     [
         (
             _payload(payload_schema_version=1),
-            "9bcd581965583904bc3242c08d6e65407f2382c67d874298778ea6c44ad29581",
+            "0bec4cafa2aa2762ed4ed4d8b15e39570f92c776f59f3616ed8b5aa2aadb3cc8",
         ),
         (
             _payload(payload_schema_version=2),
-            "9ee5d67f36cfc5e927da5ebd78f099d99c7216ce64ced884b5e874aa6a581ad4",
+            "e44d78be94287d8a211d7bbe966469977b4705a113c41b01f332dabd4f874a01",
         ),
         (
             _payload(
@@ -52,7 +54,7 @@ def _payload(
                     max_tokens=123,
                 ),
             ),
-            "d558b468930ed483bc6e673cb01f7b33bc610248ebbf1e5b73ecda86b630740f",
+            "d70c97307b92b1a805e3759ace3bfe514e2d085424ae83e2e64bdbc0e97f712d",
         ),
     ],
 )

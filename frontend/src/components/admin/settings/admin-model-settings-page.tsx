@@ -69,21 +69,15 @@ const COMMON_SETTING_KEYS = [
   "max_retries",
 ] as const;
 
-const PROVIDER_ADAPTERS = [
+export const ADMIN_MODEL_PROVIDER_ADAPTERS = [
   { value: "openai", credential: true },
   { value: "anthropic", credential: true },
   { value: "deepseek", credential: true },
   { value: "patched_openai", credential: true },
   { value: "patched_deepseek", credential: true },
-  { value: "patched_mimo", credential: true },
-  { value: "patched_minimax", credential: true },
-  { value: "patched_stepfun", credential: true },
-  { value: "mindie", credential: true },
   { value: "vllm", credential: true },
   { value: "vision_openai_compatible_v1", credential: true },
   { value: "vision_bridge_fake", credential: false },
-  { value: "claude_code", credential: false },
-  { value: "codex_cli", credential: false },
 ] as const;
 
 type AdminModelTranslations = Translations["adminModelSettings"];
@@ -96,11 +90,10 @@ const DEFAULT_FORM_VALIDATION_MESSAGES: AdminModelFormValidationMessages = {
   maxTokens: "最大 Token",
   requestTimeout: "请求超时",
   maxRetries: "重试次数",
-  sortOrder: "排序值",
   advancedJsonInvalid: "高级 JSON 格式不正确",
   advancedJsonObject: "高级 JSON 必须是对象",
   advancedJsonUnsafe: "高级 JSON 只能包含支持的安全字段和精确类型",
-  invalidForm: "请检查必填项、模型名称和 Credential 绑定",
+  invalidForm: "请检查必填项、显示名称、模型 ID 和 Credential 绑定",
   invalidConfiguration: "模型配置格式不正确",
 };
 
@@ -257,8 +250,6 @@ export function selectAdminModelCatalogItems(
     if (normalizedSearch === "") return true;
     return [
       model.display_name,
-      model.logical_name,
-      model.description,
       model.provider_adapter,
       model.provider_model,
       model.credential_env_key ?? "",
@@ -269,7 +260,6 @@ export function selectAdminModelCatalogItems(
 const MODEL_EDITOR_ERROR_ID = "admin-model-editor-error";
 const MODEL_EDITOR_CREDENTIAL_STATUS_ID =
   "admin-model-editor-credential-status";
-const MODEL_EDITOR_SORT_ORDER_HINT_ID = "admin-model-sort-order-hint";
 const MODEL_EDITOR_BASE_URL_HINT_ID = "admin-model-base-url-hint";
 const MODEL_EDITOR_ENVIRONMENT_KEY_HINT_ID = "admin-model-environment-key-hint";
 const MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID =
@@ -334,7 +324,7 @@ function readOptionalNumber(
 }
 
 function providerAdapterInfo(adapter: string) {
-  return PROVIDER_ADAPTERS.find((item) => item.value === adapter);
+  return ADMIN_MODEL_PROVIDER_ADAPTERS.find((item) => item.value === adapter);
 }
 
 function providerAdapterLabel(
@@ -472,21 +462,8 @@ export function parseAdminModelEditorForm(
   const credentialId = readFormString(formData, "credential_id");
   const credentialVersionId = readFormString(formData, "credential_version_id");
   const credentialEnvKey = readFormString(formData, "credential_env_key");
-  const sortOrder =
-    readOptionalNumber(
-      formData,
-      "sort_order",
-      messages.sortOrder,
-      messages.invalidNumber,
-      {
-        integer: true,
-        min: 0,
-      },
-    ) ?? 0;
   const result = createAdminModelInputSchema.safeParse({
-    logical_name: readFormString(formData, "logical_name"),
     display_name: readFormString(formData, "display_name"),
-    description: readFormString(formData, "description"),
     provider_adapter: readFormString(formData, "provider_adapter"),
     provider_model: readFormString(formData, "provider_model"),
     settings,
@@ -497,7 +474,6 @@ export function parseAdminModelEditorForm(
     credential_id: credentialId || null,
     credential_version_id: credentialId ? credentialVersionId || null : null,
     credential_env_key: credentialId ? credentialEnvKey || null : null,
-    sort_order: sortOrder,
   });
   if (!result.success) {
     const firstPath = result.error.issues[0]?.path[0];
@@ -521,6 +497,7 @@ export function parseAdminModelConnectionTestForm(
     provider_adapter: input.provider_adapter,
     provider_model: input.provider_model,
     settings: input.settings,
+    supports_vision: input.supports_vision,
     credential_id: input.credential_id,
     credential_version_id: input.credential_version_id,
     credential_env_key: input.credential_env_key,
@@ -589,13 +566,7 @@ function CatalogMetric({
   );
 }
 
-function ModelIdentity({
-  model,
-  showSecondary = true,
-}: {
-  model: AdminModelItem;
-  showSecondary?: boolean;
-}) {
+function ModelIdentity({ model }: { model: AdminModelItem }) {
   const { t } = useI18n();
   const labels = t.adminModelSettings;
   return (
@@ -613,27 +584,12 @@ function ModelIdentity({
             {labels.card.defaultModel}
           </Badge>
         ) : null}
+        {!providerAdapterInfo(model.provider_adapter) ? (
+          <Badge variant="outline" className="text-muted-foreground">
+            {labels.editor.retiredProviderAdapter}
+          </Badge>
+        ) : null}
       </div>
-      {showSecondary ? (
-        <p className="text-muted-foreground mt-1 flex min-w-0 items-center gap-1.5 text-xs">
-          <span
-            className="min-w-0 truncate font-mono"
-            title={model.logical_name}
-          >
-            {model.logical_name}
-          </span>
-          {model.description ? (
-            <>
-              <span aria-hidden className="shrink-0">
-                ·
-              </span>
-              <span className="min-w-0 truncate" title={model.description}>
-                {model.description}
-              </span>
-            </>
-          ) : null}
-        </p>
-      ) : null}
     </div>
   );
 }
@@ -714,8 +670,11 @@ function ModelActions({
   const { t } = useI18n();
   const labels = t.adminModelSettings;
   const pending = pendingAction !== null;
-  const toggleUnavailable = model.is_default;
-  const defaultUnavailable = model.is_default || model.status !== "active";
+  const providerSupported = providerAdapterInfo(model.provider_adapter) != null;
+  const toggleUnavailable =
+    model.is_default || (!providerSupported && model.status !== "active");
+  const defaultUnavailable =
+    !providerSupported || model.is_default || model.status !== "active";
   const toggleReasonId = `admin-model-${model.id}${idSuffix}-toggle-reason`;
   const defaultReasonId = `admin-model-${model.id}${idSuffix}-default-reason`;
   const editLabel = labels.card.actionFor(labels.card.edit, model.display_name);
@@ -794,14 +753,18 @@ function ModelActions({
       </Button>
       {toggleUnavailable ? (
         <span id={toggleReasonId} className="sr-only">
-          {labels.card.defaultCannotPause}
+          {model.is_default
+            ? labels.card.defaultCannotPause
+            : labels.editor.retiredProviderAdapter}
         </span>
       ) : null}
       {defaultUnavailable ? (
         <span id={defaultReasonId} className="sr-only">
-          {model.is_default
-            ? labels.card.currentDefault
-            : labels.card.suspended}
+          {!providerSupported
+            ? labels.editor.retiredProviderAdapter
+            : model.is_default
+              ? labels.card.currentDefault
+              : labels.card.suspended}
         </span>
       ) : null}
     </div>
@@ -874,14 +837,14 @@ function ModelCatalog({
                   className="hover:bg-muted/20 align-middle transition-colors"
                 >
                   <td className="px-4 py-3.5">
-                    <ModelIdentity model={model} showSecondary={false} />
+                    <ModelIdentity model={model} />
                   </td>
                   <td className="px-3 py-3.5">
-                    <p className="truncate font-medium">
-                      {providerAdapterLabel(
-                        model.provider_adapter,
-                        labels.adapters,
-                      )}
+                    <p
+                      className="truncate font-mono text-xs font-medium"
+                      title={model.provider_model}
+                    >
+                      {model.provider_model}
                     </p>
                   </td>
                   <td className="px-3 py-3.5">
@@ -896,11 +859,9 @@ function ModelCatalog({
                       title={labels.card.versionMeta(
                         model.version_number,
                         model.revision,
-                        model.sort_order,
                       )}
                     >
-                      v{model.version_number} · r{model.revision} ·{" "}
-                      {model.sort_order}
+                      v{model.version_number} · r{model.revision}
                     </p>
                   </td>
                   <td className="px-3 py-3.5 text-xs">
@@ -1338,8 +1299,12 @@ export function ModelEditorDialog({
   const [providerAdapter, setProviderAdapter] = useState<string>(
     model?.provider_adapter ?? "openai",
   );
+  const selectedProviderAdapter = providerAdapterInfo(providerAdapter);
+  const providerAdapterSupported = selectedProviderAdapter != null;
   const providerAcceptsCredential =
-    providerAdapterInfo(providerAdapter)?.credential ?? false;
+    selectedProviderAdapter?.credential ??
+    (model?.provider_adapter === providerAdapter &&
+      model.credential_id !== null);
   const formRef = useRef<HTMLFormElement>(null);
   const errorRef = useRef<HTMLParagraphElement>(null);
   const credentialChoices = useMemo(
@@ -1362,12 +1327,14 @@ export function ModelEditorDialog({
       !selectedCredentialChoice.historical &&
       !selectedCredentialChoice.unavailable);
   const closingBlocked = pending || submitting || testingConnection;
-  const editorCanSubmit = canSubmitAdminModelEditor(
-    credentialStatus,
-    closingBlocked,
-    providerAcceptsCredential,
-    credentialBindingReady,
-  );
+  const editorCanSubmit =
+    providerAdapterSupported &&
+    canSubmitAdminModelEditor(
+      credentialStatus,
+      closingBlocked,
+      providerAcceptsCredential,
+      credentialBindingReady,
+    );
 
   useEffect(() => {
     if (!formError && !mutationError) return;
@@ -1519,23 +1486,6 @@ export function ModelEditorDialog({
                 </p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <LabeledField
-                    label={labels.editor.logicalName}
-                    htmlFor="logical_name"
-                  >
-                    <Input
-                      id="logical_name"
-                      name="logical_name"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "logical_name",
-                        invalidFieldId,
-                      )}
-                      required
-                      defaultValue={model?.logical_name ?? ""}
-                      placeholder="analysis-pro"
-                      readOnly={model !== null}
-                    />
-                  </LabeledField>
-                  <LabeledField
                     label={labels.editor.displayName}
                     htmlFor="display_name"
                   >
@@ -1554,6 +1504,11 @@ export function ModelEditorDialog({
                   <LabeledField
                     label={labels.editor.providerAdapter}
                     htmlFor="provider_adapter"
+                    hint={
+                      providerAdapterSupported
+                        ? undefined
+                        : labels.editor.retiredProviderAdapterHint
+                    }
                   >
                     <select
                       id="provider_adapter"
@@ -1569,7 +1524,16 @@ export function ModelEditorDialog({
                       }
                       className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
                     >
-                      {PROVIDER_ADAPTERS.map((adapter) => (
+                      {!providerAdapterSupported ? (
+                        <option value={providerAdapter} disabled>
+                          {providerAdapterLabel(
+                            providerAdapter,
+                            labels.adapters,
+                          )}{" "}
+                          · {labels.editor.retiredProviderAdapter}
+                        </option>
+                      ) : null}
+                      {ADMIN_MODEL_PROVIDER_ADAPTERS.map((adapter) => (
                         <option key={adapter.value} value={adapter.value}>
                           {providerAdapterLabel(adapter.value, labels.adapters)}
                         </option>
@@ -1612,22 +1576,6 @@ export function ModelEditorDialog({
                       placeholder="https://api.example.com/v1"
                     />
                   </LabeledField>
-                  <LabeledField
-                    label={labels.editor.modelDescription}
-                    htmlFor="description"
-                    className="sm:col-span-2"
-                  >
-                    <Input
-                      id="description"
-                      name="description"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "description",
-                        invalidFieldId,
-                      )}
-                      defaultValue={model?.description ?? ""}
-                      placeholder={labels.editor.modelDescriptionPlaceholder}
-                    />
-                  </LabeledField>
                   <LabeledField label={labels.editor.status} htmlFor="status">
                     {model ? (
                       <>
@@ -1664,26 +1612,6 @@ export function ModelEditorDialog({
                       </select>
                     )}
                   </LabeledField>
-                  <LabeledField
-                    label={labels.editor.sortOrder}
-                    htmlFor="sort_order"
-                    hint={labels.editor.sortOrderHint}
-                    hintId={MODEL_EDITOR_SORT_ORDER_HINT_ID}
-                  >
-                    <Input
-                      id="sort_order"
-                      name="sort_order"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "sort_order",
-                        invalidFieldId,
-                        MODEL_EDITOR_SORT_ORDER_HINT_ID,
-                      )}
-                      type="number"
-                      min="0"
-                      step="1"
-                      defaultValue={model?.sort_order ?? 0}
-                    />
-                  </LabeledField>
                 </div>
               </fieldset>
 
@@ -1694,9 +1622,6 @@ export function ModelEditorDialog({
                 <legend className="px-0 text-sm font-semibold">
                   {labels.editor.credentialBinding}
                 </legend>
-                <p className="text-muted-foreground text-xs">
-                  {labels.editor.credentialBindingDescription}
-                </p>
                 <div className="grid gap-4 sm:grid-cols-2">
                   <LabeledField
                     label={labels.editor.systemCredential}
@@ -1893,9 +1818,6 @@ export function ModelEditorDialog({
                 <legend className="px-0 text-sm font-semibold">
                   {labels.editor.capabilitiesAndRuntime}
                 </legend>
-                <p className="text-muted-foreground text-xs">
-                  {labels.editor.capabilitiesDescription}
-                </p>
                 <div className="grid gap-3 sm:grid-cols-3">
                   {[
                     [
@@ -1932,9 +1854,6 @@ export function ModelEditorDialog({
                   <div>
                     <p className="text-sm font-medium">
                       {labels.editor.commonProviderSettings}
-                    </p>
-                    <p className="text-muted-foreground mt-1 text-xs">
-                      {labels.editor.commonProviderSettingsDescription}
                     </p>
                   </div>
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -2155,7 +2074,6 @@ function AuthorizedAdminModelSettingsPage({
           modelId: editor.model.id,
           input: {
             display_name: input.display_name,
-            description: input.description,
             provider_adapter: input.provider_adapter,
             provider_model: input.provider_model,
             settings: input.settings,
@@ -2165,7 +2083,6 @@ function AuthorizedAdminModelSettingsPage({
             credential_id: input.credential_id,
             credential_version_id: input.credential_version_id,
             credential_env_key: input.credential_env_key,
-            sort_order: input.sort_order,
             expected_revision: editor.model.revision,
           },
         });

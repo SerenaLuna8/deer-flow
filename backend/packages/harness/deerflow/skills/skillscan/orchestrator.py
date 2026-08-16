@@ -991,10 +991,10 @@ class _ClientAnalysis:
     remaining: int
     found: ast.AST | None = None
 
-    def charge(self, cost: int = 1) -> None:
-        if cost > self.remaining:
+    def charge(self, units: int = 1) -> None:
+        if units > self.remaining:
             raise _ClientAnalysisBudgetExceeded
-        self.remaining -= cost
+        self.remaining -= units
 
 
 def _find_client_handle_sink(

@@ -15,6 +15,7 @@ from app.gateway.routers.project_agent_builder import (
 from app.gateway.system_model_callers import DatabaseOneshotModelCaller
 from app.shared_assets.agent_design_generation import (
     AgentDesignGenerationContext,
+    AgentDesignGenerationInvalid,
     AgentDesignGenerationRequest,
     AgentDesignGenerationService,
     NeedsClarificationResult,
@@ -23,6 +24,8 @@ from app.shared_assets.agent_design_service import (
     AgentDesignSessionSummary,
     AgentDesignStatus,
 )
+
+GENERATION_MODEL_REF = "00000000-0000-4000-8000-000000000308"
 
 
 def test_agent_builder_session_summary_exposes_revision_for_safe_deletion() -> None:
@@ -74,18 +77,36 @@ async def test_agent_design_generation_uses_the_selected_conversation_model() ->
             phase="discovery",
         ),
         context=AgentDesignGenerationContext(),
-        model_ref="gpt-5.6-luna",
+        model_ref=GENERATION_MODEL_REF,
     )
 
     assert isinstance(result, NeedsClarificationResult)
-    assert caller.model_ref == "gpt-5.6-luna"
+    assert caller.model_ref == GENERATION_MODEL_REF
+
+
+@pytest.mark.asyncio
+async def test_agent_design_generation_rejects_a_legacy_logical_model_name() -> None:
+    caller = _RecordingAgentDesignCaller()
+
+    with pytest.raises(AgentDesignGenerationInvalid):
+        await AgentDesignGenerationService(model_caller=caller).generate(
+            AgentDesignGenerationRequest(
+                agent_name="代码审查",
+                brief="审查代码并给出建议",
+                phase="discovery",
+            ),
+            context=AgentDesignGenerationContext(),
+            model_ref="gpt-5.6-luna",
+        )
+
+    assert caller.model_ref is None
 
 
 def test_agent_builder_turn_maps_the_selected_generation_model() -> None:
     request = AgentDesignTurnRequest.model_validate(
         {
             "input": {"kind": "message", "message": "创建一个代码审查 Agent"},
-            "generation_model_ref": "gpt-5.6-luna",
+            "generation_model_ref": GENERATION_MODEL_REF,
             "expected_revision": 1,
             "idempotency_key": "builder-model-selection",
         }
@@ -93,7 +114,7 @@ def test_agent_builder_turn_maps_the_selected_generation_model() -> None:
 
     command = _turn(request)
 
-    assert command.generation_model_ref == "gpt-5.6-luna"
+    assert command.generation_model_ref == GENERATION_MODEL_REF
 
 
 def test_agent_builder_turn_rejects_an_invalid_generation_model_ref() -> None:
@@ -118,11 +139,11 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
     class _Materializer:
         async def materialize_active(self, model_ref: str | None = None):
             materialized_refs.append(model_ref)
-            return SimpleNamespace(name="gpt-5.6-luna")
+            return SimpleNamespace(name=GENERATION_MODEL_REF)
 
     class _Config:
         def with_runtime_models(self, models):
-            assert tuple(model.name for model in models) == ("gpt-5.6-luna",)
+            assert tuple(model.name for model in models) == (GENERATION_MODEL_REF,)
             return self
 
     async def _run_oneshot_llm(**kwargs):
@@ -143,9 +164,9 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
         await caller(
             system_instruction="system",
             user_content="user",
-            model_ref="gpt-5.6-luna",
+            model_ref=GENERATION_MODEL_REF,
         )
         == "ok"
     )
-    assert materialized_refs == ["gpt-5.6-luna"]
-    assert invoked_names == ["gpt-5.6-luna"]
+    assert materialized_refs == [GENERATION_MODEL_REF]
+    assert invoked_names == [GENERATION_MODEL_REF]

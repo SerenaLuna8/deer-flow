@@ -821,7 +821,7 @@ function ModelField({
         </option>
         {!available && value ? (
           <option value={value} disabled>
-            {value} — {labels.unavailableModel}
+            {labels.unavailableModel}
           </option>
         ) : null}
         {activeModels.map((model) => (
@@ -1053,7 +1053,7 @@ function ContextSizeRow({
   const valueLabel = isKeep
     ? locale === "zh-CN"
       ? "保留数量"
-      : "Amount to keep"
+      : "Number to keep"
     : locale === "zh-CN"
       ? "触发阈值"
       : "Trigger threshold";
@@ -1357,8 +1357,8 @@ function agentRuntimeGroups(locale: Locale) {
       title: locale === "zh-CN" ? "运行预算" : "Run budget",
       description:
         locale === "zh-CN"
-          ? "限制单次任务的 Token、执行步数和子 Agent 数量，避免成本或执行时间失控。"
-          : "Limit Tokens, steps, and subagents per Run to keep cost and execution time under control.",
+          ? "限制单次任务的 Token、执行步数和子 Agent 数量，避免资源占用或执行时间失控。"
+          : "Limit Tokens, steps, and subagents per Run to keep resource usage and execution time under control.",
       icon: GaugeIcon,
     },
     {

@@ -1,7 +1,10 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
-import { MODEL_OUTPUT_LIMIT } from "@/core/private-work/api-client";
+import {
+  MODEL_OUTPUT_LIMIT,
+  OUTPUT_DELIVERY_INCOMPLETE,
+} from "@/core/private-work/api-client";
 import {
   getLatestRegenerationTarget,
   latestRunFailureCode,
@@ -23,7 +26,7 @@ function run(status: string, error: string | null): Run {
   } as unknown as Run;
 }
 
-describe("model output-limit recovery", () => {
+describe("run failure recovery", () => {
   test("recognizes the stable code from live and refreshed durable failures", () => {
     const durableFailure = [run("error", MODEL_OUTPUT_LIMIT)];
 
@@ -48,6 +51,25 @@ describe("model output-limit recovery", () => {
     expect(
       latestRunFailureCode([run("success", MODEL_OUTPUT_LIMIT)]),
     ).toBeNull();
+  });
+
+  test("recognizes incomplete output delivery without offering a model replay", () => {
+    const durableFailure = [run("error", OUTPUT_DELIVERY_INCOMPLETE)];
+
+    expect(latestRunFailureCode(durableFailure)).toBe(
+      OUTPUT_DELIVERY_INCOMPLETE,
+    );
+    expect(resolveRunFailureCode(undefined, durableFailure)).toBe(
+      OUTPUT_DELIVERY_INCOMPLETE,
+    );
+    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBeNull();
+
+    const liveError = new Error(OUTPUT_DELIVERY_INCOMPLETE);
+    liveError.name = OUTPUT_DELIVERY_INCOMPLETE;
+    expect(resolveRunFailureCode(liveError, [])).toBe(
+      OUTPUT_DELIVERY_INCOMPLETE,
+    );
+    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBeNull();
   });
 
   test("reuses the latest assistant turn as the existing regenerate target", () => {

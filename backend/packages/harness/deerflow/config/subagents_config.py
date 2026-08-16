@@ -131,7 +131,7 @@ class SubagentsAppConfig(BaseModel):
     )
     token_budget: TokenBudgetConfig = Field(
         default_factory=default_subagent_token_budget,
-        description="Default per-run token budget for subagents — a cost-ceiling backstop that engages by default (#3875 Phase 2). Set enabled: false to disable, or override per agent via agents.<name>.token_budget.",
+        description="Default per-run token budget for subagents — a resource ceiling that engages by default (#3875 Phase 2). Set enabled: false to disable, or override per agent via agents.<name>.token_budget.",
     )
     agents: dict[str, SubagentOverrideConfig] = Field(
         default_factory=dict,

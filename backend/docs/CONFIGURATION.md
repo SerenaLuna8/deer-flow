@@ -195,7 +195,7 @@ side-effect revalidation。
 
 `lower(email)` 是完整数据库 schema 的一部分。已处于受支持 Alembic 链上、marker 为已知
 祖先 revision 的数据库，先备份后只能通过 `make upgrade-db` 显式升级；新装仍只接受空目标并
-运行 `make setup-db`，直接记录首个正式 revision `initial_schema`。未知/legacy marker 或 catalog
+运行 `make setup-db`，直接记录当前链头 revision `model_catalog_simplify`。未知/legacy marker 或 catalog
 drift 保持 fail-closed，必须换空目标；不要
 在运行时 `ALTER`、手工 stamp，新增 schema 变更必须同时维护 ORM、`full_schema.sql` 与正式迁移。
 
@@ -253,16 +253,17 @@ leaving a newly created half-initialized database.
 After application startup, sign in as a system admin and use
 `/admin/settings/models` to inspect or change the catalog:
 
-1. create a logical model and immutable provider version;
-2. choose an allowlisted provider adapter and provider model identifier;
+1. create a model catalog entry and immutable provider version;
+2. choose an allowlisted provider adapter and model ID;
 3. add bounded, secret-free JSON settings such as `base_url`, `temperature`, or
    provider-specific request options;
 4. bind the exact encrypted Credential version and its environment key when the
    adapter requires authentication;
 5. activate the model and choose the catalog default.
 
-The general model adapter allowlist includes OpenAI, Anthropic, DeepSeek, MindIE, vLLM,
-patched OpenAI-compatible adapters, Xiaomi MiMo, Claude Code, and Codex CLI.
+The general model adapter allowlist includes OpenAI, Anthropic, DeepSeek, vLLM,
+the patched OpenAI and DeepSeek adapters, and the controlled Vision Bridge
+adapters.
 Arbitrary Python class paths are not accepted. Secret-bearing keys, headers,
 tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
@@ -272,10 +273,9 @@ The current wire-protocol families are:
 
 | Protocol | Model adapters |
 | --- | --- |
-| OpenAI-compatible Chat Completions | `openai` when Responses is not selected, `deepseek`, `mindie`, `vllm`, and the `patched_*` adapters |
+| OpenAI-compatible Chat Completions | `openai` when Responses is not selected, `deepseek`, `vllm`, `patched_openai`, `patched_deepseek`, and `vision_openai_compatible_v1` |
 | OpenAI Responses | `openai` and `patched_openai` with `use_responses_api=true` |
-| Anthropic Messages | `anthropic` and `claude_code` |
-| Codex private Responses | `codex_cli`; this is not the public OpenAI Responses API |
+| Anthropic Messages | `anthropic` |
 
 Vision, thinking, reasoning effort, tool calling and structured output are
 model capabilities layered on a protocol; an adapter name or
@@ -287,14 +287,18 @@ model capabilities layered on a protocol; an adapter name or
 `tools:` or `tool_groups:` in `config.yaml`; declaring that name there fails
 closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
 
-1. In `/admin/settings/models`, create an active logical model with
-   `supports_vision=true`, an exact encrypted Credential, an HTTPS `base_url`,
-   and a Bridge-supported wire protocol.
-2. In `/admin/settings/system`, open **Vision Bridge** and select that model.
+1. In `/admin/settings/models`, inspect the seeded model or create an active
+   model with `supports_vision=true` and a Bridge-supported wire
+   protocol. A real endpoint also requires an exact encrypted Credential and
+   an HTTPS `base_url`; `vision_bridge_fake` intentionally requires neither.
+2. In `/admin/settings/system`, open **Vision Bridge** and confirm or select
+   that model.
    A non-null `agent_runtime.vision_bridge.model_name` enables later text-only
    project Runs; clearing it disables the bridge. There is no second `enabled`
    flag and no project egress grant. Fresh installations select the seeded
-   `gpt-5.6-luna` model by default.
+   `gpt-5.6-luna` model by default. This bootstrap value is not evidence of an
+   organization's provider-policy approval; clear it before accepting project
+   Runs in a production deployment whose data-egress review is incomplete.
 3. `timeout_seconds` is the single image-read-through-result deadline.
    `contract_version` is fixed to `vision.bridge.v1` and is not free-form.
 
@@ -328,17 +332,22 @@ The one runtime-policy timeout covers file read, normalization, queueing,
 connection, one bounded retry, response buffering and validation. Requests are
 non-streaming, redirects and ambient proxies are disabled, response bytes and
 Run-level calls/bytes/pixels are bounded, and normalized token usage is added
-to the Run journal. The exact model and Credential are re-materialized before
-and after every remote dispatch. Revoking that Credential is the immediate
-egress kill switch for already admitted Runs.
+to the Run journal. Every potential real HTTP attempt obtains its own dispatch authority
+and submits its own usage receipt; known token usage is aggregated, while any
+dispatched attempt without trusted usage keeps `usage_unknown=true`. The exact
+model and Credential are re-materialized before and after every attempt. Once a
+pre-dispatch revalidation observes a suspended System Model or revoked
+Credential, it blocks that and every later attempt for the admitted Run. This
+cannot recall a request already in flight, so operators must not describe it as
+an instantaneous network kill switch.
 
 Because graph-level LangSmith/Langfuse handlers can observe tool arguments and
 OCR evidence, every external Bridge protocol and external content tracing are
-currently mutually exclusive and fail closed. System model selection is the
-deployment-wide data-egress approval; there is no separate `enabled` flag or
-project grant. Complete provider policy, staging quality, rate-limit and cost
-acceptance before selecting the real adapter in production; fake tests are not
-evidence of provider behavior. See
+currently mutually exclusive and fail closed. Confirming or selecting a real
+System Model in production is the deployment-wide data-egress approval; there
+is no separate `enabled` flag or project grant. Complete provider policy,
+staging quality, latency and rate-limit acceptance before enabling project Runs
+against the real adapter; fake tests are not evidence of provider behavior. See
 [TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md).
 
 Gateway, Worker, Scheduler, and Docker Compose do not receive the local
@@ -838,7 +847,7 @@ managed in `/admin/settings/models`. Do not broadcast `OPENAI_API_KEY`,
 - `TAVILY_API_KEY` - Tavily search API key
 - `BRAVE_SEARCH_API_KEY` - Brave Search API key for `web_search` and `image_search`
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
-- `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
+- `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, and Perplexity)
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
@@ -904,9 +913,8 @@ To keep this off the default attack surface:
 
 ### CLI Credential Mounts (Claude Code / Codex)
 
-ActWeave can reuse your Claude Code / Codex CLI subscription login as a model
-provider (`ClaudeChatModel`, the Codex provider) or for ACP agents that run the
-CLI in-container. The Compose stack used to bind-mount the **entire** `~/.claude`
+ActWeave can reuse your Claude Code / Codex CLI subscription login for ACP agents
+that run the CLI in-container. The Compose stack used to bind-mount the **entire** `~/.claude`
 and `~/.codex` directories (read-only) into the gateway container in **every**
 configuration — exposing not just credentials but full conversation history,
 per-project session data, and global CLI config. A gateway compromise (prompt
@@ -915,17 +923,14 @@ injection, tool/MCP misuse, RCE) would leak all of it.
 These directories are **no longer mounted by default**. Supply CLI credentials
 with the least exposure that fits your setup:
 
-| Need                                  | How                                                                                                                | Exposure                          |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
-| API-key model adapter                 | Bind an encrypted, exact Credential version in `/admin/settings/models`                                            | Execution-boundary value only     |
-| Claude Code / Codex CLI model adapter | Use the opt-in `docker/docker-compose.cli-auth.yaml` overlay only when local subscription auth is required         | Full CLI directory in Worker      |
-| ACP agent                             | Follow the adapter's isolated auth contract; use the CLI overlay only if it genuinely reads the full CLI directory | Adapter-specific / full directory |
+| Need      | How                                                                                                                | Exposure                          |
+| --------- | ------------------------------------------------------------------------------------------------------------------ | --------------------------------- |
+| ACP agent | Follow the adapter's isolated auth contract; use the CLI overlay only if it genuinely reads the full CLI directory | Adapter-specific / full directory |
 
 The base Compose stack never forwards root `.env` wholesale to Gateway, Worker,
-Scheduler, or Provisioner. CLI-backed model adapters are the explicit local
-subscription exception: they do not accept a model Credential binding and may
-read the opt-in Worker mount. API-key model adapters must use the PostgreSQL
-Credential binding instead.
+Scheduler, or Provisioner. API-key model adapters must use PostgreSQL Credential
+bindings; the opt-in CLI mount is reserved for ACP processes that require the
+CLI's local configuration.
 
 ## Best Practices
 

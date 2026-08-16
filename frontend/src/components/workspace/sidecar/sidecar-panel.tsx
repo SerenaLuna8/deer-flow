@@ -800,7 +800,6 @@ export function SidecarPanel({ className }: { className?: string }) {
                   models={models}
                   open={modelDialogOpen}
                   selectedModel={selectedModel}
-                  selectedModelName={modelSelection.modelName}
                   modelSelectionLocked={modelSelection.modelSelectionLocked}
                   onModelSelect={handleModelSelect}
                   onOpenChange={setModelDialogOpen}
@@ -1086,7 +1085,6 @@ function SidecarModelSelector({
   models,
   open,
   selectedModel,
-  selectedModelName,
   modelSelectionLocked,
   onModelSelect,
   onOpenChange,
@@ -1096,13 +1094,13 @@ function SidecarModelSelector({
   models: Model[];
   open: boolean;
   selectedModel?: Model;
-  selectedModelName?: string;
   modelSelectionLocked: boolean;
   onModelSelect: (modelName: string) => void;
   onOpenChange: (open: boolean) => void;
 }) {
   const { t } = useI18n();
-  const displayName = selectedModel?.display_name ?? selectedModelName;
+  const displayName =
+    selectedModel?.display_name ?? t.conversation.agentModelUnavailableTitle;
 
   if (!displayName) {
     return null;
@@ -1150,12 +1148,9 @@ function SidecarModelSelector({
               key={model.name}
               onSelect={() => onModelSelect(model.name)}
             >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-xs">
-                  {model.model}
-                </span>
-              </div>
+              <ModelSelectorName className="min-w-0 flex-1 truncate">
+                {model.display_name}
+              </ModelSelectorName>
               {model.name === context.model_name ? (
                 <CheckIcon className="ml-auto size-4" />
               ) : (

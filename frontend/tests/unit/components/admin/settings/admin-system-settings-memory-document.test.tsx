@@ -12,6 +12,8 @@ import type { SystemSettingsCatalog } from "@/core/admin-settings/system/types";
 import { I18nProvider } from "@/core/i18n/context";
 
 const TIMESTAMP = "2026-08-09T00:00:00Z";
+const VISION_MODEL_ID = "00000000-0000-4000-8000-000000000206";
+const MISSING_MODEL_ID = "00000000-0000-4000-8000-000000000207";
 
 function renderChinese(node: React.ReactNode): string {
   return renderToStaticMarkup(
@@ -230,15 +232,14 @@ describe("admin Memory document settings", () => {
   test("renders Vision Bridge as model selection without an enable or grant switch", () => {
     const data = catalog();
     data.sections.agent_runtime.value.vision_bridge.model_name =
-      "small-vision-model";
+      VISION_MODEL_ID;
     const html = renderChinese(
       <AdminSystemSettingsStateView
         activeModels={[
           {
-            name: "small-vision-model",
-            model: "small-vision-model",
+            name: VISION_MODEL_ID,
+            model: VISION_MODEL_ID,
             display_name: "Small Vision Model",
-            description: "",
             supports_thinking: false,
             supports_reasoning_effort: false,
             supports_vision: true,
@@ -259,10 +260,32 @@ describe("admin Memory document settings", () => {
 
     expect(html).toContain('data-settings-destination="vision-bridge"');
     expect(html).toContain('name="agent_runtime.vision_bridge.model_name"');
-    expect(html).toContain('value="small-vision-model" selected=""');
+    expect(html).toContain(`value="${VISION_MODEL_ID}" selected=""`);
     expect(html).toContain(">关闭</option>");
     expect(html).not.toContain("egress_grant");
     expect(html).not.toContain("agent_runtime.vision_bridge.enabled");
+  });
+
+  test("does not display an unavailable internal model reference", () => {
+    const data = catalog();
+    data.sections.agent_runtime.value.vision_bridge.model_name =
+      MISSING_MODEL_ID;
+    const html = renderChinese(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data }}
+      />,
+    );
+
+    expect(html).toContain("当前引用的模型已不可用");
+    expect(html).not.toContain(`>${MISSING_MODEL_ID}`);
   });
 });
 

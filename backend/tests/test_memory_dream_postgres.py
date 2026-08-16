@@ -133,15 +133,14 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,
-                     current_version_id,revision,sort_order,created_by_user_id,
+                    (id,display_name,status,
+                     current_version_id,revision,created_by_user_id,
                      updated_by_user_id)
-                    VALUES (:id,:name,'Dream test','PostgreSQL Dream test',
-                            'active',NULL,1,0,:owner,:owner)"""
+                    VALUES (:id,'Dream test','active',NULL,1,
+                            :owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": f"dream-test-{model_id.hex}",
                     "owner": scope.owner_user_id,
                 },
             )
@@ -153,7 +152,7 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'codex_cli','dream-test',
+                    VALUES (:id,:model,1,'vision_bridge_fake','dream-test',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,NULL,:owner)"""
                 ),
@@ -522,7 +521,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
     model_id = uuid.uuid4()
     model_version_id = uuid.uuid4()
     model_checksum = "d" * 64
-    model_name = f"dream-lock-order-{model_id.hex}"
+    model_name = str(model_id)
     policy_revision = 2
     worker_project_locked = asyncio.Event()
     release_worker = asyncio.Event()
@@ -590,16 +589,14 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,
-                     current_version_id,revision,sort_order,created_by_user_id,
+                    (id,display_name,status,
+                     current_version_id,revision,created_by_user_id,
                      updated_by_user_id)
-                    VALUES (:id,:name,'Dream lock-order model',
-                            'PostgreSQL Dream lock-order test','active',
-                            NULL,1,0,:owner,:owner)"""
+                    VALUES (:id,'Dream lock-order model','active',
+                            NULL,1,:owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": model_name,
                     "owner": worker_scope.owner_user_id,
                 },
             )
@@ -611,7 +608,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'codex_cli','dream-lock-order',
+                    VALUES (:id,:model,1,'vision_bridge_fake','dream-lock-order',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,NULL,:owner)"""
                 ),
@@ -861,16 +858,14 @@ async def test_release_settlement_locks_document_before_active_job(
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,
-                     current_version_id,revision,sort_order,created_by_user_id,
+                    (id,display_name,status,
+                     current_version_id,revision,created_by_user_id,
                      updated_by_user_id)
-                    VALUES (:id,:name,'Dream release lock-order model',
-                            'PostgreSQL Dream release lock-order test','active',
-                            NULL,1,0,:owner,:owner)"""
+                    VALUES (:id,'Dream release lock-order model','active',
+                            NULL,1,:owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": f"dream-release-lock-order-{model_id.hex}",
                     "owner": scope.owner_user_id,
                 },
             )
@@ -882,7 +877,7 @@ async def test_release_settlement_locks_document_before_active_job(
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'codex_cli','dream-release-lock-order',
+                    VALUES (:id,:model,1,'vision_bridge_fake','dream-release-lock-order',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,NULL,:owner)"""
                 ),
@@ -1059,7 +1054,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
     drifted_model_version_id = uuid.uuid4()
     frozen_checksum = "a" * 64
     drifted_checksum = "b" * 64
-    model_name = f"dream-settlement-{model_id.hex}"
+    model_name = str(model_id)
     policy_revision = 2
     tagged_text = "- [durable] Remember the settlement boundary."
     changed_content = EMPTY_MEMORY_DOCUMENT.replace(
@@ -1092,16 +1087,14 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,
-                     current_version_id,revision,sort_order,created_by_user_id,
+                    (id,display_name,status,
+                     current_version_id,revision,created_by_user_id,
                      updated_by_user_id)
-                    VALUES (:id,:name,'Dream settlement model',
-                            'PostgreSQL Dream settlement drift test','active',
-                            NULL,1,0,:owner,:owner)"""
+                    VALUES (:id,'Dream settlement model','active',
+                            NULL,1,:owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": model_name,
                     "owner": scope.owner_user_id,
                 },
             )
@@ -1113,7 +1106,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'codex_cli','dream-frozen',
+                    VALUES (:id,:model,1,'vision_bridge_fake','dream-frozen',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,NULL,:owner)"""
                 ),
@@ -1253,7 +1246,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,2,'codex_cli','dream-drifted',
+                    VALUES (:id,:model,2,'vision_bridge_fake','dream-drifted',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,:supersedes,:owner)"""
                 ),

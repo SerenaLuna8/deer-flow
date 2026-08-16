@@ -22,6 +22,8 @@ from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.models import AgentModelSettings, AgentPayload, WorkflowStatus
 from deerflow.persistence.shared_assets import AgentVersionRow
 
+RETIRED_MODEL_REF = "00000000-0000-4000-8000-000000000309"
+
 
 class _Session:
     async def __aenter__(self):
@@ -219,6 +221,23 @@ async def test_catalog_validator_rejects_unknown_group_before_model_lookup() -> 
 
 
 @pytest.mark.asyncio
+async def test_catalog_validator_rejects_a_legacy_model_name_before_lookup() -> None:
+    session = _Session()
+    validator, models = _validator(session)
+
+    with pytest.raises(AssetValidationFailed):
+        await validator.validate(
+            session,  # type: ignore[arg-type]
+            request_id="catalog-legacy-model-name",
+            model_ref="gpt-5.6-luna",
+            tool_groups=("file:read",),
+        )
+
+    assert models.calls == []
+    assert models.factory_sessions == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_catalog_validator_rejects_inactive_or_missing_model() -> None:
     session = _Session()
     validator, models = _validator(session, active_models=set())
@@ -227,12 +246,12 @@ async def test_catalog_validator_rejects_inactive_or_missing_model() -> None:
         await validator.validate(
             session,  # type: ignore[arg-type]
             request_id="catalog-inactive-model",
-            model_ref="retired-model",
+            model_ref=RETIRED_MODEL_REF,
             tool_groups=("file:read",),
         )
 
     assert caught.value.request_id == "catalog-inactive-model"
-    assert models.calls == [("retired-model", False)]
+    assert models.calls == [(RETIRED_MODEL_REF, False)]
 
 
 @pytest.mark.asyncio
@@ -306,11 +325,11 @@ async def test_builder_package_rejects_inactive_model_before_writing(
             session,  # type: ignore[arg-type]
             actor,
             CreateAgent(slug="reviewer", display_name="Reviewer"),
-            _payload(model_ref="retired-model"),
+            _payload(model_ref=RETIRED_MODEL_REF),
         )
 
     repository.create_project_asset.assert_not_awaited()
-    assert models.calls == [("retired-model", False)]
+    assert models.calls == [(RETIRED_MODEL_REF, False)]
 
 
 @pytest.mark.asyncio
@@ -329,7 +348,7 @@ async def test_publish_revalidates_the_drafts_model_catalog(
     draft = _version(
         asset.id,
         workflow_status=WorkflowStatus.DRAFT,
-        model_ref="retired-model",
+        model_ref=RETIRED_MODEL_REF,
         tool_groups=("file:read",),
         supersedes_version_id=live_version_id,
     )
@@ -363,7 +382,7 @@ async def test_publish_revalidates_the_drafts_model_catalog(
     assert draft.row.workflow_status == WorkflowStatus.DRAFT.value
     assert asset.current_published_version_id == live_version_id
     assert asset.version == 8
-    assert models.calls == [("retired-model", False)]
+    assert models.calls == [(RETIRED_MODEL_REF, False)]
 
 
 @pytest.mark.asyncio

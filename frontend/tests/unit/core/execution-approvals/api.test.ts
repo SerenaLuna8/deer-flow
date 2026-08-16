@@ -13,6 +13,11 @@ import {
   executionApprovalActiveQueryKey,
   executionApprovalQueryKey,
 } from "@/core/execution-approvals/query-keys";
+import {
+  executionApprovalDecisionSurface,
+  executionApprovalsActiveResponseSchema,
+  type ExecutionApprovalsActiveResponse,
+} from "@/core/execution-approvals/schemas";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
@@ -170,38 +175,77 @@ describe("execution approval API", () => {
     );
   });
 
-  test("commits a decision to by-id cache without leaving terminal state active", () => {
-    const queryClient = new QueryClient();
-    const denied = {
-      schema_version: 1 as const,
-      server_time: "2026-08-14T16:15:01Z",
-      approval: {
-        ...approvalCommon,
-        status: "denied" as const,
-        can_decide: false as const,
-        decision_at: "2026-08-14T16:15:01Z",
-        denial_delivery_status: "delivered" as const,
-        continuation_run: null,
-      },
-    };
+  test.each(["approved", "denied"] as const)(
+    "commits %s so the decision surface closes synchronously",
+    (status) => {
+      const queryClient = new QueryClient();
+      const queryKey = executionApprovalQueryKey(
+        access.scope,
+        THREAD_ID,
+        APPROVAL_ID,
+      );
+      queryClient.setQueryData<ExecutionApprovalsActiveResponse>(
+        queryKey,
+        executionApprovalsActiveResponseSchema.parse({
+          schema_version: 1,
+          server_time: "2026-08-14T16:15:00Z",
+          approval: pendingApproval,
+        }),
+      );
+      expect(
+        executionApprovalDecisionSurface(
+          queryClient.getQueryData<ExecutionApprovalsActiveResponse>(queryKey)
+            ?.approval,
+        )?.status,
+      ).toBe("pending");
 
-    commitExecutionApprovalDecisionResponse(
-      queryClient,
-      access.scope,
-      THREAD_ID,
-      APPROVAL_ID,
-      denied,
-    );
+      const response = executionApprovalsActiveResponseSchema.parse(
+        status === "approved"
+          ? {
+              schema_version: 1,
+              server_time: "2026-08-14T16:15:01Z",
+              approval: {
+                ...approvalCommon,
+                status: "approved",
+                version: "2",
+                can_decide: false,
+                decision_at: "2026-08-14T16:15:01Z",
+                claim_expires_at: "2026-08-14T16:16:01Z",
+                continuation_run: { run_id: "run-2", status: "pending" },
+              },
+            }
+          : {
+              schema_version: 1,
+              server_time: "2026-08-14T16:15:01Z",
+              approval: {
+                ...approvalCommon,
+                status: "denied",
+                version: "2",
+                can_decide: false,
+                decision_at: "2026-08-14T16:15:01Z",
+                denial_delivery_status: "delivered",
+                continuation_run: null,
+              },
+            },
+      );
 
-    expect(
-      queryClient.getQueryData(
-        executionApprovalQueryKey(access.scope, THREAD_ID, APPROVAL_ID),
-      ),
-    ).toMatchObject({ approval: { status: "denied" } });
-    expect(
-      queryClient.getQueryData(
-        executionApprovalActiveQueryKey(access.scope, THREAD_ID),
-      ),
-    ).toMatchObject({ approval: null });
-  });
+      commitExecutionApprovalDecisionResponse(
+        queryClient,
+        access.scope,
+        THREAD_ID,
+        APPROVAL_ID,
+        response,
+      );
+
+      const committed =
+        queryClient.getQueryData<ExecutionApprovalsActiveResponse>(queryKey);
+      expect(committed?.approval?.status).toBe(status);
+      expect(executionApprovalDecisionSurface(committed?.approval)).toBeNull();
+      expect(
+        queryClient.getQueryData<ExecutionApprovalsActiveResponse>(
+          executionApprovalActiveQueryKey(access.scope, THREAD_ID),
+        )?.approval?.status ?? null,
+      ).toBe(status === "approved" ? "approved" : null);
+    },
+  );
 });

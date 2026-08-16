@@ -65,19 +65,18 @@ def _checkpointer_url(database_url: str) -> str:
 async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
     model_id = uuid.uuid4()
     version_id = uuid.uuid4()
-    model_name = f"memory-seal-{model_id.hex}"
+    model_name = str(model_id)
     async with seed.engine.begin() as connection:
         await connection.execute(
             text(
                 """INSERT INTO system_model_configs
-                (id,logical_name,display_name,description,status,current_version_id,
-                 revision,sort_order,created_by_user_id,updated_by_user_id)
-                VALUES (:id,:name,'Memory seal test model','seal PostgreSQL test',
-                        'active',NULL,1,0,:owner,:owner)"""
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,updated_by_user_id)
+                VALUES (:id,'Memory seal test model','active',NULL,1,
+                        :owner,:owner)"""
             ),
             {
                 "id": model_id,
-                "name": model_name,
                 "owner": str(seed.owner_a.user_id),
             },
         )
@@ -89,7 +88,7 @@ async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
                  supports_reasoning_effort,supports_vision,credential_id,
                  credential_version_id,credential_env_key,payload_checksum,
                  supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'codex_cli','memory-seal-test','{}'::jsonb,
+                VALUES (:id,:model,1,'vision_bridge_fake','memory-seal-test','{}'::jsonb,
                         false,false,false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
             ),
             {
@@ -208,7 +207,7 @@ async def _seed_due_thread(
                 assistant_id=str(seed.project_agent_id),
                 owner_user_id=str(seed.owner_a.user_id),
                 status="success",
-                model_name="memory-seal-test",
+                model_name=app_config.summarization.model_name,
                 multitask_strategy="reject",
                 metadata_json={},
                 kwargs_json={},
@@ -294,11 +293,19 @@ async def _admit_and_claim(
         )
         assert queued is not None
         assert queued.status == "queued"
+        database_now = await session.scalar(sa.select(sa.func.clock_timestamp()))
+        assert isinstance(database_now, datetime)
+        # Production claims sample PostgreSQL time. This closure test injects
+        # one explicit logical instant at or after the row becomes available so
+        # host/database skew does not turn it into a claim-clock test instead.
+        claim_at = max(database_now, queued.available_at)
+        assert queued.available_at <= claim_at
         jobs = JobRepository(session)
         claim = await jobs.claim_next(
             worker_id=worker_id,
             capabilities=frozenset({"memory_seal"}),
             lease_seconds=300,
+            now=claim_at,
         )
         assert claim is not None
         assert claim.job_id == queued.id
@@ -307,6 +314,7 @@ async def _admit_and_claim(
         assert await jobs.mark_running(
             claim.job_id,
             lease_token=claim.lease_token,
+            now=claim_at,
         )
     return claim
 
@@ -534,7 +542,7 @@ async def test_memory_seal_real_postgres_live_run_preempts_with_noop(
                         assistant_id=str(seed.project_agent_id),
                         owner_user_id=str(seed.owner_a.user_id),
                         status="running",
-                        model_name="memory-seal-test",
+                        model_name=runtime_model.name,
                         multitask_strategy="reject",
                         metadata_json={},
                         kwargs_json={},

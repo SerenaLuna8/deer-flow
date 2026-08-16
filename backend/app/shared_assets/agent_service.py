@@ -29,6 +29,7 @@ from app.shared_assets.errors import (
     SharedAssetError,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -1143,7 +1144,7 @@ class AgentService:
             )
         except TypeError:
             raise AssetValidationFailed(request_id) from None
-        if not normalized.model_ref.strip() or len(normalized.model_ref) > 255:
+        if normalized.model_ref != DEFAULT_MODEL_REF and exact_model_ref(normalized.model_ref) is None:
             raise AssetValidationFailed(request_id)
         if payload_schema_version in (1, 2) and not normalized.model_settings.is_empty:
             raise AssetValidationFailed(request_id)

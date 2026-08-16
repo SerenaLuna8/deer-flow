@@ -196,7 +196,6 @@ def _repointed_checksum(pin: _LockedPin, credential_version_id: uuid.UUID) -> st
 def _command(pin: _LockedPin, credential_version_id: uuid.UUID) -> UpdateSystemModel:
     return UpdateSystemModel(
         display_name=pin.model.display_name,
-        description=pin.model.description,
         provider_adapter=pin.version.provider_adapter,
         provider_model=pin.version.provider_model,
         settings=pin.version.settings,
@@ -206,7 +205,6 @@ def _command(pin: _LockedPin, credential_version_id: uuid.UUID) -> UpdateSystemM
         credential_id=uuid.UUID(str(pin.version.credential_id)),
         credential_version_id=credential_version_id,
         credential_env_key=pin.version.credential_env_key,
-        sort_order=pin.model.sort_order,
     )
 
 

@@ -21,6 +21,11 @@ from pydantic import (
     model_validator,
 )
 
+from deerflow.vision.dispatch import (
+    VISION_TOOL_FREQUENCY_HARD_STOP,
+    VISION_TOOL_FREQUENCY_WARN,
+)
+
 _JSON_SAFE_INTEGER = 2**53 - 1
 _MAX_CHARS = 10_000_000
 MAX_MEMORY_DOCUMENT_SECTION_TITLE_CHARS = 80
@@ -47,9 +52,12 @@ ModelName = Annotated[
     str,
     StringConstraints(
         strip_whitespace=True,
-        min_length=1,
-        max_length=128,
-        pattern=r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+        min_length=36,
+        max_length=36,
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
     ),
 ]
 
@@ -252,6 +260,10 @@ class LoopDetectionPolicy(_PolicyModel):
             "web_fetch": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
             "web_search": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
             "recall_memory": ToolFrequencyOverridePolicy(warn=6, hard_limit=10),
+            "inspect_image": ToolFrequencyOverridePolicy(
+                warn=VISION_TOOL_FREQUENCY_WARN,
+                hard_limit=VISION_TOOL_FREQUENCY_HARD_STOP,
+            ),
         },
         max_length=64,
     )
@@ -383,7 +395,12 @@ class LockedMemoryDocumentPolicy:
 
 
 CATALOG_DEFAULT_MODEL_REF = "default"
-DEFAULT_VISION_BRIDGE_MODEL_NAME = "gpt-5.6-luna"
+DEFAULT_VISION_BRIDGE_MODEL_NAME = str(
+    uuid.uuid5(
+        uuid.UUID("e9ef2794-807b-5d89-967c-c67be15b42e7"),
+        "gpt-5.6-luna:model",
+    )
+)
 
 
 def auxiliary_model_snapshot_ref(

@@ -18,19 +18,31 @@ from pydantic import (
 from deerflow.vision.prompt import VisionMode
 
 MAX_EVIDENCE_JSON_BYTES = 24_000
-BoundedSummary = Annotated[str, StringConstraints(min_length=1, max_length=2_000)]
+MAX_SUMMARY_CHARS = 2_000
+MAX_EVIDENCE_TEXT_CHARS = 2_000
+MAX_LOCATION_CHARS = 256
+MAX_OCR_TEXT_CHARS = 12_000
+MAX_UNCERTAINTY_CHARS = 1_000
+
+BoundedSummary = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=MAX_SUMMARY_CHARS),
+]
 BoundedEvidenceText = Annotated[
     str,
-    StringConstraints(min_length=1, max_length=2_000),
+    StringConstraints(min_length=1, max_length=MAX_EVIDENCE_TEXT_CHARS),
 ]
 BoundedLocation = Annotated[
     str,
-    StringConstraints(min_length=1, max_length=256),
+    StringConstraints(min_length=1, max_length=MAX_LOCATION_CHARS),
 ]
-BoundedOcrText = Annotated[str, StringConstraints(max_length=12_000)]
+BoundedOcrText = Annotated[
+    str,
+    StringConstraints(max_length=MAX_OCR_TEXT_CHARS),
+]
 BoundedUncertainty = Annotated[
     str,
-    StringConstraints(min_length=1, max_length=1_000),
+    StringConstraints(min_length=1, max_length=MAX_UNCERTAINTY_CHARS),
 ]
 
 
@@ -44,7 +56,7 @@ class InspectImageInput(_StrictContract):
 
 
 class VisionErrorResult(_StrictContract):
-    ok: Literal[False] = False
+    ok: Literal[False]
     code: Literal[
         "IMAGE_UNAVAILABLE",
         "UNSUPPORTED_MEDIA",
@@ -69,6 +81,13 @@ class VisionEvidenceItem(_StrictContract):
     text: BoundedEvidenceText
     location: BoundedLocation
 
+    @field_validator("text", "location")
+    @classmethod
+    def visible_fields_must_have_text(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("evidence text and location must be non-empty")
+        return value
+
 
 class VisionOcrEvidence(_StrictContract):
     full_text: BoundedOcrText
@@ -76,9 +95,9 @@ class VisionOcrEvidence(_StrictContract):
 
 
 class VisionEvidence(_StrictContract):
-    ok: Literal[True] = True
-    content_type: Literal["untrusted_image_evidence"] = "untrusted_image_evidence"
-    schema_version: Literal["vision.evidence.v1"] = "vision.evidence.v1"
+    ok: Literal[True]
+    content_type: Literal["untrusted_image_evidence"]
+    schema_version: Literal["vision.evidence.v1"]
     summary: BoundedSummary
     evidence: list[VisionEvidenceItem] = Field(max_length=64)
     ocr: VisionOcrEvidence | None = None
@@ -90,6 +109,16 @@ class VisionEvidence(_StrictContract):
     def summary_must_have_visible_text(cls, value: str) -> str:
         if not value.strip():
             raise ValueError("summary must be non-empty")
+        return value
+
+    @field_validator("uncertainty")
+    @classmethod
+    def uncertainty_must_have_visible_text(
+        cls,
+        value: list[str],
+    ) -> list[str]:
+        if any(not item.strip() for item in value):
+            raise ValueError("uncertainty items must be non-empty")
         return value
 
     @model_validator(mode="after")
@@ -135,7 +164,12 @@ class VisionInvocationResult:
 
 __all__ = [
     "InspectImageInput",
+    "MAX_EVIDENCE_TEXT_CHARS",
     "MAX_EVIDENCE_JSON_BYTES",
+    "MAX_LOCATION_CHARS",
+    "MAX_OCR_TEXT_CHARS",
+    "MAX_SUMMARY_CHARS",
+    "MAX_UNCERTAINTY_CHARS",
     "VisionEvidence",
     "VisionErrorResult",
     "VisionEvidenceItem",

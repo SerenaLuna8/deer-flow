@@ -49,6 +49,8 @@ FINAL_REQUIRED_RELATIONS = (
     "run_event_invariants",
     "run_event_partition_state",
     "run_events",
+    "execution_approval_output_delivery_obligations",
+    "execution_approval_output_delivery_candidates",
     "project_usage_ledger",
     "audit_logs",
     "system_runtime_policy_catalog_state",

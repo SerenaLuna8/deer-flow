@@ -52,7 +52,12 @@ from app.private_work.inbound_dedupe import (
     PrivateRunInboundDelivery,
     ProjectInboundDeliveryRepository,
 )
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    assign_output_delivery_obligation,
+)
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_metadata import strip_server_run_metadata
 from app.private_work.run_repository import PrivateRunConflict, PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
 from app.private_work.sandbox_files import (
     RUN_CURRENT_UPLOAD_SNAPSHOT_KWARG,
@@ -607,7 +612,7 @@ class PrivateRunAdmissionService:
             persisted_kwargs,
             request.kwargs,
         )
-        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and run.metadata == request.metadata and kwargs_match and profile_match
+        return run.thread_id == thread_id and run.multitask_strategy == request.multitask_strategy and strip_server_run_metadata(run.metadata) == strip_server_run_metadata(request.metadata) and kwargs_match and profile_match
 
     @staticmethod
     def _server_kwargs(
@@ -852,12 +857,29 @@ class PrivateRunAdmissionService:
                             active_execution_approval.continuation_run_id = locked_existing.run_id
                             active_execution_approval.continuation_job_id = existing_job.job_id
                             active_execution_approval.version += 1
-                            active_execution_approval.updated_at = datetime.now(
+                            linked_at = await session.scalar(
+                                select(func.clock_timestamp()),
+                            )
+                            if not isinstance(linked_at, datetime) or linked_at.tzinfo is None:
+                                raise PrivateWorkUnavailable(context.request_id)
+                            active_execution_approval.updated_at = linked_at.astimezone(
                                 UTC,
                             )
                             await session.flush()
                         elif active_execution_approval.continuation_run_id != locked_existing.run_id or active_execution_approval.continuation_job_id != existing_job.job_id:
                             raise PrivateWorkConflict(context.request_id)
+                        else:
+                            linked_at = approval_checked_at
+                        try:
+                            await assign_output_delivery_obligation(
+                                session,
+                                approval=active_execution_approval,
+                                continuation_run_id=locked_existing.run_id,
+                                continuation_job_id=existing_job.job_id,
+                                now=linked_at.astimezone(UTC),
+                            )
+                        except OutputDeliveryObligationConflict:
+                            raise ExecutionApprovalPrivateLifecycleConflict() from None
                     if inbound_authority is not None and inbound_delivery is not None:
                         await inbound_deliveries.bind(
                             scope=context.resource_scope,
@@ -955,6 +977,16 @@ class PrivateRunAdmissionService:
                         raise PrivateWorkUnavailable(context.request_id)
                     active_execution_approval.updated_at = linked_at.astimezone(UTC)
                     await session.flush()
+                    try:
+                        await assign_output_delivery_obligation(
+                            session,
+                            approval=active_execution_approval,
+                            continuation_run_id=run.run_id,
+                            continuation_job_id=job.job_id,
+                            now=linked_at.astimezone(UTC),
+                        )
+                    except OutputDeliveryObligationConflict:
+                        raise ExecutionApprovalPrivateLifecycleConflict() from None
                 if inbound_authority is not None and inbound_delivery is not None:
                     await inbound_deliveries.bind(
                         scope=context.resource_scope,

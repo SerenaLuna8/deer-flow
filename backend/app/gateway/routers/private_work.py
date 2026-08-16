@@ -574,7 +574,7 @@ def _public_run_metadata(value: object) -> dict[str, Any]:
     return {
         str(key): (_public_run_metadata(item) if isinstance(item, Mapping) else [_public_run_metadata(entry) if isinstance(entry, Mapping) else entry for entry in item] if isinstance(item, list) else item)
         for key, item in value.items()
-        if isinstance(key, str) and key not in {"project_id", "owner_user_id", "user_id"} and not any(part in key.lower() for part in sensitive_parts)
+        if isinstance(key, str) and not key.startswith("__") and key not in {"project_id", "owner_user_id", "user_id"} and not any(part in key.lower() for part in sensitive_parts)
     }
 
 
@@ -1030,7 +1030,15 @@ async def _durable_private_sse_consumer(
                     thread_id,
                     run_id,
                     status=_fallback_terminal_status(record.status),
-                    error_code=("MODEL_OUTPUT_LIMIT" if record.error == "MODEL_OUTPUT_LIMIT" else None),
+                    error_code=(
+                        record.error
+                        if record.error
+                        in {
+                            "MODEL_OUTPUT_LIMIT",
+                            "OUTPUT_DELIVERY_INCOMPLETE",
+                        }
+                        else None
+                    ),
                 )
                 terminal_cursor = int(terminal.id)
                 if terminal_cursor > cursor:

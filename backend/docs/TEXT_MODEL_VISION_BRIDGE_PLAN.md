@@ -1,8 +1,8 @@
 # 方案：文本模型内部识图桥接（第三方小型多模态 API）
 
-> 状态：目标设计 v1，尚未实现，不代表当前运行时行为。
+> 状态：v1 已实现；本文同时定义当前运行时契约、验收边界和后续生产门禁。
 > 范围：Gateway Run 准入、Worker 模型物化、harness 工具与图片权限、第三方视觉 API、结果治理和测试。
-> 核心假设：“内部小模型”指内部逻辑模型别名和受治理调用链，实际推理由第三方
+> 核心假设：“内部小模型”指受治理的系统模型 UUID 和调用链，实际推理由第三方
 > HTTP API 承载；本期不托管本地推理进程。
 > 关联文档：[ARCHITECTURE.md](ARCHITECTURE.md)、
 > [CONFIGURATION.md](CONFIGURATION.md)、[FILE_UPLOAD.md](FILE_UPLOAD.md)、
@@ -27,12 +27,12 @@
 - [`tools.py`](../packages/harness/deerflow/tools/tools.py)
 - [`test_current_upload_vision.py`](../tests/test_current_upload_vision.py)
 
-因此，文本模型即使能看到当前上传文件的安全虚拟路径，也没有受支持的方式读取
-图片内容。目标改造是在不削弱现有文件权限、Run snapshot、Credential 和
-checkpoint 边界的前提下，为 text-only lead model 增加一个视觉证据工具。
+未选择兼容 Vision Bridge 模型时，文本模型即使能看到当前上传文件的安全虚拟路径，
+也没有受支持的方式读取图片内容。当前实现是在不削弱现有文件权限、Run snapshot、
+Credential 和 checkpoint 边界的前提下，为 text-only lead model 提供视觉证据工具。
 
 该能力不能简单理解为“给文本模型加一个图片 URL”。第三方 API 调用会使图片内容
-离开 ActWeave 信任边界，还会引入提示注入、供应商留存、费用、超时、模型漂移和
+离开 ActWeave 信任边界，还会引入提示注入、供应商留存、超时、模型漂移和
 结构化输出不稳定等问题。这些必须作为一等设计约束，而不是留给工具提示词处理。
 
 ## 2. 已确认事实、目标决策与未验证假设
@@ -60,7 +60,7 @@ checkpoint 边界的前提下，为 text-only lead model 增加一个视觉证�
   绝对路径、project/owner ID、Provider 或认证参数。
 - 小型视觉模型作为明确的辅助模型 purpose 冻结到 Run snapshot；不得在执行时读取
   最新 catalog 指针或静默切换供应商。
-- 首版仅接入一个受治理的第三方 API adapter，不做自动多供应商 failover。
+- 每个 Run 只冻结一个 Bridge 模型并解析为一个受治理协议，不做自动多供应商 failover。
 - 视觉模型输出必须经过严格、版本化 Schema 校验；供应商原始响应不能直接进入主
   模型上下文。
 - 图片内容和视觉结果都按不可信外部内容处理；OCR 中的指令没有系统或用户指令权限。
@@ -70,12 +70,15 @@ checkpoint 边界的前提下，为 text-only lead model 增加一个视觉证�
 
 ### 2.3 尚未验证的前提
 
-- 目标第三方 API 的具体协议、认证方式、结构化输出能力和响应大小上限尚未确定。
+- 当前代码已经固定受控的 OpenAI-compatible Chat Completions 与 OpenAI Responses
+  协议映射，并内置使用 Responses profile 的 `gpt-5.6-luna`；但 fake/unit 测试或一次性
+  连接探针不能证明目标 Endpoint、Credential、图片输入和 strict Schema 能力长期兼容，
+  仍需隔离 staging 证据。
 - 目标小模型在中文/英文 OCR、表格、图表、UI 截图、旋转图片和低分辨率图片上的
   质量尚未通过本项目评测。
 - 供应商的数据留存、no-training、部署地域和敏感数据处理条款尚未形成项目准入结论。
 - 是否必须对“当前消息带图”实施运行时强制识图，而不是由文本模型主动调用工具，
-  尚需结合产品成本和真实模型工具调用命中率决定。
+  尚需结合真实模型工具调用命中率决定。
 - 图片像素、输出长度和端到端 timeout 的最终数值需要通过真实 API 压测校准。
 
 未验证项不得被实现或文档表述为当前保证；它们是生产启用前的显式门禁。
@@ -90,7 +93,7 @@ text-only lead model 可以通过 `inspect_image` 分析当前上传图片、工
 ### G2. 保持原生视觉路径不回归
 
 原生视觉模型继续使用 `view_image` 和 `ViewImageMiddleware`。启用 Vision Bridge
-不得重复上传同一图片、重复计费、改变原生图片消息，或把原生视觉模型降级为证据
+不得重复上传同一图片、重复调用辅助模型、改变原生图片消息，或把原生视觉模型降级为证据
 文本模式。
 
 ### G3. 保持文件授权和 Run 隔离
@@ -116,7 +119,7 @@ Endpoint。
 会话、主模型 System Prompt、其他附件、内部路径或权限信息。视觉结果以不可信 tool
 result 进入主模型，不能提升图片内文本的权限。
 
-### G7. 提供可预测的失败、取消与成本边界
+### G7. 提供可预测的失败、取消与资源边界
 
 资产读取、图片处理和 API 调用共享一个端到端 deadline 和取消信号。只对明确可恢复
 错误做至多一次重试；失败时文本模型必须说明无法读取图片，不得根据文件名、alt 文本
@@ -129,7 +132,8 @@ result 进入主模型，不能提升图片内文本的权限。
 普通 Runtime Policy revision 只影响新 Run：清空 Bridge 模型选择后，新 Run 不冻结视觉
 模型、不注册工具。
 已准入 Run 继续遵循冻结策略；需要即时阻断后续外发时，管理员使用 Worker 每次 dispatch
-都会复验的 emergency egress kill switch 或 Credential grant 撤销。
+都会复验的当前模型状态或 Credential 状态：暂停该系统模型或撤销其 Credential，都会
+阻断下一次外发。
 
 ## 4. 非目标
 
@@ -144,7 +148,7 @@ result 进入主模型，不能提升图片内文本的权限。
 - 将用户原文、完整对话或模型生成的自由文本 question 转发给视觉 Provider；MVP 只允许
   固定 mode 对应的服务端任务说明；
 - delegated Agent、Skill Builder 专用 Agent、SDK/TUI 隔离运行时的视觉桥接；首版只
-  改造 project Run 的 lead agent，其他 builder 需单独做 authority 和成本评审；
+  改造 project Run 的 lead agent，其他 builder 需单独做 authority 和资源预算评审；
 - 模型选择 Provider、model、Endpoint、headers、API Key 或透传 `extra_body`；
 - 自动跨供应商 failover；
 - 跨项目或跨租户共享视觉结果缓存；
@@ -172,7 +176,7 @@ Skill 语义触发依赖模型判断，不能作为能力或授权保证；伪�
 会绕过现有准入语义。`inspect_image` 必须是 Worker 创建并注册的受治理外部调用工具，
 其 Schema 在每次相关模型调用中可见。
 
-虽然工具不修改 ActWeave 文件，但图片一旦发给第三方就已经发生数据披露、计费和可能
+虽然工具不修改 ActWeave 文件，但图片一旦发给第三方就已经发生数据披露和可能
 的供应商留存，不能把它标记为 trusted read-only 并绕过 ambiguous-side-effect fence。
 外发前后必须经过专用 dispatch/settlement 边界，详见 §13.5。
 
@@ -183,10 +187,11 @@ authority 建立授权边界。首版工具继续接收该虚拟路径，由服�
 向 Agent runtime 之外的调用者开放识图 API，再引入 opaque `asset_ref`；不得把当前
 虚拟路径扩展为宿主机路径或远程 URL。
 
-### 5.4 单一适配器和单一模型别名
+### 5.4 单一选择和确定性协议
 
-首版只支持一个管理员选择的视觉模型，例如逻辑别名 `vision-small-v1`。供应商差异封装
-在 Worker 内部 adapter，文本模型和工具参数都看不到供应商配置。
+一次 Runtime Policy 只选择一个视觉模型；Run 冻结该模型的精确版本，并由
+adapter/settings 确定性解析为一个受控 Chat Completions 或 Responses profile。供应商
+差异封装在 Worker 内部 adapter，文本模型和工具参数都看不到供应商配置。
 
 ### 5.5 不复制大而全的视觉报告
 
@@ -212,7 +217,7 @@ flowchart LR
     W --> T["inspect_image"]
     T --> A["Private FileAuthority 复验"]
     A --> N["图片校验、规范化、去 EXIF"]
-    N --> D["Dispatch fence：lease、Credential、kill switch、quota"]
+    N --> D["Per-attempt dispatch：lease、模型/Credential、calls/bytes/pixels"]
     D --> V["第三方小型多模态 API"]
     V --> J["vision.evidence.v1 严格校验"]
     J --> Z["不可信内容清洗与输出预算"]
@@ -271,7 +276,7 @@ Vision Bridge 是否配置无关，不是 `inspect_image` 的隐式回退。
 ### 7.3 不在 `config.yaml` 声明工具
 
 `inspect_image` 是平台保留的条件内置工具，不是 `config.yaml` 中 `tools[].use` 加载的
-community/operator tool。实现后不需要、也不允许增加以下配置：
+community/operator tool。当前不需要、也不允许增加以下配置：
 
 ```yaml
 tools:
@@ -362,10 +367,11 @@ private file authority、Sandbox 和当前 Run scope 校验。
   `uncertainty` 非空，不能为了满足 Schema 伪造证据；
 - `ocr` 按 mode 可选，其余成功字段必须存在；
 - `ocr.full_text` 是转录数据，不获得指令权限；
-- 所有字符串和数组必须有上限；初始值由 P0 评测确定并作为代码常量与聚焦测试同步；
+- 所有字符串和数组都有 v1 代码常量与聚焦测试同步的上限；后续只能通过真实评测发布
+  受测试的新值；
 - `partial=true` 时必须至少给出一项 uncertainty 或截断说明；
 - 禁止输出模型自报的数值置信度和未经验证的像素 bbox；
-- 模型可见结果不包含本地路径、供应商、模型 Endpoint、token usage、成本和重试详情；
+- 模型可见结果不包含本地路径、供应商、模型 Endpoint、token usage 和重试详情；
 - 供应商原始响应和解析前文本只允许存在于受限内存，不进入 checkpoint、事件、日志或
   ToolMessage。
 
@@ -421,9 +427,9 @@ Run/Thread 的既有授权和保留策略；它不是公开数据，也不额外
 
 ### 9.1 必须复用的现有边界
 
-实现应将 `view_image_tool.py` 中通用的安全图片读取能力重构为 harness 内部共享模块，
-供 `view_image` 和 `inspect_image` 使用，而不是从一个工具文件导入另一个工具的私有
-函数。共享能力至少包括：
+v1 已将 `view_image_tool.py` 中通用的安全图片读取能力抽取到 harness 的
+`vision/image_input.py`，供 `view_image` 和 `inspect_image` 使用，而不是从一个工具文件
+导入另一个工具的私有函数。共享能力包括：
 
 - 允许虚拟根校验；
 - `sandbox.open_regular_file` 的常规文件读取；
@@ -448,9 +454,9 @@ Run/Thread 的既有授权和保留策略；它不是公开数据，也不额外
 - 在保持可读性的前提下按 Provider 限制缩放；
 - 规范化后 MIME、尺寸、字节数和 SHA-256 重新计算。
 
-除单图限制外，还必须有本次 Run 的累计外发图片字节、像素和调用次数预算，避免模型
-通过多次合法单图调用绕过总体成本边界；初值在 P0 根据现有当前消息最多四图、总图片
-预算和供应商计费方式确定。
+除单图限制外，当前每 Run 资源上限为 8 次外发 attempt 预留、40 MiB 累计规范化图片
+字节和 80,000,000 累计规范化像素，避免模型通过多次合法单图调用绕过总体资源边界。
+这些值是 v1 代码常量并由聚焦测试固定，未来调整必须基于真实评测同步代码与测试。
 
 第三方 API 优先接收内联字节或 multipart。只有 adapter 必须使用 OpenAI-compatible
 图片块时才生成临时 Data URL；不得把内部对象存储地址或签名 URL交给供应商。
@@ -464,7 +470,7 @@ Run-scoped 私有临时目录、最小权限和 `finally` 清理；能在受限�
 
 ### 10.1 管理配置入口与权威
 
-实现后的管理员配置只有系统级两步，不增加独立的 `enabled` 布尔开关，也不增加项目级
+当前管理员配置只有系统级两步，不增加独立的 `enabled` 布尔开关，也不增加项目级
 egress grant：
 
 - **Bridge 视觉模型选择**（`agent_runtime.vision_bridge.model_name`）：平台级 System
@@ -486,50 +492,53 @@ egress grant：
    只读展示，不能填写任意版本或 Prompt。
 
 系统模型目录继续是 Provider、Endpoint 受限设置和 Credential 引用的唯一权威；Agent
-Runtime Policy 只选择一个逻辑模型，不复制 Provider 配置或密钥。两者都保存在
+Runtime Policy 只选择一个系统模型 UUID，不复制 Provider 配置或密钥。两者都保存在
 PostgreSQL。API 对应现有的 `/api/admin/settings/models` 与
 `/api/admin/settings/system/agent_runtime` 管理契约。不得在 `config.yaml`、环境变量、
-Agent 定义或工具参数中添加视觉模型名/API Key 回退。
+Agent 定义或工具参数中添加视觉模型 UUID/API Key 回退。
 
-建议保存的 `agent_runtime` 片段如下；这是完整 section 中的一个字段，不是独立配置文件：
+当前保存的 `agent_runtime` 片段如下；这是完整 section 中的一个字段，不是独立配置文件：
 
 ```json
 {
   "vision_bridge": {
-    "model_name": "gpt-5.6-luna",
+    "model_name": "065a9345-6bb3-5407-a27c-e31fa2a0bac1",
     "timeout_seconds": 20,
     "contract_version": "vision.bridge.v1"
   }
 }
 ```
 
-当前 checkout 已落地 P1 基础闭环和受控的 Chat Completions/Responses P2 执行器：严格 `vision_bridge` policy、
+当前 checkout 已落地 v1 控制面和执行闭环：严格 `vision_bridge` policy、
 `purpose="vision"` Run snapshot/Worker 物化、共享安全图片规范化、固定 prompt/Schema、
 条件内置 `inspect_image`、对象 provenance、inline-only 结果以及管理端模型过滤。
-`vision_bridge_fake` 继续只验证控制面和数据通路。真实 Bridge 不再要求另一种专用模型
-协议：它从冻结的系统模型 adapter/settings 解析协议。`openai`/`patched_openai` 的
+`vision_bridge_fake` 继续只验证控制面和数据通路。真实 Bridge 从冻结的系统模型
+adapter/settings 解析受控协议：`openai`/`patched_openai` 的
 `use_responses_api=true` 使用 `/responses`；其他已批准的 OpenAI-compatible adapter 使用
 `/chat/completions`。旧 `vision_openai_compatible_v1` 仅作为显式窄 Chat Completions
-profile 保留。
+profile 保留。全新安装内置并选择的 `gpt-5.6-luna` 使用 Responses profile。
 
 真实 adapter 已实现单一绝对 deadline、最多一次可恢复错误重试、redirect/ambient proxy
 禁用、请求/响应上限、严格本地 Schema、每 Run 和每精确模型并发/累计预算、服务端取消、
-Credential/精确 snapshot 前后复验、ambiguous-side-effect fence 以及 RunJournal usage
-归因。Credential 撤销作为即时外发熔断。当前选择的保守 tracing 策略是：外部
-LangSmith/Langfuse 内容 tracing 与真实 Bridge 互斥并失败关闭，而不是假设
-`attach_tracing=false` 能隐藏工具参数和 OCR。
+ambiguous-side-effect fence 以及 RunJournal usage 归因。每个真实 HTTP attempt 发出前都
+取得独立 dispatch authority，并在 attempt 结束时提交对应 usage receipt；所有 attempt 的
+已知 token usage 会聚合，任一已外发 attempt 缺少可信 usage 时保留
+`usage_unknown=true`。每次 attempt 前后重新物化精确 snapshot，同时复验模型 active
+状态和 Credential 当前有效性；暂停模型或撤销 Credential 是已准入 Run 的即时外发熔断。
+当前选择的保守 tracing 策略是：外部 LangSmith/Langfuse 内容 tracing 与真实 Bridge
+互斥并失败关闭，而不是假设 `attach_tracing=false` 能隐藏工具参数和 OCR。
 
 通用模型只有在 `supports_vision=true`、有明确 HTTPS `base_url`、Credential 完整且协议
-执行器已实现时才能被 Bridge 选择；当前不支持 Anthropic Messages、Codex 私有 Responses
-等视觉协议。管理员不能使用旁路 YAML、环境变量或任意 HTTP passthrough 接入。Bridge
+执行器已实现时才能被 Bridge 选择；当前不支持 Anthropic Messages 等其他视觉协议。
+管理员不能使用旁路 YAML、环境变量或任意 HTTP passthrough 接入。Bridge
 只复用 endpoint、model、Credential 和协议选择，忽略通用 adapter 的 extras、headers、
 重试、stream 与 timeout。供应商数据政策批准、真实 Credential
-staging 质量/延迟/限流/成本评测以及生产验收仍是部署前 P3 门禁，mock/fake 测试不能
+staging 质量/延迟/限流评测以及生产验收仍是部署前 P3 门禁，mock/fake 测试不能
 替代这些外部证据。
 
 ### 10.2 Runtime Policy
 
-在 `AgentRuntimePolicyValue` 增加严格策略段，建议初始契约：
+`AgentRuntimePolicyValue` 当前包含以下严格策略段，v1 契约为：
 
 ```python
 class VisionBridgePolicy(_PolicyModel):
@@ -565,9 +574,10 @@ class VisionBridgePolicy(_PolicyModel):
 项目按本契约外发受权图片”。这是一项部署级数据边界决策，必须由系统管理员执行并进入
 闭合审计；不能从模型参数、文件 metadata、项目设置或运行时全局变量推导。
 
-另需一个 platform/provider 级 emergency egress kill switch。普通 Runtime Policy 被 Run
-冻结，不能承担即时熔断；kill switch 与 Credential 当前有效性一样，在每次 dispatch 前
-复验，只用于撤销后续副作用授权，不回写历史 snapshot。
+普通 Runtime Policy 被 Run 冻结，清空模型选择只能影响新 Run，不能承担即时熔断。
+当前实现不增加独立 emergency 布尔开关：Worker 在每个 HTTP attempt 前后重新物化精确
+snapshot；系统模型被暂停或其 Credential 被撤销时物化失败，从而阻断已准入 Run 的后续
+外发，但不回写历史 snapshot。
 
 ### 10.3 Run 准入
 
@@ -580,21 +590,22 @@ class VisionBridgePolicy(_PolicyModel):
 4. `provider_adapter + provider settings + contract_version` 能解析到已实现的 Bridge 协议。
 
 Gateway 必须把精确 System Runtime Policy revision 和视觉模型版本随 Run 准入冻结；
-Worker 在每次真正发出 HTTP 请求前重新验证 Credential、lease、项目/文件授权和 emergency
-kill switch。未选择 Bridge 模型时，Run 正常准入，但没有 vision snapshot 和
+工具读取图片时重新验证 project/file authority；Worker 在每个 HTTP attempt 前后重新
+验证 Run/Job lease、冻结模型的 active 状态和 Credential 当前有效性。未选择 Bridge
+模型时，Run 正常准入，但没有 vision snapshot 和
 `inspect_image`。已选择模型却无法冻结指定模型、adapter 或完整 snapshot 时，Run 准入
 失败；Worker 执行时绝不能临时寻找默认视觉模型。Credential 授权撤销、snapshot 不完整
 或 materialization 不一致时，沿用 Run 资产 stale/unavailable 失败关闭语义。
 
-`run_model_config_snapshots.purpose` 已支持通用、受约束字符串，预计不需要为 `vision`
-增加新列或新表；但 Runtime Policy 是持久 JSON 契约，仍必须更新 policy schema version、
-默认值、序列化、payload checksum 测试和管理端契约。是否需要 Alembic 迁移必须在实现时以
-当前 schema 和 migration chain 验证，不能仅凭“JSON 字段”断言无需迁移。
+`run_model_config_snapshots.purpose` 已支持通用、受约束字符串；v1 通过既有 snapshot 表和
+持久 JSON Runtime Policy 落地，没有为 `vision` 增加新列或新表。policy schema version、
+默认值、序列化、payload checksum 测试和管理端契约已同步；未来若改变持久 schema，仍须
+按正常 ORM、full-schema、migration-chain 和 parity 流程升级。
 
 ### 10.4 Worker 物化
 
-Worker 应与 title、summarization、memory 辅助模型相同，按 `purpose="vision"` 物化精确
-模型版本并合入本次隔离的 `AppConfig`。工具 builder 捕获该精确逻辑模型名，不读取全局
+Worker 与 title、summarization、memory 辅助模型相同，按 `purpose="vision"` 物化精确
+模型版本并合入本次隔离的 `AppConfig`。工具 builder 捕获该精确模型 UUID，不读取全局
 当前默认值。
 
 模型 Credential 只在该 Worker 边界解析，并通过现有 model factory/provider adapter
@@ -605,7 +616,7 @@ Worker 应与 title、summarization、memory 辅助模型相同，按 `purpose="
 
 ### 11.1 内部接口
 
-建议在 harness 增加单一内部接口：
+harness 当前使用单一内部接口；外部 dispatch authority 和 usage observer 只由服务端注入：
 
 ```python
 @dataclass(frozen=True)
@@ -615,6 +626,8 @@ class VisionInvocationResult:
 
 
 class VisionEvidenceClient(Protocol):
+    requires_external_dispatch: bool
+
     async def analyze(
         self,
         *,
@@ -622,7 +635,10 @@ class VisionEvidenceClient(Protocol):
         mime_type: str,
         mode: VisionMode,
         deadline_monotonic: float,
-        abort_signal: ServerAbortSignal,
+        abort_signal: Event,
+        dispatch_authority: VisionDispatchAuthority | None = None,
+        normalized_pixels: int | None = None,
+        usage_observer: Callable[[VisionUsageReceipt], None] | None = None,
     ) -> VisionInvocationResult: ...
 ```
 
@@ -642,7 +658,7 @@ Provider 自带的隐式 retry/stream 配置。
 完整 `response.json()` 或等价解析前执行字节上限控制。
 
 `VisionUsageReceipt` 是 server-only 结果，至少记录调用次数、是否发出请求、Provider
-返回的规范化 usage（若有）、usage 是否未知和计费状态；它不能进入 ToolMessage。嵌套
+返回的规范化 usage（若有）及 usage 是否未知；它不能进入 ToolMessage。嵌套
 模型调用不得假设会自动进入 lead 的 RunJournal，dispatch/settlement 必须显式提交该
 receipt，并以独立 caller 标签归因。失败异常也必须携带或允许 settlement 构造对应
 receipt，确保 `finally` 路径能结算“已外发但没有正常结果”的调用。
@@ -653,19 +669,15 @@ receipt，确保 `finally` 路径能结算“已外发但没有正常结果”�
 准入还必须验证：冻结模型的 `provider_adapter + contract_version` 存在经过测试的
 Vision adapter，并支持目标图片格式、输出约束、finish reason、取消和 usage 语义。
 
-每个允许的 adapter 必须：
+当前 v1 在代码中要求系统模型目录保存明确 HTTPS `base_url`，Run 冻结该精确 Endpoint
+和 adapter/contract；HTTP client 使用正常证书校验、`follow_redirects=false`、
+`trust_env=false` 和固定认证头，并忽略任意 headers、`extra_body` 与 ambient proxy。
+不满足协议或这些网络约束的模型不能被 Bridge policy 保存，Run 准入也会失败关闭。
 
-- 将冻结 Endpoint origin 与平台批准的 Provider origin/contract 匹配；
-- 默认要求 HTTPS 和正常证书校验；
-- 禁止跨源 redirect，最好完全关闭 redirect；
-- 不继承未经治理的 ambient proxy；显式企业代理属于部署配置而非模型参数；
-- 只允许 Credential 注入 adapter 固定的认证头；
-- 禁止图片 URL 回源、任意自定义 headers 和模型可控 Endpoint；
-- Endpoint origin、子处理方或数据地域变化时产生新批准策略/adapter 版本，旧批准不能
-  自动覆盖新接收方。
-
-不满足以上任一项的视觉模型不能出现在管理端 Bridge 模型选择中，Run 准入也必须再次
-失败关闭。
+当前没有独立于系统模型目录的静态 Provider origin allowlist，也不在代码中推断子处理者、
+数据地域或组织审批状态。因此，系统管理员必须在 P3 部署流程中批准冻结的精确 Endpoint
+origin/contract；Endpoint origin、子处理方或数据地域变化时，应创建新模型版本并重新
+批准，旧选择不能被文档解释为自动覆盖新接收方。
 
 ### 11.3 请求内容
 
@@ -706,8 +718,12 @@ Provider 和 mode 生成受测试的 schema projection，但 projection 不能�
 ### 11.5 敏感 tracing 边界
 
 通用 graph tracing 会看到 tool args、ToolMessage 和嵌套模型调用，单纯给视觉模型设置
-`attach_tracing=false` 不足以阻止根 tracer 捕获 `image_path`、evidence 或 OCR。目标实现
-必须同时做到：
+`attach_tracing=false` 不足以阻止根 tracer 捕获 `image_path`、evidence 或 OCR。当前 v1
+没有宣称已经实现可让两者同时启用的 selective redactor；真实 Bridge 与外部内容 tracing
+互斥，Worker/adapter 在发出 Provider 请求前失败关闭。
+
+未来若要允许真实 Bridge 与 LangSmith/Langfuse 同时启用，新的 contract version 必须
+同时做到：
 
 - `inspect_image` 以精确 callable marker 标记为 sensitive trace payload；
 - LangSmith、Langfuse 等 tracer 对该工具只接收内容无关的状态、耗时、计数和稳定错误
@@ -718,8 +734,8 @@ Provider 和 mode 生成受测试的 schema projection，但 projection 不能�
 - 开启每一种受支持 tracing provider 的集成测试，断言 trace 中没有图片/Base64、虚拟
   路径、evidence/OCR 或 Provider 原始响应。
 
-如果当前 tracing adapter 无法选择性隐藏这些 payload，启用内容 tracing 与真实 Vision
-Bridge 必须互斥并失败关闭，不能依赖运维约定避免泄漏。
+在上述 redactor 和各 tracing provider 集成测试落地前，不能把 fail-closed 现状描述为
+“trace 已安全记录视觉调用”；它只是阻止这两个能力同时运行。
 
 ## 12. 固定视觉提示词、提示注入与不可信证据
 
@@ -838,10 +854,9 @@ deadline 派生；不得为重试重新发放完整预算。
 
 ### 13.2 取消
 
-当前 Runtime context 没有可直接满足该承诺的通用 abort signal。改造必须增加
-server-owned `ServerAbortSignal`（或等价 authority），由 Worker 安装到私有 Runtime，
-模型参数和调用方 metadata 均不能伪造。它需要桥接 asyncio task、Sandbox 分块读取和
-有界 worker thread。
+当前 Worker 已将 server-owned abort event 安装到私有 Runtime；模型参数和调用方
+metadata 不能伪造。`inspect_image` 将该事件桥接到 asyncio task、Sandbox 分块读取、
+有界 worker thread 和 HTTP adapter。
 
 Run 取消、lease 失效或工具取消必须立即停止等待和结果发布，并协作中止：
 
@@ -857,7 +872,10 @@ Run 取消、lease 失效或工具取消必须立即停止等待和结果发布�
 
 ### 13.3 重试
 
-- 连接建立失败、408、429 和明确可恢复的 5xx：总预算内至多重试一次；
+- 明确发生在发送前的连接建立失败，以及已收到 408、429 或明确可恢复 5xx 响应：总预算
+  内至多重试一次；
+- read/write timeout 和其他无法证明请求尚未发送的 transport error 按 ambiguous external
+  side effect 处理，不自动重试；
 - 429 遵守合法、受上限约束的 `Retry-After`；
 - 使用带抖动的短退避；
 - 400、401、403、404、图片非法、数据策略阻断不重试；
@@ -867,8 +885,11 @@ Run 取消、lease 失效或工具取消必须立即停止等待和结果发布�
 
 ### 13.4 调用频率与缓存
 
-- `inspect_image` 必须加入 loop detection/tool frequency 治理，初始阈值由最多四张当前
-  消息图片和真实成本评测确定，不能沿用对低成本本地工具过宽的默认值；
+- `inspect_image` 已加入专用 loop detection/tool frequency 治理：第 6 次给出 warning，
+  同一 graph execution 允许最多 8 次工具调用并在第 9 次提议时 hard stop；该本地循环
+  治理也覆盖不外发数据的 deterministic fake adapter，但不把 fake 计数冒充 durable
+  dispatch 预算。真实 Bridge 的每次调用仍可能因一次重试消耗两个 attempt 预留，因此
+  独立的每 Run 8-attempt authority 上限可能更早拒绝外发；
 - Provider/model 维度设置全局 semaphore，每 Run 设置独立并发上限；等待队列必须有界，
   排队时间计入同一 deadline，队列满时在发出请求前返回 `VISION_BUSY`；
 - MVP 不增加跨 Run 持久缓存；ToolMessage/checkpoint 已保存本次结果，避免先引入敏感
@@ -879,22 +900,27 @@ Run 取消、lease 失效或工具取消必须立即停止等待和结果发布�
 
 ### 13.5 外发副作用、dispatch 和恢复
 
-`inspect_image` 不得使用 trusted read-only marker。HTTP 发出前必须经过专用
-`before_vision_dispatch`（名称可调整）持久边界，至少完成：
+`inspect_image` 不使用 trusted read-only marker。工具先通过 private file authority 读取并
+规范化图片；随后每个可能发出真实 HTTP 的 attempt 都分别调用 server-owned
+`before_attempt`，而不是在工具入口一次性授权全部重试。该边界在外发前：
 
-- 当前 Run/Job lease、项目/文件授权、Credential grant 和 emergency kill switch 复验；
-- 最坏两次请求的 quota/cost reserve；
-- 记录不含内容的调用指纹、adapter/contract/model 版本和“可能发生外部副作用”状态；
-- 生成仅用于本次 adapter 的 dispatch/request ID，不将其作为供应商幂等保证。
+- 复验当前 Run/Job lease，并重新物化冻结的精确模型版本；模型必须仍为 active，
+  Credential 及其 envelope 必须仍有效；
+- 为这一个 attempt 累计本次 Run 的调用次数、规范化字节和像素预算；
+- 写入“可能发生外部副作用”的 durable ambiguity fence；
+- 返回仅属于该 attempt 的 opaque authority token，不能由模型或工具参数构造。
 
-响应后、ToolMessage 发布前再次复验 lease、Credential 和 kill switch，并以 server-only
-usage receipt settle reserve。供应商可能已接收图片或计费，但 Worker 在响应、journal 或
-checkpoint 前崩溃；
+每个 attempt 结束时，adapter 都以同一 token 调用 `after_attempt` 并提交该 attempt 的
+server-only usage receipt；即使 Provider 返回错误，已返回的可信 usage 也会保留。所有
+attempt 的 receipt 聚合后写入 RunJournal；已外发但没有可信 usage 的 attempt 使聚合结果
+保持 `usage_unknown=true`。`after_attempt` 再次复验 lease、模型和 Credential，复验失败时
+仍保留已发生的 usage，但不会向 lead model 发布 Provider evidence。供应商可能已接收图片，
+但 Worker 在响应、journal 或 checkpoint 前崩溃；
 这种结果属于 ambiguous external side effect。Run retry/resume 不得盲目重放相同图片，
 应沿用或扩展现有 ambiguous-side-effect fence，转入明确的人工/用户重试决策或安全失败
 状态。测试必须覆盖“请求已发出、Provider 已接收、checkpoint 前崩溃”。
 
-## 14. 数据外发、Quota、审计和可观测性
+## 14. 数据外发、资源预算、审计和可观测性
 
 ### 14.1 生产启用前的数据门禁
 
@@ -913,26 +939,32 @@ checkpoint 前崩溃；
 就不能在该部署选择真实 Bridge 模型；应改用满足要求的 Provider、独立部署或保持
 `model_name=null`。不能因为工具运行在 Worker 内就认定数据仍在内部。
 
-在平台统一数据外发结论、系统管理员审计和 Worker dispatch 的
-Credential/kill-switch/lease 复验没有落地前，Bridge 只能连接测试 fake server；不得
-配置、灰度或通过旁路环境变量调用真实 Provider。
+全新安装会在技术上预选内置 `gpt-5.6-luna`，但这个 bootstrap 默认值不能替代组织的
+供应商数据政策审批。生产部署若尚未完成上述结论，必须在接收 project Run 前清空 Bridge
+模型选择；完成审批后再确认或重新选择该模型。
+
+当前代码已经落地系统管理员模型选择、受控真实协议和 Worker 每-attempt 的
+lease/模型/Credential 复验，因此不再受“只能连接 fake server”的实现限制。但在平台统一
+数据外发结论和真实 Provider staging 验收完成前，不得把真实 Bridge 视为生产就绪，也不得
+通过旁路环境变量或任意 HTTP passthrough 绕过系统模型与 Credential 治理。
 
 现有原生视觉模型也可能由第三方 Provider 承载并接收图片。P0 必须审计现有模型选择、
 Credential grant 和平台数据政策是否已经形成等价的图片外发权威。本方案不借新增工具
 之名默许或重新定义现有原生视觉路径的数据政策。
 
-### 14.2 Quota 与 usage
+### 14.2 资源预算与 usage
 
-- 视觉调用必须进入现有模型 usage/cost 统计，不得成为无计量旁路；
-- 外发前按冻结的 pricing/version 和最多两次请求的最坏成本 reserve；
-- Provider 返回可信 usage 时按规范化真实值 settle；失败响应没有 usage 时记录
-  `usage_unknown`，按冻结的保守计费规则结算，不能伪造精确 token 数；
-- quota/lease 在外部调用前后均遵守现有 authoritative boundary；
+- 视觉调用必须进入现有模型 usage 统计，不得成为无计量旁路；
+- 每个可能外发的 HTTP attempt 发出前预留并累计本次 Run 的 attempt 次数、规范化字节和
+  像素预算；
+- Provider 返回可信 usage 时记录规范化真实值；失败响应没有 usage 时记录
+  `usage_unknown`，不能伪造精确 token 数；
+- 资源预算和 lease 在外部调用前后均遵守现有 authoritative boundary；
 - 不在数据库事务中等待远程模型；准入冻结输入，调用后重新验证适用的 Run/lease 状态
   再发布结果。
 
-是否需要独立 `vision_calls` 或图片字节配额属于实现前开放项；未决定前至少使用工具频率
-上限和现有模型 usage 账本。
+首版使用固定的每 Run 8 次外发 attempt 预留、40 MiB 累计规范化字节、80,000,000 累计
+规范化像素上限，以及第 9 次工具提议 hard stop 和现有模型 usage 账本。
 
 ### 14.3 允许记录的遥测
 
@@ -942,7 +974,7 @@ Credential grant 和平台数据政策是否已经形成等价的图片外发权
 - MIME、原始和规范化字节数、规范化宽高；
 - 读取、规范化、排队、Provider、校验和总耗时；
 - HTTP 状态类别、稳定错误码、重试次数；
-- 规范化 input/output usage 数值、调用次数和估算成本，不记录 Provider 原始 usage 对象；
+- 规范化 input/output usage 数值和调用次数，不记录 Provider 原始 usage 对象；
 - `partial`、`truncated` 布尔值、uncertainty 数量和 Schema violation 的纯属性路径/规则，
   不记录对应文本或 offending value；
 - 可选 singleflight/cache 命中。
@@ -962,36 +994,36 @@ Audit metadata 继续遵守闭合 action/target/outcome 契约，不写内容、
 
 ## 15. 代码改造地图
 
-以下是目标落点，不代表必须机械地按文件拆分；实现时仍需保持
+下表记录 v1 已落地的主要维护点和后续演进边界，不是未实现 backlog；仍需保持
 `app.* -> deerflow.*` 的依赖方向。
 
-| 范围 | 目标改造 |
+| 范围 | 当前职责与后续维护边界 |
 | --- | --- |
-| `backend/app/system_runtime_settings/models.py` | 增加 `VisionBridgePolicy`、严格校验、平台统一外发语义和 policy schema/version 契约 |
-| system runtime/provider governance | 增加模型选择审计、emergency kill switch 及 dispatch 复验契约 |
+| `backend/app/system_runtime_settings/models.py` | 持有 `VisionBridgePolicy`、严格校验和 policy schema/version 契约 |
+| system runtime/provider governance | 持有部署级模型选择、模型暂停/Credential 撤销和 dispatch 复验契约 |
 | `backend/app/private_work/snapshot_repository.py` | text-only + 已选择 Bridge 模型时冻结 `purpose="vision"` 模型 |
 | `backend/app/reliability/run_execution/executor.py` | 物化 vision snapshot，合入本次隔离 `AppConfig` |
-| `backend/app/reliability/run_execution/boundary.py` 及相关 journal | 增加 vision dispatch/settlement、quota reserve 和 ambiguous-side-effect fence |
-| `backend/packages/harness/deerflow/config/` | 增加运行时可物化的 Vision Bridge 配置及 DB policy path 白名单 |
+| `backend/app/reliability/run_execution/boundary.py` 及相关 journal | 承载 vision dispatch/settlement、资源预留和 ambiguous-side-effect fence |
+| `backend/packages/harness/deerflow/config/` | 持有运行时可物化的 Vision Bridge 配置及 DB policy path 白名单 |
 | `backend/packages/harness/deerflow/models/factory.py` | 复用 ModelConfig/Credential；仅在能满足 VisionCallProfile 时复用通用模型实例 |
-| `backend/packages/harness/deerflow/vision/`（新增） | canonical Schema、prompt、adapter/client、图片规范化和错误类型 |
-| `backend/packages/harness/deerflow/tools/builtins/inspect_image_tool.py`（新增） | 工具 Schema、Runtime authority、调用编排和安全 ToolMessage |
-| `backend/packages/harness/deerflow/tools/builtins/view_image_tool.py` | 抽取共享的安全图片读取能力，保持现有行为不变 |
-| `backend/packages/harness/deerflow/tools/tools.py` | 只增加保留名称/冲突防护；不得在通用装配中自动加入 Bridge 工具 |
+| `backend/packages/harness/deerflow/vision/` | 持有 canonical Schema、prompt、adapter/client、图片规范化和错误类型 |
+| `backend/packages/harness/deerflow/tools/builtins/inspect_image_tool.py` | 持有工具 Schema、Runtime authority、调用编排和安全 ToolMessage |
+| `backend/packages/harness/deerflow/tools/builtins/view_image_tool.py` | 复用共享的安全图片读取能力，保持现有行为不变 |
+| `backend/packages/harness/deerflow/tools/tools.py` | 持有保留名称/冲突防护；不得在通用装配中自动加入 Bridge 工具 |
 | `backend/packages/harness/deerflow/agents/lead_agent/agent.py` | 仅在 project lead 装配层按 capability/policy 显式加入 `inspect_image` |
-| `backend/packages/harness/deerflow/agents/lead_agent/prompt.py` | 增加“图片结论前调用工具”和“不信任 OCR 指令”的主模型规则 |
+| `backend/packages/harness/deerflow/agents/lead_agent/prompt.py` | 持有“图片结论前调用工具”和“不信任 OCR 指令”的主模型规则 |
 | `backend/packages/harness/deerflow/agents/middlewares/tool_result_sanitization_middleware.py` | 将视觉证据纳入不可信内容清洗 |
 | `backend/packages/harness/deerflow/agents/middlewares/tool_output_budget_middleware.py` | 使用 exact-object inline-only marker，禁止 OCR 派生文件 |
 | tool error/loop detection middleware | 外发工具不得标记 trusted read-only；增加频率、并发和 ambiguous dispatch 测试 |
-| `backend/packages/harness/deerflow/runtime/context_keys.py` | 增加 server-owned abort authority，并由 Worker 安装而非模型传入 |
-| tracing callbacks/redactor | 对 sensitive tool/model span 只记录内容无关 metadata，并隔离嵌套 callbacks |
+| `backend/packages/harness/deerflow/runtime/context_keys.py` | 持有 server-owned abort authority，并由 Worker 安装而非模型传入 |
+| tracing gate | 当前真实 Bridge 与外部内容 tracing 互斥并失败关闭；selective redactor 与 provider-on 集成验收属于后续 contract |
 | RunJournal/usage settlement | 接收 server-only `VisionUsageReceipt`，按独立 caller 归因和结算 |
 | `backend/app/gateway/routers/admin_system_settings.py` 及 policy service | 在现有 `agent_runtime` CAS 契约中读写 `vision_bridge` |
 | 系统模型管理契约 | 复用 Provider/model/Credential/`supports_vision` 和模型协议设置；Bridge 选择器只接收 active 且协议可解析的模型 |
-| `frontend/src/core/admin-settings/system/types.ts` | 增加严格 `vision_bridge` Schema、默认值和模型引用校验 |
-| `frontend/src/components/admin/settings/admin-system-settings-page.tsx` | 增加“Vision Bridge”分组和 model/timeout 控件，无独立 enabled 开关 |
-| `backend/docs/CONFIGURATION.md` | 实现后记录正式配置和生效范围 |
-| `backend/docs/README.md` | 实现完成后将本方案转为当前行为文档并加入 Agent harness 索引 |
+| `frontend/src/core/admin-settings/system/types.ts` | 持有严格 `vision_bridge` Schema、默认值和模型引用校验 |
+| `frontend/src/components/admin/settings/admin-system-settings-page.tsx` | 提供“Vision Bridge”分组和 model/timeout 控件，无独立 enabled 开关 |
+| `backend/docs/CONFIGURATION.md` | 记录正式配置和生效范围 |
+| `backend/docs/README.md` | 将本方案作为当前行为文档加入 Agent harness 索引 |
 
 如果实现引入数据库列、闭合审计类型或新的 durable usage ledger，必须同步 ORM、
 `full_schema.sql`、migration chain、schema marker/catalog digest、中文注释和 PostgreSQL
@@ -999,7 +1031,15 @@ parity 测试；不得通过手工 patch 或 stamp 数据库规避。
 
 ## 16. 分阶段实施
 
-### P0：协议和质量门禁
+以下 P0-P3 是历史实施顺序和发布门禁，不代表当前代码仍停在 P1。当前 checkout 已具备
+P1 基础闭环和 P2 的受控真实协议、每-attempt authority/usage 与即时停用机制；
+P1 的 fake-only 限制只描述当时的中间阶段。真实 Provider 数据政策、外部质量、延迟和
+限流证据仍未验证，因此 P3 生产门禁尚未完成。
+
+### P0：协议和质量门禁（历史设计门禁）
+
+状态：prompt、Schema、协议映射和资源上限已形成 v1 契约；真实 Provider 数据政策与质量
+证据转入 P3 外部门禁，本文不声称它们已经通过。
 
 - 确认第三方协议、认证、结构化输出、图片和响应限制；
 - 定义单一 `vision.evidence.v1` Schema、规范 `vision.prompt.v1`、六个固定 mode literal
@@ -1007,15 +1047,18 @@ parity 测试；不得通过手工 patch 或 stamp 数据库规避。
 - 建立中文/英文 OCR、文档、图表、UI、旋转、低分辨率和图片提示注入 eval；
 - 确定字符串、数组、像素、timeout 和输出预算初值；
 - 完成覆盖部署内所有项目图片的供应商数据外发准入结论；
-- 明确系统管理员模型选择审计、平台统一授权范围和 emergency kill switch 语义；
-- 确定 approved Endpoint origin、TLS/redirect/proxy、pricing 和 tracing 策略。
+- 明确系统管理员模型选择审计、平台统一授权范围和模型暂停/Credential 撤销语义；
+- 确定 approved Endpoint origin、TLS/redirect/proxy 和 tracing 策略。
 
 退出条件：目标模型在关键场景达到约定质量，且供应商政策允许目标数据分类外发。
 
-### P1：最小后端闭环
+### P1：最小后端闭环（历史中间阶段，已完成）
 
-- 增加 Runtime Policy；全新安装默认选择内置 `gpt-5.6-luna`，配置或改选模型后自动对
-  所有项目中符合能力条件的新 Run 生效，不增加独立 enabled 开关或项目 grant；
+状态：以下 fake-only 要求是 P1 当时的退出条件；当前代码已经在 P2 受控边界内支持真实
+Chat Completions/Responses，不再是当前限制。
+
+- 增加 Runtime Policy；P1 测试只选择 fake 模型，对所有项目中符合能力条件的新 Run
+  生效，不增加独立 enabled 开关或项目 grant；
 - 建立 System Policy 和视觉模型的 Run 冻结路径；P1 只允许不可配置为真实 Endpoint 的
   `fake` adapter；
 - 冻结和物化 `purpose="vision"` 模型；
@@ -1029,30 +1072,36 @@ parity 测试；不得通过手工 patch 或 stamp 数据库规避。
 
 退出条件：text-only 模型能通过 fake API 读一张授权静态图片；任意路径、跨 scope
 文件、危险图片和畸形响应全部失败关闭；原生视觉及其他 Agent runtime 测试不回归。
-P1 代码必须硬性阻止真实 Provider 配置。
+P1 当时的退出 gate 必须硬性阻止真实 Provider 配置；该限制已由 P2 的受控协议门禁取代。
 
-### P2：真实 Provider 安全闭环
+### P2：真实 Provider 安全闭环（技术控制已实现）
 
-- 完成平台统一数据外发批准、模型选择审计、emergency kill switch 和 dispatch 前复验；
+状态：受控协议、dispatch authority、usage、取消、资源/频率限制、管理端过滤和即时停用
+机制已经落地；真实供应商数据政策批准和 staging 结果属于 P3，当前尚无验证证据。
+
+- 全新安装内置并预选使用 Responses profile 的 `gpt-5.6-luna`；
+- 建立部署级模型选择治理、模型暂停/Credential 撤销即时停用和 dispatch 前后复验；
 - 实现 VisionCallProfile、模型协议解析、Endpoint/TLS/redirect/proxy 门禁；
-- 接入 usage receipt、quota reserve/settlement、频率/并发限制和稳定错误；
-- 增加 sensitive tracing exclusion/redaction，并在 LangSmith/Langfuse 开启时验证；
+- 接入 usage receipt、资源预算预留/结算、频率/并发限制和稳定错误；
+- 在 LangSmith/Langfuse 内容 tracing 开启时阻止真实 Bridge 外发；selective redaction 和
+  两者共存的 provider-on 验证留给后续 contract；
 - 实现 abort authority 和 ambiguous-side-effect fence，验证 Run 取消、lease 失效、
   Credential 撤销、请求后崩溃和 retry/resume；
 - 完成管理端策略和模型能力过滤；
 - 运行 PostgreSQL snapshot/materialization 测试和安全测试。
 
-退出条件：所有授权、Credential、deadline、日志和数据外发门禁通过。
+技术退出条件：授权、Credential、deadline、日志和受控外发实现通过本地测试；供应商
+数据政策与真实服务行为仍由 P3 验证。
 
-### P3：灰度与生产验收
+### P3：灰度与生产验收（待真实 Provider 验证）
 
-- 在隔离 staging 完成验证后，由系统管理员选择 Bridge 模型，对生产部署内所有项目的
-  protocol-compatible text-only lead 统一生效；
-- 使用真实付费 API 跑质量、p95/p99 延迟、429、费用和工具调用命中率评测；
+- 在隔离 staging 完成验证后，由系统管理员确认或选择 Bridge 模型，对生产部署内所有
+  项目的 protocol-compatible text-only lead 统一生效；
+- 使用真实 API 跑质量、p95/p99 延迟、429 和工具调用命中率评测；
 - 比较 text-only + bridge 与原生视觉模型的答案质量和失败模式；
 - 根据数据决定是否需要 current-image preflight、per-Run singleflight 或模式细分。
 
-退出条件：达到产品定义的工具触发、Schema-valid、延迟、成本和质量目标，无数据边界
+退出条件：达到产品定义的工具触发、Schema-valid、延迟和质量目标，无数据边界
 违规后再扩大范围。
 
 ## 17. 测试矩阵
@@ -1101,14 +1150,15 @@ P1 代码必须硬性阻止真实 Provider 配置。
   Bridge 注册语义，文件访问仍按各自 project/owner/Run authority 隔离；
 - 工具 Schema 已注册但模型没有调用时，fake API 必须保持零请求；只有有效工具调用才
   外发目标图片；
-- emergency kill switch 在不改写 snapshot 的情况下阻止已准入 Run 的下一次外发；
+- 模型暂停或 Credential 撤销在不改写 snapshot 的情况下阻止已准入 Run 的下一次外发；
 - 清空 Bridge 模型选择不改写已准入 Run，且只影响后续 Run；
 - Run admission、retry/resume 始终使用同一精确 vision 模型版本；
 - Credential 只在 Worker 物化边界出现，撤销后失败关闭；
 - 当前上传、workspace、outputs 和历史文件路径分别通过正确 authority；
 - 工具失败后主模型明确说明无法读取，不基于文件名猜测；
 - 请求已发出但 checkpoint 前崩溃时进入 ambiguous-side-effect 状态，不自动重放；
-- LangSmith/Langfuse 分别开启时，trace 只含安全 metadata，不含参数或结果内容；
+- LangSmith/Langfuse 内容 tracing 开启时，真实 Bridge 在外发前失败关闭；若未来允许
+  共存，必须另有 provider-on 集成测试证明 trace 不含参数或结果内容；
 - usage receipt 在成功、失败有 usage、失败无 usage 三种情况正确 reserve/settle。
 
 ### 17.3 PostgreSQL 和进程测试
@@ -1133,16 +1183,17 @@ P1 代码必须硬性阻止真实 Provider 配置。
 - 各 mode 所需证据是否保留，无法确认时是否正确弃权；
 - 同一 eval 集在模型、prompt 或 Schema 版本升级前后的回归对比。
 
-真实 API eval 消耗额度且可能外发样本，只能使用批准的数据集和 Credential；fake API
+真实 API eval 会产生真实外发，只能使用批准的数据集和 Credential；fake API
 测试不能替代真实质量、限流、地域或供应商行为验证。
 
 ## 18. 验收标准
 
-功能完成必须同时满足：
+下列 1-13 项是 v1 代码契约；第 14 项同时包含 checkout 验证和部署级真实 API 门禁。
+前者通过不代表后者已经完成，本文不以 fake/mock 测试宣称真实 Provider 已生产验收。
 
 1. `supports_vision=false` 且已选择协议可解析的 Bridge 模型时，所有项目的新
    lead Run 都只获得 `inspect_image`；未选择模型时，Run 正常但没有 vision snapshot、
-   工具或视觉外发。kill switch/Credential 撤销后，已准入 Run 的下一次 dispatch 也被
+   工具或视觉外发。暂停模型或撤销 Credential 后，已准入 Run 的下一次 dispatch 也被
    阻断。
 2. `supports_vision=true` 的现有 `view_image`、当前消息图片和历史图片行为无回归，且
    不额外调用第三方辅助视觉模型。
@@ -1165,18 +1216,20 @@ P1 代码必须硬性阻止真实 Provider 配置。
 11. checkpoint 只包含有界 canonical evidence，不包含图片、Base64、临时规范化文件、
    Secret 或原始 Provider body；日志、审计和错误响应另外不得包含完整 OCR、路径或
    签名 URL。
-12. `inspect_image` 结果保持 inline-only，不创建 OCR 派生文件；LangSmith/Langfuse trace
-    不记录工具参数、图片或证据内容。
-13. 成功、失败有 usage、失败无 usage 三种调用都完成 quota reserve/settlement，并保留
-    server-only usage receipt，不成为无计量模型旁路。
-14. focused tests、受影响 backend suite、格式、lint、blocking IO 检测、PostgreSQL
-    parity gate 和批准的真实 API 手工 gate 均有当前 checkout 证据。
+12. `inspect_image` 结果保持 inline-only，不创建 OCR 派生文件；当前真实 Bridge 与
+    LangSmith/Langfuse 内容 tracing 互斥并在外发前失败关闭。
+13. 成功、失败有 usage、失败无 usage 三种调用都完成资源预留和 usage settlement，并
+    保留 server-only usage receipt，不成为无计量模型旁路。
+14. checkout 交付必须有 focused tests、受影响 backend suite、格式、lint、blocking IO
+    检测和 PostgreSQL parity gate 的当前证据；生产扩大范围前另须通过批准的真实 API
+    手工 gate。
 
 ## 19. 发布与回滚
 
 - 第一阶段先部署能够解析新 policy 的代码；历史 policy 继续按冻结的
   `model_name=null` 语义运行。所有 Gateway 和 Worker 实例完成升级后，才将现有部署的
-  policy 显式选择 `gpt-5.6-luna`；全新安装直接以 Luna 为初始选择；
+  policy 显式选择 `gpt-5.6-luna`；全新安装直接以 Luna 为初始选择，但未完成 P3 外部
+  门禁的生产部署必须在接收 project Run 前清空该选择；
 - Agent runtime policy 使用 `extra="forbid"`。一旦数据库写入新字段，旧代码可能无法
   解析，因此回滚前必须在新代码仍运行时恢复旧 schema 兼容值，或提供明确的 policy
   downgrade 转换；
@@ -1184,30 +1237,32 @@ P1 代码必须硬性阻止真实 Provider 配置。
   staging 完成真实 API gate，且不得从系统默认模型或名称模式猜测 Bridge 模型；
 - 将 `vision_bridge.model_name` 清空为 `null` 只影响新 Run：新 Run 不冻结 vision
   snapshot、不注册工具；已准入 Run 继续使用冻结策略，不做隐式中途改写；
-- emergency egress kill switch 和 Credential grant 撤销属于当前安全权威，Worker 每次
-  dispatch 都复验，可以立即阻断已准入 Run 的下一次外发；它们不能
+- 系统模型暂停和 Credential 撤销属于当前即时安全权威，Worker 每次 attempt 前后
+  都复验，可以立即阻断已准入 Run 的下一次外发；它们不能
   改写已持久的 snapshot，只改变副作用边界是否仍被授权；
-- 供应商安全事件、留存政策变化或异常成本时，先通过策略阻断新 Run，再按既有
+- 供应商安全事件、留存政策变化或异常调用量时，先通过策略阻断新 Run，再按既有
   Credential 撤销和 Run settlement 边界处理在途调用；
 - 回滚不得修改或删除原生 `view_image` 链路。
 
-## 20. 待确认项
+## 20. 当前待验证项
 
-进入 P1 实现前需要明确：
+首个系统模型、协议、认证治理、strict Schema、本地资源上限和 usage 归因已经不是 P1 前
+开放项：当前内置 `gpt-5.6-luna`，使用受控 OpenAI Responses profile；Bridge 也支持受控
+OpenAI-compatible Chat Completions。当前仍需在 P3 以外部证据确认：
 
-1. 首个第三方 Provider、API 协议和逻辑模型名；
-2. 是否支持原生 strict JSON Schema 或强制 tool call；
-3. 允许外发的数据分类、地域、留存和 no-training 要求；
-4. 首版支持格式、像素和规范化上限；
-5. timeout、最大输出和每 Run 调用频率初值；
-6. 视觉调用如何计入现有 quota/usage 和成本展示；
-7. text-only 模型主动调用工具的生产门槛，是否需要 current-image 强制 preflight；
-8. 平台统一外发批准的负责人、覆盖的数据分类和系统审计要求；
-9. approved Endpoint、redirect/proxy、tracing 与模型协议兼容清单；
-10. 真实 API eval 数据集、Credential、执行环境和验收负责人。
+1. 目标供应商允许外发的数据分类、地域、留存、no-training、删除和子处理者条款；
+2. 当前 Endpoint 与 Credential 的真实请求能否持续满足单图输入、strict Schema、响应
+   上限、取消和 usage 语义；
+3. `gpt-5.6-luna` 在批准数据集上的中英文 OCR、文档、图表、UI、旋转和低分辨率质量；
+4. 真实 API 的 p95/p99 延迟、429/5xx 行为和工具调用命中率，以及是否需要
+   current-image 强制 preflight；
+5. 现有 calls/normalized bytes/pixels 上限、timeout、最大输出和 token usage 统计是否需
+   根据实测调校；
+6. approved Endpoint origin、数据政策批准负责人、真实 eval 数据集、执行环境和验收
+   负责人。
 
-这些问题不会改变“受治理文件引用、冻结视觉模型、Worker 调用、严格证据 Schema、
-不可信 tool result”这一核心架构，但会影响生产启用范围和具体限制。
+这些外部门禁不会改变“受治理文件引用、冻结视觉模型、Worker 调用、严格证据 Schema、
+不可信 tool result”这一核心架构，但会决定真实 Provider 能否生产启用。
 
 ## 21. 从参考实现保留与舍弃的机制
 
@@ -1220,7 +1275,7 @@ P1 代码必须硬性阻止真实 Provider 配置。
 | CLI 子进程 | 舍弃 | Worker 内已有模型、Credential 和异步调用边界 |
 | 任意本地路径/URL | 舍弃 | 破坏 project/owner/Run 文件授权并扩大外发面 |
 | 伪造 text-only 模型图片能力 | 舍弃 | 会绕过现有 capability routing 和原生视觉语义 |
-| 自动多 Provider failover | 舍弃 | 会静默改变数据接收方、地域、成本和答案质量 |
+| 自动多 Provider failover | 舍弃 | 会静默改变数据接收方、地域和答案质量 |
 | 任意 Provider `extra_body` | 舍弃 | 模型或错误配置可能覆盖图片、Prompt、Schema 和安全字段 |
 | 无标志截断 OCR/丢弃结构字段 | 舍弃 | 主模型无法判断证据完整性，直接损害答案质量 |
-| 全局图片 hash 缓存 | MVP 舍弃 | 派生证据敏感且存在跨租户侧信道和生命周期成本 |
+| 全局图片 hash 缓存 | MVP 舍弃 | 派生证据敏感且存在跨租户侧信道和额外生命周期负担 |

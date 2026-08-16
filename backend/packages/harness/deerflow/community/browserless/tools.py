@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import math
 import os
@@ -443,7 +444,12 @@ async def web_capture_tool(
             )
             if presenter is None:
                 raise RuntimeError("Private file authority is unavailable")
-            presenter.record_presented_paths((virtual_path,))
+            recorded = presenter.record_presented_paths(
+                (virtual_path,),
+                tool_call_id=tool_call_id,
+            )
+            if inspect.isawaitable(recorded):
+                await recorded
         message = f"Captured screenshot: {virtual_path}{_target_status_warning(result)}"
         return Command(
             update={

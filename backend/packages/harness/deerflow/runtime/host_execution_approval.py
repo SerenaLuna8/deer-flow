@@ -27,7 +27,7 @@ _HOST_EXECUTION_BIDI_CONTROLS = frozenset(
     },
 )
 
-HostExecutionApprovalStatus = Literal["pending", "approved", "denied"]
+HostExecutionApprovalStatus = Literal["pending", "denied"]
 HostExecutionFrozenClaimStatus = Literal[
     "not_applicable",
     "claimed",
@@ -238,17 +238,20 @@ class HostExecutionApprovalResult:
     reason_code: str | None = None
 
     def __post_init__(self) -> None:
+        if self.status not in {"pending", "denied"}:
+            raise ValueError("unsupported host execution approval result")
         if self.status == "pending":
             if self.artifact is None:
                 raise ValueError("pending result requires an approval artifact")
             if self.approval_id not in {None, self.artifact.approval_id}:
                 raise ValueError("pending approval_id must match its artifact")
+            if self.reason_code is not None:
+                raise ValueError("pending result cannot carry reason_code")
             object.__setattr__(self, "approval_id", self.artifact.approval_id)
-        elif self.artifact is not None:
-            raise ValueError("only pending result may carry an approval artifact")
-        if self.status == "approved" and not self.approval_id:
-            raise ValueError("approved result requires approval_id")
-        if self.status == "denied" and not self.reason_code:
+            return
+        if self.artifact is not None or self.approval_id is not None:
+            raise ValueError("only pending result may carry approval data")
+        if not self.reason_code:
             raise ValueError("denied result requires reason_code")
 
     @classmethod
@@ -257,10 +260,6 @@ class HostExecutionApprovalResult:
         artifact: HostExecutionApprovalArtifact,
     ) -> HostExecutionApprovalResult:
         return cls(status="pending", artifact=artifact)
-
-    @classmethod
-    def approved(cls, approval_id: str) -> HostExecutionApprovalResult:
-        return cls(status="approved", approval_id=approval_id)
 
     @classmethod
     def denied(cls, reason_code: str) -> HostExecutionApprovalResult:
@@ -365,18 +364,16 @@ class HostExecutionFrozenClaim:
 
 @runtime_checkable
 class HostExecutionApprovalPort(Protocol):
-    """App-owned authority boundary used by Lead and delegated Agents."""
+    """App-owned staging boundary used by Lead and delegated Agents.
+
+    A staged request can only become executable through the separately claimed
+    frozen continuation. This port therefore never grants inline execution.
+    """
 
     async def request_host_execution(
         self,
         plan: HostExecutionPlan,
     ) -> HostExecutionApprovalResult: ...
-
-    async def complete_host_execution(
-        self,
-        approval_id: str,
-        outcome: HostExecutionOutcome,
-    ) -> None: ...
 
 
 @runtime_checkable
@@ -403,6 +400,25 @@ class HostExecutionContinuationPort(Protocol):
         ...
 
 
+@runtime_checkable
+class HostExecutionRetrySafetyFencePort(Protocol):
+    """App port that atomically commits a receipt with one retry fence."""
+
+    async def complete_host_execution_with_retry_safety_fence(
+        self,
+        approval_id: str,
+        outcome: HostExecutionOutcome,
+        retry_safety_fence: object,
+    ) -> None: ...
+
+
+@runtime_checkable
+class HostExecutionOutputDeliveryPort(Protocol):
+    """Optional server-owned continuation output-delivery projection."""
+
+    async def output_delivery_requirement_paths(self) -> tuple[str, ...]: ...
+
+
 __all__ = [
     "HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY",
     "HOST_EXECUTION_APPROVAL_CONTEXT_KEY",
@@ -414,5 +430,7 @@ __all__ = [
     "HostExecutionContinuationPort",
     "HostExecutionFrozenClaim",
     "HostExecutionOutcome",
+    "HostExecutionOutputDeliveryPort",
     "HostExecutionPlan",
+    "HostExecutionRetrySafetyFencePort",
 ]

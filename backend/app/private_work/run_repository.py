@@ -13,12 +13,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.execution_profile import RequestedRunExecutionProfile
+from app.private_work.run_metadata import (
+    RunVisionDispatchBudgetExceeded,
+    reserve_run_vision_dispatch_budget,
+)
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobRepository, JobScope
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.trace_context import generate_trace_id, normalize_trace_id
+from deerflow.vision.dispatch import (
+    MAX_VISION_CALLS_PER_RUN,
+    MAX_VISION_NORMALIZED_BYTES_PER_RUN,
+    MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +149,10 @@ class PrivateRunConflict(Exception):
 
 class PrivateRunExecutionLeaseLost(PrivateRunConflict):
     """The supplied durable job token cannot mutate the scoped Run."""
+
+
+class PrivateRunVisionDispatchRateLimited(PrivateRunConflict):
+    """One more Vision HTTP attempt would cross the logical Run limit."""
 
 
 class PrivateRunRepository:
@@ -701,6 +714,76 @@ class PrivateRunRepository:
             job.updated_at = checked_at
             await self.session.flush()
         return cancel_requested
+
+    async def reserve_vision_dispatch_attempt(
+        self,
+        *,
+        scope: PrivateResourceScope,
+        run_id: str,
+        job_id: uuid.UUID,
+        lease_token: str,
+        normalized_bytes: int,
+        normalized_pixels: int,
+        now: datetime | None = None,
+    ) -> bool:
+        """Atomically reserve one HTTP attempt and its ambiguity fence.
+
+        The counters live on the logical Run rather than a Worker attempt, so
+        retry, checkpoint takeover, and process replacement cannot reset them.
+        No remote work may start until the caller-owned transaction commits.
+        """
+
+        token_hash = self._lease_token_hash(lease_token)
+        job, run = await self._locked_job_run(
+            scope=scope,
+            run_id=run_id,
+            job_id=job_id,
+        )
+        await self._locked_active_attempt(
+            job=job,
+            job_id=job_id,
+            token_hash=token_hash,
+        )
+        checked_at = await self._authority_time_after_locks(now)
+        if (
+            not self._active_job_lease(
+                job,
+                token_hash=token_hash,
+                now=checked_at,
+            )
+            or run.status != "running"
+            or run.execution_lease_token_hash != token_hash
+            or run.execution_lease_expires_at is None
+            or run.execution_lease_expires_at <= checked_at
+        ):
+            raise PrivateRunExecutionLeaseLost
+        cancel_requested = any(
+            value is not None
+            for value in (
+                job.cancel_requested_at,
+                run.cancel_requested_at,
+                run.authorization_cancel_requested_at,
+            )
+        )
+        if cancel_requested:
+            return True
+        try:
+            reserved_metadata = reserve_run_vision_dispatch_budget(
+                run.metadata_json,
+                normalized_bytes=normalized_bytes,
+                normalized_pixels=normalized_pixels,
+                max_calls=MAX_VISION_CALLS_PER_RUN,
+                max_normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN,
+                max_normalized_pixels=MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
+            )
+        except RunVisionDispatchBudgetExceeded:
+            raise PrivateRunVisionDispatchRateLimited from None
+        run.metadata_json = reserved_metadata
+        if job.retry_safety == "safe":
+            job.retry_safety = "unknown"
+            job.updated_at = checked_at
+        await self.session.flush()
+        return False
 
     async def settle_execution(
         self,

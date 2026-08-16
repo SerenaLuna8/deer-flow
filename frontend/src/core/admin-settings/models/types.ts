@@ -9,34 +9,29 @@ export const adminModelIdSchema = z.string().uuid();
 export const adminModelStatusSchema = z.enum(["active", "suspended"]);
 export const adminModelProviderAdapterSchema = z.enum([
   "anthropic",
-  "claude_code",
-  "codex_cli",
   "deepseek",
-  "mindie",
   "openai",
   "patched_deepseek",
-  "patched_mimo",
-  "patched_minimax",
   "patched_openai",
-  "patched_stepfun",
   "vision_bridge_fake",
   "vision_openai_compatible_v1",
   "vllm",
 ]);
+// Retired values remain response-readable so an existing database can still be
+// opened and remediated. Mutation contracts below use the supported schema only.
+const retiredAdminModelProviderAdapterSchema = z.enum([
+  "claude_code",
+  "codex_cli",
+  "mindie",
+  "patched_mimo",
+  "patched_minimax",
+  "patched_stepfun",
+]);
+const readableAdminModelProviderAdapterSchema = z.union([
+  adminModelProviderAdapterSchema,
+  retiredAdminModelProviderAdapterSchema,
+]);
 
-const logicalNameSchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u)
-  .superRefine((value, context) => {
-    if (hasSecretLikeValue(value)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Logical name must not contain a credential-like value",
-      });
-    }
-  });
 const providerFieldSchema = z
   .string()
   .trim()
@@ -268,7 +263,7 @@ const credentialBindingFields = {
 
 function validateCredentialBinding(
   value: {
-    provider_adapter: z.infer<typeof adminModelProviderAdapterSchema>;
+    provider_adapter: z.infer<typeof readableAdminModelProviderAdapterSchema>;
     credential_id: string | null;
     credential_version_id: string | null;
     credential_env_key: string | null;
@@ -310,7 +305,7 @@ function validateCredentialBinding(
 }
 
 const PROVIDER_SETTING_FIELDS: Record<
-  z.infer<typeof adminModelProviderAdapterSchema>,
+  z.infer<typeof readableAdminModelProviderAdapterSchema>,
   ReadonlySet<string>
 > = {
   anthropic: new Set([
@@ -474,7 +469,7 @@ const PROVIDER_SETTING_FIELDS: Record<
 
 function validateProviderSettings(
   value: {
-    provider_adapter: z.infer<typeof adminModelProviderAdapterSchema>;
+    provider_adapter: z.infer<typeof readableAdminModelProviderAdapterSchema>;
     settings: Record<string, unknown>;
   },
   context: z.RefinementCtx,
@@ -503,8 +498,7 @@ function validateProviderSettings(
       context.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["settings", "base_url"],
-        message:
-          "Vision Bridge v1 requires exactly one HTTPS base_url setting",
+        message: "Vision Bridge v1 requires exactly one HTTPS base_url setting",
       });
     }
   }
@@ -512,21 +506,23 @@ function validateProviderSettings(
 
 const modelVersionFields = {
   display_name: secretSafeTextSchema(120, true),
-  description: secretSafeTextSchema(4000, false),
-  provider_adapter: adminModelProviderAdapterSchema,
+  provider_adapter: readableAdminModelProviderAdapterSchema,
   provider_model: providerFieldSchema,
   settings: safeAdminModelSettingsSchema,
   supports_thinking: z.boolean(),
   supports_reasoning_effort: z.boolean(),
   supports_vision: z.boolean(),
   ...credentialBindingFields,
-  sort_order: z.number().int().nonnegative(),
+} as const;
+
+const writableModelVersionFields = {
+  ...modelVersionFields,
+  provider_adapter: adminModelProviderAdapterSchema,
 } as const;
 
 export const adminModelItemSchema = z
   .object({
     id: adminModelIdSchema,
-    logical_name: logicalNameSchema,
     ...modelVersionFields,
     status: adminModelStatusSchema,
     is_default: z.boolean(),
@@ -562,22 +558,11 @@ export const adminModelCatalogSchema = z
         message: "A catalog cannot contain more than one default model",
       });
     }
-    if (
-      new Set(catalog.items.map((item) => item.logical_name)).size !==
-      catalog.items.length
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["items"],
-        message: "Model logical names must be unique",
-      });
-    }
   });
 
 export const createAdminModelInputSchema = z
   .object({
-    logical_name: logicalNameSchema,
-    ...modelVersionFields,
+    ...writableModelVersionFields,
     status: adminModelStatusSchema,
   })
   .strict()
@@ -588,7 +573,7 @@ export const createAdminModelInputSchema = z
 
 export const replaceAdminModelInputSchema = z
   .object({
-    ...modelVersionFields,
+    ...writableModelVersionFields,
     expected_revision: z.number().int().positive(),
   })
   .strict()
@@ -602,6 +587,7 @@ export const testAdminModelConnectionInputSchema = z
     provider_adapter: adminModelProviderAdapterSchema,
     provider_model: providerFieldSchema,
     settings: safeAdminModelSettingsSchema,
+    supports_vision: z.boolean(),
     ...credentialBindingFields,
   })
   .strict()

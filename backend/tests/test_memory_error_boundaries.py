@@ -151,11 +151,12 @@ async def test_runtime_worker_preserves_memory_authority_unavailable_for_durable
 async def test_durable_executor_maps_memory_authority_unavailable_to_existing_retry_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    model_ref = "00000000-0000-4000-8000-000000000308"
     model = ModelConfig(
-        name="memory-boundary-model",
+        name=model_ref,
         display_name="Memory boundary model",
         description="",
-        use="deerflow.models.openai_codex_provider:CodexChatModel",
+        use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
         model="memory-boundary-model",
     )
     app_config = AppConfig(

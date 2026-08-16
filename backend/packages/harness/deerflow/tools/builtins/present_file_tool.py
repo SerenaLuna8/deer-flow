@@ -1,3 +1,4 @@
+import inspect
 from pathlib import Path, PurePosixPath
 from typing import Annotated
 
@@ -105,7 +106,7 @@ def _normalize_presented_filepath(
 
 
 @tool("present_files", parse_docstring=True)
-def present_file_tool(
+async def present_file_tool(
     runtime: Runtime,
     filepaths: list[str],
     tool_call_id: Annotated[str, InjectedToolCallId],
@@ -124,7 +125,9 @@ def present_file_tool(
 
     Notes:
     - You should call this tool after creating files and moving them to the `/mnt/user-data/outputs` directory.
-    - This tool can be safely called in parallel with other tools. State updates are handled by a reducer to prevent conflicts.
+    - Include every file you want to expose in one call. During an approved
+      host-command continuation, the first successful call is the durable
+      delivery intent; a later call with a different path set is rejected.
 
     Args:
         filepaths: List of absolute file paths to present to the user. **Only** files in `/mnt/user-data/outputs` can be presented.
@@ -135,7 +138,15 @@ def present_file_tool(
             normalized_paths = [_normalize_presented_filepath(runtime, filepath) for filepath in filepaths]
         else:
             normalized_paths = [_normalize_private_presented_filepath(filepath) for filepath in filepaths]
-            authority.record_presented_paths(tuple(normalized_paths))
+            recorded = authority.record_presented_paths(
+                tuple(normalized_paths),
+                tool_call_id=tool_call_id,
+            )
+            # Compatibility for embedded authorities outside project mode;
+            # production private authority is async because it durably records
+            # continuation delivery intent before the ToolMessage is emitted.
+            if inspect.isawaitable(recorded):
+                await recorded
     except ValueError as exc:
         return Command(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},

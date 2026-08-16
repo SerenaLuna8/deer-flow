@@ -48,6 +48,7 @@ from app.shared_assets.errors import (
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
 )
+from app.shared_assets.model_refs import exact_model_ref
 from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.project_authoring_catalog import (
     ProjectAuthoringCatalogRepository,
@@ -110,9 +111,6 @@ from deerflow.sandbox.sandbox import AuthorizationRevoked
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
 _CHECKSUM_PATTERN = re.compile(r"[0-9a-f]{64}\Z")
 _PUBLIC_ERROR_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
-_EXECUTION_MODEL_NAME_PATTERN = re.compile(
-    r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\Z",
-)
 _MAX_IDEMPOTENCY_KEY_CHARS = 255
 _MAX_MESSAGE_CHARS = 8_000
 _MAX_SESSION_MESSAGES = 128
@@ -2862,7 +2860,7 @@ class SkillDesignService:
     ) -> str | None:
         if value is None:
             return None
-        if not isinstance(value, str) or _EXECUTION_MODEL_NAME_PATTERN.fullmatch(value) is None:
+        if exact_model_ref(value) is None:
             raise AssetValidationFailed(context.request_id)
         return value
 

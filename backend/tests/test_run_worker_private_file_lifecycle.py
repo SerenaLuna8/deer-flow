@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from deerflow.error_codes import PublicRunErrorCode
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
@@ -35,6 +36,107 @@ class _FailingAgent:
         del graph_input, config, stream_mode, subgraphs
         raise RuntimeError("private-agent-failure")
         yield  # pragma: no cover - keeps this method an async generator
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("delivery_status", "expected_status", "expected_error"),
+    [
+        ("delivered", RunStatus.success, None),
+        (
+            "assigned",
+            RunStatus.error,
+            PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+        ),
+        (
+            "intent_recorded",
+            RunStatus.error,
+            PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+        ),
+    ],
+)
+async def test_continuation_requires_durable_output_delivery_terminal(
+    delivery_status: str,
+    expected_status: RunStatus,
+    expected_error: str | None,
+) -> None:
+    class Authority:
+        async def restore(self) -> object:
+            return object()
+
+        async def finalize(self) -> object:
+            return SimpleNamespace(workspace_changes=None, artifacts=())
+
+        async def output_delivery_status(self) -> str:
+            return delivery_status
+
+        async def mark_failed(self) -> None:
+            pass
+
+        async def release(self) -> None:
+            pass
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-output-delivery-terminal")
+
+    await run_agent(
+        _bridge([]),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=Authority()),
+        agent_factory=lambda **_kwargs: _SuccessfulAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is expected_status
+    assert record.error == expected_error
+
+
+@pytest.mark.anyio
+async def test_delivered_source_candidate_satisfies_any_one_with_new_output() -> None:
+    class Authority:
+        async def restore(self) -> object:
+            return object()
+
+        async def finalize(self) -> object:
+            return SimpleNamespace(
+                workspace_changes={
+                    "created": ["outputs/new-from-command.txt"],
+                    "modified": [],
+                    "deleted": [],
+                },
+                artifacts=[
+                    SimpleNamespace(
+                        metadata={"logical_path": "outputs/source-candidate.txt"},
+                    ),
+                ],
+            )
+
+        async def output_delivery_status(self) -> str:
+            return "delivered"
+
+        async def mark_failed(self) -> None:
+            pass
+
+        async def release(self) -> None:
+            pass
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-output-delivery-any-one")
+
+    await run_agent(
+        _bridge([]),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, file_authority=Authority()),
+        agent_factory=lambda **_kwargs: _SuccessfulAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success
+    assert record.error is None
 
 
 def _bridge(events: list[str]) -> SimpleNamespace:

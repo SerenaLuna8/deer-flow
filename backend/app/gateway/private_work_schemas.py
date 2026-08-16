@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.private_work.context import strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkInvalid
+from app.shared_assets.model_refs import exact_model_ref
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 
@@ -120,18 +121,17 @@ class PrivateRunExecutionProfileRequest(StrictPrivateWorkRequest):
 
     model_name: str | None = Field(
         default=None,
-        min_length=1,
-        max_length=128,
-        pattern=r"^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$",
+        min_length=36,
+        max_length=36,
     )
     thinking_enabled: bool | None = None
     reasoning_effort: Literal["none", "minimal", "low", "medium", "high"] | None = None
 
     @field_validator("model_name")
     @classmethod
-    def reject_symbolic_default(cls, value: str | None) -> str | None:
-        if value == "default":
-            raise ValueError("model_name must be an exact logical name")
+    def require_model_uuid(cls, value: str | None) -> str | None:
+        if value is not None and exact_model_ref(value) is None:
+            raise ValueError("model_name must be an exact model UUID")
         return value
 
 

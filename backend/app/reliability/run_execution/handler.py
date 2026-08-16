@@ -19,10 +19,18 @@ from app.private_work.checkpointer import ProjectScopedCheckpointer
 from app.private_work.context import PrivateWorkContext
 from app.private_work.errors import PrivateWorkMcpQuotaExceeded
 from app.private_work.execution_approval import (
+    recover_staged_execution_approval_id,
     settle_staged_execution_approvals,
 )
 from app.private_work.execution_approval_audit import (
     NoopHostExecutionApprovalAudit,
+)
+from app.private_work.execution_approval_lifecycle import (
+    ExecutionApprovalPrivateLifecycleConflict,
+)
+from app.private_work.output_delivery_obligation import (
+    OutputDeliveryObligationConflict,
+    settle_continuation_output_delivery,
 )
 from app.private_work.run_admission import PersistedRunSnapshot
 from app.private_work.run_repository import (
@@ -458,11 +466,48 @@ class PrivateRunJobHandler:
                 run_id=state.run.run_id,
             )
             if terminal is not None:
+                terminal_result = self._terminal_result(terminal)
+                if terminal_result.status == "succeeded":
+                    try:
+                        suspended_approval_id = await recover_staged_execution_approval_id(
+                            session,
+                            claim=claim,
+                        )
+                    except ExecutionApprovalPrivateLifecycleConflict:
+                        raise LeaseLost(claim.job_id) from None
+                    terminal_result = AgentExecutionResult.succeeded(
+                        suspended_approval_id=suspended_approval_id,
+                    )
                 return (
                     None,
                     state.cancel_requested,
                     _RecoveredPrivateRunTerminal(
-                        self._terminal_result(terminal),
+                        terminal_result,
+                    ),
+                    context.resource_scope,
+                )
+            # The suspension marker is committed after checkpoint drain and
+            # before the public success terminal.  If that later stream write
+            # lost its Worker, the marker itself is the server-owned recovery
+            # proof: revalidate its exact staged approval and settle without
+            # invoking the graph again, while repairing the missing terminal
+            # in the same authoritative settlement transaction.
+            try:
+                suspended_approval_id = await recover_staged_execution_approval_id(
+                    session,
+                    claim=claim,
+                )
+            except ExecutionApprovalPrivateLifecycleConflict:
+                raise LeaseLost(claim.job_id) from None
+            if suspended_approval_id is not None:
+                return (
+                    None,
+                    state.cancel_requested,
+                    _RecoveredPrivateRunTerminal(
+                        AgentExecutionResult.succeeded(
+                            suspended_approval_id=suspended_approval_id,
+                        ),
+                        ensure_stream_terminal=True,
                     ),
                     context.resource_scope,
                 )
@@ -570,9 +615,14 @@ class PrivateRunJobHandler:
         if status in {"cancelled", "interrupted"}:
             return AgentExecutionResult.cancelled()
         if status in {"error", "failed", "timeout"}:
-            if isinstance(terminal.data, Mapping) and terminal.data.get("error_code") == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value:
+            if isinstance(terminal.data, Mapping) and terminal.data.get(
+                "error_code",
+            ) in {
+                PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+            }:
                 return AgentExecutionResult.failed(
-                    PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
+                    str(terminal.data["error_code"]),
                     retryable=False,
                 )
             return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
@@ -646,11 +696,30 @@ class PrivateRunJobHandler:
                         "timeout",
                         "interrupted",
                     }:
+                        try:
+                            await settle_continuation_output_delivery(
+                                session,
+                                approval_id_value=settled_run.kwargs.get(
+                                    "host_execution_approval_id",
+                                ),
+                                project_id=locked_scope.project_id,
+                                owner_user_id=locked_scope.owner_user_id,
+                                thread_id=settled_run.thread_id,
+                                continuation_run_id=settled_run.run_id,
+                                continuation_job_id=claim.job_id,
+                                settled_status=settled_run.status,
+                                now=settled_run.updated_at,
+                                ambiguous_side_effect=ambiguous_side_effect,
+                            )
+                        except OutputDeliveryObligationConflict:
+                            raise PrivateRunExecutionLeaseLost from None
                         await settle_staged_execution_approvals(
                             session,
                             claim=claim,
                             succeeded=settled_run.status == "success",
+                            suspended_approval_id=(result.suspended_approval_id if settled_run.status == "success" else None),
                             request_ttl_seconds=(self._execution_approval_ttl_seconds),
+                            durable_terminal_replay=durable_terminal,
                             audit=self._execution_approval_audit,
                         )
                     if settled_run.status in {
@@ -734,6 +803,24 @@ class PrivateRunJobHandler:
         with request_trace_context(origin_trace_id):
             return await self._handle_with_trace(claim, authority)
 
+    async def _recover_sealed_suspension_after_execution(
+        self,
+        claim: JobClaim,
+    ) -> str | None:
+        """Re-read durable proof after a post-marker executor failure."""
+
+        try:
+            async with self._factory() as session, session.begin():
+                return await recover_staged_execution_approval_id(
+                    session,
+                    claim=claim,
+                )
+        except Exception:
+            # A malformed/mismatched marker or unavailable authority must not
+            # fall through to failure settlement, which would erase the only
+            # checkpoint-safe success proof.
+            raise LeaseLost(claim.job_id) from None
+
     async def _handle_with_trace(
         self,
         claim: JobClaim,
@@ -771,6 +858,7 @@ class PrivateRunJobHandler:
                 AgentExecutionResult.cancelled(),
                 scope=execution.context.resource_scope,
             )
+        ambiguous_side_effect = False
         try:
             result = await self._executor.execute(execution, authority)
         except asyncio.CancelledError:
@@ -785,24 +873,45 @@ class PrivateRunJobHandler:
         except PrivateWorkMcpQuotaExceeded as error:
             result = AgentExecutionResult.failed(error.code)
         except AmbiguousExternalSideEffect as error:
-            return self._settlement(
-                claim,
-                AgentExecutionResult.failed(
-                    "SIDE_EFFECT_STATE_UNKNOWN",
-                    attempt_usage=error.attempt_usage,
-                ),
-                scope=execution.context.resource_scope,
-                ambiguous_side_effect=True,
+            result = AgentExecutionResult.failed(
+                "SIDE_EFFECT_STATE_UNKNOWN",
+                attempt_usage=error.attempt_usage,
             )
+            ambiguous_side_effect = True
         except Exception:
-            return self._settlement(
-                claim,
-                AgentExecutionResult.failed("SIDE_EFFECT_STATE_UNKNOWN"),
-                scope=execution.context.resource_scope,
-                ambiguous_side_effect=True,
+            result = AgentExecutionResult.failed(
+                "SIDE_EFFECT_STATE_UNKNOWN",
             )
+            ambiguous_side_effect = True
         if not isinstance(result, AgentExecutionResult):
             result = AgentExecutionResult.failed("INVALID_AGENT_RESULT")
+        if result.status == "succeeded" and result.suspended_approval_id is not None:
+            # A successful suspension can only return after the Worker sealed
+            # its exact marker.  Give that durable proof precedence over a
+            # cancellation arriving after the marker, and idempotently repair
+            # a terminal whose ACK was lost.
+            return self._settlement(
+                claim,
+                result,
+                scope=execution.context.resource_scope,
+                durable_terminal=True,
+                ensure_stream_terminal=True,
+            )
+        if result.status != "succeeded" or authority.cancel_requested:
+            suspended_approval_id = await self._recover_sealed_suspension_after_execution(
+                claim,
+            )
+            if suspended_approval_id is not None:
+                return self._settlement(
+                    claim,
+                    AgentExecutionResult.succeeded(
+                        attempt_usage=result.attempt_usage,
+                        suspended_approval_id=suspended_approval_id,
+                    ),
+                    scope=execution.context.resource_scope,
+                    durable_terminal=True,
+                    ensure_stream_terminal=True,
+                )
         if authority.cancel_requested:
             result = AgentExecutionResult.cancelled(
                 attempt_usage=result.attempt_usage,
@@ -811,6 +920,7 @@ class PrivateRunJobHandler:
             claim,
             result,
             scope=execution.context.resource_scope,
+            ambiguous_side_effect=ambiguous_side_effect,
         )
 
 

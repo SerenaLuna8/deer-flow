@@ -82,12 +82,9 @@ export function InputBoxModelChooser({
               key={model.name}
               onSelect={() => onSelect(model.name)}
             >
-              <div className="flex min-w-0 flex-1 flex-col">
-                <ModelSelectorName>{model.display_name}</ModelSelectorName>
-                <span className="text-muted-foreground truncate text-xs">
-                  {model.model}
-                </span>
-              </div>
+              <ModelSelectorName className="min-w-0 flex-1 truncate">
+                {model.display_name}
+              </ModelSelectorName>
               {model.name === selectedModelName ? (
                 <CheckIcon className="ml-auto size-4" />
               ) : (

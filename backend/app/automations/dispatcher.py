@@ -57,6 +57,7 @@ from app.private_work.errors import (
     PrivateWorkUnavailable,
 )
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.run_metadata import strip_server_run_metadata
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRecord, PrivateRunRepository
 from app.private_work.runtime_context import prepare_private_run_config
 from app.private_work.snapshot_repository import (
@@ -1180,7 +1181,7 @@ class AutomationDispatcher:
         coordinates: _DispatchCoordinates,
         run: PrivateRunRecord,
     ) -> None:
-        if run.thread_id != coordinates.expected_thread_id or run.run_id != coordinates.expected_run_id or run.metadata != coordinates.run_metadata:
+        if run.thread_id != coordinates.expected_thread_id or run.run_id != coordinates.expected_run_id or strip_server_run_metadata(run.metadata) != strip_server_run_metadata(coordinates.run_metadata):
             raise AutomationConflict(_DISPATCH_REQUEST_ID)
 
     @staticmethod

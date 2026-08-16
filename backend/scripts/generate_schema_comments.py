@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 87
-_EXPECTED_COLUMN_COUNT = 1080
+_EXPECTED_TABLE_COUNT = 89
+_EXPECTED_COLUMN_COUNT = 1104
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -59,6 +59,14 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "execution_approval_result_receipts": (
         "执行审批结果回执",
         "保存一次已审批本机命令的有界私有执行结果。",
+    ),
+    "execution_approval_output_delivery_obligations": (
+        "审批输出交付义务",
+        "保存审批暂停后必须由续接运行完成的私有输出交付义务。",
+    ),
+    "execution_approval_output_delivery_candidates": (
+        "审批输出交付候选",
+        "冻结可满足审批输出交付义务的私有文件身份与版本。",
     ),
     "jobs": ("后台任务", "保存 Worker 可领取、续租、重试和结算的持久化任务。"),
     "project_invitation_rate_limits": ("项目邀请限流", "记录项目邀请码失败尝试的限流窗口。"),
@@ -131,7 +139,10 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "project_skill_credential_bindings": ("技能凭据绑定", "保存技能凭据槽位到受管凭据版本的绑定。"),
     "run_skill_credential_snapshots": ("运行技能凭据快照", "冻结运行使用技能时的凭据绑定闭包。"),
     "system_model_catalog_state": ("系统模型目录状态", "记录系统模型目录的单例修订号。"),
-    "system_model_configs": ("系统模型配置", "保存系统模型配置的逻辑身份和当前版本指针。"),
+    "system_model_configs": (
+        "系统模型配置",
+        "保存系统模型配置的稳定标识、展示名称和当前版本指针。",
+    ),
     "system_model_config_versions": ("系统模型配置版本", "保存不可变的系统模型提供方与能力配置。"),
     "run_model_config_snapshots": ("运行模型配置快照", "冻结一次运行采用的模型配置版本。"),
     "system_runtime_policy_catalog_state": ("系统运行策略目录状态", "记录系统运行策略目录的单例修订号。"),
@@ -172,6 +183,7 @@ _COLUMN_PHRASES: dict[str, str] = {
     "deletion_requested_by_user_id": "请求删除的用户标识",
     "created_at": "记录创建时间",
     "updated_at": "记录最近更新时间",
+    "spawn_authorized_at": "一次性进程创建授权提交时间",
     "deleted_at": "记录删除时间",
     "status": "生命周期状态",
     "version": "记录版本号",
@@ -331,6 +343,14 @@ _COLUMN_PHRASES: dict[str, str] = {
     "approval_id": "执行审批请求标识",
     "exit_code": "命令进程退出代码",
     "result_digest": "有界私有执行结果的内容摘要",
+    "mode": "履约模式",
+    "intent_tool_call_id": "记录输出交付意图的工具调用标识",
+    "intent_digest": "规范化私有输出交付意图的内容摘要",
+    "intent_private_json": "仅限授权边界读取的输出交付意图 JSON",
+    "satisfied_artifact_id": "满足输出交付义务的运行制品标识",
+    "assigned_at": "输出交付义务分配给续接运行的时间",
+    "intent_recorded_at": "输出交付意图持久化的时间",
+    "file_version": "候选文件的冻结版本号",
 }
 
 # Reused column names can carry materially different privacy and storage
@@ -373,6 +393,14 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
         "execution_approval_result_receipts",
         "outcome",
     ): "命令启动或完成结果",
+    (
+        "execution_approval_output_delivery_obligations",
+        "intent_private_json",
+    ): "仅限授权边界读取的规范化输出交付意图 JSON（最多 1 MiB）",
+    (
+        "execution_approval_output_delivery_obligations",
+        "terminal_at",
+    ): "输出交付义务进入终态的时间",
 }
 
 

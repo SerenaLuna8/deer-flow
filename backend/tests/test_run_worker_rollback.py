@@ -36,6 +36,10 @@ from deerflow.runtime.skill_context_authority import (
 )
 from deerflow.subagents.runtime_catalog import build_runtime_agent_catalog
 
+SAFE_MODEL_REF = "00000000-0000-4000-8000-000000000401"
+AUTHORITATIVE_MODEL_REF = "00000000-0000-4000-8000-000000000402"
+FAKE_TEST_MODEL_REF = "00000000-0000-4000-8000-000000000403"
+
 
 class FakeCheckpointer:
     def __init__(self, *, put_result):
@@ -516,7 +520,7 @@ async def test_private_run_fails_closed_when_pre_run_message_boundary_is_unavail
         run_id="private-run",
         thread_id="private-thread",
         assistant_id="project-agent",
-        model_name="safe-model",
+        model_name=SAFE_MODEL_REF,
         scope=scope,
     )
     bridge = SimpleNamespace(
@@ -560,7 +564,7 @@ async def test_model_output_limit_publishes_terminal_before_job_settlement() -> 
         run_id="output-limit-run",
         thread_id="output-limit-thread",
         assistant_id="project-agent",
-        model_name="safe-model",
+        model_name=SAFE_MODEL_REF,
         scope=scope,
     )
     bridge = SimpleNamespace(
@@ -604,7 +608,7 @@ async def test_private_run_allows_first_empty_checkpoint():
         run_id="private-run",
         thread_id="private-thread",
         assistant_id="project-agent",
-        model_name="safe-model",
+        model_name=SAFE_MODEL_REF,
         scope=scope,
     )
     bridge = SimpleNamespace(
@@ -650,7 +654,7 @@ async def test_private_run_forces_persisted_thread_and_root_checkpoint_namespace
         run_id="private-run",
         thread_id="persisted-thread",
         assistant_id="project-agent",
-        model_name="safe-model",
+        model_name=SAFE_MODEL_REF,
         scope=scope,
     )
     bridge = SimpleNamespace(
@@ -821,7 +825,7 @@ async def test_private_run_agent_factory_receives_authoritative_persisted_model_
         run_id="private-run",
         thread_id="private-thread",
         assistant_id="project-assistant",
-        model_name="deepseek-v4",
+        model_name=AUTHORITATIVE_MODEL_REF,
         scope=PrivateResourceScope(
             project_id="exact-project",
             owner_user_id="exact-owner",
@@ -842,7 +846,7 @@ async def test_private_run_agent_factory_receives_authoritative_persisted_model_
     private_runtime = PrivateRuntime()
 
     class DummyAgent:
-        metadata = {"model_name": "deepseek-v4"}
+        metadata = {"model_name": AUTHORITATIVE_MODEL_REF}
 
         async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
             captured["astream_model_name"] = config["configurable"].get("model_name")
@@ -875,11 +879,11 @@ async def test_private_run_agent_factory_receives_authoritative_persisted_model_
     await asyncio.sleep(0)
 
     assert captured == {
-        "factory_model_name": "deepseek-v4",
-        "factory_context_model_name": "deepseek-v4",
-        "factory_resolved_model_name": "deepseek-v4",
-        "astream_model_name": "deepseek-v4",
-        "astream_context_model_name": "deepseek-v4",
+        "factory_model_name": AUTHORITATIVE_MODEL_REF,
+        "factory_context_model_name": AUTHORITATIVE_MODEL_REF,
+        "factory_resolved_model_name": AUTHORITATIVE_MODEL_REF,
+        "astream_model_name": AUTHORITATIVE_MODEL_REF,
+        "astream_context_model_name": AUTHORITATIVE_MODEL_REF,
         "private_runtime": private_runtime,
     }
     assert record.status == RunStatus.success
@@ -1714,7 +1718,7 @@ async def test_interrupted_run_never_generates_an_automatic_title(monkeypatch):
     )
 
     class _AbortingAgent:
-        metadata = {"model_name": "fake-test-model"}
+        metadata = {"model_name": FAKE_TEST_MODEL_REF}
         checkpointer: Any | None = None
         store: Any | None = None
         interrupt_before_nodes = None
@@ -1810,7 +1814,7 @@ async def test_replacement_run_waits_for_prior_finalizing_run():
     replacement_started = asyncio.Event()
 
     class _ReplacementAgent:
-        metadata = {"model_name": "fake-test-model"}
+        metadata = {"model_name": FAKE_TEST_MODEL_REF}
         checkpointer: Any | None = None
         store: Any | None = None
         interrupt_before_nodes = None

@@ -529,7 +529,8 @@ export function InputBox({
       supportThinking,
     ],
   );
-  const modelDisplayName = selectedModel?.display_name ?? resolvedModelName;
+  const modelDisplayName =
+    selectedModel?.display_name ?? t.conversation.agentModelUnavailableTitle;
 
   const enabledSkillNames = useMemo(
     () =>

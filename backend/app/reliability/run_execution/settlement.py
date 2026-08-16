@@ -137,6 +137,7 @@ class PrivateRunJobTerminalPort:
             owner_user_id=event.owner_user_id,
             run_id=event.run_id,
             job_id=event.job_id,
+            terminal_job_status=event.status,
             now=event.occurred_at,
             request_id=origin_trace_id,
             audit=self._execution_approval_audit,

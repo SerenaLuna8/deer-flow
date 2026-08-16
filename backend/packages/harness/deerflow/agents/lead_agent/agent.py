@@ -645,7 +645,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
     model_config = resolved_app_config.get_model_config(model_name)
 
     if model_config is None:
-        raise ValueError("No chat model could be resolved. A platform administrator must configure an active model in System Settings, and the request must reference its logical name.")
+        raise ValueError("No chat model could be resolved. A platform administrator must configure an active model in System Settings, and the request must reference its model UUID.")
     exact_agent_thinking = getattr(agent_version_model_settings, "thinking_enabled", None) if agent_version_model_settings is not None else None
     exact_agent_reasoning = getattr(agent_version_model_settings, "reasoning_effort", None) if agent_version_model_settings is not None else None
     if "thinking_enabled" not in cfg and exact_agent_thinking is True and not model_config.supports_thinking:
@@ -853,6 +853,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             exact_skills=runtime_skills,
             exact_skills_container_path=container_base_path if runtime_skills is not None else None,
             runtime_agent_catalog=runtime_agent_catalog,
+            inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
         ),
         state_schema=get_thread_state_schema(
             mode,

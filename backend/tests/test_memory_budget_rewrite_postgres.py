@@ -277,7 +277,7 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
     model_id = uuid.uuid4()
     model_version_id = uuid.uuid4()
     model_checksum = "c" * 64
-    model_name = f"budget-rewrite-{model_id.hex}"
+    model_ref = str(model_id)
     worker_id = uuid.uuid4()
     now = datetime.now(UTC)
 
@@ -304,16 +304,14 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
             await connection.execute(
                 text(
                     """INSERT INTO system_model_configs
-                    (id,logical_name,display_name,description,status,
-                     current_version_id,revision,sort_order,created_by_user_id,
+                    (id,display_name,status,current_version_id,
+                     revision,created_by_user_id,
                      updated_by_user_id)
-                    VALUES (:id,:name,'Budget rewrite test',
-                            'PostgreSQL budget rewrite closure','active',
-                            NULL,1,0,:owner,:owner)"""
+                    VALUES (:id,'Budget rewrite test','active',
+                            NULL,1,:owner,:owner)"""
                 ),
                 {
                     "id": model_id,
-                    "name": model_name,
                     "owner": scope.owner_user_id,
                 },
             )
@@ -325,7 +323,7 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
                      supports_reasoning_effort,supports_vision,credential_id,
                      credential_version_id,credential_env_key,payload_checksum,
                      supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'codex_cli','budget-rewrite-test',
+                    VALUES (:id,:model,1,'vision_bridge_fake','budget-rewrite-test',
                             '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                             :checksum,NULL,:owner)"""
                 ),
@@ -370,7 +368,7 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
                         assistant_id=str(seed.project_agent_id),
                         owner_user_id=scope.owner_user_id,
                         status="pending",
-                        model_name=model_name,
+                        model_name=model_ref,
                         multitask_strategy="reject",
                         metadata_json={},
                         kwargs_json={},

@@ -23,11 +23,15 @@ from deerflow.persistence.final_schema_contract import (
 
 # Ordered migration chain, root -> head. Every released revision id lives here;
 # ``backend/tests/test_schema_migration_parity.py`` pins this tuple to the actual
-# scripts under ``backend/migrations/versions``. The first public release folds
-# every pre-release schema change into one initial snapshot. Consequently,
-# provisional markers such as ``full_schema`` and ``execution_approvals`` are
+# scripts under ``backend/migrations/versions``. ``initial_schema`` is the first
+# public root and known ancestors advance only through this explicit chain.
+# Provisional markers such as ``full_schema`` and ``execution_approvals`` remain
 # deliberately unknown and require a fresh database instead of an upgrade.
-KNOWN_CHAIN_REVISIONS: tuple[str, ...] = ("initial_schema",)
+KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
+    "initial_schema",
+    "approval_output_delivery",
+    "model_catalog_simplify",
+)
 
 # The migration-chain head revision id. ``full_schema.sql`` stamps exactly
 # this marker, so a fresh install is always already at head.

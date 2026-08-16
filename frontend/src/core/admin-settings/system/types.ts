@@ -39,11 +39,7 @@ const secretValuePatterns = [
   /-----BEGIN [A-Z ]*PRIVATE KEY-----/u,
 ] as const;
 const httpUrlPattern = /https?:\/\/[^\s<>()]+/giu;
-const logicalModelNameSchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$/u);
+const modelIdSchema = z.string().uuid();
 const toolNameSchema = z
   .string()
   .trim()
@@ -212,7 +208,7 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       max_recursion_limit: boundedInteger(1, 100_000),
       vision_bridge: z
         .object({
-          model_name: logicalModelNameSchema.nullable(),
+          model_name: modelIdSchema.nullable(),
           timeout_seconds: boundedInteger(5, 120),
           contract_version: z.literal("vision.bridge.v1"),
         })
@@ -222,7 +218,7 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
           enabled: z.boolean(),
           max_words: boundedInteger(1, 20),
           max_chars: boundedInteger(10, 200),
-          model_name: logicalModelNameSchema.nullable(),
+          model_name: modelIdSchema.nullable(),
         })
         .strict(),
       suggestions: z.object({ enabled: z.boolean() }).strict(),
@@ -230,13 +226,13 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
         .object({
           enabled: z.boolean(),
           max_chars: boundedInteger(1, 100_000),
-          model_name: logicalModelNameSchema.nullable(),
+          model_name: modelIdSchema.nullable(),
         })
         .strict(),
       summarization: z
         .object({
           enabled: z.boolean(),
-          model_name: logicalModelNameSchema.nullable(),
+          model_name: modelIdSchema.nullable(),
           trigger: z.array(contextSizeSchema).max(8).nullable(),
           keep: contextSizeSchema,
           trim_tokens_to_summarize: boundedInteger(1, 2_000_000).nullable(),
@@ -250,7 +246,7 @@ export const agentRuntimeSettingsValueSchema = boundedJson(
       memory: z
         .object({
           enabled: z.boolean(),
-          model_name: logicalModelNameSchema.nullable(),
+          model_name: modelIdSchema.nullable(),
           dream_interval_minutes: boundedInteger(15, 1_440),
           max_injection_tokens: boundedInteger(100, 8_000),
           idle_seal_minutes: boundedInteger(0, 10_080).refine(
@@ -605,7 +601,7 @@ export function validateAgentRuntimeModelReferences(
 ): AgentRuntimeSettingsValue {
   const parsed = agentRuntimeSettingsValueSchema.parse(value);
   const allowed = new Set(
-    activeModelNames.map((name) => logicalModelNameSchema.parse(name)),
+    activeModelNames.map((name) => modelIdSchema.parse(name)),
   );
   const referenced = [
     parsed.title.model_name,
@@ -620,7 +616,7 @@ export function validateAgentRuntimeModelReferences(
   }
   if (parsed.vision_bridge.model_name !== null) {
     const allowedVisionBridgeModels = new Set(
-      visionBridgeModelNames.map((name) => logicalModelNameSchema.parse(name)),
+      visionBridgeModelNames.map((name) => modelIdSchema.parse(name)),
     );
     if (!allowedVisionBridgeModels.has(parsed.vision_bridge.model_name)) {
       throw new Error(

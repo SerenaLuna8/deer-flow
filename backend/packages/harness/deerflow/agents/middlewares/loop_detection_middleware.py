@@ -256,6 +256,33 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
     @classmethod
     def from_config(cls, config: LoopDetectionConfig) -> LoopDetectionMiddleware:
         """Construct from a Pydantic-validated config, trusting its validation."""
+        overrides = {name: (override.warn, override.hard_limit) for name, override in config.tool_freq_overrides.items()}
+        # Real ``inspect_image`` HTTP attempts also have a durable per-Run
+        # dispatch cap. This graph-local loop guard covers tool proposals and
+        # the deterministic, non-egress fake adapter; an operator policy may
+        # tighten it but must never widen it past the ninth proposal.
+        from deerflow.vision.dispatch import (
+            VISION_TOOL_FREQUENCY_HARD_STOP,
+            VISION_TOOL_FREQUENCY_WARN,
+        )
+
+        configured_warn, configured_hard = overrides.get(
+            "inspect_image",
+            (
+                VISION_TOOL_FREQUENCY_WARN,
+                VISION_TOOL_FREQUENCY_HARD_STOP,
+            ),
+        )
+        vision_hard = min(
+            configured_hard,
+            VISION_TOOL_FREQUENCY_HARD_STOP,
+        )
+        vision_warn = min(
+            configured_warn,
+            VISION_TOOL_FREQUENCY_WARN,
+            vision_hard,
+        )
+        overrides["inspect_image"] = (vision_warn, vision_hard)
         return cls(
             warn_threshold=config.warn_threshold,
             hard_limit=config.hard_limit,
@@ -263,7 +290,7 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             max_tracked_threads=config.max_tracked_threads,
             tool_freq_warn=config.tool_freq_warn,
             tool_freq_hard_limit=config.tool_freq_hard_limit,
-            tool_freq_overrides={name: (o.warn, o.hard_limit) for name, o in config.tool_freq_overrides.items()},
+            tool_freq_overrides=overrides,
         )
 
     def _get_thread_id(self, runtime: Runtime) -> str:

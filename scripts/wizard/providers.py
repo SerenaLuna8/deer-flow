@@ -96,7 +96,7 @@ SEARCH_PROVIDERS: list[SearchProvider] = [
     SearchProvider(
         name="groundroute",
         display_name="GroundRoute",
-        description="One key across six engines, price-routed with failover, API key required",
+        description="One key across six engines with failover, API key required",
         use="deerflow.community.groundroute.tools:web_search_tool",
         env_var="GROUNDROUTE_API_KEY",
         extra_config={"max_results": 5},

@@ -63,12 +63,16 @@ from deerflow.models.factory import create_chat_model
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
+PRIMARY_MODEL_REF = "00000000-0000-4000-8000-000000000301"
+OTHER_MODEL_REF = "00000000-0000-4000-8000-000000000302"
+SAMPLING_MODEL_REF = "00000000-0000-4000-8000-000000000303"
+
 
 def test_private_run_execution_profile_is_strict_and_separate_from_generic_context() -> None:
     request = PrivateRunCreateRequest.model_validate(
         {
             "execution_profile": {
-                "model_name": "gpt-5.6-luna",
+                "model_name": PRIMARY_MODEL_REF,
                 "thinking_enabled": True,
                 "reasoning_effort": "high",
             },
@@ -89,7 +93,7 @@ def test_private_run_execution_profile_is_strict_and_separate_from_generic_conte
     )
 
     assert request.execution_profile.model_dump() == {
-        "model_name": "gpt-5.6-luna",
+        "model_name": PRIMARY_MODEL_REF,
         "thinking_enabled": True,
         "reasoning_effort": "high",
     }
@@ -97,7 +101,14 @@ def test_private_run_execution_profile_is_strict_and_separate_from_generic_conte
     assert request.context == {}
 
     with pytest.raises(ValidationError):
-        PrivateRunCreateRequest.model_validate({"execution_profile": {"model_name": "gpt-5.6-luna", "unknown": True}})
+        PrivateRunCreateRequest.model_validate(
+            {
+                "execution_profile": {
+                    "model_name": PRIMARY_MODEL_REF,
+                    "unknown": True,
+                }
+            }
+        )
 
 
 def test_private_run_server_context_owns_channel_identity() -> None:
@@ -144,15 +155,15 @@ def test_private_run_server_context_owns_channel_identity() -> None:
 
 def test_default_agent_selection_and_effective_profile_are_fail_closed() -> None:
     requested = RequestedRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
     )
-    assert selected_run_model_ref("default", requested) == "gpt-5.6-luna"
+    assert selected_run_model_ref("default", requested) == PRIMARY_MODEL_REF
 
     effective = resolve_admitted_run_execution_profile(
         requested=requested,
-        logical_name="gpt-5.6-luna",
+        model_ref=PRIMARY_MODEL_REF,
         supports_thinking=True,
         supports_reasoning_effort=True,
         supports_vision=True,
@@ -160,19 +171,19 @@ def test_default_agent_selection_and_effective_profile_are_fail_closed() -> None
         agent_reasoning_effort=None,
     )
     assert effective == EffectiveRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
         supports_vision=True,
     )
 
     with pytest.raises(RunModelSelectionLocked):
-        selected_run_model_ref("deepseek-v4-flash", requested)
+        selected_run_model_ref(OTHER_MODEL_REF, requested)
 
     with pytest.raises(RunExecutionProfileUnsupported):
         resolve_admitted_run_execution_profile(
             requested=requested,
-            logical_name="text-only",
+            model_ref=OTHER_MODEL_REF,
             supports_thinking=False,
             supports_reasoning_effort=False,
             supports_vision=False,
@@ -187,7 +198,7 @@ def test_disabled_thinking_freezes_none_effort_for_reasoning_models() -> None:
             thinking_enabled=False,
             reasoning_effort="none",
         ),
-        logical_name="gpt-5.6-luna",
+        model_ref=PRIMARY_MODEL_REF,
         supports_thinking=True,
         supports_reasoning_effort=True,
         supports_vision=True,
@@ -204,7 +215,7 @@ def test_disabled_thinking_freezes_none_effort_for_reasoning_models() -> None:
                 thinking_enabled=False,
                 reasoning_effort="minimal",
             ),
-            logical_name="gpt-5.6-luna",
+            model_ref=PRIMARY_MODEL_REF,
             supports_thinking=True,
             supports_reasoning_effort=True,
             supports_vision=True,
@@ -215,7 +226,7 @@ def test_disabled_thinking_freezes_none_effort_for_reasoning_models() -> None:
 
 def test_flash_and_image_profile_reach_openai_responses_payload() -> None:
     model = ModelConfig(
-        name="gpt-5.6-luna",
+        name=PRIMARY_MODEL_REF,
         display_name="GPT 5.6 Luna",
         description="",
         use="langchain_openai:ChatOpenAI",
@@ -298,12 +309,12 @@ def _run_record(
 
 def test_run_idempotency_includes_the_requested_execution_profile() -> None:
     requested = RequestedRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
     )
     effective = EffectiveRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
         supports_vision=True,
@@ -327,7 +338,7 @@ def test_run_idempotency_includes_the_requested_execution_profile() -> None:
             run_id=record.run_id,
             kwargs={"input": {"messages": []}},
             execution_profile=RequestedRunExecutionProfile(
-                model_name="gpt-5.6-luna",
+                model_name=PRIMARY_MODEL_REF,
                 thinking_enabled=True,
                 reasoning_effort="low",
             ),
@@ -338,12 +349,12 @@ def test_run_idempotency_includes_the_requested_execution_profile() -> None:
 @pytest.mark.asyncio
 async def test_private_run_launcher_passes_only_the_typed_profile_to_admission() -> None:
     requested = RequestedRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
     )
     effective = EffectiveRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
         supports_vision=True,
@@ -407,12 +418,12 @@ async def test_private_run_launcher_passes_only_the_typed_profile_to_admission()
 
 def test_worker_consumes_only_the_persisted_effective_profile() -> None:
     requested = RequestedRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
     )
     effective = EffectiveRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="high",
         supports_vision=True,
@@ -454,9 +465,9 @@ def test_worker_consumes_only_the_persisted_effective_profile() -> None:
 async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    requested = RequestedRunExecutionProfile(model_name="codex-test")
+    requested = RequestedRunExecutionProfile(model_name=SAMPLING_MODEL_REF)
     effective = EffectiveRunExecutionProfile(
-        model_name="codex-test",
+        model_name=SAMPLING_MODEL_REF,
         thinking_enabled=False,
         reasoning_effort="none",
         supports_vision=False,
@@ -473,11 +484,11 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
     )
     context = PrivateWorkContext.from_project(project)
     model = ModelConfig(
-        name="codex-test",
-        display_name="Codex test",
+        name=SAMPLING_MODEL_REF,
+        display_name="Sampling test",
         description="",
-        use="deerflow.models.openai_codex_provider:CodexChatModel",
-        model="codex-test",
+        use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
+        model="sampling-test",
         supports_thinking=True,
         supports_reasoning_effort=True,
     )
@@ -576,9 +587,9 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
 
 
 def test_run_response_echoes_the_effective_execution_profile() -> None:
-    requested = RequestedRunExecutionProfile(model_name="gpt-5.6-luna")
+    requested = RequestedRunExecutionProfile(model_name=PRIMARY_MODEL_REF)
     effective = EffectiveRunExecutionProfile(
-        model_name="gpt-5.6-luna",
+        model_name=PRIMARY_MODEL_REF,
         thinking_enabled=True,
         reasoning_effort="medium",
         supports_vision=True,
@@ -588,7 +599,7 @@ def test_run_response_echoes_the_effective_execution_profile() -> None:
 
     assert response.execution_profile is not None
     assert response.execution_profile.model_dump() == {
-        "model_name": "gpt-5.6-luna",
+        "model_name": PRIMARY_MODEL_REF,
         "thinking_enabled": True,
         "reasoning_effort": "medium",
         "supports_vision": True,
@@ -607,7 +618,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
     default_version_id = uuid.uuid4()
     selected_model_id = uuid.uuid4()
     selected_version_id = uuid.uuid4()
-    selected_name = f"luna-{selected_model_id.hex}"
+    selected_name = str(selected_model_id)
     try:
         async with seed.factory() as session, session.begin():
             agent_version = (
@@ -637,7 +648,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                 (
                     default_model_id,
                     default_version_id,
-                    f"default-{default_model_id.hex}",
+                    str(default_model_id),
                     False,
                 ),
                 (
@@ -650,10 +661,10 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                 await session.execute(
                     text(
                         """INSERT INTO system_model_configs
-                        (id,logical_name,display_name,description,status,
-                         current_version_id,revision,sort_order,
+                        (id,display_name,status,
+                         current_version_id,revision,
                          created_by_user_id,updated_by_user_id)
-                        VALUES (:id,:name,:name,'profile test','active',NULL,1,0,
+                        VALUES (:id,:name,'active',NULL,1,
                                 :owner,:owner)"""
                     ),
                     {
@@ -670,7 +681,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                          supports_reasoning_effort,supports_vision,credential_id,
                          credential_version_id,credential_env_key,payload_checksum,
                          supersedes_version_id,created_by_user_id)
-                        VALUES (:version,:model,1,'codex_cli',:name,'{}'::jsonb,
+                        VALUES (:version,:model,1,'vision_bridge_fake',:name,'{}'::jsonb,
                                 :supports,:supports,:supports,NULL,NULL,NULL,
                                 :checksum,NULL,:owner)"""
                     ),
@@ -753,14 +764,14 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
             row = (
                 await session.execute(
                     text(
-                        """SELECT logical_name,model_config_version_id
+                        """SELECT model_config_id,model_config_version_id
                         FROM run_model_config_snapshots
                         WHERE run_id=:run_id AND purpose='lead'"""
                     ),
                     {"run_id": run_id},
                 )
             ).one()
-        assert row.logical_name == selected_name
+        assert row.model_config_id == selected_model_id
         assert row.model_config_version_id == selected_version_id
 
         incompatible_agent = ResolvedAgentSnapshot(

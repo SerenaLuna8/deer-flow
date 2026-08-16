@@ -20,6 +20,8 @@ from app.shared_assets.models import (
 from app.shared_assets.resolver import ProjectAssetResolver, _ResolvedRecord
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
+_MODEL_REF = "88888888-8888-4888-8888-888888888891"
+
 
 class _EmptyScalarResult:
     def scalars(self) -> _EmptyScalarResult:
@@ -38,7 +40,7 @@ def _snapshot() -> ResolvedAgentSnapshot:
     payload = AgentPayload(
         description="original",
         soul="soul",
-        model_ref="model-a",
+        model_ref=_MODEL_REF,
         tool_groups=("task",),
         skill_version_ids=(),
         mcp_version_ids=(),

@@ -134,9 +134,9 @@ test("carries requested choices through the SDK and consumes the effective Run p
 
 test("labels vision as a model capability rather than claiming image input", () => {
   expect(
-    zhCN.conversation.runExecutionProfile("gpt-5.6-luna", "Pro", true),
-  ).toBe("实际执行：gpt-5.6-luna · Pro · 支持视觉");
+    zhCN.conversation.runExecutionProfile("GPT-5.6 Luna", "Pro", true),
+  ).toBe("实际执行：GPT-5.6 Luna · Pro · 支持视觉");
   expect(
-    enUS.conversation.runExecutionProfile("gpt-5.6-luna", "Pro", true),
-  ).toBe("Effective run: gpt-5.6-luna · Pro · vision-capable");
+    enUS.conversation.runExecutionProfile("GPT-5.6 Luna", "Pro", true),
+  ).toBe("Effective run: GPT-5.6 Luna · Pro · vision-capable");
 });

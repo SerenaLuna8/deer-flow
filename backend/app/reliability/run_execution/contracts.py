@@ -20,6 +20,7 @@ class AgentExecutionResult:
     public_error_code: str | None = None
     retryable: bool = False
     attempt_usage: PrivateRunUsageSnapshot | None = None
+    suspended_approval_id: str | None = None
 
     def __post_init__(self) -> None:
         JobOutcome(self.status, self.public_error_code)
@@ -29,14 +30,28 @@ class AgentExecutionResult:
             raise ValueError("terminal success/cancel outcomes cannot be retryable")
         if self.attempt_usage is not None and type(self.attempt_usage) is not PrivateRunUsageSnapshot:
             raise TypeError("attempt_usage must be a PrivateRunUsageSnapshot or None")
+        if self.suspended_approval_id is not None:
+            if self.status != "succeeded":
+                raise ValueError(
+                    "only successful approval suspension may carry an approval id",
+                )
+            if not isinstance(self.suspended_approval_id, str) or not self.suspended_approval_id:
+                raise ValueError(
+                    "suspended_approval_id must be a non-empty string",
+                )
 
     @classmethod
     def succeeded(
         cls,
         *,
         attempt_usage: PrivateRunUsageSnapshot | None = None,
+        suspended_approval_id: str | None = None,
     ) -> AgentExecutionResult:
-        return cls("succeeded", attempt_usage=attempt_usage)
+        return cls(
+            "succeeded",
+            attempt_usage=attempt_usage,
+            suspended_approval_id=suspended_approval_id,
+        )
 
     @classmethod
     def cancelled(

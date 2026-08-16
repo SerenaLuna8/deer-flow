@@ -30,6 +30,10 @@ import {
   createWriteArtifactAutoOpenState,
   extractWriteArtifactSelections,
 } from "@/core/artifacts/preview";
+import {
+  deriveExecutionApprovalSubtaskUpdate,
+  type ExecutionApprovalProjection,
+} from "@/core/execution-approvals";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   deriveHumanInputThreadState,
@@ -310,6 +314,9 @@ export function MessageList({
   canDeleteFiles = false,
   enableSidecarActions = true,
   sidecarSurface = false,
+  suspendLoadingIndicators = false,
+  executionApproval = null,
+  observedExecutionApprovalId = null,
   trailingContent,
   initialScroll = "smooth",
   resizeScroll = "smooth",
@@ -348,6 +355,9 @@ export function MessageList({
   canDeleteFiles?: boolean;
   enableSidecarActions?: boolean;
   sidecarSurface?: boolean;
+  suspendLoadingIndicators?: boolean;
+  executionApproval?: ExecutionApprovalProjection | null;
+  observedExecutionApprovalId?: string | null;
   trailingContent?: ReactNode;
   initialScroll?: ConversationProps["initial"];
   resizeScroll?: ConversationProps["resize"];
@@ -362,6 +372,7 @@ export function MessageList({
     setOpen: setArtifactsOpen,
   } = useArtifacts();
   const sidecar = useMaybeSidecar();
+  const visualRunIsLoading = thread.isLoading && !suspendLoadingIndicators;
   const [selectionToolbar, setSelectionToolbar] =
     useState<SelectionToolbarState | null>(null);
   const [turnStartTime, setTurnStartTime] = useState<number | null>(() =>
@@ -425,7 +436,7 @@ export function MessageList({
   const groupedMessages = useMemo(() => getMessageGroups(messages), [messages]);
   const assistantTurnDisplay = useMemo(() => {
     const displays = getAssistantTurnDisplays(groupedMessages, {
-      isCurrentTurnLoading: thread.isLoading,
+      isCurrentTurnLoading: visualRunIsLoading,
     });
     return {
       byFinalGroupIndex: new Map(
@@ -435,7 +446,7 @@ export function MessageList({
         displays.flatMap((display) => display.hiddenGroupIndexes),
       ),
     };
-  }, [groupedMessages, thread.isLoading]);
+  }, [groupedMessages, visualRunIsLoading]);
   useEffect(() => {
     if (thread.isLoading && !prevIsLoading.current) {
       const now = Date.now();
@@ -494,7 +505,7 @@ export function MessageList({
     () => hasActiveAssistantReasoning(groupedMessages),
     [groupedMessages],
   );
-  const rehypePlugins = useRehypeSplitWordsIntoSpans(thread.isLoading);
+  const rehypePlugins = useRehypeSplitWordsIntoSpans(visualRunIsLoading);
   const updateSubtask = useUpdateSubtask();
   const lastGroupIndex = groupedMessages.length - 1;
   const turnUsageMessagesByGroupIndex =
@@ -529,10 +540,10 @@ export function MessageList({
     () =>
       getStreamingMessageLookup(
         messages,
-        thread.isLoading,
+        visualRunIsLoading,
         thread.getMessagesMetadata,
       ),
-    [messages, thread.getMessagesMetadata, thread.isLoading],
+    [messages, thread.getMessagesMetadata, visualRunIsLoading],
   );
 
   const humanInputState = useMemo(
@@ -1004,6 +1015,14 @@ export function MessageList({
       ) {
         continue;
       }
+      const approvalUpdate = deriveExecutionApprovalSubtaskUpdate(message, {
+        approval: executionApproval,
+        observedApprovalId: observedExecutionApprovalId,
+      });
+      if (approvalUpdate) {
+        updateSubtask(approvalUpdate);
+        continue;
+      }
       const parsed = parseSubtaskResult(
         extractTextFromMessage(message),
         message.additional_kwargs,
@@ -1250,7 +1269,7 @@ export function MessageList({
 
             const turnUsageMessages = turnUsageMessagesByGroupIndex[groupIndex];
             const groupIsLoading =
-              thread.isLoading && groupIndex === lastGroupIndex;
+              visualRunIsLoading && groupIndex === lastGroupIndex;
             const turnDisplay =
               assistantTurnDisplay.byFinalGroupIndex.get(groupIndex);
             const durationDisplays = resolveRunDurationDisplays(
@@ -1287,7 +1306,7 @@ export function MessageList({
                         <MessageListItem
                           message={msg}
                           isLoading={
-                            thread.isLoading &&
+                            visualRunIsLoading &&
                             groupIndex === groupedMessages.length - 1
                           }
                           threadId={threadId}
@@ -1483,7 +1502,7 @@ export function MessageList({
                     <div key={group.id} className="w-full">
                       <MarkdownContent
                         content={extractContentFromMessage(message)}
-                        isLoading={thread.isLoading}
+                        isLoading={visualRunIsLoading}
                         rehypePlugins={rehypePlugins}
                       />
                       {renderTokenUsage({
@@ -1548,7 +1567,7 @@ export function MessageList({
                     {group.messages[0] && hasContent(group.messages[0]) && (
                       <MarkdownContent
                         content={extractContentFromMessage(group.messages[0])}
-                        isLoading={thread.isLoading}
+                        isLoading={visualRunIsLoading}
                         rehypePlugins={rehypePlugins}
                         className="mb-4"
                       />
@@ -1602,7 +1621,7 @@ export function MessageList({
               durationDisplays,
             );
           })}
-          {thread.isLoading &&
+          {visualRunIsLoading &&
             !hasActiveAssistantText &&
             !hasActiveReasoning && (
               <div className="w-full">

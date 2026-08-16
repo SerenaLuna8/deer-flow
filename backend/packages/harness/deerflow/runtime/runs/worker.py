@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from typing import Any, Literal, Protocol, cast
 
+from langchain_core.messages import ToolMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.types import Overwrite
 
@@ -86,6 +87,10 @@ from deerflow.sandbox.sandbox import (
     AuthorizationRevoked,
 )
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount, get_sandbox_provider
+from deerflow.sandbox.security import (
+    HostBashExecutionMode,
+    resolve_host_bash_execution_mode,
+)
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
 from deerflow.trace_context import get_current_trace_id, normalize_trace_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -816,6 +821,8 @@ async def run_agent(
     rollback_cancellation_pending = False
     defer_terminal_settlement = False
     terminal_published = False
+    suspended_approval_id: str | None = None
+    local_host_execution_approval_enabled = ctx.host_execution_approval_port is not None and isinstance(ctx.app_config, AppConfig) and resolve_host_bash_execution_mode(ctx.app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED
 
     async def _settle_requested_rollback() -> bool:
         return await _settle_rollback(
@@ -1081,7 +1088,7 @@ async def run_agent(
         configurable = config.setdefault("configurable", {})
         configurable["__pregel_runtime"] = runtime
         if ctx.private_agent_runtime is not None:
-            # Private admission persists the exact configured logical model on
+            # Private admission persists the exact configured model UUID on
             # the Run.  Reassert that authoritative value at the Worker boundary
             # so absent or forged caller config cannot influence the private
             # runtime factory.  ``None`` remains a fail-closed value.
@@ -1300,7 +1307,9 @@ async def run_agent(
             return goal_evaluator_model
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal llm_error_fallback_message
+            nonlocal suspended_approval_id, llm_error_fallback_message
+            if suspended_approval_id is not None:
+                return
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
             text_delta_flush_ms = ctx.app_config.worker.stream.text_delta_flush_ms if isinstance(ctx.app_config, AppConfig) else DEFAULT_TEXT_DELTA_FLUSH_MS
             # 0 disables coalescing and restores per-token durable frames.
@@ -1311,11 +1320,13 @@ async def run_agent(
                     # File batching intentionally requires values mode, so this
                     # path remains ordinary per-frame publication.
                     single_mode = lg_modes[0]
-                    raw_stream = agent.astream(
-                        input_payload,
-                        config=stream_config,
-                        stream_mode=single_mode,
-                    )
+                    stream_kwargs: dict[str, Any] = {
+                        "config": stream_config,
+                        "stream_mode": single_mode,
+                    }
+                    if local_host_execution_approval_enabled:
+                        stream_kwargs["durability"] = "sync"
+                    raw_stream = agent.astream(input_payload, **stream_kwargs)
                     async for chunk in _iter_with_text_delta_deadline(
                         raw_stream,
                         text_delta_coalescer,
@@ -1339,6 +1350,10 @@ async def run_agent(
                             chunk,
                             pre_existing_message_ids,
                         )
+                        current_run_approval_id = _current_run_host_execution_approval_id(
+                            chunk,
+                            run_id,
+                        )
                         sse_event = _lg_mode_to_sse_event(single_mode)
                         frames = text_delta_coalescer.push(chunk) if single_mode == "messages" and text_delta_coalescer is not None else [chunk]
                         for frame in frames:
@@ -1349,15 +1364,23 @@ async def run_agent(
                             )
                         if single_mode == "custom":
                             await subagent_events.add(chunk)
+                        if current_run_approval_id is not None and suspended_approval_id is None:
+                            suspended_approval_id = current_run_approval_id
+                            logger.info(
+                                "Run %s staged host execution approval — hidden goal continuation is suspended",
+                                run_id,
+                            )
                     return
 
                 # Multiple modes or subgraphs: astream yields tuples.
-                raw_stream = agent.astream(
-                    input_payload,
-                    config=stream_config,
-                    stream_mode=lg_modes,
-                    subgraphs=stream_subgraphs,
-                )
+                stream_kwargs = {
+                    "config": stream_config,
+                    "stream_mode": lg_modes,
+                    "subgraphs": stream_subgraphs,
+                }
+                if local_host_execution_approval_enabled:
+                    stream_kwargs["durability"] = "sync"
+                raw_stream = agent.astream(input_payload, **stream_kwargs)
                 async for item in _iter_with_text_delta_deadline(
                     raw_stream,
                     text_delta_coalescer,
@@ -1394,6 +1417,10 @@ async def run_agent(
                             chunk,
                             pre_existing_message_ids,
                         )
+                    current_run_approval_id = _current_run_host_execution_approval_id(
+                        chunk,
+                        run_id,
+                    )
                     await _publish_stream_item(
                         bridge=bridge,
                         run_id=run_id,
@@ -1404,6 +1431,12 @@ async def run_agent(
                         text_delta_coalescer=text_delta_coalescer,
                         subagent_events=subagent_events,
                     )
+                    if current_run_approval_id is not None and suspended_approval_id is None:
+                        suspended_approval_id = current_run_approval_id
+                        logger.info(
+                            "Run %s staged host execution approval — hidden goal continuation is suspended",
+                            run_id,
+                        )
             finally:
                 stream_error = sys.exception()
                 if text_delta_coalescer is not None or file_tool_chunk_batcher is not None:
@@ -1435,9 +1468,31 @@ async def run_agent(
                             exc_info=True,
                         )
 
+        async def _refresh_host_execution_approval_gate() -> None:
+            """Recheck durable state when the selected stream hides messages."""
+
+            nonlocal suspended_approval_id
+            if suspended_approval_id is not None or not local_host_execution_approval_enabled or checkpointer is None or accessor is None or not callable(getattr(accessor.graph, "aget_state", None)):
+                return
+            messages = await _materialized_checkpoint_messages(
+                accessor,
+                thread_id,
+            )
+            approval_id = _current_run_host_execution_approval_id(
+                messages,
+                run_id,
+            )
+            if approval_id is not None:
+                suspended_approval_id = approval_id
+                logger.info(
+                    "Run %s found staged host execution approval in its materialized checkpoint — hidden goal continuation is suspended",
+                    run_id,
+                )
+
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         await _stream_once(graph_input, initial_runnable_config)
-        while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+        await _refresh_host_execution_approval_gate()
+        while suspended_approval_id is None and not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
                 checkpointer=checkpointer,
@@ -1454,6 +1509,7 @@ async def run_agent(
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
+            await _refresh_host_execution_approval_gate()
 
         # 8. Final status
         if record.abort_event.is_set():
@@ -1481,7 +1537,22 @@ async def run_agent(
             await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
         else:
             await private_files.finalize()
-            if private_files.output_delivery_satisfied():
+            obligation_status = await private_files.output_delivery_status()
+            if suspended_approval_id is not None:
+                await run_manager.set_status(run_id, RunStatus.success)
+            elif obligation_status == "delivered":
+                # The persisted any-one obligation covers the union of source
+                # candidates and continuation outputs.  Delivering an exact
+                # candidate is sufficient even when the command also created
+                # another output during this continuation.
+                await run_manager.set_status(run_id, RunStatus.success)
+            elif obligation_status not in {"not_required", "delivered"}:
+                await run_manager.set_status(
+                    run_id,
+                    RunStatus.error,
+                    error=PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+                )
+            elif private_files.output_delivery_satisfied():
                 await run_manager.set_status(run_id, RunStatus.success)
             else:
                 await run_manager.set_status(
@@ -1745,6 +1816,21 @@ async def run_agent(
                     exc_info=True,
                 )
 
+        record.suspended_approval_id = suspended_approval_id if record.status is RunStatus.success else None
+        if record.suspended_approval_id is not None and local_host_execution_approval_enabled:
+            seal_suspension = getattr(
+                ctx.host_execution_approval_port,
+                "seal_suspended_approval_marker",
+                None,
+            )
+            if not callable(seal_suspension):
+                raise RuntimeError(
+                    "host execution suspension marker authority is unavailable",
+                )
+            # This is the last durable side-effect before the public success
+            # terminal. It proves the checkpoint-safe pause under the live
+            # source Job lease so a later attempt can recover the exact row.
+            await seal_suspension(record.suspended_approval_id)
         if not defer_terminal_settlement and not terminal_published:
             await bridge.publish_end(run_id)
         if private_files.cancellation_pending or rollback_cancellation_pending:
@@ -2828,6 +2914,67 @@ def _message_id(obj: Any) -> str | None:
         if isinstance(raw, str) and raw:
             return raw
     return None
+
+
+def _current_run_host_execution_approval_id(
+    value: Any,
+    run_id: str,
+) -> str | None:
+    """Find a trusted host-approval anchor owned by the current Run.
+
+    Values-mode chunks replay the thread's full message history, so merely
+    finding an approval artifact would make every later Run stop on an old
+    request.  The app-owned approval port stamps the source Run into the
+    artifact; require that exact coordinate before treating the chunk as a
+    suspension boundary.
+    """
+
+    seen: set[int] = set()
+
+    def walk(obj: Any) -> str | None:
+        oid = id(obj)
+        if oid in seen:
+            return None
+        seen.add(oid)
+
+        if isinstance(obj, ToolMessage):
+            artifact = obj.artifact
+            approval = artifact.get("host_execution_approval") if isinstance(artifact, dict) else None
+            if (
+                isinstance(approval, dict)
+                and approval.get("schema_version") == 1
+                and approval.get("kind") == "local_shell"
+                and approval.get("source_run_id") == run_id
+                and isinstance(approval.get("approval_id"), str)
+                and bool(approval["approval_id"])
+                and isinstance(approval.get("source_tool_call_id"), str)
+                and bool(approval["source_tool_call_id"])
+            ):
+                return approval["approval_id"]
+
+        if isinstance(obj, dict):
+            for item in obj.values():
+                approval_id = walk(item)
+                if approval_id is not None:
+                    return approval_id
+            return None
+        if isinstance(obj, (list, tuple, set)):
+            for item in obj:
+                approval_id = walk(item)
+                if approval_id is not None:
+                    return approval_id
+        return None
+
+    return walk(value)
+
+
+def _contains_current_run_host_execution_approval(
+    value: Any,
+    run_id: str,
+) -> bool:
+    """Compatibility predicate backed by the exact typed approval anchor."""
+
+    return _current_run_host_execution_approval_id(value, run_id) is not None
 
 
 def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None) -> str | None:

@@ -41,6 +41,7 @@ _READY_AGENT_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
 _UNAVAILABLE_AGENT_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 _DEPENDENCY_AGENT_ID = uuid.UUID("66666666-6666-4666-8666-666666666666")
 _MODEL_AGENT_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
+_INACTIVE_MODEL_REF = "88888888-8888-4888-8888-888888888890"
 _REQUEST_ID = "agent-runtime-assessment"
 
 
@@ -115,7 +116,7 @@ class _Resolver:
         if selection.asset_id == _UNAVAILABLE_AGENT_ID:
             raise AssetResolutionUnavailable(_REQUEST_ID)
         if selection.asset_id == _MODEL_AGENT_ID:
-            return _closure(selection.asset_id, model_ref="inactive-model")
+            return _closure(selection.asset_id, model_ref=_INACTIVE_MODEL_REF)
         return _closure(selection.asset_id)
 
 
@@ -249,7 +250,7 @@ async def test_batch_assessment_preserves_input_order_and_fails_closed_per_agent
     ]
     assert service.project_read_lock_calls == [(_context(), True)]  # type: ignore[attr-defined]
     assert len(validator.contexts) == 3
-    assert models.calls == [("default", False), ("inactive-model", False)]
+    assert models.calls == [("default", False), (_INACTIVE_MODEL_REF, False)]
 
 
 @pytest.mark.asyncio
@@ -313,7 +314,7 @@ async def test_batch_assessment_validates_every_delegated_agent_model() -> None:
         ),
         payload=replace(
             lead_closure.lead_agent.payload,
-            model_ref="inactive-model",
+            model_ref=_INACTIVE_MODEL_REF,
         ),
     )
     closure = replace(lead_closure, delegated_agents=(delegate,))

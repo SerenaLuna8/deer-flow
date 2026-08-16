@@ -256,26 +256,16 @@ def test_finished_execution_approval_requires_a_durable_result() -> None:
         )
 
 
-def test_internal_staged_approval_has_a_pollable_pending_api_shape() -> None:
-    payload = {
-        **_common_response_projection(uuid.uuid4()),
-        "status": "pending",
-        "can_decide": False,
-        "decision_expires_at": "2026-08-14T08:05:00+00:00",
-        "remaining_ttl_seconds": 300,
-    }
-
+def test_execution_approval_envelope_hides_internal_staged_state() -> None:
     parsed = private_work_router.ExecutionApprovalEnvelopeResponse.model_validate(
         {
             "schema_version": 1,
             "server_time": "2026-08-14T08:00:00+00:00",
-            "approval": payload,
+            "approval": None,
         },
     )
 
-    assert parsed.approval is not None
-    assert parsed.approval.status == "pending"
-    assert parsed.approval.can_decide is False
+    assert parsed.approval is None
 
 
 def test_client_cannot_persist_host_execution_authority_fields() -> None:

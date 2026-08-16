@@ -39,6 +39,7 @@ import {
   executionApprovalActiveQueryKey,
   executionApprovalBlocksSending,
   executionApprovalContinuationRunId,
+  executionApprovalDecisionSurface,
   executionApprovalNeedsAdmissionRecovery,
   findLatestExecutionApprovalArtifact,
   submitExecutionApprovalDecision,
@@ -264,8 +265,10 @@ export function ScopedChatPage({
   });
 
   const approval = executionApproval.approval;
+  const approvalDecision = executionApprovalDecisionSurface(approval);
   const approvalBlocksSending =
     executionApprovalBlocksSending(approval) ||
+    executionApproval.isPreparing ||
     (!isMock && executionApproval.active.isPending);
   const [pendingExecutionDecision, setPendingExecutionDecision] =
     useState<ExecutionApprovalDecision | null>(null);
@@ -727,6 +730,11 @@ export function ScopedChatPage({
                   isHistoryLoading={isHistoryLoading}
                   historyError={historyError}
                   retryHistory={retryHistory}
+                  suspendLoadingIndicators={approvalDecision !== null}
+                  executionApproval={approval}
+                  observedExecutionApprovalId={
+                    executionApproval.observedApprovalId
+                  }
                   tokenUsageInlineMode={tokenUsageInlineMode}
                   canSubmitFeedback={scope.canRun}
                   canDeleteFiles={scope.canDeleteFiles === true}
@@ -785,9 +793,9 @@ export function ScopedChatPage({
                     scope.branchVisible === false ? undefined : handleBranchTurn
                   }
                   trailingContent={
-                    approval ? (
+                    approvalDecision ? (
                       <ExecutionApprovalCard
-                        approval={approval}
+                        approval={approvalDecision}
                         decisionError={executionDecisionError}
                         disabled={
                           !scope.canRun || !scope.canApproveHostExecution

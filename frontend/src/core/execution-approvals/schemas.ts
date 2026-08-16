@@ -244,6 +244,12 @@ export function executionApprovalIsActive(
 
 export const executionApprovalBlocksSending = executionApprovalIsActive;
 
+export function executionApprovalDecisionSurface(
+  approval: ExecutionApprovalProjection | null | undefined,
+) {
+  return approval?.status === "pending" ? approval : null;
+}
+
 export function executionApprovalNeedsAdmissionRecovery(
   approval: ExecutionApprovalProjection | null | undefined,
 ) {

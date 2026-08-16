@@ -14,9 +14,32 @@ import {
 import {
   executionApprovalIsActive,
   selectNewerExecutionApprovalProjection,
+  type ExecutionApprovalsActiveResponse,
 } from "./schemas";
 
 export const EXECUTION_APPROVAL_POLL_INTERVAL_MS = 1_000;
+
+type ExecutionApprovalQuerySnapshot = {
+  state: {
+    status: "pending" | "error" | "success";
+    data?: ExecutionApprovalsActiveResponse;
+  };
+};
+
+export function executionApprovalByIdRefetchInterval(
+  query: ExecutionApprovalQuerySnapshot,
+) {
+  if (query.state.status === "error") return false;
+  const approval = query.state.data?.approval;
+  if (query.state.status === "success" && approval === null) {
+    return EXECUTION_APPROVAL_POLL_INTERVAL_MS;
+  }
+  return executionApprovalIsActive(approval) ||
+    (approval?.status === "denied" &&
+      approval.denial_delivery_status === "pending")
+    ? EXECUTION_APPROVAL_POLL_INTERVAL_MS
+    : false;
+}
 
 function normalizeOptionalApprovalId(value: string | null | undefined) {
   const trimmed = value?.trim();
@@ -138,12 +161,7 @@ export function useExecutionApproval({
       );
     },
     enabled: enabled && threadId.length > 0 && selectedApprovalId !== null,
-    refetchInterval: (query) =>
-      executionApprovalIsActive(query.state.data?.approval) ||
-      (query.state.data?.approval?.status === "denied" &&
-        query.state.data.approval.denial_delivery_status === "pending")
-        ? EXECUTION_APPROVAL_POLL_INTERVAL_MS
-        : false,
+    refetchInterval: executionApprovalByIdRefetchInterval,
     refetchIntervalInBackground: false,
     refetchOnMount: "always",
     refetchOnReconnect: "always",
@@ -225,11 +243,16 @@ export function useThreadExecutionApproval({
     matchingByIdApproval,
     matchingActiveApproval,
   );
+  const isPreparing =
+    approval === null &&
+    observedApprovalId !== null &&
+    (byId.isPending || (byId.isSuccess && byId.data?.approval === null));
 
   return {
     active,
     byId,
     approval,
+    isPreparing,
     observedApprovalId,
   } as const;
 }

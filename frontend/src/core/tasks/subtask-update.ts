@@ -5,6 +5,7 @@ const STATUS_SOURCE_RANK: Record<SubtaskStatusSource, number> = {
   inferred: 0,
   custom_event: 1,
   tool_result: 2,
+  execution_approval: 3,
 };
 
 export function isTerminalSubtaskStatus(status: Subtask["status"] | undefined) {
@@ -103,6 +104,10 @@ function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {
   return (
     previous.status !== next.status ||
     previous.statusSource !== next.statusSource ||
+    !executionApprovalEquals(
+      previous.executionApproval,
+      next.executionApproval,
+    ) ||
     previous.modelName !== next.modelName ||
     previous.result !== next.result ||
     previous.error !== next.error ||
@@ -113,6 +118,20 @@ function subtaskChanged(previous: Subtask | undefined, next: Subtask): boolean {
     previous.latestMessage !== next.latestMessage ||
     previous.steps !== next.steps ||
     !usageEquals(previous.usage, next.usage)
+  );
+}
+
+function executionApprovalEquals(
+  a: Subtask["executionApproval"],
+  b: Subtask["executionApproval"],
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.approvalId === b.approvalId &&
+    a.status === b.status &&
+    a.exitCode === b.exitCode &&
+    a.reasonCode === b.reasonCode
   );
 }
 

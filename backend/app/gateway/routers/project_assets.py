@@ -238,7 +238,14 @@ class AgentCreateRequest(_StrictModel):
     soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    model_ref: str = Field(min_length=1, max_length=255)
+    model_ref: str = Field(
+        min_length=7,
+        max_length=36,
+        pattern=(
+            r"^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})$"
+        ),
+    )
     model_settings: AgentModelSettings
     tool_groups: list[str]
     skill_version_ids: list[uuid.UUID]

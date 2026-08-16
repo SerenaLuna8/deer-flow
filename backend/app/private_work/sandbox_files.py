@@ -485,6 +485,7 @@ class PrivateRunFileAuthority:
         mounts: tuple[RunScopedReadOnlyMount, ...] = (),
         provider: SandboxProvider | None = None,
         current_upload_snapshot: tuple[CurrentUploadSnapshotEntry, ...] = (),
+        output_delivery_port: object | None = None,
     ) -> None:
         if type(current_upload_snapshot) is not tuple or any(type(entry) is not CurrentUploadSnapshotEntry for entry in current_upload_snapshot):
             raise ValueError("Invalid current private upload snapshot")
@@ -498,6 +499,7 @@ class PrivateRunFileAuthority:
         self._provider = provider
         self._current_upload_snapshot = current_upload_snapshot
         self._current_upload_snapshot_ids = frozenset(snapshot_ids)
+        self._output_delivery_port = output_delivery_port
         self._lease: PrivateSandboxLease | None = None
         self._sandbox: Any | None = None
         self._manifest: AuthorityManifest | None = None
@@ -513,6 +515,25 @@ class PrivateRunFileAuthority:
     @property
     def manifest(self) -> AuthorityManifest | None:
         return self._manifest
+
+    @staticmethod
+    def _validated_presented_paths(paths: object) -> tuple[str, ...]:
+        if type(paths) is not tuple or any(type(path) is not str for path in paths):
+            raise ValueError("Invalid private presented paths")
+        normalized: list[str] = []
+        root = PurePosixPath("/mnt/user-data/outputs")
+        for path in paths:
+            parsed = PurePosixPath(path)
+            if not parsed.is_absolute() or parsed.as_posix() != path or ".." in parsed.parts:
+                raise ValueError("Invalid private presented paths")
+            try:
+                relative = parsed.relative_to(root)
+            except ValueError:
+                raise ValueError("Invalid private presented paths") from None
+            if not relative.parts:
+                raise ValueError("Invalid private presented paths")
+            normalized.append(path)
+        return tuple(dict.fromkeys(normalized))
 
     async def restore(self) -> AuthorityManifest:
         if self._manifest is not None:
@@ -562,12 +583,61 @@ class PrivateRunFileAuthority:
             ):
                 raise CurrentUploadSnapshotStale
         self._current_upload_ids = [entry.file_id for entry in self._current_upload_snapshot]
+        intent_restorer = getattr(
+            self._output_delivery_port,
+            "restore_output_delivery_intent_paths",
+            None,
+        )
+        if callable(intent_restorer):
+            restored_paths = self._validated_presented_paths(
+                await intent_restorer(),
+            )
+            self._presented_paths = list(
+                dict.fromkeys((*self._presented_paths, *restored_paths)),
+            )
         return self._manifest
 
-    def record_presented_paths(self, presented_paths: tuple[str, ...]) -> None:
-        if type(presented_paths) is not tuple or any(type(path) is not str for path in presented_paths):
-            raise ValueError("Invalid private presented paths")
+    async def record_presented_paths(
+        self,
+        presented_paths: tuple[str, ...],
+        *,
+        tool_call_id: str,
+    ) -> None:
+        presented_paths = self._validated_presented_paths(presented_paths)
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            raise ValueError("Invalid private presentation tool call")
+        recorder = getattr(
+            self._output_delivery_port,
+            "record_output_delivery_intent",
+            None,
+        )
+        if callable(recorder):
+            await recorder(
+                presented_paths,
+                tool_call_id=tool_call_id,
+            )
         self._presented_paths = list(dict.fromkeys((*self._presented_paths, *presented_paths)))
+
+    async def output_delivery_status(self) -> str:
+        status_reader = getattr(
+            self._output_delivery_port,
+            "output_delivery_status",
+            None,
+        )
+        if not callable(status_reader):
+            return "not_required"
+        status = await status_reader()
+        if status not in {
+            "not_required",
+            "assigned",
+            "intent_recorded",
+            "delivered",
+            "cancelled",
+            "blocked_unknown",
+            "failed",
+        }:
+            raise PrivateWorkUnavailable(self._run_scope.context.request_id)
+        return status
 
     def record_current_upload_ids(self, file_ids: tuple[str, ...]) -> None:
         """Remember authorized current-Run uploads for lead requests."""

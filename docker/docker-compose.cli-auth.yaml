@@ -1,8 +1,6 @@
 # ActWeave — CLI auth overlay (OPT-IN, NOT loaded by default)
 #
 # Bind-mounts the host Claude Code / Codex CLI config dirs into the Worker so:
-#   - ClaudeChatModel / Codex model providers can reuse the CLI subscription
-#     login (~/.claude/.credentials.json, ~/.codex/auth.json), and
 #   - ACP agents (acp_agents in config.yaml) that run the claude/codex CLI
 #     inside the container can read their config.
 #
@@ -11,11 +9,7 @@
 # the Worker container, read-only. A Worker compromise leaks all of it. That
 # is why they are NOT mounted by default.
 #
-# Prefer passing only a token via env instead (no directory exposure):
-#   CLAUDE_CODE_OAUTH_TOKEN / ANTHROPIC_AUTH_TOKEN for Claude, CODEX_AUTH_PATH
-#   for a single Codex auth file supplied through the runtime environment.
-# Use this overlay only when you need the full CLI config (e.g. ACP adapters
-# that run the CLI in-container and read more than just the credential file).
+# Use this overlay only when an ACP adapter genuinely needs the full CLI config.
 #
 # Manual use (works with both prod and dev compose):
 #   docker compose -f docker-compose.yaml -f docker-compose.cli-auth.yaml up -d

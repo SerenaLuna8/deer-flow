@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
 
 RUN_EXECUTION_PROFILE_KWARG = "__run_execution_profile"
 
-_MODEL_NAME = re.compile(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?\Z")
 _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
 _REQUESTED_KEYS = frozenset({"model_name", "thinking_enabled", "reasoning_effort"})
 _EFFECTIVE_KEYS = frozenset(
@@ -33,7 +31,7 @@ class RunModelSelectionLocked(RunExecutionProfileError):
 
 
 class RunSelectedModelUnavailable(RunExecutionProfileError):
-    """An explicitly selected logical model is not active and admissible."""
+    """An explicitly selected model UUID is not active and admissible."""
 
 
 class RunExecutionProfileUnsupported(RunExecutionProfileError):
@@ -41,8 +39,8 @@ class RunExecutionProfileUnsupported(RunExecutionProfileError):
 
 
 def _validate_model_name(value: str | None) -> None:
-    if value is not None and (type(value) is not str or value == DEFAULT_MODEL_REF or _MODEL_NAME.fullmatch(value) is None):
-        raise TypeError("model_name must be an exact logical model name")
+    if value is not None and exact_model_ref(value) is None:
+        raise TypeError("model_name must be an exact model UUID")
 
 
 def _validate_reasoning_effort(value: str | None) -> None:
@@ -122,7 +120,7 @@ def selected_run_model_ref(
 def resolve_admitted_run_execution_profile(
     *,
     requested: RequestedRunExecutionProfile,
-    logical_name: str,
+    model_ref: str,
     supports_thinking: bool,
     supports_reasoning_effort: bool,
     supports_vision: bool,
@@ -134,8 +132,8 @@ def resolve_admitted_run_execution_profile(
     if type(requested) is not RequestedRunExecutionProfile:
         raise RunExecutionProfileUnsupported
     try:
-        _validate_model_name(logical_name)
-        if logical_name is None:
+        _validate_model_name(model_ref)
+        if model_ref is None:
             raise TypeError
         if any(
             type(value) is not bool
@@ -178,7 +176,7 @@ def resolve_admitted_run_execution_profile(
         raise RunExecutionProfileUnsupported
 
     return EffectiveRunExecutionProfile(
-        model_name=logical_name,
+        model_name=model_ref,
         thinking_enabled=thinking_enabled,
         reasoning_effort=reasoning_effort,
         supports_vision=supports_vision,

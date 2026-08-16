@@ -215,13 +215,10 @@ async def _frozen_dream(
     checksum = hashlib.sha256(version_id.bytes).hexdigest()
     model = SystemModelConfigRow(
         id=model_id,
-        logical_name=f"memory-prepare-{model_id.hex}",
         display_name="Memory prepare PostgreSQL model",
-        description="Memory prepare PostgreSQL test",
         status="active",
         current_version_id=None,
         revision=1,
-        sort_order=0,
         created_by_user_id=scope.owner_user_id,
         updated_by_user_id=scope.owner_user_id,
     )
@@ -232,7 +229,7 @@ async def _frozen_dream(
             id=version_id,
             model_config_id=model_id,
             version_number=1,
-            provider_adapter="codex_cli",
+            provider_adapter="vision_bridge_fake",
             provider_model="memory-prepare-test",
             settings={},
             supports_thinking=False,

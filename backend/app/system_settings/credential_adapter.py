@@ -107,9 +107,9 @@ class SystemModelCredentialAdapter:
 
             kwargs: dict[str, object] = {
                 **settings,
-                "name": material.model.logical_name,
+                "name": str(uuid.UUID(str(material.model.id))),
                 "display_name": material.model.display_name,
-                "description": material.model.description,
+                "description": "",
                 "use": class_path,
                 "model": material.version.provider_model,
                 "supports_thinking": material.version.supports_thinking,
@@ -213,12 +213,12 @@ class SystemModelCredentialAdapter:
                 **settings,
                 "name": "model-connection-test",
                 "display_name": "Model connection test",
-                "description": "Transient administrator connectivity check",
+                "description": "",
                 "use": class_path,
                 "model": command.provider_model,
                 "supports_thinking": False,
                 "supports_reasoning_effort": False,
-                "supports_vision": False,
+                "supports_vision": command.supports_vision,
             }
             if api_key is not None:
                 kwargs["api_key"] = api_key

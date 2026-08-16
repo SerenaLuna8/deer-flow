@@ -59,6 +59,7 @@ describe("Agent lifecycle translations", () => {
             identity: "# Identity",
             user_context: "# User",
           }}
+          models={[]}
           canAuthor={false}
           editing={false}
           pending={false}

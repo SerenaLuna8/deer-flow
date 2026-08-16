@@ -1,3 +1,4 @@
+import type { Message } from "@langchain/langgraph-sdk";
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -35,35 +36,83 @@ const approval: ExecutionApprovalProjection = {
   remaining_ttl_seconds: 300,
 };
 
-const thread = {
-  error: undefined,
-  getMessagesMetadata: () => undefined,
-  isLoading: false,
-  isThreadLoading: false,
-  messages: [],
-} as unknown as BaseStream<AgentThreadState>;
+function threadState({
+  isLoading = false,
+  messages = [],
+}: {
+  isLoading?: boolean;
+  messages?: Message[];
+} = {}) {
+  return {
+    error: undefined,
+    getMessagesMetadata: () => undefined,
+    isLoading,
+    isThreadLoading: false,
+    messages,
+  } as unknown as BaseStream<AgentThreadState>;
+}
+
+function renderMessageList(
+  thread: BaseStream<AgentThreadState>,
+  options: { suspendLoadingIndicators?: boolean } = {},
+) {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="en-US">
+      <StandaloneArtifactsProvider enabled={false}>
+        <MessageList
+          thread={thread}
+          threadId="thread-1"
+          suspendLoadingIndicators={options.suspendLoadingIndicators}
+          trailingContent={
+            <ExecutionApprovalCard
+              approval={approval}
+              onDecision={() => undefined}
+            />
+          }
+        />
+      </StandaloneArtifactsProvider>
+    </I18nProvider>,
+  );
+}
 
 describe("MessageList execution approval integration", () => {
   test("renders the pending approval as trailing timeline content", () => {
-    const html = renderToStaticMarkup(
-      <I18nProvider initialLocale="en-US">
-        <StandaloneArtifactsProvider enabled={false}>
-          <MessageList
-            thread={thread}
-            threadId="thread-1"
-            trailingContent={
-              <ExecutionApprovalCard
-                approval={approval}
-                onDecision={() => undefined}
-              />
-            }
-          />
-        </StandaloneArtifactsProvider>
-      </I18nProvider>,
-    );
+    const html = renderMessageList(threadState());
 
     expect(html).toContain('data-testid="message-list-trailing-content"');
     expect(html).toContain('data-execution-approval-state="pending"');
     expect(html).toContain("Allow once");
+  });
+
+  test("suppresses the generic RunActivity while a pending decision card is visible", () => {
+    const activeThread = threadState({ isLoading: true });
+
+    expect(renderMessageList(activeThread)).toContain(
+      'data-testid="run-activity"',
+    );
+    expect(
+      renderMessageList(activeThread, { suspendLoadingIndicators: true }),
+    ).not.toContain('data-testid="run-activity"');
+  });
+
+  test("settles the last reasoning message visually while approval is pending", () => {
+    const activeThread = threadState({
+      isLoading: true,
+      messages: [
+        {
+          id: "ai-1",
+          type: "ai",
+          content: "",
+          additional_kwargs: { reasoning_content: "Preparing the command" },
+        } as Message,
+      ],
+    });
+
+    expect(renderMessageList(activeThread)).toContain("Thinking…");
+    const suspended = renderMessageList(activeThread, {
+      suspendLoadingIndicators: true,
+    });
+    expect(suspended).not.toContain("Thinking…");
+    expect(suspended).toContain("Reasoning");
   });
 });

@@ -79,6 +79,8 @@ from deerflow.error_codes import PublicRunError, PublicRunErrorCode
 from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.skills.types import Skill, SkillCategory
 
+_BUILDER_MODEL_REF = "88888888-8888-4888-8888-888888888889"
+
 
 class _Catalog(ProjectAuthoringCatalogTools):
     def __init__(self) -> None:
@@ -1050,7 +1052,7 @@ def _private_runtime(skill_root: Path) -> object:
             ),
         ),
         skill_root=skill_root,
-        model_ref="builder-model",
+        model_ref=_BUILDER_MODEL_REF,
         model_settings=SimpleNamespace(
             thinking_enabled=None,
             reasoning_effort=None,
@@ -1094,7 +1096,7 @@ def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
     app_config = AppConfig(
         models=[
             ModelConfig(
-                name="builder-model",
+                name=_BUILDER_MODEL_REF,
                 display_name="Builder",
                 description="",
                 use="langchain_openai:ChatOpenAI",

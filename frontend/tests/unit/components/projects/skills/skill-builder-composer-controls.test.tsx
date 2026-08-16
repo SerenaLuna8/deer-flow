@@ -9,6 +9,8 @@ import {
 import { I18nProvider } from "@/core/i18n/context";
 import type { Model } from "@/core/models/types";
 
+const MODEL_ID = "00000000-0000-4000-8000-000000000205";
+
 function renderUi(node: React.ReactNode) {
   return renderToStaticMarkup(
     <I18nProvider initialLocale="zh-CN">{node}</I18nProvider>,
@@ -17,10 +19,9 @@ function renderUi(node: React.ReactNode) {
 
 function model(overrides: Partial<Model> = {}): Model {
   return {
-    name: "doubao-seed-2.0",
-    model: "doubao-seed-2.0",
+    name: MODEL_ID,
+    model: MODEL_ID,
     display_name: "Doubao Seed 2.0",
-    description: "",
     supports_thinking: true,
     supports_reasoning_effort: true,
     supports_vision: false,

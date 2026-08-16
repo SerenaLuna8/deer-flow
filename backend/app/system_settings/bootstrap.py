@@ -155,16 +155,12 @@ class DefaultSystemModelBootstrapMaterial:
 
 def _deepseek_model_command(
     *,
-    logical_name: str,
     display_name: str,
     provider_model: str,
-    sort_order: int,
 ) -> CreateSystemModel:
     return validate_create_system_model(
         CreateSystemModel(
-            logical_name=logical_name,
             display_name=display_name,
-            description="",
             status="active",
             provider_adapter="patched_deepseek",
             provider_model=provider_model,
@@ -196,7 +192,6 @@ def _deepseek_model_command(
             credential_id=DEFAULT_CREDENTIAL_ID,
             credential_version_id=DEFAULT_CREDENTIAL_VERSION_ID,
             credential_env_key="DEEPSEEK_API_KEY",
-            sort_order=sort_order,
         )
     )
 
@@ -204,9 +199,7 @@ def _deepseek_model_command(
 def _opencode_model_command() -> CreateSystemModel:
     return validate_create_system_model(
         CreateSystemModel(
-            logical_name="gpt-5.6-luna",
             display_name="GPT 5.6 Luna",
-            description="",
             status="active",
             provider_adapter="openai",
             provider_model="gpt-5.6-luna",
@@ -227,7 +220,6 @@ def _opencode_model_command() -> CreateSystemModel:
             credential_id=OPENCODE_CREDENTIAL_ID,
             credential_version_id=OPENCODE_CREDENTIAL_VERSION_ID,
             credential_env_key="OPENCODE_API_KEY",
-            sort_order=20,
         )
     )
 
@@ -236,20 +228,16 @@ def _default_model_entries() -> tuple[DefaultSystemModelBootstrapEntry, ...]:
     return (
         DefaultSystemModelBootstrapEntry(
             command=_deepseek_model_command(
-                logical_name="deepseek-v4-flash",
                 display_name="DeepSeek V4 Flash",
                 provider_model="deepseek-v4-flash",
-                sort_order=0,
             ),
             model_id=DEEPSEEK_V4_FLASH_MODEL_ID,
             model_version_id=DEEPSEEK_V4_FLASH_MODEL_VERSION_ID,
         ),
         DefaultSystemModelBootstrapEntry(
             command=_deepseek_model_command(
-                logical_name="deepseek-v4",
                 display_name="DeepSeek V4 Pro",
                 provider_model="deepseek-v4-pro",
-                sort_order=10,
             ),
             model_id=DEEPSEEK_V4_PRO_MODEL_ID,
             model_version_id=DEEPSEEK_V4_PRO_MODEL_VERSION_ID,
@@ -370,9 +358,7 @@ async def _validate_existing_catalog(session: AsyncSession) -> None:
         SystemModelCredentialAdapter().materialize(material)
         command = validate_create_system_model(
             CreateSystemModel(
-                logical_name=material.model.logical_name,
                 display_name=material.model.display_name,
-                description=material.model.description,
                 status=material.model.status,
                 provider_adapter=material.version.provider_adapter,
                 provider_model=material.version.provider_model,
@@ -383,7 +369,6 @@ async def _validate_existing_catalog(session: AsyncSession) -> None:
                 credential_id=(uuid.UUID(str(material.version.credential_id)) if material.version.credential_id is not None else None),
                 credential_version_id=(uuid.UUID(str(material.version.credential_version_id)) if material.version.credential_version_id is not None else None),
                 credential_env_key=material.version.credential_env_key,
-                sort_order=material.model.sort_order,
             )
         )
         if (
@@ -410,7 +395,6 @@ async def _bootstrap_fresh_catalog(
 ) -> None:
     model_ids = {entry.model_id for entry in material.models}
     model_version_ids = {entry.model_version_id for entry in material.models}
-    logical_names = {entry.command.logical_name for entry in material.models}
     credential_ids = {entry.credential_id for entry in material.credentials}
     credential_version_ids = {entry.credential_version_id for entry in material.credentials}
     credential_names = {entry.name for entry in material.credentials}
@@ -431,7 +415,6 @@ async def _bootstrap_fresh_catalog(
         or material.default_model_id not in model_ids
         or len(model_ids) != len(material.models)
         or len(model_version_ids) != len(material.models)
-        or len(logical_names) != len(material.models)
         or len(credential_ids) != len(material.credentials)
         or len(credential_version_ids) != len(material.credentials)
         or len(credential_names) != len(material.credentials)
@@ -501,12 +484,9 @@ async def _bootstrap_fresh_catalog(
     for entry in material.models:
         model = SystemModelConfigRow(
             id=entry.model_id,
-            logical_name=entry.command.logical_name,
             display_name=entry.command.display_name,
-            description=entry.command.description,
             status=entry.command.status,
             revision=1,
-            sort_order=entry.command.sort_order,
             created_by_user_id=actor_id,
             updated_by_user_id=actor_id,
         )

@@ -12,6 +12,7 @@ const SKILL_ID = "50000000-0000-4000-8000-000000000001";
 const SKILL_VERSION_ID = "60000000-0000-4000-8000-000000000001";
 const MCP_ID = "70000000-0000-4000-8000-000000000001";
 const MCP_VERSION_ID = "80000000-0000-4000-8000-000000000001";
+const MODEL_ID = "80000000-0000-4000-8000-000000000002";
 const TIMESTAMP = "2026-08-13T00:00:00Z";
 const DRAFT_CHECKSUM = "a".repeat(64);
 
@@ -237,10 +238,9 @@ async function mockSkillBuilderDurableAgent(page: Page) {
       return json(route, {
         models: [
           {
-            name: "mock-model",
-            model: "mock-model",
+            name: MODEL_ID,
+            model: MODEL_ID,
             display_name: "Mock model",
-            description: "Deterministic browser-test model",
             supports_thinking: false,
             supports_reasoning_effort: false,
             supports_vision: false,

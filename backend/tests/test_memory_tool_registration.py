@@ -18,6 +18,7 @@ from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
 MODEL_NAME = "memory-tool-registration-model"
+VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
 
 
 def _app_config(
@@ -41,7 +42,7 @@ def _app_config(
     vision_bridge: dict[str, object] = {}
     if bridge:
         vision_model = ModelConfig(
-            name="vision-small-v1",
+            name=VISION_MODEL_REF,
             display_name="Vision fake",
             description="",
             use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
@@ -51,7 +52,7 @@ def _app_config(
         vision_model._system_model_config_version_id = uuid.uuid4()
         vision_model._system_provider_adapter = "vision_bridge_fake"
         models.append(vision_model)
-        vision_bridge = {"model_name": "vision-small-v1"}
+        vision_bridge = {"model_name": VISION_MODEL_REF}
     return AppConfig(
         models=models,
         sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},

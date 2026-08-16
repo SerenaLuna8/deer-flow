@@ -302,9 +302,8 @@ def create_chat_model(
             "when_thinking_disabled",
             "thinking",
             "supports_vision",
-            # Presentation-only metadata (consumed by the console's cost
-            # display) — must never reach the provider client, which would
-            # forward unknown kwargs into the completion request payload.
+            # Deny the removed legacy metadata even if an in-process caller
+            # constructed ModelConfig without validation.
             "pricing",
         },
     )
@@ -366,40 +365,6 @@ def create_chat_model(
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.
     _normalize_openai_base_url(model_class, model_settings_from_config)
     _apply_stream_chunk_timeout_default(model_class, model_settings_from_config)
-
-    # For Codex Responses API models: map thinking mode to reasoning_effort
-    from deerflow.models.openai_codex_provider import CodexChatModel
-
-    if issubclass(model_class, CodexChatModel):
-        if model_overrides is not None and model_overrides.get("max_tokens") is not None:
-            raise AgentModelSettingsUnsupported(
-                f"Model {name} does not support Agent model setting max_tokens",
-            )
-        # The ChatGPT Codex endpoint currently rejects max_tokens/max_output_tokens.
-        model_settings_from_config.pop("max_tokens", None)
-        model_settings_from_config.pop("max_output_tokens", None)
-
-        # Use explicit reasoning_effort from the admitted Run when provided.
-        explicit_effort = kwargs.pop("reasoning_effort", None)
-        if not thinking_enabled:
-            model_settings_from_config["reasoning_effort"] = "none"
-        elif explicit_effort and explicit_effort in (
-            "none",
-            "minimal",
-            "low",
-            "medium",
-            "high",
-            "xhigh",
-        ):
-            model_settings_from_config["reasoning_effort"] = explicit_effort
-        elif "reasoning_effort" not in model_settings_from_config:
-            model_settings_from_config["reasoning_effort"] = "medium"
-
-    # For MindIE models: enforce conservative retry defaults.
-    # Timeout normalization is handled inside MindIEChatModel itself.
-    if getattr(model_class, "__name__", "") == "MindIEChatModel":
-        # Enforce max_retries constraint to prevent cascading timeouts.
-        model_settings_from_config["max_retries"] = model_settings_from_config.get("max_retries", 1)
 
     # Ensure stream_usage is enabled so that token usage metadata is available
     # in streaming responses.  LangChain's BaseChatOpenAI only defaults

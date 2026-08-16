@@ -54,15 +54,14 @@ async def _seed_model_version(seed, scope) -> uuid.UUID:
         await connection.execute(
             text(
                 """INSERT INTO system_model_configs
-                (id,logical_name,display_name,description,status,
-                 current_version_id,revision,sort_order,created_by_user_id,
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,
                  updated_by_user_id)
-                VALUES (:id,:name,'Episode test','Episode PG test',
-                        'active',NULL,1,0,:owner,:owner)"""
+                VALUES (:id,'Episode test','active',NULL,1,
+                        :owner,:owner)"""
             ),
             {
                 "id": model_id,
-                "name": f"episode-test-{model_id.hex}",
                 "owner": scope.owner_user_id,
             },
         )
@@ -74,7 +73,7 @@ async def _seed_model_version(seed, scope) -> uuid.UUID:
                  supports_reasoning_effort,supports_vision,credential_id,
                  credential_version_id,credential_env_key,payload_checksum,
                  supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'codex_cli','episode-test',
+                VALUES (:id,:model,1,'vision_bridge_fake','episode-test',
                         '{}'::jsonb,false,false,false,NULL,NULL,NULL,
                         :checksum,NULL,:owner)"""
             ),

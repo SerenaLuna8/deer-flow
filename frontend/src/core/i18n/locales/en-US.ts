@@ -753,13 +753,13 @@ export const enUS: Translations = {
       suspended: "Suspended",
       updatedAt: (formattedDate) => `Updated ${formattedDate}`,
       updatedAtColumn: "Updated",
-      providerModel: "Provider model",
+      providerModel: "Model ID",
       credential: "Credential",
       environmentKey: "Environment variable",
       status: "Status",
       version: "Version",
-      versionMeta: (versionNumber, revision, sortOrder) =>
-        `Config v${versionNumber} · revision ${revision} · order ${sortOrder}`,
+      versionMeta: (versionNumber, revision) =>
+        `Config v${versionNumber} · revision ${revision}`,
       capabilities: "Model capabilities",
       noCapabilities: "None",
       thinking: "Thinking",
@@ -790,30 +790,23 @@ export const enUS: Translations = {
       description:
         "Provider parameters are saved as model configuration. Credential references point to existing versions; secret values are never entered here.",
       basicInformation: "Basic information",
-      basicDescription:
-        "Define the stable logical name, Provider mapping, and catalog details.",
-      logicalName: "Logical name",
+      basicDescription: "Define the Provider mapping and catalog details.",
       displayName: "Display name",
       displayNamePlaceholder: "Analysis Pro",
       providerAdapter: "Provider Adapter",
-      providerModel: "Provider model",
+      retiredProviderAdapter: "No longer supported",
+      retiredProviderAdapterHint:
+        "Select a supported Provider Adapter before saving or testing the connection.",
+      providerModel: "Model ID",
       status: "Status",
       active: "Enable",
       suspended: "Suspend",
-      modelDescription: "Description",
-      modelDescriptionPlaceholder: "Recommended use cases",
-      sortOrder: "Sort order",
-      sortOrderHint: "Lower values appear first. New models use 0 by default.",
       capabilities: "Model capabilities",
       capabilitiesAndRuntime: "Capabilities and runtime parameters",
-      capabilitiesDescription:
-        "These capabilities determine which input and reasoning controls are available in conversations.",
       supportsThinking: "Supports thinking",
       supportsReasoningEffort: "Supports reasoning effort",
       supportsVision: "Supports vision input",
       commonProviderSettings: "Runtime parameters",
-      commonProviderSettingsDescription:
-        "Only allowlisted request parameters are saved. Secret values are never stored here.",
       baseUrl: "Base URL",
       baseUrlHint:
         "The Provider API base address. Do not include a model-specific path.",
@@ -822,8 +815,6 @@ export const enUS: Translations = {
       requestTimeout: "Request timeout (seconds)",
       maxRetries: "Maximum retries",
       credentialBinding: "Credential binding",
-      credentialBindingDescription:
-        "Bind an exact system Credential version. Secret values never enter the page cache.",
       systemCredential: "System Credential",
       credentialsUnavailableHint:
         "Credential metadata is unavailable, so the binding cannot be changed.",
@@ -855,13 +846,12 @@ export const enUS: Translations = {
       maxTokens: "Maximum Tokens",
       requestTimeout: "Request timeout",
       maxRetries: "Retry count",
-      sortOrder: "Sort order",
       advancedJsonInvalid: "Advanced JSON is invalid",
       advancedJsonObject: "Advanced JSON must be an object",
       advancedJsonUnsafe:
         "Advanced JSON may contain only supported safe fields with exact value types",
       invalidForm:
-        "Check the required fields, model names, and Credential binding",
+        "Check required fields, display names, model IDs, and Credential binding",
       invalidConfiguration: "The model configuration is invalid",
     },
     actionErrors: {
@@ -2359,11 +2349,14 @@ export const enUS: Translations = {
       "The model reached its per-request output limit, so this response is incomplete.",
     modelOutputLimitRetry: "Retry without deep thinking",
     modelOutputLimitRetrying: "Retrying…",
+    outputDeliveryIncompleteTitle: "Output file was not delivered",
+    outputDeliveryIncompleteDescription:
+      "A required output file was created but was not published to this conversation. Resending may repeat an already completed command, so review the run first.",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
       "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",
-    runExecutionProfile: (modelName, modeName, supportsVision) =>
-      `Effective run: ${modelName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
+    runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
+      `Effective run: ${modelDisplayName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
   },
 
   // Chats
@@ -2571,7 +2564,7 @@ export const enUS: Translations = {
     unavailable:
       "No token usage yet. Usage appears only after a successful model response when the provider returns usage_metadata.",
     unavailableShort: "No usage returned",
-    note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only. Totals may differ from provider billing pages.",
+    note: "Header totals use persisted thread usage, plus visible in-flight usage while a run is still streaming. Per-turn and debug usage come from currently visible messages only, so their scopes may differ.",
     presets: {
       off: "Off",
       summary: "Summary",

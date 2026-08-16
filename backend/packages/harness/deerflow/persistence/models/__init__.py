@@ -34,6 +34,8 @@ from deerflow.persistence.channel_connections.model import (
     ProjectChannelInstanceRow,
 )
 from deerflow.persistence.execution_approvals import (
+    ExecutionApprovalOutputDeliveryCandidateRow,
+    ExecutionApprovalOutputDeliveryObligationRow,
     ExecutionApprovalRequestRow,
     ExecutionApprovalResultReceiptRow,
 )
@@ -144,6 +146,8 @@ __all__ = [
     "CredentialRow",
     "CredentialVersionRow",
     "FeedbackRow",
+    "ExecutionApprovalOutputDeliveryCandidateRow",
+    "ExecutionApprovalOutputDeliveryObligationRow",
     "ExecutionApprovalRequestRow",
     "ExecutionApprovalResultReceiptRow",
     "DeadJobRow",

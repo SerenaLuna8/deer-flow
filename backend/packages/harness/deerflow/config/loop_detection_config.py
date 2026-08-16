@@ -2,6 +2,11 @@
 
 from pydantic import BaseModel, Field, model_validator
 
+from deerflow.vision.dispatch import (
+    VISION_TOOL_FREQUENCY_HARD_STOP,
+    VISION_TOOL_FREQUENCY_WARN,
+)
+
 
 class ToolFreqOverride(BaseModel):
     """Per-tool frequency threshold override.
@@ -63,6 +68,10 @@ class LoopDetectionConfig(BaseModel):
             "web_fetch": ToolFreqOverride(warn=6, hard_limit=10),
             "web_search": ToolFreqOverride(warn=6, hard_limit=10),
             "recall_memory": ToolFreqOverride(warn=6, hard_limit=10),
+            "inspect_image": ToolFreqOverride(
+                warn=VISION_TOOL_FREQUENCY_WARN,
+                hard_limit=VISION_TOOL_FREQUENCY_HARD_STOP,
+            ),
         },
         description=(
             "Per-tool overrides for tool_freq_warn / tool_freq_hard_limit, keyed by tool name. "

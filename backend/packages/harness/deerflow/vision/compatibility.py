@@ -14,13 +14,9 @@ VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES: Final = "openai_responses"
 _OPENAI_CHAT_COMPLETIONS_ADAPTERS: Final = frozenset(
     {
         "deepseek",
-        "mindie",
         "openai",
         "patched_deepseek",
-        "patched_mimo",
-        "patched_minimax",
         "patched_openai",
-        "patched_stepfun",
         "vllm",
         VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
     }

@@ -112,7 +112,7 @@ def test_proxy_407_is_not_misclassified_as_provider_authentication() -> None:
 
 
 @pytest.mark.parametrize("status_code", [401, 403])
-def test_httpx_status_auth_from_codex_cli_is_classified_structurally(status_code: int) -> None:
+def test_httpx_status_auth_is_classified_structurally(status_code: int) -> None:
     middleware = _middleware()
     response = _provider_response(status_code)
 

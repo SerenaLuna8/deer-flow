@@ -74,9 +74,7 @@ class _StrictModel(BaseModel):
 
 
 class AdminModelCreateRequest(_StrictModel):
-    logical_name: str
     display_name: str
-    description: str = ""
     status: Literal["active", "suspended"] = "suspended"
     provider_adapter: str
     provider_model: str
@@ -87,12 +85,10 @@ class AdminModelCreateRequest(_StrictModel):
     credential_id: _JsonUuid | None = None
     credential_version_id: _JsonUuid | None = None
     credential_env_key: str | None = None
-    sort_order: int = 0
 
 
 class AdminModelUpdateRequest(_StrictModel):
     display_name: str
-    description: str = ""
     provider_adapter: str
     provider_model: str
     settings: dict[str, object]
@@ -102,7 +98,6 @@ class AdminModelUpdateRequest(_StrictModel):
     credential_id: _JsonUuid | None = None
     credential_version_id: _JsonUuid | None = None
     credential_env_key: str | None = None
-    sort_order: int
     expected_revision: int
 
 
@@ -119,6 +114,7 @@ class AdminModelConnectionTestRequest(_StrictModel):
     provider_adapter: str
     provider_model: str
     settings: dict[str, object]
+    supports_vision: bool
     credential_id: _JsonUuid | None = None
     credential_version_id: _JsonUuid | None = None
     credential_env_key: str | None = None
@@ -126,9 +122,7 @@ class AdminModelConnectionTestRequest(_StrictModel):
 
 class AdminModelItemResponse(_StrictModel):
     id: uuid.UUID
-    logical_name: str
     display_name: str
-    description: str
     provider_adapter: str
     provider_model: str
     settings: dict[str, object]
@@ -142,7 +136,6 @@ class AdminModelItemResponse(_StrictModel):
     credential_id: uuid.UUID | None
     credential_version_id: uuid.UUID | None
     credential_env_key: str | None
-    sort_order: int
     updated_at: datetime
 
 
@@ -181,9 +174,7 @@ def _item_response(
         raise TypeError("model settings must be an object")
     return AdminModelItemResponse(
         id=item.id,
-        logical_name=item.logical_name,
         display_name=item.display_name,
-        description=item.description,
         provider_adapter=item.current_version.provider_adapter,
         provider_model=item.current_version.provider_model,
         settings=settings,
@@ -197,7 +188,6 @@ def _item_response(
         credential_id=item.current_version.credential_id,
         credential_version_id=item.current_version.credential_version_id,
         credential_env_key=item.current_version.credential_env_key,
-        sort_order=item.sort_order,
         updated_at=item.updated_at,
     )
 
@@ -304,9 +294,7 @@ async def create_admin_model(
         created = await service.create_model(
             context,
             CreateSystemModel(
-                logical_name=body.logical_name,
                 display_name=body.display_name,
-                description=body.description,
                 status=body.status,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
@@ -317,7 +305,6 @@ async def create_admin_model(
                 credential_id=body.credential_id,
                 credential_version_id=body.credential_version_id,
                 credential_env_key=body.credential_env_key,
-                sort_order=body.sort_order,
             ),
         )
         catalog = await _catalog_after_mutation(service, context)
@@ -360,6 +347,7 @@ async def test_admin_model_connection(
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
                 settings=body.settings,
+                supports_vision=body.supports_vision,
                 credential_id=body.credential_id,
                 credential_version_id=body.credential_version_id,
                 credential_env_key=body.credential_env_key,
@@ -398,7 +386,6 @@ async def update_admin_model(
             model_config_id,
             UpdateSystemModel(
                 display_name=body.display_name,
-                description=body.description,
                 provider_adapter=body.provider_adapter,
                 provider_model=body.provider_model,
                 settings=body.settings,
@@ -408,7 +395,6 @@ async def update_admin_model(
                 credential_id=body.credential_id,
                 credential_version_id=body.credential_version_id,
                 credential_env_key=body.credential_env_key,
-                sort_order=body.sort_order,
             ),
             expected_revision=body.expected_revision,
         )

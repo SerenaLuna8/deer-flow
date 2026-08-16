@@ -37,6 +37,11 @@ from app.shared_assets.skill_design_service import (
 )
 from app.system_settings import PublicSystemModelView
 
+_MODEL_REF = "00000000-0000-4000-8000-000000000101"
+_OTHER_MODEL_REF = "00000000-0000-4000-8000-000000000102"
+_PLAIN_MODEL_REF = "00000000-0000-4000-8000-000000000103"
+_THINKING_MODEL_REF = "00000000-0000-4000-8000-000000000104"
+
 
 def _context() -> ProjectContext:
     return ProjectContext(
@@ -59,15 +64,14 @@ def _command(turn: SkillDesignMessageTurn) -> SubmitSkillDesignTurn:
 
 
 def _model(
-    name: str,
+    model_ref: str,
     *,
     supports_thinking: bool = True,
     is_default: bool = False,
 ) -> PublicSystemModelView:
     return PublicSystemModelView(
-        logical_name=name,
-        display_name=name,
-        description="",
+        model_ref=model_ref,
+        display_name=model_ref,
         supports_thinking=supports_thinking,
         supports_reasoning_effort=supports_thinking,
         supports_vision=False,
@@ -81,7 +85,7 @@ class TestValidateTurn:
         turn = SkillDesignMessageTurn(
             kind="message",
             message="请根据附件生成 Skill",
-            model_name="doubao-seed-2.0",
+            model_name=_MODEL_REF,
             reasoning_effort="high",
             attachments=(SkillDesignTurnAttachment(name="api.md", content="# API\n"),),
         )
@@ -89,7 +93,7 @@ class TestValidateTurn:
         validated = SkillDesignService._validate_turn(_context(), _command(turn))
 
         assert isinstance(validated.input, SkillDesignMessageTurn)
-        assert validated.input.model_name == "doubao-seed-2.0"
+        assert validated.input.model_name == _MODEL_REF
         assert validated.input.reasoning_effort == "high"
         assert validated.input.attachments == (SkillDesignTurnAttachment(name="api.md", content="# API\n"),)
 
@@ -224,13 +228,13 @@ class TestGenerationExecutionOptions:
         result = await service.generate(
             request,
             skill_creator_content="# skill-creator",
-            model_name="doubao-seed-2.0",
+            model_name=_MODEL_REF,
             reasoning_effort="high",
         )
 
         assert result.status == "candidate"
         assert calls
-        assert calls[0]["model_name"] == "doubao-seed-2.0"
+        assert calls[0]["model_name"] == _MODEL_REF
         assert calls[0]["reasoning_effort"] == "high"
         payload = json.loads(str(calls[0]["user_content"]).split("--- BEGIN UNTRUSTED SKILL DESIGN INPUT ---\n")[1].split("\n--- END UNTRUSTED SKILL DESIGN INPUT ---")[0])
         assert payload["attachments"] == [{"name": "api.md", "content": "# 附件内容\n"}]
@@ -338,7 +342,7 @@ class TestRouterAdmission:
             input=SkillDesignMessageTurnRequest(
                 kind="message",
                 message="hi",
-                model_name="doubao-seed-2.0",
+                model_name=_MODEL_REF,
                 reasoning_effort="medium",
                 attachments=[
                     SkillDesignAttachmentRequest(name="api.md", content="# A"),
@@ -351,7 +355,7 @@ class TestRouterAdmission:
         command = _turn(body)
 
         assert isinstance(command.input, SkillDesignMessageTurn)
-        assert command.input.model_name == "doubao-seed-2.0"
+        assert command.input.model_name == _MODEL_REF
         assert command.input.reasoning_effort == "medium"
         assert command.input.attachments == (SkillDesignTurnAttachment(name="api.md", content="# A"),)
 
@@ -372,8 +376,8 @@ class TestRouterAdmission:
     def test_rejects_model_missing_from_catalog(self) -> None:
         with pytest.raises(HTTPException) as excinfo:
             require_admissible_execution_options(
-                [_model("known-model", is_default=True)],
-                model_name="ghost-model",
+                [_model(_MODEL_REF, is_default=True)],
+                model_name=_OTHER_MODEL_REF,
                 reasoning_effort=None,
                 request_id="req-1",
             )
@@ -384,8 +388,8 @@ class TestRouterAdmission:
     def test_rejects_thinking_on_unsupported_model(self) -> None:
         with pytest.raises(HTTPException) as excinfo:
             require_admissible_execution_options(
-                [_model("plain-model", supports_thinking=False)],
-                model_name="plain-model",
+                [_model(_PLAIN_MODEL_REF, supports_thinking=False)],
+                model_name=_PLAIN_MODEL_REF,
                 reasoning_effort="high",
                 request_id="req-1",
             )
@@ -395,14 +399,14 @@ class TestRouterAdmission:
     def test_checks_default_model_for_effort_only_requests(self) -> None:
         with pytest.raises(HTTPException):
             require_admissible_execution_options(
-                [_model("plain-default", supports_thinking=False, is_default=True)],
+                [_model(_PLAIN_MODEL_REF, supports_thinking=False, is_default=True)],
                 model_name=None,
                 reasoning_effort="low",
                 request_id="req-1",
             )
 
         require_admissible_execution_options(
-            [_model("thinking-default", is_default=True)],
+            [_model(_THINKING_MODEL_REF, is_default=True)],
             model_name=None,
             reasoning_effort="low",
             request_id="req-1",

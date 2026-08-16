@@ -25,6 +25,7 @@ from deerflow.runtime.host_execution_runner import (
 from deerflow.sandbox.local.local_sandbox import (
     LocalProcessSpawnDeadlineExpired,
 )
+from deerflow.sandbox.sandbox import AuthorizationBoundaryFenceUncertain
 
 
 def _config(
@@ -74,6 +75,7 @@ class _Port:
         self.final_spawn_authorization_count = 0
         self.final_spawn_authorization_entered: asyncio.Event | None = None
         self.final_spawn_authorization_release: asyncio.Event | None = None
+        self.delivery_requirement_paths: tuple[str, ...] = ()
 
     async def claim_frozen_host_execution(self) -> HostExecutionFrozenClaim:
         self.claim_count += 1
@@ -85,6 +87,9 @@ class _Port:
         outcome: HostExecutionOutcome,
     ) -> None:
         self.completions.append((approval_id, outcome))
+
+    async def output_delivery_requirement_paths(self) -> tuple[str, ...]:
+        return self.delivery_requirement_paths
 
     def prepare_host_execution_environment(self) -> dict[str, str] | None:
         return {"PATH": "/usr/bin"}
@@ -103,6 +108,22 @@ class _Port:
             remaining = self.final_spawn_authorization_deadline_monotonic - time.monotonic()
             return remaining if remaining > 0 else None
         return self.final_spawn_authorization_remaining_seconds
+
+
+class _FencePort(_Port):
+    def __init__(self, claim: HostExecutionFrozenClaim) -> None:
+        super().__init__(claim)
+        self.fenced_completions: list[tuple[str, HostExecutionOutcome, object]] = []
+
+    async def complete_host_execution_with_retry_safety_fence(
+        self,
+        approval_id: str,
+        outcome: HostExecutionOutcome,
+        retry_safety_fence: object,
+    ) -> None:
+        self.fenced_completions.append(
+            (approval_id, outcome, retry_safety_fence),
+        )
 
 
 class _Sandbox:
@@ -186,6 +207,7 @@ async def test_worker_claims_rebases_and_spawns_frozen_plan_once(
 ) -> None:
     plan = _plan()
     port = _Port(HostExecutionFrozenClaim.claimed("approval-1", plan))
+    port.delivery_requirement_paths = ("/mnt/user-data/outputs/bubble_sort.py",)
     sandbox = _Sandbox()
     provider = SimpleNamespace(get=lambda sandbox_id: sandbox if sandbox_id == sandbox.id else None)
     monkeypatch.setattr(
@@ -218,6 +240,11 @@ async def test_worker_claims_rebases_and_spawns_frozen_plan_once(
     assert "retry bash" not in graph_input["messages"][0]["content"]
     assert "already been executed" in graph_input["messages"][0]["content"]
     assert "42" in graph_input["messages"][0]["content"]
+    assert "must call present_files" in graph_input["messages"][0]["content"]
+    assert "/mnt/user-data/outputs/bubble_sort.py" in graph_input["messages"][0]["content"]
+    assert graph_input["messages"][0]["additional_kwargs"]["host_execution_continuation"]["required_output_paths"] == [
+        "/mnt/user-data/outputs/bubble_sort.py",
+    ]
 
 
 @pytest.mark.asyncio
@@ -259,6 +286,47 @@ async def test_final_spawn_authorization_pauses_before_thread_and_denial_never_s
     assert sandbox.executed == []
     assert port.completions[0][1].status == "launch_failed"
     assert port.completions[0][1].reason_code == ("pre_spawn_authorization_failed")
+    assert "pre_spawn_authorization_failed" in result["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_uncertain_boundary_ack_resolves_its_exact_fence_with_launch_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fence = object()
+
+    class _UncertainBoundary:
+        async def before_sandbox_exec(self) -> None:
+            raise AuthorizationBoundaryFenceUncertain(fence)
+
+    port = _FencePort(
+        HostExecutionFrozenClaim.claimed("approval-1", _plan()),
+    )
+    sandbox = _Sandbox()
+    monkeypatch.setattr(
+        "deerflow.runtime.host_execution_runner.get_sandbox_provider",
+        lambda: SimpleNamespace(get=lambda _sandbox_id: sandbox),
+    )
+    runtime_context = _context(_config(), port)
+    runtime_context["__authorization_boundary"] = _UncertainBoundary()
+
+    result = await execute_frozen_host_execution_continuation(
+        approval_port=port,
+        app_config=_config(),
+        runtime_context=runtime_context,
+        file_authority=_Authority(),
+        graph_input={"messages": []},
+        continuation_required=True,
+    )
+
+    assert sandbox.executed == []
+    assert port.completions == []
+    assert len(port.fenced_completions) == 1
+    approval_id, outcome, resolved_fence = port.fenced_completions[0]
+    assert approval_id == "approval-1"
+    assert outcome.status == "launch_failed"
+    assert outcome.reason_code == "pre_spawn_authorization_failed"
+    assert resolved_fence is fence
     assert "pre_spawn_authorization_failed" in result["messages"][0]["content"]
 
 
@@ -397,6 +465,7 @@ async def test_claimed_continuation_fails_closed_on_provider_or_policy_drift(
     reason: str,
 ) -> None:
     port = _Port(HostExecutionFrozenClaim.claimed("approval-1", _plan()))
+    port.delivery_requirement_paths = ("/mnt/user-data/outputs/source-report.md",)
 
     result = await execute_frozen_host_execution_continuation(
         approval_port=port,
@@ -411,6 +480,8 @@ async def test_claimed_continuation_fails_closed_on_provider_or_policy_drift(
     assert port.completions[0][1].status == "launch_failed"
     assert port.completions[0][1].reason_code == reason
     assert "was not launched" in result["messages"][0]["content"]
+    assert "must call present_files" in result["messages"][0]["content"]
+    assert "/mnt/user-data/outputs/source-report.md" in result["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

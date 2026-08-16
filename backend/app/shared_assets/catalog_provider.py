@@ -26,6 +26,7 @@ from app.shared_assets.errors import AssetValidationFailed, SharedAssetError
 from app.shared_assets.keyring import CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -385,7 +386,12 @@ class PostgresAssetCatalogProvider:
                 model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
             except ValidationError:
                 raise AssetCatalogUnavailable("system agent catalog is invalid") from None
-            if version.payload_schema_version not in (1, 2, 3) or (version.payload_schema_version in (1, 2) and not model_settings.is_empty) or not isinstance(version.tool_groups, list):
+            if (
+                version.payload_schema_version not in (1, 2, 3)
+                or (version.payload_schema_version in (1, 2) and not model_settings.is_empty)
+                or not isinstance(version.tool_groups, list)
+                or (version.model_ref != DEFAULT_MODEL_REF and exact_model_ref(version.model_ref) is None)
+            ):
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
             payload = AgentPayload(
                 description=version.description,

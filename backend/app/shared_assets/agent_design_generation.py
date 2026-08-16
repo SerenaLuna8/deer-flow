@@ -24,6 +24,7 @@ from app.shared_assets.agent_service import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     MAX_AGENT_INSTRUCTIONS_TOTAL_BYTES,
 )
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.utils import llm_text
@@ -650,6 +651,11 @@ class AgentDesignGenerationService:
             raise AgentDesignGenerationInvalid(
                 "AGENT_DESIGN_INVALID_INPUT",
                 "Agent design generation input is invalid.",
+            )
+        if model_ref is not None and model_ref != DEFAULT_MODEL_REF and exact_model_ref(model_ref) is None:
+            raise AgentDesignGenerationInvalid(
+                "AGENT_DESIGN_INVALID_INPUT",
+                "Agent design model selection is invalid.",
             )
         input_document = self._input_document(request, context)
         if self._contains_secret(input_document):

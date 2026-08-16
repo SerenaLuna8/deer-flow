@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.models import LockedSystemModelMaterial
 from deerflow.persistence.shared_assets import (
     CredentialEnvelopeRow,
@@ -69,9 +70,8 @@ class SystemModelRepository:
                 (SystemModelConfigVersionRow.id == SystemModelConfigRow.current_version_id) & (SystemModelConfigVersionRow.model_config_id == SystemModelConfigRow.id),
             )
             .order_by(
-                SystemModelConfigRow.sort_order,
-                SystemModelConfigRow.logical_name,
-                SystemModelConfigRow.id,
+                SystemModelConfigRow.created_at.desc(),
+                SystemModelConfigRow.id.desc(),
             )
         )
         if active_only:
@@ -115,13 +115,17 @@ class SystemModelRepository:
         load_envelope: bool,
     ) -> LockedSystemModelMaterial | None:
         state = await self.catalog_state()
-        if model_ref in {None, "default"}:
+        if model_ref is None or model_ref == DEFAULT_MODEL_REF:
             model_config_id = state.default_model_config_id
             if model_config_id is None:
                 return None
             predicate = SystemModelConfigRow.id == model_config_id
         else:
-            predicate = SystemModelConfigRow.logical_name == model_ref
+            exact_ref = exact_model_ref(model_ref)
+            if exact_ref is None:
+                return None
+            model_config_id = uuid.UUID(exact_ref)
+            predicate = SystemModelConfigRow.id == model_config_id
         model = (
             await self.session.execute(
                 select(SystemModelConfigRow)
@@ -356,7 +360,6 @@ class SystemModelRepository:
                 select(SystemModelConfigRow)
                 .where(
                     SystemModelConfigRow.id == snapshot.model_config_id,
-                    SystemModelConfigRow.logical_name == snapshot.logical_name,
                     SystemModelConfigRow.status == "active",
                 )
                 .with_for_update(read=True, of=SystemModelConfigRow)
