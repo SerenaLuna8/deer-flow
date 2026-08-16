@@ -1,9 +1,10 @@
 # Vision Bridge 架构收敛改造方案
 
 > 状态：统一调用架构和主要生产路径已实现；当前目标数据库的 legacy 引用只读盘点为
-> 0，旧专用 Provider client 已删除；OpenAI Responses 真实视觉调用、完整后端/前端测试和
-> 浏览器端 text-only lead 到 `inspect_image` 的端到端链路已验证。其他计划启用的真实
-> Provider 仍需各部署环境单独验收。
+> 0，旧专用 Provider client 已删除。OpenAI Responses 真实视觉调用和浏览器端 text-only
+> lead 到 `inspect_image` 的旧输入链路曾完成验证；新增必填 `analysis_goal` 已通过聚焦契约、
+> Runtime 和 adapter 序列化测试，真实 Provider 与浏览器端到端仍需重新验收。其他计划启用的
+> 真实 Provider 也需各部署环境单独验收。
 > 旧版 Bridge 专用协议、`vision.evidence.v1` 和历史实现背景见
 > [TEXT_MODEL_VISION_BRIDGE_PLAN.md](TEXT_MODEL_VISION_BRIDGE_PLAN.md)。
 
@@ -35,7 +36,8 @@
   Provider URL、headers 或原始 HTTP body；
 - Vision Bridge policy 继续选择系统模型 UUID，Run 准入继续冻结
   `purpose="vision"` 的精确模型版本和 Credential 引用；
-- `inspect_image` 只负责图片授权、读取与规范化、固定任务提示、调用编排、结果限额和
+- `inspect_image` 只负责图片授权、读取与规范化、固定 mode 提示、必填且有界的
+  `analysis_goal`、调用编排、结果限额和
   安全 ToolMessage；
 - 原生视觉 lead model 继续使用 `view_image`，不会同时注册 `inspect_image`；
 - `vision_openai_compatible_v1` 不在生产 registry，`vision_bridge_fake` 只允许作为测试依赖；
@@ -144,7 +146,7 @@ sequenceDiagram
     participant R as "ModelRuntime"
     participant P as "selected Provider adapter"
 
-    L->>T: "authorized image path + fixed mode"
+    L->>T: "authorized image path + fixed mode + analysis_goal"
     T->>T: "scope/path/read/normalize/limits"
     T->>A: "before_attempt"
     T->>R: "standard LangChain multimodal messages"
@@ -165,6 +167,7 @@ sequenceDiagram
     HumanMessage(
         content=[
             {"type": "text", "text": fixed_mode_prompt},
+            {"type": "text", "text": bounded_analysis_goal},
             {
                 "type": "image",
                 "base64": normalized_base64,
@@ -185,7 +188,7 @@ protocol。
 
 - private Run scope 和安全虚拟路径校验；
 - 有界读取、图片魔数/格式验证和规范化；
-- 固定的 system prompt 与六种 mode；
+- 固定的 system prompt、六种 mode 与必填且有界的 `analysis_goal`；
 - Run 剩余 deadline 和 server abort 传递；
 - durable dispatch `before_attempt` / `after_attempt`；
 - `AIMessage` 唯一文本、refusal、tool call、finish reason 和 usage 校验；
@@ -271,6 +274,8 @@ Provider 终态元数据使用闭合判定：OpenAI Responses 只接受
 
 `vision.bridge.v1` 仍作为现有 Runtime Policy/Run snapshot 的控制契约版本保留。它不再
 表示 OpenAI 专用 wire protocol，也不要求 Provider 生成 ActWeave 自定义 evidence JSON。
+当前 v1 工具输入要求 `analysis_goal`；部署前必须排空可能已持久化旧参数、但尚未执行
+`inspect_image` 的 Run。历史已完成 ToolMessage 继续按原 Schema 读取。
 
 ## 6. Legacy adapter 状态
 

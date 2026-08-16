@@ -88,13 +88,15 @@ def test_existing_adapter_serializes_provider_neutral_image_block(
         image_bytes=b"normalized-image",
         mime_type="image/jpeg",
         mode="describe",
+        analysis_goal="Analyze the visible layout.",
     )
 
     payload = model._get_request_payload(messages)  # type: ignore[attr-defined]
 
     if payload_kind == "openai_chat":
         user = payload["messages"][1]
-        assert user["content"][1] == {
+        assert "Analyze the visible layout." in str(user["content"][1])
+        assert user["content"][2] == {
             "type": "image_url",
             "image_url": {
                 "url": "data:image/jpeg;base64,bm9ybWFsaXplZC1pbWFnZQ==",
@@ -103,7 +105,8 @@ def test_existing_adapter_serializes_provider_neutral_image_block(
         assert "input" not in payload
     elif payload_kind == "openai_responses":
         user = payload["input"][1]
-        assert user["content"][1] == {
+        assert "Analyze the visible layout." in str(user["content"][1])
+        assert user["content"][2] == {
             "type": "input_image",
             "image_url": "data:image/jpeg;base64,bm9ybWFsaXplZC1pbWFnZQ==",
         }
@@ -111,7 +114,8 @@ def test_existing_adapter_serializes_provider_neutral_image_block(
     else:
         assert payload["system"]
         user = payload["messages"][0]
-        assert user["content"][1] == {
+        assert "Analyze the visible layout." in str(user["content"][1])
+        assert user["content"][2] == {
             "type": "image",
             "source": {
                 "type": "base64",
@@ -317,6 +321,7 @@ async def test_sensitive_runtime_round_trips_existing_adapter_response(
                 image_bytes=b"normalized-image",
                 mime_type="image/jpeg",
                 mode="describe",
+                analysis_goal="Analyze the visible layout.",
             ),
             profile=ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
             model_name="visual-model",

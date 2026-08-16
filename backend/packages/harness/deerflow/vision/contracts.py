@@ -58,6 +58,19 @@ class _StrictContract(BaseModel):
 class InspectImageInput(_StrictContract):
     image_path: str = Field(min_length=1, max_length=1_024)
     mode: VisionMode = "auto"
+    analysis_goal: str = Field(
+        min_length=1,
+        max_length=1_000,
+        description=("Concise, specific visual question or analysis focus derived from the user's request."),
+    )
+
+    @field_validator("analysis_goal")
+    @classmethod
+    def analysis_goal_must_have_visible_content(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("analysis goal must be non-empty")
+        return normalized
 
 
 class VisionErrorResult(_StrictContract):

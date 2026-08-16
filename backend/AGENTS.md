@@ -256,8 +256,9 @@ Text-model image inspection follows
 active System Model must declare `supports_vision=true`; its existing Provider
 adapter owns SDK construction, credentials, wire serialization, and response
 parsing through the single `ModelRuntime`. The tool owns only Run/file
-authorization, bounded image normalization, fixed task instructions, durable
-dispatch settlement, and a bounded untrusted ToolMessage. Use standard
+authorization, bounded image normalization, fixed mode instructions plus one
+required bounded analysis goal, durable dispatch settlement, and a bounded
+untrusted ToolMessage. Use standard
 LangChain multimodal content blocks. Never add a Bridge-specific adapter,
 Provider HTTP client, protocol resolver, raw headers/body passthrough, or a
 second model factory. `vision_openai_compatible_v1` has no production

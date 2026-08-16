@@ -37,6 +37,7 @@ from deerflow.vision.dispatch import VisionDispatchAttempt
 from deerflow.vision.provenance import is_vision_evidence_tool
 
 VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
+ANALYSIS_GOAL = "Describe the visible image evidence relevant to the request."
 
 
 class _Sandbox:
@@ -146,6 +147,7 @@ async def test_inspect_image_returns_bounded_untrusted_analysis(
         runtime=SimpleNamespace(context=_context()),
         image_path="/mnt/user-data/uploads/image.png",
         mode="describe",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-1",
     )
     payload = InspectImageResult.model_validate_json(result.content)
@@ -182,6 +184,7 @@ async def test_inspect_image_collapses_noncanonical_path_without_reading(
         runtime=SimpleNamespace(context=_context()),
         image_path="/mnt/user-data/uploads/../workspace/secret.png",
         mode="auto",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-2",
     )
 
@@ -194,10 +197,17 @@ def test_tool_schema_excludes_runtime_authority_and_provider_parameters() -> Non
     schema = inspect_image.tool_call_schema.model_json_schema()
 
     assert schema["additionalProperties"] is False
-    assert set(schema["properties"]) == {"image_path", "mode"}
+    assert set(schema["required"]) == {"image_path", "analysis_goal"}
+    assert set(schema["properties"]) == {
+        "image_path",
+        "mode",
+        "analysis_goal",
+    }
+    assert schema["properties"]["analysis_goal"]["maxLength"] == 1_000
     assert set(inspect_image.args_schema.model_fields) == {
         "image_path",
         "mode",
+        "analysis_goal",
         "runtime",
         "tool_call_id",
     }
@@ -215,6 +225,7 @@ async def test_inspect_image_accepts_real_toolnode_injection(
         "args": {
             "image_path": "/mnt/user-data/uploads/image.png",
             "mode": "describe",
+            "analysis_goal": ANALYSIS_GOAL,
         },
         "id": "call-injected",
         "type": "tool_call",
@@ -341,7 +352,10 @@ def test_inspect_image_frequency_guard_allows_eight_and_blocks_ninth() -> None:
                     tool_calls=[
                         {
                             "name": "inspect_image",
-                            "args": {"image_path": f"/mnt/user-data/uploads/{index}.png"},
+                            "args": {
+                                "image_path": f"/mnt/user-data/uploads/{index}.png",
+                                "analysis_goal": ANALYSIS_GOAL,
+                            },
                             "id": f"call-{index}",
                             "type": "tool_call",
                         }
@@ -360,7 +374,10 @@ def test_inspect_image_frequency_guard_allows_eight_and_blocks_ninth() -> None:
                     tool_calls=[
                         {
                             "name": "inspect_image",
-                            "args": {"image_path": "/mnt/user-data/uploads/9.png"},
+                            "args": {
+                                "image_path": "/mnt/user-data/uploads/9.png",
+                                "analysis_goal": ANALYSIS_GOAL,
+                            },
                             "id": "call-9",
                             "type": "tool_call",
                         }

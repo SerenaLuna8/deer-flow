@@ -276,6 +276,7 @@ def _inspect_image_messages(
     image_bytes: bytes,
     mime_type: str,
     mode: VisionMode,
+    analysis_goal: str,
 ) -> list[SystemMessage | HumanMessage]:
     """Build one Provider-neutral LangChain multimodal request."""
 
@@ -286,6 +287,14 @@ def _inspect_image_messages(
                 {
                     "type": "text",
                     "text": render_inspect_image_prompt(mode),
+                },
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {"analysis_goal": analysis_goal},
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ),
                 },
                 {
                     "type": "image",
@@ -410,6 +419,7 @@ def build_inspect_image_tool(
     async def inspect_image(
         runtime: Runtime,
         image_path: str,
+        analysis_goal: str,
         tool_call_id: Annotated[str, InjectedToolCallId],
         mode: VisionMode = "auto",
     ) -> ToolMessage:
@@ -420,6 +430,7 @@ def build_inspect_image_tool(
 
         Args:
             image_path: Authorized absolute /mnt/user-data virtual image path.
+            analysis_goal: Specific visual question or analysis focus to answer.
             mode: Fixed analysis mode: auto, describe, ocr, document, chart, or ui.
         """
 
@@ -512,6 +523,7 @@ def build_inspect_image_tool(
                 image_bytes=normalized.data,
                 mime_type=normalized.mime_type,
                 mode=mode,
+                analysis_goal=analysis_goal,
             )
             try:
                 response = await model_runtime.ainvoke(

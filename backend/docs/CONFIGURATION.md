@@ -314,6 +314,11 @@ closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
    Policy and Run snapshot compatibility. It is a platform control-contract
    version, not a Provider wire-protocol selector.
 
+`analysis_goal` is required by the current v1 tool input. Before deploying this
+change, drain pending, running, or paused Runs that may already contain an
+unexecuted legacy `inspect_image` call without that field. Completed historical
+tool results remain readable and keep their existing result schema.
+
 The policy accepts any active current model whose adapter remains eligible for
 new binding and whose model version declares `supports_vision=true`. It does not
 hard-code Luna, OpenAI, Chat Completions, Responses, or another Provider. Luna
@@ -326,18 +331,20 @@ the same snapshot; neither the tool nor current catalog defaults may change the
 model, Endpoint, adapter, or Credential reference.
 
 `inspect_image` uses the same `deerflow.models.ModelRuntime` as all other model
-calls. It sends one fixed System instruction and one Human message containing a
-standard LangChain text block plus normalized image block. The selected
+calls. It sends one fixed System instruction and one Human message containing
+the fixed mode task, the required bounded `analysis_goal` supplied by the lead,
+and the normalized image block. The selected
 model's existing adapter owns Provider SDK construction, authentication,
 Endpoint handling, request serialization, and response parsing. Bridge code
 does not construct Chat Completions or Responses HTTP requests and does not
 require the Provider to generate an ActWeave-specific JSON Schema.
 
-The request contains only the normalized image and fixed mode instructions;
-paths, full chat history, Memory, other attachments, and authority metadata are
-not sent. The Provider returns a normal `AIMessage`. The server rejects empty,
-refusal, tool-call, ambiguous, or otherwise invalid responses and wraps valid
-text in a bounded `inspect_image.result.v2` ToolMessage whose content type is
+The request contains only the normalized image, fixed mode instructions, and
+the lead's bounded analysis goal; paths, full chat history, Memory, other
+attachments, and authority metadata are not sent. The Provider returns a
+normal `AIMessage`. The server rejects empty, refusal, tool-call, ambiguous, or
+otherwise invalid responses and wraps valid text in a bounded
+`inspect_image.result.v2` ToolMessage whose content type is
 `untrusted_image_analysis`. Historical `vision.evidence.v1` ToolMessages remain
 readable during the compatibility period, but new calls write v2.
 

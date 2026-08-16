@@ -26,6 +26,7 @@ from deerflow.vision.contracts import InspectImageResult, VisionUsageReceipt
 from deerflow.vision.dispatch import VisionDispatchAttempt, VisionDispatchDenied
 
 VISION_MODEL_REF = "00000000-0000-4000-8000-000000000406"
+ANALYSIS_GOAL = "Analyze the content layout and visual hierarchy."
 
 
 class _Sandbox:
@@ -251,6 +252,7 @@ async def test_inspect_image_uses_selected_model_through_sensitive_runtime(
         runtime=SimpleNamespace(context=_tool_context(authority, journal)),
         image_path="/mnt/user-data/uploads/image.png",
         mode="describe",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-unified-runtime",
     )
 
@@ -273,8 +275,14 @@ async def test_inspect_image_uses_selected_model_through_sensitive_runtime(
     assert isinstance(messages, list)
     assert isinstance(messages[0], SystemMessage)
     assert isinstance(messages[1], HumanMessage)
-    assert messages[1].content[0]["type"] == "text"
-    image_block = messages[1].content[1]
+    assert ANALYSIS_GOAL not in str(messages[0].content)
+    human_content = messages[1].content
+    assert isinstance(human_content, list)
+    text_blocks = [block for block in human_content if isinstance(block, dict) and block.get("type") == "text"]
+    assert len(text_blocks) == 2
+    assert ANALYSIS_GOAL not in text_blocks[0]["text"]
+    assert ANALYSIS_GOAL in text_blocks[1]["text"]
+    image_block = human_content[2]
     assert image_block["type"] == "image"
     assert image_block["mime_type"] == "image/jpeg"
     assert isinstance(image_block["base64"], str)
@@ -331,6 +339,7 @@ async def test_inspect_image_rejects_model_tool_calls_and_settles_unknown_usage(
         runtime=SimpleNamespace(context=_tool_context(authority, journal)),
         image_path="/mnt/user-data/uploads/image.png",
         mode="auto",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-tool-call",
     )
 
@@ -357,6 +366,7 @@ async def test_inspect_image_bounds_long_multibyte_model_text(
         runtime=SimpleNamespace(context=_tool_context(_Authority(), _Journal())),
         image_path="/mnt/user-data/uploads/image.png",
         mode="ocr",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-long",
     )
 
@@ -387,6 +397,7 @@ async def test_inspect_image_maps_provider_failure_without_leaking_message(
         runtime=SimpleNamespace(context=_tool_context(authority, _Journal())),
         image_path="/mnt/user-data/uploads/image.png",
         mode="chart",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-rate-limit",
     )
 
@@ -413,6 +424,7 @@ async def test_inspect_image_requires_durable_authority_before_model_call(
         runtime=SimpleNamespace(context={"run_id": "run-no-authority"}),
         image_path="/mnt/user-data/uploads/image.png",
         mode="ui",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-no-authority",
     )
 
@@ -453,6 +465,7 @@ async def test_server_abort_cancels_runtime_and_settles_reserved_attempt(
             ),
             image_path="/mnt/user-data/uploads/image.png",
             mode="auto",
+            analysis_goal=ANALYSIS_GOAL,
             tool_call_id="call-server-abort",
         )
     )
@@ -497,6 +510,7 @@ async def test_caller_cancellation_propagates_after_attempt_settlement(
             runtime=SimpleNamespace(context=_tool_context(authority, journal)),
             image_path="/mnt/user-data/uploads/image.png",
             mode="chart",
+            analysis_goal=ANALYSIS_GOAL,
             tool_call_id="call-cancelled",
         )
     )
@@ -546,6 +560,7 @@ async def test_post_response_authority_revocation_hides_result_but_keeps_usage(
         runtime=SimpleNamespace(context=_tool_context(authority, journal)),
         image_path="/mnt/user-data/uploads/image.png",
         mode="document",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-revoked",
     )
 
@@ -584,6 +599,7 @@ async def test_provider_refusal_is_content_blocked_and_usage_is_preserved(
         runtime=SimpleNamespace(context=_tool_context(authority, journal)),
         image_path="/mnt/user-data/uploads/image.png",
         mode="ocr",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-refusal",
     )
 
@@ -631,6 +647,7 @@ async def test_provider_incomplete_or_refusal_blocks_visual_result(
         ),
         image_path="/mnt/user-data/uploads/image.png",
         mode="describe",
+        analysis_goal=ANALYSIS_GOAL,
         tool_call_id="call-provider-terminal-state",
     )
 

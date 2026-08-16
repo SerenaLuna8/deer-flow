@@ -153,9 +153,9 @@ Provider 的现有 adapter 负责 Credential、Endpoint、请求序列化和响�
 `supports_vision=true` 且 adapter 仍可新绑定的系统模型都可以被选择，不按模型名称或
 Luna 身份硬编码。
 
-工具只发送规范化后的单张图片、固定 system prompt 和固定 mode 指令，不发送完整对话或
-文件路径。服务端把普通 `AIMessage` 文本包装成有界的
-`inspect_image.result.v2` ToolMessage，并明确标记为不可信内容。管理端“测试连接”使用
+工具只发送规范化后的单张图片、固定 system prompt、固定 mode 指令和 lead 根据当前用户
+问题生成的必填 `analysis_goal`，不发送完整对话或文件路径。服务端把普通 `AIMessage`
+文本包装成有界的 `inspect_image.result.v2` ToolMessage，并明确标记为不可信内容。管理端“测试连接”使用
 平台生成的无敏感 64×64 蓝色方块 PNG 经过同一个 Runtime 和 adapter；成功只证明当次
 连接可用，生产启用前仍须完成供应商政策和真实 API 质量、延迟与限流验收。
 

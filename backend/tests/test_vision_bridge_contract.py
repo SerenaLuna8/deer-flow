@@ -65,6 +65,7 @@ def test_lead_prompt_requires_inspection_and_forbids_guessing_only_when_availabl
     assert "<vision_bridge>" not in without_bridge
     assert "Before making any claim about image contents" in with_bridge
     assert "MUST call `inspect_image`" in with_bridge
+    assert "MUST include a concise `analysis_goal`" in with_bridge
     assert "do not guess" in with_bridge
 
 
@@ -72,9 +73,14 @@ def test_inspect_input_schema_is_closed_and_contains_no_authority_fields() -> No
     schema = InspectImageInput.model_json_schema()
 
     assert schema["additionalProperties"] is False
-    assert schema["required"] == ["image_path"]
-    assert set(schema["properties"]) == {"image_path", "mode"}
+    assert set(schema["required"]) == {"image_path", "analysis_goal"}
+    assert set(schema["properties"]) == {
+        "image_path",
+        "mode",
+        "analysis_goal",
+    }
     assert schema["properties"]["image_path"]["maxLength"] == 1_024
+    assert schema["properties"]["analysis_goal"]["maxLength"] == 1_000
     assert schema["properties"]["mode"]["enum"] == [
         "auto",
         "describe",
@@ -83,6 +89,43 @@ def test_inspect_input_schema_is_closed_and_contains_no_authority_fields() -> No
         "chart",
         "ui",
     ]
+
+
+def test_inspect_input_requires_a_bounded_analysis_goal() -> None:
+    with pytest.raises(ValidationError):
+        InspectImageInput.model_validate(
+            {
+                "image_path": "/mnt/user-data/uploads/image.png",
+                "mode": "ui",
+            }
+        )
+
+    valid = InspectImageInput.model_validate(
+        {
+            "image_path": "/mnt/user-data/uploads/image.png",
+            "mode": "ui",
+            "analysis_goal": "x" * 1_000,
+        }
+    )
+    assert valid.analysis_goal == "x" * 1_000
+
+    with pytest.raises(ValidationError):
+        InspectImageInput.model_validate(
+            {
+                "image_path": "/mnt/user-data/uploads/image.png",
+                "mode": "ui",
+                "analysis_goal": "x" * 1_001,
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        InspectImageInput.model_validate(
+            {
+                "image_path": "/mnt/user-data/uploads/image.png",
+                "mode": "ui",
+                "analysis_goal": "   ",
+            }
+        )
 
 
 def test_evidence_is_strict_and_rejects_empty_shell_success() -> None:
