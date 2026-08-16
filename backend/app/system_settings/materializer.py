@@ -18,6 +18,9 @@ from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
 )
+from app.system_settings.validation import (
+    is_provider_adapter_eligible_for_new_binding,
+)
 from deerflow.config.model_config import ModelConfig
 
 
@@ -43,7 +46,11 @@ class SystemModelMaterializer:
                     model_ref,
                     load_envelope=True,
                 )
-                if material is None:
+                if material is None or not (
+                    is_provider_adapter_eligible_for_new_binding(
+                        material.version.provider_adapter,
+                    )
+                ):
                     raise SystemModelMaterializationUnavailable
                 return await asyncio.to_thread(
                     self._credential_adapter.materialize,

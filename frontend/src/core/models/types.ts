@@ -8,6 +8,7 @@ export const modelSchema = z
     supports_thinking: z.boolean(),
     supports_reasoning_effort: z.boolean(),
     supports_vision: z.boolean(),
+    // Legacy wire compatibility only. UI capability checks use supports_vision.
     supports_vision_bridge: z.boolean().default(false),
     is_default: z.boolean(),
   })

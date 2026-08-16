@@ -1,0 +1,657 @@
+from __future__ import annotations
+
+import asyncio
+import time
+from dataclasses import replace
+from types import SimpleNamespace
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage
+from langsmith.run_helpers import get_tracing_context, tracing_context
+
+import deerflow.models.runtime as model_runtime_module
+from deerflow.config.app_config import AppConfig
+from deerflow.config.model_config import ModelConfig
+from deerflow.models.factory import (
+    RuntimeModelSettingsUnsupported,
+    create_chat_model,
+)
+from deerflow.models.runtime import ModelRuntime, ModelRuntimeProfile
+from deerflow.utils.oneshot_llm import run_oneshot_llm
+
+
+def test_model_runtime_profiles_are_closed_private_and_bounded() -> None:
+    assert set(ModelRuntimeProfile) == {
+        ModelRuntimeProfile.AGENT_GRAPH,
+        ModelRuntimeProfile.PRIVATE_ONESHOT,
+        ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+        ModelRuntimeProfile.ADMIN_PROBE,
+    }
+    assert model_runtime_module._PROFILE_POLICIES[ModelRuntimeProfile.AGENT_GRAPH].default_timeout_seconds is None
+    for profile in (
+        ModelRuntimeProfile.PRIVATE_ONESHOT,
+        ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+        ModelRuntimeProfile.ADMIN_PROBE,
+    ):
+        policy = model_runtime_module._PROFILE_POLICIES[profile]
+        assert policy.attach_model_tracing is False
+        assert policy.default_timeout_seconds == 600.0
+
+
+@pytest.mark.anyio
+async def test_model_runtime_builds_through_shared_factory_and_invokes_model() -> None:
+    observed: dict[str, object] = {}
+    response = AIMessage(content="runtime response")
+
+    class FakeChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            observed["messages"] = messages
+            observed["invoke_config"] = config
+            return response
+
+    def model_factory(**kwargs: object) -> FakeChatModel:
+        observed["factory_kwargs"] = kwargs
+        return FakeChatModel()
+
+    app_config = SimpleNamespace()
+    runtime = ModelRuntime(
+        app_config=app_config,  # type: ignore[arg-type]
+        model_factory=model_factory,
+    )
+    messages = [HumanMessage(content="hello")]
+    invoke_config = {"run_name": "model-runtime-test"}
+
+    result = await runtime.ainvoke(
+        messages,
+        profile=ModelRuntimeProfile.AGENT_GRAPH,
+        model_name="model-id",
+        thinking_enabled=True,
+        reasoning_effort="low",
+        model_overrides={"max_tokens": 128},
+        config=invoke_config,
+    )
+
+    assert result is response
+    assert observed == {
+        "factory_kwargs": {
+            "name": "model-id",
+            "thinking_enabled": True,
+            "app_config": app_config,
+            "attach_tracing": False,
+            "model_overrides": {"max_tokens": 128},
+            "reasoning_effort": "low",
+            "runtime_overrides": {"max_retries": 0},
+        },
+        "messages": messages,
+        "invoke_config": invoke_config,
+    }
+
+
+@pytest.mark.anyio
+async def test_model_runtime_does_not_forward_absent_reasoning_effort() -> None:
+    observed: dict[str, object] = {}
+
+    class FakeChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            return AIMessage(content="ok")
+
+    def model_factory(**kwargs: object) -> FakeChatModel:
+        observed.update(kwargs)
+        return FakeChatModel()
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=model_factory,
+    )
+
+    await runtime.ainvoke(
+        [HumanMessage(content="hello")],
+        profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+        config={"run_name": "model-runtime-test"},
+    )
+
+    assert "reasoning_effort" not in observed
+    assert observed["attach_tracing"] is False
+    assert observed["runtime_overrides"] == {"max_retries": 2}
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ModelRuntimeProfile.PRIVATE_ONESHOT,
+        ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+        ModelRuntimeProfile.ADMIN_PROBE,
+    ],
+)
+def test_private_profiles_disable_model_tracing(
+    profile: ModelRuntimeProfile,
+) -> None:
+    observed: dict[str, object] = {}
+
+    def model_factory(**kwargs: object) -> object:
+        observed.update(kwargs)
+        return object()
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=model_factory,
+    )
+
+    runtime.build_chat_model(profile=profile)
+
+    assert observed["attach_tracing"] is False
+    expected_retries = 2 if profile is ModelRuntimeProfile.PRIVATE_ONESHOT else 0
+    assert observed["runtime_overrides"] == {"max_retries": expected_retries}
+
+
+@pytest.mark.anyio
+async def test_sensitive_runtime_clears_inherited_callbacks() -> None:
+    observed: dict[str, object] = {}
+
+    class FakeChatModel:
+        async def ainvoke(self, messages: object, *, config: object) -> AIMessage:
+            del messages
+            observed["config"] = config
+            return AIMessage(content="ok")
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: FakeChatModel(),
+    )
+
+    await runtime.ainvoke(
+        [HumanMessage(content="private")],
+        profile=ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+        config={"callbacks": [object()], "run_name": "private-image"},
+    )
+
+    assert observed["config"] == {
+        "callbacks": [],
+        "run_name": "private-image",
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "profile",
+    [
+        ModelRuntimeProfile.PRIVATE_ONESHOT,
+        ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+        ModelRuntimeProfile.ADMIN_PROBE,
+    ],
+)
+async def test_private_profiles_disable_ambient_langsmith_tracing(
+    profile: ModelRuntimeProfile,
+) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeChatModel:
+        async def ainvoke(self, messages: object, *, config: object) -> AIMessage:
+            del messages, config
+            observed["tracing_enabled"] = get_tracing_context()["enabled"]
+            return AIMessage(content="ok")
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: FakeChatModel(),
+    )
+
+    with tracing_context(enabled=True):
+        await runtime.ainvoke(
+            [HumanMessage(content="private")],
+            profile=profile,
+        )
+
+    assert observed["tracing_enabled"] is False
+
+
+@pytest.mark.anyio
+async def test_model_runtime_invokes_bound_runnable_under_private_profile() -> None:
+    observed: dict[str, object] = {}
+    response = AIMessage(content="private bound response")
+
+    class BoundRunnable:
+        async def ainvoke(
+            self,
+            value: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            observed["value"] = value
+            observed["config"] = config
+            observed["tracing_enabled"] = get_tracing_context()["enabled"]
+            return response
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+    input_value = [HumanMessage(content="private")]
+
+    with tracing_context(enabled=True):
+        result = await runtime.ainvoke_runnable(
+            BoundRunnable(),
+            input_value,
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            config={"callbacks": [object()], "run_name": "private-bound"},
+        )
+
+    assert result is response
+    assert observed == {
+        "value": input_value,
+        "config": {"callbacks": [], "run_name": "private-bound"},
+        "tracing_enabled": False,
+    }
+
+
+def test_model_runtime_invokes_sync_graph_runnable_with_exact_config() -> None:
+    observed: dict[str, object] = {}
+    response = AIMessage(content="sync graph response")
+
+    class GraphRunnable:
+        def invoke(self, value: object, *, config: object) -> AIMessage:
+            observed["value"] = value
+            observed["config"] = config
+            return response
+
+    invoke_config = {
+        "run_name": "sync-summary",
+        "metadata": {"lc_source": "summarization"},
+    }
+    result = ModelRuntime.invoke_runnable(
+        GraphRunnable(),
+        "summary prompt",
+        profile=ModelRuntimeProfile.AGENT_GRAPH,
+        config=invoke_config,
+    )
+
+    assert result is response
+    assert observed == {
+        "value": "summary prompt",
+        "config": invoke_config,
+    }
+
+
+def test_model_runtime_sync_runnable_rejects_profiles_with_runtime_owned_policy() -> None:
+    class NeverInvoked:
+        def invoke(self, value: object, *, config: object) -> object:
+            raise AssertionError((value, config))
+
+    with pytest.raises(ValueError, match="only supports AGENT_GRAPH"):
+        ModelRuntime.invoke_runnable(
+            NeverInvoked(),
+            "private",
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+        )
+
+
+@pytest.mark.anyio
+async def test_model_runtime_bound_runnable_deadline_cancels_and_joins() -> None:
+    started = asyncio.Event()
+    cancelled_and_joined = asyncio.Event()
+
+    class BlockingRunnable:
+        async def ainvoke(self, value: object, *, config: object) -> AIMessage:
+            del value, config
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                raise
+            finally:
+                cancelled_and_joined.set()
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+
+    with pytest.raises(TimeoutError):
+        await runtime.ainvoke_runnable(
+            BlockingRunnable(),
+            "private",
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            deadline_monotonic=time.monotonic() + 0.01,
+        )
+
+    assert started.is_set()
+    assert cancelled_and_joined.is_set()
+
+
+@pytest.mark.anyio
+async def test_model_runtime_bound_runnable_caller_cancel_joins_provider() -> None:
+    started = asyncio.Event()
+    cancelled_and_joined = asyncio.Event()
+
+    class BlockingRunnable:
+        async def ainvoke(self, value: object, *, config: object) -> AIMessage:
+            del value, config
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                raise
+            finally:
+                cancelled_and_joined.set()
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+    invocation = asyncio.create_task(
+        runtime.ainvoke_runnable(
+            BlockingRunnable(),
+            "private",
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+        )
+    )
+    await started.wait()
+    invocation.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert cancelled_and_joined.is_set()
+
+
+@pytest.mark.anyio
+async def test_model_runtime_abort_wins_when_provider_completes_simultaneously() -> None:
+    release = asyncio.Event()
+    started = asyncio.Event()
+
+    class SimultaneousRunnable:
+        async def ainvoke(self, value: object, *, config: object) -> AIMessage:
+            del value, config
+            started.set()
+            await release.wait()
+            return AIMessage(content="must not escape abort")
+
+    class SimultaneousAbort:
+        def is_set(self) -> bool:
+            return False
+
+        async def wait(self) -> object:
+            await release.wait()
+            return None
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+    invocation = asyncio.create_task(
+        runtime.ainvoke_runnable(
+            SimultaneousRunnable(),
+            "private",
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            abort_event=SimultaneousAbort(),
+        )
+    )
+    await started.wait()
+    release.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+
+def test_model_runtime_rejects_unregistered_profile_values() -> None:
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+
+    with pytest.raises(TypeError, match="ModelRuntimeProfile"):
+        runtime.build_chat_model(profile="oneshot")  # type: ignore[arg-type]
+
+
+@pytest.mark.anyio
+async def test_model_runtime_deadline_cancels_provider_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class BlockingChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            del messages, config
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: BlockingChatModel(),
+    )
+
+    with pytest.raises(TimeoutError):
+        await runtime.ainvoke(
+            [HumanMessage(content="hello")],
+            profile=ModelRuntimeProfile.ADMIN_PROBE,
+            config={"run_name": "deadline-test"},
+            deadline_monotonic=time.monotonic() + 0.01,
+        )
+
+    assert started.is_set()
+    assert cancelled.is_set()
+
+
+@pytest.mark.anyio
+async def test_model_runtime_profile_default_deadline_cancels_and_joins_provider_task(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    joined = asyncio.Event()
+
+    class BlockingChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            del messages, config
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                # Prove ModelRuntime awaits Provider cleanup instead of merely
+                # requesting cancellation and returning the timeout early.
+                await asyncio.sleep(0)
+                joined.set()
+
+    policy = model_runtime_module._PROFILE_POLICIES[ModelRuntimeProfile.PRIVATE_ONESHOT]
+    monkeypatch.setitem(
+        model_runtime_module._PROFILE_POLICIES,
+        ModelRuntimeProfile.PRIVATE_ONESHOT,
+        replace(policy, default_timeout_seconds=0.01),
+    )
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: BlockingChatModel(),
+    )
+
+    with pytest.raises(TimeoutError):
+        await runtime.ainvoke(
+            [HumanMessage(content="hello")],
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            config={"run_name": "profile-default-deadline-test"},
+        )
+
+    assert started.is_set()
+    assert joined.is_set()
+
+
+@pytest.mark.anyio
+async def test_model_runtime_abort_signal_cancels_provider_task() -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    abort_event = asyncio.Event()
+
+    class BlockingChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            *,
+            config: object,
+        ) -> AIMessage:
+            del messages, config
+            started.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: BlockingChatModel(),
+    )
+    invocation = asyncio.create_task(
+        runtime.ainvoke(
+            [HumanMessage(content="hello")],
+            profile=ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+            config={"run_name": "abort-test"},
+            abort_event=abort_event,
+        )
+    )
+    await started.wait()
+    abort_event.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await invocation
+
+    assert cancelled.is_set()
+
+
+def test_shared_factory_runtime_override_replaces_catalog_retry_without_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetryAwareModel:
+        model_fields = {
+            "max_retries": SimpleNamespace(alias=None),
+        }
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(
+        "deerflow.models.factory.resolve_class",
+        lambda *_args, **_kwargs: RetryAwareModel,
+    )
+    model = ModelConfig(
+        name="runtime-model",
+        display_name="Runtime model",
+        description="",
+        use="example:RetryAwareModel",
+        model="provider-model",
+        max_retries=9,
+    )
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    instance = create_chat_model(
+        name=model.name,
+        app_config=app_config,
+        attach_tracing=False,
+        runtime_overrides={"max_retries": 0},
+    )
+
+    assert instance.kwargs["max_retries"] == 0
+    assert "runtime_overrides" not in instance.kwargs
+
+
+def test_shared_factory_rejects_unregistered_runtime_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RetryAwareModel:
+        model_fields = {
+            "max_retries": SimpleNamespace(alias=None),
+        }
+
+    monkeypatch.setattr(
+        "deerflow.models.factory.resolve_class",
+        lambda *_args, **_kwargs: RetryAwareModel,
+    )
+    model = ModelConfig(
+        name="runtime-model",
+        display_name="Runtime model",
+        description="",
+        use="example:RetryAwareModel",
+        model="provider-model",
+    )
+    app_config = AppConfig(
+        models=[model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+
+    with pytest.raises(RuntimeModelSettingsUnsupported):
+        create_chat_model(
+            name=model.name,
+            app_config=app_config,
+            attach_tracing=False,
+            runtime_overrides={"timeout": 1},
+        )
+
+
+@pytest.mark.anyio
+async def test_oneshot_llm_defaults_to_private_runtime_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+    app_config = SimpleNamespace()
+
+    class FakeRuntime:
+        def __init__(self, *, app_config: object) -> None:
+            observed["app_config"] = app_config
+
+        async def ainvoke(
+            self,
+            messages: object,
+            **kwargs: object,
+        ) -> AIMessage:
+            observed["messages"] = messages
+            observed["invoke_kwargs"] = kwargs
+            return AIMessage(content="one-shot response")
+
+    monkeypatch.setattr(
+        "deerflow.utils.oneshot_llm.ModelRuntime",
+        FakeRuntime,
+    )
+
+    result = await run_oneshot_llm(
+        system_instruction="system",
+        user_content="user",
+        run_name="admin-probe",
+        app_config=app_config,  # type: ignore[arg-type]
+        model_name="model-id",
+    )
+
+    assert result == "one-shot response"
+    assert observed["app_config"] is app_config
+    assert observed["invoke_kwargs"] == {
+        "profile": ModelRuntimeProfile.PRIVATE_ONESHOT,
+        "model_name": "model-id",
+        "thinking_enabled": False,
+        "reasoning_effort": None,
+        "model_overrides": None,
+        "config": {"run_name": "admin-probe"},
+        "deadline_monotonic": None,
+        "abort_event": None,
+    }

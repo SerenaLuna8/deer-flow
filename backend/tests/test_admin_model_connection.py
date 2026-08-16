@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import ast
+import base64
 import uuid
-from threading import Event
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from app.audit.models import resolve_system_audit_context
 from app.gateway.deps import (
@@ -26,6 +29,7 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     validate_system_model_connection_test,
 )
+from deerflow.models import ModelRuntimeProfile
 
 
 class _RuntimeConfig:
@@ -35,6 +39,14 @@ class _RuntimeConfig:
     def with_runtime_models(self, models: tuple[object, ...]) -> _RuntimeConfig:
         self.models = models
         return self
+
+
+def test_gateway_model_callers_do_not_import_vision_protocol_implementations() -> None:
+    path = Path(__file__).resolve().parents[1] / "app/gateway/system_model_callers.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    imported_modules = {node.module for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module is not None}
+
+    assert not any(module.startswith("deerflow.vision") for module in imported_modules)
 
 
 class _ConnectionTestRepository:
@@ -88,131 +100,145 @@ class _ConnectionTestService(SystemModelCatalogService):
 
 
 @pytest.mark.anyio
-async def test_model_connection_tester_uses_one_untraced_probe(
+async def test_model_connection_tester_uses_closed_text_probe_profile(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _RuntimeConfig()
     observed: dict[str, object] = {}
 
-    async def probe(**kwargs: object) -> str:
-        observed.update(kwargs)
-        return "OK"
+    class Runtime:
+        def __init__(self, *, app_config: object) -> None:
+            observed["app_config"] = app_config
 
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.run_oneshot_llm",
-        probe,
-    )
+        async def ainvoke(self, messages: object, **kwargs: object) -> AIMessage:
+            observed["messages"] = messages
+            observed["invoke_kwargs"] = kwargs
+            return AIMessage(content="OK")
+
+    monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
 
     connected = await ModelConnectionTester(config).test(
-        SimpleNamespace(name="model-connection-test"),
+        SimpleNamespace(
+            name="model-connection-test",
+            supports_vision=False,
+        ),
     )
 
     assert connected is True
     assert config.models[0].name == "model-connection-test"
-    assert observed == {
-        "system_instruction": "You are a connectivity probe. Reply with OK.",
-        "user_content": "OK",
+    messages = observed["messages"]
+    assert isinstance(messages, list)
+    assert messages == [
+        SystemMessage(content="You are a connectivity probe. Reply with OK."),
+        HumanMessage(content="OK"),
+    ]
+    invoke_kwargs = observed["invoke_kwargs"]
+    assert isinstance(invoke_kwargs, dict)
+    assert invoke_kwargs["profile"] is ModelRuntimeProfile.ADMIN_PROBE
+    assert invoke_kwargs["model_name"] == "model-connection-test"
+    assert invoke_kwargs["config"] == {
         "run_name": "admin_model_connection_test",
-        "app_config": config,
-        "model_name": "model-connection-test",
-        "thread_id": None,
-        "attach_tracing": False,
     }
+    assert isinstance(invoke_kwargs["deadline_monotonic"], float)
 
 
 @pytest.mark.anyio
-async def test_model_connection_tester_hides_provider_failures(
+@pytest.mark.parametrize("failure", [RuntimeError("provider failed"), TimeoutError()])
+async def test_model_connection_tester_hides_provider_failures_and_timeouts(
     monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
 ) -> None:
-    async def failing_probe(**_kwargs: object) -> str:
-        raise RuntimeError("provider failed")
+    class Runtime:
+        def __init__(self, *, app_config: object) -> None:
+            del app_config
 
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.run_oneshot_llm",
-        failing_probe,
-    )
+        async def ainvoke(self, *_args: object, **_kwargs: object) -> AIMessage:
+            raise failure
+
+    monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
 
     connected = await ModelConnectionTester(_RuntimeConfig()).test(
-        SimpleNamespace(name="model-connection-test"),
+        SimpleNamespace(
+            name="model-connection-test",
+            supports_vision=False,
+        ),
     )
 
     assert connected is False
 
 
 @pytest.mark.anyio
-async def test_real_vision_connection_test_uses_synthetic_image_and_narrow_profile(
+@pytest.mark.parametrize(
+    ("provider_adapter", "use_responses_api"),
+    [
+        ("openai", False),
+        ("openai", True),
+        ("anthropic", None),
+    ],
+    ids=["openai-chat", "openai-responses", "anthropic"],
+)
+async def test_visual_connection_test_uses_adapter_neutral_multimodal_message(
     monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+    use_responses_api: bool | None,
 ) -> None:
     observed: dict[str, object] = {}
 
-    class ProbeClient:
-        async def analyze(self, **kwargs: object) -> object:
-            observed.update(kwargs)
-            return object()
+    class ChatModel:
+        async def ainvoke(
+            self,
+            messages: object,
+            config: object = None,
+        ) -> AIMessage:
+            observed["messages"] = messages
+            observed["invoke_config"] = config
+            return AIMessage(content="OK")
 
-    def client_factory(
-        model: object,
-        contract_version: str,
-        *,
-        transient_gate_key: str,
-    ) -> ProbeClient:
-        observed["model"] = model
-        observed["contract_version"] = contract_version
-        observed["gate_key"] = transient_gate_key
-        return ProbeClient()
+    def model_factory(**kwargs: object) -> ChatModel:
+        observed["factory_kwargs"] = kwargs
+        return ChatModel()
 
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.build_vision_evidence_client",
-        client_factory,
-    )
+    monkeypatch.setattr("deerflow.models.runtime.create_chat_model", model_factory)
     model = SimpleNamespace(
         name="vision-probe",
-        system_provider_adapter="openai",
+        system_provider_adapter=provider_adapter,
         supports_vision=True,
-        base_url="https://responses.example.test/v1",
-        use_responses_api=True,
+        use_responses_api=use_responses_api,
     )
+    config = _RuntimeConfig()
 
-    connected = await ModelConnectionTester(_RuntimeConfig()).test(model)
+    connected = await ModelConnectionTester(config).test(model)
 
     assert connected is True
-    assert observed["model"] is model
-    assert observed["contract_version"] == "vision.bridge.v1"
-    assert observed["gate_key"] == "admin-vision-connection-test"
-    assert bytes(observed["image_bytes"]).startswith(b"\x89PNG\r\n\x1a\n")
-    assert observed["mime_type"] == "image/png"
-    assert observed["mode"] == "auto"
-    assert isinstance(observed["deadline_monotonic"], float)
-    assert isinstance(observed["abort_signal"], Event)
-
-
-@pytest.mark.anyio
-async def test_visual_connection_test_never_falls_back_to_text_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    text_probe_called = False
-
-    async def text_probe(**_kwargs: object) -> str:
-        nonlocal text_probe_called
-        text_probe_called = True
-        return "OK"
-
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.run_oneshot_llm",
-        text_probe,
-    )
-    model = SimpleNamespace(
-        name="unsupported-vision-probe",
-        system_provider_adapter="anthropic",
-        supports_vision=True,
-        base_url="https://vision.example.test/v1",
-        use_responses_api=False,
-    )
-
-    connected = await ModelConnectionTester(_RuntimeConfig()).test(model)
-
-    assert connected is False
-    assert text_probe_called is False
+    assert config.models == (model,)
+    factory_kwargs = observed["factory_kwargs"]
+    assert isinstance(factory_kwargs, dict)
+    assert factory_kwargs["app_config"] is config
+    assert factory_kwargs["name"] == "vision-probe"
+    assert factory_kwargs["attach_tracing"] is False
+    assert factory_kwargs["runtime_overrides"] == {"max_retries": 0}
+    assert observed["invoke_config"] == {
+        "callbacks": [],
+        "run_name": "admin_model_connection_test",
+    }
+    messages = observed["messages"]
+    assert isinstance(messages, list)
+    assert len(messages) == 2
+    assert isinstance(messages[0], SystemMessage)
+    assert isinstance(messages[1], HumanMessage)
+    blocks = messages[1].content
+    assert isinstance(blocks, list)
+    assert blocks[0] == {
+        "type": "text",
+        "text": "Inspect this platform-generated image and reply with OK.",
+    }
+    image = blocks[1]
+    assert image["type"] == "image"
+    assert image["mime_type"] == "image/png"
+    payload = base64.b64decode(image["base64"], validate=True)
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    assert int.from_bytes(payload[16:20], "big") == 64
+    assert int.from_bytes(payload[20:24], "big") == 64
 
 
 @pytest.mark.anyio
@@ -234,26 +260,19 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
     runtime_config = _RuntimeConfig()
     observed: list[str] = []
 
-    class ProbeClient:
-        async def analyze(self, **_kwargs: object) -> object:
-            observed.append("vision")
-            return object()
+    class Runtime:
+        def __init__(self, *, app_config: object) -> None:
+            self.app_config = app_config
 
-    def client_factory(*_args: object, **_kwargs: object) -> ProbeClient:
-        return ProbeClient()
+        async def ainvoke(self, messages: object, **kwargs: object) -> AIMessage:
+            del kwargs
+            assert isinstance(messages, list)
+            human = messages[-1]
+            assert isinstance(human, HumanMessage)
+            observed.append("vision" if isinstance(human.content, list) else "text")
+            return AIMessage(content="OK")
 
-    async def text_probe(**_kwargs: object) -> str:
-        observed.append("text")
-        return "OK"
-
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.build_vision_evidence_client",
-        client_factory,
-    )
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.run_oneshot_llm",
-        text_probe,
-    )
+    monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
 
     context = resolve_system_audit_context(
         SimpleNamespace(id=uuid.uuid4(), system_role="system_admin"),
@@ -334,19 +353,19 @@ async def test_admin_visual_connection_route_materializes_credential_without_lea
         lambda *_args, **_kwargs: {"env": {"OPENAI_API_KEY": secret}},
     )
 
-    class ProbeClient:
-        async def analyze(self, **_kwargs: object) -> object:
+    class Runtime:
+        def __init__(self, *, app_config: object) -> None:
+            model = app_config.models[0]  # type: ignore[attr-defined]
+            observed["secret"] = model.api_key.get_secret_value()
+
+        async def ainvoke(self, messages: object, **_kwargs: object) -> AIMessage:
+            assert isinstance(messages, list)
+            assert isinstance(messages[-1], HumanMessage)
+            assert isinstance(messages[-1].content, list)
             observed["probe"] = "vision"
-            return object()
+            return AIMessage(content="OK")
 
-    def client_factory(model: object, *_args: object, **_kwargs: object) -> ProbeClient:
-        observed["secret"] = model.api_key.get_secret_value()  # type: ignore[attr-defined]
-        return ProbeClient()
-
-    monkeypatch.setattr(
-        "app.gateway.system_model_callers.build_vision_evidence_client",
-        client_factory,
-    )
+    monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
     context = resolve_system_audit_context(
         SimpleNamespace(id=uuid.uuid4(), system_role="system_admin"),
         request_id="credential-vision-probe",

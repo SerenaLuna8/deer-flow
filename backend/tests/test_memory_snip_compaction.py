@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from types import SimpleNamespace
 from typing import Any
@@ -22,8 +23,10 @@ from deerflow.agents.middlewares import summarization_middleware as summarizatio
 from deerflow.agents.middlewares.summarization_middleware import (
     DeerFlowSummarizationMiddleware,
 )
+from deerflow.models import ModelRuntimeProfile
 from deerflow.runtime import context_compaction as context_compaction_module
 from deerflow.runtime.context_compaction import prepare_thread_compaction
+from deerflow.runtime.context_keys import RuntimeContextKeys
 
 
 class _RecordingModel(FakeListChatModel):
@@ -81,10 +84,13 @@ def _runtime(
     *,
     archive_context: SnipArchiveContext | None = None,
     execution_checkpoint_id: str | None = None,
+    server_abort_event: asyncio.Event | None = None,
 ) -> SimpleNamespace:
     context: dict[str, object] = {"thread_id": "thread-1"}
     if archive_context is not None:
         context[MEMORY_ARCHIVE_CONTEXT_KEY] = archive_context
+    if server_abort_event is not None:
+        context[RuntimeContextKeys.SERVER_ABORT_EVENT] = server_abort_event
     execution_info = None if execution_checkpoint_id is None else SimpleNamespace(checkpoint_id=execution_checkpoint_id)
     return SimpleNamespace(
         context=context,
@@ -281,6 +287,117 @@ def test_compaction_uses_complete_turns_excludes_dynamic_reminders_and_calls_onc
         source_checkpoint_id="checkpoint-source",
         messages=messages[:-1],
     )
+
+
+def test_sync_compaction_invokes_summary_through_model_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model("must-not-be-called-directly")
+    middleware = _middleware(model)
+    observed: dict[str, object] = {}
+
+    def invoke_runnable(
+        runnable: object,
+        input_: object,
+        *,
+        profile: ModelRuntimeProfile,
+        config: object,
+    ) -> SimpleNamespace:
+        observed.update(
+            runnable=runnable,
+            input=input_,
+            profile=profile,
+            config=config,
+        )
+        return SimpleNamespace(
+            text=_dual("Synchronous continuity.", "- [durable] Sync fact."),
+        )
+
+    monkeypatch.setattr(
+        summarization_module.ModelRuntime,
+        "invoke_runnable",
+        staticmethod(invoke_runnable),
+    )
+
+    result = middleware.compact_state(
+        {
+            "messages": [
+                HumanMessage(id="old-human", content="old"),
+                AIMessage(id="old-ai", content="old answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+        },
+        _runtime(),
+        force=True,
+    )
+
+    assert result is not None
+    assert result.summary_text == "Synchronous continuity."
+    assert observed["runnable"] is middleware._summary_model
+    assert observed["profile"] is ModelRuntimeProfile.AGENT_GRAPH
+    assert observed["config"] == {
+        "metadata": {"lc_source": "summarization"},
+    }
+    assert isinstance(observed["input"], str)
+    assert model.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_async_compaction_invokes_runtime_and_propagates_server_abort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _model("must-not-be-called-directly")
+    middleware = _middleware(model)
+    abort_event = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def ainvoke_runnable(
+        runnable: object,
+        input_: object,
+        *,
+        profile: ModelRuntimeProfile,
+        config: object,
+        abort_event: object,
+    ) -> SimpleNamespace:
+        observed.update(
+            runnable=runnable,
+            input=input_,
+            profile=profile,
+            config=config,
+            abort_event=abort_event,
+        )
+        return SimpleNamespace(
+            text=_dual("Asynchronous continuity.", "- [durable] Async fact."),
+        )
+
+    monkeypatch.setattr(
+        summarization_module.ModelRuntime,
+        "ainvoke_runnable",
+        staticmethod(ainvoke_runnable),
+    )
+
+    result = await middleware.acompact_state(
+        {
+            "messages": [
+                HumanMessage(id="old-human", content="old"),
+                AIMessage(id="old-ai", content="old answer"),
+                HumanMessage(id="current-human", content="current"),
+            ],
+        },
+        _runtime(server_abort_event=abort_event),
+        force=True,
+    )
+
+    assert result is not None
+    assert result.summary_text == "Asynchronous continuity."
+    assert observed["runnable"] is middleware._summary_model
+    assert observed["profile"] is ModelRuntimeProfile.AGENT_GRAPH
+    assert observed["config"] == {
+        "metadata": {"lc_source": "summarization"},
+    }
+    assert observed["abort_event"] is abort_event
+    assert isinstance(observed["input"], str)
+    assert model.call_count == 0
 
 
 def test_completed_clarification_continuation_is_one_compactable_logical_turn() -> None:
@@ -877,10 +994,17 @@ def test_configured_custom_prompt_reaches_the_production_factory(
         summary_prompt=custom_prompt,
     )
     app_config = SimpleNamespace(summarization=config)
+
+    build_calls: list[dict[str, Any]] = []
+
+    def build_model(_self: object, **kwargs: Any) -> _RecordingModel:
+        build_calls.append(kwargs)
+        return _model("- [durable] Custom prompt output.")
+
     monkeypatch.setattr(
-        summarization_module,
-        "create_chat_model",
-        lambda **_kwargs: _model("- [durable] Custom prompt output."),
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        build_model,
     )
 
     middleware = summarization_module.create_summarization_middleware(
@@ -888,6 +1012,7 @@ def test_configured_custom_prompt_reaches_the_production_factory(
     )
 
     assert middleware is not None
+    assert build_calls[0]["profile"] is ModelRuntimeProfile.AGENT_GRAPH
     assert middleware.summary_prompt == custom_prompt
     assert middleware._dual_output_contract is False
 
@@ -906,9 +1031,9 @@ def test_explicit_custom_prompt_equal_to_packaged_text_stays_single_segment(
     )
     app_config = SimpleNamespace(summarization=config)
     monkeypatch.setattr(
-        summarization_module,
-        "create_chat_model",
-        lambda **_kwargs: _model("- [durable] Explicit custom output."),
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **_kwargs: _model("- [durable] Explicit custom output."),
     )
     monkeypatch.setattr(
         summarization_module,
@@ -942,9 +1067,9 @@ def test_packaged_prompt_budget_reaches_the_production_factory(
     model = _model(_dual("Continue the task.", "(nothing)"))
     observed: list[_RecordingModel] = []
     monkeypatch.setattr(
-        summarization_module,
-        "create_chat_model",
-        lambda **_kwargs: model,
+        summarization_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **_kwargs: model,
     )
 
     def record_budget(candidate: _RecordingModel) -> _RecordingModel:

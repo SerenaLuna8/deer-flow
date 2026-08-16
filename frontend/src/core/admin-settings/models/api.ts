@@ -86,7 +86,7 @@ async function requestModelSettings(
 
 async function readModelSettingsResponse<T>(
   response: Response,
-  schema: z.ZodType<T>,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
 ): Promise<T> {
   let body: unknown;
   try {

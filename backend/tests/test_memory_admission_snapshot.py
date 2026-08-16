@@ -535,8 +535,25 @@ async def test_continuation_fails_closed_when_over_budget_snapshot_digest_drifts
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("vision_provider_adapter", "vision_provider_settings"),
+    [
+        (
+            "openai",
+            {
+                "base_url": "https://responses.example.test/v1",
+                "use_responses_api": True,
+            },
+        ),
+        ("anthropic", {}),
+        ("vllm", {}),
+    ],
+    ids=["openai-responses", "anthropic", "ordinary-vision-adapter"],
+)
 async def test_run_admission_locks_models_before_user_memory_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    vision_provider_adapter: str,
+    vision_provider_settings: dict[str, object],
 ) -> None:
     events: list[str] = []
     now = datetime.now(UTC)
@@ -614,8 +631,8 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
             events.append(f"model:{purpose}")
             return SimpleNamespace(
                 model_ref=(VISION_MODEL_REF if purpose == "vision" else LEAD_MODEL_REF),
-                provider_adapter=("vision_bridge_fake" if purpose == "vision" else "openai"),
-                provider_settings={},
+                provider_adapter=(vision_provider_adapter if purpose == "vision" else "openai"),
+                provider_settings=(vision_provider_settings if purpose == "vision" else {}),
                 supports_thinking=False,
                 supports_reasoning_effort=False,
                 supports_vision=purpose == "vision",

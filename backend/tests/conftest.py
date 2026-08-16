@@ -56,6 +56,27 @@ _executor_mock.get_background_task_result = MagicMock()
 sys.modules["deerflow.subagents.executor"] = _executor_mock
 
 
+@pytest.fixture(scope="session", autouse=True)
+def install_test_only_system_model_adapter():
+    """Expose the deterministic vision fake only inside pytest processes."""
+
+    from app.system_settings import validation
+
+    adapter_name = "vision_bridge_fake"
+    previous = validation.PROVIDER_ADAPTERS.get(adapter_name)
+    validation.PROVIDER_ADAPTERS[adapter_name] = validation.ProviderAdapterSpec(
+        "support.fake_models:FakeVisionBridgeChatModel",
+        False,
+    )
+    try:
+        yield
+    finally:
+        if previous is None:
+            validation.PROVIDER_ADAPTERS.pop(adapter_name, None)
+        else:
+            validation.PROVIDER_ADAPTERS[adapter_name] = previous
+
+
 @pytest.fixture(scope="session")
 def postgres_admin_url() -> str:
     """Derive a maintenance URL from the development URL without logging it."""

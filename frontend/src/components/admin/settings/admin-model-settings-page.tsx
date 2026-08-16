@@ -40,8 +40,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import {
   AdminModelSettingsApiError,
+  adminModelSettingsSchemaForProvider,
   createAdminModelInputSchema,
-  safeAdminModelSettingsSchema,
   useAdminModelCatalog,
   useCreateAdminModel,
   useReplaceAdminModel,
@@ -51,6 +51,8 @@ import {
   type AdminModelCatalog,
   type AdminModelConnectionTestResponse,
   type AdminModelItem,
+  type AdminModelProviderAdapterDescriptor,
+  type AdminModelProviderSettingField,
   type AdminModelSettingValue,
   type CreateAdminModelInput,
   type TestAdminModelConnectionInput,
@@ -60,25 +62,6 @@ import type { Locale, Translations } from "@/core/i18n";
 import { useI18n } from "@/core/i18n/hooks";
 import { useAdminAssets, type AdminCredentialList } from "@/core/shared-assets";
 import { cn } from "@/lib/utils";
-
-const COMMON_SETTING_KEYS = [
-  "base_url",
-  "temperature",
-  "max_tokens",
-  "request_timeout",
-  "max_retries",
-] as const;
-
-export const ADMIN_MODEL_PROVIDER_ADAPTERS = [
-  { value: "openai", credential: true },
-  { value: "anthropic", credential: true },
-  { value: "deepseek", credential: true },
-  { value: "patched_openai", credential: true },
-  { value: "patched_deepseek", credential: true },
-  { value: "vllm", credential: true },
-  { value: "vision_openai_compatible_v1", credential: true },
-  { value: "vision_bridge_fake", credential: false },
-] as const;
 
 type AdminModelTranslations = Translations["adminModelSettings"];
 export type AdminModelFormValidationMessages =
@@ -260,7 +243,6 @@ export function selectAdminModelCatalogItems(
 const MODEL_EDITOR_ERROR_ID = "admin-model-editor-error";
 const MODEL_EDITOR_CREDENTIAL_STATUS_ID =
   "admin-model-editor-credential-status";
-const MODEL_EDITOR_BASE_URL_HINT_ID = "admin-model-base-url-hint";
 const MODEL_EDITOR_ENVIRONMENT_KEY_HINT_ID = "admin-model-environment-key-hint";
 const MODEL_EDITOR_ADVANCED_SETTINGS_HINT_ID =
   "admin-model-advanced-settings-hint";
@@ -323,8 +305,17 @@ function readOptionalNumber(
   return value;
 }
 
-function providerAdapterInfo(adapter: string) {
-  return ADMIN_MODEL_PROVIDER_ADAPTERS.find((item) => item.value === adapter);
+export function findAdminModelProviderAdapterDescriptor(
+  providerAdapters: AdminModelProviderAdapterDescriptor[],
+  adapter: string,
+): AdminModelProviderAdapterDescriptor | undefined {
+  return providerAdapters.find((item) => item.id === adapter);
+}
+
+export function selectAdminModelVisibleSettingFields(
+  descriptor: AdminModelProviderAdapterDescriptor | undefined,
+): AdminModelProviderSettingField[] {
+  return descriptor?.setting_fields.filter((field) => !field.advanced) ?? [];
 }
 
 function providerAdapterLabel(
@@ -342,27 +333,40 @@ function providerAdapterLabel(
       return labels.patchedOpenAI;
     case "patched_deepseek":
       return labels.patchedDeepSeek;
-    case "patched_mimo":
-      return labels.patchedMiMo;
-    case "patched_minimax":
-      return labels.patchedMiniMax;
-    case "patched_stepfun":
-      return labels.patchedStepFun;
-    case "mindie":
-      return "MindIE";
     case "vllm":
       return "vLLM";
-    case "vision_bridge_fake":
-      return "Vision Bridge Fake (test only)";
-    case "vision_openai_compatible_v1":
-      return "Vision Bridge OpenAI-compatible v1";
-    case "claude_code":
-      return "Claude Code CLI";
-    case "codex_cli":
-      return "Codex CLI";
     default:
       return adapter;
   }
+}
+
+export function AdminModelProviderAdapterOptions({
+  providerAdapters,
+  value,
+}: {
+  providerAdapters: AdminModelProviderAdapterDescriptor[];
+  value: string;
+}) {
+  const labels = useI18n().t.adminModelSettings;
+  const selected = findAdminModelProviderAdapterDescriptor(
+    providerAdapters,
+    value,
+  );
+  return (
+    <>
+      {!selected && value ? (
+        <option value={value} disabled>
+          {providerAdapterLabel(value, labels.adapters)} ·{" "}
+          {labels.editor.retiredProviderAdapter}
+        </option>
+      ) : null}
+      {providerAdapters.map((adapter) => (
+        <option key={adapter.id} value={adapter.id}>
+          {providerAdapterLabel(adapter.id, labels.adapters)}
+        </option>
+      ))}
+    </>
+  );
 }
 
 function formatUpdatedAt(value: string, locale: Locale): string {
@@ -374,6 +378,7 @@ function formatUpdatedAt(value: string, locale: Locale): string {
 
 function parseAdvancedSettings(
   value: string,
+  descriptor: AdminModelProviderAdapterDescriptor,
   messages: AdminModelFormValidationMessages,
 ): Record<string, AdminModelSettingValue> {
   let parsed: unknown;
@@ -391,14 +396,57 @@ function parseAdvancedSettings(
       "advanced_settings",
     );
   }
-  const safe = safeAdminModelSettingsSchema.safeParse(parsed);
-  if (!safe.success) {
+  const safe =
+    adminModelSettingsSchemaForProvider(descriptor).safeParse(parsed);
+  const advancedFields = new Set(
+    descriptor.setting_fields
+      .filter((field) => field.advanced)
+      .map((field) => field.name),
+  );
+  if (
+    !safe.success ||
+    Object.keys(parsed as Record<string, unknown>).some(
+      (key) => !advancedFields.has(key),
+    )
+  ) {
     throw new AdminModelEditorFormError(
       messages.advancedJsonUnsafe,
       "advanced_settings",
     );
   }
   return safe.data;
+}
+
+function readProviderSettingFormValue(
+  formData: FormData,
+  field: AdminModelProviderSettingField,
+  messages: AdminModelFormValidationMessages,
+): AdminModelSettingValue | undefined {
+  if (field.input_type === "json") return undefined;
+  const raw = readFormString(formData, field.name);
+  if (raw === "") return undefined;
+  if (field.input_type === "boolean") {
+    if (raw === "true") return true;
+    if (raw === "false") return false;
+    throw new AdminModelEditorFormError(
+      messages.advancedJsonUnsafe,
+      field.name,
+    );
+  }
+  if (field.input_type === "integer" || field.input_type === "number") {
+    return readOptionalNumber(
+      formData,
+      field.name,
+      field.label,
+      messages.invalidNumber,
+      {
+        integer: field.input_type === "integer",
+        ...(field.minimum === null ? {} : { min: field.minimum }),
+        ...(field.maximum === null ? {} : { max: field.maximum }),
+      },
+    );
+  }
+  return raw;
 }
 
 /**
@@ -408,72 +456,64 @@ function parseAdvancedSettings(
  */
 export function parseAdminModelEditorForm(
   formData: FormData,
+  providerDescriptor: AdminModelProviderAdapterDescriptor,
   messages: AdminModelFormValidationMessages = DEFAULT_FORM_VALIDATION_MESSAGES,
 ): CreateAdminModelInput {
+  const providerAdapter = readFormString(formData, "provider_adapter");
+  if (providerAdapter !== providerDescriptor.id) {
+    throw new AdminModelEditorFormError(
+      messages.invalidForm,
+      "provider_adapter",
+    );
+  }
   const settings = parseAdvancedSettings(
     readFormString(formData, "advanced_settings"),
+    providerDescriptor,
     messages,
   );
-  for (const key of COMMON_SETTING_KEYS) delete settings[key];
-
-  const baseUrl = readFormString(formData, "base_url");
-  if (baseUrl !== "") settings.base_url = baseUrl;
-  const temperature = readOptionalNumber(
-    formData,
-    "temperature",
-    messages.temperature,
-    messages.invalidNumber,
-    { min: -2, max: 2 },
-  );
-  if (temperature !== undefined) settings.temperature = temperature;
-  const maxTokens = readOptionalNumber(
-    formData,
-    "max_tokens",
-    messages.maxTokens,
-    messages.invalidNumber,
-    {
-      integer: true,
-      min: 1,
-    },
-  );
-  if (maxTokens !== undefined) settings.max_tokens = maxTokens;
-  const requestTimeout = readOptionalNumber(
-    formData,
-    "request_timeout",
-    messages.requestTimeout,
-    messages.invalidNumber,
-    { min: 0.1 },
-  );
-  if (requestTimeout !== undefined) {
-    settings.request_timeout = requestTimeout;
+  for (const field of selectAdminModelVisibleSettingFields(
+    providerDescriptor,
+  )) {
+    const value = readProviderSettingFormValue(formData, field, messages);
+    if (value !== undefined) settings[field.name] = value;
   }
-  const maxRetries = readOptionalNumber(
-    formData,
-    "max_retries",
-    messages.maxRetries,
-    messages.invalidNumber,
-    {
-      integer: true,
-      min: 0,
-    },
-  );
-  if (maxRetries !== undefined) settings.max_retries = maxRetries;
+  const descriptorSettings =
+    adminModelSettingsSchemaForProvider(providerDescriptor).safeParse(settings);
+  if (!descriptorSettings.success) {
+    throw new AdminModelEditorFormError(
+      messages.advancedJsonUnsafe,
+      "advanced_settings",
+    );
+  }
 
   const credentialId = readFormString(formData, "credential_id");
   const credentialVersionId = readFormString(formData, "credential_version_id");
   const credentialEnvKey = readFormString(formData, "credential_env_key");
+  const credentialFieldCount = [
+    credentialId,
+    credentialVersionId,
+    credentialEnvKey,
+  ].filter(Boolean).length;
+  const credentialBindingPresent = credentialFieldCount === 3;
+  if (
+    (credentialFieldCount !== 0 && !credentialBindingPresent) ||
+    (providerDescriptor.credential_required && !credentialBindingPresent) ||
+    (!providerDescriptor.credential_required && credentialFieldCount !== 0)
+  ) {
+    throw new AdminModelEditorFormError(messages.invalidForm, "credential_id");
+  }
   const result = createAdminModelInputSchema.safeParse({
     display_name: readFormString(formData, "display_name"),
-    provider_adapter: readFormString(formData, "provider_adapter"),
+    provider_adapter: providerAdapter,
     provider_model: readFormString(formData, "provider_model"),
-    settings,
+    settings: descriptorSettings.data,
     supports_thinking: formData.has("supports_thinking"),
     supports_reasoning_effort: formData.has("supports_reasoning_effort"),
     supports_vision: formData.has("supports_vision"),
     status: readFormString(formData, "status"),
     credential_id: credentialId || null,
-    credential_version_id: credentialId ? credentialVersionId || null : null,
-    credential_env_key: credentialId ? credentialEnvKey || null : null,
+    credential_version_id: credentialVersionId || null,
+    credential_env_key: credentialEnvKey || null,
   });
   if (!result.success) {
     const firstPath = result.error.issues[0]?.path[0];
@@ -490,9 +530,14 @@ export function parseAdminModelEditorForm(
 
 export function parseAdminModelConnectionTestForm(
   formData: FormData,
+  providerDescriptor: AdminModelProviderAdapterDescriptor,
   messages: AdminModelFormValidationMessages = DEFAULT_FORM_VALIDATION_MESSAGES,
 ): TestAdminModelConnectionInput {
-  const input = parseAdminModelEditorForm(formData, messages);
+  const input = parseAdminModelEditorForm(
+    formData,
+    providerDescriptor,
+    messages,
+  );
   return {
     provider_adapter: input.provider_adapter,
     provider_model: input.provider_model,
@@ -504,25 +549,31 @@ export function parseAdminModelConnectionTestForm(
   };
 }
 
-function splitProviderSettings(settings: AdminModelItem["settings"]): {
-  common: Record<(typeof COMMON_SETTING_KEYS)[number], string>;
+function splitProviderSettings(
+  settings: AdminModelItem["settings"],
+  providerDescriptor: AdminModelProviderAdapterDescriptor | undefined,
+): {
+  visible: Record<string, string>;
   advanced: string;
 } {
   const remainder: Record<string, AdminModelSettingValue> = { ...settings };
-  const common = Object.fromEntries(
-    COMMON_SETTING_KEYS.map((key) => {
-      const value = remainder[key];
-      delete remainder[key];
+  delete remainder.max_retries;
+  const visible = Object.fromEntries(
+    selectAdminModelVisibleSettingFields(providerDescriptor).map((field) => {
+      const value = remainder[field.name];
+      delete remainder[field.name];
       return [
-        key,
-        typeof value === "string" || typeof value === "number"
+        field.name,
+        typeof value === "string" ||
+        typeof value === "number" ||
+        typeof value === "boolean"
           ? String(value)
           : "",
       ];
     }),
-  ) as Record<(typeof COMMON_SETTING_KEYS)[number], string>;
+  );
   return {
-    common,
+    visible,
     advanced: JSON.stringify(remainder, null, 2),
   };
 }
@@ -566,7 +617,13 @@ function CatalogMetric({
   );
 }
 
-function ModelIdentity({ model }: { model: AdminModelItem }) {
+function ModelIdentity({
+  model,
+  providerSupported,
+}: {
+  model: AdminModelItem;
+  providerSupported: boolean;
+}) {
   const { t } = useI18n();
   const labels = t.adminModelSettings;
   return (
@@ -584,7 +641,7 @@ function ModelIdentity({ model }: { model: AdminModelItem }) {
             {labels.card.defaultModel}
           </Badge>
         ) : null}
-        {!providerAdapterInfo(model.provider_adapter) ? (
+        {!providerSupported ? (
           <Badge variant="outline" className="text-muted-foreground">
             {labels.editor.retiredProviderAdapter}
           </Badge>
@@ -652,6 +709,7 @@ function ModelCapabilities({ model }: { model: AdminModelItem }) {
 
 function ModelActions({
   model,
+  providerSupported,
   pendingAction,
   compact = false,
   idSuffix = "",
@@ -660,6 +718,7 @@ function ModelActions({
   onSetDefault,
 }: {
   model: AdminModelItem;
+  providerSupported: boolean;
   pendingAction: string | null;
   compact?: boolean;
   idSuffix?: string;
@@ -670,7 +729,6 @@ function ModelActions({
   const { t } = useI18n();
   const labels = t.adminModelSettings;
   const pending = pendingAction !== null;
-  const providerSupported = providerAdapterInfo(model.provider_adapter) != null;
   const toggleUnavailable =
     model.is_default || (!providerSupported && model.status !== "active");
   const defaultUnavailable =
@@ -773,12 +831,14 @@ function ModelActions({
 
 function ModelCatalog({
   models,
+  providerAdapters,
   pendingAction,
   onEdit,
   onToggleStatus,
   onSetDefault,
 }: {
   models: AdminModelItem[];
+  providerAdapters: AdminModelProviderAdapterDescriptor[];
   pendingAction: string | null;
   onEdit: (model: AdminModelItem) => void;
   onToggleStatus: (model: AdminModelItem) => void;
@@ -830,6 +890,11 @@ function ModelCatalog({
           </thead>
           <tbody className="divide-border/70 divide-y">
             {models.map((model) => {
+              const providerSupported =
+                findAdminModelProviderAdapterDescriptor(
+                  providerAdapters,
+                  model.provider_adapter,
+                ) !== undefined;
               return (
                 <tr
                   key={model.id}
@@ -837,7 +902,10 @@ function ModelCatalog({
                   className="hover:bg-muted/20 align-middle transition-colors"
                 >
                   <td className="px-4 py-3.5">
-                    <ModelIdentity model={model} />
+                    <ModelIdentity
+                      model={model}
+                      providerSupported={providerSupported}
+                    />
                   </td>
                   <td className="px-3 py-3.5">
                     <p
@@ -877,6 +945,7 @@ function ModelCatalog({
                   <td className="px-1.5 py-3.5">
                     <ModelActions
                       model={model}
+                      providerSupported={providerSupported}
                       pendingAction={pendingAction}
                       compact
                       onEdit={onEdit}
@@ -897,13 +966,21 @@ function ModelCatalog({
         className="border-border/70 bg-card divide-border/70 divide-y overflow-hidden rounded-xl border lg:hidden"
       >
         {models.map((model) => {
+          const providerSupported =
+            findAdminModelProviderAdapterDescriptor(
+              providerAdapters,
+              model.provider_adapter,
+            ) !== undefined;
           return (
             <article
               key={model.id}
               data-testid={`admin-model-mobile-${model.id}`}
               className="space-y-3 p-4"
             >
-              <ModelIdentity model={model} />
+              <ModelIdentity
+                model={model}
+                providerSupported={providerSupported}
+              />
               <p className="text-muted-foreground text-[0.6875rem]">
                 {labels.card.updatedAt(
                   formatUpdatedAt(model.updated_at, locale),
@@ -942,6 +1019,7 @@ function ModelCatalog({
               </div>
               <ModelActions
                 model={model}
+                providerSupported={providerSupported}
                 pendingAction={pendingAction}
                 idSuffix="-mobile"
                 onEdit={onEdit}
@@ -1012,7 +1090,14 @@ export function AdminModelCatalogStateView({
             </h1>
           </div>
         </div>
-        <Button type="button" onClick={onCreate}>
+        <Button
+          type="button"
+          disabled={
+            state.status !== "ready" ||
+            state.data.provider_adapters.length === 0
+          }
+          onClick={onCreate}
+        >
           <PlusIcon aria-hidden />
           {labels.header.create}
         </Button>
@@ -1184,6 +1269,7 @@ export function AdminModelCatalogStateView({
           {visibleModels.length > 0 ? (
             <ModelCatalog
               models={visibleModels}
+              providerAdapters={state.data.provider_adapters}
               pendingAction={pendingAction}
               onEdit={onEdit}
               onToggleStatus={onToggleStatus}
@@ -1242,9 +1328,82 @@ function LabeledField({
   );
 }
 
+export function AdminModelProviderSettingInput({
+  field,
+  value,
+  invalidFieldId,
+}: {
+  field: AdminModelProviderSettingField;
+  value: string;
+  invalidFieldId: string | null;
+}) {
+  const errorAttributes = adminModelEditorFieldErrorAttributes(
+    field.name,
+    invalidFieldId,
+  );
+  if (field.input_type === "boolean") {
+    return (
+      <LabeledField label={field.label} htmlFor={field.name}>
+        <select
+          id={field.name}
+          name={field.name}
+          {...errorAttributes}
+          defaultValue={value}
+          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+        >
+          <option value="">Default</option>
+          <option value="true">True</option>
+          <option value="false">False</option>
+        </select>
+      </LabeledField>
+    );
+  }
+  if (field.input_type === "enum") {
+    return (
+      <LabeledField label={field.label} htmlFor={field.name}>
+        <select
+          id={field.name}
+          name={field.name}
+          {...errorAttributes}
+          defaultValue={value}
+          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
+        >
+          <option value="">Default</option>
+          {field.options.map((option) => (
+            <option key={option} value={option}>
+              {option}
+            </option>
+          ))}
+        </select>
+      </LabeledField>
+    );
+  }
+  const numeric =
+    field.input_type === "integer" || field.input_type === "number";
+  return (
+    <LabeledField label={field.label} htmlFor={field.name}>
+      <Input
+        id={field.name}
+        name={field.name}
+        {...errorAttributes}
+        type={numeric ? "number" : field.input_type === "url" ? "url" : "text"}
+        {...(numeric && field.minimum !== null ? { min: field.minimum } : {})}
+        {...(numeric && field.maximum !== null ? { max: field.maximum } : {})}
+        {...(numeric
+          ? {
+              step: field.step ?? (field.input_type === "integer" ? 1 : "any"),
+            }
+          : {})}
+        defaultValue={value}
+      />
+    </LabeledField>
+  );
+}
+
 export function ModelEditorDialog({
   open,
   model,
+  providerAdapters,
   credentials,
   credentialStatus,
   credentialsRefreshing,
@@ -1257,6 +1416,7 @@ export function ModelEditorDialog({
 }: {
   open: boolean;
   model: AdminModelItem | null;
+  providerAdapters: AdminModelProviderAdapterDescriptor[];
   credentials: AdminModelCredentialOption[];
   credentialStatus: AdminModelCredentialLoadStatus;
   credentialsRefreshing: boolean;
@@ -1271,9 +1431,16 @@ export function ModelEditorDialog({
 }) {
   const { t } = useI18n();
   const labels = t.adminModelSettings;
+  const initialProviderAdapter =
+    model?.provider_adapter ?? providerAdapters[0]?.id ?? "";
+  const initialProviderDescriptor = findAdminModelProviderAdapterDescriptor(
+    providerAdapters,
+    initialProviderAdapter,
+  );
   const providerSettings = useMemo(
-    () => splitProviderSettings(model?.settings ?? {}),
-    [model],
+    () =>
+      splitProviderSettings(model?.settings ?? {}, initialProviderDescriptor),
+    [initialProviderDescriptor, model],
   );
   const initialCredentialState = buildAdminModelCredentialEditorState(
     model,
@@ -1297,14 +1464,20 @@ export function ModelEditorDialog({
     model?.credential_env_key ?? "OPENAI_API_KEY",
   );
   const [providerAdapter, setProviderAdapter] = useState<string>(
-    model?.provider_adapter ?? "openai",
+    initialProviderAdapter,
   );
-  const selectedProviderAdapter = providerAdapterInfo(providerAdapter);
+  const selectedProviderAdapter = findAdminModelProviderAdapterDescriptor(
+    providerAdapters,
+    providerAdapter,
+  );
   const providerAdapterSupported = selectedProviderAdapter != null;
   const providerAcceptsCredential =
-    selectedProviderAdapter?.credential ??
+    selectedProviderAdapter?.credential_required ??
     (model?.provider_adapter === providerAdapter &&
       model.credential_id !== null);
+  const visibleSettingFields = selectAdminModelVisibleSettingFields(
+    selectedProviderAdapter,
+  );
   const formRef = useRef<HTMLFormElement>(null);
   const errorRef = useRef<HTMLParagraphElement>(null);
   const credentialChoices = useMemo(
@@ -1365,7 +1538,10 @@ export function ModelEditorDialog({
 
   function changeProviderAdapter(nextAdapter: string): void {
     setProviderAdapter(nextAdapter);
-    if (!providerAdapterInfo(nextAdapter)?.credential) {
+    if (
+      !findAdminModelProviderAdapterDescriptor(providerAdapters, nextAdapter)
+        ?.credential_required
+    ) {
       setCredentialId("");
       setCredentialVersionId("");
     }
@@ -1373,13 +1549,14 @@ export function ModelEditorDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
-    if (!editorCanSubmit) return;
+    if (!editorCanSubmit || !selectedProviderAdapter) return;
     setFormError(null);
     setInvalidFieldId(null);
     setSubmitting(true);
     try {
       const input = parseAdminModelEditorForm(
         new FormData(event.currentTarget),
+        selectedProviderAdapter,
         labels.validation,
       );
       if (await onSubmit(input)) {
@@ -1403,7 +1580,8 @@ export function ModelEditorDialog({
   }
 
   async function testConnection(): Promise<void> {
-    if (!formRef.current || !editorCanSubmit) return;
+    if (!formRef.current || !editorCanSubmit || !selectedProviderAdapter)
+      return;
     setFormError(null);
     setInvalidFieldId(null);
     setConnectionStatus(null);
@@ -1411,6 +1589,7 @@ export function ModelEditorDialog({
     try {
       const input = parseAdminModelConnectionTestForm(
         new FormData(formRef.current),
+        selectedProviderAdapter,
         labels.validation,
       );
       const result = await onTestConnection(input);
@@ -1524,20 +1703,10 @@ export function ModelEditorDialog({
                       }
                       className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
                     >
-                      {!providerAdapterSupported ? (
-                        <option value={providerAdapter} disabled>
-                          {providerAdapterLabel(
-                            providerAdapter,
-                            labels.adapters,
-                          )}{" "}
-                          · {labels.editor.retiredProviderAdapter}
-                        </option>
-                      ) : null}
-                      {ADMIN_MODEL_PROVIDER_ADAPTERS.map((adapter) => (
-                        <option key={adapter.value} value={adapter.value}>
-                          {providerAdapterLabel(adapter.value, labels.adapters)}
-                        </option>
-                      ))}
+                      <AdminModelProviderAdapterOptions
+                        providerAdapters={providerAdapters}
+                        value={providerAdapter}
+                      />
                     </select>
                   </LabeledField>
                   <LabeledField
@@ -1554,26 +1723,6 @@ export function ModelEditorDialog({
                       required
                       defaultValue={model?.provider_model ?? ""}
                       placeholder="gpt-5.2"
-                    />
-                  </LabeledField>
-                  <LabeledField
-                    label={labels.editor.baseUrl}
-                    htmlFor="base_url"
-                    hint={labels.editor.baseUrlHint}
-                    hintId={MODEL_EDITOR_BASE_URL_HINT_ID}
-                    className="sm:col-span-2"
-                  >
-                    <Input
-                      id="base_url"
-                      name="base_url"
-                      {...adminModelEditorFieldErrorAttributes(
-                        "base_url",
-                        invalidFieldId,
-                        MODEL_EDITOR_BASE_URL_HINT_ID,
-                      )}
-                      type="url"
-                      defaultValue={providerSettings.common.base_url}
-                      placeholder="https://api.example.com/v1"
                     />
                   </LabeledField>
                   <LabeledField label={labels.editor.status} htmlFor="status">
@@ -1850,84 +1999,25 @@ export function ModelEditorDialog({
                     </label>
                   ))}
                 </div>
-                <div className="border-border/70 space-y-4 border-t pt-5">
-                  <div>
-                    <p className="text-sm font-medium">
-                      {labels.editor.commonProviderSettings}
-                    </p>
+                {visibleSettingFields.length > 0 ? (
+                  <div className="border-border/70 space-y-4 border-t pt-5">
+                    <div>
+                      <p className="text-sm font-medium">
+                        {labels.editor.commonProviderSettings}
+                      </p>
+                    </div>
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      {visibleSettingFields.map((field) => (
+                        <AdminModelProviderSettingInput
+                          key={field.name}
+                          field={field}
+                          value={providerSettings.visible[field.name] ?? ""}
+                          invalidFieldId={invalidFieldId}
+                        />
+                      ))}
+                    </div>
                   </div>
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <LabeledField
-                      label={labels.editor.temperature}
-                      htmlFor="temperature"
-                    >
-                      <Input
-                        id="temperature"
-                        name="temperature"
-                        {...adminModelEditorFieldErrorAttributes(
-                          "temperature",
-                          invalidFieldId,
-                        )}
-                        type="number"
-                        step="0.01"
-                        min="-2"
-                        max="2"
-                        defaultValue={providerSettings.common.temperature}
-                      />
-                    </LabeledField>
-                    <LabeledField
-                      label={labels.editor.maxTokens}
-                      htmlFor="max_tokens"
-                    >
-                      <Input
-                        id="max_tokens"
-                        name="max_tokens"
-                        {...adminModelEditorFieldErrorAttributes(
-                          "max_tokens",
-                          invalidFieldId,
-                        )}
-                        type="number"
-                        min="1"
-                        step="1"
-                        defaultValue={providerSettings.common.max_tokens}
-                      />
-                    </LabeledField>
-                    <LabeledField
-                      label={labels.editor.requestTimeout}
-                      htmlFor="request_timeout"
-                    >
-                      <Input
-                        id="request_timeout"
-                        name="request_timeout"
-                        {...adminModelEditorFieldErrorAttributes(
-                          "request_timeout",
-                          invalidFieldId,
-                        )}
-                        type="number"
-                        min="0.1"
-                        step="0.1"
-                        defaultValue={providerSettings.common.request_timeout}
-                      />
-                    </LabeledField>
-                    <LabeledField
-                      label={labels.editor.maxRetries}
-                      htmlFor="max_retries"
-                    >
-                      <Input
-                        id="max_retries"
-                        name="max_retries"
-                        {...adminModelEditorFieldErrorAttributes(
-                          "max_retries",
-                          invalidFieldId,
-                        )}
-                        type="number"
-                        min="0"
-                        step="1"
-                        defaultValue={providerSettings.common.max_retries}
-                      />
-                    </LabeledField>
-                  </div>
-                </div>
+                ) : null}
               </fieldset>
 
               <details
@@ -2170,6 +2260,9 @@ function AuthorizedAdminModelSettingsPage({
           key={editor.model?.id ?? "create"}
           open={editor.open}
           model={editor.model}
+          providerAdapters={
+            state.status === "ready" ? state.data.provider_adapters : []
+          }
           credentials={credentials}
           credentialStatus={credentialStatus}
           credentialsRefreshing={credentialsQuery.isFetching}

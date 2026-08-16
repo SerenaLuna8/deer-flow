@@ -7,12 +7,16 @@ import {
   isSystemSettingsSaveDisabled,
   MemoryDocumentSectionsEditor,
   moveMemoryDocumentSection,
+  selectVisionInputModels,
 } from "@/components/admin/settings/admin-system-settings-page";
 import type { SystemSettingsCatalog } from "@/core/admin-settings/system/types";
 import { I18nProvider } from "@/core/i18n/context";
+import type { Model } from "@/core/models/types";
 
 const TIMESTAMP = "2026-08-09T00:00:00Z";
-const VISION_MODEL_ID = "00000000-0000-4000-8000-000000000206";
+const OPENAI_VISION_MODEL_ID = "00000000-0000-4000-8000-000000000205";
+const ANTHROPIC_VISION_MODEL_ID = "00000000-0000-4000-8000-000000000206";
+const TEXT_ONLY_MODEL_ID = "00000000-0000-4000-8000-000000000208";
 const MISSING_MODEL_ID = "00000000-0000-4000-8000-000000000207";
 
 function renderChinese(node: React.ReactNode): string {
@@ -229,24 +233,50 @@ describe("admin Memory document settings", () => {
     );
   });
 
-  test("renders Vision Bridge as model selection without an enable or grant switch", () => {
+  test("offers every vision-capable model and ignores the legacy Bridge flag", () => {
     const data = catalog();
     data.sections.agent_runtime.value.vision_bridge.model_name =
-      VISION_MODEL_ID;
+      OPENAI_VISION_MODEL_ID;
+    const activeModels: Model[] = [
+      {
+        name: OPENAI_VISION_MODEL_ID,
+        model: OPENAI_VISION_MODEL_ID,
+        display_name: "OpenAI vision model",
+        supports_thinking: false,
+        supports_reasoning_effort: false,
+        supports_vision: true,
+        supports_vision_bridge: false,
+        is_default: false,
+      },
+      {
+        name: ANTHROPIC_VISION_MODEL_ID,
+        model: ANTHROPIC_VISION_MODEL_ID,
+        display_name: "Anthropic vision model",
+        supports_thinking: false,
+        supports_reasoning_effort: false,
+        supports_vision: true,
+        supports_vision_bridge: true,
+        is_default: false,
+      },
+      {
+        name: TEXT_ONLY_MODEL_ID,
+        model: TEXT_ONLY_MODEL_ID,
+        display_name: "Legacy-qualified text-only model",
+        supports_thinking: false,
+        supports_reasoning_effort: false,
+        supports_vision: false,
+        supports_vision_bridge: true,
+        is_default: false,
+      },
+    ];
+
+    expect(
+      selectVisionInputModels(activeModels).map((model) => model.name),
+    ).toEqual([OPENAI_VISION_MODEL_ID, ANTHROPIC_VISION_MODEL_ID]);
+
     const html = renderChinese(
       <AdminSystemSettingsStateView
-        activeModels={[
-          {
-            name: VISION_MODEL_ID,
-            model: VISION_MODEL_ID,
-            display_name: "Small Vision Model",
-            supports_thinking: false,
-            supports_reasoning_effort: false,
-            supports_vision: true,
-            supports_vision_bridge: true,
-            is_default: false,
-          },
-        ]}
+        activeModels={activeModels}
         lastResults={{}}
         modelsStatus="ready"
         onRetry={rs.fn()}
@@ -259,9 +289,23 @@ describe("admin Memory document settings", () => {
     );
 
     expect(html).toContain('data-settings-destination="vision-bridge"');
-    expect(html).toContain('name="agent_runtime.vision_bridge.model_name"');
-    expect(html).toContain(`value="${VISION_MODEL_ID}" selected=""`);
-    expect(html).toContain(">关闭</option>");
+    const visionModelSelect =
+      /<select name="agent_runtime\.vision_bridge\.model_name"[\s\S]*?<\/select>/u.exec(
+        html,
+      )?.[0] ?? "";
+    expect(visionModelSelect).toContain(
+      'name="agent_runtime.vision_bridge.model_name"',
+    );
+    expect(visionModelSelect).toContain(
+      `value="${OPENAI_VISION_MODEL_ID}" selected=""`,
+    );
+    expect(visionModelSelect).toContain("OpenAI vision model");
+    expect(visionModelSelect).toContain("Anthropic vision model");
+    expect(visionModelSelect).not.toContain("Legacy-qualified text-only model");
+    expect(html).toContain("视觉模型");
+    expect(html).toContain("支持视觉输入");
+    expect(html).not.toContain("图片识别桥接");
+    expect(visionModelSelect).toContain(">关闭</option>");
     expect(html).not.toContain("egress_grant");
     expect(html).not.toContain("agent_runtime.vision_bridge.enabled");
   });

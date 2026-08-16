@@ -1,9 +1,13 @@
 # 方案：文本模型内部识图桥接（第三方小型多模态 API）
 
-> 状态：v1 已实现；本文同时定义当前运行时契约、验收边界和后续生产门禁。
-> 范围：Gateway Run 准入、Worker 模型物化、harness 工具与图片权限、第三方视觉 API、结果治理和测试。
+> 状态：历史归档。本文冻结旧 v1 专用协议方案；下文所有“当前”“已实现”和
+> “当前 checkout”只描述归档时点，不代表现有代码或运行时契约。
+> 范围：旧版 Gateway Run 准入、Worker 模型物化、harness 工具与图片权限、
+> 第三方视觉 API、结果治理和测试。
 > 核心假设：“内部小模型”指受治理的系统模型 UUID 和调用链，实际推理由第三方
 > HTTP API 承载；本期不托管本地推理进程。
+> 当前唯一权威方案和实施状态见
+> [VISION_BRIDGE_REFACTOR_PLAN.md](VISION_BRIDGE_REFACTOR_PLAN.md)。
 > 关联文档：[ARCHITECTURE.md](ARCHITECTURE.md)、
 > [CONFIGURATION.md](CONFIGURATION.md)、[FILE_UPLOAD.md](FILE_UPLOAD.md)、
 > [GUARDRAILS.md](GUARDRAILS.md)。

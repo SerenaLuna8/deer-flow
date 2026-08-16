@@ -47,7 +47,7 @@ from deerflow.assets.catalog import (
 from deerflow.config.agents_config import AGENT_NAME_PATTERN
 from deerflow.config.app_config import get_app_config, is_trace_correlation_enabled, reload_app_config
 from deerflow.config.paths import get_paths
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.runtime.checkpoint_mode import (
     ensure_checkpoint_mode_compatible,
     freeze_checkpoint_channel_mode,
@@ -302,7 +302,11 @@ class DeerFlowClient:
             # callbacks at the graph invocation root so a single embedded run
             # produces one trace with correct session_id / user_id propagation.
             # Attaching them again on the model would emit duplicate spans.
-            "model": create_chat_model(name=model_name, thinking_enabled=thinking_enabled, attach_tracing=False),
+            "model": ModelRuntime(app_config=self._app_config).build_chat_model(
+                profile=ModelRuntimeProfile.AGENT_GRAPH,
+                model_name=model_name,
+                thinking_enabled=thinking_enabled,
+            ),
             "tools": final_tools,
             "middleware": normalize_middleware_state_schemas(
                 build_middlewares(

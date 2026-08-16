@@ -16,26 +16,27 @@
 
 ## 配置与集成
 
-| 文档                                                     | 内容                                        |
-| -------------------------------------------------------- | ------------------------------------------- |
-| [CONFIGURATION.md](./CONFIGURATION.md)                   | `config.yaml` v1、环境变量、系统策略和 Sandbox |
-| [SSO.md](./SSO.md)                                       | OIDC SSO 配置                               |
-| [IM_CHANNEL_CONNECTIONS.md](./IM_CHANNEL_CONNECTIONS.md) | 项目 Channel Connection                     |
-| [MCP_SERVER.md](./MCP_SERVER.md)                         | MCP、Credential 和 Run snapshot             |
-| [APPLE_CONTAINER.md](./APPLE_CONTAINER.md)               | Apple Container Sandbox                     |
-| [TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) | 文本模型识图 Bridge 的固定协议、真实 API 安全边界和生产验收门禁 |
+| 文档                                                                   | 内容                                                  |
+| ---------------------------------------------------------------------- | ----------------------------------------------------- |
+| [CONFIGURATION.md](./CONFIGURATION.md)                                 | `config.yaml` v1、环境变量、系统策略和 Sandbox        |
+| [SSO.md](./SSO.md)                                                     | OIDC SSO 配置                                         |
+| [IM_CHANNEL_CONNECTIONS.md](./IM_CHANNEL_CONNECTIONS.md)               | 项目 Channel Connection                               |
+| [MCP_SERVER.md](./MCP_SERVER.md)                                       | MCP、Credential 和 Run snapshot                       |
+| [APPLE_CONTAINER.md](./APPLE_CONTAINER.md)                             | Apple Container Sandbox                               |
+| [VISION_BRIDGE_REFACTOR_PLAN.md](./VISION_BRIDGE_REFACTOR_PLAN.md)     | 当前图片识别、统一 `ModelRuntime`、模型选择与验收边界 |
+| [TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md) | 历史归档：旧版 Bridge 专用 Provider 协议方案          |
 
 ## Agent harness
 
-| 文档                                                   | 内容                          |
-| ------------------------------------------------------ | ----------------------------- |
-| [GUARDRAILS.md](./GUARDRAILS.md)                       | Tool call 前置策略与 provider |
+| 文档                                                       | 内容                                            |
+| ---------------------------------------------------------- | ----------------------------------------------- |
+| [GUARDRAILS.md](./GUARDRAILS.md)                           | Tool call 前置策略与 provider                   |
 | [HOST_EXECUTION_APPROVAL.md](./HOST_EXECUTION_APPROVAL.md) | Local Provider 本机命令单次审批、恢复与安全边界 |
-| [FILE_UPLOAD.md](./FILE_UPLOAD.md)                     | 文件上传和转换                |
-| [AUTO_TITLE_GENERATION.md](./AUTO_TITLE_GENERATION.md) | Thread title 生成             |
-| [plan_mode_usage.md](./plan_mode_usage.md)             | Plan Mode 与 Todo middleware  |
-| [summarization.md](./summarization.md)                 | 上下文压缩和 Memory 输入      |
-| [TUI.md](./TUI.md)                                     | 本地 Terminal UI              |
+| [FILE_UPLOAD.md](./FILE_UPLOAD.md)                         | 文件上传和转换                                  |
+| [AUTO_TITLE_GENERATION.md](./AUTO_TITLE_GENERATION.md)     | Thread title 生成                               |
+| [plan_mode_usage.md](./plan_mode_usage.md)                 | Plan Mode 与 Todo middleware                    |
+| [summarization.md](./summarization.md)                     | 上下文压缩和 Memory 输入                        |
+| [TUI.md](./TUI.md)                                         | 本地 Terminal UI                                |
 
 ## 诊断与性能
 

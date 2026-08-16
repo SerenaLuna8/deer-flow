@@ -167,7 +167,6 @@ def _deepseek_model_command(
             settings={
                 "base_url": "https://api.deepseek.com",
                 "request_timeout": 600.0,
-                "max_retries": 2,
                 "max_tokens": 51_200,
                 "temperature": 0.7,
                 "reasoning_effort": "high",
@@ -210,7 +209,6 @@ def _opencode_model_command() -> CreateSystemModel:
                 # the supplied /go/v1/responses endpoint.
                 "base_url": "https://opencode.ai/zen/go/v1",
                 "request_timeout": 600.0,
-                "max_retries": 2,
                 "use_responses_api": True,
                 "output_version": "responses/v1",
             },

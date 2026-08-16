@@ -76,8 +76,24 @@ import {
   resolveRunFailureRunId,
 } from "./run-history";
 import {
+  admitRunAndNotify,
   buildThreadSubmitCheckpointOptions,
   buildThreadSubmitMessages,
+  createMessageSendAttempt,
+  createRunAdmissionLatch,
+  createUploadedAttachmentRefCache,
+  forgetUploadedAttachmentRefs,
+  isCurrentMessageSendAttempt,
+  isCurrentThreadCallback,
+  monitorRunAdmissionLifecycle,
+  planAttachmentUploadRetry,
+  rememberUploadedAttachmentRef,
+  retainUploadedAttachmentRefs,
+  shouldIgnoreMetadataLessStreamError,
+  shouldIgnoreAttributedThreadCallback,
+  staleMessageSendError,
+  type MessageSendAttempt,
+  type RunAdmissionLatch,
   type SendMessageOptions,
   uploadedFileInfoToMessage,
 } from "./send-message";
@@ -117,6 +133,15 @@ export type ThreadStreamOptions = {
   onStart?: (threadId: string, runId: string) => void;
   onFinish?: (state: AgentThreadState) => void;
   onToolEnd?: (event: ToolEndEvent) => void;
+};
+
+type PendingMessageAdmission = {
+  threadId: string;
+  attempt: MessageSendAttempt;
+  latch: RunAdmissionLatch;
+  optimisticMessages: Message[];
+  uploadedClientIds: Array<string | undefined>;
+  onSent?: () => void;
 };
 
 type RegeneratePrepareResponse = {
@@ -305,6 +330,12 @@ export function useThreadStream({
   const startedRef = useRef(false);
   const pendingUsageBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const preparedReplayAttemptRef = useRef<PreparedReplayAttempt | null>(null);
+  const messageSendGenerationRef = useRef(0);
+  const activeMessageSendRef = useRef<MessageSendAttempt | null>(null);
+  const uploadedAttachmentRefsRef = useRef(createUploadedAttachmentRefCache());
+  const pendingMessageAdmissionRef = useRef<PendingMessageAdmission | null>(
+    null,
+  );
   const attachedContinuationRunIdsRef = useRef<Set<string>>(new Set());
   const [ignoredReplayHistoryError, setIgnoredReplayHistoryError] = useState<{
     error: unknown;
@@ -315,6 +346,13 @@ export function useThreadStream({
     onFinish,
     onToolEnd,
   });
+  const streamOwnerMountedRef = useRef(false);
+  useEffect(() => {
+    streamOwnerMountedRef.current = true;
+    return () => {
+      streamOwnerMountedRef.current = false;
+    };
+  }, []);
 
   const {
     messages: history,
@@ -387,7 +425,11 @@ export function useThreadStream({
       return currentLiveMessagesThreadId;
     });
     if (!startedRef.current) {
-      listeners.current.onStart?.(_threadId, _runId);
+      try {
+        listeners.current.onStart?.(_threadId, _runId);
+      } catch {
+        // A presentation observer cannot veto a server-admitted Run.
+      }
       startedRef.current = true;
     }
     setOnStreamThreadId(_threadId);
@@ -432,6 +474,15 @@ export function useThreadStream({
     fetchStateHistory: { limit: 1 },
     throttle: true,
     onCreated(meta) {
+      if (!streamOwnerMountedRef.current) return;
+      // A submit started for a previously viewed thread may finish after the
+      // hook has switched. It must not bind that old stream back into the new
+      // projection or notify the new composer.
+      if (
+        !isCurrentThreadCallback(meta.thread_id, currentViewThreadIdRef.current)
+      ) {
+        return;
+      }
       const replayAttempt = preparedReplayAttemptRef.current;
       if (
         replayAttempt?.status === "submitting" &&
@@ -441,6 +492,31 @@ export function useThreadStream({
       }
       setIgnoredReplayHistoryError(null);
       handleStreamStart(meta.thread_id, meta.run_id);
+      const pendingAdmission = pendingMessageAdmissionRef.current;
+      if (
+        pendingAdmission?.threadId === meta.thread_id &&
+        pendingAdmission.attempt === activeMessageSendRef.current &&
+        pendingAdmission.latch.isPending()
+      ) {
+        pendingMessageAdmissionRef.current = null;
+        forgetUploadedAttachmentRefs(
+          uploadedAttachmentRefsRef.current,
+          meta.thread_id,
+          pendingAdmission.uploadedClientIds,
+        );
+        setLiveMessagesThreadId(meta.thread_id);
+        if (pendingAdmission.optimisticMessages.length > 0) {
+          setOptimisticThreadId(meta.thread_id);
+          setOptimisticMessages(pendingAdmission.optimisticMessages);
+        }
+        // `onCreated` is the server admission boundary. Resolve the composer
+        // in this same React batch so the accepted user turn replaces, rather
+        // than duplicates, its recoverable draft and attachments.
+        setIsUploading(false);
+        admitRunAndNotify(pendingAdmission.latch, pendingAdmission.onSent, () =>
+          listeners.current.onSend?.(meta.thread_id),
+        );
+      }
       const now = new Date().toISOString();
       const runQueryKey = scopedThreadQueryKey(
         privateWork.scope,
@@ -507,6 +583,7 @@ export function useThreadStream({
       }
     },
     onLangChainEvent(event) {
+      if (!streamOwnerMountedRef.current) return;
       if (event.event === "on_tool_end") {
         listeners.current.onToolEnd?.({
           name: event.name,
@@ -515,6 +592,7 @@ export function useThreadStream({
       }
     },
     onUpdateEvent(data) {
+      if (!streamOwnerMountedRef.current) return;
       const _messages = getSummarizationMiddlewareMessages(data);
       if (_messages && _messages.length >= 2) {
         for (const m of _messages) {
@@ -603,6 +681,7 @@ export function useThreadStream({
       }
     },
     onCustomEvent(event: unknown, callbackOptions) {
+      if (!streamOwnerMountedRef.current) return;
       if (!isRootStreamCallback(callbackOptions)) return;
 
       const terminalUpdate = parseSubtaskTerminalEvent(event);
@@ -662,7 +741,29 @@ export function useThreadStream({
       }
     },
     onError(error, callbackOptions) {
+      if (!streamOwnerMountedRef.current) return;
       const replayAttempt = preparedReplayAttemptRef.current;
+      // SDK history refresh failures are metadata-less, including late errors
+      // from an old A view after the hook has switched to B. Without an
+      // explicit prepared-replay attribution window they cannot safely mutate
+      // or toast any projection. Message admission failures are authoritative
+      // through the submit lifecycle monitor below.
+      if (
+        shouldIgnoreMetadataLessStreamError(
+          callbackOptions?.thread_id,
+          replayAttempt?.status === "submitting",
+        )
+      ) {
+        return;
+      }
+      if (
+        shouldIgnoreAttributedThreadCallback(
+          callbackOptions?.thread_id,
+          currentViewThreadIdRef.current,
+        )
+      ) {
+        return;
+      }
       const decision =
         replayAttempt?.status === "submitting"
           ? classifyPreparedReplaySdkError({
@@ -720,6 +821,15 @@ export function useThreadStream({
       );
     },
     onFinish(state, callbackOptions) {
+      if (!streamOwnerMountedRef.current) return;
+      if (
+        shouldIgnoreAttributedThreadCallback(
+          callbackOptions?.thread_id,
+          currentViewThreadIdRef.current,
+        )
+      ) {
+        return;
+      }
       const replayAttempt = preparedReplayAttemptRef.current;
       if (
         replayAttempt?.status === "submitting" &&
@@ -904,6 +1014,16 @@ export function useThreadStream({
   // Reset thread-local pending UI state when switching between threads so
   // optimistic messages and in-flight guards do not leak across chat views.
   useEffect(() => {
+    messageSendGenerationRef.current += 1;
+    activeMessageSendRef.current?.abortController.abort();
+    activeMessageSendRef.current = null;
+    const pendingAdmission = pendingMessageAdmissionRef.current;
+    if (pendingAdmission?.latch.isPending()) {
+      pendingMessageAdmissionRef.current = null;
+      pendingAdmission.latch.reject(
+        new Error("The active thread changed before the Run was admitted."),
+      );
+    }
     startedRef.current = false;
     sendInFlightRef.current = false;
     messagesRef.current = [];
@@ -920,8 +1040,24 @@ export function useThreadStream({
     setIgnoredReplayHistoryError(null);
     setPendingSupersededRunIds(new Set());
     setPendingSupersededMessageIds(new Set());
+    setIsUploading(false);
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
+    const effectThreadId = threadId ?? null;
+    return () => {
+      messageSendGenerationRef.current += 1;
+      const activeAttempt = activeMessageSendRef.current;
+      if (activeAttempt?.threadId === effectThreadId) {
+        activeAttempt.abortController.abort();
+        activeMessageSendRef.current = null;
+        sendInFlightRef.current = false;
+      }
+      const pending = pendingMessageAdmissionRef.current;
+      if (pending?.threadId === effectThreadId) {
+        pendingMessageAdmissionRef.current = null;
+        pending.latch.reject(staleMessageSendError());
+      }
+    };
   }, [threadId]);
 
   // Release archive-buffer entries once the canonical history state has absorbed
@@ -1006,84 +1142,52 @@ export function useThreadStream({
       options?: SendMessageOptions,
     ) => {
       if (sendInFlightRef.current) {
-        return;
+        throw new Error("A message submission is already in progress.");
+      }
+      const attempt = createMessageSendAttempt(
+        messageSendGenerationRef.current + 1,
+        threadId,
+      );
+      messageSendGenerationRef.current = attempt.generation;
+      if (threadId !== currentViewThreadIdRef.current) {
+        attempt.abortController.abort();
+        throw staleMessageSendError();
       }
       sendInFlightRef.current = true;
+      activeMessageSendRef.current = attempt;
 
       const text = message.text.trim();
       const humanMessageId = `human-${crypto.randomUUID()}`;
-
-      // Capture the current human message count before showing optimistic
-      // messages so we can wait for the server's copy of the user input.
-      prevHumanMsgCountRef.current = humanMessageCount;
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        persistedMessages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
-      currentRunBaselineMessageIdsRef.current = new Set(
-        persistedMessages
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
-      runBaselinePreparedRef.current = true;
-
-      // Build optimistic files list with uploading status
-      const optimisticFiles: FileInMessage[] = (message.files ?? []).map(
-        (f) => ({
-          filename: f.filename ?? "",
-          size: 0,
-          status: "uploading" as const,
-        }),
-      );
-
-      const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
-      const optimisticAdditionalKwargs = {
-        ...options?.additionalKwargs,
-        ...(optimisticFiles.length > 0 ? { files: optimisticFiles } : {}),
-      };
-
-      const newOptimistic: Message[] = [];
-      if (!hideFromUI) {
-        newOptimistic.push({
-          type: "human",
-          id: humanMessageId,
-          content: text ? [{ type: "text", text }] : "",
-          additional_kwargs: optimisticAdditionalKwargs,
-        });
-      }
-
-      if (optimisticFiles.length > 0 && !hideFromUI) {
-        // Mock AI message while files are being uploaded
-        newOptimistic.push({
-          type: "ai",
-          id: `opt-ai-${Date.now()}`,
-          content: t.uploads.uploadingFiles,
-          additional_kwargs: { element: "task" },
-        });
-      }
-      setOptimisticThreadId(threadId);
-      setLiveMessagesThreadId(threadId);
-      setOptimisticMessages(newOptimistic);
-
-      listeners.current.onSend?.(threadId);
-
       let uploadedFileInfo: UploadedFileInfo[] = [];
+      let lifecycleStarted = false;
+      const requireCurrentAttempt = () => {
+        if (
+          !isCurrentMessageSendAttempt(
+            activeMessageSendRef.current,
+            attempt,
+            currentViewThreadIdRef.current,
+          )
+        ) {
+          throw staleMessageSendError();
+        }
+      };
 
       try {
         // Upload files first if any
         if (message.files && message.files.length > 0) {
           setIsUploading(true);
           try {
-            const filePromises = message.files.map((fileUIPart) =>
-              promptInputFilePartToFile(fileUIPart),
+            const converted = await Promise.all(
+              message.files.map(async (filePart, index) => ({
+                filePart,
+                index,
+                file: await promptInputFilePartToFile(filePart),
+              })),
             );
-
-            const conversionResults = await Promise.all(filePromises);
-            const files = conversionResults.filter(
-              (file): file is File => file !== null,
-            );
-            const failedConversions = conversionResults.length - files.length;
+            requireCurrentAttempt();
+            const failedConversions = converted.filter(
+              ({ file }) => file === null,
+            ).length;
 
             if (failedConversions > 0) {
               throw new Error(
@@ -1091,67 +1195,126 @@ export function useThreadStream({
               );
             }
 
-            if (!threadId) {
-              throw new Error("Thread is not ready for file upload.");
-            }
+            const attachmentClientIds = converted.map(
+              ({ filePart }) => filePart.clientId,
+            );
+            retainUploadedAttachmentRefs(
+              uploadedAttachmentRefsRef.current,
+              threadId,
+              attachmentClientIds,
+            );
+            const retryPlan = planAttachmentUploadRetry(
+              uploadedAttachmentRefsRef.current,
+              threadId,
+              attachmentClientIds,
+            );
+            const resolvedUploads = retryPlan.resolved;
+            const missingIndexSet = new Set(retryPlan.missingIndexes);
+            const missing = converted.filter(({ index }) =>
+              missingIndexSet.has(index),
+            );
 
-            if (files.length > 0) {
-              const uploadResponse = await runPrivateWorkAbortable(
+            if (missing.length > 0) {
+              await runPrivateWorkAbortable(
                 privateWork,
-                (signal) => uploadFiles(threadId, files, privateWork, signal),
-              );
-              uploadedFileInfo = uploadResponse.files;
-
-              // Update optimistic human message with uploaded status + paths
-              const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
-                uploadedFileInfoToMessage,
-              );
-              setOptimisticMessages((messages) => {
-                if (messages.length > 1 && messages[0]) {
-                  const humanMessage: Message = messages[0];
-                  return [
-                    {
-                      ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
+                async (privateWorkSignal) => {
+                  const signal = privateWorkSignal
+                    ? AbortSignal.any([
+                        privateWorkSignal,
+                        attempt.abortController.signal,
+                      ])
+                    : attempt.abortController.signal;
+                  await uploadFiles(
+                    threadId,
+                    missing.map(({ file }) => file!),
+                    privateWork,
+                    signal,
+                    (uploaded, _file, missingIndex) => {
+                      const entry = missing[missingIndex]!;
+                      resolvedUploads[entry.index] = uploaded;
+                      rememberUploadedAttachmentRef(
+                        uploadedAttachmentRefsRef.current,
+                        threadId,
+                        entry.filePart.clientId,
+                        uploaded,
+                      );
                     },
-                    ...messages.slice(1),
-                  ];
-                }
-                return messages;
-              });
+                  );
+                },
+              );
             }
+            requireCurrentAttempt();
+            if (resolvedUploads.some((uploaded) => !uploaded)) {
+              throw new Error("An uploaded attachment reference is missing.");
+            }
+            uploadedFileInfo = resolvedUploads as UploadedFileInfo[];
           } catch (error) {
-            const errorMessage = uploadFailureMessage(error, {
-              tooLarge: t.uploads.serverTooLarge,
-              storageQuotaExceeded: t.uploads.storageQuotaExceeded,
-              preflightRejected: t.uploads.preflightRejected,
-              fallback: t.uploads.uploadFailed,
-            });
-            toast.error(errorMessage);
-            setOptimisticMessages([]);
-            setOptimisticThreadId(null);
-            setLiveMessagesThreadId(null);
+            if (
+              isCurrentMessageSendAttempt(
+                activeMessageSendRef.current,
+                attempt,
+                currentViewThreadIdRef.current,
+              )
+            ) {
+              const errorMessage = uploadFailureMessage(error, {
+                tooLarge: t.uploads.serverTooLarge,
+                storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+                preflightRejected: t.uploads.preflightRejected,
+                fallback: t.uploads.uploadFailed,
+              });
+              toast.error(errorMessage);
+              setOptimisticMessages([]);
+              setOptimisticThreadId(null);
+              setLiveMessagesThreadId(null);
+            }
             throw error;
-          } finally {
-            setIsUploading(false);
           }
         }
 
-        // Build files metadata for submission (included in additional_kwargs)
+        requireCurrentAttempt();
+
         const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
           uploadedFileInfoToMessage,
         );
+        const submitMessages = buildThreadSubmitMessages({
+          text,
+          messageId: humanMessageId,
+          additionalKwargs: options?.additionalKwargs,
+          additionalInputMessages: options?.additionalInputMessages,
+          filesForSubmit,
+        });
+        const hideFromUI = options?.additionalKwargs?.hide_from_ui === true;
+        const visibleHumanMessage = submitMessages.at(-1);
+        const admission = createRunAdmissionLatch();
+        const pendingAdmission: PendingMessageAdmission = {
+          threadId,
+          attempt,
+          latch: admission,
+          optimisticMessages:
+            !hideFromUI && visibleHumanMessage ? [visibleHumanMessage] : [],
+          uploadedClientIds: message.files.map((file) => file.clientId),
+          onSent: options?.onSent,
+        };
 
-        await thread.submit(
-          {
-            messages: buildThreadSubmitMessages({
-              text,
-              messageId: humanMessageId,
-              additionalKwargs: options?.additionalKwargs,
-              additionalInputMessages: options?.additionalInputMessages,
-              filesForSubmit,
-            }),
-          },
+        // Capture the baseline immediately before dispatch. Uploading is not a
+        // conversation turn and therefore must not alter the message projection.
+        prevHumanMsgCountRef.current = humanMessageCount;
+        pendingUsageBaselineMessageIdsRef.current = new Set(
+          persistedMessages
+            .map(messageIdentity)
+            .filter((id): id is string => Boolean(id)),
+        );
+        currentRunBaselineMessageIdsRef.current = new Set(
+          persistedMessages
+            .map(messageIdentity)
+            .filter((id): id is string => Boolean(id)),
+        );
+        runBaselinePreparedRef.current = true;
+        pendingMessageAdmissionRef.current = pendingAdmission;
+        requireCurrentAttempt();
+
+        const lifecycle = thread.submit(
+          { messages: submitMessages },
           {
             threadId: threadId,
             ...buildThreadSubmitCheckpointOptions(
@@ -1168,7 +1331,45 @@ export function useThreadStream({
             ),
           },
         );
-        options?.onSent?.();
+        lifecycleStarted = true;
+        void monitorRunAdmissionLifecycle({
+          admission,
+          lifecycle,
+          onAdmissionFailure: (error) => {
+            if (pendingMessageAdmissionRef.current === pendingAdmission) {
+              pendingMessageAdmissionRef.current = null;
+              setIsUploading(false);
+              if (
+                streamOwnerMountedRef.current &&
+                isCurrentMessageSendAttempt(
+                  activeMessageSendRef.current,
+                  attempt,
+                  currentViewThreadIdRef.current,
+                )
+              ) {
+                toast.error(
+                  isModelOutputLimitError(error)
+                    ? t.conversation.modelOutputLimitDescription
+                    : isOutputDeliveryIncompleteError(error)
+                      ? t.conversation.outputDeliveryIncompleteDescription
+                      : isProjectRunTerminalFailure(error)
+                        ? t.conversation.runFailedDescription
+                        : getStreamErrorMessage(error),
+                );
+              }
+            }
+          },
+          onSettled: () => {
+            if (activeMessageSendRef.current === attempt) {
+              activeMessageSendRef.current = null;
+              sendInFlightRef.current = false;
+            }
+          },
+        });
+
+        // `thread.submit()` settles at the Run terminal. The composer instead
+        // waits only for `useStream.onCreated`, the durable admission boundary.
+        await admission.promise;
         void queryClient.invalidateQueries({
           queryKey: scopedThreadQueryKey(
             privateWork.scope,
@@ -1183,13 +1384,25 @@ export function useThreadStream({
           ),
         });
       } catch (error) {
-        setOptimisticMessages([]);
-        setOptimisticThreadId(null);
-        setLiveMessagesThreadId(null);
-        setIsUploading(false);
+        if (activeMessageSendRef.current === attempt) {
+          const pendingAdmission = pendingMessageAdmissionRef.current;
+          if (
+            pendingAdmission?.attempt === attempt &&
+            pendingAdmission.latch.isPending()
+          ) {
+            pendingMessageAdmissionRef.current = null;
+            pendingAdmission.latch.reject(error);
+          }
+          setOptimisticMessages([]);
+          setOptimisticThreadId(null);
+          setLiveMessagesThreadId(null);
+          setIsUploading(false);
+          if (!lifecycleStarted) {
+            activeMessageSendRef.current = null;
+            sendInFlightRef.current = false;
+          }
+        }
         throw error;
-      } finally {
-        sendInFlightRef.current = false;
       }
     },
     [
@@ -1198,7 +1411,9 @@ export function useThreadStream({
       t.uploads.serverTooLarge,
       t.uploads.storageQuotaExceeded,
       t.uploads.uploadFailed,
-      t.uploads.uploadingFiles,
+      t.conversation.modelOutputLimitDescription,
+      t.conversation.outputDeliveryIncompleteDescription,
+      t.conversation.runFailedDescription,
       context,
       executionProfile,
       queryClient,

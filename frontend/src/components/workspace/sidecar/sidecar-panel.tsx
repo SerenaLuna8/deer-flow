@@ -12,7 +12,7 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -68,8 +68,13 @@ import {
   buildReferenceMessageMetadata,
   buildSidecarContextPrompt,
   buildSidecarThreadMetadata,
+  awaitAbortableSidecarPreparation,
+  canClaimSidecarQueue,
   consumeSidecarQueue,
+  createSidecarQueueSettlement,
+  settleSidecarQueueSubmission,
   type SidecarIdentity,
+  type SidecarQueueSettlement,
   type SidecarQueuedValue,
 } from "@/core/sidecar";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -137,6 +142,24 @@ function promptMessageFiles(message: PromptInputMessage) {
   );
 }
 
+function sidecarAdmissionChangedError(message: string): Error {
+  const error = new Error(message);
+  error.name = "AbortError";
+  return error;
+}
+
+type QueuedSidecarSubmit = SidecarQueuedValue<{
+  message: PromptInputMessage;
+  references: SidecarReference[];
+  settlement: SidecarQueueSettlement;
+}>;
+
+type PendingSidecarSubmit = Readonly<{
+  identity: SidecarIdentity;
+  settlement: SidecarQueueSettlement;
+  abortController: AbortController;
+}>;
+
 export function SidecarPanel({ className }: { className?: string }) {
   const { t } = useI18n();
   const privateWork = usePrivateWorkAccess();
@@ -150,10 +173,26 @@ export function SidecarPanel({ className }: { className?: string }) {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const { mutateAsync: deleteThread, isPending: isDeleting } =
     useDeleteThread();
-  const [queuedSubmit, setQueuedSubmit] = useState<SidecarQueuedValue<{
-    message: PromptInputMessage;
-    references: SidecarReference[];
-  }> | null>(null);
+  const [queuedSubmit, setQueuedSubmit] = useState<QueuedSidecarSubmit | null>(
+    null,
+  );
+  const queuedSubmitRef = useRef(queuedSubmit);
+  const pendingSubmitRef = useRef<PendingSidecarSubmit | null>(null);
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      const error = sidecarAdmissionChangedError(
+        "The side conversation closed before admission.",
+      );
+      pendingSubmitRef.current?.abortController.abort(error);
+      pendingSubmitRef.current?.settlement.reject(error);
+      pendingSubmitRef.current = null;
+      queuedSubmitRef.current?.value.settlement.reject(error);
+      queuedSubmitRef.current = null;
+    };
+  }, []);
   const { data: uploadLimits } = useUploadLimits(
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
   );
@@ -383,20 +422,28 @@ export function SidecarPanel({ className }: { className?: string }) {
     async (
       identity: SidecarIdentity,
       references: SidecarReference[],
+      attempt: PendingSidecarSubmit,
     ): Promise<string | null> => {
-      if (!sidecar.isIdentityCurrent(identity)) return null;
+      const isCurrentAttempt = () =>
+        mountedRef.current &&
+        pendingSubmitRef.current === attempt &&
+        !attempt.abortController.signal.aborted &&
+        sidecar.isIdentityCurrent(identity);
+      if (!isCurrentAttempt()) return null;
       if (sidecar.sidecarThreadId) {
         return sidecar.sidecarThreadId;
       }
       const restoredThreadId = await sidecar.restoreSidecarThread({ identity });
+      if (!isCurrentAttempt()) return null;
       if (restoredThreadId) {
         return restoredThreadId;
       }
-      if (!sidecar.isIdentityCurrent(identity)) return null;
       if (references.length === 0) {
         throw new Error(t.sidecar.noContext);
       }
-      setCreatingThread(true);
+      if (isCurrentAttempt()) {
+        setCreatingThread(true);
+      }
       try {
         const contexts = references.map((reference) => reference.context);
         const projectScope = privateWork.scope;
@@ -406,7 +453,7 @@ export function SidecarPanel({ className }: { className?: string }) {
         const parent = await privateWork.client.threads.get(
           identity.parentThreadId,
         );
-        if (!sidecar.isIdentityCurrent(identity)) return null;
+        if (!isCurrentAttempt()) return null;
         const agentAssetId = parent.metadata?.agent_asset_id;
         const agentScope = parent.metadata?.agent_scope;
         if (
@@ -424,11 +471,14 @@ export function SidecarPanel({ className }: { className?: string }) {
             contexts,
           ),
         });
+        if (!isCurrentAttempt()) return null;
         return sidecar.adoptSidecarThread(identity, created.thread_id)
           ? created.thread_id
           : null;
       } finally {
-        setCreatingThread(false);
+        if (mountedRef.current && pendingSubmitRef.current === attempt) {
+          setCreatingThread(false);
+        }
       }
     },
     [privateWork, sidecar, t.sidecar.noContext],
@@ -504,6 +554,12 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
+    if (
+      queuedSubmit &&
+      !canClaimSidecarQueue(queuedSubmitRef.current, queuedSubmit)
+    ) {
+      return;
+    }
     const decision = consumeSidecarQueue({
       currentIdentity: sidecar.identity,
       queued: queuedSubmit,
@@ -511,6 +567,12 @@ export function SidecarPanel({ className }: { className?: string }) {
       boundThreadId,
     });
     if (decision.action === "drop") {
+      decision.queued.value.settlement.reject(
+        sidecarAdmissionChangedError(
+          "The side conversation changed before admission.",
+        ),
+      );
+      queuedSubmitRef.current = null;
       setQueuedSubmit(null);
       return;
     }
@@ -519,36 +581,28 @@ export function SidecarPanel({ className }: { className?: string }) {
     }
 
     const nextSubmit = decision.value;
+    queuedSubmitRef.current = null;
     setQueuedSubmit(null);
-    void submitToSidecarThread(
-      boundThreadId!,
-      nextSubmit.message,
-      nextSubmit.references,
-      // Clear references only once the send genuinely proceeds; a send dropped
-      // by the in-flight guard leaves them attached instead of losing them.
-      () => {
-        if (nextSubmit.references.length > 0) {
-          sidecar.clearActiveReferences();
-        }
-      },
-    ).catch((error) => {
-      toast.error(
-        uploadFailureMessage(error, {
-          tooLarge: t.uploads.serverTooLarge,
-          storageQuotaExceeded: t.uploads.storageQuotaExceeded,
-          preflightRejected: t.uploads.preflightRejected,
-          fallback: t.sidecar.sendFailed,
-        }),
-      );
-    });
+    void settleSidecarQueueSubmission(nextSubmit.settlement, () =>
+      submitToSidecarThread(
+        boundThreadId!,
+        nextSubmit.message,
+        nextSubmit.references,
+        // Clear references only once the send genuinely proceeds; a send dropped
+        // by the in-flight guard leaves them attached instead of losing them.
+        () => {
+          if (nextSubmit.references.length > 0) {
+            sidecar.clearActiveReferences();
+          }
+        },
+      ),
+    );
   }, [
     queuedSubmit,
     boundThreadId,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
-    t.sidecar.sendFailed,
-    t.uploads,
     thread.isLoading,
   ]);
 
@@ -556,8 +610,11 @@ export function SidecarPanel({ className }: { className?: string }) {
     async (message: PromptInputMessage) => {
       const text = message.text.trim();
       const files = promptMessageFiles(message);
-      if ((!text && message.files.length === 0) || disabled) {
+      if (!text && message.files.length === 0) {
         return;
+      }
+      if (disabled) {
+        throw new Error("The side conversation cannot admit this message.");
       }
       const uploadValidation = validateUploadLimits([], files, uploadLimits);
       if (uploadValidation.violations.length > 0) {
@@ -567,20 +624,46 @@ export function SidecarPanel({ className }: { className?: string }) {
 
       const pendingReferences = [...sidecar.activeReferences];
       const operationIdentity = sidecar.captureIdentity();
+      let pendingAttempt: PendingSidecarSubmit | null = null;
       try {
         if (!sidecar.sidecarThreadId) {
-          const threadId = await ensureSidecarThread(
-            operationIdentity,
-            pendingReferences,
+          const settlement = createSidecarQueueSettlement();
+          const attempt = {
+            identity: operationIdentity,
+            settlement,
+            abortController: new AbortController(),
+          } satisfies PendingSidecarSubmit;
+          pendingAttempt = attempt;
+          pendingSubmitRef.current = attempt;
+          const threadId = await awaitAbortableSidecarPreparation(
+            attempt.abortController.signal,
+            () =>
+              ensureSidecarThread(
+                operationIdentity,
+                pendingReferences,
+                attempt,
+              ),
           );
-          if (!threadId || !sidecar.isIdentityCurrent(operationIdentity)) {
-            return;
+          if (
+            !threadId ||
+            !mountedRef.current ||
+            pendingSubmitRef.current !== attempt ||
+            !sidecar.isIdentityCurrent(operationIdentity)
+          ) {
+            throw sidecarAdmissionChangedError(
+              "The side conversation changed before admission.",
+            );
           }
-          setQueuedSubmit({
+          const nextQueuedSubmit = {
             identity: operationIdentity,
             threadId,
-            value: { message, references: pendingReferences },
-          });
+            value: { message, references: pendingReferences, settlement },
+          } satisfies QueuedSidecarSubmit;
+          pendingSubmitRef.current = null;
+          pendingAttempt = null;
+          queuedSubmitRef.current = nextQueuedSubmit;
+          setQueuedSubmit(nextQueuedSubmit);
+          await settlement.promise;
           return;
         }
 
@@ -595,14 +678,22 @@ export function SidecarPanel({ className }: { className?: string }) {
           },
         );
       } catch (error) {
-        toast.error(
-          uploadFailureMessage(error, {
-            tooLarge: t.uploads.serverTooLarge,
-            storageQuotaExceeded: t.uploads.storageQuotaExceeded,
-            preflightRejected: t.uploads.preflightRejected,
-            fallback: t.sidecar.sendFailed,
-          }),
-        );
+        if (pendingAttempt && pendingSubmitRef.current === pendingAttempt) {
+          pendingSubmitRef.current = null;
+          pendingAttempt.abortController.abort(error);
+          pendingAttempt.settlement.reject(error);
+        }
+        if (!(error instanceof Error && error.name === "AbortError")) {
+          toast.error(
+            uploadFailureMessage(error, {
+              tooLarge: t.uploads.serverTooLarge,
+              storageQuotaExceeded: t.uploads.storageQuotaExceeded,
+              preflightRejected: t.uploads.preflightRejected,
+              fallback: t.sidecar.sendFailed,
+            }),
+          );
+        }
+        throw error;
       }
     },
     [
@@ -620,6 +711,15 @@ export function SidecarPanel({ className }: { className?: string }) {
   const discardDraftAndClose = useCallback(() => {
     const identity = sidecar.captureIdentity();
     sidecar.resetSidecar(identity);
+    const error = sidecarAdmissionChangedError(
+      "The side conversation was closed before admission.",
+    );
+    pendingSubmitRef.current?.abortController.abort(error);
+    pendingSubmitRef.current?.settlement.reject(error);
+    pendingSubmitRef.current = null;
+    setCreatingThread(false);
+    queuedSubmitRef.current?.value.settlement.reject(error);
+    queuedSubmitRef.current = null;
     setQueuedSubmit(null);
   }, [sidecar]);
 
@@ -636,6 +736,12 @@ export function SidecarPanel({ className }: { className?: string }) {
     try {
       await deleteThread({ threadId });
       sidecar.resetSidecar(deleteIdentity);
+      queuedSubmitRef.current?.value.settlement.reject(
+        sidecarAdmissionChangedError(
+          "The side conversation was deleted before admission.",
+        ),
+      );
+      queuedSubmitRef.current = null;
       setQueuedSubmit(null);
       setDeleteDialogOpen(false);
       toast.success(t.sidecar.deleteSuccess);
@@ -809,7 +915,10 @@ export function SidecarPanel({ className }: { className?: string }) {
                     className="rounded-full"
                     disabled={disabled}
                     status={
-                      thread.isLoading || creatingThread || queuedSubmit
+                      isUploading ||
+                      thread.isLoading ||
+                      creatingThread ||
+                      queuedSubmit
                         ? "submitted"
                         : "ready"
                     }

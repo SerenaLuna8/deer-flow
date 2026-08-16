@@ -338,6 +338,58 @@ def _sanitize_vision_evidence_content(content: object) -> str:
     return _compact_sanitized_vision_evidence(safe)
 
 
+def _sanitize_vision_analysis_content(content: object) -> str:
+    """Sanitize one Provider-neutral v2 image analysis result."""
+
+    from deerflow.agents.middlewares.input_sanitization_middleware import (
+        neutralize_untrusted_tags,
+    )
+    from deerflow.vision.contracts import (
+        MAX_EVIDENCE_JSON_BYTES,
+        MAX_IMAGE_ANALYSIS_TEXT_CHARS,
+        InspectImageResult,
+    )
+
+    if not isinstance(content, str):
+        raise ValueError("VISION_SCHEMA_MISMATCH")
+    source = InspectImageResult.model_validate_json(content)
+    text = neutralize_untrusted_tags(source.text).strip()
+    if not text:
+        raise ValueError("VISION_SCHEMA_MISMATCH")
+    truncated = source.truncated
+    if len(text) > MAX_IMAGE_ANALYSIS_TEXT_CHARS:
+        text = text[:MAX_IMAGE_ANALYSIS_TEXT_CHARS]
+        truncated = True
+
+    while True:
+        result = InspectImageResult(
+            ok=True,
+            schema_version="inspect_image.result.v2",
+            content_type="untrusted_image_analysis",
+            mode=source.mode,
+            text=text,
+            truncated=truncated,
+        )
+        encoded = _encoded_vision_evidence(
+            result.model_dump(mode="json"),
+        )
+        if len(encoded) <= MAX_EVIDENCE_JSON_BYTES:
+            return result.canonical_json()
+        if len(text) <= 1:
+            raise ValueError("VISION_RESPONSE_TOO_LARGE")
+        overflow = len(encoded) - MAX_EVIDENCE_JSON_BYTES
+        target_bytes = max(1, len(text.encode("utf-8")) - overflow - 16)
+        reduced = _truncate_utf8_prefix(
+            text,
+            target_bytes=target_bytes,
+            min_chars=1,
+        )
+        if reduced == text:
+            reduced = text[:-1]
+        text = reduced
+        truncated = True
+
+
 def _vision_schema_error_message(message: ToolMessage) -> ToolMessage:
     from deerflow.vision.contracts import VisionErrorResult
 
@@ -429,8 +481,18 @@ def _sanitize_vision_tool_message(message: ToolMessage) -> ToolMessage:
             },
         )
 
+    metadata = message.additional_kwargs or {}
+    schema_version = metadata.get("schema_version")
     try:
-        content = _sanitize_vision_evidence_content(message.content)
+        if schema_version == "inspect_image.result.v2":
+            content = _sanitize_vision_analysis_content(message.content)
+            content_type = "untrusted_image_analysis"
+        elif schema_version in {None, "vision.evidence.v1"}:
+            content = _sanitize_vision_evidence_content(message.content)
+            content_type = "untrusted_image_evidence"
+            schema_version = "vision.evidence.v1"
+        else:
+            raise ValueError("VISION_SCHEMA_MISMATCH")
     except (TypeError, ValueError) as error:
         content_bytes = len(message.content.encode("utf-8")) if isinstance(message.content, str) else None
         logger.info(
@@ -447,8 +509,8 @@ def _sanitize_vision_tool_message(message: ToolMessage) -> ToolMessage:
     additional_kwargs = dict(message.additional_kwargs or {})
     additional_kwargs.update(
         {
-            "content_type": "untrusted_image_evidence",
-            "schema_version": "vision.evidence.v1",
+            "content_type": content_type,
+            "schema_version": schema_version,
         },
     )
     if content == message.content and additional_kwargs == message.additional_kwargs:

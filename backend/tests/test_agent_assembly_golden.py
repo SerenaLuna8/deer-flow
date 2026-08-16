@@ -293,8 +293,8 @@ def _build_production_lead_chain(*, private: bool) -> list[AgentMiddleware]:
         patch.object(lead_agent_module, "load_agent_config", return_value=None),
         patch.object(lead_agent_module, "build_tracing_callbacks", return_value=[]),
         patch.object(
-            lead_agent_module,
-            "create_chat_model",
+            lead_agent_module.ModelRuntime,
+            "build_chat_model",
             return_value=MagicMock(),
         ),
         patch.object(
@@ -388,7 +388,10 @@ def _build_embedded_chain() -> list[AgentMiddleware]:
     app_config = _full_feature_app_config()
     with (
         patch("deerflow.client.get_app_config", return_value=app_config),
-        patch("deerflow.client.create_chat_model", return_value=MagicMock()),
+        patch(
+            "deerflow.client.ModelRuntime.build_chat_model",
+            return_value=MagicMock(),
+        ),
         patch("deerflow.client.create_agent", return_value=MagicMock()) as create,
         patch("deerflow.client.apply_prompt_template", return_value="golden prompt"),
         patch("deerflow.client.get_effective_user_id", return_value=None),

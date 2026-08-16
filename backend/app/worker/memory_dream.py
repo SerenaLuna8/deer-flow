@@ -45,7 +45,7 @@ from deerflow.memory_contract import (
     MemoryDocumentInvalid,
     validate_memory_document,
 )
-from deerflow.models import create_chat_model, model_supports_temperature
+from deerflow.models import ModelRuntime, ModelRuntimeProfile, model_supports_temperature
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.private_work.memory_document_repository import (
     BUDGET_REWRITE_HISTORY_DIGEST,
@@ -187,13 +187,16 @@ class MemoryDreamJobHandler:
             raise RuntimeError("Dream model is invalid")
         runtime_config = self._app_config.with_runtime_models((model,))
         overrides = {"temperature": 0.0} if model_supports_temperature(model_name, app_config=runtime_config) else None
-        chat_model = create_chat_model(
-            model_name,
-            app_config=runtime_config,
-            attach_tracing=True,
+        model_runtime = ModelRuntime(app_config=runtime_config)
+        chat_model = model_runtime.build_chat_model(
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            model_name=model_name,
             model_overrides=overrides,
         )
-        return MemoryDreamRunner(chat_model)
+        return MemoryDreamRunner(
+            chat_model,
+            model_runtime=model_runtime,
+        )
 
     @staticmethod
     def _scope(claim: JobClaim) -> MemoryDocumentScope:

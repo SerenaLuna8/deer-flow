@@ -7,30 +7,15 @@ export const adminModelAccountIdSchema = z.union([
 
 export const adminModelIdSchema = z.string().uuid();
 export const adminModelStatusSchema = z.enum(["active", "suspended"]);
-export const adminModelProviderAdapterSchema = z.enum([
-  "anthropic",
-  "deepseek",
-  "openai",
-  "patched_deepseek",
-  "patched_openai",
-  "vision_bridge_fake",
-  "vision_openai_compatible_v1",
-  "vllm",
-]);
-// Retired values remain response-readable so an existing database can still be
-// opened and remediated. Mutation contracts below use the supported schema only.
-const retiredAdminModelProviderAdapterSchema = z.enum([
-  "claude_code",
-  "codex_cli",
-  "mindie",
-  "patched_mimo",
-  "patched_minimax",
-  "patched_stepfun",
-]);
-const readableAdminModelProviderAdapterSchema = z.union([
-  adminModelProviderAdapterSchema,
-  retiredAdminModelProviderAdapterSchema,
-]);
+// Adapter identity comes from the backend registry. The browser constrains the
+// wire shape only; catalog descriptor membership decides authorability.
+export const adminModelProviderAdapterSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*$/u);
+const readableAdminModelProviderAdapterSchema = adminModelProviderAdapterSchema;
 
 const providerFieldSchema = z
   .string()
@@ -139,121 +124,135 @@ const baseUrlSchema = z
       });
     }
   });
-const reasoningEffortSchema = z.enum([
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-]);
-const thinkingSchema = z
-  .object({
-    type: z.enum(["adaptive", "disabled", "enabled"]),
-    budget_tokens: z.number().int().min(1).max(2_000_000).optional(),
-  })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.type === "disabled" && value.budget_tokens !== undefined) {
+const settingKeySchema = z
+  .string()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z][a-z0-9_]*$/u);
+const SECRET_SETTING_KEY =
+  /(^|_)(api_key|apikey|access_key|private_key|client_secret|refresh_token|secret|token|password|passwd|credential|credentials|auth|authorization|bearer|cookie)(_|$)/iu;
+
+function validateGenericSettingValue(
+  value: unknown,
+  context: z.RefinementCtx,
+  path: (string | number)[],
+  depth: number,
+): void {
+  if (depth > 8) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path,
+      message: "Model setting nesting is too deep",
+    });
+    return;
+  }
+  if (value === null || typeof value === "boolean") return;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["budget_tokens"],
-        message: "Disabled thinking cannot have a token budget",
+        path,
+        message: "Model setting numbers must be finite",
       });
     }
-  });
-const extraBodySchema = z
-  .object({
-    thinking: thinkingSchema.optional(),
-    reasoning: z.object({ effort: reasoningEffortSchema }).strict().optional(),
-    reasoning_format: z.literal("deepseek-style").optional(),
-    chat_template_kwargs: z
-      .object({
-        thinking: z.boolean().optional(),
-        enable_thinking: z.boolean().optional(),
-      })
-      .strict()
-      .refine((value) => Object.keys(value).length > 0)
-      .optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0);
-
-function thinkingTransitionSchema(enabled: boolean) {
-  return z
-    .object({
-      extra_body: extraBodySchema.optional(),
-      thinking: thinkingSchema.optional(),
-      reasoning_effort: reasoningEffortSchema.optional(),
-    })
-    .strict()
-    .refine((value) => Object.keys(value).length > 0)
-    .superRefine((value, context) => {
-      const expectedTypes = enabled
-        ? new Set(["adaptive", "enabled"])
-        : new Set(["disabled"]);
-      const profiles = [value.thinking, value.extra_body?.thinking];
-      if (
-        profiles.some((profile) => profile && !expectedTypes.has(profile.type))
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Thinking transition type does not match its mode",
-        });
-      }
-      const template = value.extra_body?.chat_template_kwargs;
-      if (
-        template &&
-        Object.values(template).some((item) => item !== enabled)
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["extra_body", "chat_template_kwargs"],
-          message: "Thinking template flag does not match its mode",
-        });
-      }
+    return;
+  }
+  if (typeof value === "string") {
+    if (value.length > 8_192 || hasSecretLikeValue(value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path,
+        message: "Model setting text is unsafe",
+      });
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    if (value.length > 128) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path,
+        message: "Model setting arrays are too large",
+      });
+      return;
+    }
+    value.forEach((item, index) =>
+      validateGenericSettingValue(item, context, [...path, index], depth + 1),
+    );
+    return;
+  }
+  if (typeof value !== "object") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path,
+      message: "Model setting values must be JSON",
     });
+    return;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > 128) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path,
+      message: "Model setting objects are too large",
+    });
+    return;
+  }
+  for (const [key, item] of entries) {
+    if (
+      !settingKeySchema.safeParse(key).success ||
+      SECRET_SETTING_KEY.test(key)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [...path, key],
+        message: "Model setting key is unsafe",
+      });
+      continue;
+    }
+    validateGenericSettingValue(item, context, [...path, key], depth + 1);
+  }
 }
 
-/**
- * Provider settings enter query and mutation caches only after this exact
- * schema proves every key, nested shape, string enum, number and endpoint.
- */
-export const safeAdminModelSettingsSchema = z
-  .object({
-    base_url: baseUrlSchema.optional(),
-    request_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    default_request_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    timeout: z.number().finite().min(0.1).max(3600).optional(),
-    connect_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    read_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    write_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    pool_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    stream_chunk_timeout: z.number().finite().min(0.1).max(3600).optional(),
-    max_retries: z.number().int().min(0).max(20).optional(),
-    retry_max_attempts: z.number().int().min(1).max(20).optional(),
-    max_tokens: z.number().int().min(1).max(2_000_000).optional(),
-    prompt_cache_size: z.number().int().min(0).max(100).optional(),
-    temperature: z.number().finite().min(-2).max(2).optional(),
-    reasoning_effort: reasoningEffortSchema.optional(),
-    extra_body: extraBodySchema.optional(),
-    thinking: thinkingSchema.optional(),
-    when_thinking_enabled: thinkingTransitionSchema(true).optional(),
-    when_thinking_disabled: thinkingTransitionSchema(false).optional(),
-    auto_thinking_budget: z.boolean().optional(),
-    cumulative_stream_usage: z.boolean().optional(),
-    enable_prompt_caching: z.boolean().optional(),
-    use_responses_api: z.boolean().optional(),
-    output_version: z.literal("responses/v1").optional(),
-  })
-  .strict()
+function validateAdminModelSettingsSize(
+  settings: Record<string, unknown>,
+  context: z.RefinementCtx,
+): void {
+  if (new TextEncoder().encode(JSON.stringify(settings)).byteLength > 32768) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Model settings exceed the safe size limit",
+    });
+  }
+}
+
+const genericAdminModelSettingsSchema: z.ZodType<
+  Record<string, AdminModelSettingValue>,
+  z.ZodTypeDef,
+  Record<string, unknown>
+> = z
+  .record(z.unknown())
   .superRefine((settings, context) => {
-    if (new TextEncoder().encode(JSON.stringify(settings)).byteLength > 32768) {
+    validateGenericSettingValue(settings, context, [], 0);
+    validateAdminModelSettingsSize(settings, context);
+  })
+  .transform((settings) => settings as Record<string, AdminModelSettingValue>);
+
+/** Generic mutation boundary; the selected descriptor adds field authority. */
+export const safeAdminModelSettingsSchema =
+  genericAdminModelSettingsSchema.superRefine((settings, context) => {
+    if (Object.hasOwn(settings, "max_retries")) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Model settings exceed the safe size limit",
+        path: ["max_retries"],
+        message: "Retry policy is runtime-owned",
       });
     }
   });
+
+// Read compatibility only: old rows may contain the now runtime-owned retry
+// count, but every new mutation strips and rejects it.
+const readableAdminModelSettingsSchema = genericAdminModelSettingsSchema;
 
 const credentialBindingFields = {
   credential_id: z.string().uuid().nullable(),
@@ -285,230 +284,200 @@ function validateCredentialBinding(
     });
     return;
   }
-  const credentialRequired = ![
-    "claude_code",
-    "codex_cli",
-    "vision_bridge_fake",
-  ].includes(value.provider_adapter);
+}
+
+export const adminModelProviderSettingFieldSchema = z
+  .object({
+    name: settingKeySchema,
+    label: secretSafeTextSchema(120, true),
+    input_type: z.enum([
+      "boolean",
+      "enum",
+      "integer",
+      "json",
+      "number",
+      "string",
+      "url",
+    ]),
+    advanced: z.boolean(),
+    minimum: z.number().finite().nullable(),
+    maximum: z.number().finite().nullable(),
+    step: z.number().finite().positive().nullable(),
+    options: z.array(secretSafeTextSchema(255, true)).max(64),
+  })
+  .strict()
+  .superRefine((field, context) => {
+    const numeric =
+      field.input_type === "integer" || field.input_type === "number";
+    if (
+      !numeric &&
+      (field.minimum !== null || field.maximum !== null || field.step !== null)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Only numeric fields may declare numeric constraints",
+      });
+    }
+    if (
+      field.minimum !== null &&
+      field.maximum !== null &&
+      field.minimum > field.maximum
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provider setting minimum exceeds maximum",
+      });
+    }
+    if (
+      field.input_type === "integer" &&
+      [field.minimum, field.maximum, field.step].some(
+        (value) => value !== null && !Number.isInteger(value),
+      )
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Integer fields require integer constraints",
+      });
+    }
+    if (field.input_type === "enum") {
+      if (
+        field.options.length === 0 ||
+        new Set(field.options).size !== field.options.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["options"],
+          message: "Enum fields require unique options",
+        });
+      }
+    } else if (field.options.length !== 0) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["options"],
+        message: "Only enum fields may declare options",
+      });
+    }
+    if (!field.advanced && field.input_type === "json") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["advanced"],
+        message: "JSON fields must use the advanced editor",
+      });
+    }
+  });
+
+export const adminModelProviderAdapterDescriptorSchema = z
+  .object({
+    id: adminModelProviderAdapterSchema,
+    credential_required: z.boolean(),
+    setting_fields: z.array(adminModelProviderSettingFieldSchema).max(64),
+  })
+  .strict()
+  .superRefine((descriptor, context) => {
+    const fieldNames = descriptor.setting_fields.map((field) => field.name);
+    if (new Set(fieldNames).size !== fieldNames.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["setting_fields"],
+        message: "Provider setting fields must be unique",
+      });
+    }
+  });
+
+function validateDescriptorSettingValue(
+  field: z.infer<typeof adminModelProviderSettingFieldSchema>,
+  value: AdminModelSettingValue,
+  context: z.RefinementCtx,
+): void {
+  if (field.input_type === "json") return;
+  if (field.input_type === "url") {
+    const parsed = baseUrlSchema.safeParse(value);
+    if (!parsed.success) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field.name],
+        message: "Provider setting must be a safe URL",
+      });
+    }
+    return;
+  }
+  if (field.input_type === "string") {
+    if (
+      typeof value !== "string" ||
+      value.length === 0 ||
+      value.length > 2_048 ||
+      hasSecretLikeValue(value)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field.name],
+        message: "Provider setting must be safe text",
+      });
+    }
+    return;
+  }
+  if (field.input_type === "boolean") {
+    if (typeof value !== "boolean") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field.name],
+        message: "Provider setting must be boolean",
+      });
+    }
+    return;
+  }
+  if (field.input_type === "enum") {
+    if (typeof value !== "string" || !field.options.includes(value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: [field.name],
+        message: "Provider setting must use a declared option",
+      });
+    }
+    return;
+  }
   if (
-    (credentialRequired && present === 0) ||
-    (!credentialRequired && present !== 0)
+    typeof value !== "number" ||
+    !Number.isFinite(value) ||
+    (field.input_type === "integer" && !Number.isInteger(value)) ||
+    (field.minimum !== null && value < field.minimum) ||
+    (field.maximum !== null && value > field.maximum)
   ) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      path: ["credential_id"],
-      message: credentialRequired
-        ? "This provider requires a Credential binding"
-        : "This provider does not accept a Credential binding",
+      path: [field.name],
+      message: "Provider setting violates numeric constraints",
     });
   }
 }
 
-const PROVIDER_SETTING_FIELDS: Record<
-  z.infer<typeof readableAdminModelProviderAdapterSchema>,
-  ReadonlySet<string>
-> = {
-  anthropic: new Set([
-    "base_url",
-    "default_request_timeout",
-    "max_retries",
-    "max_tokens",
-    "request_timeout",
-    "temperature",
-    "thinking",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  claude_code: new Set([
-    "auto_thinking_budget",
-    "base_url",
-    "default_request_timeout",
-    "enable_prompt_caching",
-    "max_retries",
-    "max_tokens",
-    "prompt_cache_size",
-    "request_timeout",
-    "retry_max_attempts",
-    "temperature",
-    "thinking",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  codex_cli: new Set(["reasoning_effort", "retry_max_attempts"]),
-  deepseek: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  mindie: new Set([
-    "base_url",
-    "connect_timeout",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "pool_timeout",
-    "read_timeout",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-    "write_timeout",
-  ]),
-  openai: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "output_version",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "use_responses_api",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  patched_deepseek: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  patched_mimo: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  patched_minimax: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  patched_openai: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "output_version",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "use_responses_api",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  patched_stepfun: new Set([
-    "base_url",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-  vision_bridge_fake: new Set(),
-  vision_openai_compatible_v1: new Set(["base_url"]),
-  vllm: new Set([
-    "base_url",
-    "cumulative_stream_usage",
-    "extra_body",
-    "max_retries",
-    "max_tokens",
-    "reasoning_effort",
-    "request_timeout",
-    "stream_chunk_timeout",
-    "temperature",
-    "timeout",
-    "when_thinking_disabled",
-    "when_thinking_enabled",
-  ]),
-};
-
-function validateProviderSettings(
-  value: {
-    provider_adapter: z.infer<typeof readableAdminModelProviderAdapterSchema>;
-    settings: Record<string, unknown>;
-  },
-  context: z.RefinementCtx,
-): void {
-  const allowed = PROVIDER_SETTING_FIELDS[value.provider_adapter];
-  for (const key of Object.keys(value.settings)) {
-    if (!allowed.has(key)) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["settings", key],
-        message: "Setting is not supported by this provider adapter",
-      });
-    }
-  }
-  if (value.provider_adapter === "vision_openai_compatible_v1") {
-    const baseUrl = value.settings.base_url;
-    let valid = typeof baseUrl === "string";
-    if (valid) {
-      try {
-        valid = new URL(baseUrl as string).protocol === "https:";
-      } catch {
-        valid = false;
+export function adminModelSettingsSchemaForProvider(
+  descriptor: z.infer<typeof adminModelProviderAdapterDescriptorSchema>,
+) {
+  const fields = new Map(
+    descriptor.setting_fields.map((field) => [field.name, field] as const),
+  );
+  return safeAdminModelSettingsSchema.superRefine((settings, context) => {
+    for (const [key, value] of Object.entries(settings)) {
+      const field = fields.get(key);
+      if (!field) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [key],
+          message: "Provider setting is not declared by its adapter",
+        });
+        continue;
       }
+      validateDescriptorSettingValue(field, value, context);
     }
-    if (!valid || Object.keys(value.settings).length !== 1) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["settings", "base_url"],
-        message: "Vision Bridge v1 requires exactly one HTTPS base_url setting",
-      });
-    }
-  }
+  });
 }
 
 const modelVersionFields = {
   display_name: secretSafeTextSchema(120, true),
   provider_adapter: readableAdminModelProviderAdapterSchema,
   provider_model: providerFieldSchema,
-  settings: safeAdminModelSettingsSchema,
+  settings: readableAdminModelSettingsSchema,
   supports_thinking: z.boolean(),
   supports_reasoning_effort: z.boolean(),
   supports_vision: z.boolean(),
@@ -518,6 +487,7 @@ const modelVersionFields = {
 const writableModelVersionFields = {
   ...modelVersionFields,
   provider_adapter: adminModelProviderAdapterSchema,
+  settings: safeAdminModelSettingsSchema,
 } as const;
 
 export const adminModelItemSchema = z
@@ -533,7 +503,6 @@ export const adminModelItemSchema = z
   .strict()
   .superRefine((item, context) => {
     validateCredentialBinding(item, context);
-    validateProviderSettings(item, context);
     if (item.is_default && item.status !== "active") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -546,6 +515,7 @@ export const adminModelItemSchema = z
 export const adminModelCatalogSchema = z
   .object({
     items: z.array(adminModelItemSchema),
+    provider_adapters: z.array(adminModelProviderAdapterDescriptorSchema),
     catalog_revision: z.number().int().positive(),
     request_id: z.string().min(1).max(255),
   })
@@ -558,6 +528,14 @@ export const adminModelCatalogSchema = z
         message: "A catalog cannot contain more than one default model",
       });
     }
+    const adapterIds = catalog.provider_adapters.map((adapter) => adapter.id);
+    if (new Set(adapterIds).size !== adapterIds.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["provider_adapters"],
+        message: "Provider adapter descriptors must be unique",
+      });
+    }
   });
 
 export const createAdminModelInputSchema = z
@@ -568,7 +546,6 @@ export const createAdminModelInputSchema = z
   .strict()
   .superRefine((item, context) => {
     validateCredentialBinding(item, context);
-    validateProviderSettings(item, context);
   });
 
 export const replaceAdminModelInputSchema = z
@@ -579,7 +556,6 @@ export const replaceAdminModelInputSchema = z
   .strict()
   .superRefine((item, context) => {
     validateCredentialBinding(item, context);
-    validateProviderSettings(item, context);
   });
 
 export const testAdminModelConnectionInputSchema = z
@@ -593,7 +569,6 @@ export const testAdminModelConnectionInputSchema = z
   .strict()
   .superRefine((item, context) => {
     validateCredentialBinding(item, context);
-    validateProviderSettings(item, context);
   });
 
 export const adminModelStatusInputSchema = z
@@ -625,6 +600,12 @@ export const adminModelConnectionTestResponseSchema = z
   .strict();
 
 export type AdminModelItem = z.infer<typeof adminModelItemSchema>;
+export type AdminModelProviderSettingField = z.infer<
+  typeof adminModelProviderSettingFieldSchema
+>;
+export type AdminModelProviderAdapterDescriptor = z.infer<
+  typeof adminModelProviderAdapterDescriptorSchema
+>;
 export type AdminModelCatalog = z.infer<typeof adminModelCatalogSchema>;
 export type CreateAdminModelInput = z.infer<typeof createAdminModelInputSchema>;
 export type ReplaceAdminModelInput = z.infer<

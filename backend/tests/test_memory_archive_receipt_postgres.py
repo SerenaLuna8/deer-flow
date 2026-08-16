@@ -722,7 +722,7 @@ async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_ba
             name="snip-long-compact-model",
             display_name=None,
             description=None,
-            use=("langchain_core.language_models.fake_chat_models:FakeListChatModel"),
+            use="support.fake_models:GovernedFakeListChatModel",
             model="snip-long-compact-model",
             responses=[
                 f"<continuity>\n{continuity}\n</continuity>\n{tagged_text}",
@@ -829,7 +829,7 @@ async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_bef
             name="snip-barrier-model",
             display_name=None,
             description=None,
-            use=("langchain_core.language_models.fake_chat_models:FakeListChatModel"),
+            use="support.fake_models:GovernedFakeListChatModel",
             model="snip-barrier-model",
             responses=["<continuity>\nThe thread is drained ahead of the Dream admission barrier.\n</continuity>\n- [durable] Direct Dream requests archive the Thread before admission"],
             custom_get_token_ids=lambda text: list(range(len(text))),

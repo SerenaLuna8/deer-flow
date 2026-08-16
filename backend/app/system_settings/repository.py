@@ -10,6 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.models import LockedSystemModelMaterial
+from app.system_settings.validation import (
+    is_provider_adapter_eligible_for_new_binding,
+)
 from deerflow.persistence.shared_assets import (
     CredentialEnvelopeRow,
     CredentialRow,
@@ -139,6 +142,10 @@ class SystemModelRepository:
         if model is None:
             return None
         version = await self.current_version(model, for_update=True)
+        if not is_provider_adapter_eligible_for_new_binding(
+            version.provider_adapter,
+        ):
+            return None
         credential = await self.lock_system_credential_reference(
             version.credential_id,
             version.credential_version_id,

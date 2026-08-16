@@ -24,6 +24,7 @@ from app.shared_assets.agent_design_service import (
     AgentDesignSessionSummary,
     AgentDesignStatus,
 )
+from deerflow.models import ModelRuntimeProfile
 
 GENERATION_MODEL_REF = "00000000-0000-4000-8000-000000000308"
 
@@ -134,7 +135,7 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     materialized_refs: list[str | None] = []
-    invoked_names: list[str] = []
+    invocation: dict[str, object] = {}
 
     class _Materializer:
         async def materialize_active(self, model_ref: str | None = None):
@@ -147,7 +148,7 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
             return self
 
     async def _run_oneshot_llm(**kwargs):
-        invoked_names.append(kwargs["model_name"])
+        invocation.update(kwargs)
         return "ok"
 
     monkeypatch.setattr(
@@ -169,4 +170,6 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
         == "ok"
     )
     assert materialized_refs == [GENERATION_MODEL_REF]
-    assert invoked_names == [GENERATION_MODEL_REF]
+    assert invocation["model_name"] == GENERATION_MODEL_REF
+    assert invocation["profile"] is ModelRuntimeProfile.PRIVATE_ONESHOT
+    assert "attach_tracing" not in invocation

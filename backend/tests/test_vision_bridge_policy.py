@@ -22,15 +22,8 @@ from app.system_runtime_settings.validation import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.sandbox_config import SandboxConfig
-from deerflow.vision.compatibility import (
-    VISION_BRIDGE_CONTRACT_V1,
-    VISION_BRIDGE_FAKE_ADAPTER,
-    VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
-    VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
-    VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
-    is_vision_bridge_adapter_compatible,
-    resolve_vision_bridge_protocol,
-)
+
+VISION_BRIDGE_CONTRACT_V1 = "vision.bridge.v1"
 
 VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
 
@@ -156,47 +149,22 @@ def test_runtime_overlay_materializes_bridge_but_yaml_rejects_it() -> None:
         )
 
 
-def test_compatibility_resolves_the_selected_models_protocol() -> None:
-    assert is_vision_bridge_adapter_compatible(
-        VISION_BRIDGE_FAKE_ADAPTER,
-        VISION_BRIDGE_CONTRACT_V1,
-    )
-    assert is_vision_bridge_adapter_compatible(
-        VISION_OPENAI_COMPATIBLE_V1_ADAPTER,
-        VISION_BRIDGE_CONTRACT_V1,
-    )
-    assert (
-        resolve_vision_bridge_protocol(
-            "openai",
-            {
-                "base_url": "https://responses.example.test/v1",
-                "use_responses_api": True,
-                "max_retries": 9,
-            },
-            VISION_BRIDGE_CONTRACT_V1,
+def test_policy_does_not_encode_a_provider_wire_protocol() -> None:
+    dumped = VisionBridgePolicy(
+        model_name=VISION_MODEL_REF,
+    ).model_dump(mode="json")
+
+    assert set(dumped) == {
+        "model_name",
+        "timeout_seconds",
+        "contract_version",
+    }
+    assert not any(
+        key in dumped
+        for key in (
+            "provider_adapter",
+            "use_responses_api",
+            "base_url",
+            "provider_protocol",
         )
-        == VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES
-    )
-    assert (
-        resolve_vision_bridge_protocol(
-            "vllm",
-            {
-                "base_url": "https://vllm.example.test/v1",
-                "extra_body": {"ignored_by_bridge": True},
-            },
-            VISION_BRIDGE_CONTRACT_V1,
-        )
-        == VISION_BRIDGE_PROTOCOL_OPENAI_CHAT_COMPLETIONS
-    )
-    assert (
-        resolve_vision_bridge_protocol(
-            "openai",
-            {"use_responses_api": True},
-            VISION_BRIDGE_CONTRACT_V1,
-        )
-        is None
-    )
-    assert not is_vision_bridge_adapter_compatible(
-        VISION_BRIDGE_FAKE_ADAPTER,
-        "vision.bridge.v2",
     )

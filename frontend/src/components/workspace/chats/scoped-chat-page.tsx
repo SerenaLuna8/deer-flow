@@ -511,13 +511,11 @@ export function ScopedChatPage({
         approvalBlocksSending ||
         (!scope.canUpload && message.files.length > 0)
       ) {
-        return;
+        return Promise.reject(
+          new Error("The current project cannot admit this message."),
+        );
       }
-      const sendPromise = sendMessage(threadId, message, undefined, options);
-      if (message.files.length > 0) {
-        return sendPromise;
-      }
-      void sendPromise;
+      return sendMessage(threadId, message, undefined, options);
     },
     [
       approvalBlocksSending,
@@ -896,11 +894,13 @@ export function ScopedChatPage({
                       draftConversationScope={threadId}
                       autoFocus={isWelcomeMode}
                       status={
-                        thread.error
-                          ? "error"
-                          : thread.isLoading
-                            ? "streaming"
-                            : "ready"
+                        isUploading
+                          ? "submitted"
+                          : thread.error
+                            ? "error"
+                            : thread.isLoading
+                              ? "streaming"
+                              : "ready"
                       }
                       context={settings.context}
                       extraHeader={

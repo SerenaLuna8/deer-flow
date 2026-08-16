@@ -5,6 +5,7 @@ import {
   jobFiltersSchema,
 } from "@/core/admin-operations/types";
 import {
+  adminModelCatalogSchema,
   adminModelItemSchema,
   createAdminModelInputSchema,
   replaceAdminModelInputSchema,
@@ -98,7 +99,112 @@ function agentRuntimeSettings() {
 }
 
 describe("admin contracts", () => {
-  test("rejects removed descriptions from the public model contract", () => {
+  test("fails closed on malformed provider descriptors while allowing intentional omission", () => {
+    const baseUrlField = {
+      name: "base_url",
+      label: "Base URL",
+      input_type: "url" as const,
+      advanced: false,
+      minimum: null,
+      maximum: null,
+      step: null,
+      options: [],
+    };
+    const customNumberField = {
+      name: "vendor_quality",
+      label: "Vendor quality",
+      input_type: "integer" as const,
+      advanced: false,
+      minimum: 1,
+      maximum: 7,
+      step: 1,
+      options: [],
+    };
+    const newAdapterDescriptor = {
+      id: "new_vendor_v2",
+      credential_required: false,
+      setting_fields: [baseUrlField, customNumberField],
+    };
+    const catalog = {
+      items: [],
+      provider_adapters: [newAdapterDescriptor],
+      catalog_revision: 1,
+      request_id: "descriptor-contract",
+    };
+
+    expect(
+      adminModelCatalogSchema
+        .parse(catalog)
+        .provider_adapters.map((descriptor) => descriptor.id),
+    ).toEqual(["new_vendor_v2"]);
+    const { provider_adapters: _providerAdapters, ...missingDescriptors } =
+      catalog;
+    expect(_providerAdapters).toHaveLength(1);
+    expect(adminModelCatalogSchema.safeParse(missingDescriptors).success).toBe(
+      false,
+    );
+    expect(
+      adminModelCatalogSchema.safeParse({
+        ...catalog,
+        provider_adapters: [
+          { ...newAdapterDescriptor, id: "Unknown-Provider" },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      adminModelCatalogSchema.safeParse({
+        ...catalog,
+        provider_adapters: [newAdapterDescriptor, newAdapterDescriptor],
+      }).success,
+    ).toBe(false);
+    const unsupportedField = adminModelCatalogSchema.safeParse({
+      ...catalog,
+      provider_adapters: [
+        {
+          ...newAdapterDescriptor,
+          setting_fields: [
+            {
+              ...customNumberField,
+              input_type: "vendor_magic_mode",
+            },
+          ],
+        },
+      ],
+    });
+    expect(unsupportedField.success).toBe(false);
+    expect(
+      adminModelCatalogSchema.safeParse({
+        ...catalog,
+        provider_adapters: [
+          {
+            ...newAdapterDescriptor,
+            setting_fields: [
+              { ...customNumberField, name: "vendor_quality" },
+              { ...customNumberField, name: "vendor_quality" },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+    expect(
+      adminModelCatalogSchema.safeParse({
+        ...catalog,
+        provider_adapters: [
+          {
+            ...newAdapterDescriptor,
+            setting_fields: [
+              {
+                ...baseUrlField,
+                minimum: 1,
+              },
+            ],
+          },
+        ],
+      }).success,
+    ).toBe(false);
+  });
+
+  test("keeps the legacy vision flag readable but optional in the public model contract", () => {
     const model = {
       name: PUBLIC_MODEL_ID,
       model: PUBLIC_MODEL_ID,
@@ -110,7 +216,13 @@ describe("admin contracts", () => {
       is_default: true,
     };
 
-    expect(modelSchema.safeParse(model).success).toBe(true);
+    expect(modelSchema.parse(model).supports_vision_bridge).toBe(false);
+    const { supports_vision_bridge: _legacyVisionFlag, ...withoutLegacyFlag } =
+      model;
+    expect(_legacyVisionFlag).toBe(false);
+    expect(modelSchema.parse(withoutLegacyFlag).supports_vision_bridge).toBe(
+      false,
+    );
     expect(
       modelSchema.safeParse({
         ...model,
@@ -127,8 +239,8 @@ describe("admin contracts", () => {
     const item = {
       id: "00000000-0000-4000-8000-000000000208",
       display_name: "Visible admin model",
-      provider_adapter: "vision_bridge_fake" as const,
-      provider_model: "vision-bridge-fake-v1",
+      provider_adapter: "historical_adapter_v1" as const,
+      provider_model: "historical-model-v1",
       settings: {},
       supports_thinking: false,
       supports_reasoning_effort: false,
@@ -158,18 +270,62 @@ describe("admin contracts", () => {
     }
   });
 
-  test("reads retired model adapters but rejects them from every write contract", () => {
-    const retiredAdapters = [
-      "patched_mimo",
-      "patched_minimax",
-      "patched_stepfun",
-      "mindie",
-      "claude_code",
-      "codex_cli",
-    ] as const;
-    const base = {
-      display_name: "Retired model",
-      provider_model: "retired-model",
+  test("reads the historical retry field but rejects it from every write contract", () => {
+    const version = {
+      display_name: "Historical retry model",
+      provider_adapter: "openai" as const,
+      provider_model: "gpt-history",
+      settings: { max_retries: 4 },
+      supports_thinking: false,
+      supports_reasoning_effort: false,
+      supports_vision: false,
+      credential_id: "00000000-0000-4000-8000-000000000101",
+      credential_version_id: "00000000-0000-4000-8000-000000000102",
+      credential_env_key: "OPENAI_API_KEY",
+    };
+
+    expect(
+      adminModelItemSchema.safeParse({
+        ...version,
+        id: "00000000-0000-4000-8000-000000000103",
+        status: "suspended",
+        is_default: false,
+        revision: 1,
+        version_number: 1,
+        updated_at: "2026-08-16T00:00:00+00:00",
+      }).success,
+    ).toBe(true);
+    expect(
+      createAdminModelInputSchema.safeParse({
+        ...version,
+        status: "suspended",
+      }).success,
+    ).toBe(false);
+    expect(
+      replaceAdminModelInputSchema.safeParse({
+        ...version,
+        expected_revision: 1,
+      }).success,
+    ).toBe(false);
+    expect(
+      testAdminModelConnectionInputSchema.safeParse({
+        provider_adapter: version.provider_adapter,
+        provider_model: version.provider_model,
+        settings: version.settings,
+        supports_vision: version.supports_vision,
+        credential_id: version.credential_id,
+        credential_version_id: version.credential_version_id,
+        credential_env_key: version.credential_env_key,
+      }).success,
+    ).toBe(false);
+  });
+
+  test("reads bounded historical adapter IDs without maintaining a retired list", () => {
+    const item = {
+      id: "00000000-0000-4000-8000-000000000105",
+      display_name: "Historical model",
+      provider_adapter: "legacy_adapter_v1",
+      provider_model: "legacy-model",
       settings: {},
       supports_thinking: false,
       supports_reasoning_effort: false,
@@ -177,139 +333,26 @@ describe("admin contracts", () => {
       credential_id: null,
       credential_version_id: null,
       credential_env_key: null,
+      status: "suspended",
+      is_default: false,
+      revision: 1,
+      version_number: 1,
+      updated_at: "2026-08-16T00:00:00+00:00",
     };
 
-    for (const provider_adapter of retiredAdapters) {
-      const credentialRequired = !["claude_code", "codex_cli"].includes(
-        provider_adapter,
-      );
-      const item = {
-        ...base,
-        provider_adapter,
-        ...(credentialRequired
-          ? {
-              credential_id: "00000000-0000-4000-8000-000000000103",
-              credential_version_id: "00000000-0000-4000-8000-000000000104",
-              credential_env_key: "LEGACY_API_KEY",
-            }
-          : {}),
-      };
-
+    expect(adminModelItemSchema.safeParse(item).success).toBe(true);
+    for (const invalidAdapter of [
+      "LegacyAdapter",
+      "legacy-adapter",
+      `a${"b".repeat(64)}`,
+    ]) {
       expect(
         adminModelItemSchema.safeParse({
           ...item,
-          id: "00000000-0000-4000-8000-000000000105",
-          status: "suspended",
-          is_default: false,
-          revision: 1,
-          version_number: 1,
-          updated_at: "2026-08-16T00:00:00+00:00",
-        }).success,
-      ).toBe(true);
-      expect(
-        createAdminModelInputSchema.safeParse({
-          ...item,
-          status: "suspended",
-        }).success,
-      ).toBe(false);
-      expect(
-        replaceAdminModelInputSchema.safeParse({
-          ...item,
-          expected_revision: 1,
-        }).success,
-      ).toBe(false);
-      expect(
-        testAdminModelConnectionInputSchema.safeParse({
-          provider_adapter,
-          provider_model: item.provider_model,
-          settings: item.settings,
-          supports_vision: false,
-          credential_id: item.credential_id,
-          credential_version_id: item.credential_version_id,
-          credential_env_key: item.credential_env_key,
+          provider_adapter: invalidAdapter,
         }).success,
       ).toBe(false);
     }
-  });
-
-  test("accepts the credential-free Vision Bridge fake adapter", () => {
-    const input = {
-      display_name: "Small Vision Model",
-      provider_adapter: "vision_bridge_fake",
-      provider_model: "vision-bridge-fake-v1",
-      settings: {},
-      supports_thinking: false,
-      supports_reasoning_effort: false,
-      supports_vision: true,
-      credential_id: null,
-      credential_version_id: null,
-      credential_env_key: null,
-      status: "active",
-    };
-    expect(createAdminModelInputSchema.parse(input).provider_adapter).toBe(
-      "vision_bridge_fake",
-    );
-    for (const removedField of [
-      { logical_name: "internal-name" },
-      { description: "Removed" },
-      { sort_order: 0 },
-    ]) {
-      expect(
-        createAdminModelInputSchema.safeParse({
-          ...input,
-          ...removedField,
-        }).success,
-      ).toBe(false);
-    }
-    expect(
-      createAdminModelInputSchema.safeParse({
-        ...input,
-        settings: { base_url: "https://example.com" },
-      }).success,
-    ).toBe(false);
-  });
-
-  test("accepts only the narrow credential-bound real Vision Bridge adapter", () => {
-    const input = {
-      display_name: "Small Vision API",
-      provider_adapter: "vision_openai_compatible_v1",
-      provider_model: "small-vlm",
-      settings: { base_url: "https://vision.example.test/v1" },
-      supports_thinking: false,
-      supports_reasoning_effort: false,
-      supports_vision: true,
-      credential_id: "00000000-0000-4000-8000-000000000101",
-      credential_version_id: "00000000-0000-4000-8000-000000000102",
-      credential_env_key: "VISION_API_KEY",
-      status: "active",
-    };
-
-    expect(createAdminModelInputSchema.parse(input).provider_adapter).toBe(
-      "vision_openai_compatible_v1",
-    );
-    expect(
-      createAdminModelInputSchema.safeParse({
-        ...input,
-        settings: { base_url: "http://vision.example.test/v1" },
-      }).success,
-    ).toBe(false);
-    expect(
-      createAdminModelInputSchema.safeParse({
-        ...input,
-        settings: {
-          base_url: "https://vision.example.test/v1",
-          max_retries: 4,
-        },
-      }).success,
-    ).toBe(false);
-    expect(
-      createAdminModelInputSchema.safeParse({
-        ...input,
-        credential_id: null,
-        credential_version_id: null,
-        credential_env_key: null,
-      }).success,
-    ).toBe(false);
   });
 
   test("accepts only the final frozen Memory policy", () => {

@@ -50,6 +50,7 @@ from deerflow.mcp_definition_policy import (
     McpEndpointPolicy,
     NetworkMcpEndpointPolicy,
 )
+from deerflow.models import ModelRuntimeProfile
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 from deerflow.utils.oneshot_llm import run_oneshot_llm
@@ -197,7 +198,7 @@ class ProjectInputPolishService:
                 run_name="project_input_polish",
                 app_config=runtime_config,
                 model_name=model_name,
-                thread_id=str(body.thread_id),
+                profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
             )
             rewritten = _clean_rewritten_text(raw)
         except SystemModelMaterializationUnavailable as exc:

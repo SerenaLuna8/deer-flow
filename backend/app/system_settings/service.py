@@ -44,7 +44,7 @@ from app.system_settings.repository import (
 from app.system_settings.validation import (
     ModelSettingsInvalid,
     canonical_model_payload_checksum,
-    is_provider_adapter_supported,
+    is_provider_adapter_eligible_for_new_binding,
     validate_create_system_model,
     validate_system_model_connection_test,
     validate_update_system_model,
@@ -55,10 +55,6 @@ from deerflow.persistence.system_settings import (
     SystemModelConfigVersionRow,
 )
 from deerflow.persistence.user.model import UserRow
-from deerflow.vision.compatibility import (
-    VISION_BRIDGE_CONTRACT_V1,
-    resolve_vision_bridge_protocol,
-)
 
 _PURPOSE = re.compile(r"[a-z][a-z0-9._-]{0,63}\Z")
 _CONFLICT_CONSTRAINTS = frozenset(
@@ -276,7 +272,9 @@ class SystemModelCatalogService:
                     for model, version in await repository.list_models(
                         active_only=True,
                     )
-                    if is_provider_adapter_supported(version.provider_adapter)
+                    if is_provider_adapter_eligible_for_new_binding(
+                        version.provider_adapter,
+                    )
                 )
                 rows = tuple(
                     sorted(
@@ -291,15 +289,9 @@ class SystemModelCatalogService:
                         supports_thinking=version.supports_thinking,
                         supports_reasoning_effort=(version.supports_reasoning_effort),
                         supports_vision=version.supports_vision,
-                        supports_vision_bridge=(
-                            version.supports_vision
-                            and resolve_vision_bridge_protocol(
-                                version.provider_adapter,
-                                version.settings,
-                                VISION_BRIDGE_CONTRACT_V1,
-                            )
-                            is not None
-                        ),
+                        # Compatibility field: every eligible multimodal model
+                        # can back inspect_image through its registered adapter.
+                        supports_vision_bridge=version.supports_vision,
                         is_default=model.id == default_id,
                     )
                     for model, version in rows
@@ -494,8 +486,10 @@ class SystemModelCatalogService:
             if model.revision != expected_revision or model.status == status:
                 raise SystemModelConflict(actor.request_id)
             version = await repository.current_version(model)
-            if status == "active" and not is_provider_adapter_supported(
-                version.provider_adapter,
+            if status == "active" and not (
+                is_provider_adapter_eligible_for_new_binding(
+                    version.provider_adapter,
+                )
             ):
                 raise SystemModelInvalid(actor.request_id)
             model.status = status
@@ -534,7 +528,9 @@ class SystemModelCatalogService:
             if model is None or model.status != "active":
                 raise SystemModelNotFound(actor.request_id)
             version = await repository.current_version(model)
-            if not is_provider_adapter_supported(version.provider_adapter):
+            if not is_provider_adapter_eligible_for_new_binding(
+                version.provider_adapter,
+            ):
                 raise SystemModelInvalid(actor.request_id)
             if state.default_model_config_id != model.id:
                 state.default_model_config_id = model.id
@@ -585,8 +581,10 @@ class SystemModelCatalogService:
                 model_ref,
                 load_envelope=False,
             )
-            if material is None or not is_provider_adapter_supported(
-                material.version.provider_adapter,
+            if material is None or not (
+                is_provider_adapter_eligible_for_new_binding(
+                    material.version.provider_adapter,
+                )
             ):
                 raise SystemModelNotFound(request_id)
             existing = await repository.existing_snapshot(

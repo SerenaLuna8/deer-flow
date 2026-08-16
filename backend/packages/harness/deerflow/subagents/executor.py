@@ -34,7 +34,7 @@ from deerflow.error_codes import (
     llm_error_code_for_reason,
 )
 from deerflow.guardrails.provider import copy_guardrail_attribution
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.skills.tool_policy import (
@@ -866,10 +866,8 @@ class SubagentExecutor:
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
         model_kwargs: dict[str, object] = {
-            "name": self.model_name,
+            "model_name": self.model_name,
             "thinking_enabled": False,
-            "app_config": app_config,
-            "attach_tracing": False,
         }
         if self._agent_model_settings is not None:
             model_kwargs["thinking_enabled"] = bool(self._agent_model_settings.thinking_enabled)
@@ -878,7 +876,10 @@ class SubagentExecutor:
             sampling_overrides = self._agent_model_settings.sampling_overrides()
             if sampling_overrides:
                 model_kwargs["model_overrides"] = sampling_overrides
-        model = create_chat_model(**model_kwargs)
+        model = ModelRuntime(app_config=app_config).build_chat_model(
+            profile=ModelRuntimeProfile.AGENT_GRAPH,
+            **model_kwargs,
+        )
 
         from deerflow.agents.middlewares.assembly import (
             build_subagent_runtime_middlewares,

@@ -52,6 +52,9 @@ from app.system_runtime_settings.validation import (
     canonical_policy_payload_for_schema,
     parse_policy_value,
 )
+from app.system_settings.validation import (
+    is_provider_adapter_eligible_for_new_binding,
+)
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
     SystemRuntimePolicyVersionRow,
@@ -61,9 +64,6 @@ from deerflow.persistence.system_settings import (
     SystemModelConfigVersionRow,
 )
 from deerflow.persistence.user.model import UserRow
-from deerflow.vision.compatibility import (
-    resolve_vision_bridge_protocol,
-)
 
 _TARGET_NAMESPACE = uuid.UUID("4475fe37-f970-5820-9dcb-7db6c9585200")
 _CONFLICT_CONSTRAINTS = frozenset(
@@ -253,7 +253,6 @@ class SystemRuntimePolicyService:
                             select(
                                 SystemModelConfigRow.id,
                                 SystemModelConfigVersionRow.provider_adapter,
-                                SystemModelConfigVersionRow.settings,
                                 SystemModelConfigVersionRow.supports_vision,
                             )
                             .join(
@@ -275,21 +274,18 @@ class SystemRuntimePolicyService:
                     ).all()
                 )
                 active_by_ref = {str(row.id): row for row in active_models}
-                if frozenset(active_by_ref) != refs:
+                if frozenset(active_by_ref) != refs or any(
+                    not is_provider_adapter_eligible_for_new_binding(
+                        row.provider_adapter,
+                    )
+                    for row in active_models
+                ):
                     raise SystemRuntimePolicyInvalid(actor.request_id)
                 if isinstance(parsed_value, AgentRuntimePolicyValue):
                     vision_ref = parsed_value.vision_bridge.model_name
                     if vision_ref is not None:
                         vision_model = active_by_ref[vision_ref]
-                        if (
-                            not vision_model.supports_vision
-                            or resolve_vision_bridge_protocol(
-                                vision_model.provider_adapter,
-                                vision_model.settings,
-                                parsed_value.vision_bridge.contract_version,
-                            )
-                            is None
-                        ):
+                        if not vision_model.supports_vision:
                             raise SystemRuntimePolicyInvalid(actor.request_id)
 
             now = datetime.now(UTC)

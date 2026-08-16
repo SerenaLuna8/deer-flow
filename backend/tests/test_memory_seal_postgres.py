@@ -110,7 +110,7 @@ async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
         name=model_name,
         display_name=None,
         description=None,
-        use=("langchain_core.language_models.fake_chat_models:FakeListChatModel"),
+        use="support.fake_models:GovernedFakeListChatModel",
         model=model_name,
         responses=[
             f"<continuity>\n{_CONTINUITY}\n</continuity>\n{_TAGGED_TEXT}",

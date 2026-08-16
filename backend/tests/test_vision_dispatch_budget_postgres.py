@@ -2,14 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from threading import Event
 
-import httpx
 import pytest
+from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import SecretStr
 from support.private_thread_seed import seed_private_thread_database
 
@@ -41,7 +39,10 @@ from app.reliability.run_execution.boundary import PrivateRunExecutionBoundary
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
+from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.sandbox_config import SandboxConfig
+from deerflow.models.runtime import ModelRuntime, ModelRuntimeProfile
 from deerflow.persistence.jobs.model import JobAttemptRow, JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import (
     JobClaim,
@@ -51,14 +52,12 @@ from deerflow.persistence.jobs.sql import (
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.vision.contracts import VisionUsageReceipt
 from deerflow.vision.dispatch import (
     MAX_VISION_CALLS_PER_RUN,
     MAX_VISION_NORMALIZED_BYTES_PER_RUN,
     MAX_VISION_NORMALIZED_PIXELS_PER_RUN,
     VisionDispatchDenied,
-)
-from deerflow.vision.openai_compatible import (
-    OpenAICompatibleVisionEvidenceClient,
 )
 
 
@@ -689,26 +688,53 @@ async def test_postgres_committed_reserve_survives_inflight_provider_cancellatio
         )
         provider_started = asyncio.Event()
 
-        async def blocking_provider(_request: httpx.Request) -> httpx.Response:
-            provider_started.set()
-            await asyncio.Future()
-            raise AssertionError("unreachable")
+        class BlockingChatModel:
+            async def ainvoke(
+                self,
+                _messages: object,
+                *,
+                config: object,
+            ) -> AIMessage:
+                del config
+                provider_started.set()
+                await asyncio.Future()
+                raise AssertionError("unreachable")
 
-        client = OpenAICompatibleVisionEvidenceClient(
-            model,
-            transport=httpx.MockTransport(blocking_provider),
+        runtime = ModelRuntime(
+            app_config=AppConfig(
+                models=[model],
+                sandbox=SandboxConfig(
+                    use="deerflow.sandbox.local:LocalSandboxProvider",
+                ),
+            ),
+            model_factory=lambda **_kwargs: BlockingChatModel(),
         )
-        task = asyncio.create_task(
-            client.analyze(
-                image_bytes=b"image",
-                mime_type="image/png",
-                mode="auto",
-                deadline_monotonic=time.monotonic() + 5,
-                abort_signal=Event(),
-                dispatch_authority=authority,
+
+        async def invoke() -> None:
+            attempt = await authority.before_attempt(
+                normalized_bytes=5,
                 normalized_pixels=23,
             )
-        )
+            try:
+                await runtime.ainvoke(
+                    [HumanMessage(content="image request")],
+                    profile=ModelRuntimeProfile.SENSITIVE_MULTIMODAL,
+                    model_name=model.name,
+                )
+            finally:
+                await asyncio.shield(
+                    authority.after_attempt(
+                        attempt=attempt,
+                        usage_receipt=VisionUsageReceipt(
+                            call_count=1,
+                            request_dispatched=True,
+                            usage_unknown=True,
+                        ),
+                        error_code="VISION_AUTH_FAILED",
+                    )
+                )
+
+        task = asyncio.create_task(invoke())
         await asyncio.wait_for(provider_started.wait(), timeout=2)
 
         # Reaching the provider proves before_attempt returned. Read through a

@@ -159,6 +159,11 @@ export async function uploadFiles(
   files: File[],
   options: UploadRequestOptions,
   signal?: AbortSignal,
+  onFileUploaded?: (
+    uploaded: UploadedFileInfo,
+    file: File,
+    index: number,
+  ) => void,
 ): Promise<UploadResponse> {
   signal?.throwIfAborted();
   if (files.length === 0) {
@@ -177,7 +182,7 @@ export async function uploadFiles(
   }
   const uploadedFiles: UploadedFileInfo[] = [];
   const apiBaseURL = uploadAPIBaseURL(options);
-  for (const file of files) {
+  for (const [index, file] of files.entries()) {
     signal?.throwIfAborted();
     const formData = new FormData();
     formData.append("file", file);
@@ -191,7 +196,9 @@ export async function uploadFiles(
     }
     const uploaded = privateUploadedFileSchema.parse(await response.json());
     signal?.throwIfAborted();
-    uploadedFiles.push(mapPrivateUploadedFile(uploaded, apiBaseURL, threadId));
+    const mapped = mapPrivateUploadedFile(uploaded, apiBaseURL, threadId);
+    uploadedFiles.push(mapped);
+    onFileUploaded?.(mapped, file, index);
   }
   signal?.throwIfAborted();
   return {

@@ -18,6 +18,7 @@ from pydantic import (
 from deerflow.vision.prompt import VisionMode
 
 MAX_EVIDENCE_JSON_BYTES = 24_000
+MAX_IMAGE_ANALYSIS_TEXT_CHARS = 20_000
 MAX_SUMMARY_CHARS = 2_000
 MAX_EVIDENCE_TEXT_CHARS = 2_000
 MAX_LOCATION_CHARS = 256
@@ -27,6 +28,10 @@ MAX_UNCERTAINTY_CHARS = 1_000
 BoundedSummary = Annotated[
     str,
     StringConstraints(min_length=1, max_length=MAX_SUMMARY_CHARS),
+]
+BoundedImageAnalysisText = Annotated[
+    str,
+    StringConstraints(min_length=1, max_length=MAX_IMAGE_ANALYSIS_TEXT_CHARS),
 ]
 BoundedEvidenceText = Annotated[
     str,
@@ -74,6 +79,35 @@ class VisionErrorResult(_StrictContract):
         "VISION_SCHEMA_MISMATCH",
     ]
     message: str = Field(min_length=1, max_length=200)
+
+
+class InspectImageResult(_StrictContract):
+    """Server-owned, Provider-neutral result returned to the lead model."""
+
+    ok: Literal[True]
+    schema_version: Literal["inspect_image.result.v2"]
+    content_type: Literal["untrusted_image_analysis"]
+    mode: VisionMode
+    text: BoundedImageAnalysisText
+    truncated: bool
+
+    @field_validator("text")
+    @classmethod
+    def text_must_have_visible_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("analysis text must be non-empty")
+        return value
+
+    def canonical_json(self) -> str:
+        encoded = json.dumps(
+            self.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        if len(encoded) > MAX_EVIDENCE_JSON_BYTES:
+            raise ValueError("VISION_RESPONSE_TOO_LARGE")
+        return encoded.decode("utf-8")
 
 
 class VisionEvidenceItem(_StrictContract):
@@ -156,16 +190,12 @@ class VisionUsageReceipt:
     usage_unknown: bool = True
 
 
-@dataclass(frozen=True, slots=True)
-class VisionInvocationResult:
-    evidence: VisionEvidence
-    usage_receipt: VisionUsageReceipt
-
-
 __all__ = [
+    "InspectImageResult",
     "InspectImageInput",
     "MAX_EVIDENCE_TEXT_CHARS",
     "MAX_EVIDENCE_JSON_BYTES",
+    "MAX_IMAGE_ANALYSIS_TEXT_CHARS",
     "MAX_LOCATION_CHARS",
     "MAX_OCR_TEXT_CHARS",
     "MAX_SUMMARY_CHARS",
@@ -173,7 +203,6 @@ __all__ = [
     "VisionEvidence",
     "VisionErrorResult",
     "VisionEvidenceItem",
-    "VisionInvocationResult",
     "VisionMode",
     "VisionOcrEvidence",
     "VisionUsageReceipt",

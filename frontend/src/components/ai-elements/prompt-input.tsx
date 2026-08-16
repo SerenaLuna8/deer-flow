@@ -75,6 +75,11 @@ import {
 } from "react";
 import { toast } from "sonner";
 
+import {
+  createPromptInputSubmissionState,
+  runExclusivePromptInputSubmission,
+} from "./prompt-input-submission";
+
 // ============================================================================
 // Provider Context & Types
 // ============================================================================
@@ -489,6 +494,7 @@ export const PromptInput = ({
   // Refs
   const inputRef = useRef<HTMLInputElement | null>(null);
   const formRef = useRef<HTMLFormElement | null>(null);
+  const submissionStateRef = useRef(createPromptInputSubmissionState());
 
   // ----- Local attachments (only used when no provider)
   const [items, setItems] = useState<(PromptInputFilePart & { id: string })[]>(
@@ -765,13 +771,6 @@ export const PromptInput = ({
           return (formData.get("message") as string) || "";
         })();
 
-    // Reset form immediately after capturing text to avoid race condition
-    // where user input during async blob conversion would be lost
-    if (!usingProvider) {
-      form.reset();
-    }
-
-    // Convert blob URLs to data URLs asynchronously
     const submittedFileIds = files.map((file) => file.id);
     const clearSubmittedState = () => {
       const currentFileIds = new Set(filesRef.current.map((file) => file.id));
@@ -787,50 +786,43 @@ export const PromptInput = ({
       }
       if (usingProvider && providerTextRef.current === text) {
         controller.textInput.clear();
+      } else if (!usingProvider) {
+        form.reset();
       }
     };
 
-    Promise.all(
-      files.map(async ({ id, ...item }) => {
-        if (item.file instanceof File) {
-          // Downstream upload prep reads the preserved File directly.
-          return item;
-        }
-        if (item.url && item.url.startsWith("blob:")) {
-          const dataUrl = await convertBlobUrlToDataUrl(item.url);
-          // If conversion failed, keep the original blob URL
-          return {
-            ...item,
-            url: dataUrl ?? item.url,
-          };
-        }
-        return item;
-      }),
-    )
-      .then((convertedFiles: PromptInputFilePart[]) => {
-        try {
-          const result = onSubmit({ text, files: convertedFiles }, event);
+    void runExclusivePromptInputSubmission({
+      state: submissionStateRef.current,
+      disabled: disabled === true,
+      task: async () => {
+        const convertedFiles = await Promise.all(
+          files.map(async ({ id, ...item }) => {
+            if (item.file instanceof File) {
+              // Downstream upload prep reads the preserved File directly.
+              return { ...item, clientId: id };
+            }
+            if (item.url && item.url.startsWith("blob:")) {
+              const dataUrl = await convertBlobUrlToDataUrl(item.url);
+              // If conversion failed, keep the original blob URL
+              return {
+                ...item,
+                clientId: id,
+                url: dataUrl ?? item.url,
+              };
+            }
+            return { ...item, clientId: id };
+          }),
+        );
 
-          // Handle both sync and async onSubmit
-          if (result instanceof Promise) {
-            result
-              .then(() => {
-                clearSubmittedState();
-              })
-              .catch(() => {
-                // Don't clear on error - user may want to retry
-              });
-          } else {
-            // Sync function completed without throwing, clear attachments
-            clearSubmittedState();
-          }
-        } catch {
-          // Don't clear on error - user may want to retry
-        }
-      })
-      .catch(() => {
-        // Don't clear on error - user may want to retry
-      });
+        await onSubmit(
+          { text, files: convertedFiles as PromptInputFilePart[] },
+          event,
+        );
+        clearSubmittedState();
+      },
+    }).catch(() => {
+      // Keep text and attachments on conversion, upload, or admission failure.
+    });
   };
 
   // Render with or without local provider

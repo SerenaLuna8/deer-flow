@@ -137,7 +137,7 @@ from deerflow.agents.thread_state import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
@@ -1493,14 +1493,15 @@ class SkillBuilderAgentFactory:
         sampling_overrides = getattr(model_settings, "sampling_overrides", None)
         model_overrides = sampling_overrides() if callable(sampling_overrides) else None
         model_kwargs = {
-            "name": model_name,
+            "model_name": model_name,
             "thinking_enabled": thinking_enabled,
             "reasoning_effort": reasoning_effort,
-            "app_config": app_config,
-            "attach_tracing": False,
             "model_overrides": model_overrides,
         }
-        lead_model = create_chat_model(**model_kwargs)
+        lead_model = ModelRuntime(app_config=app_config).build_chat_model(
+            profile=ModelRuntimeProfile.AGENT_GRAPH,
+            **model_kwargs,
+        )
 
         frozen_mode = frozen_checkpoint_channel_mode()
         requested_mode = (

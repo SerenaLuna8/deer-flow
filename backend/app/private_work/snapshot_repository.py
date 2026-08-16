@@ -108,9 +108,6 @@ from deerflow.persistence.shared_assets.agent_model import (
 )
 from deerflow.persistence.shared_assets.mcp_model import McpServerRow, McpServerVersionRow
 from deerflow.persistence.shared_assets.skill_model import SkillRow, SkillVersionRow
-from deerflow.vision.compatibility import (
-    resolve_vision_bridge_protocol,
-)
 
 _FORBIDDEN_PERSISTED_KEY_PARTS = (
     "secret",
@@ -916,15 +913,7 @@ class RunSnapshotRepository:
                                 purpose=purpose,
                                 model_ref=snapshot_ref,
                             )
-                            if purpose == "vision" and (
-                                not auxiliary_snapshot.supports_vision
-                                or resolve_vision_bridge_protocol(
-                                    auxiliary_snapshot.provider_adapter,
-                                    auxiliary_snapshot.provider_settings,
-                                    locked_runtime_policy.value.vision_bridge.contract_version,
-                                )
-                                is None
-                            ):
+                            if purpose == "vision" and not auxiliary_snapshot.supports_vision:
                                 raise SystemModelInvalid(context.request_id)
                         except SystemModelNotFound:
                             if purpose == "title" and model_ref is None:

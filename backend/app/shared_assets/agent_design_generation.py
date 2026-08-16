@@ -27,6 +27,7 @@ from app.shared_assets.agent_service import (
 from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.models.runtime import ModelRuntimeProfile
 from deerflow.utils import llm_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
@@ -616,8 +617,7 @@ class RunOneshotAgentDesignModelCaller:
             run_name="agent_design_generation",
             app_config=self.app_config,
             model_name=model_ref if model_ref is not None else self.model_name,
-            thread_id=None,
-            attach_tracing=False,
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
         )
 
 

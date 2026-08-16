@@ -6,7 +6,7 @@ import html
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Literal, NotRequired, TypedDict, override
+from typing import Any, Literal, NotRequired, TypedDict, cast, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import SummarizationMiddleware
@@ -39,7 +39,9 @@ from deerflow.agents.memory.snip import (
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.config.summarization_config import validate_summary_prompt_template
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
+from deerflow.models.runtime import AsyncAbortEvent
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 from deerflow.utils.messages import SUMMARY_MESSAGE_NAME, is_real_user_message
 
@@ -47,6 +49,17 @@ logger = logging.getLogger(__name__)
 _SUMMARY_TRIGGER_MESSAGE_NAME = "summary"
 _ASK_CLARIFICATION_TOOL_NAME = "ask_clarification"
 MIN_SNIP_SUMMARY_OUTPUT_TOKENS = 4096
+
+
+def _server_abort_event(runtime_context: object | None) -> AsyncAbortEvent | None:
+    if not isinstance(runtime_context, Mapping):
+        return None
+    candidate = runtime_context.get(RuntimeContextKeys.SERVER_ABORT_EVENT)
+    if not callable(getattr(candidate, "is_set", None)) or not callable(
+        getattr(candidate, "wait", None),
+    ):
+        return None
+    return cast(AsyncAbortEvent, candidate)
 
 
 def _ensure_snip_summary_output_budget(model: Any) -> Any:
@@ -203,8 +216,10 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         # never echoes the invalid output.
         for attempt_prompt in (prompt, f"{prompt}\n\n{SNIP_RETRY_REINFORCEMENT}"):
             try:
-                response = self._summary_model.invoke(
+                response = ModelRuntime.invoke_runnable(
+                    self._summary_model,
                     attempt_prompt,
+                    profile=ModelRuntimeProfile.AGENT_GRAPH,
                     config={"metadata": {"lc_source": "summarization"}},
                 )
                 return self._parse_snip_response(response.text)
@@ -239,13 +254,19 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
                     parent_config = get_config()
                 except RuntimeError:
                     parent_config = {}
+                effective_authorization_context = authorization_context or parent_config.get("context")
                 await check_authorization_boundary(
-                    authorization_context or parent_config.get("context"),
+                    effective_authorization_context,
                     "before_model_call",
                 )
-                response = await self._summary_model.ainvoke(
+                response = await ModelRuntime.ainvoke_runnable(
+                    self._summary_model,
                     attempt_prompt,
+                    profile=ModelRuntimeProfile.AGENT_GRAPH,
                     config={"metadata": {"lc_source": "summarization"}},
+                    abort_event=_server_abort_event(
+                        effective_authorization_context,
+                    ),
                 )
                 return self._parse_snip_response(response.text)
             except AuthorizationRevoked:
@@ -847,19 +868,11 @@ def create_summarization_middleware(
         else:
             trigger = config.trigger.to_tuple()
 
-    if config.model_name:
-        model = create_chat_model(
-            name=config.model_name,
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
-    else:
-        model = create_chat_model(
-            thinking_enabled=False,
-            app_config=resolved_app_config,
-            attach_tracing=False,
-        )
+    model = ModelRuntime(app_config=resolved_app_config).build_chat_model(
+        profile=ModelRuntimeProfile.AGENT_GRAPH,
+        model_name=config.model_name or None,
+        thinking_enabled=False,
+    )
     dual_output_contract = config.summary_prompt is None
     summary_prompt = SNIP_ARCHIVE_PROMPT if dual_output_contract else config.summary_prompt
     if dual_output_contract:

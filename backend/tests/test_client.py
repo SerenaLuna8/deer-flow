@@ -17,6 +17,7 @@ from deerflow.agents.thread_state import DeltaThreadState
 from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
+from deerflow.models import ModelRuntimeProfile
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -954,7 +955,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model") as build_model,
             patch("deerflow.client.create_agent", return_value=mock_agent),
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
@@ -966,6 +967,7 @@ class TestEnsureAgent:
             client._ensure_agent(config)
 
         assert client._agent is mock_agent
+        assert build_model.call_args.kwargs["profile"] is ModelRuntimeProfile.AGENT_GRAPH
         # Verify agent_name propagation
         mock_build_middlewares.assert_called_once()
         assert mock_build_middlewares.call_args.kwargs.get("agent_name") == "custom-agent"
@@ -979,7 +981,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t-delta")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch(
                 "deerflow.client.create_agent",
                 return_value=MagicMock(),
@@ -1003,7 +1005,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1027,7 +1029,7 @@ class TestEnsureAgent:
             return [MagicMock()] + custom + [mock_clarification]
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", side_effect=fake_build_middlewares),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1046,7 +1048,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=mock_agent) as mock_create_agent,
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1087,7 +1089,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
@@ -1107,7 +1109,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt") as mock_apply_prompt,
@@ -1147,7 +1149,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1168,7 +1170,7 @@ class TestEnsureAgent:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", return_value=MagicMock()),
             patch("deerflow.client.build_middlewares", return_value=[]) as mock_build_middlewares,
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1861,7 +1863,7 @@ class TestScenarioAgentRecreation:
         config_b = client._get_runnable_config("t1", model_name="claude-3")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1889,7 +1891,7 @@ class TestScenarioAgentRecreation:
         config = client._get_runnable_config("t1", model_name="gpt-4")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),
@@ -1914,7 +1916,7 @@ class TestScenarioAgentRecreation:
         config = client._get_runnable_config("t1")
 
         with (
-            patch("deerflow.client.create_chat_model"),
+            patch("deerflow.client.ModelRuntime.build_chat_model"),
             patch("deerflow.client.create_agent", side_effect=fake_create_agent),
             patch("deerflow.client.build_middlewares", return_value=[]),
             patch("deerflow.client.apply_prompt_template", return_value="prompt"),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import time
 from dataclasses import dataclass
 from importlib import resources
 from typing import Protocol
@@ -28,6 +29,7 @@ from deerflow.memory_contract.document import (
     validate_memory_document_structure,
 )
 from deerflow.memory_contract.dream import DREAM_PROMPT_VERSION
+from deerflow.models.runtime import ModelRuntime, ModelRuntimeProfile
 
 MAX_DREAM_HISTORY_ITEMS = 20
 MAX_DREAM_HISTORY_CHARS = 1_000
@@ -258,7 +260,7 @@ def build_dream_tools(draft: _MemoryDraft) -> tuple[StructuredTool, StructuredTo
 
 
 class _BoundDreamModel(Protocol):
-    async def ainvoke(self, messages: list[object]) -> AIMessage: ...
+    async def ainvoke(self, messages: list[object], *, config: object) -> AIMessage: ...
 
 
 class DreamModel(Protocol):
@@ -272,12 +274,22 @@ class MemoryDreamRunner:
         self,
         model: DreamModel,
         *,
+        model_runtime: ModelRuntime,
         timeout_seconds: float = DEFAULT_DREAM_TIMEOUT_SECONDS,
         max_rounds: int = DEFAULT_DREAM_MAX_ROUNDS,
     ) -> None:
-        if not callable(getattr(model, "bind_tools", None)) or isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float) or timeout_seconds <= 0 or type(max_rounds) is not int or not 1 <= max_rounds <= 32:
+        if (
+            not callable(getattr(model, "bind_tools", None))
+            or not callable(getattr(model_runtime, "ainvoke_runnable", None))
+            or isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, int | float)
+            or timeout_seconds <= 0
+            or type(max_rounds) is not int
+            or not 1 <= max_rounds <= 32
+        ):
             raise ValueError("Dream runner configuration is invalid")
         self._model = model
+        self._model_runtime = model_runtime
         self._timeout_seconds = float(timeout_seconds)
         self._max_rounds = max_rounds
 
@@ -304,10 +316,16 @@ class MemoryDreamRunner:
         consecutive_over_budget = 0
         fresh_regeneration_used = False
         fresh_regeneration_requires_replace = False
+        deadline_monotonic = time.monotonic() + self._timeout_seconds
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 for round_number in range(1, self._max_rounds + 1):
-                    response = await bound.ainvoke(messages)
+                    response = await self._model_runtime.ainvoke_runnable(
+                        bound,
+                        messages,
+                        profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+                        deadline_monotonic=deadline_monotonic,
+                    )
                     if not isinstance(response, AIMessage):
                         raise MemoryDreamError("MEMORY_DREAM_MODEL_INVALID")
                     messages.append(response)

@@ -17,6 +17,7 @@ _AGENT_MODEL_SETTING_FIELDS = frozenset(
         "max_tokens",
     }
 )
+_RUNTIME_MODEL_OVERRIDE_FIELDS = frozenset({"max_retries"})
 _AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
     "max_tokens",
     "max_output_tokens",
@@ -25,6 +26,10 @@ _AGENT_MAX_TOKENS_PROVIDER_FIELDS = (
 
 class AgentModelSettingsUnsupported(ValueError):
     """The exact provider cannot honor immutable Agent sampling settings."""
+
+
+class RuntimeModelSettingsUnsupported(ValueError):
+    """The exact provider cannot honor a closed runtime call profile."""
 
 
 def _deep_merge_dicts(base: dict | None, override: dict) -> dict:
@@ -249,6 +254,36 @@ def _validated_agent_model_overrides(
     return mapped
 
 
+def _validated_runtime_model_overrides(
+    model_class: type[BaseChatModel],
+    model_name: str,
+    overrides: Mapping[str, object] | None,
+) -> dict[str, int]:
+    """Validate the small server-owned Provider override surface."""
+
+    if overrides is None:
+        return {}
+    if not isinstance(overrides, Mapping):
+        raise RuntimeModelSettingsUnsupported(
+            "Runtime model overrides must be a mapping",
+        )
+    unknown = set(overrides) - _RUNTIME_MODEL_OVERRIDE_FIELDS
+    if unknown:
+        raise RuntimeModelSettingsUnsupported(
+            f"Unsupported runtime model setting: {sorted(unknown)[0]}",
+        )
+    value = overrides.get("max_retries")
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 20:
+        raise RuntimeModelSettingsUnsupported(
+            "Runtime model setting max_retries must be an integer between 0 and 20",
+        )
+    if "max_retries" not in _provider_model_field_names(model_class):
+        raise RuntimeModelSettingsUnsupported(
+            f"Model {model_name} does not support runtime model setting max_retries",
+        )
+    return {"max_retries": value}
+
+
 def create_chat_model(
     name: str | None = None,
     thinking_enabled: bool = False,
@@ -256,6 +291,7 @@ def create_chat_model(
     app_config: AppConfig | None = None,
     attach_tracing: bool = True,
     model_overrides: Mapping[str, object] | None = None,
+    runtime_overrides: Mapping[str, object] | None = None,
     **kwargs,
 ) -> BaseChatModel:
     """Create a chat model instance from the config.
@@ -278,6 +314,8 @@ def create_chat_model(
         model_overrides: Exact per-Agent sampling defaults. Only
             ``temperature`` and canonical ``max_tokens`` are accepted, and
             each is mapped only when the selected provider declares support.
+        runtime_overrides: Closed server-owned Provider settings selected by
+            ``ModelRuntime``. Only ``max_retries`` is accepted.
 
     Returns:
         A chat model instance.
@@ -311,6 +349,11 @@ def create_chat_model(
         model_class,
         name,
         model_overrides,
+    )
+    runtime_model_overrides = _validated_runtime_model_overrides(
+        model_class,
+        name,
+        runtime_overrides,
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
@@ -360,6 +403,14 @@ def create_chat_model(
             model_settings_from_config.pop("max_tokens", None)
             model_settings_from_config.pop("max_output_tokens", None)
         model_settings_from_config.update(agent_model_overrides)
+
+    # Runtime policy is applied last and replaces both catalog values and any
+    # legacy direct constructor kwarg, avoiding duplicate keyword arguments.
+    if runtime_model_overrides:
+        for key in runtime_model_overrides:
+            model_settings_from_config.pop(key, None)
+            kwargs.pop(key, None)
+        model_settings_from_config.update(runtime_model_overrides)
 
     # Normalize the api_base -> base_url alias FIRST, so the downstream OpenAI-compatible
     # heuristics (stream_usage / stream_chunk_timeout) see the canonical endpoint key.

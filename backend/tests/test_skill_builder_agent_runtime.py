@@ -76,6 +76,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.models import ModelRuntimeProfile
 from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -1073,9 +1074,9 @@ def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
 
     monkeypatch.setattr(runtime_module, "create_agent", fake_create_agent)
     monkeypatch.setattr(
-        runtime_module,
-        "create_chat_model",
-        lambda **kwargs: SimpleNamespace(kind="model", kwargs=kwargs),
+        runtime_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **kwargs: SimpleNamespace(kind="model", kwargs=kwargs),
     )
     monkeypatch.setattr(runtime_module, "build_tracing_callbacks", lambda: [])
     monkeypatch.setattr(
@@ -1127,6 +1128,7 @@ def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
     )
 
     assert graph == "builder-graph"
+    assert captured["model"].kwargs["profile"] is ModelRuntimeProfile.AGENT_GRAPH  # type: ignore[union-attr]
     assert tuple(tool.name for tool in captured["tools"]) == SKILL_BUILDER_TOOL_NAMES  # type: ignore[union-attr]
     assert all(
         forbidden not in {tool.name for tool in captured["tools"]}  # type: ignore[union-attr]

@@ -24,7 +24,9 @@ from langgraph.checkpoint.base import empty_checkpoint, uuid6
 
 import deerflow.utils.llm_text as llm_text
 from deerflow.agents.goal_state import GoalBlocker, GoalEvaluation, GoalState
-from deerflow.models import create_chat_model
+from deerflow.config.app_config import get_app_config
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
+from deerflow.models.runtime import AsyncAbortEvent
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import now_iso
 
@@ -243,11 +245,11 @@ def create_goal_evaluator_model(
     app_config: Any | None = None,
 ) -> Any:
     """Create the non-thinking chat model used by the goal evaluator."""
-    return create_chat_model(
-        name=model_name,
+    resolved_app_config = app_config or get_app_config()
+    return ModelRuntime(app_config=resolved_app_config).build_chat_model(
+        profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+        model_name=model_name,
         thinking_enabled=False,
-        app_config=app_config,
-        attach_tracing=False,
     )
 
 
@@ -259,6 +261,7 @@ async def evaluate_goal_completion(
     model_name: str | None = None,
     app_config: Any | None = None,
     authorization_boundary: object | None = None,
+    abort_event: AsyncAbortEvent | None = None,
 ) -> GoalEvaluation:
     """Ask a small non-thinking model whether the active goal is satisfied."""
     conversation = format_visible_conversation(messages)
@@ -282,13 +285,27 @@ async def evaluate_goal_completion(
     )
     user_content = f"Active goal:\n{goal['objective']}\n\nVisible conversation evidence:\n{conversation}\n\nIs the active goal fully satisfied?"
 
-    if model is None:
-        model = create_goal_evaluator_model(model_name=model_name, app_config=app_config)
+    resolved_app_config = app_config or get_app_config()
+    model_factory = None
+    if model is not None:
+
+        def existing_model_factory(**_kwargs: object) -> Any:
+            return model
+
+        model_factory = existing_model_factory
+    runtime = ModelRuntime(
+        app_config=resolved_app_config,
+        model_factory=model_factory,
+    )
     if authorization_boundary is not None:
         await authorization_boundary.before_model_call()
-    response = await model.ainvoke(
+    response = await runtime.ainvoke(
         [SystemMessage(content=system_instruction), HumanMessage(content=user_content)],
+        profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+        model_name=model_name,
+        thinking_enabled=False,
         config={"run_name": "goal_evaluator"},
+        abort_event=abort_event,
     )
     return parse_goal_evaluation_response(_extract_response_text(response.content))
 

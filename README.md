@@ -25,8 +25,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
-  `inspect_image` 返回结构化、不可信视觉证据；支持确定性 fake、受控的
-  OpenAI-compatible Chat Completions 与 Responses 协议。
+  `inspect_image` 返回有界、不可信视觉分析；视觉调用与其他模型调用共用唯一
+  `ModelRuntime` 和所选模型已有的 Provider adapter。
 - Local、容器、BoxLite 和可选 Provisioner/Kubernetes Sandbox provider。
 - 一次性或 Cron Automation，以及 Feishu、Slack、Telegram 等外部 Channel。
 - 平台管理员的系统设置、模型目录、资产治理和运维界面。
@@ -127,44 +127,40 @@ make stop
 ### 系统模型适配器
 
 管理端当前可创建 OpenAI、OpenAI 兼容增强、Anthropic、DeepSeek、DeepSeek
-兼容增强、vLLM，以及受控 Vision Bridge 模型。MiMo、MiniMax、StepFun、MindIE、
-Claude Code CLI 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或
-准入新 Run；已有历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只
-初始化 `patched_deepseek` 和 `openai` 模型配置。
+兼容增强和 vLLM 模型。Vision Bridge 不再定义专用模型适配器；
+`vision_openai_compatible_v1` 不在生产适配器注册表，`vision_bridge_fake` 仅供测试注入。
+MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
+和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或准入新 Run；已有
+历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只初始化
+`patched_deepseek` 和 `openai` 模型配置。
 
 ### 文本模型图片识别桥接
 
 该能力不在 `config.yaml` 声明工具、模型或开关。System admin 先在
-`/admin/settings/models` 检查内置模型或创建 active、`supports_vision=true` 且协议受支持
-的视觉模型，再到 `/admin/settings/system` 的“图片识别桥接”确认或选择该模型；
-非空选择即对后续 text-only project Run 启用，清空即关闭。全新安装默认选择已内置的
-GPT 5.6 Luna；原生
-视觉 lead model 继续使用现有 `view_image`，不会同时注册 `inspect_image`。该 bootstrap
-默认值不替代供应商数据政策审批；生产部署尚未批准外发时，须在接收项目 Run 前清空选择。
+`/admin/settings/models` 检查内置模型或创建 active、`supports_vision=true` 的视觉模型，
+并使用“测试连接”验证其多模态调用，再到 `/admin/settings/system` 的“图片识别桥接”
+确认或选择该模型。非空选择即对后续 text-only project Run 启用，清空即关闭。全新安装
+默认选择已内置的
+GPT 5.6 Luna；原生视觉 lead model 继续使用现有 `view_image`，不会同时注册
+`inspect_image`。该 bootstrap 默认值不替代供应商数据政策审批；生产部署尚未批准外发
+时，须在接收项目 Run 前清空选择。
 
-Bridge 不定义另一套厂商协议，而是使用所选模型的协议：
+Bridge 不解析或重写厂商协议。`inspect_image` 通过唯一 `ModelRuntime` 向所选模型发送标准
+LangChain 多模态 content block；OpenAI、Anthropic、DeepSeek、vLLM 或其他已支持
+Provider 的现有 adapter 负责 Credential、Endpoint、请求序列化和响应解析。任意 active、
+`supports_vision=true` 且 adapter 仍可新绑定的系统模型都可以被选择，不按模型名称或
+Luna 身份硬编码。
 
-- `vision_bridge_fake`：不接受 Endpoint/Credential，不联网，仅验证链路；
-- `openai`/`patched_openai` 且 `use_responses_api=true`：调用
-  `{base_url}/responses`；内置 GPT 5.6 Luna 使用该路径；
-- OpenAI-compatible adapter：调用 `{base_url}/chat/completions`；旧的
-  `vision_openai_compatible_v1` 仍作为窄 Chat Completions profile 保留。
+工具只发送规范化后的单张图片、固定 system prompt 和固定 mode 指令，不发送完整对话或
+文件路径。服务端把普通 `AIMessage` 文本包装成有界的
+`inspect_image.result.v2` ToolMessage，并明确标记为不可信内容。管理端“测试连接”使用
+平台生成的无敏感 64×64 蓝色方块 PNG 经过同一个 Runtime 和 adapter；成功只证明当次
+连接可用，生产启用前仍须完成供应商政策和真实 API 质量、延迟与限流验收。
 
-两种真实协议都要求加密 Credential 和明确 HTTPS `base_url`。Bridge 只复用模型的
-Endpoint、模型 ID、Credential 和协议选择；不会转发通用模型设置里的任意 headers、
-`extra_body`、重试、stream 或 timeout。
-
-管理端“测试连接”会用平台生成的无敏感 64×64 蓝色方块 PNG 走同一图片/strict Schema
-协议；只支持文本、但不支持图片或结构化输出的 Endpoint 不能通过该测试。
-
-真实 adapter 只发送规范化后的单张图片、固定 `vision.prompt.v1`、固定 mode 指令和
-`vision.evidence.v1` Schema，不发送完整对话或文件路径。暂停所选系统模型或撤销其
-Credential，都会阻断已准入 Run 的下一次外发；启用 LangSmith/Langfuse 内容 tracing
-时真实 Bridge 失败关闭。生产环境确认或选择真实模型，表示系统管理员已批准该部署中所有
-项目按此 Provider 数据边界外发；不存在第二个 `enabled` 或项目 grant。生产启用前仍须
-完成供应商政策与真实 API 质量、延迟和限流验收。完整
-协议、固定提示词、证据 Schema 和验收门禁见
-[文本模型内部识图桥接方案](./backend/docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md)。
+Run 仍冻结精确 `purpose="vision"` 模型版本和 Credential 引用，Worker 调用前后仍使用
+durable dispatch authority；暂停模型或撤销 Credential 会阻断后续调用，但不能召回已经
+在途的请求。完整架构、实施状态、历史兼容和验收门禁见
+[Vision Bridge 架构收敛改造方案](./backend/docs/VISION_BRIDGE_REFACTOR_PLAN.md)。
 
 ## Docker 与部署
 

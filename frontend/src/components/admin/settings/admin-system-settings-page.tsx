@@ -224,12 +224,12 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
     unit: "步",
   },
   "agent_runtime.vision_bridge.model_name": {
-    zh: "文本模型图片识别模型",
-    en: "Vision Bridge model",
+    zh: "视觉模型",
+    en: "Vision model",
     hintZh:
-      "选择后，为不支持图片的主文本模型提供 inspect_image 工具；留空即关闭，不会回退到系统默认模型。",
+      "选择支持视觉输入的模型后，为不支持视觉输入的主模型提供 inspect_image 工具；留空即关闭，不会回退到系统默认模型。",
     hintEn:
-      "Select a model to expose inspect_image to text-only lead models. Empty means off and never falls back to the system default model.",
+      "Select a model that supports vision input to expose inspect_image to lead models without vision input. Empty means off and never falls back to the system default model.",
   },
   "agent_runtime.vision_bridge.timeout_seconds": {
     zh: "单次图片识别超时",
@@ -240,11 +240,11 @@ const FIELD_COPY: Record<string, LocalizedCopy> = {
       "One deadline covers image reading through structured evidence (5–120 seconds).",
   },
   "agent_runtime.vision_bridge.contract_version": {
-    zh: "证据契约版本",
-    en: "Evidence contract version",
-    hintZh: "固定版本，由服务端和视觉模型适配器共同校验。",
+    zh: "图片识别结果版本",
+    en: "Image inspection result version",
+    hintZh: "固定版本，由服务端校验图片识别返回的结构化结果。",
     hintEn:
-      "Fixed version validated by both the server and the vision adapter.",
+      "Fixed version used by the server to validate structured image-inspection results.",
   },
   "agent_runtime.subagents.max_total_per_run": {
     zh: "每个 Run 最多调用子 Agent",
@@ -773,6 +773,10 @@ export function formatSystemDefaultModelOption(
     return `${fallbackLabel}（${defaultModelDisplayName}）`;
   }
   return `${fallbackLabel} (${defaultModelDisplayName})`;
+}
+
+export function selectVisionInputModels(models: Model[]): Model[] {
+  return models.filter((model) => model.supports_vision);
 }
 
 function ModelField({
@@ -1390,11 +1394,11 @@ function agentRuntimeGroups(locale: Locale) {
     },
     {
       value: "vision-bridge",
-      title: locale === "zh-CN" ? "图片识别桥接" : "Vision Bridge",
+      title: locale === "zh-CN" ? "图片识别" : "Image inspection",
       description:
         locale === "zh-CN"
-          ? "为不支持图片的主文本模型提供受控的 inspect_image 工具。选择兼容模型即启用，留空即关闭。"
-          : "Give text-only lead models a governed inspect_image tool. Selecting a compatible model enables it; empty disables it.",
+          ? "为不支持视觉输入的主模型提供受控的 inspect_image 工具。选择支持视觉输入的模型即启用，留空即关闭。"
+          : "Give lead models without vision input a governed inspect_image tool. Selecting a model that supports vision input enables it; empty disables it.",
       icon: ImageIcon,
     },
     {
@@ -1813,9 +1817,7 @@ function AgentRuntimeEditor({
         <ModelField
           name="agent_runtime.vision_bridge.model_name"
           value={value.vision_bridge.model_name}
-          activeModels={activeModels.filter(
-            (model) => model.supports_vision_bridge,
-          )}
+          activeModels={selectVisionInputModels(activeModels)}
           modelsStatus={modelsStatus}
           emptyOptionLabel={locale === "zh-CN" ? "关闭" : "Off"}
           onChange={(next) => update("vision_bridge.model_name", next)}
@@ -2597,9 +2599,9 @@ export function AdminSystemSettingsStateView({
                   validateAgentRuntimeModelReferences(
                     value,
                     activeModels.map((model) => model.name),
-                    activeModels
-                      .filter((model) => model.supports_vision_bridge)
-                      .map((model) => model.name),
+                    selectVisionInputModels(activeModels).map(
+                      (model) => model.name,
+                    ),
                   )
                 }
                 pending={pendingSection === "agent_runtime"}
@@ -2694,9 +2696,7 @@ function AuthorizedAdminSystemSettingsPage({
           const parsed = validateAgentRuntimeModelReferences(
             value,
             models.models.map((model) => model.name),
-            models.models
-              .filter((model) => model.supports_vision_bridge)
-              .map((model) => model.name),
+            selectVisionInputModels(models.models).map((model) => model.name),
           );
           result = await replaceSection.mutateAsync({
             section,

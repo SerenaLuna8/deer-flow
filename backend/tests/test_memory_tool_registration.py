@@ -45,7 +45,7 @@ def _app_config(
             name=VISION_MODEL_REF,
             display_name="Vision fake",
             description="",
-            use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
+            use="support.fake_models:FakeVisionBridgeChatModel",
             model="fake-vision",
             supports_vision=True,
         )
@@ -115,7 +115,11 @@ def _assemble_lead_tool_names(
     monkeypatch.setattr(lead_agent_module, "normalize_middleware_state_schemas", lambda value, *_args: value)
     monkeypatch.setattr(lead_agent_module, "apply_prompt_template", lambda **_kwargs: "prompt")
     monkeypatch.setattr(lead_agent_module, "get_thread_state_schema", lambda *_args: dict)
-    monkeypatch.setattr(lead_agent_module, "create_chat_model", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        lead_agent_module.ModelRuntime,
+        "build_chat_model",
+        lambda _self, **_kwargs: object(),
+    )
     monkeypatch.setattr(lead_agent_module, "create_agent", capture_agent)
 
     context = {} if authority is None else {"__memory_authority": authority}

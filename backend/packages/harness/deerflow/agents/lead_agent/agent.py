@@ -6,16 +6,16 @@ INVARIANT — tracing callback placement
 Tracing callbacks (Langfuse, LangSmith) are attached at the **graph
 invocation root** in :func:`_make_lead_agent` (see the
 ``build_tracing_callbacks()`` block that appends to ``config["callbacks"]``).
-Every ``create_chat_model(...)`` call inside this module — and inside any
+Every model built inside this module — and inside any
 middleware reachable from this graph (e.g. ``TitleMiddleware``) — MUST pass
-``attach_tracing=False``.
+through the ``AGENT_GRAPH`` ModelRuntime profile.
 
 Forgetting that flag emits duplicate spans (one rooted at the graph, one at
 the model) AND prevents the Langfuse handler's ``propagate_attributes``
 path from firing, so ``session_id`` / ``user_id`` never reach the trace.
-The four current sites are: bootstrap agent, default agent, summarization
-middleware, and the async path inside ``TitleMiddleware``. Any new in-graph
-``create_chat_model`` call must add to this list and pass the flag.
+The current sites are the lead agent, recovery model, summarization middleware,
+and the async path inside ``TitleMiddleware``. Any new in-graph model must use
+the same profile.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ from deerflow.agents.thread_state import (
 from deerflow.assets.catalog import trusted_asset_context
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.app_config import AppConfig, get_app_config
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
     freeze_checkpoint_channel_mode,
@@ -797,15 +797,17 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             else:
                 agent_model_overrides[key] = cfg[key]
     create_model_kwargs: dict[str, object] = {
-        "name": model_name,
+        "model_name": model_name,
         "thinking_enabled": thinking_enabled,
         "reasoning_effort": reasoning_effort,
-        "app_config": resolved_app_config,
-        "attach_tracing": False,
     }
     if agent_model_overrides:
         create_model_kwargs["model_overrides"] = agent_model_overrides
-    lead_model = create_chat_model(**create_model_kwargs)
+    model_runtime = ModelRuntime(app_config=resolved_app_config)
+    lead_model = model_runtime.build_chat_model(
+        profile=ModelRuntimeProfile.AGENT_GRAPH,
+        **create_model_kwargs,
+    )
     output_limit_recovery_model = None
     if private_runtime is not None:
         recovery_model_kwargs = {
@@ -813,7 +815,10 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
             "thinking_enabled": False,
             "reasoning_effort": None,
         }
-        output_limit_recovery_model = create_chat_model(**recovery_model_kwargs)
+        output_limit_recovery_model = model_runtime.build_chat_model(
+            profile=ModelRuntimeProfile.AGENT_GRAPH,
+            **recovery_model_kwargs,
+        )
     return create_agent(
         model=lead_model,
         tools=final_tools,

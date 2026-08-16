@@ -21,6 +21,7 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     provider_class_path,
     provider_credential_required,
+    validate_materialized_model_settings,
     validate_model_settings,
 )
 from deerflow.config.model_config import ModelConfig
@@ -45,7 +46,7 @@ class SystemModelCredentialAdapter:
         try:
             if not isinstance(material, LockedSystemModelMaterial) or material.model.status != "active" or material.version.model_config_id != material.model.id:
                 raise ValueError
-            settings = validate_model_settings(
+            settings = validate_materialized_model_settings(
                 material.version.settings,
                 provider_adapter=material.version.provider_adapter,
             )

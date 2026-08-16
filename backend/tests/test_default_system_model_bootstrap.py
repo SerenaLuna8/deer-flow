@@ -23,11 +23,6 @@ from deerflow.persistence.system_settings import (
     SystemModelConfigRow,
     SystemModelConfigVersionRow,
 )
-from deerflow.vision.compatibility import (
-    VISION_BRIDGE_CONTRACT_V1,
-    VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES,
-    resolve_vision_bridge_protocol,
-)
 
 
 @pytest.fixture()
@@ -75,21 +70,16 @@ def test_default_model_bootstrap_prepares_deepseek_and_opencode_models(
     assert material.models[-1].command.settings == {
         "base_url": "https://opencode.ai/zen/go/v1",
         "request_timeout": 600.0,
-        "max_retries": 2,
         "use_responses_api": True,
         "output_version": "responses/v1",
     }
     assert material.models[-1].command.supports_thinking is True
     assert material.models[-1].command.supports_reasoning_effort is True
     assert material.models[-1].command.supports_vision is True
-    assert (
-        resolve_vision_bridge_protocol(
-            material.models[-1].command.provider_adapter,
-            material.models[-1].command.settings,
-            VISION_BRIDGE_CONTRACT_V1,
-        )
-        == VISION_BRIDGE_PROTOCOL_OPENAI_RESPONSES
-    )
+    # Luna is one ordinary visual System Model. Its existing OpenAI adapter
+    # selects Responses; inspect_image never resolves a second Bridge protocol.
+    assert material.models[-1].command.provider_adapter == "openai"
+    assert material.models[-1].command.settings["use_responses_api"] is True
     assert [credential.name for credential in material.credentials] == [
         "deepseek-v4-api-key",
         "opencode-api-key",

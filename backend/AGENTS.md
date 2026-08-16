@@ -245,16 +245,21 @@ reactivated, made default, exposed in the public model catalog, or admitted to a
 new Run snapshot.
 
 Text-model image inspection follows
-[`docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md`](docs/TEXT_MODEL_VISION_BRIDGE_PLAN.md):
+[`docs/VISION_BRIDGE_REFACTOR_PLAN.md`](docs/VISION_BRIDGE_REFACTOR_PLAN.md).
 `inspect_image` is a reserved, conditional Worker tool selected through
 `agent_runtime.vision_bridge.model_name`, never `config.yaml`. The selected
-System Model owns the wire protocol: current controlled executors support
-OpenAI-compatible Chat Completions and `openai`/`patched_openai` Responses
-models with an exact HTTPS `base_url`. Bridge execution still fixes the
-prompt/schema/body, ignores generic adapter retries/timeouts/extras, bounds
-response/concurrency, propagates Worker abort, revalidates dispatch authority,
-and excludes content tracing. Do not route image egress through the generic
-LangChain call path or add HTTP passthrough fields to widen this contract.
+active System Model must declare `supports_vision=true`; its existing Provider
+adapter owns SDK construction, credentials, wire serialization, and response
+parsing through the single `ModelRuntime`. The tool owns only Run/file
+authorization, bounded image normalization, fixed task instructions, durable
+dispatch settlement, and a bounded untrusted ToolMessage. Use standard
+LangChain multimodal content blocks. Never add a Bridge-specific adapter,
+Provider HTTP client, protocol resolver, raw headers/body passthrough, or a
+second model factory. `vision_openai_compatible_v1` has no production
+descriptor/class path and `vision_bridge_fake` is test-only; neither may enter
+new authoring, defaults, bindings, or Run snapshots. Preserve exact frozen `purpose="vision"` snapshots,
+Worker abort/deadline behavior, tracing suppression, and durable dispatch
+authority.
 
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required

@@ -2,7 +2,8 @@
 
 import logging
 import re
-from typing import TYPE_CHECKING, Any, NotRequired, override
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, NotRequired, cast, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -11,8 +12,11 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.config.app_config import get_app_config
 from deerflow.config.title_config import get_title_config
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
+from deerflow.models.runtime import AsyncAbortEvent
+from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.sandbox.sandbox import AuthorizationRevoked, check_authorization_boundary
 
 if TYPE_CHECKING:
@@ -20,6 +24,17 @@ if TYPE_CHECKING:
     from deerflow.config.title_config import TitleConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _server_abort_event(runtime_context: object | None) -> AsyncAbortEvent | None:
+    if not isinstance(runtime_context, Mapping):
+        return None
+    candidate = runtime_context.get(RuntimeContextKeys.SERVER_ABORT_EVENT)
+    if not callable(getattr(candidate, "is_set", None)) or not callable(
+        getattr(candidate, "wait", None),
+    ):
+        return None
+    return cast(AsyncAbortEvent, candidate)
 
 
 class TitleMiddlewareState(AgentState):
@@ -239,21 +254,30 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
 
         try:
             prompt, user_msg = self._build_title_prompt(state)
-            # attach_tracing=False because ``_get_runnable_config()`` inherits
+            # The graph profile disables model-level tracing because
+            # ``_get_runnable_config()`` inherits
             # the graph-level RunnableConfig (set in ``_make_lead_agent``) whose
             # callbacks already carry tracing handlers; binding them again at
             # the model level would emit duplicate spans.
-            model_kwargs = {"thinking_enabled": False, "attach_tracing": False}
-            if self._app_config is not None:
-                model_kwargs["app_config"] = self._app_config
             # ``model_name is None`` uses the AppConfig default model (catalog
             # default after Worker overlay, otherwise models[0]).
-            model = create_chat_model(name=config.model_name, **model_kwargs)
+            resolved_app_config = self._app_config or get_app_config()
+            model = ModelRuntime(app_config=resolved_app_config).build_chat_model(
+                profile=ModelRuntimeProfile.AGENT_GRAPH,
+                model_name=config.model_name,
+                thinking_enabled=False,
+            )
             await check_authorization_boundary(
                 runtime_context,
                 "before_model_call",
             )
-            response = await model.ainvoke(prompt, config=self._get_runnable_config())
+            response = await ModelRuntime.ainvoke_runnable(
+                model,
+                prompt,
+                profile=ModelRuntimeProfile.AGENT_GRAPH,
+                config=self._get_runnable_config(),
+                abort_event=_server_abort_event(runtime_context),
+            )
             title = self._parse_title(response.content)
             if title:
                 return {"title": title}

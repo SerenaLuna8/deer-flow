@@ -124,6 +124,7 @@ def _is_bounded_vision_tool_message(message: ToolMessage) -> bool:
 
     from deerflow.vision.contracts import (
         MAX_EVIDENCE_JSON_BYTES,
+        InspectImageResult,
         VisionErrorResult,
         VisionEvidence,
     )
@@ -139,7 +140,13 @@ def _is_bounded_vision_tool_message(message: ToolMessage) -> bool:
                 return False
             error = VisionErrorResult.model_validate_json(message.content)
             return metadata.get("error_code") == error.code
-        if metadata.get("content_type") != "untrusted_image_evidence" or metadata.get("schema_version") != "vision.evidence.v1":
+        schema_version = metadata.get("schema_version")
+        if schema_version == "inspect_image.result.v2":
+            if metadata.get("content_type") != "untrusted_image_analysis":
+                return False
+            analysis = InspectImageResult.model_validate_json(message.content)
+            return analysis.canonical_json() == message.content
+        if metadata.get("content_type") != "untrusted_image_evidence" or schema_version != "vision.evidence.v1":
             return False
         evidence = VisionEvidence.model_validate_json(message.content)
         return evidence.canonical_json() == message.content

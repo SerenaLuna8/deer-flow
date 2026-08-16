@@ -25,6 +25,7 @@ from pydantic import (
 from app.shared_assets.model_refs import exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.models.runtime import ModelRuntimeProfile
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 MAX_SKILL_DESIGN_BRIEF_CHARS = 8_000
@@ -533,8 +534,7 @@ class RunOneshotSkillDesignModelCaller:
             model_name=model_name or self.model_name,
             thinking_enabled=effort is not None,
             reasoning_effort=effort,
-            thread_id=None,
-            attach_tracing=False,
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
         )
 
 

@@ -305,3 +305,78 @@ async def test_public_catalog_keeps_default_first_then_repository_time_order(
         str(ids[0]),
         str(ids[2]),
     ]
+
+
+@pytest.mark.anyio
+async def test_public_catalog_projects_vision_capability_without_a_second_protocol_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ids = tuple(uuid.uuid4() for _ in range(5))
+    adapters = (
+        (
+            "openai",
+            {
+                "base_url": "https://responses.example.test/v1",
+                "use_responses_api": True,
+            },
+            True,
+        ),
+        ("anthropic", {}, True),
+        ("vllm", {}, True),
+        ("openai", {}, False),
+        (
+            "vision_openai_compatible_v1",
+            {"base_url": "https://legacy.example.test/v1"},
+            True,
+        ),
+    )
+    repository_rows = tuple(
+        (
+            SimpleNamespace(id=model_id, display_name=f"Model {index}"),
+            SimpleNamespace(
+                provider_adapter=provider_adapter,
+                settings=settings,
+                supports_thinking=False,
+                supports_reasoning_effort=False,
+                supports_vision=supports_vision,
+            ),
+        )
+        for index, (model_id, (provider_adapter, settings, supports_vision)) in enumerate(zip(ids, adapters, strict=True))
+    )
+
+    class Session:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def begin(self):
+            return self
+
+    class Repository:
+        def __init__(self, _session: Session) -> None:
+            pass
+
+        async def catalog_state(self):
+            return SimpleNamespace(default_model_config_id=ids[0])
+
+        async def list_models(self, *, active_only: bool):
+            assert active_only is True
+            return repository_rows
+
+    monkeypatch.setattr(
+        "app.system_settings.service.SystemModelRepository",
+        Repository,
+    )
+
+    catalog = await SystemModelCatalogService(Session).list_available_models()
+
+    assert [item.model_ref for item in catalog] == [str(model_id) for model_id in ids[:4]]
+    assert [item.supports_vision_bridge for item in catalog] == [
+        True,
+        True,
+        True,
+        False,
+    ]
+    assert all(item.supports_vision_bridge is item.supports_vision for item in catalog)

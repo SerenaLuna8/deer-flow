@@ -47,12 +47,16 @@ from app.reliability.execution import (
     PrivateRunExecution,
     RunAgentPrivateExecutor,
 )
+from app.reliability.run_execution.vision_dispatch import (
+    PrivateRunVisionDispatchAuthority,
+)
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
     AssetScope,
     ResolvedAgentSnapshot,
 )
+from app.system_runtime_settings.models import AgentRuntimePolicyValue
 from app.system_settings import SystemModelCatalogService
 from app.worker.service import JobLeaseAuthority
 from deerflow.agents.memory.snip import SnipArchiveContext
@@ -62,6 +66,7 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.models.factory import create_chat_model
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
+from deerflow.runtime import RunStatus
 
 PRIMARY_MODEL_REF = "00000000-0000-4000-8000-000000000301"
 OTHER_MODEL_REF = "00000000-0000-4000-8000-000000000302"
@@ -487,7 +492,7 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
         name=SAMPLING_MODEL_REF,
         display_name="Sampling test",
         description="",
-        use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
+        use="support.fake_models:FakeVisionBridgeChatModel",
         model="sampling-test",
         supports_thinking=True,
         supports_reasoning_effort=True,
@@ -584,6 +589,185 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
         match="RUN_EXECUTION_PROFILE_UNSUPPORTED",
     ):
         await executor.execute(execution, authority)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider_adapter", "provider_settings"),
+    [
+        (
+            "openai",
+            {
+                "base_url": "https://responses.example.test/v1",
+                "use_responses_api": True,
+            },
+        ),
+        ("anthropic", {}),
+        ("vllm", {}),
+    ],
+    ids=["openai-responses", "anthropic", "ordinary-vision-adapter"],
+)
+async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_adapter: str,
+    provider_settings: dict[str, object],
+) -> None:
+    vision_model_ref = OTHER_MODEL_REF
+    lead_model = ModelConfig(
+        name=PRIMARY_MODEL_REF,
+        display_name="Text lead",
+        description="",
+        use="support.fake_models:FakeVisionBridgeChatModel",
+        model="text-lead",
+        supports_vision=False,
+    )
+    lead_model._system_model_config_version_id = uuid.uuid4()
+    lead_model._system_provider_adapter = "openai"
+    vision_model = ModelConfig(
+        name=vision_model_ref,
+        display_name="Selected visual model",
+        description="",
+        use="support.fake_models:FakeVisionBridgeChatModel",
+        model="selected-visual-model",
+        supports_vision=True,
+        **provider_settings,
+    )
+    vision_model._system_model_config_version_id = uuid.uuid4()
+    vision_model._system_provider_adapter = provider_adapter
+    app_config = AppConfig(
+        models=[lead_model, vision_model],
+        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+    )
+    runtime_policy = AgentRuntimePolicyValue(
+        title={"enabled": False},
+        vision_bridge={"model_name": vision_model_ref},
+    )
+    materialized_purposes: list[str] = []
+
+    class RuntimePolicy:
+        async def materialize_run_snapshot(self, **_kwargs):
+            return runtime_policy
+
+    class Models:
+        async def materialize_snapshot(self, *, purpose: str, **_kwargs):
+            materialized_purposes.append(purpose)
+            if purpose == "lead":
+                return lead_model
+            assert purpose == "vision"
+            return vision_model
+
+    class Runtime:
+        model_ref = lead_model.name
+        skill_root = None
+
+        async def aclose(self) -> None:
+            return None
+
+    class Assets:
+        async def materialize(self, *_args, **_kwargs):
+            return Runtime()
+
+    class Checkpointer:
+        def for_context(self, _context, *, thread_kind: str):
+            assert thread_kind == "chat"
+            return SimpleNamespace(
+                set_authorization_boundary=lambda _boundary: None,
+            )
+
+    observed: dict[str, object] = {}
+
+    async def runner(_bridge, _run_manager, record, *, ctx, **_kwargs):
+        observed["authority"] = ctx.vision_dispatch_authority
+        record.status = RunStatus.success
+
+    executor = RunAgentPrivateExecutor(
+        lambda: None,
+        app_config=app_config,
+        bridge=SimpleNamespace(),
+        project_checkpointer=Checkpointer(),
+        store=SimpleNamespace(),
+        event_store=SimpleNamespace(),
+        asset_runtime=Assets(),
+        model_materializer=Models(),
+        runtime_policy_materializer=RuntimePolicy(),
+        agent_factory=object(),
+        runner=runner,
+    )
+    requested = RequestedRunExecutionProfile(model_name=lead_model.name)
+    effective = EffectiveRunExecutionProfile(
+        model_name=lead_model.name,
+        thinking_enabled=False,
+        reasoning_effort="none",
+        supports_vision=False,
+    )
+    run = _run_record(requested=requested, effective=effective)
+    context = PrivateWorkContext.from_project(
+        ProjectContext(
+            user_id=uuid.UUID(run.owner_user_id),
+            project_id=run.project_id,
+            membership_id=uuid.uuid4(),
+            role=ProjectRole.ADMIN,
+            capabilities=capabilities_for(ProjectRole.ADMIN),
+            membership_version=1,
+            request_id="worker-vision-authority",
+        )
+    )
+    execution = PrivateRunExecution(
+        context=context,
+        run=run,
+        snapshot=PersistedRunSnapshot(
+            assets=(),
+            mcp_grants=(),
+            catalog_generation=1,
+        ),
+        checkpoint_namespace="",
+        graph_input={"messages": []},
+        command=None,
+        config={},
+        interrupt_before=None,
+        interrupt_after=None,
+        stream_mode=["values"],
+        stream_subgraphs=False,
+    )
+    claim = JobClaim(
+        job_id=uuid.uuid4(),
+        attempt_id=uuid.uuid4(),
+        lease_token="lease",
+        job_type="private_run",
+        scope=JobScope(context.project_id, str(context.user_id)),
+        run_id=run.run_id,
+        occurrence_id=None,
+        retry_safety="safe",
+        cancel_requested=False,
+        origin_trace_id=run.origin_trace_id,
+    )
+    authority = JobLeaseAuthority(lambda: None, claim, lease_seconds=30)
+    archive_context = SnipArchiveContext(
+        enabled=False,
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        namespace="default",
+        preference_version=1,
+        summary_model_ref=None,
+    )
+
+    async def memory_archive_context(*_args, **_kwargs):
+        return archive_context
+
+    monkeypatch.setattr(
+        executor,
+        "_memory_archive_context",
+        memory_archive_context,
+    )
+
+    result = await executor.execute(execution, authority)
+
+    assert result.status == "succeeded"
+    assert materialized_purposes == ["lead", "vision"]
+    assert isinstance(
+        observed["authority"],
+        PrivateRunVisionDispatchAuthority,
+    )
 
 
 def test_run_response_echoes_the_effective_execution_profile() -> None:

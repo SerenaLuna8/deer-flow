@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.audit.models import resolve_system_audit_context
+from app.system_runtime_settings.errors import SystemRuntimePolicyInvalid
 from app.system_runtime_settings.models import (
     AgentRuntimePolicyValue,
     RuntimePolicySection,
@@ -15,8 +16,18 @@ from app.system_runtime_settings.service import SystemRuntimePolicyService
 
 
 class _Session:
-    def __init__(self, model_id: uuid.UUID) -> None:
+    def __init__(
+        self,
+        model_id: uuid.UUID,
+        *,
+        provider_adapter: str = "openai",
+        settings: dict[str, object] | None = None,
+        supports_vision: bool = False,
+    ) -> None:
         self.model_id = model_id
+        self.provider_adapter = provider_adapter
+        self.settings = settings or {}
+        self.supports_vision = supports_vision
         self.statements: list[object] = []
 
     async def execute(self, statement):  # type: ignore[no-untyped-def]
@@ -25,9 +36,9 @@ class _Session:
             all=lambda: (
                 SimpleNamespace(
                     id=self.model_id,
-                    provider_adapter="openai",
-                    settings={},
-                    supports_vision=False,
+                    provider_adapter=self.provider_adapter,
+                    settings=self.settings,
+                    supports_vision=self.supports_vision,
                 ),
             )
         )
@@ -45,8 +56,20 @@ class _Audit:
 
 
 class _Repository:
-    def __init__(self, model_id: uuid.UUID) -> None:
-        self.session = _Session(model_id)
+    def __init__(
+        self,
+        model_id: uuid.UUID,
+        *,
+        provider_adapter: str = "openai",
+        settings: dict[str, object] | None = None,
+        supports_vision: bool = False,
+    ) -> None:
+        self.session = _Session(
+            model_id,
+            provider_adapter=provider_adapter,
+            settings=settings,
+            supports_vision=supports_vision,
+        )
         self.state = SimpleNamespace(
             revision=4,
             updated_by_user_id=None,
@@ -120,3 +143,75 @@ async def test_runtime_policy_locks_models_by_uuid_primary_key() -> None:
     params = statement.compile().params
     assert any(model_id in value for value in params.values() if isinstance(value, list))
     assert len(audit.calls) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provider_adapter", "settings"),
+    [
+        (
+            "openai",
+            {
+                "base_url": "https://responses.example.test/v1",
+                "use_responses_api": True,
+            },
+        ),
+        ("anthropic", {}),
+        ("vllm", {}),
+    ],
+    ids=["openai-responses", "anthropic", "ordinary-vision-adapter"],
+)
+async def test_runtime_policy_accepts_any_eligible_visual_model_adapter(
+    provider_adapter: str,
+    settings: dict[str, object],
+) -> None:
+    model_id = uuid.uuid4()
+    repository = _Repository(
+        model_id,
+        provider_adapter=provider_adapter,
+        settings=settings,
+        supports_vision=True,
+    )
+
+    result = await _Service(repository, _Audit()).update_policy(
+        _admin_context(),
+        RuntimePolicySection.AGENT_RUNTIME,
+        expected_revision=1,
+        value=AgentRuntimePolicyValue(
+            vision_bridge={"model_name": str(model_id)},
+        ),
+    )
+
+    assert result.policy.value.vision_bridge.model_name == str(model_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("provider_adapter", "supports_vision"),
+    [
+        ("openai", False),
+        ("vision_openai_compatible_v1", True),
+    ],
+    ids=["non-visual", "retired-adapter"],
+)
+async def test_runtime_policy_rejects_ineligible_visual_model_selection(
+    provider_adapter: str,
+    supports_vision: bool,
+) -> None:
+    model_id = uuid.uuid4()
+    repository = _Repository(
+        model_id,
+        provider_adapter=provider_adapter,
+        settings={"base_url": "https://vision.example.test/v1"},
+        supports_vision=supports_vision,
+    )
+
+    with pytest.raises(SystemRuntimePolicyInvalid):
+        await _Service(repository, _Audit()).update_policy(
+            _admin_context(),
+            RuntimePolicySection.AGENT_RUNTIME,
+            expected_revision=1,
+            value=AgentRuntimePolicyValue(
+                vision_bridge={"model_name": str(model_id)},
+            ),
+        )

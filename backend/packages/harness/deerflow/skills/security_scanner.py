@@ -10,7 +10,7 @@ from typing import Any
 
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
-from deerflow.models import create_chat_model
+from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.skills.types import SKILL_MD_FILE
 
 logger = logging.getLogger(__name__)
@@ -102,12 +102,15 @@ async def scan_skill_content(
     model_responded = False
     try:
         config = app_config or get_app_config()
-        model = create_chat_model(thinking_enabled=False, app_config=config)
-        response = await model.ainvoke(
+        response = await ModelRuntime(app_config=config).ainvoke(
             [
                 {"role": "system", "content": rubric},
                 {"role": "user", "content": prompt},
             ],
+            # Skill source and deterministic evidence are project content and
+            # must not be exported through model-level tracing.
+            profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
+            thinking_enabled=False,
             config={"run_name": "security_agent"},
         )
         model_responded = True

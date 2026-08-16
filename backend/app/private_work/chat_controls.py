@@ -60,6 +60,7 @@ from app.system_settings import (
 from deerflow.agents.memory.snip import SnipArchiveContext
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.mcp_definition_policy import McpEndpointPolicy
+from deerflow.models import ModelRuntimeProfile
 from deerflow.persistence.private_work.memory_document_repository import (
     DEFAULT_MEMORY_NAMESPACE,
 )
@@ -792,7 +793,7 @@ class ProjectChatControlService:
                 run_name="project_suggest_agent",
                 app_config=runtime_config,
                 model_name=model_name,
-                thread_id=thread_id,
+                profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
             )
         except Exception:
             logger.exception(

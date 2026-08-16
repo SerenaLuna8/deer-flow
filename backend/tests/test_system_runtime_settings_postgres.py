@@ -347,14 +347,14 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
                     compatible_model_id,
                     compatible_version_id,
                     compatible_name,
-                    "vision_bridge_fake",
+                    "openai",
                     "d" * 64,
                 ),
                 (
                     incompatible_model_id,
                     incompatible_version_id,
                     incompatible_name,
-                    "openai",
+                    "vision_openai_compatible_v1",
                     "e" * 64,
                 ),
             ):
@@ -381,7 +381,8 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
                          supports_reasoning_effort,supports_vision,credential_id,
                          credential_version_id,credential_env_key,payload_checksum,
                          supersedes_version_id,created_by_user_id)
-                        VALUES (:version,:model,1,:adapter,:name,'{}'::jsonb,
+                        VALUES (:version,:model,1,:adapter,:name,
+                                '{"base_url":"https://vision.example.test/v1"}'::jsonb,
                                 false,false,true,NULL,NULL,NULL,:checksum,NULL,:owner)"""
                     ),
                     {
@@ -422,6 +423,19 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
                 RuntimePolicySection.AGENT_RUNTIME,
                 expected_revision=1,
                 value=incompatible_value,
+            )
+
+        retired_auxiliary_value = dict(base_value)
+        retired_auxiliary_value["title"] = {
+            **base_value["title"],
+            "model_name": incompatible_name,
+        }
+        with pytest.raises(SystemRuntimePolicyInvalid):
+            await service.update_policy(
+                context,
+                RuntimePolicySection.AGENT_RUNTIME,
+                expected_revision=1,
+                value=retired_auxiliary_value,
             )
 
         compatible_value = dict(base_value)

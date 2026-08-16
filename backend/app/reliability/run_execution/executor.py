@@ -106,7 +106,6 @@ from deerflow.config.app_config import (
 )
 from deerflow.config.mcp_security_config import McpSecurityConfig
 from deerflow.config.model_config import ModelConfig
-from deerflow.config.tracing_config import is_tracing_enabled
 from deerflow.error_codes import (
     PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
     MemoryAuthorityUnavailable,
@@ -143,10 +142,6 @@ from deerflow.runtime.user_context import (
 from deerflow.sandbox.sandbox import AuthorizationRevoked
 from deerflow.sandbox.sandbox_provider import RunScopedReadOnlyMount
 from deerflow.trace_context import normalize_trace_id, request_trace_context
-from deerflow.vision.compatibility import (
-    resolve_materialized_vision_bridge_protocol,
-    vision_bridge_protocol_requires_external_dispatch,
-)
 
 logger = logging.getLogger("app.reliability.execution")
 
@@ -521,7 +516,6 @@ class RunAgentPrivateExecutor:
             runtime_app_config = self._app_config
             runtime_policy = None
             vision_model: ModelConfig | None = None
-            vision_bridge_protocol: str | None = None
             delegate_model_names: dict[uuid.UUID, str] = {}
             if self._runtime_policy_materializer is not None:
                 try:
@@ -614,16 +608,10 @@ class RunAgentPrivateExecutor:
                                 raise PermanentExecutionError(
                                     "RUN_ASSET_STALE",
                                 )
-                            if purpose == "vision":
-                                resolved_protocol = resolve_materialized_vision_bridge_protocol(
-                                    auxiliary_model,
-                                    runtime_app_config.vision_bridge.contract_version,
+                            if purpose == "vision" and not auxiliary_model.supports_vision:
+                                raise PermanentExecutionError(
+                                    "RUN_ASSET_STALE",
                                 )
-                                if not auxiliary_model.supports_vision or resolved_protocol is None:
-                                    raise PermanentExecutionError(
-                                        "RUN_ASSET_STALE",
-                                    )
-                                vision_bridge_protocol = resolved_protocol
                             existing = runtime_models.get(auxiliary_model.name)
                             if existing is not None and existing != auxiliary_model:
                                 raise PermanentExecutionError(
@@ -655,14 +643,6 @@ class RunAgentPrivateExecutor:
                             ),
                         },
                     )
-                if (
-                    vision_model is not None
-                    and vision_bridge_protocol_requires_external_dispatch(
-                        vision_bridge_protocol,
-                    )
-                    and is_tracing_enabled()
-                ):
-                    raise PermanentExecutionError("RUN_POLICY_STALE")
             elif runtime_app_config.get_model_config(exact_model_name) is None:
                 # Compatibility path for isolated unit tests. Production
                 # composition always injects the PostgreSQL materializer.
@@ -778,13 +758,7 @@ class RunAgentPrivateExecutor:
                     run_id=execution.run.run_id,
                     expected_model=vision_model,
                 )
-                if (
-                    vision_model is not None
-                    and self._model_materializer is not None
-                    and vision_bridge_protocol_requires_external_dispatch(
-                        vision_bridge_protocol,
-                    )
-                )
+                if (vision_model is not None and self._model_materializer is not None)
                 else None
             )
 

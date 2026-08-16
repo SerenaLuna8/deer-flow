@@ -2204,6 +2204,7 @@ async def _prepare_goal_continuation_input(
             model_name=model_name,
             app_config=app_config,
             authorization_boundary=authorization_boundary,
+            abort_event=abort_event,
         )
         if abort_event is not None and abort_event.is_set():
             return None

@@ -46,6 +46,7 @@ from app.system_settings import (
     UpdateSystemModel,
 )
 from app.system_settings.errors import SystemModelError
+from app.system_settings.validation import BUILTIN_PROVIDER_ADAPTERS
 from deerflow.config.app_config import AppConfig
 
 router = APIRouter(
@@ -139,8 +140,34 @@ class AdminModelItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class AdminModelProviderSettingFieldResponse(_StrictModel):
+    name: str
+    label: str
+    input_type: Literal[
+        "boolean",
+        "enum",
+        "integer",
+        "json",
+        "number",
+        "string",
+        "url",
+    ]
+    advanced: bool
+    minimum: int | float | None
+    maximum: int | float | None
+    step: int | float | None
+    options: list[str]
+
+
+class AdminModelProviderAdapterResponse(_StrictModel):
+    id: str
+    credential_required: bool
+    setting_fields: list[AdminModelProviderSettingFieldResponse]
+
+
 class AdminModelCatalogResponse(_StrictModel):
     items: list[AdminModelItemResponse]
+    provider_adapters: list[AdminModelProviderAdapterResponse]
     catalog_revision: int
     request_id: str
 
@@ -203,6 +230,29 @@ def _catalog_response(
                 default_model_config_id=catalog.default_model_config_id,
             )
             for item in catalog.items
+        ],
+        provider_adapters=[
+            AdminModelProviderAdapterResponse(
+                id=adapter_id,
+                credential_required=descriptor.credential_required,
+                setting_fields=[
+                    AdminModelProviderSettingFieldResponse(
+                        name=field.name,
+                        label=field.label,
+                        input_type=field.input_type,
+                        advanced=field.advanced,
+                        minimum=field.minimum,
+                        maximum=field.maximum,
+                        step=field.step,
+                        options=list(field.options),
+                    )
+                    for field in sorted(
+                        descriptor.fields,
+                        key=lambda item: item.name,
+                    )
+                ],
+            )
+            for adapter_id, descriptor in BUILTIN_PROVIDER_ADAPTERS.items()
         ],
         catalog_revision=catalog.catalog_revision,
         request_id=request_id,
@@ -494,6 +544,8 @@ __all__ = [
     "AdminModelConnectionTestResponse",
     "AdminModelCreateRequest",
     "AdminModelItemResponse",
+    "AdminModelProviderAdapterResponse",
+    "AdminModelProviderSettingFieldResponse",
     "AdminModelMutationResponse",
     "AdminModelUpdateRequest",
     "current_model_admin_context",

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from collections import deque
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langsmith.run_helpers import get_tracing_context, tracing_context
 
 from deerflow.agents.memory.dream import (
     DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
@@ -26,6 +29,7 @@ from deerflow.agents.memory.dream import (
     render_empty_memory_document,
     validate_memory_document,
 )
+from deerflow.models.runtime import ModelRuntime
 
 
 def _document(*lines: str) -> str:
@@ -239,9 +243,13 @@ class _BoundModel:
     def __init__(self, responses: deque[AIMessage]) -> None:
         self.responses = responses
         self.messages: list[list[object]] = []
+        self.configs: list[object] = []
+        self.tracing_enabled: list[object] = []
 
-    async def ainvoke(self, messages: list[object]) -> AIMessage:
+    async def ainvoke(self, messages: list[object], *, config: object) -> AIMessage:
         self.messages.append(list(messages))
+        self.configs.append(config)
+        self.tracing_enabled.append(get_tracing_context()["enabled"])
         return self.responses.popleft()
 
 
@@ -253,6 +261,18 @@ class _Model:
     def bind_tools(self, tools):
         self.tool_names = [tool.name for tool in tools]
         return self.bound
+
+
+def _runner(model: _Model, **kwargs: object) -> MemoryDreamRunner:
+    runtime = ModelRuntime(
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        model_factory=lambda **_kwargs: object(),
+    )
+    return MemoryDreamRunner(
+        model,
+        model_runtime=runtime,
+        **kwargs,
+    )
 
 
 def _input() -> MemoryDreamInput:
@@ -298,12 +318,15 @@ async def test_dream_runner_exposes_exactly_two_tools_and_returns_complete_draft
         AIMessage(content="done"),
     )
 
-    result = await MemoryDreamRunner(model).run(_input())
+    with tracing_context(enabled=True, client=MagicMock()):
+        result = await _runner(model).run(_input())
 
     assert model.tool_names == ["read_memory_document", "replace_memory_document"]
     assert result.content == replacement
     assert result.replaced is True
     assert len(model.bound.messages) == 2
+    assert model.bound.configs == [{"callbacks": []}, {"callbacks": []}]
+    assert model.bound.tracing_enabled == [False, False]
 
 
 @pytest.mark.asyncio
@@ -323,7 +346,7 @@ async def test_dream_runner_no_replace_is_a_successful_unchanged_result() -> Non
         AIMessage(content="no change"),
     )
 
-    result = await MemoryDreamRunner(model).run(_input())
+    result = await _runner(model).run(_input())
 
     assert result.content == EMPTY_MEMORY_DOCUMENT
     assert result.replaced is False
@@ -381,7 +404,7 @@ async def test_dream_runner_lets_the_model_revise_a_rejected_draft(
         max_tokens=2_000,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result.content == replacement
     assert result.replaced is True
@@ -491,7 +514,7 @@ async def test_dream_runner_enters_exact_fresh_regeneration_context_after_two_ov
         max_tokens=100,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result == MemoryDreamResult(content=replacement, replaced=True)
     repair_context = model.bound.messages[3]
@@ -546,7 +569,7 @@ async def test_dream_runner_fresh_regeneration_is_used_at_most_once() -> None:
         max_tokens=100,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result == MemoryDreamResult(content=replacement, replaced=True)
     repair_contexts = [
@@ -577,7 +600,7 @@ async def test_dream_runner_fresh_regeneration_requires_a_valid_replace() -> Non
     )
 
     with pytest.raises(MemoryDreamError, match="MEMORY_DREAM_ROUND_LIMIT"):
-        await MemoryDreamRunner(model, max_rounds=5).run(value)
+        await _runner(model, max_rounds=5).run(value)
 
 
 @pytest.mark.asyncio
@@ -600,7 +623,7 @@ async def test_dream_runner_non_budget_rejection_breaks_over_budget_streak() -> 
         max_tokens=100,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result == MemoryDreamResult(content=replacement, replaced=True)
     assert not any(len(messages) == 3 and isinstance(messages[-1], HumanMessage) and str(messages[-1].content).startswith("Fresh-regeneration phase") for messages in model.bound.messages)
@@ -654,7 +677,7 @@ async def test_dream_runner_requires_a_valid_replace_after_rejected_draft() -> N
         max_tokens=100,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result == MemoryDreamResult(content=replacement, replaced=True)
     retry_messages = model.bound.messages[3]
@@ -727,7 +750,7 @@ async def test_dream_runner_detects_the_same_rejected_draft_by_digest() -> None:
         max_tokens=100,
     )
 
-    result = await MemoryDreamRunner(model).run(value)
+    result = await _runner(model).run(value)
 
     assert result == MemoryDreamResult(content=replacement, replaced=True)
     second_retry_messages = model.bound.messages[3]
@@ -785,7 +808,7 @@ async def test_dream_runner_rejected_draft_then_no_tool_exhausts_round_limit() -
     )
 
     with pytest.raises(MemoryDreamError, match="MEMORY_DREAM_ROUND_LIMIT"):
-        await MemoryDreamRunner(model, max_rounds=3).run(value)
+        await _runner(model, max_rounds=3).run(value)
 
 
 @pytest.mark.asyncio
@@ -805,4 +828,4 @@ async def test_dream_runner_rejects_any_ambient_tool_call() -> None:
     )
 
     with pytest.raises(MemoryDreamError, match="MEMORY_DREAM_TOOL_INVALID"):
-        await MemoryDreamRunner(model).run(_input())
+        await _runner(model).run(_input())

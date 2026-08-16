@@ -6,6 +6,31 @@ import {
   buildThreadSubmitMessages,
   uploadedFileInfoToMessage,
 } from "@/core/threads/hooks";
+import {
+  admitRunAndNotify,
+  createMessageSendAttempt,
+  createRunAdmissionLatch,
+  createUploadedAttachmentRefCache,
+  forgetUploadedAttachmentRefs,
+  isCurrentMessageSendAttempt,
+  isCurrentThreadCallback,
+  monitorRunAdmissionLifecycle,
+  planAttachmentUploadRetry,
+  rememberUploadedAttachmentRef,
+  retainUploadedAttachmentRefs,
+  shouldIgnoreMetadataLessStreamError,
+  shouldIgnoreAttributedThreadCallback,
+} from "@/core/threads/send-message";
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
+    resolve = nextResolve;
+    reject = nextReject;
+  });
+  return { promise, resolve, reject };
+}
 
 test("omits the SDK branch checkpoint after a successful compaction", () => {
   expect(buildThreadSubmitCheckpointOptions(true)).toEqual({
@@ -159,4 +184,193 @@ test("keeps human input response metadata on the hidden user message", () => {
       },
     },
   ]);
+});
+
+test("does not settle the composer before Run admission", async () => {
+  const admission = createRunAdmissionLatch();
+  let settled = false;
+  void admission.promise.then(() => {
+    settled = true;
+  });
+
+  await Promise.resolve();
+  expect(settled).toBe(false);
+
+  expect(admission.admit()).toBe(true);
+  await admission.promise;
+  expect(settled).toBe(true);
+  expect(admission.admit()).toBe(false);
+});
+
+test("observer failures cannot veto an admitted Run", async () => {
+  const admission = createRunAdmissionLatch();
+  let secondObserverCalls = 0;
+
+  expect(
+    admitRunAndNotify(
+      admission,
+      () => {
+        throw new Error("local draft cleanup failed");
+      },
+      () => {
+        secondObserverCalls += 1;
+      },
+    ),
+  ).toBe(true);
+
+  await expect(admission.promise).resolves.toBeUndefined();
+  expect(secondObserverCalls).toBe(1);
+  expect(admission.isPending()).toBe(false);
+});
+
+test("rejects a retryable composer when submit fails before admission", async () => {
+  const admission = createRunAdmissionLatch();
+  const lifecycle = deferred<void>();
+  let admissionFailures = 0;
+  let lifecycleSettles = 0;
+  const observed = monitorRunAdmissionLifecycle({
+    admission,
+    lifecycle: lifecycle.promise,
+    onAdmissionFailure: () => {
+      admissionFailures += 1;
+    },
+    onSettled: () => {
+      lifecycleSettles += 1;
+    },
+  });
+
+  lifecycle.reject(new Error("admission failed"));
+  await expect(admission.promise).rejects.toThrow("admission failed");
+  await observed;
+  expect(admissionFailures).toBe(1);
+  expect(lifecycleSettles).toBe(1);
+});
+
+test("consumes a terminal failure after admission without reopening the composer", async () => {
+  const admission = createRunAdmissionLatch();
+  const lifecycle = deferred<void>();
+  let admissionFailures = 0;
+  let lifecycleSettles = 0;
+  const observed = monitorRunAdmissionLifecycle({
+    admission,
+    lifecycle: lifecycle.promise,
+    onAdmissionFailure: () => {
+      admissionFailures += 1;
+    },
+    onSettled: () => {
+      lifecycleSettles += 1;
+    },
+  });
+
+  admission.admit();
+  await expect(admission.promise).resolves.toBeUndefined();
+  lifecycle.reject(new Error("model failed after admission"));
+  await expect(observed).resolves.toBeUndefined();
+
+  expect(admissionFailures).toBe(0);
+  expect(lifecycleSettles).toBe(1);
+  expect(admission.isPending()).toBe(false);
+});
+
+test("fails closed when the submit lifecycle ends without an admission event", async () => {
+  const admission = createRunAdmissionLatch();
+  let admissionFailures = 0;
+  const admissionFailure = expect(admission.promise).rejects.toThrow(
+    "Run ended before admission was confirmed",
+  );
+  await monitorRunAdmissionLifecycle({
+    admission,
+    lifecycle: Promise.resolve(),
+    onAdmissionFailure: () => {
+      admissionFailures += 1;
+    },
+    onSettled: () => undefined,
+  });
+
+  await admissionFailure;
+  expect(admissionFailures).toBe(1);
+});
+
+test("keeps stale thread attempts and callbacks isolated from the new owner", () => {
+  const attemptA = createMessageSendAttempt(1, "thread-a");
+  const attemptB = createMessageSendAttempt(2, "thread-b");
+
+  expect(isCurrentMessageSendAttempt(attemptA, attemptA, "thread-a")).toBe(
+    true,
+  );
+  attemptA.abortController.abort();
+  expect(isCurrentMessageSendAttempt(attemptA, attemptA, "thread-a")).toBe(
+    false,
+  );
+  expect(isCurrentMessageSendAttempt(attemptB, attemptA, "thread-b")).toBe(
+    false,
+  );
+  expect(isCurrentMessageSendAttempt(attemptB, attemptB, "thread-b")).toBe(
+    true,
+  );
+  expect(isCurrentThreadCallback("thread-a", "thread-b")).toBe(false);
+  expect(isCurrentThreadCallback("thread-b", "thread-b")).toBe(true);
+});
+
+test("does not attribute a late metadata-less history error to the current view", () => {
+  expect(shouldIgnoreMetadataLessStreamError(undefined, false)).toBe(true);
+  expect(shouldIgnoreMetadataLessStreamError(undefined, true)).toBe(false);
+  expect(shouldIgnoreMetadataLessStreamError("thread-b", false)).toBe(false);
+  expect(shouldIgnoreAttributedThreadCallback(undefined, "thread-b")).toBe(
+    false,
+  );
+  expect(shouldIgnoreAttributedThreadCallback("thread-a", "thread-b")).toBe(
+    true,
+  );
+  expect(shouldIgnoreAttributedThreadCallback("thread-b", "thread-b")).toBe(
+    false,
+  );
+});
+
+test("reuses partial uploaded refs and uploads only missing attachment ids", () => {
+  const cache = createUploadedAttachmentRefCache();
+  const uploadedA = {
+    id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+    filename: "a.png",
+    size: 10,
+    path: "/mnt/user-data/uploads/a.png",
+    virtual_path: "/mnt/user-data/uploads/a.png",
+    artifact_url: "/api/files/a",
+  };
+  const uploadedB = {
+    ...uploadedA,
+    id: "63c7cdd2-a785-41b5-9e14-b39c026f94a6",
+    filename: "b.png",
+    path: "/mnt/user-data/uploads/b.png",
+    virtual_path: "/mnt/user-data/uploads/b.png",
+    artifact_url: "/api/files/b",
+  };
+
+  rememberUploadedAttachmentRef(cache, "thread-a", "client-a", uploadedA);
+  const partialRetry = planAttachmentUploadRetry(cache, "thread-a", [
+    "client-a",
+    "client-b",
+  ]);
+  expect(partialRetry.resolved).toEqual([uploadedA, undefined]);
+  expect(partialRetry.missingIndexes).toEqual([1]);
+
+  rememberUploadedAttachmentRef(cache, "thread-a", "client-b", uploadedB);
+  expect(
+    planAttachmentUploadRetry(cache, "thread-a", ["client-a", "client-b"]),
+  ).toEqual({ resolved: [uploadedA, uploadedB], missingIndexes: [] });
+
+  // Admission consumes only those exact attachment identities. Removing and
+  // re-adding a file creates a new client id and cannot inherit an old ref.
+  retainUploadedAttachmentRefs(cache, "thread-a", ["client-c"]);
+  expect(planAttachmentUploadRetry(cache, "thread-a", ["client-c"])).toEqual({
+    resolved: [undefined],
+    missingIndexes: [0],
+  });
+
+  rememberUploadedAttachmentRef(cache, "thread-a", "client-c", uploadedA);
+  forgetUploadedAttachmentRefs(cache, "thread-a", ["client-c"]);
+  expect(planAttachmentUploadRetry(cache, "thread-a", ["client-c"])).toEqual({
+    resolved: [undefined],
+    missingIndexes: [0],
+  });
 });

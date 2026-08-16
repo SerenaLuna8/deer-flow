@@ -3,6 +3,9 @@ import type { FileUIPart } from "ai";
 export type PromptInputFilePart = FileUIPart & {
   // Transient submit-time handle to the original browser File; not serializable.
   file?: File;
+  // Stable only for the lifetime of one composer attachment. It lets a retry
+  // reuse an already-uploaded opaque file after pre-admission failure.
+  clientId?: string;
 };
 
 export async function promptInputFilePartToFile(

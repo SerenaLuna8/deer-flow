@@ -156,7 +156,7 @@ async def test_durable_executor_maps_memory_authority_unavailable_to_existing_re
         name=model_ref,
         display_name="Memory boundary model",
         description="",
-        use="deerflow.vision.fake_chat_model:FakeVisionBridgeChatModel",
+        use="support.fake_models:FakeVisionBridgeChatModel",
         model="memory-boundary-model",
     )
     app_config = AppConfig(

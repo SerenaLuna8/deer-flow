@@ -261,25 +261,34 @@ After application startup, sign in as a system admin and use
    adapter requires authentication;
 5. activate the model and choose the catalog default.
 
-The general model adapter allowlist includes OpenAI, Anthropic, DeepSeek, vLLM,
-the patched OpenAI and DeepSeek adapters, and the controlled Vision Bridge
-adapters.
+The authorable model adapter allowlist includes OpenAI, Anthropic, DeepSeek,
+vLLM, and the patched OpenAI and DeepSeek adapters. Vision Bridge uses these
+same adapters and does not add a second adapter family.
+
 Arbitrary Python class paths are not accepted. Secret-bearing keys, headers,
 tokens, passwords, and Credential material are rejected from model settings.
 Provider secrets are stored only as encrypted Credential envelopes and are
 decrypted for the exact admitted model version at the execution boundary.
 
+`vision_openai_compatible_v1` has no production descriptor or runtime class
+path. An unknown historical provider string may remain admin-readable for
+diagnosis, but cannot be authored, reactivated, made default, bound to a new
+Runtime Policy, admitted, or materialized.
+`vision_bridge_fake` is not a production adapter and may only be injected by
+tests.
+
 The current wire-protocol families are:
 
-| Protocol | Model adapters |
-| --- | --- |
-| OpenAI-compatible Chat Completions | `openai` when Responses is not selected, `deepseek`, `vllm`, `patched_openai`, `patched_deepseek`, and `vision_openai_compatible_v1` |
-| OpenAI Responses | `openai` and `patched_openai` with `use_responses_api=true` |
-| Anthropic Messages | `anthropic` |
+| Protocol                           | Model adapters                                                                                        |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| OpenAI-compatible Chat Completions | `openai` when Responses is not selected, `deepseek`, `vllm`, `patched_openai`, and `patched_deepseek` |
+| OpenAI Responses                   | `openai` and `patched_openai` with `use_responses_api=true`                                           |
+| Anthropic Messages                 | `anthropic`                                                                                           |
 
 Vision, thinking, reasoning effort, tool calling and structured output are
-model capabilities layered on a protocol; an adapter name or
-`supports_vision=true` alone does not prove all of them.
+model capabilities layered on a protocol. `supports_vision=true` makes an
+active model selectable for visual work; the administrator connection probe
+and target-environment staging must still verify the claimed capability.
 
 #### Text-model Vision Bridge
 
@@ -288,10 +297,11 @@ model capabilities layered on a protocol; an adapter name or
 closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
 
 1. In `/admin/settings/models`, inspect the seeded model or create an active
-   model with `supports_vision=true` and a Bridge-supported wire
-   protocol. A real endpoint also requires an exact encrypted Credential and
-   an HTTPS `base_url`; `vision_bridge_fake` intentionally requires neither.
-2. In `/admin/settings/system`, open **Vision Bridge** and confirm or select
+   model with `supports_vision=true` using one of the ordinary authorable
+   Provider adapters. Bind its exact encrypted Credential when the adapter
+   requires one, then run **Test connection** to exercise that adapter's
+   multimodal path.
+2. In `/admin/settings/system`, open **Image inspection** and confirm or select
    that model.
    A non-null `agent_runtime.vision_bridge.model_name` enables later text-only
    project Runs; clearing it disables the bridge. There is no second `enabled`
@@ -300,55 +310,59 @@ closed. Vision Bridge model selection is PostgreSQL System Runtime Policy:
    organization's provider-policy approval; clear it before accepting project
    Runs in a production deployment whose data-egress review is incomplete.
 3. `timeout_seconds` is the single image-read-through-result deadline.
-   `contract_version` is fixed to `vision.bridge.v1` and is not free-form.
+   `contract_version` remains fixed to `vision.bridge.v1` for existing Runtime
+   Policy and Run snapshot compatibility. It is a platform control-contract
+   version, not a Provider wire-protocol selector.
 
-`vision.bridge.v1` resolves the selected System Model's protocol:
+The policy accepts any active current model whose adapter remains eligible for
+new binding and whose model version declares `supports_vision=true`. It does not
+hard-code Luna, OpenAI, Chat Completions, Responses, or another Provider. Luna
+is only the fresh-install default.
 
-- `vision_bridge_fake` accepts no settings or Credential and performs no
-  network I/O. Use it only for control-path verification.
-- `openai` or `patched_openai` with `use_responses_api=true` calls
-  `{base_url}/responses`. The seeded GPT 5.6 Luna uses this profile.
-- OpenAI-compatible adapters without Responses selected call
-  `{base_url}/chat/completions`. The legacy narrow
-  `vision_openai_compatible_v1` adapter remains supported as an explicit Chat
-  Completions profile.
+At Run admission, a text-only lead freezes the selected model as an exact,
+secret-free `purpose="vision"` snapshot. Worker materialization resolves that
+version and Credential into the Run-isolated `AppConfig`. Retry and resume use
+the same snapshot; neither the tool nor current catalog defaults may change the
+model, Endpoint, adapter, or Credential reference.
 
-For a real model, set `supports_vision=true` and the provider's visual model
-identifier. Its endpoint must implement the selected protocol's single-image
-shape and native strict `json_schema` output. Bridge dispatch reads only the
-frozen endpoint, model ID, Credential and protocol selector from the model;
-generic retries, timeouts, streaming, headers and `extra_body` are ignored. The
-request contains only the normalized image, fixed `vision.prompt.v1`, fixed
-mode task and `vision.evidence.v1`; paths, full chat history, Memory and other
-attachments are not sent.
+`inspect_image` uses the same `deerflow.models.ModelRuntime` as all other model
+calls. It sends one fixed System instruction and one Human message containing a
+standard LangChain text block plus normalized image block. The selected
+model's existing adapter owns Provider SDK construction, authentication,
+Endpoint handling, request serialization, and response parsing. Bridge code
+does not construct Chat Completions or Responses HTTP requests and does not
+require the Provider to generate an ActWeave-specific JSON Schema.
 
-The administrator **Test connection** action for a compatible visual model sends only a
-platform-generated 64x64 blue-square PNG through that same image/strict-schema
-profile. A plain text-compatible endpoint therefore cannot pass the probe while
-lacking the required visual or structured-output capability. The synthetic
-probe does not contain project, user or uploaded-file data.
+The request contains only the normalized image and fixed mode instructions;
+paths, full chat history, Memory, other attachments, and authority metadata are
+not sent. The Provider returns a normal `AIMessage`. The server rejects empty,
+refusal, tool-call, ambiguous, or otherwise invalid responses and wraps valid
+text in a bounded `inspect_image.result.v2` ToolMessage whose content type is
+`untrusted_image_analysis`. Historical `vision.evidence.v1` ToolMessages remain
+readable during the compatibility period, but new calls write v2.
 
-The one runtime-policy timeout covers file read, normalization, queueing,
-connection, one bounded retry, response buffering and validation. Requests are
-non-streaming, redirects and ambient proxies are disabled, response bytes and
-Run-level calls/bytes/pixels are bounded, and normalized token usage is added
-to the Run journal. Every potential real HTTP attempt obtains its own dispatch authority
-and submits its own usage receipt; known token usage is aggregated, while any
-dispatched attempt without trusted usage keeps `usage_unknown=true`. The exact
-model and Credential are re-materialized before and after every attempt. Once a
-pre-dispatch revalidation observes a suspended System Model or revoked
-Credential, it blocks that and every later attempt for the admitted Run. This
-cannot recall a request already in flight, so operators must not describe it as
-an instantaneous network kill switch.
+The administrator **Test connection** action for a model declaring visual
+support sends only a platform-generated 64x64 blue-square PNG through the same
+`ModelRuntime` and Provider adapter. The synthetic probe contains no project,
+user, or uploaded-file data. Probe success is a current connectivity check, not
+proof of production image quality or provider-policy approval.
 
-Because graph-level LangSmith/Langfuse handlers can observe tool arguments and
-OCR evidence, every external Bridge protocol and external content tracing are
-currently mutually exclusive and fail closed. Confirming or selecting a real
-System Model in production is the deployment-wide data-egress approval; there
-is no separate `enabled` flag or project grant. Complete provider policy,
-staging quality, latency and rate-limit acceptance before enabling project Runs
-against the real adapter; fake tests are not evidence of provider behavior. See
-[TEXT_MODEL_VISION_BRIDGE_PLAN.md](./TEXT_MODEL_VISION_BRIDGE_PLAN.md).
+The one runtime-policy timeout covers file read, normalization, dispatch, the
+single Provider invocation, response validation, and ToolMessage generation.
+The sensitive multimodal Runtime profile suppresses inherited/model content
+tracing and sets Provider internal retries to zero. Run-level calls, bytes, and
+pixels remain bounded. Every possible external call obtains durable dispatch
+authority before invocation and submits a usage receipt afterward; dispatched
+work without trusted usage keeps `usage_unknown=true` and is not automatically
+replayed. A suspended System Model or revoked Credential blocks a later call,
+but cannot recall a request already in flight.
+
+There is no second `enabled` flag, project grant, Bridge adapter, or Bridge
+Provider client. Complete provider policy, staging quality, latency, and
+rate-limit acceptance before enabling project Runs. Current architecture,
+implementation status, legacy cleanup gates, and the complete acceptance matrix
+are documented in
+[VISION_BRIDGE_REFACTOR_PLAN.md](./VISION_BRIDGE_REFACTOR_PLAN.md).
 
 Gateway, Worker, Scheduler, and Docker Compose do not receive the local
 bootstrap provider key as a process-wide environment block. Each Run records a secret-free,
@@ -877,12 +891,12 @@ ActWeave executes agent-generated shell/code through a configurable sandbox
 one mode requires mounting the host Docker socket. Understand the trade-offs
 before exposing an instance to untrusted input.
 
-| Mode                       | `config.yaml`                                                              | Host Docker socket           | Isolation                                                                                                                                                                     |
-| -------------------------- | -------------------------------------------------------------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Mode                       | `config.yaml`                                                              | Host Docker socket           | Isolation                                                                                                                                                                             |
+| -------------------------- | -------------------------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `local` (default)          | `deerflow.sandbox.local:LocalSandboxProvider`                              | Not mounted                  | Commands run in the Worker OS namespace. Not a strong boundary. Keep Bash disabled for untrusted workloads; per-command approval adds consent and one-shot accounting, not isolation. |
-| `aio` (native macOS)       | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | Not mounted                  | Apple Container runs each sandbox in a lightweight Linux VM. Only explicitly configured/run-scoped mounts expose host paths.                                                 |
-| `aio` (Docker / DooD)      | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                    |
-| `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url`                                   | Not mounted                  | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation.                                                                                    |
+| `aio` (native macOS)       | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | Not mounted                  | Apple Container runs each sandbox in a lightweight Linux VM. Only explicitly configured/run-scoped mounts expose host paths.                                                          |
+| `aio` (Docker / DooD)      | `deerflow.community.aio_sandbox:AioSandboxProvider` (no `provisioner_url`) | **Mounted** (opt-in overlay) | Sandbox containers are started via the host Docker daemon.                                                                                                                            |
+| `provisioner` (Kubernetes) | `AioSandboxProvider` + `provisioner_url`                                   | Not mounted                  | Sandbox pods are created through the provisioner's K8s API over HTTP. Strongest isolation.                                                                                            |
 
 #### The Docker socket is host root
 
