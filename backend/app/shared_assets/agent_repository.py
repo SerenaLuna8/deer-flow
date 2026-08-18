@@ -5,9 +5,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from sqlalchemy import and_, delete, exists, func, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import aliased
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
@@ -15,25 +14,12 @@ from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFoun
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
-from deerflow.persistence.channel_connections.group_challenge_model import (
-    ProjectChannelGroupBindingChallengeRow,
-)
-from deerflow.persistence.channel_connections.group_model import (
-    ProjectChannelGroupBindingRow,
-)
-from deerflow.persistence.channel_connections.model import (
-    ChannelConnectionRow,
-    ChannelOAuthStateRow,
-)
-from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import (
     ProjectDefaultAgentRow,
     ProjectMembershipRow,
     ProjectRow,
 )
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_assets import (
-    AgentDesignSessionRow,
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
@@ -45,7 +31,6 @@ from deerflow.persistence.shared_assets import (
     SkillRow,
     SkillVersionRow,
 )
-from deerflow.persistence.thread_meta.model import ThreadMetaRow
 
 
 class AgentCreateCommand(Protocol):
@@ -267,206 +252,46 @@ class AgentRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is not None:
             raise AssetConflict(context.request_id)
 
-    async def plan_project_asset_deletion(
+    async def clear_current_project_default(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+    ) -> bool:
+        """Clear a matching default pointer before locking the Agent."""
+
+        self._require_project_actor(context)
+        await self._lock_project_context(context)
+        pointer = (
+            await self.session.execute(
+                select(ProjectDefaultAgentRow)
+                .where(
+                    ProjectDefaultAgentRow.project_id == context.project_id,
+                )
+                .with_for_update(of=ProjectDefaultAgentRow)
+            )
+        ).scalar_one_or_none()
+        if pointer is None or pointer.agent_asset_id != asset_id:
+            return False
+        pointer.agent_asset_id = None
+        pointer.revision += 1
+        pointer.updated_by_user_id = str(context.user_id)
+        await self.session.flush()
+        return True
+
+    async def archive_project_asset(
         self,
         context: ProjectContext,
         asset: AgentRow,
-    ) -> tuple[uuid.UUID, ...]:
-        """Lock one project Agent package and reject retained external uses."""
+    ) -> None:
+        """Archive one locked project Agent while retaining its package."""
 
         self._require_project_actor(context)
         if asset.scope != "project" or asset.project_id != context.project_id:
             raise AssetNotFound(context.request_id)
-        version_ids = tuple((await self.session.execute(select(AgentVersionRow.id).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number).with_for_update(of=AgentVersionRow))).scalars().all())
-
-        # ``AgentService.delete`` has already locked the Project and Agent at
-        # this point. Challenge completion uses the same Project -> Agent ->
-        # challenge order, so deletion never waits for a challenge while its
-        # completer waits for this Agent.
-        #
-        # Consumed or expired challenges no longer grant runtime authority and
-        # carry no retained identity mapping. PostgreSQL ``now()`` is
-        # transaction-stable, making cleanup and the complementary pending
-        # predicate below one database-authoritative time decision. Channel
-        # Binding tombstones remain retained after soft deletion: physically
-        # removing one here would cascade its external-principal mappings and
-        # could mint a duplicate guest identity on a later rebind. Tombstones
-        # release their Agent pair, so only live binding rows block deletion.
-        await self.session.execute(
-            delete(ProjectChannelGroupBindingChallengeRow).where(
-                ProjectChannelGroupBindingChallengeRow.project_id == context.project_id,
-                ProjectChannelGroupBindingChallengeRow.agent_asset_id == asset.id,
-                ProjectChannelGroupBindingChallengeRow.agent_scope == "project",
-                or_(
-                    ProjectChannelGroupBindingChallengeRow.consumed_at.is_not(None),
-                    ProjectChannelGroupBindingChallengeRow.expires_at <= func.now(),
-                ),
-            )
-        )
-
-        # Legacy owner Connections and pending OAuth states retain their Agent
-        # target in JSON metadata instead of a relational foreign key. Lock the
-        # matching live rows while the Project and Agent are already locked so
-        # callback completion, reconnect, and deletion serialize in the same
-        # Project -> Agent -> connection/state order.
-        connection_ids = tuple(
-            (
-                await self.session.execute(
-                    select(ChannelConnectionRow.id)
-                    .where(
-                        ChannelConnectionRow.project_id == context.project_id,
-                        ChannelConnectionRow.status != "revoked",
-                        ChannelConnectionRow.metadata_json["agent_scope"].as_string() == "project",
-                        ChannelConnectionRow.metadata_json["agent_asset_id"].as_string() == str(asset.id),
-                    )
-                    .order_by(ChannelConnectionRow.id)
-                    .with_for_update(of=ChannelConnectionRow)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        oauth_state_hashes = tuple(
-            (
-                await self.session.execute(
-                    select(ChannelOAuthStateRow.state_hash)
-                    .where(
-                        ChannelOAuthStateRow.project_id == context.project_id,
-                        ChannelOAuthStateRow.consumed_at.is_(None),
-                        ChannelOAuthStateRow.expires_at >= func.now(),
-                        ChannelOAuthStateRow.metadata_json["agent_scope"].as_string() == "project",
-                        ChannelOAuthStateRow.metadata_json["agent_asset_id"].as_string() == str(asset.id),
-                    )
-                    .order_by(ChannelOAuthStateRow.state_hash)
-                    .with_for_update(of=ChannelOAuthStateRow)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        retained_reference_exists = bool(
-            await self.session.scalar(
-                select(
-                    or_(
-                        exists().where(
-                            ThreadMetaRow.project_id == context.project_id,
-                            ThreadMetaRow.agent_asset_id == asset.id,
-                            ThreadMetaRow.agent_scope == "project",
-                        ),
-                        exists().where(
-                            ScheduledTaskRow.project_id == context.project_id,
-                            ScheduledTaskRow.agent_asset_id == asset.id,
-                            ScheduledTaskRow.agent_scope == "project",
-                        ),
-                        exists().where(
-                            RunAssetVersionRow.project_id == context.project_id,
-                            RunAssetVersionRow.asset_kind == "agent",
-                            RunAssetVersionRow.asset_scope == "project",
-                            RunAssetVersionRow.asset_id == asset.id,
-                        ),
-                        exists().where(
-                            ProjectChannelGroupBindingRow.project_id == context.project_id,
-                            ProjectChannelGroupBindingRow.agent_asset_id == asset.id,
-                            ProjectChannelGroupBindingRow.agent_scope == "project",
-                            ProjectChannelGroupBindingRow.deleted_at.is_(None),
-                        ),
-                        exists().where(
-                            ProjectChannelGroupBindingChallengeRow.project_id == context.project_id,
-                            ProjectChannelGroupBindingChallengeRow.agent_asset_id == asset.id,
-                            ProjectChannelGroupBindingChallengeRow.agent_scope == "project",
-                            ProjectChannelGroupBindingChallengeRow.consumed_at.is_(None),
-                            ProjectChannelGroupBindingChallengeRow.expires_at > func.now(),
-                        ),
-                    )
-                )
-            )
-        )
-        if connection_ids or oauth_state_hashes or retained_reference_exists:
+        if asset.status == "archived":
             raise AssetConflict(context.request_id)
-        return version_ids
-
-    async def delete_project_asset(
-        self,
-        context: ProjectContext,
-        asset: AgentRow,
-        version_ids: Sequence[uuid.UUID],
-    ) -> None:
-        """Physically remove one locked Agent package without private work."""
-
-        self._require_project_actor(context)
-        selected_version_ids = tuple(version_ids)
-        if asset.scope != "project" or asset.project_id != context.project_id or len(set(selected_version_ids)) != len(selected_version_ids):
-            raise AssetNotFound(context.request_id)
-
-        # Preserve owner-private Builder content while severing the deleted
-        # shared-asset reference. Completed retries then fail with 409.
-        await self.session.execute(
-            update(AgentDesignSessionRow)
-            .where(
-                AgentDesignSessionRow.project_id == context.project_id,
-                AgentDesignSessionRow.created_agent_id == asset.id,
-            )
-            .values(
-                created_agent_id=None,
-                created_agent_version_id=None,
-                created_agent_deleted=True,
-            )
-        )
-
-        # This transient state is never committed. Together with the
-        # transaction-local exact asset id it authorizes deleting immutable
-        # dependency refs for this package only.
-        asset.current_published_version_id = None
         asset.status = "archived"
-        await self.session.flush()
-        await self.session.scalar(
-            select(
-                func.set_config(
-                    "deerflow.agent_hard_delete_asset_id",
-                    str(asset.id),
-                    True,
-                )
-            )
-        )
-
-        if selected_version_ids:
-            await self.session.execute(
-                delete(AgentVersionSkillRefRow).where(
-                    AgentVersionSkillRefRow.agent_version_id.in_(
-                        selected_version_ids,
-                    )
-                )
-            )
-            await self.session.execute(
-                delete(AgentVersionMcpRefRow).where(
-                    AgentVersionMcpRefRow.agent_version_id.in_(
-                        selected_version_ids,
-                    )
-                )
-            )
-            child = aliased(AgentVersionRow)
-            remaining = set(selected_version_ids)
-            while remaining:
-                deleted_ids = set(
-                    (
-                        await self.session.execute(
-                            delete(AgentVersionRow)
-                            .where(
-                                AgentVersionRow.id.in_(remaining),
-                                AgentVersionRow.agent_id == asset.id,
-                                ~exists().where(child.supersedes_version_id == AgentVersionRow.id),
-                            )
-                            .returning(AgentVersionRow.id)
-                        )
-                    )
-                    .scalars()
-                    .all()
-                )
-                if not deleted_ids:
-                    raise AssetConflict(context.request_id)
-                remaining.difference_update(deleted_ids)
-
-        await self.session.delete(asset)
+        asset.version += 1
         await self.session.flush()
 
     async def get_system_asset(
@@ -483,11 +308,15 @@ class AgentRepository:
             AgentRow.id == asset_id,
             AgentRow.scope == "system",
             AgentRow.project_id.is_(None),
+            or_(
+                AgentRow.source_key.is_(None),
+                AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+            ),
         )
         if for_update:
             statement = statement.with_for_update(of=AgentRow)
         row = (await self.session.execute(statement)).scalar_one_or_none()
-        if row is None:
+        if row is None or _is_internal_skill_builder_agent(row):
             raise AssetNotFound(context.request_id)
         return row
 
@@ -689,6 +518,10 @@ class AgentRepository:
                 AgentVersionRow.agent_id == asset_id,
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+                or_(
+                    AgentRow.source_key.is_(None),
+                    AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                ),
             )
         )
         if for_update:
@@ -774,6 +607,10 @@ class AgentRepository:
                 AgentVersionRow.agent_id == asset_id,
                 AgentRow.scope == "system",
                 AgentRow.project_id.is_(None),
+                or_(
+                    AgentRow.source_key.is_(None),
+                    AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                ),
             )
             .order_by(AgentVersionRow.version_number.desc())
             .limit(1)
@@ -822,6 +659,7 @@ class AgentRepository:
         project_statement = select(AgentRow).where(
             AgentRow.scope == "project",
             AgentRow.project_id == context.project_id,
+            AgentRow.status != "archived",
             self._project_context_exists(context),
         )
         system_statement = select(AgentRow).where(
@@ -854,19 +692,14 @@ class AgentRepository:
         statement = select(AgentRow).where(
             AgentRow.scope == "system",
             AgentRow.project_id.is_(None),
+            or_(
+                AgentRow.source_key.is_(None),
+                AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+            ),
         )
-        if isinstance(context, SystemAssetReadContext):
-            statement = statement.where(
-                or_(
-                    AgentRow.source_key.is_(None),
-                    AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
-                )
-            )
         statement = statement.order_by(AgentRow.created_at, AgentRow.id)
         rows = tuple((await self.session.execute(statement)).scalars().all())
-        if isinstance(context, SystemAssetReadContext):
-            return tuple(row for row in rows if not _is_internal_skill_builder_agent(row))
-        return rows
+        return tuple(row for row in rows if not _is_internal_skill_builder_agent(row))
 
     async def list_override_visible(
         self,

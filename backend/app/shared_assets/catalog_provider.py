@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,6 +23,9 @@ from app.shared_assets.credential_closure import (
     lock_mcp_credential_closures,
 )
 from app.shared_assets.errors import AssetValidationFailed, SharedAssetError
+from app.shared_assets.internal_assets import (
+    BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+)
 from app.shared_assets.keyring import CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
@@ -338,6 +341,10 @@ class PostgresAssetCatalogProvider:
                     AgentRow.scope == "system",
                     AgentRow.project_id.is_(None),
                     AgentRow.status == "active",
+                    or_(
+                        AgentRow.source_key.is_(None),
+                        AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                    ),
                     AgentVersionRow.workflow_status == "published",
                 )
                 .order_by(AgentRow.slug)
@@ -345,6 +352,8 @@ class PostgresAssetCatalogProvider:
         ).all()
         snapshots: list[AssetCatalogAgentSnapshot] = []
         for asset, version in rows:
+            if asset.source_key == BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY:
+                continue
             if asset.status != "active":
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
             raw_skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars().all())

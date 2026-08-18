@@ -56,11 +56,34 @@ export function SkillBuilderRunActivity({
 }) {
   const { t } = useI18n();
   const copy = t.skills.builder.activity;
+  const terminalPresentation =
+    presentation &&
+    !skillBuilderRunIsActive(presentation.status) &&
+    (!activeRun || activeRun.runId === presentation.runId) &&
+    (!projection || presentation.runId === projection.runId)
+      ? presentation
+      : null;
   const status =
-    projection?.status ?? activeRun?.status ?? presentation?.status;
+    terminalPresentation?.status ??
+    projection?.status ??
+    activeRun?.status ??
+    presentation?.status;
   if (!status) return null;
 
-  const steps = projection?.toolSteps ?? [];
+  const steps = (projection?.toolSteps ?? []).map((step) => {
+    if (
+      !terminalPresentation ||
+      step.status === "completed" ||
+      step.status === "failed"
+    ) {
+      return step;
+    }
+    return {
+      ...step,
+      status:
+        terminalPresentation.status === "success" ? "completed" : "failed",
+    } satisfies SkillBuilderRunToolStepProjection;
+  });
   const active = skillBuilderRunIsActive(status);
 
   return (

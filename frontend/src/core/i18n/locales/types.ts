@@ -2009,6 +2009,7 @@ export interface Translations {
   // Account-wide project workspace
   projectWorkspace: {
     title: string;
+    subtitle: string;
     account: string;
     platformAdministration: string;
     systemSettings: string;
@@ -2025,10 +2026,18 @@ export interface Translations {
     projectLoadFailed: string;
     loadingProjects: string;
     retry: string;
+    columns: {
+      project: string;
+      description: string;
+      actions: string;
+    };
     card: {
       edit: string;
+      editAction: string;
       pin: string;
+      pinAction: string;
       unpin: string;
+      pinned: string;
       noDescription: string;
       open: string;
     };
@@ -2144,6 +2153,9 @@ export interface Translations {
     currentUploadUnavailableDescription: string;
     agentSuspendedTitle: string;
     agentSuspendedDescription: string;
+    agentArchivedTitle: string;
+    agentArchivedDescription: string;
+    agentArchivedAction: string;
     agentModelUnavailableTitle: string;
     agentModelUnavailableDescription: string;
     runExecutionProfile: (

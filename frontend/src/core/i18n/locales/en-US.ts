@@ -2359,6 +2359,7 @@ export const enUS: Translations = {
 
   projectWorkspace: {
     title: "Workspace",
+    subtitle: "Manage and enter your projects",
     account: "Account",
     platformAdministration: "Platform administration",
     systemSettings: "System settings",
@@ -2375,10 +2376,18 @@ export const enUS: Translations = {
     projectLoadFailed: "Projects could not be loaded",
     loadingProjects: "Loading projects",
     retry: "Retry",
+    columns: {
+      project: "Project",
+      description: "Description",
+      actions: "Actions",
+    },
     card: {
       edit: "Edit project",
+      editAction: "Edit",
       pin: "Pin project",
+      pinAction: "Pin",
       unpin: "Unpin project",
+      pinned: "Pinned",
       noDescription: "No project description",
       open: "Open project",
     },
@@ -2519,6 +2528,10 @@ export const enUS: Translations = {
     agentSuspendedTitle: "Agent suspended",
     agentSuspendedDescription:
       "The project Agent bound to this chat is suspended, so new messages cannot be sent. Ask a project administrator to reactivate it or start a new chat with another Agent.",
+    agentArchivedTitle: "Agent deleted",
+    agentArchivedDescription:
+      "This Agent was deleted, so this chat cannot continue. Choose another Agent to start a new chat.",
+    agentArchivedAction: "Choose another Agent for a new chat",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
       "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",

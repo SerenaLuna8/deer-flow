@@ -117,10 +117,10 @@ export function ProjectWorkbench({
         onOpenChange={setSettingsOpen}
         defaultSection="appearance"
       />
-      <header className="flex h-16 shrink-0 items-center justify-between gap-4 border-b px-4 sm:px-6">
+      <header className="flex h-20 shrink-0 items-center justify-between gap-4 border-b px-5 sm:px-8">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="text-primary font-serif text-lg">ActWeave</span>
-          <span className="text-muted-foreground hidden text-sm sm:inline">
+          <span className="text-primary font-serif text-2xl">ActWeave</span>
+          <span className="text-muted-foreground hidden text-base sm:inline">
             {copy.title}
           </span>
         </div>
@@ -176,16 +176,35 @@ export function ProjectWorkbench({
         </div>
       </header>
       <WorkspaceBody className="overflow-y-auto">
-        <main className="mx-auto w-full max-w-[1440px] px-4 py-8 sm:px-6 sm:py-14 lg:px-12">
+        <main className="mx-auto w-full max-w-[1440px] px-5 py-10 sm:px-8 sm:py-12 lg:px-12 lg:py-14">
+          <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">
+                {copy.title}
+              </h1>
+              <p className="text-muted-foreground mt-3 text-base sm:text-lg">
+                {copy.subtitle}
+              </p>
+            </div>
+            <Button
+              type="button"
+              size="lg"
+              className="h-14 shrink-0 px-7 text-base max-sm:w-full"
+              onClick={() => setCreateOpen(true)}
+            >
+              <PlusIcon aria-hidden className="size-5" /> {copy.createProject}
+            </Button>
+          </div>
+
           <div
             data-testid="project-toolbar"
-            className="border-border/80 bg-card mb-8 grid gap-3 rounded-xl border p-5 shadow-xs lg:grid-cols-[minmax(24rem,1fr)_18.5rem_minmax(17rem,auto)] lg:items-center"
+            className="mt-12 mb-12 grid gap-4 md:grid-cols-[minmax(0,1fr)_20rem] md:items-center lg:grid-cols-[minmax(22rem,1fr)_24rem_auto]"
           >
             <div className="relative min-w-0 flex-1">
-              <SearchIcon className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
+              <SearchIcon className="text-muted-foreground absolute top-1/2 left-4 size-5 -translate-y-1/2" />
               <Input
                 aria-label={copy.searchProjects}
-                className="h-12 pl-9 text-base shadow-none"
+                className="h-14 rounded-lg pl-12 text-base shadow-none"
                 placeholder={copy.searchPlaceholder}
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
@@ -194,12 +213,12 @@ export function ProjectWorkbench({
             <div
               role="group"
               aria-label={copy.filterProjects}
-              className="bg-muted grid grid-cols-2 rounded-lg p-1"
+              className="bg-muted grid h-14 grid-cols-2 rounded-lg p-1"
             >
               <Button
                 type="button"
-                variant={filter === "all" ? "outline" : "ghost"}
-                className="aria-pressed:border-border aria-pressed:bg-background h-10 min-w-36 border-transparent text-base shadow-none aria-pressed:shadow-xs"
+                variant="ghost"
+                className="aria-pressed:border-selection/15 aria-pressed:bg-selection-subtle aria-pressed:text-selection h-12 min-w-0 border border-transparent text-base shadow-none"
                 aria-pressed={filter === "all"}
                 onClick={() => setFilter("all")}
               >
@@ -207,32 +226,22 @@ export function ProjectWorkbench({
               </Button>
               <Button
                 type="button"
-                variant={filter === "pinned" ? "outline" : "ghost"}
-                className="aria-pressed:border-border aria-pressed:bg-background h-10 min-w-36 border-transparent text-base shadow-none aria-pressed:shadow-xs"
+                variant="ghost"
+                className="aria-pressed:border-selection/15 aria-pressed:bg-selection-subtle aria-pressed:text-selection h-12 min-w-0 border border-transparent text-base shadow-none"
                 aria-pressed={filter === "pinned"}
                 onClick={() => setFilter("pinned")}
               >
                 {copy.pinnedOnly}
               </Button>
             </div>
-            <div className="flex items-center justify-between gap-4 lg:justify-end">
-              <div
-                aria-live="polite"
-                aria-atomic="true"
-                className="text-muted-foreground flex min-h-9 min-w-20 items-center text-base"
-              >
-                {!projectsQuery.isLoading && !projectsQuery.error
-                  ? copy.projectCount(projects.length)
-                  : null}
-              </div>
-              <Button
-                type="button"
-                size="lg"
-                className="h-12 shrink-0 px-6"
-                onClick={() => setCreateOpen(true)}
-              >
-                <PlusIcon size={16} /> {copy.createProject}
-              </Button>
+            <div
+              aria-live="polite"
+              aria-atomic="true"
+              className="text-muted-foreground flex min-h-9 min-w-20 items-center text-base md:col-span-2 md:justify-self-end lg:col-span-1"
+            >
+              {!projectsQuery.isLoading && !projectsQuery.error
+                ? copy.projectCount(projects.length)
+                : null}
             </div>
           </div>
 
@@ -241,10 +250,12 @@ export function ProjectWorkbench({
               <div
                 data-testid="project-loading"
                 aria-label={copy.loadingProjects}
-                className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 xl:gap-8"
+                className="border-border/80 divide-border/80 overflow-hidden rounded-xl border"
               >
                 {[0, 1, 2].map((item) => (
-                  <Skeleton key={item} className="h-[23.5rem] rounded-xl" />
+                  <div key={item} className="border-t p-6 first:border-t-0">
+                    <Skeleton className="h-20 rounded-xl" />
+                  </div>
                 ))}
               </div>
             ) : projectsQuery.error ? (
@@ -275,17 +286,28 @@ export function ProjectWorkbench({
               />
             ) : (
               <div
-                data-testid="project-grid"
-                className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 xl:gap-8"
+                data-testid="project-list"
+                className="border-border/80 divide-border/80 overflow-hidden rounded-xl border"
               >
-                {projects.map((project) => (
-                  <ProjectCardWithActions
-                    key={project.id}
-                    project={project}
-                    userId={userId}
-                    onEdit={() => setEditingProject(project)}
-                  />
-                ))}
+                <div
+                  data-testid="project-list-header"
+                  aria-hidden
+                  className="text-foreground/80 hidden grid-cols-[minmax(18rem,1.2fr)_minmax(14rem,1fr)_minmax(23rem,auto)] items-center gap-5 border-b px-8 py-5 text-sm font-semibold xl:grid"
+                >
+                  <span>{copy.columns.project}</span>
+                  <span>{copy.columns.description}</span>
+                  <span>{copy.columns.actions}</span>
+                </div>
+                <div className="divide-border/80 divide-y">
+                  {projects.map((project) => (
+                    <ProjectCardWithActions
+                      key={project.id}
+                      project={project}
+                      userId={userId}
+                      onEdit={() => setEditingProject(project)}
+                    />
+                  ))}
+                </div>
               </div>
             )}
           </section>

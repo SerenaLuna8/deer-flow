@@ -4,7 +4,7 @@ import asyncio
 import contextlib
 import copy
 import uuid
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from dataclasses import asdict
 from datetime import datetime
 from typing import Annotated, Any, Literal
@@ -115,6 +115,7 @@ from deerflow.runtime.events.stream import (
     parse_stream_cursor,
 )
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS
+from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellation
 from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.time import coerce_iso
 
@@ -1004,6 +1005,17 @@ def _fallback_terminal_status(status_value: str) -> str:
     return "completed" if status_value == "success" else status_value
 
 
+async def _await_stream_database_operation[T](operation: Awaitable[T]) -> T:
+    """Finish one session-owning operation before propagating cancellation."""
+
+    outcome = await await_despite_cancellation(operation)
+    if outcome.cancellation_pending:
+        if not outcome.task.cancelled():
+            outcome.task.exception()
+        raise asyncio.CancelledError
+    return outcome.result()
+
+
 async def _read_private_stream_page(
     bridge: PostgresStreamBridge,
     context: PrivateWorkContext,
@@ -1012,12 +1024,14 @@ async def _read_private_stream_page(
     cursor: int,
 ) -> tuple[StoredStreamFrame, ...]:
     try:
-        return await bridge.read_after(
-            context.resource_scope,
-            thread_id,
-            cursor=cursor,
-            limit=100,
-            run_id=run_id,
+        return await _await_stream_database_operation(
+            bridge.read_after(
+                context.resource_scope,
+                thread_id,
+                cursor=cursor,
+                limit=100,
+                run_id=run_id,
+            )
         )
     except StreamCursorOutOfRange:
         raise ReliabilityInvalidStreamCursor(context.request_id) from None
@@ -1079,14 +1093,16 @@ async def _durable_private_sse_consumer(
                 if frames:
                     continue
 
-            record = await service.get(context, thread_id, run_id)
+            record = await _await_stream_database_operation(service.get(context, thread_id, run_id))
             if record.status in _PRIVATE_RUN_TERMINAL_STATUSES:
-                terminal = await bridge.ensure_settled_terminal(
-                    context.resource_scope,
-                    thread_id,
-                    run_id,
-                    status=_fallback_terminal_status(record.status),
-                    error_code=(record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None),
+                terminal = await _await_stream_database_operation(
+                    bridge.ensure_settled_terminal(
+                        context.resource_scope,
+                        thread_id,
+                        run_id,
+                        status=_fallback_terminal_status(record.status),
+                        error_code=(record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None),
+                    )
                 )
                 terminal_cursor = int(terminal.id)
                 if terminal_cursor > cursor:
@@ -1757,10 +1773,12 @@ async def reconnect_private_run_stream(
         bridge = _private_stream_bridge(request, context.request_id)
         cursor = _private_stream_cursor(request, context.request_id)
         service = _run_service(request, context.request_id)
-        await service.get(
-            context,
-            selected_thread_id,
-            selected_run_id,
+        await _await_stream_database_operation(
+            service.get(
+                context,
+                selected_thread_id,
+                selected_run_id,
+            )
         )
         initial_frames = await _read_private_stream_page(
             bridge,

@@ -17,7 +17,7 @@ Main is the project-level orchestrator and the fallback when the project has no 
 
 A project administrator may instead select an active, published project Agent as the project default. A configured default that is no longer executable fails closed; ActWeave does not silently switch it back to Main.
 
-The current project default Agent cannot be deleted directly. Select Main or another available Agent as the default first. Agents referenced by conversations, Automations, or Run records are also retained; ActWeave does not cascade-delete those records.
+The current project default Agent can be deleted directly. Deletion soft-archives it, clears the default automatically, and makes subsequent project work fall back to Main. Existing conversations, Automations, Channels, OAuth connections, and Run records are retained rather than cascade-deleted. An already admitted Run continues with its frozen snapshot; starting a new Run from an existing conversation reports that the Agent was deleted and requires switching Agents. An archived record no longer occupies the project name, so the same slug may be reused by a new Agent with a new ID; old conversations remain bound to the archived ID.
 
 ### Custom agents
 
@@ -31,7 +31,7 @@ Custom agents are named variants of the Lead Agent. Each one can have:
 
 Agents are created and managed from the entered project's **Agents** page. Platform administrators manage system agents under **Admin > Assets > Agents**. The corresponding authenticated APIs are scoped to that project or to the system-admin asset surface; there is no global workspace Agent client.
 
-The slug is derived from the display name and must be unique within its asset scope. Published versions and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill and MCP versions referenced by that Agent version. Omitting a dependency does not inherit every project asset.
+The slug is derived from the display name and must be unique among non-deleted Agents within its asset scope. After an Agent is archived, its slug can be reused by a new Agent with a new ID. Published versions and explicit project bindings are stored in PostgreSQL. Unlike Main, a custom Agent loads only the Skill and MCP versions referenced by that Agent version. Omitting a dependency does not inherit every project asset.
 
 To create an Agent in the app, open **Agents**, choose **New Agent**, enter a name and brief, and answer the AI Builder's clarification questions. Review the generated Blueprint, assumptions, and conflicts before confirming. Error-severity conflicts block creation until another AI turn regenerates the candidate; editing a document alone does not resolve them. You may edit the four instruction documents or rename the Agent in the same session, including after a name conflict, without discarding the conversation. Builder creation automatically binds enabled System Skill/MCP dependencies; select exact project-authored Skill/MCP versions later from the Agent detail page.
 

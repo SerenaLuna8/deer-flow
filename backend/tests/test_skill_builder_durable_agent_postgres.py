@@ -48,6 +48,10 @@ from app.shared_assets.skill_design_service import (
 )
 from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
+from app.system_settings.bootstrap import (
+    GPT_5_6_LUNA_MODEL_ID,
+    GPT_5_6_LUNA_MODEL_VERSION_ID,
+)
 from app.worker.service import JobLeaseAuthority
 from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobRepository
@@ -57,6 +61,7 @@ from deerflow.persistence.shared_assets import (
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
+from deerflow.persistence.system_settings import RunModelConfigSnapshotRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.sandbox.sandbox import AuthorizationRevoked
@@ -191,6 +196,49 @@ async def _seed_default_model(seed: PrivateThreadSeed) -> None:
                  WHERE id=:model"""
             ),
             {"version": version_id, "model": model_id},
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO system_model_configs
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,updated_by_user_id)
+                VALUES (:id,'Builder PG vision model','active',NULL,1,
+                        :owner,:owner)"""
+            ),
+            {
+                "id": GPT_5_6_LUNA_MODEL_ID,
+                "owner": str(seed.owner_a.user_id),
+            },
+        )
+        await connection.execute(
+            text(
+                """INSERT INTO system_model_config_versions
+                (id,model_config_id,version_number,provider_adapter,provider_model,
+                 settings,supports_thinking,supports_reasoning_effort,
+                 supports_vision,credential_id,credential_version_id,
+                 credential_env_key,payload_checksum,supersedes_version_id,
+                 created_by_user_id)
+                VALUES (:id,:model,1,'vision_bridge_fake','builder-pg-vision',
+                        '{}'::jsonb,false,false,true,NULL,NULL,NULL,
+                        :checksum,NULL,:owner)"""
+            ),
+            {
+                "id": GPT_5_6_LUNA_MODEL_VERSION_ID,
+                "model": GPT_5_6_LUNA_MODEL_ID,
+                "checksum": "c" * 64,
+                "owner": str(seed.owner_a.user_id),
+            },
+        )
+        await connection.execute(
+            text(
+                """UPDATE system_model_configs
+                   SET current_version_id=:version
+                 WHERE id=:model"""
+            ),
+            {
+                "version": GPT_5_6_LUNA_MODEL_VERSION_ID,
+                "model": GPT_5_6_LUNA_MODEL_ID,
+            },
         )
         await connection.execute(
             text(
@@ -369,6 +417,18 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
             assert thread is not None
             assert thread.thread_kind == "skill_builder"
             assert run.metadata_json == {}
+            vision_snapshot = (
+                await session.execute(
+                    sa.select(RunModelConfigSnapshotRow).where(
+                        RunModelConfigSnapshotRow.project_id == context.project_id,
+                        RunModelConfigSnapshotRow.owner_user_id == str(context.user_id),
+                        RunModelConfigSnapshotRow.run_id == first.run_id,
+                        RunModelConfigSnapshotRow.purpose == "vision",
+                    )
+                )
+            ).scalar_one()
+            assert vision_snapshot.model_config_id == GPT_5_6_LUNA_MODEL_ID
+            assert vision_snapshot.model_config_version_id == GPT_5_6_LUNA_MODEL_VERSION_ID
             initial_payload = json.loads(
                 run.kwargs_json["input"]["messages"][0]["content"],
             )

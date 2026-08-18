@@ -12,6 +12,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.agent_repository import AgentRepository
 from app.shared_assets.binding_repository import BindingRepository, BindingTarget
+from app.shared_assets.catalog_provider import PostgresAssetCatalogProvider
 from app.shared_assets.contexts import (
     SystemAssetGovernanceContext,
     SystemAssetReadContext,
@@ -206,9 +207,23 @@ async def test_authenticated_system_catalog_hides_internal_skill_builder() -> No
 
 
 @pytest.mark.asyncio
-async def test_global_governance_catalog_retains_internal_skill_builder() -> None:
+async def test_global_governance_catalog_hides_internal_skill_builder() -> None:
     builder, _version = _builder_rows()
-    session = _QueueSession(_Result(rows=(builder,)))
+    ordinary = AgentRow(
+        id=uuid.uuid4(),
+        scope="system",
+        project_id=None,
+        slug="ordinary-system-agent",
+        display_name="Ordinary System Agent",
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+        version=1,
+        source_key="builtin:agent:ordinary-system-agent",
+        created_by_user_id="system",
+        created_at=datetime.now(UTC),
+        updated_at=datetime.now(UTC),
+    )
+    session = _QueueSession(_Result(rows=(builder, ordinary)))
     actor = SystemAssetGovernanceContext(
         user_id=uuid.uuid4(),
         request_id="global-governance-catalog",
@@ -216,14 +231,97 @@ async def test_global_governance_catalog_retains_internal_skill_builder() -> Non
 
     visible = await AgentRepository(session).list_system_visible(actor)  # type: ignore[arg-type]
 
-    assert visible == (builder,)
+    assert visible == (ordinary,)
     statement_sql = str(
         session.statements[0].compile(
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
         )
     )
-    assert BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY not in statement_sql
+    assert BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY in statement_sql
+
+
+@pytest.mark.asyncio
+async def test_global_governance_detail_hides_internal_skill_builder() -> None:
+    builder, _version = _builder_rows()
+    session = _QueueSession(_Result(value=builder))
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="global-governance-detail",
+    )
+
+    with pytest.raises(AssetNotFound):
+        await AgentRepository(session).get_system_asset(actor, builder.id)  # type: ignore[arg-type]
+
+    statement_sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY in statement_sql
+
+
+@pytest.mark.asyncio
+async def test_global_governance_version_history_hides_internal_skill_builder() -> None:
+    builder, _version = _builder_rows()
+    session = _QueueSession(_Result(value=builder), _Result(rows=()))
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="global-governance-history",
+    )
+
+    with pytest.raises(AssetNotFound):
+        await AgentRepository(session).get_system_version_history(  # type: ignore[arg-type]
+            actor,
+            builder.id,
+        )
+
+    assert session.execute_count == 1
+
+
+@pytest.mark.asyncio
+async def test_global_governance_direct_version_lookup_hides_internal_skill_builder() -> None:
+    builder, version = _builder_rows()
+    session = _QueueSession(_Result(value=None))
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="global-governance-version-detail",
+    )
+
+    with pytest.raises(AssetNotFound):
+        await AgentRepository(session).get_system_version(  # type: ignore[arg-type]
+            actor,
+            builder.id,
+            version.id,
+        )
+
+    statement_sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY in statement_sql
+
+
+@pytest.mark.asyncio
+async def test_runtime_system_agent_catalog_hides_internal_skill_builder() -> None:
+    session = _QueueSession(_Result(rows=()))
+
+    loaded = await PostgresAssetCatalogProvider._load_agents(  # noqa: SLF001
+        session,  # type: ignore[arg-type]
+        1,
+    )
+
+    assert loaded == ()
+    statement_sql = str(
+        session.statements[0].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY in statement_sql
 
 
 @pytest.mark.asyncio

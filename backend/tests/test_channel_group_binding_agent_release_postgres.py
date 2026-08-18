@@ -28,7 +28,6 @@ from app.projects.models import ProjectRole
 from app.projects.system_lifecycle import SystemProjectLifecycleService
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.agent_service import AgentService
-from app.shared_assets.errors import AssetConflict
 from app.shared_assets.models import AgentPayload
 from deerflow.persistence.channel_connections import (
     ChannelExternalPrincipalRow,
@@ -434,7 +433,9 @@ async def test_soft_delete_releases_agent_and_rebind_reuses_identity(
             expected_asset_version=1,
         )
         async with factory() as session:
-            assert await session.get(AgentRow, seed.old_agent_id) is None
+            archived_agent = await session.get(AgentRow, seed.old_agent_id)
+        assert archived_agent is not None
+        assert archived_agent.status == "archived"
 
         code_digest = uuid.uuid4().hex * 2
         challenged_at = deleted_at + timedelta(seconds=1)
@@ -1121,7 +1122,7 @@ async def test_binding_delete_and_challenge_completion_do_not_deadlock(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_binding_delete_and_agent_delete_serialize_without_deadlock(
+async def test_binding_delete_and_agent_archive_serialize_without_deadlock(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -1145,15 +1146,12 @@ async def test_binding_delete_and_agent_delete_serialize_without_deadlock(
             return "binding-deleted"
 
         async def delete_agent() -> object:
-            try:
-                await AgentService(factory).delete(
-                    seed.context,
-                    seed.old_agent_id,
-                    expected_asset_version=1,
-                )
-                return "agent-deleted"
-            except AssetConflict as error:
-                return error
+            await AgentService(factory).delete(
+                seed.context,
+                seed.old_agent_id,
+                expected_asset_version=1,
+            )
+            return "agent-archived"
 
         binding_result, agent_result = await asyncio.wait_for(
             asyncio.gather(delete_binding(), delete_agent()),
@@ -1172,16 +1170,8 @@ async def test_binding_delete_and_agent_delete_serialize_without_deadlock(
         assert principal is not None and principal.status == "frozen"
         assert connection is not None and connection.status == "frozen"
         assert connection.metadata_json == {"group_binding_id": str(seed.binding_id)}
-        if agent_result == "agent-deleted":
-            assert old_agent is None
-        else:
-            assert isinstance(agent_result, AssetConflict)
-            assert old_agent is not None
-            await AgentService(factory).delete(
-                seed.context,
-                seed.old_agent_id,
-                expected_asset_version=1,
-            )
+        assert agent_result == "agent-archived"
+        assert old_agent is not None and old_agent.status == "archived"
     finally:
         await engine.dispose()
 

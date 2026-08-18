@@ -25,6 +25,7 @@ from app.shared_assets.default_agent_service import (
     ProjectDefaultAgentService,
 )
 from app.shared_assets.errors import (
+    AgentArchived,
     AgentDesignConflictUnresolved,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
@@ -108,6 +109,7 @@ __all__ = [
     "AgentModelSettings",
     "AgentPayload",
     "AgentAssetView",
+    "AgentArchived",
     "AgentCapabilityBindings",
     "AgentInstructions",
     "AgentService",

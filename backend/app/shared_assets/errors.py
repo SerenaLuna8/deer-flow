@@ -112,6 +112,14 @@ class AssetResolutionUnavailable(SharedAssetError):
     public_message = "Asset resolution unavailable"
 
 
+class AgentArchived(AssetResolutionUnavailable):
+    """A project Agent exists but cannot admit any new Run."""
+
+    code = "AGENT_ARCHIVED"
+    status_code = 409
+    public_message = "Agent is archived"
+
+
 class SkillDesignTargetUnsupported(SharedAssetError):
     """The published base version cannot seed a Builder revision session."""
 

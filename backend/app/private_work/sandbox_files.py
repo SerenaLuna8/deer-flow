@@ -520,6 +520,39 @@ class PrivateRunFileAuthority:
     def manifest(self) -> AuthorityManifest | None:
         return self._manifest
 
+    def authorizes_run_read_only_mount_path(
+        self,
+        *,
+        run_id: str,
+        path: str,
+    ) -> bool:
+        """Authorize one path from this authority's active exact-Run mounts.
+
+        The caller-facing runtime context is not mount authority.  A path is
+        trusted only while this object owns the matching live private lease,
+        the private projection has completed, and the exact server-admitted
+        read-only mount covers the normalized container path.
+        """
+
+        if type(run_id) is not str or not run_id or type(path) is not str:
+            return False
+        parsed = PurePosixPath(path)
+        if not parsed.is_absolute() or ".." in parsed.parts or parsed.as_posix() != path:
+            return False
+
+        lease = self._lease
+        manifest = self._manifest
+        if type(lease) is not PrivateSandboxLease or lease.run_id != run_id or self._run_scope.run_id != run_id or self._sandbox is None or type(manifest) is not AuthorityManifest or manifest.run_id != run_id:
+            return False
+
+        for mount in self._mounts:
+            if type(mount) is not RunScopedReadOnlyMount or mount.run_id != run_id:
+                continue
+            prefix = mount.container_path.rstrip("/") or "/"
+            if path == prefix or path.startswith(f"{prefix}/"):
+                return True
+        return False
+
     @staticmethod
     def _validated_presented_paths(paths: object) -> tuple[str, ...]:
         if type(paths) is not tuple or any(type(path) is not str for path in paths):

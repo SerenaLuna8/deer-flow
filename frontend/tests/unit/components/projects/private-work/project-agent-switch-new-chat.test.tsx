@@ -19,6 +19,7 @@ const CURRENT_AGENT_ID = "00000000-0000-4000-8000-000000000003";
 const OTHER_AGENT_ID = "00000000-0000-4000-8000-000000000004";
 const VERSION_ID = "00000000-0000-4000-8000-000000000005";
 const NEW_THREAD_ID = "00000000-0000-4000-8000-000000000006";
+const CURRENT_THREAD_ID = "00000000-0000-4000-8000-000000000007";
 
 function agent(
   id: string,
@@ -94,6 +95,8 @@ describe("use another Agent for a new project chat", () => {
     expect(navigations).toEqual([
       `/projects/alpha%20project/chats/${NEW_THREAD_ID}`,
     ]);
+    expect(JSON.stringify(requests)).not.toContain(CURRENT_THREAD_ID);
+    expect(navigations[0]).not.toContain(CURRENT_THREAD_ID);
   });
 
   test("labels the current Agent action as creating a new chat", () => {

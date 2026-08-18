@@ -828,8 +828,11 @@ class AgentService:
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
-        async def operation(repository: AgentRepository) -> None:
-            await repository.ensure_not_current_project_default(actor, asset_id)
+        async def operation(repository: AgentRepository) -> bool:
+            cleared_default = await repository.clear_current_project_default(
+                actor,
+                asset_id,
+            )
             asset = await repository.get_project_asset(
                 actor,
                 asset_id,
@@ -845,26 +848,33 @@ class AgentService:
                     actor,
                     Capability.SHARED_ASSETS_MANAGE_BINDINGS,
                 )
-            version_ids = await repository.plan_project_asset_deletion(
+            await repository.archive_project_asset(
                 actor,
                 asset,
             )
-            await repository.delete_project_asset(
-                actor,
-                asset,
-                version_ids,
-            )
+            return cleared_default
 
-        await self._execute(
-            actor,
-            operation,
-            governance=lambda session, _result: self._record_governance(
+        async def governance(session: AsyncSession, cleared_default: bool) -> None:
+            if cleared_default:
+                await self._record_governance(
+                    session,
+                    actor,
+                    asset_id,
+                    None,
+                    "agent.default.clear",
+                )
+            await self._record_governance(
                 session,
                 actor,
                 asset_id,
                 None,
                 "agent.delete",
-            ),
+            )
+
+        await self._execute(
+            actor,
+            operation,
+            governance=governance,
         )
 
     async def suspend(

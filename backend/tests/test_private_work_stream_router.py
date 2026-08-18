@@ -1,18 +1,61 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import sqlalchemy as sa
 from fastapi import FastAPI
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
 from deerflow.runtime import DisconnectMode
 from deerflow.runtime.events.models import StoredStreamFrame
+
+
+class _CancellationProbe:
+    def __init__(self, result: object) -> None:
+        self.result = result
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.exited = asyncio.Event()
+        self.cancelled = False
+
+    async def run(self, *_args: object, **_kwargs: object) -> object:
+        self.entered.set()
+        try:
+            await self.release.wait()
+            return self.result
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        finally:
+            self.exited.set()
+
+
+async def _assert_cancellation_waits_for_probe(
+    pending: asyncio.Task[object],
+    probe: _CancellationProbe,
+) -> None:
+    pending.cancel()
+    await asyncio.sleep(0)
+    pending.cancel()
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if pending.done() or probe.cancelled:
+            break
+
+    assert probe.cancelled is False
+    assert pending.done() is False
+    probe.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+    assert probe.exited.is_set()
 
 
 @pytest.fixture()
@@ -480,18 +523,159 @@ async def test_durable_consumer_emits_heartbeat_while_run_is_silent(
 
 
 @pytest.mark.asyncio
-async def test_durable_consumer_persists_cancel_when_stream_task_is_cancelled() -> None:
-    entered = asyncio.Event()
-    hold = asyncio.Event()
+@pytest.mark.parametrize("operation", ["read_after", "get", "ensure_terminal"])
+async def test_durable_consumer_waits_for_database_owner_before_propagating_cancellation(
+    operation: str,
+) -> None:
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    terminal = StoredStreamFrame(
+        id="1",
+        thread_id=thread_id,
+        run_id=run_id,
+        event="end",
+        data={"status": "completed"},
+        terminal=True,
+    )
+    probe = _CancellationProbe(terminal if operation == "ensure_terminal" else ())
+    bridge = SimpleNamespace(
+        read_after=(probe.run if operation == "read_after" else AsyncMock(return_value=())),
+        ensure_settled_terminal=(probe.run if operation == "ensure_terminal" else AsyncMock(return_value=terminal)),
+    )
+    service = SimpleNamespace(
+        get=(
+            probe.run
+            if operation == "get"
+            else AsyncMock(
+                return_value=SimpleNamespace(
+                    status=("success" if operation == "ensure_terminal" else "running"),
+                    error=None,
+                )
+            )
+        ),
+    )
+    context = SimpleNamespace(request_id="cancel-db", resource_scope=object())
+    request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+    stream = private_work_router._durable_private_sse_consumer(
+        bridge=bridge,
+        service=service,
+        context=context,
+        thread_id=thread_id,
+        run_id=run_id,
+        request=request,
+        cursor=0,
+        initial_frames=(),
+        cancel_on_disconnect=False,
+    )
+    pending = asyncio.create_task(anext(stream))
+    await probe.entered.wait()
 
-    async def blocked_read_after(*_args, **_kwargs):
-        entered.set()
-        await hold.wait()
-        return ()
+    await _assert_cancellation_waits_for_probe(pending, probe)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["get", "read_after"])
+async def test_reconnect_waits_for_initial_database_owner_before_propagating_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    thread_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    probe = _CancellationProbe(SimpleNamespace(status="running", error=None) if operation == "get" else ())
+    bridge = SimpleNamespace(read_after=(probe.run if operation == "read_after" else AsyncMock(return_value=())))
+    service = SimpleNamespace(get=(probe.run if operation == "get" else AsyncMock(return_value=SimpleNamespace(status="running", error=None))))
+    context = SimpleNamespace(
+        request_id="reconnect-cancel-db",
+        project_id=uuid.uuid4(),
+        resource_scope=object(),
+    )
+    request = SimpleNamespace()
+    monkeypatch.setattr(
+        private_work_router,
+        "_private_stream_bridge",
+        lambda _request, _request_id: bridge,
+    )
+    monkeypatch.setattr(
+        private_work_router,
+        "_run_service",
+        lambda _request, _request_id: service,
+    )
+    monkeypatch.setattr(
+        private_work_router,
+        "_private_stream_cursor",
+        lambda _request, _request_id: 0,
+    )
+    pending = asyncio.create_task(
+        private_work_router.reconnect_private_run_stream(
+            thread_id,
+            run_id,
+            request,
+            context,
+        )
+    )
+    await probe.entered.wait()
+
+    await _assert_cancellation_waits_for_probe(pending, probe)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_durable_consumer_cancellation_returns_real_postgres_connection_to_pool(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    probe = _CancellationProbe(())
+
+    async def database_read(*_args: object, **_kwargs: object) -> object:
+        async with factory() as session:
+            await session.execute(sa.text("SELECT 1"))
+            return await probe.run()
 
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
-    bridge = SimpleNamespace(read_after=blocked_read_after)
+    bridge = SimpleNamespace(read_after=database_read)
+    service = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(status="running")),
+    )
+    context = SimpleNamespace(request_id="cancel-real-db", resource_scope=object())
+    request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
+    stream = private_work_router._durable_private_sse_consumer(
+        bridge=bridge,
+        service=service,
+        context=context,
+        thread_id=thread_id,
+        run_id=run_id,
+        request=request,
+        cursor=0,
+        initial_frames=(),
+        cancel_on_disconnect=False,
+    )
+    pending = asyncio.create_task(anext(stream))
+    try:
+        baseline = engine.pool.checkedout()
+        await probe.entered.wait()
+        assert engine.pool.checkedout() == baseline + 1
+
+        await _assert_cancellation_waits_for_probe(pending, probe)
+
+        assert engine.pool.checkedout() == baseline
+    finally:
+        probe.release.set()
+        if not pending.done():
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await pending
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_durable_consumer_persists_cancel_when_stream_task_is_cancelled() -> None:
+    probe = _CancellationProbe(())
+
+    thread_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    bridge = SimpleNamespace(read_after=probe.run)
     service = SimpleNamespace(
         get=AsyncMock(return_value=SimpleNamespace(status="running")),
         cancel=AsyncMock(),
@@ -510,11 +694,9 @@ async def test_durable_consumer_persists_cancel_when_stream_task_is_cancelled() 
         cancel_on_disconnect=True,
     )
     pending = asyncio.create_task(anext(stream))
-    await entered.wait()
+    await probe.entered.wait()
 
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
+    await _assert_cancellation_waits_for_probe(pending, probe)
 
     service.cancel.assert_awaited_once_with(
         context,

@@ -43,7 +43,6 @@ import {
   useDeleteProjectMcp,
   useDeleteProjectSkill,
   useProjectAssetVersions,
-  useProjectDefaultAgent,
   useProjectMcpEditableConfiguration,
   usePublishProjectAssetVersion,
   useRestoreProjectAgentVersion,
@@ -348,21 +347,6 @@ export function createProjectAgentDeleteSnapshot(
     expectedAssetVersion: item.version,
     startedAt,
   });
-}
-
-export function projectAgentDeleteBlockedReason(
-  agentId: string,
-  defaultAgentId: string | null | undefined,
-  loading: boolean,
-  failed: boolean,
-): string | null {
-  if (loading) return "正在确认项目默认 Agent，请稍候。";
-  if (failed || defaultAgentId === undefined) {
-    return "无法确认项目默认 Agent，请刷新后重试。";
-  }
-  return defaultAgentId === agentId
-    ? "当前默认 Agent 无法删除，请先将 Main 或其他 Agent 设为默认。"
-    : null;
 }
 
 export type ProjectMcpDeleteSnapshot = Readonly<{
@@ -737,11 +721,6 @@ export function ProjectAssetDetailSheet({
     accountId,
     projectId,
   );
-  const projectDefaultAgent = useProjectDefaultAgent(
-    accountId,
-    projectId,
-    open && kind === "agents",
-  );
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [versionDirty, setVersionDirty] = useState(false);
   const [versionEditing, setVersionEditing] = useState(false);
@@ -931,15 +910,6 @@ export function ProjectAssetDetailSheet({
     showSkillDetailActions ||
     showAgentDelete;
   const showVersionPicker = showsVersionHistory && versions.length > 1;
-  const agentDeleteBlockedReason =
-    kind === "agents" && canDeleteAsset
-      ? projectAgentDeleteBlockedReason(
-          item.id,
-          projectDefaultAgent.data?.agent_asset_id,
-          projectDefaultAgent.isLoading,
-          Boolean(projectDefaultAgent.error),
-        )
-      : null;
   const versionActions = useMemo(() => {
     if (
       item.scope !== "project" ||
@@ -1299,16 +1269,8 @@ export function ProjectAssetDetailSheet({
                     <Button
                       type="button"
                       variant="destructive"
-                      disabled={
-                        actionPending || agentDeleteBlockedReason !== null
-                      }
-                      aria-describedby={
-                        agentDeleteBlockedReason
-                          ? "project-agent-delete-blocked-reason"
-                          : undefined
-                      }
+                      disabled={actionPending}
                       onClick={() => {
-                        if (agentDeleteBlockedReason) return;
                         deleteAgent.reset();
                         setAgentDeleteSnapshot(
                           createProjectAgentDeleteSnapshot(item, Date.now()),
@@ -1319,18 +1281,6 @@ export function ProjectAssetDetailSheet({
                     </Button>
                   ) : null}
                 </div>
-              ) : null}
-
-              {kind === "agents" &&
-              canDeleteAsset &&
-              agentDeleteBlockedReason ? (
-                <p
-                  id="project-agent-delete-blocked-reason"
-                  role="status"
-                  className="text-muted-foreground text-sm"
-                >
-                  {agentDeleteBlockedReason}
-                </p>
               ) : null}
 
               {renderAssetEditor ? (

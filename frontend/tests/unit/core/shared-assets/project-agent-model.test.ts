@@ -1,6 +1,9 @@
 import { expect, test } from "@rstest/core";
 
-import { resolveThreadAgentModelRef } from "@/core/shared-assets/project-skill-catalog";
+import {
+  isThreadProjectAgentArchived,
+  resolveThreadAgentModelRef,
+} from "@/core/shared-assets/project-skill-catalog";
 import type {
   ProjectAssetList,
   VersionHistoryResponse,
@@ -155,4 +158,48 @@ test("fails closed when an existing Thread points at a suspended project Agent",
       history,
     ),
   ).toBeNull();
+});
+
+test("recognizes a project Agent removed from a settled catalog as archived", () => {
+  const catalog = {
+    project_items: [],
+    system_items: [],
+  } as unknown as ProjectAssetList;
+  const metadata = {
+    agent_asset_id: AGENT_ID,
+    agent_scope: "project",
+  };
+
+  expect(isThreadProjectAgentArchived(catalog, metadata, true)).toBe(true);
+  expect(isThreadProjectAgentArchived(catalog, metadata, false)).toBe(false);
+  expect(isThreadProjectAgentArchived(undefined, metadata, true)).toBe(false);
+});
+
+test("does not mislabel system or still-cataloged project Agents as archived", () => {
+  const catalog = {
+    project_items: [
+      {
+        id: AGENT_ID,
+        scope: "project",
+        status: "suspended",
+        current_published_version_id: null,
+      },
+    ],
+    system_items: [],
+  } as unknown as ProjectAssetList;
+
+  expect(
+    isThreadProjectAgentArchived(
+      catalog,
+      { agent_asset_id: AGENT_ID, agent_scope: "project" },
+      true,
+    ),
+  ).toBe(false);
+  expect(
+    isThreadProjectAgentArchived(
+      { project_items: [], system_items: [] } as unknown as ProjectAssetList,
+      { agent_asset_id: AGENT_ID, agent_scope: "system" },
+      true,
+    ),
+  ).toBe(false);
 });

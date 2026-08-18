@@ -118,6 +118,23 @@ function threadAgent(
   return items.find((item) => item.id === id) ?? null;
 }
 
+export function isThreadProjectAgentArchived(
+  catalog: ProjectAssetList | undefined,
+  metadata: ThreadAgentMetadata | null | undefined,
+  catalogSettled: boolean,
+): boolean {
+  const id = metadata?.agent_asset_id;
+  if (
+    !catalogSettled ||
+    !catalog ||
+    metadata?.agent_scope !== "project" ||
+    typeof id !== "string"
+  ) {
+    return false;
+  }
+  return !catalog.project_items.some((item) => item.id === id);
+}
+
 function selectedAgentVersionId(agent: ProjectAssetItem | null): string {
   if (!agent) return "";
   if (agent.scope === "project") {
@@ -166,6 +183,11 @@ export function useThreadAgentModelRef(
     enabled,
   );
   const catalog = agentQuery.data as ProjectAssetList | undefined;
+  const catalogSettled =
+    catalog !== undefined &&
+    !agentQuery.isLoading &&
+    !agentQuery.isFetching &&
+    agentQuery.error == null;
   const agent = useMemo(
     () => threadAgent(catalog, metadata),
     [catalog, metadata],
@@ -173,6 +195,11 @@ export function useThreadAgentModelRef(
   const isMain =
     agent?.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
   const agentSuspended = isSuspendedProjectAgent(agent);
+  const agentArchived = isThreadProjectAgentArchived(
+    catalog,
+    metadata,
+    catalogSettled,
+  );
   const versionId = isMain ? "" : selectedAgentVersionId(agent);
   const versionQuery = useProjectAssetVersions(
     scope.accountId,
@@ -203,6 +230,7 @@ export function useThreadAgentModelRef(
   }, [agent, agentQuery, agentSuspended, isMain, versionId, versionQuery]);
   return {
     modelRef,
+    agentArchived,
     agentSuspended,
     isLoading,
     error: agentQuery.error ?? versionQuery.error,

@@ -26,6 +26,7 @@ from deerflow.persistence.shared_assets import (
     AgentVersionSkillRefRow,
     AssetCatalogStateRow,
     McpServerRow,
+    ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
     ProjectSystemSkillBindingRow,
     SkillRow,
@@ -62,6 +63,38 @@ def _entry(name: str, version: int, payload: bytes) -> dict[str, object]:
         "version": version,
         "payload_path": f"content/{name}-v{version}.skill.json",
         "payload_format": "skill_archive_v1",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def _agent_payload(
+    description: str,
+    *,
+    skill_source_key: str,
+    tool_groups: tuple[str, ...] = (),
+) -> bytes:
+    return json.dumps(
+        {
+            "description": description,
+            "soul": "Build the requested governed asset.",
+            "model_ref": "default",
+            "tool_groups": list(tool_groups),
+            "skill_source_keys": [skill_source_key],
+            "mcp_source_keys": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _agent_entry(name: str, version: int, payload: bytes) -> dict[str, object]:
+    return {
+        "source_key": f"builtin:agent:{name}",
+        "kind": "agent",
+        "slug": name,
+        "display_name": name,
+        "version": version,
+        "payload_path": f"content/{name}-v{version}.agent.json",
         "sha256": hashlib.sha256(payload).hexdigest(),
     }
 
@@ -219,7 +252,7 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
         assert first.counts["skill"] > 0
         assert first.counts["agent"] > 0
         assert first.counts["mcp"] == 0
-        assert first.applied_releases == sum(first.counts.values())
+        assert first.applied_releases == sum(first.counts.values()) + 1
         assert second.counts == first.counts
         assert second.digest == first.digest
         assert second.applied_releases == 0
@@ -241,13 +274,23 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
                     )
                 )
             ).scalar_one()
-            builder_version = await session.get(
-                AgentVersionRow,
-                builder.current_published_version_id,
-            )
-            assert builder_version is not None
-            assert builder_version.workflow_status == "published"
-            assert builder_version.tool_groups == []
+            builder_versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == builder.id).order_by(AgentVersionRow.version_number))).scalars().all())
+            assert [version.version_number for version in builder_versions] == [1, 2]
+            assert [version.workflow_status for version in builder_versions] == [
+                "published",
+                "published",
+            ]
+            assert builder.current_published_version_id == builder_versions[1].id
+            assert builder.version == 2
+            assert builder_versions[0].tool_groups == []
+            assert builder_versions[1].tool_groups == [
+                "web",
+                "file:read",
+                "file:write",
+                "bash",
+                "task",
+            ]
+            assert builder_versions[1].supersedes_version_id == builder_versions[0].id
 
             creator = (
                 await session.execute(
@@ -267,20 +310,22 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
             skill_refs = (
                 (
                     await session.execute(
-                        select(AgentVersionSkillRefRow).where(
-                            AgentVersionSkillRefRow.agent_version_id == builder_version.id,
+                        select(AgentVersionSkillRefRow)
+                        .where(
+                            AgentVersionSkillRefRow.agent_version_id.in_(tuple(version.id for version in builder_versions)),
                         )
+                        .order_by(AgentVersionSkillRefRow.agent_version_id)
                     )
                 )
                 .scalars()
                 .all()
             )
-            assert [(reference.skill_version_id, reference.sort_order) for reference in skill_refs] == [(creator_v1.id, 0)]
+            assert [(reference.skill_version_id, reference.sort_order) for reference in skill_refs] == [(creator_v1.id, 0), (creator_v1.id, 0)]
             mcp_refs = (
                 (
                     await session.execute(
                         select(AgentVersionMcpRefRow).where(
-                            AgentVersionMcpRefRow.agent_version_id == builder_version.id,
+                            AgentVersionMcpRefRow.agent_version_id.in_(tuple(version.id for version in builder_versions)),
                         )
                     )
                 )
@@ -659,6 +704,186 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
             project_id=project.project_id,
         )
         assert after_rerun == after_upgrade
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempotently(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    suffix = uuid.uuid4().hex[:8]
+    skill_name = f"agent-dependency-{suffix}"
+    agent_name = f"bootstrap-agent-{suffix}"
+    skill_payload = _skill_archive(
+        skill_name,
+        "Pinned Agent dependency.",
+        "release one\n",
+    )
+    skill_entry = _entry(skill_name, 1, skill_payload)
+    version_one_payload = _agent_payload(
+        "Original Agent release.",
+        skill_source_key=str(skill_entry["source_key"]),
+    )
+    version_two_payload = _agent_payload(
+        "Improved Agent release.",
+        skill_source_key=str(skill_entry["source_key"]),
+        tool_groups=("web", "file:read"),
+    )
+    agent_one = _agent_entry(agent_name, 1, version_one_payload)
+    agent_two = _agent_entry(agent_name, 2, version_two_payload)
+    version_one_root = tmp_path / "agent-catalog-v1"
+    version_two_root = tmp_path / "agent-catalog-v2"
+    _write_entries(
+        version_one_root,
+        schema_version=3,
+        entries=[skill_entry, agent_one],
+        payloads={
+            str(skill_entry["payload_path"]): skill_payload,
+            str(agent_one["payload_path"]): version_one_payload,
+        },
+    )
+    _write_entries(
+        version_two_root,
+        schema_version=3,
+        entries=[skill_entry, agent_one, agent_two],
+        payloads={
+            str(skill_entry["payload_path"]): skill_payload,
+            str(agent_one["payload_path"]): version_one_payload,
+            str(agent_two["payload_path"]): version_two_payload,
+        },
+    )
+    active_root = version_one_root
+    monkeypatch.setattr(catalog_module, "_package_root", lambda: active_root)
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    owner_id = uuid.uuid4()
+    source_key = str(agent_one["source_key"])
+    try:
+        first = await bootstrap_service.bootstrap_system_assets(factory)
+        assert first.applied_releases == 2
+
+        async with factory.begin() as session:
+            session.add(
+                UserRow(
+                    id=str(owner_id),
+                    email=f"{owner_id.hex}@example.test",
+                    password_hash=None,
+                    system_role="user",
+                    oauth_provider=None,
+                    oauth_id=None,
+                    needs_setup=False,
+                    token_version=0,
+                )
+            )
+        async with factory() as session:
+            project = await ProjectRepository(session).create_with_admin(
+                owner_id,
+                CreateProject(
+                    slug=f"agent-upgrade-{suffix}",
+                    display_name="Agent Bootstrap Evolution Project",
+                ),
+                "req-system-agent-bootstrap-v1",
+            )
+        async with factory.begin() as session:
+            asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
+            version_one = (
+                await session.execute(
+                    select(AgentVersionRow).where(
+                        AgentVersionRow.agent_id == asset.id,
+                        AgentVersionRow.version_number == 1,
+                    )
+                )
+            ).scalar_one()
+            session.add(
+                ProjectSystemAgentBindingRow(
+                    project_id=project.project_id,
+                    system_agent_id=asset.id,
+                    agent_version_id=version_one.id,
+                    enabled=True,
+                    created_by_user_id=str(owner_id),
+                    updated_by_user_id=str(owner_id),
+                )
+            )
+
+        version_one_snapshot = (
+            version_one.id,
+            version_one.description,
+            tuple(version_one.tool_groups),
+            version_one.payload_checksum,
+            version_one.created_at,
+        )
+        active_root = version_two_root
+        upgraded = await upgrade_system_assets(migrated_postgres_database_url)
+        assert upgraded.applied_releases == 1
+
+        async with factory() as session:
+            asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
+            versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number))).scalars().all())
+            binding = await session.get(
+                ProjectSystemAgentBindingRow,
+                (project.project_id, asset.id),
+            )
+            assert binding is not None
+            assert asset.version == 2
+            assert asset.current_published_version_id == versions[1].id
+            assert [version.version_number for version in versions] == [1, 2]
+            assert versions[1].supersedes_version_id == versions[0].id
+            assert (
+                versions[0].id,
+                versions[0].description,
+                tuple(versions[0].tool_groups),
+                versions[0].payload_checksum,
+                versions[0].created_at,
+            ) == version_one_snapshot
+            assert binding.agent_version_id == versions[0].id
+            assert binding.enabled is True
+            assert binding.version == 1
+            upgraded_snapshot = (
+                asset.current_published_version_id,
+                asset.version,
+                tuple(
+                    (
+                        version.id,
+                        version.version_number,
+                        version.supersedes_version_id,
+                        version.payload_checksum,
+                    )
+                    for version in versions
+                ),
+                binding.agent_version_id,
+                binding.version,
+            )
+
+        repeated = await upgrade_system_assets(migrated_postgres_database_url)
+        assert repeated.applied_releases == 0
+        async with factory() as session:
+            asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
+            versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number))).scalars().all())
+            binding = await session.get(
+                ProjectSystemAgentBindingRow,
+                (project.project_id, asset.id),
+            )
+            assert binding is not None
+            assert (
+                asset.current_published_version_id,
+                asset.version,
+                tuple(
+                    (
+                        version.id,
+                        version.version_number,
+                        version.supersedes_version_id,
+                        version.payload_checksum,
+                    )
+                    for version in versions
+                ),
+                binding.agent_version_id,
+                binding.version,
+            ) == upgraded_snapshot
     finally:
         await engine.dispose()
 

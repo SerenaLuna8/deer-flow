@@ -88,9 +88,15 @@ export function ProjectChatPage({ project }: { project: Project }) {
   const agentCatalog = agents.data as ProjectAssetList | undefined;
   const agentCatalogSettled =
     agentCatalog !== undefined || (!agents.isLoading && !agents.isFetching);
+  const handleStartNewAgentChat = useCallback(
+    (thread: AgentThread | null | undefined) => {
+      setCurrentAgent(resolveThreadAgentSelection(thread));
+      setAgentSelectorOpen(true);
+    },
+    [],
+  );
   const renderHeaderAccessory = useCallback(
     (thread: AgentThread | null | undefined) => {
-      const selection = resolveThreadAgentSelection(thread);
       return (
         <ThreadAgentIndicator
           identity={resolveThreadAgentIdentity(
@@ -99,17 +105,17 @@ export function ProjectChatPage({ project }: { project: Project }) {
             agentCatalogSettled,
           )}
           onStartNewChat={
-            canStartNewChat
-              ? () => {
-                  setCurrentAgent(selection);
-                  setAgentSelectorOpen(true);
-                }
-              : undefined
+            canStartNewChat ? () => handleStartNewAgentChat(thread) : undefined
           }
         />
       );
     },
-    [agentCatalog, agentCatalogSettled, canStartNewChat],
+    [
+      agentCatalog,
+      agentCatalogSettled,
+      canStartNewChat,
+      handleStartNewAgentChat,
+    ],
   );
   const scope = useMemo(
     () => ({
@@ -124,6 +130,9 @@ export function ProjectChatPage({ project }: { project: Project }) {
         <ScopedChatPage
           scope={scope}
           renderHeaderAccessory={renderHeaderAccessory}
+          onStartNewAgentChat={
+            canStartNewChat ? handleStartNewAgentChat : undefined
+          }
           missingThreadFallback={
             <ProjectChatNotFound
               chatsPath={`/projects/${encodeURIComponent(project.slug)}/chats`}

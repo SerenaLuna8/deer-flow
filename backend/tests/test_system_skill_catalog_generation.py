@@ -74,6 +74,38 @@ def _entry(name: str, version: int, archive: bytes) -> dict[str, object]:
     }
 
 
+def _agent_payload(
+    description: str,
+    *,
+    tool_groups: tuple[str, ...] = (),
+    skill_source_keys: tuple[str, ...] = (),
+) -> bytes:
+    return json.dumps(
+        {
+            "description": description,
+            "soul": "Build the requested governed asset.",
+            "model_ref": "default",
+            "tool_groups": list(tool_groups),
+            "skill_source_keys": list(skill_source_keys),
+            "mcp_source_keys": [],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode()
+
+
+def _agent_entry(name: str, version: int, payload: bytes) -> dict[str, object]:
+    return {
+        "source_key": f"builtin:agent:{name}",
+        "kind": "agent",
+        "slug": name,
+        "display_name": name,
+        "version": version,
+        "payload_path": f"content/{name}-v{version}.agent.json",
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
 def _retained_mcp_entry(
     name: str,
     payload: bytes,
@@ -370,6 +402,36 @@ def test_catalog_loader_authenticates_each_contiguous_skill_release(
     assert catalog_module.catalog_payload(catalog, catalog.entries[1]) == version_two
 
 
+def test_catalog_loader_authenticates_each_contiguous_agent_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "versioned-agent"
+    version_one = _agent_payload("Version one.")
+    version_two = _agent_payload(
+        "Version two.",
+        tool_groups=("web", "file:read"),
+    )
+    entries = [
+        _agent_entry(name, 1, version_one),
+        _agent_entry(name, 2, version_two),
+    ]
+    (tmp_path / "content").mkdir(parents=True)
+    for entry, content in zip(entries, (version_one, version_two), strict=True):
+        (tmp_path / str(entry["payload_path"])).write_bytes(content)
+    (tmp_path / "catalog.json").write_text(
+        json.dumps({"schema_version": 3, "entries": entries}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(catalog_module.resources, "files", lambda _package: tmp_path)
+
+    catalog = catalog_module.load_bootstrap_catalog()
+
+    assert [entry.version for entry in catalog.entries] == [1, 2]
+    assert catalog_module.catalog_payload(catalog, catalog.entries[0]) == version_one
+    assert catalog_module.catalog_payload(catalog, catalog.entries[1]) == version_two
+
+
 @pytest.mark.parametrize(
     "entries",
     [
@@ -394,7 +456,31 @@ def test_catalog_rejects_noncanonical_skill_release_history(
         catalog_module.BootstrapCatalog.model_validate({"schema_version": 2, "entries": entries})
 
 
-def test_agent_v1_dependency_names_remain_pinned_to_release_v1() -> None:
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [
+            _agent_entry("version-gap-agent", 1, b"one"),
+            _agent_entry("version-gap-agent", 3, b"three"),
+        ],
+        [
+            _agent_entry("metadata-drift-agent", 1, b"one"),
+            {
+                **_agent_entry("metadata-drift-agent", 2, b"two"),
+                "display_name": "Changed Name",
+            },
+        ],
+    ],
+    ids=["version-gap", "metadata-drift"],
+)
+def test_catalog_rejects_noncanonical_agent_release_history(
+    entries: list[dict[str, object]],
+) -> None:
+    with pytest.raises(ValueError):
+        catalog_module.BootstrapCatalog.model_validate({"schema_version": 3, "entries": entries})
+
+
+def test_agent_dependency_names_remain_pinned_to_release_v1() -> None:
     name = "versioned-dependency"
     version_one_archive = _skill_archive(name, "Version one.")
     version_two_archive = _skill_archive(name, "Version two.")
@@ -585,6 +671,142 @@ async def test_bootstrap_appends_a_skill_release_and_moves_the_pointer(
     assert new_version.workflow_status == "published"
     assert asset.current_published_version_id == new_version.id
     assert asset.version == 2
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_appends_an_agent_release_and_moves_only_the_pointer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "versioned-agent"
+    dependency_name = "agent-dependency"
+    dependency_archive = _skill_archive(dependency_name, "Agent dependency.")
+    dependency_entry = catalog_module.BootstrapEntry.model_validate(_entry(dependency_name, 1, dependency_archive))
+    version_one_payload = _agent_payload(
+        "Version one.",
+        skill_source_keys=(dependency_entry.source_key,),
+    )
+    version_two_payload = _agent_payload(
+        "Version two.",
+        tool_groups=("web", "file:read"),
+        skill_source_keys=(dependency_entry.source_key,),
+    )
+    entry_one = catalog_module.BootstrapEntry.model_validate(_agent_entry(name, 1, version_one_payload))
+    entry_two = catalog_module.BootstrapEntry.model_validate(_agent_entry(name, 2, version_two_payload))
+    catalog = catalog_module.BootstrapCatalog.model_validate(
+        {
+            "schema_version": 3,
+            "entries": [
+                dependency_entry.model_dump(),
+                entry_one.model_dump(),
+                entry_two.model_dump(),
+            ],
+        }
+    )
+    catalog._payloads = MappingProxyType(
+        {
+            (entry_one.source_key, 1): version_one_payload,
+            (entry_two.source_key, 2): version_two_payload,
+        }
+    )
+
+    asset_id = bootstrap_service._stable_id(entry_one.source_key)
+    version_one_id = bootstrap_service._version_id(entry_one)
+    dependency_version_id = bootstrap_service._version_id(dependency_entry)
+    asset = SimpleNamespace(
+        id=asset_id,
+        scope="system",
+        project_id=None,
+        slug=name,
+        display_name=name,
+        status="active",
+        version=1,
+        source_key=entry_one.source_key,
+        created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
+        current_published_version_id=version_one_id,
+    )
+    canonical_one = bootstrap_service.AgentPayload(
+        description="Version one.",
+        soul="Build the requested governed asset.",
+        model_ref="default",
+        tool_groups=(),
+        skill_version_ids=(dependency_version_id,),
+        mcp_version_ids=(),
+    )
+    version_one = SimpleNamespace(
+        id=version_one_id,
+        agent_id=asset_id,
+        version_number=1,
+        workflow_status="published",
+        description=canonical_one.description,
+        agents_instructions="",
+        soul=canonical_one.soul,
+        identity="",
+        user_context="",
+        model_ref=canonical_one.model_ref,
+        model_settings={},
+        tool_groups=[],
+        supersedes_version_id=None,
+        payload_checksum=bootstrap_service._agent_checksum(canonical_one),
+        payload_schema_version=1,
+        submitted_at=None,
+        reviewed_at=None,
+        reviewed_by_user_id=None,
+        review_note=None,
+        created_by_user_id=str(bootstrap_service.BUILTIN_ASSET_USER_ID),
+    )
+    persisted_ref = SimpleNamespace(
+        agent_version_id=version_one_id,
+        skill_version_id=dependency_version_id,
+        sort_order=0,
+    )
+    created: list[object] = []
+
+    class Session:
+        def add(self, value: object) -> None:
+            created.append(value)
+
+        def add_all(self, values) -> None:
+            created.extend(values)
+
+        async def flush(self) -> None:
+            return None
+
+        async def get(self, _model, version_id):
+            return version_one if version_id == version_one_id else None
+
+    session = Session()
+    query_results = [
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [persisted_ref])),
+        SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: [])),
+        SimpleNamespace(
+            all=lambda: [
+                (version_one_id, 1),
+                (bootstrap_service._version_id(entry_two), 2),
+            ]
+        ),
+    ]
+    session.execute = AsyncMock(side_effect=query_results)
+    monkeypatch.setattr(
+        bootstrap_service,
+        "_existing_asset",
+        AsyncMock(return_value=asset),
+    )
+
+    created_one = await bootstrap_service._seed_agent(session, catalog, entry_one)
+    created_two = await bootstrap_service._seed_agent(session, catalog, entry_two)
+
+    assert created_one is False
+    assert created_two is True
+    new_version = next(value for value in created if isinstance(value, bootstrap_service.AgentVersionRow))
+    assert new_version.id == bootstrap_service._version_id(entry_two)
+    assert new_version.supersedes_version_id == version_one_id
+    assert new_version.workflow_status == "published"
+    assert new_version.tool_groups == ["web", "file:read"]
+    new_refs = [value for value in created if isinstance(value, bootstrap_service.AgentVersionSkillRefRow)]
+    assert [reference.skill_version_id for reference in new_refs] == [dependency_version_id]
+    assert asset.current_published_version_id == new_version.id
+    assert asset.version == 2
+    assert version_one.workflow_status == "published"
 
 
 @pytest.mark.asyncio

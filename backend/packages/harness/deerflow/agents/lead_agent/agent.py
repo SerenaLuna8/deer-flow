@@ -22,12 +22,14 @@ from __future__ import annotations
 
 import logging
 import secrets
+from dataclasses import dataclass
 from pathlib import Path
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.language_models import BaseChatModel
 from langchain_core.runnables import RunnableConfig
+from langchain_core.tools import BaseTool
 
 from deerflow.agents.lead_agent.prompt import apply_prompt_template
 from deerflow.agents.middlewares.assembly import (
@@ -67,6 +69,41 @@ logger = logging.getLogger(__name__)
 
 _NON_INTERACTIVE_DISABLED_TOOL_NAMES = frozenset({"ask_clarification"})
 _PRIVATE_RUNTIME_DEFAULT_MODEL_REF = "default"
+
+
+@dataclass(frozen=True, slots=True)
+class TrustedLeadAgentExtension:
+    """Worker-owned additions to one canonical private lead Agent graph.
+
+    This object is accepted only as an explicit Python argument to the graph
+    factory.  It is deliberately never recovered from RunnableConfig, request
+    metadata, checkpoints, or model output.
+    """
+
+    extra_tools: tuple[BaseTool, ...] = ()
+    excluded_tool_names: frozenset[str] = frozenset()
+    custom_middlewares: tuple[AgentMiddleware, ...] = ()
+    output_limit_recovery_override: AgentMiddleware | None = None
+    system_prompt_override: str | None = None
+
+    def __post_init__(self) -> None:
+        if type(self.extra_tools) is not tuple or any(not isinstance(tool, BaseTool) for tool in self.extra_tools):
+            raise TypeError("Trusted lead Agent extra tools must be a tuple of BaseTool instances")
+        tool_names = tuple(tool.name for tool in self.extra_tools)
+        if any(not isinstance(name, str) or not name for name in tool_names) or len(tool_names) != len(set(tool_names)):
+            raise ValueError("Trusted lead Agent extra tool names must be non-empty and unique")
+        if type(self.excluded_tool_names) is not frozenset or any(not isinstance(name, str) or not name for name in self.excluded_tool_names):
+            raise TypeError("Trusted lead Agent excluded tool names must be a frozenset of non-empty strings")
+        if set(tool_names) & self.excluded_tool_names:
+            raise ValueError("Trusted lead Agent tools cannot be both added and excluded")
+        if type(self.custom_middlewares) is not tuple or any(not isinstance(middleware, AgentMiddleware) for middleware in self.custom_middlewares):
+            raise TypeError("Trusted lead Agent custom middlewares must be a tuple of AgentMiddleware instances")
+        if self.output_limit_recovery_override is not None and not isinstance(self.output_limit_recovery_override, AgentMiddleware):
+            raise TypeError("Trusted lead Agent output-limit override must be AgentMiddleware")
+        if self.system_prompt_override is not None and (type(self.system_prompt_override) is not str or not self.system_prompt_override.strip()):
+            raise TypeError(
+                "Trusted lead Agent system-prompt override must be a non-empty string",
+            )
 
 
 def _get_runtime_config(config: RunnableConfig) -> dict:
@@ -293,6 +330,7 @@ def build_middlewares(
     resolved_subagent_enabled: bool | None = None,
     resolved_max_concurrent_subagents: int | None = None,
     output_limit_recovery_model: BaseChatModel | None = None,
+    output_limit_recovery_override: AgentMiddleware | None = None,
 ):
     """Build the lead-agent middleware chain based on runtime configuration.
 
@@ -456,8 +494,8 @@ def build_middlewares(
 
         token_budget_middleware = TokenBudgetMiddleware.from_config(token_budget_config)
 
-    output_limit_recovery_middleware = None
-    if output_limit_recovery_model is not None:
+    output_limit_recovery_middleware = output_limit_recovery_override
+    if output_limit_recovery_middleware is None and output_limit_recovery_model is not None:
         from deerflow.agents.middlewares.output_limit_recovery_middleware import (
             OutputLimitRecoveryMiddleware,
         )
@@ -558,11 +596,20 @@ def make_lead_agent(config: RunnableConfig):
     )
 
 
-def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_runtime=None):
+def _make_lead_agent(
+    config: RunnableConfig,
+    *,
+    app_config: AppConfig,
+    private_runtime=None,
+    trusted_extension: TrustedLeadAgentExtension | None = None,
+):
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 
+    if trusted_extension is not None and type(trusted_extension) is not TrustedLeadAgentExtension:
+        raise TypeError("trusted_extension must be a TrustedLeadAgentExtension")
+    extension = trusted_extension or TrustedLeadAgentExtension()
     resolved_app_config = app_config
     frozen_mode = frozen_checkpoint_channel_mode()
     if frozen_mode is None:
@@ -735,7 +782,12 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         tool_kwargs["include_acp"] = False
     raw_tools = get_available_tools(**tool_kwargs)
     private_mcp_tools = list(getattr(private_runtime, "mcp_tools", ())) if private_runtime is not None else []
-    candidate_tools = raw_tools + private_mcp_tools
+    candidate_tools = [tool for tool in (*raw_tools, *private_mcp_tools) if tool.name not in extension.excluded_tool_names]
+    existing_names = {tool.name for tool in candidate_tools}
+    duplicate_extension_names = existing_names & {tool.name for tool in extension.extra_tools}
+    if duplicate_extension_names:
+        raise ValueError("Trusted lead Agent extra tools conflict with canonical tools: " + ",".join(sorted(duplicate_extension_names)))
+    candidate_tools.extend(extension.extra_tools)
     if any(tool.name == "inspect_image" for tool in candidate_tools):
         raise ValueError(
             "Reserved platform tool name 'inspect_image' conflicts with a configured runtime tool",
@@ -779,6 +831,7 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
         final_tools.append(recall_memory_tool)
     if resolve_memory_authority(cfg, method="propose_entry") is not None:
         final_tools.append(remember_tool)
+    final_tools = [tool for tool in final_tools if tool.name not in extension.excluded_tool_names]
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
     runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(private_runtime, "agent_catalog", None)) if private_runtime is not None else None
     agent_model_overrides: dict[str, object] = {}
@@ -839,26 +892,32 @@ def _make_lead_agent(config: RunnableConfig, *, app_config: AppConfig, private_r
                 resolved_subagent_enabled=subagent_enabled,
                 resolved_max_concurrent_subagents=max_concurrent_subagents,
                 output_limit_recovery_model=output_limit_recovery_model,
+                output_limit_recovery_override=(extension.output_limit_recovery_override),
+                custom_middlewares=list(extension.custom_middlewares),
             ),
             mode,
             snapshot_frequency,
         ),
-        system_prompt=apply_prompt_template(
-            subagent_enabled=subagent_enabled,
-            max_concurrent_subagents=max_concurrent_subagents,
-            agent_name=agent_name,
-            available_skills=available_skills,
-            app_config=resolved_app_config,
-            deferred_names=setup.deferred_names,
-            mcp_routing_hints_section=mcp_routing_hints_section,
-            user_id=resolved_user_id,
-            skill_names=skill_setup.skill_names or None,
-            exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None and private_prompt_bundle is None else None,
-            exact_agent_prompt=private_prompt_bundle,
-            exact_skills=runtime_skills,
-            exact_skills_container_path=container_base_path if runtime_skills is not None else None,
-            runtime_agent_catalog=runtime_agent_catalog,
-            inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
+        system_prompt=(
+            extension.system_prompt_override
+            if extension.system_prompt_override is not None
+            else apply_prompt_template(
+                subagent_enabled=subagent_enabled,
+                max_concurrent_subagents=max_concurrent_subagents,
+                agent_name=agent_name,
+                available_skills=available_skills,
+                app_config=resolved_app_config,
+                deferred_names=setup.deferred_names,
+                mcp_routing_hints_section=mcp_routing_hints_section,
+                user_id=resolved_user_id,
+                skill_names=skill_setup.skill_names or None,
+                exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None and private_prompt_bundle is None else None,
+                exact_agent_prompt=private_prompt_bundle,
+                exact_skills=runtime_skills,
+                exact_skills_container_path=container_base_path if runtime_skills is not None else None,
+                runtime_agent_catalog=runtime_agent_catalog,
+                inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
+            )
         ),
         state_schema=get_thread_state_schema(
             mode,
@@ -872,6 +931,7 @@ def _make_lead_agent_with_private_runtime(
     config: RunnableConfig,
     private_runtime,
     app_config: AppConfig | None = None,
+    trusted_extension: TrustedLeadAgentExtension | None = None,
 ):
     runtime_config = _get_runtime_config(config)
     runtime_app_config = runtime_config.get("app_config")
@@ -879,6 +939,7 @@ def _make_lead_agent_with_private_runtime(
         config,
         app_config=app_config or runtime_app_config or get_app_config(),
         private_runtime=private_runtime,
+        trusted_extension=trusted_extension,
     )
 
 

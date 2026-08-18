@@ -56,6 +56,7 @@ import {
   useCancelSkillBuilderSession,
   useCommitSkillBuilderSession,
   useSkillBuilderSession,
+  useSkillBuilderRunStream,
   useSubmitSkillBuilderTurn,
   useValidateSkillBuilderSession,
   type SkillBuilderAttachment,
@@ -711,6 +712,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const session = sessionQuery.data;
   const trackedRunId =
     trackedRun?.sessionId === sessionId ? trackedRun.runId : null;
+  const runProjection = useSkillBuilderRunStream({
+    threadId: session?.thread_id ?? null,
+    runId: session?.activeRun?.runId ?? trackedRunId,
+    initialStatus: session?.activeRun?.status ?? "running",
+    enabled: Boolean(session?.activeRun),
+  });
   const runPresentation =
     trackedRun?.sessionId === sessionId && trackedRun.terminalStatus
       ? {
@@ -1402,6 +1409,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 models={executionModels}
                 executionModel={executionModel}
                 thinkingMode={thinkingMode}
+                runProjection={runProjection}
                 runPresentation={runPresentation}
                 onComposerTextChange={(value) => {
                   setComposerText(value);

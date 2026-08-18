@@ -59,6 +59,7 @@ def _provider(
     *,
     bootstrap_error: Exception | None = None,
     destroy_errors: list[Exception] | None = None,
+    mount_requests: list[object] | None = None,
 ) -> tuple[
     AioSandboxProvider,
     list[SandboxInfo],
@@ -68,6 +69,7 @@ def _provider(
     created: list[SandboxInfo] = []
     bootstrapped: list[SandboxInfo] = []
     destroyed: list[SandboxInfo] = []
+    recorded_mounts = mount_requests if mount_requests is not None else []
 
     def create(
         _thread_id: str,
@@ -76,7 +78,8 @@ def _provider(
         extra_mounts: object,
         user_id: str,
     ) -> SandboxInfo:
-        del extra_mounts, user_id
+        del user_id
+        recorded_mounts.append(extra_mounts)
         info = SandboxInfo(
             sandbox_id=sandbox_id,
             sandbox_url="http://192.168.64.5:8080",
@@ -196,6 +199,44 @@ def test_aio_private_acquire_initializes_then_preflights_all_roots(
 
     assert destroyed == [info]
     assert sandbox.close_calls == 1
+    _assert_no_private_state(provider)
+
+
+def test_aio_private_exact_skill_mount_is_read_only_and_strictly_destroyed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    sandbox = _FakePrivateSandbox()
+    mount_requests: list[object] = []
+    provider, created, _bootstrapped, destroyed = _provider(
+        monkeypatch,
+        sandbox,
+        mount_requests=mount_requests,
+    )
+    skill_root = tmp_path / "exact-skills"
+    skill_root.mkdir()
+
+    lease = provider.acquire_private(
+        "thread-1",
+        scope=_scope(),
+        user_id="owner-1",
+        run_id="run-1",
+        mounts=(
+            RunScopedReadOnlyMount(
+                run_id="run-1",
+                container_path="/mnt/skills",
+                host_path=str(skill_root),
+            ),
+        ),
+    )
+
+    assert mount_requests == [[(str(skill_root.resolve()), "/mnt/skills", True)]]
+    assert provider._warm_pool == {}
+
+    provider.release_private(lease)
+
+    assert destroyed == created
+    assert provider._warm_pool == {}
     _assert_no_private_state(provider)
 
 

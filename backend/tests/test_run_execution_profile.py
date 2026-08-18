@@ -593,6 +593,11 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "runtime_kind",
+    ["chat", "skill_builder"],
+    ids=["chat", "skill-builder"],
+)
+@pytest.mark.parametrize(
     ("provider_adapter", "provider_settings"),
     [
         (
@@ -609,6 +614,7 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
 )
 async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
     provider_adapter: str,
     provider_settings: dict[str, object],
 ) -> None:
@@ -669,7 +675,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
 
     class Checkpointer:
         def for_context(self, _context, *, thread_kind: str):
-            assert thread_kind == "chat"
+            assert thread_kind == runtime_kind
             return SimpleNamespace(
                 set_authorization_boundary=lambda _boundary: None,
             )
@@ -728,6 +734,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         interrupt_after=None,
         stream_mode=["values"],
         stream_subgraphs=False,
+        runtime_kind=runtime_kind,
     )
     claim = JobClaim(
         job_id=uuid.uuid4(),

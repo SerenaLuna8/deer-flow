@@ -407,10 +407,9 @@ async def test_published_agent_delete_requires_publisher_capability(
     )
     session = _Session()
     repository = SimpleNamespace(
-        ensure_not_current_project_default=AsyncMock(),
+        clear_current_project_default=AsyncMock(return_value=False),
         get_project_asset=AsyncMock(return_value=asset),
-        plan_project_asset_deletion=AsyncMock(return_value=()),
-        delete_project_asset=AsyncMock(),
+        archive_project_asset=AsyncMock(),
     )
     monkeypatch.setattr(
         agent_service_module,
@@ -425,10 +424,53 @@ async def test_published_agent_delete_requires_publisher_capability(
     if not allowed:
         with pytest.raises(AssetForbidden):
             await service.delete(actor, asset.id, expected_asset_version=4)
-        repository.plan_project_asset_deletion.assert_not_awaited()
-        repository.delete_project_asset.assert_not_awaited()
+        repository.archive_project_asset.assert_not_awaited()
         return
 
     await service.delete(actor, asset.id, expected_asset_version=4)
-    repository.plan_project_asset_deletion.assert_awaited_once()
-    repository.delete_project_asset.assert_awaited_once()
+    repository.clear_current_project_default.assert_awaited_once_with(
+        actor,
+        asset.id,
+    )
+    repository.archive_project_asset.assert_awaited_once_with(actor, asset)
+
+
+@pytest.mark.asyncio
+async def test_default_agent_archive_audits_pointer_clear_and_delete_together(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _context(ProjectRole.ADMIN)
+    asset = SimpleNamespace(
+        id=uuid.uuid4(),
+        scope="project",
+        project_id=actor.project_id,
+        version=3,
+        current_published_version_id=uuid.uuid4(),
+    )
+    session = _Session()
+    repository = SimpleNamespace(
+        clear_current_project_default=AsyncMock(return_value=True),
+        get_project_asset=AsyncMock(return_value=asset),
+        archive_project_asset=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        agent_service_module,
+        "AgentRepository",
+        lambda _session: repository,
+    )
+    audit = AsyncMock()
+
+    await AgentService(
+        lambda: session,
+        governance_sink=SimpleNamespace(append_project=audit),
+    ).delete(
+        actor,
+        asset.id,
+        expected_asset_version=3,
+    )
+
+    assert [call.kwargs["action"] for call in audit.await_args_list] == [
+        "agent.default.clear",
+        "agent.delete",
+    ]
+    assert all(call.args == (session,) for call in audit.await_args_list)

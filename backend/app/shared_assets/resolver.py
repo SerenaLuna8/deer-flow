@@ -29,6 +29,7 @@ from app.shared_assets.crypto import (
     decrypt_credential_payload,
 )
 from app.shared_assets.errors import (
+    AgentArchived,
     AssetForbidden,
     AssetNotFound,
     AssetResolutionUnavailable,
@@ -604,7 +605,7 @@ class ProjectAssetResolver:
                     asset_type.id == selection.asset_id,
                     asset_type.scope == AssetScope.PROJECT.value,
                     asset_type.project_id == context.project_id,
-                    asset_type.status == "active",
+                    (asset_type.status.in_(("active", "archived")) if selection.kind is AssetKind.AGENT else asset_type.status == "active"),
                     version_type.id == version_id,
                     version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
                 )
@@ -932,6 +933,8 @@ class ProjectAssetResolver:
         )
         asset = (await session.execute(project_statement)).scalar_one_or_none()
         if asset is not None:
+            if selection.kind is AssetKind.AGENT and asset.status == "archived":
+                raise AgentArchived(context.request_id)
             version_id = asset.current_published_version_id
             if version_id is None or (selection.version_id is not None and selection.version_id != version_id):
                 raise AssetResolutionUnavailable(context.request_id)

@@ -6,6 +6,8 @@ import {
   deleteProjectThread,
   disposeProjectAPIClient,
   getProjectAPIClient,
+  isProjectAgentArchivedError,
+  PRIVATE_WORK_AGENT_ARCHIVED,
   projectPrivateWorkBaseURL,
 } from "@/core/private-work/api-client";
 import type { ProjectResponseError } from "@/core/private-work/api-client";
@@ -42,6 +44,33 @@ afterEach(() => {
 });
 
 describe("project private-work API client", () => {
+  test("recognizes only the stable archived-Agent error code", () => {
+    expect(
+      isProjectAgentArchivedError({
+        status: 409,
+        code: PRIVATE_WORK_AGENT_ARCHIVED,
+      }),
+    ).toBe(true);
+    expect(
+      isProjectAgentArchivedError({
+        error: { error_code: PRIVATE_WORK_AGENT_ARCHIVED },
+      }),
+    ).toBe(true);
+    expect(
+      isProjectAgentArchivedError({
+        status: 409,
+        text: JSON.stringify({
+          detail: { code: PRIVATE_WORK_AGENT_ARCHIVED },
+        }),
+      }),
+    ).toBe(true);
+    expect(
+      isProjectAgentArchivedError(
+        new Error("该 Agent 已删除，请切换其他 Agent。"),
+      ),
+    ).toBe(false);
+  });
+
   test("does not retry browser-aborted SDK requests", async () => {
     const browserAbort = Object.assign(
       new Error("This operation was aborted"),

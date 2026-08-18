@@ -29,7 +29,13 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz` 或 `.tgz`
   包；常见 macOS 归档元数据会被忽略。新建 Skill 保持 suspended，修订草稿需由具备
   资产发布权限的成员显式发布后才生效；超出上传、解压、单文件或成员数限制的包会以
-  明确的大小限制错误拒绝。
+  明确的大小限制错误拒绝。项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
+  Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
+  名称，同一名称可用于创建具有新 ID 的 Agent。
+- AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
+  运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
+  装配，并遵循 Local/AIO Provider 各自的安全策略；候选 Skill 仍只能经受管草稿工具、
+  检查和显式提交进入不可变版本历史。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
@@ -113,7 +119,7 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `agent_design_resume_index`。
+  `agent_archived_slug_reuse`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本可直接通过 `make upgrade-db` 显式升级。

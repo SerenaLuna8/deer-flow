@@ -645,6 +645,86 @@ async def test_private_run_allows_first_empty_checkpoint():
 
 
 @pytest.mark.anyio
+async def test_worker_releases_private_authority_before_removing_pinned_skills():
+    events: list[str] = []
+    run_manager = RunManager()
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    record = await run_manager.register_persisted(
+        run_id="private-run-cleanup-order",
+        thread_id="private-thread-cleanup-order",
+        assistant_id="project-agent",
+        model_name=SAFE_MODEL_REF,
+        scope=scope,
+    )
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class Authority:
+        sandbox_id = "private-sandbox"
+
+        async def restore(self):
+            return SimpleNamespace(entries=())
+
+        async def finalize(self):
+            return SimpleNamespace(workspace_changes={})
+
+        async def mark_failed(self) -> None:
+            return None
+
+        async def release(self) -> None:
+            events.append("authority-release")
+
+    class PrivateRuntime:
+        skills = ()
+        mcp_tools = ()
+        agent_catalog = None
+
+        async def aclose(self) -> None:
+            events.append("runtime-close")
+
+    class DummyAgent:
+        async def astream(
+            self,
+            graph_input,
+            config=None,
+            stream_mode=None,
+            subgraphs=False,
+        ):
+            del graph_input, config, stream_mode, subgraphs
+            yield {"messages": []}
+
+    def private_factory(*, config, private_runtime):
+        del config
+        assert isinstance(private_runtime, PrivateRuntime)
+        return DummyAgent()
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=SimpleNamespace(aget_tuple=AsyncMock(return_value=None)),
+            private_scope=scope,
+            file_authority=Authority(),
+            private_agent_runtime=PrivateRuntime(),
+        ),
+        agent_factory=private_factory,
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert events == ["authority-release", "runtime-close"]
+
+
+@pytest.mark.anyio
 async def test_private_run_forces_persisted_thread_and_root_checkpoint_namespace():
     run_manager = RunManager()
     scope = PrivateResourceScope(

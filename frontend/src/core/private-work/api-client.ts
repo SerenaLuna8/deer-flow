@@ -306,7 +306,9 @@ type PrivateThread = z.infer<typeof privateThreadSchema>;
 
 export const PROJECT_RESPONSE_ERROR_CODES = [
   "DEFAULT_AGENT_UNAVAILABLE",
+  "PRIVATE_WORK_AGENT_ARCHIVED",
 ] as const;
+export const PRIVATE_WORK_AGENT_ARCHIVED = "PRIVATE_WORK_AGENT_ARCHIVED";
 export type ProjectResponseErrorCode =
   (typeof PROJECT_RESPONSE_ERROR_CODES)[number];
 const projectResponseErrorBodySchema = z
@@ -342,6 +344,30 @@ export function isProjectResponseErrorCode<
   code: Code,
 ): error is Error & { readonly code: Code; readonly status: number } {
   return error instanceof ProjectResponseError && error.code === code;
+}
+
+function projectResponseErrorCode(error: unknown): string | null {
+  if (typeof error === "string") {
+    try {
+      return projectResponseErrorCode(JSON.parse(error));
+    } catch {
+      return null;
+    }
+  }
+  if (typeof error !== "object" || error === null) return null;
+  for (const key of ["code", "error_code"] as const) {
+    const value = Reflect.get(error, key);
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  for (const key of ["detail", "error", "cause", "text"] as const) {
+    const nested = projectResponseErrorCode(Reflect.get(error, key));
+    if (nested) return nested;
+  }
+  return null;
+}
+
+export function isProjectAgentArchivedError(error: unknown): boolean {
+  return projectResponseErrorCode(error) === PRIVATE_WORK_AGENT_ARCHIVED;
 }
 
 type CreateProjectThreadBaseInput = {

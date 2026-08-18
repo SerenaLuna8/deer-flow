@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { type PromptInputMessage } from "@/components/ai-elements/prompt-input";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import { AgentArchivedAlert } from "@/components/workspace/agent-archived-alert";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
@@ -58,6 +59,7 @@ import {
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
 import { useNotification } from "@/core/notification/hooks";
+import { isProjectAgentArchivedError } from "@/core/private-work/api-client";
 import { commitProjectMemoryCacheChange } from "@/core/private-work/memory-freshness";
 import {
   runPrivateWorkAbortable,
@@ -141,12 +143,14 @@ export function ScopedChatPage({
   scope,
   missingThreadFallback = null,
   renderHeaderAccessory,
+  onStartNewAgentChat,
 }: {
   scope: ScopedChatRouteScope;
   missingThreadFallback?: React.ReactNode;
   renderHeaderAccessory?: (
     thread: AgentThread | null | undefined,
   ) => React.ReactNode;
+  onStartNewAgentChat?: (thread: AgentThread | null | undefined) => void;
 }) {
   const { t } = useI18n();
   const router = useRouter();
@@ -192,9 +196,11 @@ export function ScopedChatPage({
   });
   const agentModelBlocked =
     !threadReady || agentExecutionAvailability !== "ready";
+  const agentArchived = threadReady && agentModel.agentArchived;
   const agentSuspended = threadReady && agentModel.agentSuspended;
   const agentModelUnavailable =
     threadReady &&
+    !agentArchived &&
     !agentSuspended &&
     agentExecutionAvailability === "unavailable";
   const handleAgentModelRetry = useCallback(() => {
@@ -426,9 +432,11 @@ export function ScopedChatPage({
           currentView.approvalId === attempt.approvalId
         ) {
           setExecutionDecisionError(
-            error instanceof Error
-              ? error.message
-              : t.executionApproval.decisionFailed,
+            isProjectAgentArchivedError(error)
+              ? t.conversation.agentArchivedDescription
+              : error instanceof Error
+                ? error.message
+                : t.executionApproval.decisionFailed,
           );
         }
         void Promise.all([
@@ -456,6 +464,7 @@ export function ScopedChatPage({
       queryClient,
       scope.canApproveHostExecution,
       scope.canRun,
+      t.conversation.agentArchivedDescription,
       t.executionApproval.decisionFailed,
       threadId,
     ],
@@ -890,6 +899,15 @@ export function ScopedChatPage({
                       onRestoreInput={
                         recoverableFailedInput
                           ? handleRestoreFailedInput
+                          : undefined
+                      }
+                    />
+                  )}
+                  {agentArchived && (
+                    <AgentArchivedAlert
+                      onStartNewChat={
+                        onStartNewAgentChat
+                          ? () => onStartNewAgentChat(threadMetadata.data)
                           : undefined
                       }
                     />

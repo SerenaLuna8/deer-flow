@@ -44,6 +44,13 @@ class RunFileAuthority(Protocol):
 
     def current_uploads(self) -> tuple[AuthorityManifestEntry, ...]: ...
 
+    def authorizes_run_read_only_mount_path(
+        self,
+        *,
+        run_id: str,
+        path: str,
+    ) -> bool: ...
+
     async def write_output(
         self,
         relative_path: str,

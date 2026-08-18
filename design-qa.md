@@ -128,3 +128,51 @@ document remained `390px` wide with no horizontal overflow.
   keeps Agent Builder and main chat responsive behavior consistent.
 
 final result: passed
+
+---
+
+# Workspace project-list redesign design QA
+
+Date: 2026-08-18
+
+## Visual truth and intended comparison
+
+- Source visual truth: `/Users/jiangfeng/.codex/generated_images/01a012c8-c7a6-7690-a351-f6147cd4fdea/exec-99e8ab8b-dc69-4604-9a68-0d4053ebd3f2.png`
+- Source pixels: `1487 × 1058`.
+- Intended implementation viewport: `1487 × 1058` CSS px in the Codex in-app browser.
+- Intended state: authenticated Chinese workspace with one pinned project and no
+  recoverable projects.
+- Implementation screenshot: unavailable. The in-app browser currently redirects
+  `/workspace` to `/login?next=%2Fworkspace` because it has no authenticated local
+  ActWeave session.
+
+## Browser and interaction evidence
+
+- Local Gateway health returned HTTP `200`; the public workspace entry returned
+  HTTP `307` to the authenticated flow.
+- The in-app browser reached the local ActWeave sign-in page at the intended
+  viewport. No project UI or primary workspace interaction can be inspected until
+  the user completes local sign-in.
+- Console errors for the implementation state were not checked because the
+  implementation screen is not yet reachable.
+
+## Required fidelity surfaces
+
+- Fonts and typography: blocked pending the authenticated browser render.
+- Spacing and layout rhythm: blocked pending the authenticated browser render.
+- Colors and visual tokens: implementation uses existing ActWeave theme tokens,
+  but rendered comparison is blocked.
+- Image quality and asset fidelity: the target contains no raster image assets;
+  implementation reuses the existing Lucide icon dependency. Rendered icon
+  comparison is blocked.
+- Copy and content: focused component tests cover the new English copy and pinned,
+  edit, open, and recovery labels; live Chinese rendering is blocked.
+
+## Findings and comparison history
+
+- No full-view or focused comparison has been performed. A login-page capture is
+  not valid implementation evidence and was not compared against the source.
+- The source and implementation therefore have not yet been placed into the same
+  comparison input.
+
+final result: blocked

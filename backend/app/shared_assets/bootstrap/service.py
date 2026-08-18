@@ -666,7 +666,7 @@ def _resolved_dependency_ids(
 ) -> tuple[uuid.UUID, ...]:
     resolved: list[uuid.UUID] = []
     for source_key in source_keys:
-        # Agent v1 payloads predate version-qualified dependency references.
+        # Packaged Agent payloads use source-key-only dependency references.
         # Their immutable meaning is therefore the v1 release, not whichever
         # release happens to be latest in a newer deployment catalog.
         dependency = entries_by_release.get((source_key, 1))
@@ -681,6 +681,13 @@ def _resolved_dependency_ids(
 async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
     raw = _decode_json(_AgentPayload, catalog_payload(catalog, entry))
     entries = {(item.source_key, item.version): item for item in catalog.entries}
+    history = tuple(
+        sorted(
+            (item for item in catalog.entries if item.kind == "agent" and item.source_key == entry.source_key),
+            key=lambda item: item.version,
+        )
+    )
+    latest_version = history[-1].version
     payload = AgentPayload(
         description=raw.description,
         soul=raw.soul,
@@ -694,9 +701,74 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
     if asset is not None:
-        _validate_asset_row(asset, entry, expected_revision=1)
+        _validate_asset_row(asset, entry)
         version = await session.get(AgentVersionRow, version_id)
-        if version is None or not _matches(
+        if version is None:
+            if entry.version == 1:
+                raise BootstrapConflict("existing system Agent conflicts with canonical payload")
+            previous_entry = next(
+                (item for item in history if item.version == entry.version - 1),
+                None,
+            )
+            if previous_entry is None or asset.current_published_version_id != _version_id(previous_entry):
+                raise BootstrapConflict("existing system Agent release history conflicts with canonical payload")
+            if asset.version != entry.version - 1:
+                raise BootstrapConflict("existing system Agent revision conflicts with canonical release history")
+            version = AgentVersionRow(
+                id=version_id,
+                agent_id=asset_id,
+                version_number=entry.version,
+                workflow_status="draft",
+                description=payload.description,
+                soul=payload.soul,
+                model_ref=payload.model_ref,
+                model_settings={},
+                tool_groups=list(payload.tool_groups),
+                supersedes_version_id=_version_id(previous_entry),
+                payload_checksum=checksum,
+                payload_schema_version=1,
+                created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+            )
+            session.add(version)
+            await session.flush()
+            session.add_all(
+                [
+                    AgentVersionSkillRefRow(
+                        agent_version_id=version_id,
+                        skill_version_id=skill_version_id,
+                        sort_order=index,
+                    )
+                    for index, skill_version_id in enumerate(payload.skill_version_ids)
+                ]
+            )
+            session.add_all(
+                [
+                    AgentVersionMcpRefRow(
+                        agent_version_id=version_id,
+                        mcp_server_version_id=mcp_version_id,
+                        sort_order=index,
+                    )
+                    for index, mcp_version_id in enumerate(payload.mcp_version_ids)
+                ]
+            )
+            await session.flush()
+            version.workflow_status = "published"
+            await session.flush()
+            asset.current_published_version_id = version_id
+            asset.version += 1
+            await session.flush()
+            if entry.version == latest_version:
+                await _assert_exact_version_history(
+                    session,
+                    AgentVersionRow,
+                    AgentVersionRow.agent_id,
+                    asset_id,
+                    history,
+                )
+            return True
+
+        expected_supersedes = _version_id(next(item for item in history if item.version == entry.version - 1)) if entry.version > 1 else None
+        if not _matches(
             version,
             agent_id=asset_id,
             version_number=entry.version,
@@ -709,7 +781,7 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
             model_ref=payload.model_ref,
             model_settings={},
             tool_groups=list(payload.tool_groups),
-            supersedes_version_id=None,
+            supersedes_version_id=expected_supersedes,
             payload_checksum=checksum,
             payload_schema_version=1,
             submitted_at=None,
@@ -727,16 +799,24 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         expected_skills = [(version_id, skill_version_id, index) for index, skill_version_id in enumerate(payload.skill_version_ids)]
         actual_mcps = [(row.agent_version_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs]
         expected_mcps = [(version_id, mcp_version_id, index) for index, mcp_version_id in enumerate(payload.mcp_version_ids)]
-        if asset.current_published_version_id != version_id or actual_skills != expected_skills or actual_mcps != expected_mcps:
+        if actual_skills != expected_skills or actual_mcps != expected_mcps:
             raise BootstrapConflict("existing system Agent references conflict with canonical payload")
-        await _assert_exact_version_history(
-            session,
-            AgentVersionRow,
-            AgentVersionRow.agent_id,
-            asset_id,
-            (entry,),
-        )
+        if entry.version == latest_version:
+            if asset.current_published_version_id != version_id:
+                raise BootstrapConflict("existing system Agent published pointer conflicts with canonical payload")
+            if asset.version != latest_version:
+                raise BootstrapConflict("existing system Agent revision conflicts with canonical release history")
+            await _assert_exact_version_history(
+                session,
+                AgentVersionRow,
+                AgentVersionRow.agent_id,
+                asset_id,
+                history,
+            )
         return False
+
+    if entry.version != 1:
+        raise BootstrapConflict("system Agent release history must start from version 1")
 
     asset = AgentRow(
         id=asset_id,
@@ -792,13 +872,14 @@ async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: B
     await session.flush()
     asset.current_published_version_id = version_id
     await session.flush()
-    await _assert_exact_version_history(
-        session,
-        AgentVersionRow,
-        AgentVersionRow.agent_id,
-        asset_id,
-        (entry,),
-    )
+    if entry.version == latest_version:
+        await _assert_exact_version_history(
+            session,
+            AgentVersionRow,
+            AgentVersionRow.agent_id,
+            asset_id,
+            history,
+        )
     return True
 
 

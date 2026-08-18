@@ -211,8 +211,39 @@ def _is_trusted_run_scoped_skill_path(runtime: Runtime | None, path: str) -> boo
     if not isinstance(context, Mapping):
         return False
     run_id = context.get("run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return False
+
+    # PrivateRunFileAuthority owns the sandbox lease and its exact mounts.  In
+    # this path the detached context tuple is intentionally absent: trusting it
+    # would either reject a valid private lease (Skill Builder) or let a stale
+    # context claim outlive that lease.  The reserved authority object itself
+    # is installed only by RuntimeContextCarrier at the Worker boundary.
+    if "__file_authority" in context:
+        try:
+            authority = require_private_file_authority(
+                context,
+                method="authorizes_run_read_only_mount_path",
+            )
+            if authority is None:
+                return False
+            checker = getattr(
+                authority,
+                "authorizes_run_read_only_mount_path",
+            )
+            return checker(run_id=run_id, path=path) is True
+        except Exception:  # noqa: BLE001 - fail closed at the file boundary
+            logger.debug(
+                "Private file authority rejected a run-scoped Skill path",
+                exc_info=True,
+            )
+            return False
+
+    # Compatibility path for private runtimes that acquire a sandbox directly
+    # without PrivateRunFileAuthority.  RuntimeContextCarrier strips this
+    # reserved tuple from caller context and installs only Worker-issued mounts.
     mounts = context.get("__run_read_only_mounts")
-    if not isinstance(run_id, str) or not isinstance(mounts, tuple):
+    if not isinstance(mounts, tuple):
         return False
     for mount in mounts:
         if not isinstance(mount, RunScopedReadOnlyMount) or mount.run_id != run_id:

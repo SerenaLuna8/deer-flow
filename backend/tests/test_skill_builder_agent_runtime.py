@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END
 from langgraph.runtime import Runtime
 from langgraph.types import Command
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 import app.shared_assets.skill_builder_agent_runtime as runtime_module
 from app.private_work.context import PrivateWorkContext
@@ -73,10 +73,7 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     ToolOutputBudgetMiddleware,
     _is_inline_only_tool_output,
 )
-from deerflow.config.app_config import AppConfig
-from deerflow.config.model_config import ModelConfig
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
-from deerflow.models import ModelRuntimeProfile
 from deerflow.sandbox.sandbox import check_authorization_boundary
 from deerflow.skills.types import Skill, SkillCategory
 
@@ -1028,8 +1025,12 @@ def test_builder_output_limit_fails_typed_without_plain_text_retry() -> None:
     assert calls == 1
 
 
-def _private_runtime(skill_root: Path) -> object:
-    skill_dir = skill_root / "skill-creator"
+def _private_runtime(
+    skill_root: Path,
+    *,
+    tool_groups: tuple[str, ...] = (),
+) -> object:
+    skill_dir = skill_root / "public" / "skill-creator"
     skill_dir.mkdir(parents=True)
     skill_file = skill_dir / "SKILL.md"
     skill_file.write_text(
@@ -1037,7 +1038,7 @@ def _private_runtime(skill_root: Path) -> object:
         encoding="utf-8",
     )
     return SimpleNamespace(
-        tool_groups=(),
+        tool_groups=tool_groups,
         mcp_definitions=(),
         mcp_tools=(),
         skills=(
@@ -1062,58 +1063,29 @@ def _private_runtime(skill_root: Path) -> object:
     )
 
 
-def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
+@pytest.mark.parametrize(
+    "tool_groups",
+    [
+        (),
+        ("web", "file:read", "file:write", "bash", "task"),
+    ],
+)
+def test_factory_delegates_to_canonical_private_agent_with_trusted_builder_extension(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    tool_groups: tuple[str, ...],
 ) -> None:
     captured: dict[str, object] = {}
 
-    def fake_create_agent(**kwargs):  # type: ignore[no-untyped-def]
+    def fake_canonical_factory(**kwargs):  # type: ignore[no-untyped-def]
         captured.update(kwargs)
         return "builder-graph"
 
-    monkeypatch.setattr(runtime_module, "create_agent", fake_create_agent)
-    monkeypatch.setattr(
-        runtime_module.ModelRuntime,
-        "build_chat_model",
-        lambda _self, **kwargs: SimpleNamespace(kind="model", kwargs=kwargs),
-    )
-    monkeypatch.setattr(runtime_module, "build_tracing_callbacks", lambda: [])
     monkeypatch.setattr(
         runtime_module,
-        "frozen_checkpoint_channel_mode",
-        lambda: None,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "freeze_checkpoint_channel_mode",
-        lambda mode: mode,
-    )
-    monkeypatch.setattr(
-        runtime_module,
-        "freeze_checkpoint_snapshot_frequency",
-        lambda frequency: frequency,
-    )
-    app_config = AppConfig(
-        models=[
-            ModelConfig(
-                name=_BUILDER_MODEL_REF,
-                display_name="Builder",
-                description="",
-                use="langchain_openai:ChatOpenAI",
-                model="builder-model",
-                api_key=SecretStr("unit-test-key"),
-                supports_thinking=False,
-                supports_reasoning_effort=False,
-            )
-        ],
-        sandbox={"use": "deerflow.sandbox.local:LocalSandboxProvider"},
-        summarization={"enabled": False},
-        token_usage={"enabled": True},
-        loop_detection={"enabled": True},
-        token_budget={"enabled": True},
-        safety_finish_reason={"enabled": True},
-        guardrails={"enabled": False},
+        "_make_lead_agent_with_private_runtime",
+        fake_canonical_factory,
+        raising=False,
     )
     factory = SkillBuilderAgentFactory(
         catalog=_Catalog(),
@@ -1123,34 +1095,51 @@ def test_factory_builds_graph_with_exact_tools_and_no_generic_capabilities(
 
     graph = factory.private_runtime_factory(
         config=config,
-        private_runtime=_private_runtime(tmp_path),
-        app_config=app_config,
+        private_runtime=_private_runtime(
+            tmp_path,
+            tool_groups=tool_groups,
+        ),
+        app_config=SimpleNamespace(
+            skills=SimpleNamespace(container_path="/runtime/exact-skills"),
+        ),  # type: ignore[arg-type]
     )
 
     assert graph == "builder-graph"
-    assert captured["model"].kwargs["profile"] is ModelRuntimeProfile.AGENT_GRAPH  # type: ignore[union-attr]
-    assert tuple(tool.name for tool in captured["tools"]) == SKILL_BUILDER_TOOL_NAMES  # type: ignore[union-attr]
-    assert all(
-        forbidden not in {tool.name for tool in captured["tools"]}  # type: ignore[union-attr]
-        for forbidden in (
-            "bash",
-            "shell",
-            "web_search",
-            "read_file",
-            "write_file",
-            "tool_search",
-            "task",
-            "recall_memory",
-            "remember",
-        )
+    assert captured["config"] is config
+    assert captured["app_config"] is not None
+    canonical_runtime = captured["private_runtime"]
+    assert canonical_runtime.tool_groups == tool_groups  # type: ignore[union-attr]
+    assert "Keep it concise." in canonical_runtime.soul  # type: ignore[union-attr]
+    assert "research and temporary scratch work" in canonical_runtime.soul  # type: ignore[union-attr]
+    assert "Candidate Skill files remain governed" in canonical_runtime.soul  # type: ignore[union-attr]
+
+    extension = captured["trusted_extension"]
+    assert tuple(tool.name for tool in extension.extra_tools) == SKILL_BUILDER_TOOL_NAMES  # type: ignore[union-attr]
+    assert extension.excluded_tool_names == frozenset({"ask_clarification"})  # type: ignore[union-attr]
+    assert tuple(type(item) for item in extension.custom_middlewares) == (runtime_module._TerminalEnforcementMiddleware,)  # type: ignore[union-attr]
+    assert isinstance(  # type: ignore[union-attr]
+        extension.output_limit_recovery_override,
+        runtime_module._SkillBuilderOutputLimitGuard,
     )
-    assert "Keep it concise." in captured["system_prompt"]  # type: ignore[operator]
-    assert 'exactly "SKILL.md"' in captured["system_prompt"]  # type: ignore[operator]
-    assert config["metadata"]["agent_name"] == "skill-builder"  # type: ignore[index]
+    system_prompt = extension.system_prompt_override  # type: ignore[union-attr]
+    assert isinstance(system_prompt, str)
+    assert "Candidate Skill files remain governed" in system_prompt
+    assert "Finish every turn by invoking exactly one terminal tool" in system_prompt
+    if "file:read" in tool_groups:
+        assert "/runtime/exact-skills/public/skill-creator/SKILL.md" in system_prompt
+        assert "Use read_file on that exact path" in system_prompt
+    else:
+        assert "/runtime/exact-skills/public/skill-creator/SKILL.md" not in system_prompt
+        assert "Use read_file on that exact path" not in system_prompt
+    assert "ask_clarification" not in system_prompt
+    assert "Final deliverables" not in system_prompt
+    assert "Always Respond" not in system_prompt
 
     with pytest.raises(SkillBuilderRuntimeError):
         factory.private_runtime_factory(
             config=config,
             private_runtime=_private_runtime(tmp_path / "second"),
-            app_config=app_config,
+            app_config=SimpleNamespace(
+                skills=SimpleNamespace(container_path="/runtime/exact-skills"),
+            ),  # type: ignore[arg-type]
         )

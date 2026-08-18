@@ -536,6 +536,11 @@ async def test_continuation_fails_closed_when_over_budget_snapshot_digest_drifts
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "runtime_kind",
+    ["chat", "skill_builder"],
+    ids=["chat", "skill-builder"],
+)
+@pytest.mark.parametrize(
     ("vision_provider_adapter", "vision_provider_settings"),
     [
         (
@@ -550,8 +555,9 @@ async def test_continuation_fails_closed_when_over_budget_snapshot_digest_drifts
     ],
     ids=["openai-responses", "anthropic", "ordinary-vision-adapter"],
 )
-async def test_run_admission_locks_models_before_user_memory_snapshot(
+async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    runtime_kind: str,
     vision_provider_adapter: str,
     vision_provider_settings: dict[str, object],
 ) -> None:
@@ -614,7 +620,7 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
             assert scope == context.resource_scope
             assert thread_id == run.thread_id
             assert occurred_at == run.created_at
-            assert thread_kind == "chat"
+            assert thread_kind == runtime_kind
             events.append("activity")
             return True
 
@@ -699,28 +705,33 @@ async def test_run_admission_locks_models_before_user_memory_snapshot(
         ),
     )
 
+    continuation_source_run_id = "source-run" if runtime_kind == "chat" else None
     await repository.create_run_with_snapshot_in_session(
         Session(),
         context,
         thread_id,
         PrivateRunCreate(
             run_id=run.run_id,
-            follow_up_to_run_id="source-run",
+            follow_up_to_run_id=continuation_source_run_id,
         ),
         agent,
-        continuation_source_run_id="source-run",
+        continuation_source_run_id=continuation_source_run_id,
+        runtime_kind=runtime_kind,
+        admit_memory=runtime_kind == "chat",
     )
 
-    assert events == [
+    expected_events = [
         "asset",
         "policy",
         "policy_snapshot",
         "model:lead",
         "model:title",
         "model:vision",
-        "memory",
-        "activity",
     ]
+    if runtime_kind == "chat":
+        expected_events.append("memory")
+    expected_events.append("activity")
+    assert events == expected_events
 
 
 @pytest.mark.asyncio

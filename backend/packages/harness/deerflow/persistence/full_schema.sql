@@ -346,7 +346,7 @@ CREATE TABLE agents (
     CONSTRAINT uq_agents_source_key UNIQUE (source_key)
 );
 
-CREATE UNIQUE INDEX uq_agents_project_slug ON agents (project_id, lower(slug)) WHERE scope = 'project';
+CREATE UNIQUE INDEX uq_agents_project_slug ON agents (project_id, lower(slug)) WHERE scope = 'project' AND status != 'archived';
 
 CREATE UNIQUE INDEX uq_agents_system_slug ON agents (lower(slug)) WHERE scope = 'system';
 
@@ -4768,6 +4768,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('agent_design_resume_index');
+INSERT INTO alembic_version (version_num) VALUES ('agent_archived_slug_reuse');
 
 COMMIT;

@@ -134,15 +134,24 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
       aria-labelledby="workspace-recovery-title"
       className="border-border/80 bg-card mb-8 overflow-hidden rounded-xl border"
     >
-      <Collapsible defaultOpen>
+      <Collapsible>
         <h2 id="workspace-recovery-title">
           <CollapsibleTrigger
             data-testid="workspace-recovery-toggle"
-            className="group hover:bg-muted/50 focus-visible:ring-ring/50 flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-inset"
+            className="group hover:bg-muted/50 focus-visible:ring-ring/50 flex min-h-20 w-full items-center justify-between gap-4 px-5 py-5 text-left transition-colors outline-none focus-visible:ring-[3px] focus-visible:ring-inset sm:px-8"
           >
             <span className="flex items-center gap-2 font-semibold">
               <ArchiveRestoreIcon aria-hidden className="text-primary size-5" />
               {copy.title}
+              <span
+                aria-live="polite"
+                aria-atomic="true"
+                className="text-muted-foreground font-normal"
+              >
+                {!projects.isLoading && !projects.error
+                  ? recoverable.length
+                  : null}
+              </span>
             </span>
             <ChevronDownIcon
               aria-hidden

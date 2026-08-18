@@ -128,7 +128,7 @@ FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     ),
     "indexes": CatalogInvariant(
         count=311,
-        digest="407ecddb2fa7d4ee91e313ad5225d0b6aad76337abc98d6a2c5d67e38aafec48",
+        digest="2b37b18e5d3bcac2d6434c65fded6bde803378a6b4a658a99d429599f9c4a306",
     ),
     "functions": CatalogInvariant(
         count=21,

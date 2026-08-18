@@ -1,11 +1,12 @@
 import { describe, expect, test } from "@rstest/core";
 
 import { agentDependencyOptions } from "@/components/projects/assets/agent-capability-workbench";
-import {
-  projectAgentDeleteBlockedReason,
-  projectAgentVersionCanRestore,
-} from "@/components/projects/assets/project-asset-detail-sheet";
+import { projectAgentVersionCanRestore } from "@/components/projects/assets/project-asset-detail-sheet";
 import { projectAgentDeleteErrorMessage } from "@/components/projects/assets/project-asset-view-model";
+import {
+  projectAssetDeleteDescription,
+  projectAssetDeleteConfirmLabel,
+} from "@/components/projects/assets/project-skill-delete-dialog";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 import {
   SharedAssetApiError,
@@ -175,30 +176,18 @@ describe("Agent capability bindings", () => {
     ).toBe(false);
   });
 
-  test("fails closed when deleting the default Agent cannot be proven safe", () => {
-    expect(
-      projectAgentDeleteBlockedReason(
-        PROJECT_ASSET_ID,
-        PROJECT_ASSET_ID,
-        false,
-        false,
-      ),
-    ).not.toBeNull();
-    expect(
-      projectAgentDeleteBlockedReason(PROJECT_ASSET_ID, undefined, false, true),
-    ).not.toBeNull();
-    expect(
-      projectAgentDeleteBlockedReason(
-        PROJECT_ASSET_ID,
-        SYSTEM_ASSET_ID,
-        false,
-        false,
-      ),
-    ).toBeNull();
+  test("describes Agent deletion as a soft archive without a delay", () => {
+    const description = projectAssetDeleteDescription("Agent", "code-reviewer");
+    expect(description).toContain("不再用于新的运行");
+    expect(description).toContain("已有对话和运行记录会保留");
+    expect(description).not.toContain("永久删除");
+
+    expect(projectAssetDeleteConfirmLabel("Agent", 5, false)).toBe("确认删除");
+
     expect(
       projectAgentDeleteErrorMessage(
         new SharedAssetApiError(409, "ASSET_CONFLICT", "Asset conflict"),
       ),
-    ).toContain("Agent");
+    ).toContain("状态已发生变化");
   });
 });

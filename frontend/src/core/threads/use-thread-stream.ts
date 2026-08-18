@@ -24,6 +24,7 @@ import {
   isCurrentUploadUnavailableError,
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
+  isProjectAgentArchivedError,
   isProjectRunTerminalFailure,
 } from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
@@ -971,15 +972,17 @@ export function useThreadStream({
       }
       if (decision?.kind !== "ignore-history-refetch-duplicate") {
         toast.error(
-          isModelOutputLimitError(error)
-            ? t.conversation.modelOutputLimitDescription
-            : isOutputDeliveryIncompleteError(error)
-              ? t.conversation.outputDeliveryIncompleteDescription
-              : isCurrentUploadUnavailableError(error)
-                ? t.conversation.currentUploadUnavailableDescription
-                : isProjectRunTerminalFailure(error)
-                  ? t.conversation.runFailedDescription
-                  : getStreamErrorMessage(error),
+          isProjectAgentArchivedError(error)
+            ? t.conversation.agentArchivedDescription
+            : isModelOutputLimitError(error)
+              ? t.conversation.modelOutputLimitDescription
+              : isOutputDeliveryIncompleteError(error)
+                ? t.conversation.outputDeliveryIncompleteDescription
+                : isCurrentUploadUnavailableError(error)
+                  ? t.conversation.currentUploadUnavailableDescription
+                  : isProjectRunTerminalFailure(error)
+                    ? t.conversation.runFailedDescription
+                    : getStreamErrorMessage(error),
         );
       }
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -1809,17 +1812,19 @@ export function useThreadStream({
                 )
               ) {
                 toast.error(
-                  isRunAdmissionNotConfirmedError(error)
-                    ? t.conversation.runAdmissionNotConfirmedDescription
-                    : isModelOutputLimitError(error)
-                      ? t.conversation.modelOutputLimitDescription
-                      : isOutputDeliveryIncompleteError(error)
-                        ? t.conversation.outputDeliveryIncompleteDescription
-                        : isCurrentUploadUnavailableError(error)
-                          ? t.conversation.currentUploadUnavailableDescription
-                          : isProjectRunTerminalFailure(error)
-                            ? t.conversation.runFailedDescription
-                            : getStreamErrorMessage(error),
+                  isProjectAgentArchivedError(error)
+                    ? t.conversation.agentArchivedDescription
+                    : isRunAdmissionNotConfirmedError(error)
+                      ? t.conversation.runAdmissionNotConfirmedDescription
+                      : isModelOutputLimitError(error)
+                        ? t.conversation.modelOutputLimitDescription
+                        : isOutputDeliveryIncompleteError(error)
+                          ? t.conversation.outputDeliveryIncompleteDescription
+                          : isCurrentUploadUnavailableError(error)
+                            ? t.conversation.currentUploadUnavailableDescription
+                            : isProjectRunTerminalFailure(error)
+                              ? t.conversation.runFailedDescription
+                              : getStreamErrorMessage(error),
                 );
               }
             }
@@ -1885,6 +1890,7 @@ export function useThreadStream({
       t.uploads.serverTooLarge,
       t.uploads.storageQuotaExceeded,
       t.uploads.uploadFailed,
+      t.conversation.agentArchivedDescription,
       t.conversation.runAdmissionNotConfirmedDescription,
       t.conversation.modelOutputLimitDescription,
       t.conversation.outputDeliveryIncompleteDescription,
@@ -2065,7 +2071,11 @@ export function useThreadStream({
         if (preparedReplayAttemptRef.current === replayAttempt) {
           preparedReplayAttemptRef.current = null;
         }
-        toast.error(getStreamErrorMessage(error));
+        toast.error(
+          isProjectAgentArchivedError(error)
+            ? t.conversation.agentArchivedDescription
+            : getStreamErrorMessage(error),
+        );
         return false;
       } finally {
         sendInFlightRef.current = false;
@@ -2079,6 +2089,7 @@ export function useThreadStream({
       persistedMessages,
       privateWork,
       queryClient,
+      t.conversation.agentArchivedDescription,
       thread,
       uploadScopeKey,
     ],

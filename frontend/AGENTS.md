@@ -129,6 +129,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Durable SSE cursor state is keyed by account/project/thread. Event IDs and
   non-SSE message/event `seq` values remain canonical signed-BIGINT decimal
   strings. Compare by decimal length/value; never convert to JavaScript number.
+- Skill Builder Run activity joins through the project-scoped private client
+  from cursor `0` and reduces live/replayed frames to tool call ID, bounded
+  tool name, and lifecycle status only. Arguments, results, provider errors,
+  message content, and delegated-subgraph payloads never enter that UI state.
 - Drop duplicate or non-advancing frames. A newly mounted projection joins an
   active Run from cursor `0` because an old hidden consumer's cursor does not
   prove that the new UI rendered those frames.
@@ -194,6 +198,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
   send, retry/regenerate, edited rerun, and human-input submission all fail
   closed until the user re-enables the Agent or starts a new Thread with another
   Agent.
+- If a Thread's project Agent is archived, history remains readable. New send,
+  retry/regenerate, edited rerun, human-input, and execution-approval admission
+  surface the deleted-Agent message and require switching Agents. Agent deletion
+  is not blocked by default, current Thread, or historical Run references.
 - Upload messages carry opaque ready-file IDs and safe metadata, not browser-made
   image data URLs. Vision admission and file integrity remain Worker authority.
 - A persisted Thread composer eagerly uploads accepted attachments on selection,

@@ -2,6 +2,7 @@
 
 from .context import PrivateWorkContext, strip_private_client_fields
 from .errors import (
+    PrivateWorkAgentArchived,
     PrivateWorkAssetStale,
     PrivateWorkConflict,
     PrivateWorkError,
@@ -14,6 +15,7 @@ from .errors import (
 from .revalidation import PrivateWorkRevalidator
 
 __all__ = [
+    "PrivateWorkAgentArchived",
     "PrivateWorkAssetStale",
     "PrivateWorkConflict",
     "PrivateWorkContext",

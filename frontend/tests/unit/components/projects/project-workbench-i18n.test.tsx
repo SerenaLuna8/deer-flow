@@ -14,7 +14,7 @@ const project: Project = {
   icon: "folder",
   role: "admin",
   capabilities: [...CAPABILITIES],
-  is_pinned: false,
+  is_pinned: true,
   last_entered_at: null,
   member_count: 1,
   agent_count: 0,
@@ -86,18 +86,25 @@ describe("project workbench locale", () => {
 
     for (const text of [
       "Workspace",
+      "Manage and enter your projects",
       "Search by name or project slug",
       "All projects",
       "Pinned only",
       "1 project",
       "Create project",
+      "Description",
+      "Actions",
       "No project description",
+      "Pinned",
       "Open project",
       "Recoverable projects",
-      "No projects are currently recoverable.",
     ]) {
       expect(html).toContain(text);
     }
+
+    expect(html).toContain('data-testid="project-list"');
+    expect(html).toContain('data-testid="project-list-header"');
+    expect(html).not.toContain("No projects are currently recoverable.");
 
     for (const label of [
       "Account",
@@ -105,10 +112,12 @@ describe("project workbench locale", () => {
       "Filter projects",
       "Project list",
       "Edit project",
-      "Pin project",
+      "Unpin project",
     ]) {
       expect(html).toContain(`aria-label="${label}"`);
     }
+
+    expect(html).toContain('aria-pressed="true"');
 
     expect(enUS.projectWorkspace).toMatchObject({
       platformAdministration: "Platform administration",

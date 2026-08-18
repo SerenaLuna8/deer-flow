@@ -124,7 +124,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `agent_design_resume_index`. Fresh setup runs that schema directly
+the current marker is `agent_archived_slug_reuse`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -192,6 +192,12 @@ or downgrade an application database.
 - Packaged System Agent/Skill/MCP definitions are bootstrap-only and immutable at
   runtime. Global admin definition routes are read-only; the narrow packaged MCP
   Credential-grant route changes grants, not the definition.
+- Packaged System Agent release histories are contiguous and immutable. Bootstrap
+  appends each authenticated release, advances only the current pointer, preserves
+  prior versions and project pins, and is idempotent on rerun.
+- Server-owned Builder Agents are absent from every regular project, global-admin,
+  and runtime System Agent catalog, including direct detail and version-history
+  lookup. Only bootstrap and the dedicated internal resolver may address them.
 - A packaged Skill's catalog scan snapshot is release-time immutable metadata.
   Bootstrap scans the latest release and legacy releases without snapshots;
   historical snapshotted releases keep their authenticated result. Retrospective
@@ -242,10 +248,13 @@ or downgrade an application database.
   resume or cancel an existing design. Builder HTTP responses default to the
   strict v1 shape for already-open clients; the current frontend explicitly
   requests `contract_version=2` for assumptions, conflicts, and pagination.
-- Project Agent deletion treats non-revoked legacy Channel Connections and
-  unconsumed, unexpired OAuth states as live references alongside relational
-  references. OAuth begin/callback revalidate the project, capability, and
-  executable Agent inside the transaction that writes the state or connection.
+- Project Agent DELETE is a soft archive. It retains immutable versions and all
+  Thread/Run/Automation/Channel/OAuth references, atomically clears a matching
+  project-default pointer, hides the Agent from project catalogs, and rejects new
+  Run admission with `PRIVATE_WORK_AGENT_ARCHIVED`. Exact snapshots admitted
+  before archive may still materialize; suspended Agents remain fail-closed.
+  Archived project Agents retain their slug for history but do not occupy the
+  active project namespace, so a new Agent may reuse that slug with a new ID.
 
 ### Memory, audit, quota, and retention
 

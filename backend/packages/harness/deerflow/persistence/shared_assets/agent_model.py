@@ -78,7 +78,9 @@ class AgentRow(Base):
             project_id,
             func.lower(slug),
             unique=True,
-            postgresql_where=text("scope = 'project'"),
+            postgresql_where=text(
+                "scope = 'project' AND status != 'archived'",
+            ),
         ),
     )
 

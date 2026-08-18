@@ -158,6 +158,15 @@
       "version": 1,
       "payload_path": "content/skill-builder-v1.agent.json",
       "sha256": "c1d8e392e1faca5e029f79b57ee0c61424fbda2750faabdfcbc491dc659207f1"
+    },
+    {
+      "source_key": "builtin:agent:skill-builder",
+      "kind": "agent",
+      "slug": "skill-builder",
+      "display_name": "Skill Builder",
+      "version": 2,
+      "payload_path": "content/skill-builder-v2.agent.json",
+      "sha256": "e0a3374da1abe0c38ec597fe0a9dbab79eaba9df4140719cd672a9d590f0a5bd"
     }
   ]
 }

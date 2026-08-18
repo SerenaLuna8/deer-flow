@@ -77,6 +77,7 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
             "approval_output_delivery",
             "model_catalog_simplify",
             "agent_design_resume_index",
+            "agent_archived_slug_reuse",
         )
     )
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
@@ -92,7 +93,7 @@ def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
-    assert CURRENT_SCHEMA_REVISION == "agent_design_resume_index"
+    assert CURRENT_SCHEMA_REVISION == "agent_archived_slug_reuse"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -101,6 +102,7 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
     assert not list((MIGRATIONS_PATH / "baseline").glob("*.sql"))
     assert sorted(path.name for path in (MIGRATIONS_PATH / "versions").glob("*.py")) == [
+        "agent_archived_slug_reuse.py",
         "agent_design_resume_index.py",
         "approval_output_delivery.py",
         "initial_schema.py",
@@ -111,6 +113,19 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
 def test_agent_design_resume_index_matches_immutable_keyset_contract() -> None:
     index = next(candidate for candidate in Base.metadata.tables["agent_design_sessions"].indexes if candidate.name == "ix_agent_design_sessions_resume")
     expected = "CREATE INDEX ix_agent_design_sessions_resume ON agent_design_sessions (project_id, owner_user_id, created_at DESC, id DESC) WHERE status NOT IN ('completed', 'cancelled')"
+
+    compiled = " ".join(
+        str(CreateIndex(index).compile(dialect=postgresql.dialect())).split(),
+    )
+    full_schema = " ".join(FULL_SCHEMA_PATH.read_text(encoding="utf-8").split())
+
+    assert compiled == expected
+    assert expected in full_schema
+
+
+def test_project_agent_slug_index_excludes_archived_rows() -> None:
+    index = next(candidate for candidate in Base.metadata.tables["agents"].indexes if candidate.name == "uq_agents_project_slug")
+    expected = "CREATE UNIQUE INDEX uq_agents_project_slug ON agents (project_id, lower(slug)) WHERE scope = 'project' AND status != 'archived'"
 
     compiled = " ".join(
         str(CreateIndex(index).compile(dialect=postgresql.dialect())).split(),
@@ -810,6 +825,60 @@ async def test_agent_design_resume_index_migration_supports_incomplete_keyset(
 
     assert "ix_agent_design_sessions_resume" in plan
     assert "Sort" not in plan
+
+
+@pytest.mark.asyncio
+async def test_agent_archived_slug_reuse_migration_rebuilds_project_index(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(text("DROP INDEX uq_agents_project_slug"))
+            await connection.execute(
+                text(
+                    """CREATE UNIQUE INDEX uq_agents_project_slug
+                       ON agents (project_id, lower(slug))
+                       WHERE scope = 'project'""",
+                ),
+            )
+            await connection.execute(
+                text(
+                    "UPDATE alembic_version SET version_num = 'agent_design_resume_index'",
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url)
+
+    assert result.applied is True
+    assert result.from_revision == "agent_design_resume_index"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION
+    state, signature = await _catalog_signature(postgres_database_url)
+    assert state == "current"
+    assert signature == FINAL_M7_CATALOG_SIGNATURE
+
+    engine = create_async_engine(postgres_database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            index_definition = await connection.scalar(
+                text(
+                    """SELECT indexdef
+                         FROM pg_indexes
+                        WHERE schemaname = current_schema()
+                          AND tablename = 'agents'
+                          AND indexname = 'uq_agents_project_slug'""",
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+    assert index_definition is not None
+    normalized = " ".join(str(index_definition).split())
+    assert "((scope)::text = 'project'::text)" in normalized
+    assert "((status)::text <> 'archived'::text)" in normalized
 
 
 @pytest.mark.asyncio

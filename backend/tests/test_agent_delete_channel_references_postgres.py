@@ -20,7 +20,6 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.agent_service import AgentService
-from app.shared_assets.errors import AssetConflict
 from deerflow.persistence.channel_connections import (
     ChannelConnectionRepository,
     ChannelConnectionRow,
@@ -29,7 +28,11 @@ from deerflow.persistence.channel_connections import (
     ProjectChannelGroupBindingRow,
     ProjectChannelInstanceRow,
 )
-from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.persistence.projects.model import (
+    ProjectDefaultAgentRow,
+    ProjectMembershipRow,
+    ProjectRow,
+)
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 from deerflow.persistence.user import UserRow
 
@@ -41,8 +44,6 @@ class _ReferenceCase:
     name: str
     kind: _ReferenceKind
     state: str
-    blocks_deletion: bool
-    reference_survives: bool
 
 
 @dataclass(frozen=True)
@@ -254,7 +255,6 @@ async def _assert_persisted_state(
     case: _ReferenceCase,
     agent_id: uuid.UUID,
     reference_id: uuid.UUID | str,
-    agent_should_exist: bool,
 ) -> None:
     reference_model = {
         "binding": ProjectChannelGroupBindingRow,
@@ -269,31 +269,33 @@ async def _assert_persisted_state(
         else:
             reference = await session.scalar(select(reference_model).where(reference_model.id == reference_id))
         version = await session.scalar(select(AgentVersionRow).where(AgentVersionRow.agent_id == agent_id))
-    assert (agent is not None) is agent_should_exist, case.name
-    assert (version is not None) is agent_should_exist, case.name
-    assert (reference is not None) is case.reference_survives, case.name
+    assert agent is not None, case.name
+    assert agent.status == "archived", case.name
+    assert agent.version == 3, case.name
+    assert version is not None, case.name
+    assert reference is not None, case.name
 
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_agent_delete_channel_reference_matrix(
+async def test_postgres_agent_archive_preserves_every_channel_reference(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     cases = (
-        _ReferenceCase("live-binding", "binding", "live", True, True),
-        _ReferenceCase("disabled-binding", "binding", "disabled", True, True),
-        _ReferenceCase("soft-deleted-binding", "binding", "soft_deleted", False, True),
-        _ReferenceCase("pending-challenge", "challenge", "pending", True, True),
-        _ReferenceCase("expired-challenge", "challenge", "expired", False, False),
-        _ReferenceCase("consumed-challenge", "challenge", "consumed", False, False),
-        _ReferenceCase("legacy-connected-connection", "connection", "connected", True, True),
-        _ReferenceCase("legacy-frozen-connection", "connection", "frozen", True, True),
-        _ReferenceCase("legacy-revoked-connection", "connection", "revoked", False, True),
-        _ReferenceCase("pending-oauth-state", "oauth_state", "pending", True, True),
-        _ReferenceCase("expired-oauth-state", "oauth_state", "expired", False, True),
-        _ReferenceCase("consumed-oauth-state", "oauth_state", "consumed", False, True),
+        _ReferenceCase("live-binding", "binding", "live"),
+        _ReferenceCase("disabled-binding", "binding", "disabled"),
+        _ReferenceCase("soft-deleted-binding", "binding", "soft_deleted"),
+        _ReferenceCase("pending-challenge", "challenge", "pending"),
+        _ReferenceCase("expired-challenge", "challenge", "expired"),
+        _ReferenceCase("consumed-challenge", "challenge", "consumed"),
+        _ReferenceCase("legacy-connected-connection", "connection", "connected"),
+        _ReferenceCase("legacy-frozen-connection", "connection", "frozen"),
+        _ReferenceCase("legacy-revoked-connection", "connection", "revoked"),
+        _ReferenceCase("pending-oauth-state", "oauth_state", "pending"),
+        _ReferenceCase("expired-oauth-state", "oauth_state", "expired"),
+        _ReferenceCase("consumed-oauth-state", "oauth_state", "consumed"),
     )
     try:
         seed = await _seed_project(factory)
@@ -304,27 +306,18 @@ async def test_postgres_agent_delete_channel_reference_matrix(
                 seed,
                 case,
             )
-            if case.blocks_deletion:
-                with pytest.raises(AssetConflict) as exc_info:
-                    await service.delete(
-                        seed.actor,
-                        agent_id,
-                        expected_asset_version=2,
-                    )
-                assert exc_info.value.request_id == seed.actor.request_id, case.name
-            else:
-                await service.delete(
-                    seed.actor,
-                    agent_id,
-                    expected_asset_version=2,
-                )
+            await service.delete(
+                seed.actor,
+                agent_id,
+                expected_asset_version=2,
+            )
             await _assert_persisted_state(
                 factory,
                 case=case,
                 agent_id=agent_id,
                 reference_id=reference_id,
-                agent_should_exist=case.blocks_deletion,
             )
+            assert agent_id not in {item.id for item in await service.list_visible(seed.actor)}
     finally:
         await engine.dispose()
 
@@ -438,7 +431,65 @@ class _PauseAfterAgentGuardRepository(ChannelConnectionRepository):
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_agent_delete_wins_race_with_oauth_callback_without_dangling_connection(
+async def test_agent_archive_clears_default_pointer_and_preserves_published_version(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    state = "agent-default-archive-state"
+    try:
+        seed = await _seed_project(factory)
+        agent_id = await _seed_executable_agent_with_oauth_state(
+            factory,
+            seed,
+            state=state,
+        )
+        async with factory() as session, session.begin():
+            session.add(
+                ProjectDefaultAgentRow(
+                    project_id=seed.actor.project_id,
+                    agent_asset_id=agent_id,
+                    revision=1,
+                    created_by_user_id=str(seed.actor.user_id),
+                    updated_by_user_id=str(seed.actor.user_id),
+                )
+            )
+
+        await AgentService(factory).delete(
+            seed.actor,
+            agent_id,
+            expected_asset_version=2,
+        )
+
+        async with factory() as session:
+            agent = await session.get(AgentRow, agent_id)
+            default = await session.get(
+                ProjectDefaultAgentRow,
+                seed.actor.project_id,
+            )
+            versions = tuple(
+                (
+                    await session.scalars(
+                        select(AgentVersionRow).where(
+                            AgentVersionRow.agent_id == agent_id,
+                        )
+                    )
+                ).all()
+            )
+        assert agent is not None and agent.status == "archived"
+        assert agent.current_published_version_id == versions[0].id
+        assert len(versions) == 1
+        assert default is not None
+        assert default.agent_asset_id is None
+        assert default.revision == 2
+        assert default.updated_by_user_id == str(seed.actor.user_id)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_agent_archive_wins_race_with_oauth_callback_without_dangling_connection(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -480,12 +531,14 @@ async def test_agent_delete_wins_race_with_oauth_callback_without_dangling_conne
         assert exc_info.value.request_id == seed.actor.request_id
         assert str(exc_info.value) == PrivateWorkNotFound.public_message
         async with factory() as session:
-            assert await session.get(AgentRow, agent_id) is None
+            agent = await session.get(AgentRow, agent_id)
             connection = await session.scalar(
                 select(ChannelConnectionRow).where(
                     ChannelConnectionRow.project_id == seed.actor.project_id,
                 )
             )
+        assert agent is not None and agent.status == "archived"
+        assert agent.current_published_version_id is not None
         assert connection is None
     finally:
         resume.set()
@@ -494,7 +547,7 @@ async def test_agent_delete_wins_race_with_oauth_callback_without_dangling_conne
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_oauth_callback_wins_race_and_agent_delete_observes_connection(
+async def test_oauth_callback_wins_race_and_agent_archive_preserves_connection(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -538,15 +591,14 @@ async def test_oauth_callback_wins_race_and_agent_delete_observes_connection(
 
         resume.set()
         connection = await asyncio.wait_for(callback, timeout=5)
-        with pytest.raises(AssetConflict) as exc_info:
-            await asyncio.wait_for(deletion, timeout=5)
-        assert exc_info.value.request_id == seed.actor.request_id
+        await asyncio.wait_for(deletion, timeout=5)
         async with factory() as session:
-            assert await session.get(AgentRow, agent_id) is not None
+            agent = await session.get(AgentRow, agent_id)
             persisted_connection = await session.get(
                 ChannelConnectionRow,
                 connection["id"],
             )
+        assert agent is not None and agent.status == "archived"
         assert persisted_connection is not None
     finally:
         resume.set()

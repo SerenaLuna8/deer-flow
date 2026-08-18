@@ -126,10 +126,11 @@ class BootstrapCatalog(BaseModel):
                 for entry in history
             ):
                 raise ValueError("bootstrap release metadata must remain stable")
-            if first.kind == "skill":
+            if first.kind in {"agent", "skill"}:
                 versions = [entry.version for entry in history]
                 if versions != list(range(1, len(history) + 1)):
-                    raise ValueError("bootstrap Skill release history must be contiguous")
+                    raise ValueError(f"bootstrap {first.kind.title()} release history must be contiguous")
+            if first.kind == "skill":
                 if self.schema_version < 3 and any(entry.scan_summary is not None for entry in history):
                     raise ValueError("bootstrap schema v3 is required for scan snapshots")
                 if self.schema_version == 3:
@@ -139,8 +140,8 @@ class BootstrapCatalog(BaseModel):
                         if snapshot_seen and not has_snapshot:
                             raise ValueError("bootstrap Skill scan snapshots cannot disappear")
                         snapshot_seen = snapshot_seen or has_snapshot
-            elif len(history) != 1 or first.version != 1:
-                raise ValueError("bootstrap Agent and MCP assets currently require one v1 release")
+            elif first.kind == "mcp" and (len(history) != 1 or first.version != 1):
+                raise ValueError("bootstrap MCP assets currently require one v1 release")
         return self
 
 

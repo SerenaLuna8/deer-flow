@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -30,6 +31,10 @@ import {
   skillBuilderSessionsInvalidation,
   skillBuilderSessionsKey,
 } from "./query-keys";
+import {
+  consumeSkillBuilderRunStream,
+  type SkillBuilderRunStreamFrame,
+} from "./run-stream";
 import { isSkillBuilderRunAdmission } from "./types";
 import type {
   CancelSkillBuilderSessionInput,
@@ -38,9 +43,55 @@ import type {
   CreateSkillBuilderSessionInput,
   SkillBuilderSession,
   SkillBuilderSessionSummary,
+  SkillBuilderRunStreamProjection,
   SkillBuilderTurnInput,
   ValidateSkillBuilderSessionInput,
 } from "./types";
+
+export function useSkillBuilderRunStream({
+  threadId,
+  runId,
+  initialStatus,
+  enabled,
+}: {
+  threadId: string | null;
+  runId: string | null;
+  initialStatus: "pending" | "running";
+  enabled: boolean;
+}): SkillBuilderRunStreamProjection | null {
+  const access = usePrivateWorkAccess();
+  const [projection, setProjection] =
+    useState<SkillBuilderRunStreamProjection | null>(null);
+  const initialStatusRef = useRef(initialStatus);
+  initialStatusRef.current = initialStatus;
+
+  useEffect(() => {
+    if (!threadId || !runId) {
+      setProjection(null);
+      return;
+    }
+    if (!enabled || !isPrivateWorkAccessActive(access)) return;
+    const controller = new AbortController();
+    setProjection(null);
+    void consumeSkillBuilderRunStream({
+      runId,
+      initialStatus: initialStatusRef.current,
+      signal: controller.signal,
+      open: () =>
+        access.client.runs.joinStream(threadId, runId, {
+          signal: controller.signal,
+        }) as unknown as AsyncIterable<SkillBuilderRunStreamFrame>,
+      onProjection: (next) => {
+        if (!controller.signal.aborted && isPrivateWorkAccessActive(access)) {
+          setProjection(next);
+        }
+      },
+    });
+    return () => controller.abort();
+  }, [access, enabled, runId, threadId]);
+
+  return projection?.runId === runId ? projection : null;
+}
 
 export type CancelSkillBuilderSessionFromListInput =
   CancelSkillBuilderSessionInput & {

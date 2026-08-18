@@ -1724,6 +1724,8 @@ async def run_agent(
             # joined under repeated cancellation before the admission barrier is
             # cleared, so a replacement cannot observe or reuse live resources.
             cleanup_succeeded = True
+            cleanup_succeeded = await private_files.release() and cleanup_succeeded
+
             if ctx.private_agent_runtime is not None:
                 cleanup_succeeded = (
                     await private_files.join_cleanup(
@@ -1732,8 +1734,6 @@ async def run_agent(
                     )
                     and cleanup_succeeded
                 )
-
-            cleanup_succeeded = await private_files.release() and cleanup_succeeded
 
             if not cleanup_succeeded and record.status is RunStatus.success:
                 # The assistant response, checkpoints, and file finalization

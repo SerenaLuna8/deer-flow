@@ -235,6 +235,7 @@ class AgentDesignRepository:
         statement = select(AgentRow.id).where(
             AgentRow.scope == "project",
             AgentRow.project_id == context.project_id,
+            AgentRow.status != "archived",
             func.lower(AgentRow.slug) == slug.casefold(),
             self._context_exists(context),
         )

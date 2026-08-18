@@ -11,6 +11,7 @@ function renderUi(node: React.ReactNode) {
 }
 
 const RUN_ID = "44444444-4444-4444-8444-444444444444";
+const NEXT_RUN_ID = "55555555-5555-4555-8555-555555555555";
 
 describe("SkillBuilderRunActivity", () => {
   test("shows an explicit empty state before tool events are available", () => {
@@ -60,6 +61,64 @@ describe("SkillBuilderRunActivity", () => {
     );
 
     expect(html).toContain("本轮执行已取消");
+  });
+
+  test("prefers the durable terminal outcome while retaining replayed tool steps", () => {
+    const html = renderUi(
+      <SkillBuilderRunActivity
+        projection={{
+          runId: RUN_ID,
+          status: "running",
+          messages: [],
+          toolSteps: [
+            { id: "call-read", toolName: "read_file", status: "running" },
+          ],
+          clarification: null,
+        }}
+        presentation={{ runId: RUN_ID, status: "success" }}
+      />,
+    );
+
+    expect(html).toContain("本轮已完成");
+    expect(html).not.toContain("正在执行");
+    expect(html).toContain("read_file");
+    expect(html).toContain("已完成");
+    expect(html).not.toContain("调用中");
+  });
+
+  test("does not let an old terminal presentation cover a newly active Run", () => {
+    const html = renderUi(
+      <SkillBuilderRunActivity
+        activeRun={{
+          runId: NEXT_RUN_ID,
+          status: "pending",
+          streamUrl: "/api/next-run/stream",
+        }}
+        presentation={{ runId: RUN_ID, status: "success" }}
+      />,
+    );
+
+    expect(html).toContain("等待执行");
+    expect(html).not.toContain("本轮已完成");
+  });
+
+  test("settles unfinished tool steps as failed for a non-success terminal outcome", () => {
+    const html = renderUi(
+      <SkillBuilderRunActivity
+        projection={{
+          runId: RUN_ID,
+          status: "running",
+          messages: [],
+          toolSteps: [{ id: "call-bash", toolName: "bash", status: "pending" }],
+          clarification: null,
+        }}
+        presentation={{ runId: RUN_ID, status: "error" }}
+      />,
+    );
+
+    expect(html).toContain("本轮执行失败");
+    expect(html).toContain("调用失败");
+    expect(html).not.toContain("等待调用");
   });
 
   test("explains how to resume after the model output limit", () => {

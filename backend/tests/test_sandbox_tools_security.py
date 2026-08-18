@@ -745,6 +745,218 @@ def test_run_scoped_local_bash_uses_host_bash_disable_guard(monkeypatch) -> None
     assert execute_calls == 0
 
 
+def test_local_private_sandbox_reads_only_exact_pinned_skill_tree(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import threading
+    from collections import OrderedDict
+
+    from deerflow.private_scope import PrivateResourceScope
+    from deerflow.sandbox.local.local_sandbox import PathMapping
+    from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
+    from deerflow.sandbox.sandbox_provider import (
+        RunScopedReadOnlyMount,
+        private_sandbox_relative_root,
+    )
+
+    scope = PrivateResourceScope(
+        project_id="project-1",
+        owner_user_id="owner-1",
+        membership_version=1,
+    )
+    thread_id = "thread-1"
+    run_id = "run-1"
+    relative_root = private_sandbox_relative_root(scope, thread_id)
+    private_base = tmp_path / "private-base"
+    private_root = private_base / relative_root
+    pinned_root = tmp_path / "pinned-skills"
+    pinned_file = pinned_root / "public" / "skill-creator" / "SKILL.md"
+    pinned_file.parent.mkdir(parents=True)
+    pinned_file.write_text("pinned skill creator", encoding="utf-8")
+    ambient_root = tmp_path / "ambient-skills"
+    ambient_file = ambient_root / "public" / "skill-creator" / "SKILL.md"
+    ambient_file.parent.mkdir(parents=True)
+    ambient_file.write_text("ambient skill creator", encoding="utf-8")
+
+    provider = object.__new__(LocalSandboxProvider)
+    provider._path_mappings = [
+        PathMapping("/mnt/skills", str(ambient_root), True),
+    ]
+    provider._generic_sandbox = None
+    provider._thread_sandboxes = OrderedDict()
+    provider._run_sandboxes = OrderedDict()
+    provider._run_sandbox_ids = {}
+    provider._active_private_runs = {}
+    provider._max_cached_threads = 4
+    provider._lock = threading.Lock()
+
+    def private_mappings(*_args, **_kwargs):
+        user_data = private_root / "user-data"
+        return [
+            PathMapping("/mnt/user-data", str(user_data), False),
+            PathMapping(
+                "/mnt/user-data/workspace",
+                str(user_data / "workspace"),
+                False,
+            ),
+            PathMapping(
+                "/mnt/user-data/uploads",
+                str(user_data / "uploads"),
+                False,
+            ),
+            PathMapping(
+                "/mnt/user-data/outputs",
+                str(user_data / "outputs"),
+                False,
+            ),
+            PathMapping(
+                "/mnt/acp-workspace",
+                str(private_root / "acp-workspace"),
+                False,
+            ),
+        ]
+
+    monkeypatch.setattr(provider, "_build_private_path_mappings", private_mappings)
+    monkeypatch.setattr(
+        "deerflow.config.paths.get_paths",
+        lambda: SimpleNamespace(base_dir=private_base),
+    )
+    monkeypatch.setattr(
+        "deerflow.config.get_app_config",
+        lambda: SimpleNamespace(
+            skills=SimpleNamespace(container_path="/mnt/skills"),
+            sandbox=SimpleNamespace(allow_host_bash=False),
+        ),
+    )
+
+    lease = provider.acquire_private(
+        thread_id,
+        scope=scope,
+        user_id=scope.owner_user_id,
+        run_id=run_id,
+        mounts=(
+            RunScopedReadOnlyMount(
+                run_id=run_id,
+                container_path="/mnt/skills",
+                host_path=str(pinned_root),
+            ),
+        ),
+    )
+    sandbox = provider.get(lease.sandbox_id)
+    assert sandbox is not None
+
+    assert sandbox.read_file("/mnt/skills/public/skill-creator/SKILL.md") == "pinned skill creator"
+    with pytest.raises(OSError, match="Read-only file system"):
+        sandbox.write_file(
+            "/mnt/skills/public/skill-creator/SKILL.md",
+            "modified",
+        )
+    assert ambient_file.read_text(encoding="utf-8") == "ambient skill creator"
+
+    provider.release_private(lease)
+    assert provider.get(lease.sandbox_id) is None
+
+
+def test_read_file_trusts_active_private_authority_exact_skill_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.private_scope import PrivateResourceScope
+
+    calls: list[tuple[str, str]] = []
+
+    class ActivePrivateAuthority:
+        def authorizes_run_read_only_mount_path(
+            self,
+            *,
+            run_id: str,
+            path: str,
+        ) -> bool:
+            calls.append((run_id, path))
+            return run_id == "run-1" and path == "/mnt/skills/public/skill-creator/SKILL.md"
+
+    class MountedSandbox:
+        def read_file(self, path: str) -> str:
+            assert path == "/mnt/skills/public/skill-creator/SKILL.md"
+            return "exact pinned skill-creator"
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "private-1"}},
+        context={
+            "private_scope": PrivateResourceScope(
+                project_id="project-1",
+                owner_user_id="owner-1",
+                membership_version=1,
+            ),
+            "run_id": "run-1",
+            "__file_authority": ActivePrivateAuthority(),
+        },
+        config={},
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: MountedSandbox(),
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.is_local_sandbox",
+        lambda _runtime: False,
+    )
+
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="read exact creator",
+        path="/mnt/skills/public/skill-creator/SKILL.md",
+    )
+
+    assert result == "exact pinned skill-creator"
+    assert calls == [
+        ("run-1", "/mnt/skills/public/skill-creator/SKILL.md"),
+    ]
+
+
+def test_read_file_rejects_private_authority_path_outside_exact_skill_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.private_scope import PrivateResourceScope
+
+    class ExactPrivateAuthority:
+        def authorizes_run_read_only_mount_path(
+            self,
+            *,
+            run_id: str,
+            path: str,
+        ) -> bool:
+            return run_id == "run-1" and path.startswith(
+                "/mnt/skills/public/skill-creator/",
+            )
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "private-1"}},
+        context={
+            "private_scope": PrivateResourceScope(
+                project_id="project-1",
+                owner_user_id="owner-1",
+                membership_version=1,
+            ),
+            "run_id": "run-1",
+            "__file_authority": ExactPrivateAuthority(),
+        },
+        config={},
+    )
+
+    result = read_file_tool.func(
+        runtime=runtime,
+        description="attempt unrelated skill read",
+        path="/mnt/skills/public/unrelated/SKILL.md",
+    )
+
+    assert result == ("Error: Skill 'unrelated' is disabled. Access to its files is blocked. Enable the skill in settings before using it.")
+
+
 def test_bash_tool_blocks_relative_traversal_before_host_execution(monkeypatch) -> None:
     runtime = SimpleNamespace(
         state={"sandbox": {"sandbox_id": "local"}, "thread_data": _THREAD_DATA.copy()},

@@ -49,6 +49,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import { AgentArchivedAlert } from "@/components/workspace/agent-archived-alert";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -221,7 +222,9 @@ export function SidecarPanel({ className }: { className?: string }) {
     modelsError: modelCatalog.error,
   });
   const agentModelBlocked = agentExecutionAvailability !== "ready";
-  const agentModelUnavailable = agentExecutionAvailability === "unavailable";
+  const agentArchived = agentModel.agentArchived;
+  const agentModelUnavailable =
+    !agentArchived && agentExecutionAvailability === "unavailable";
   const handleAgentModelRetry = useCallback(() => {
     void Promise.all([agentModel.refetch(), modelCatalog.refetch()]);
   }, [agentModel, modelCatalog]);
@@ -869,6 +872,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       </div>
 
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
+        {agentArchived && <AgentArchivedAlert />}
         {agentModelUnavailable && (
           <Alert
             variant="destructive"

@@ -2227,6 +2227,7 @@ export const zhCN: Translations = {
 
   projectWorkspace: {
     title: "工作空间",
+    subtitle: "管理并进入你的项目",
     account: "账户",
     platformAdministration: "平台管理",
     systemSettings: "系统设置",
@@ -2243,10 +2244,18 @@ export const zhCN: Translations = {
     projectLoadFailed: "项目加载失败",
     loadingProjects: "正在加载项目",
     retry: "重试",
+    columns: {
+      project: "项目",
+      description: "描述",
+      actions: "操作",
+    },
     card: {
       edit: "编辑项目",
+      editAction: "编辑",
       pin: "置顶项目",
+      pinAction: "置顶",
       unpin: "取消置顶",
+      pinned: "已置顶",
       noDescription: "暂无项目描述",
       open: "进入项目",
     },
@@ -2372,6 +2381,10 @@ export const zhCN: Translations = {
     agentSuspendedTitle: "Agent 已停用",
     agentSuspendedDescription:
       "当前对话绑定的项目 Agent 已停用，暂时不能继续发送消息。请联系项目管理员重新启用，或使用其他 Agent 新建对话。",
+    agentArchivedTitle: "Agent 已删除",
+    agentArchivedDescription:
+      "该 Agent 已删除，当前对话不能继续。请选择其他 Agent 新建对话。",
+    agentArchivedAction: "选择其他 Agent 新建对话",
     agentModelUnavailableTitle: "Agent 模型不可用",
     agentModelUnavailableDescription:
       "无法解析 Agent 配置的模型。请检查其启用绑定、已发布版本和模型目录中的启用状态后重试。",

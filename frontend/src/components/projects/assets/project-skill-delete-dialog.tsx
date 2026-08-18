@@ -22,7 +22,7 @@ export function projectAssetDeleteDescription(
     return `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复；若 Agent 或历史运行仍引用该 Skill 的任一版本，将无法删除。此时可先停用以阻止后续使用；物理删除需解除 Agent 引用，并等待历史运行按保留策略清理。`;
   }
   if (assetKind === "Agent") {
-    return `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若该 Agent 是项目当前默认 Agent，请先将 Main 或其他 Agent 设为默认；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`;
+    return `删除后，Agent“${assetName}”将不再出现在项目 Agent 列表中，也不再用于新的运行。已有对话和运行记录会保留，正在执行的运行会继续完成。`;
   }
   return `将永久删除整个 MCP“${assetName}”及其配置与 Credential 槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或 Credential 授权快照引用时不会级联删除，需先解除引用。`;
 }
@@ -35,6 +35,17 @@ export function skillDeleteSecondsRemaining(
     5,
     Math.max(0, Math.ceil((startedAt + SKILL_DELETE_DELAY_MS - now) / 1_000)),
   );
+}
+
+export function projectAssetDeleteConfirmLabel(
+  assetKind: "Skill" | "Agent" | "MCP",
+  remainingSeconds: number,
+  pending: boolean,
+): string {
+  if (pending) return "删除中…";
+  if (assetKind === "Agent") return "确认删除";
+  if (remainingSeconds > 0) return `确认删除（${remainingSeconds} 秒）`;
+  return "确认永久删除";
 }
 
 export function ProjectSkillDeleteConfirmation({
@@ -138,12 +149,15 @@ function ProjectAssetDeleteConfirmation({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const waiting = remainingSeconds > 0;
+  const isAgentArchive = assetKind === "Agent";
+  const waiting = !isAgentArchive && remainingSeconds > 0;
 
   return (
     <>
       <DialogHeader>
-        <DialogTitle>永久删除 {assetKind}？</DialogTitle>
+        <DialogTitle>
+          {isAgentArchive ? "删除 Agent？" : `永久删除 ${assetKind}？`}
+        </DialogTitle>
         <DialogDescription>
           {projectAssetDeleteDescription(assetKind, assetName)}
         </DialogDescription>
@@ -168,11 +182,7 @@ function ProjectAssetDeleteConfirmation({
           disabled={pending || waiting}
           onClick={onConfirm}
         >
-          {pending
-            ? "删除中…"
-            : waiting
-              ? `确认删除（${remainingSeconds} 秒）`
-              : "确认永久删除"}
+          {projectAssetDeleteConfirmLabel(assetKind, remainingSeconds, pending)}
         </Button>
       </DialogFooter>
     </>
@@ -314,7 +324,9 @@ function ProjectAssetDeleteDialog({
           errorMessage={errorMessage}
           onCancel={() => onOpenChange(false)}
           onConfirm={() => {
-            if (!pending && remainingSeconds === 0) onConfirm();
+            if (!pending && (assetKind === "Agent" || remainingSeconds === 0)) {
+              onConfirm();
+            }
           }}
         />
       </DialogContent>

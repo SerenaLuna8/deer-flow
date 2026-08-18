@@ -1162,7 +1162,6 @@ export function useDeleteProjectSkill(accountId: string, projectId: string) {
 
 export function useDeleteProjectAgent(accountId: string, projectId: string) {
   const queryClient = useQueryClient();
-  const invalidate = useProjectInvalidation(accountId, projectId, "agents");
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -1212,7 +1211,11 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
             variables.assetId,
           ),
         });
-        void invalidate();
+        void invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+        );
       },
     ),
     onError: whenActive(

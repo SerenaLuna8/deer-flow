@@ -887,7 +887,7 @@ class RunSnapshotRepository:
                     ),
                     ("memory", locked_runtime_policy.value.memory.model_name),
                 ]
-                if runtime_kind == "chat" and not effective_profile.supports_vision:
+                if runtime_kind in {"chat", "skill_builder"} and not effective_profile.supports_vision:
                     auxiliary_model_refs.append(
                         (
                             "vision",

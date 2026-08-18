@@ -409,6 +409,13 @@ class RunAgentPrivateExecutor:
         raw_context = config.get("context")
         runtime_context = dict(raw_context) if isinstance(raw_context, Mapping) else {}
         runtime_context[MEMORY_ARCHIVE_CONTEXT_KEY] = archive_context
+        if getattr(execution, "runtime_kind", "chat") == "skill_builder":
+            # Skill Builder has no host-execution approval UI or dedicated
+            # continuation admission path. Mark its individual Agent turn as
+            # non-interactive so Local approval-required bash is omitted and
+            # delegated bash remains fail-closed. Isolated providers retain
+            # their normal bash tools because they do not require approval.
+            runtime_context["non_interactive"] = True
         raw_configurable = config.get("configurable")
         configurable = dict(raw_configurable) if isinstance(raw_configurable, Mapping) else {}
         if effective_profile is not None:
@@ -591,7 +598,7 @@ class RunAgentPrivateExecutor:
                             ),
                             ("memory", runtime_app_config.memory.model_name),
                         ]
-                        if execution.runtime_kind == "chat" and not lead_model.supports_vision:
+                        if execution.runtime_kind in {"chat", "skill_builder"} and not lead_model.supports_vision:
                             auxiliary_model_refs.append(
                                 (
                                     "vision",
@@ -730,7 +737,7 @@ class RunAgentPrivateExecutor:
                 if execution.runtime_kind == "chat"
                 else None
             )
-            if execution.runtime_kind == "chat":
+            if execution.runtime_kind in {"chat", "skill_builder"}:
                 file_authority = PrivateRunFileAuthority(
                     PrivateFileRunScope(
                         execution.context,
@@ -990,21 +997,21 @@ class RunAgentPrivateExecutor:
         finally:
             if runtime_config_pushed:
                 pop_current_app_config()
-            if private_runtime is not None:
-                try:
-                    await private_runtime.aclose()
-                except Exception:
-                    logger.warning(
-                        "Failed to clean private runtime for Run %s",
-                        execution.run.run_id,
-                        exc_info=True,
-                    )
             if file_authority is not None:
                 try:
                     await file_authority.release()
                 except Exception:
                     logger.warning(
                         "Failed to release private file authority for Run %s",
+                        execution.run.run_id,
+                        exc_info=True,
+                    )
+            if private_runtime is not None:
+                try:
+                    await private_runtime.aclose()
+                except Exception:
+                    logger.warning(
+                        "Failed to clean private runtime for Run %s",
                         execution.run.run_id,
                         exc_info=True,
                     )

@@ -1417,6 +1417,7 @@ async def test_duplicate_slug_preflight_is_project_scoped_and_case_insensitive()
     )
     assert "agents.scope = 'project'" in sql
     assert f"agents.project_id = '{context.project_id}'" in sql
+    assert "agents.status != 'archived'" in sql
     assert "lower(agents.slug) = 'reviewer'" in sql
     assert f"project_memberships.id = '{context.membership_id}'" in sql
 

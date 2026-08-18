@@ -22,6 +22,7 @@ from app.private_work.context import (
     strip_private_client_fields,
 )
 from app.private_work.errors import (
+    PrivateWorkAgentArchived,
     PrivateWorkAssetStale,
     PrivateWorkConflict,
     PrivateWorkError,
@@ -81,6 +82,7 @@ from app.reliability.jobs import (
     PrivateRunJobRepository,
 )
 from app.shared_assets.errors import (
+    AgentArchived,
     AssetForbidden,
     AssetResolutionUnavailable,
     AssetStorageUnavailable,
@@ -1026,6 +1028,8 @@ class PrivateRunAdmissionService:
                     opaque_runtime_scope=context.resource_scope,
                     job=job,
                 )
+        except AgentArchived:
+            raise PrivateWorkAgentArchived(context.request_id) from None
         except (RunSnapshotAssetStale, AssetResolutionUnavailable):
             raise PrivateWorkAssetStale(context.request_id) from None
         except RunModelSelectionLocked:

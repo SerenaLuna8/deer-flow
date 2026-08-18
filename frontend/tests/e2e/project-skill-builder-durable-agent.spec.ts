@@ -184,6 +184,9 @@ async function mockSkillBuilderDurableAgent(page: Page) {
   let sessionReads = 0;
   const unexpectedRequests: string[] = [];
   const sessionsBase = `/api/projects/${PROJECT_ID}/skill-builder/sessions`;
+  const runStreamPath = `/api/projects/${PROJECT_ID}/private-work/threads/${THREAD_ID}/runs/${RUN_ID}/stream`;
+  const privateStreamSecret = "tool-arguments-and-results-must-stay-private";
+  let streamRequests = 0;
 
   await page.route("**/api/**", (route) => {
     const request = route.request();
@@ -251,6 +254,91 @@ async function mockSkillBuilderDurableAgent(page: Page) {
         token_usage: { enabled: false },
       });
     }
+    if (path === runStreamPath && method === "GET") {
+      streamRequests += 1;
+      if (lifecycle === "pending") {
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body: "",
+        });
+      }
+      const frames = [
+        "event: values",
+        `data: ${JSON.stringify({
+          messages: [
+            {
+              id: `run-admission-${RUN_ID}`,
+              type: "human",
+              content: "private prompt",
+              additional_kwargs: { run_id: RUN_ID },
+            },
+            {
+              id: "assistant-tools",
+              type: "ai",
+              content: "",
+              tool_calls: [
+                {
+                  id: "call-read",
+                  name: "read_file",
+                  args: { path: privateStreamSecret },
+                },
+                {
+                  id: "call-bash",
+                  name: "bash",
+                  args: { command: privateStreamSecret },
+                },
+                {
+                  id: "call-builder",
+                  name: "skill_builder_finalize",
+                  args: { summary: privateStreamSecret },
+                },
+              ],
+            },
+            {
+              id: "result-read",
+              type: "tool",
+              tool_call_id: "call-read",
+              name: "read_file",
+              status: "success",
+              content: privateStreamSecret,
+            },
+            {
+              id: "result-bash",
+              type: "tool",
+              tool_call_id: "call-bash",
+              name: "bash",
+              status: "success",
+              content: privateStreamSecret,
+            },
+            {
+              id: "result-builder",
+              type: "tool",
+              tool_call_id: "call-builder",
+              name: "skill_builder_finalize",
+              status: "success",
+              content: privateStreamSecret,
+            },
+          ],
+        })}`,
+        "id: 1",
+        "",
+      ];
+      if (lifecycle === "draft_ready") {
+        frames.push(
+          "event: end",
+          `data: ${JSON.stringify({ status: "completed" })}`,
+          "id: 2",
+          "",
+        );
+      }
+      frames.push("");
+      return route.fulfill({
+        status: 200,
+        contentType: "text/event-stream",
+        body: frames.join("\n"),
+      });
+    }
     if (path === sessionsBase && method === "POST") {
       createBodies.push(request.postDataJSON());
       lifecycle = "interviewing";
@@ -301,6 +389,8 @@ async function mockSkillBuilderDurableAgent(page: Page) {
     turnBodies,
     unexpectedRequests,
     sessionReads: () => sessionReads,
+    streamRequests: () => streamRequests,
+    privateStreamSecret,
     setLifecycle(next: Lifecycle) {
       lifecycle = next;
     },
@@ -350,6 +440,22 @@ test("Skill Builder durable Agent admits, recovers a Run after refresh, and disp
   await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
     "Running",
   );
+  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
+    "read_file",
+  );
+  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
+    "bash",
+  );
+  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
+    "skill_builder_finalize",
+  );
+  await expect(page.getByTestId("skill-builder-run-activity")).toContainText(
+    "3 tool steps",
+  );
+  await expect(
+    page.getByTestId("skill-builder-run-activity"),
+  ).not.toContainText(builder.privateStreamSecret);
+  expect(builder.streamRequests()).toBeGreaterThan(0);
   await expect(
     page.getByRole("heading", { name: "Candidate files" }),
   ).toHaveCount(0);
