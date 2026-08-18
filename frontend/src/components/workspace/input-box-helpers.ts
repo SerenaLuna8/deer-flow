@@ -49,6 +49,18 @@ export type LatestCheckpointContinuationState = {
   threadId: string | null;
 };
 
+export function canRestoreComposerInput({
+  text,
+  hasSelectedSkill,
+  attachmentCount,
+}: {
+  text: string;
+  hasSelectedSkill: boolean;
+  attachmentCount: number;
+}): boolean {
+  return !text.trim() && !hasSelectedSkill && attachmentCount === 0;
+}
+
 export function createLatestCheckpointContinuationState(): LatestCheckpointContinuationState {
   return { pending: false, threadId: null };
 }
@@ -215,6 +227,16 @@ export function getMatchingSkillSuggestions(
     }));
 
   return [...skillMatches, ...builtinMatches].slice(0, MAX_SKILL_SUGGESTIONS);
+}
+
+export function shouldSubmitExactBuiltinSlashCommand(
+  value: string,
+  suggestion: SlashSuggestion | undefined,
+): boolean {
+  return (
+    suggestion?.kind === "builtin" &&
+    value.trim().toLowerCase() === `/${suggestion.name.toLowerCase()}`
+  );
 }
 
 export function parseGoalCommand(value: string): GoalCommand | null {

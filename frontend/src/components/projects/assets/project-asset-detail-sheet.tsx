@@ -65,6 +65,8 @@ import {
   projectAgentDeleteErrorMessage,
   projectAgentVersionCanPublish,
   projectMcpDeleteErrorMessage,
+  projectSkillDeleteErrorMessage,
+  projectSkillVersionCanPublish,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import {
@@ -905,6 +907,15 @@ export function ProjectAssetDetailSheet({
       projectCapabilities,
       selectedAgentVersion,
     );
+  const canPublishSelectedSkillVersion =
+    kind === "skills" &&
+    projectSkillVersionCanPublish(
+      item,
+      projectCapabilities,
+      selectedVersion && "workflow_status" in selectedVersion
+        ? selectedVersion
+        : null,
+    );
   const lifecycleActions =
     item.scope === "project"
       ? projectAssetDetailLifecycleActions(kind, item, projectCapabilities)
@@ -1465,7 +1476,9 @@ export function ProjectAssetDetailSheet({
                             {versionActions.includes("publish") &&
                               (kind === "agents"
                                 ? canPublishSelectedAgentVersion
-                                : canAuthor) && (
+                                : kind === "skills"
+                                  ? canPublishSelectedSkillVersion
+                                  : canAuthor) && (
                                 <Button
                                   type="button"
                                   size="sm"
@@ -1593,7 +1606,9 @@ export function ProjectAssetDetailSheet({
           startedAt={skillDeleteSnapshot.startedAt}
           pending={deleteSkill.isPending}
           errorMessage={
-            deleteSkill.error ? adminAssetErrorMessage(deleteSkill.error) : null
+            deleteSkill.error
+              ? projectSkillDeleteErrorMessage(deleteSkill.error)
+              : null
           }
           onOpenChange={(next) => {
             if (next) return;

@@ -126,13 +126,17 @@ function selectedAgentVersionId(agent: ProjectAssetItem | null): string {
   return agent.binding?.enabled === true ? agent.binding.version_id : "";
 }
 
+function isSuspendedProjectAgent(agent: ProjectAssetItem | null): boolean {
+  return agent?.scope === "project" && agent.status === "suspended";
+}
+
 export function resolveThreadAgentModelRef(
   catalog: ProjectAssetList | undefined,
   metadata: ThreadAgentMetadata | null | undefined,
   history: VersionHistoryResponse | undefined,
 ): string | null {
   const agent = threadAgent(catalog, metadata);
-  if (!agent) return null;
+  if (!agent || isSuspendedProjectAgent(agent)) return null;
   if (agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG) {
     return "default";
   }
@@ -152,12 +156,14 @@ export function resolveThreadAgentModelRef(
 
 export function useThreadAgentModelRef(
   metadata: ThreadAgentMetadata | null | undefined,
+  { enabled = true }: { enabled?: boolean } = {},
 ) {
   const { scope } = useProjectPrivateWorkScope();
   const agentQuery = useProjectAssets(
     scope.accountId,
     scope.projectId,
     "agents",
+    enabled,
   );
   const catalog = agentQuery.data as ProjectAssetList | undefined;
   const agent = useMemo(
@@ -166,13 +172,14 @@ export function useThreadAgentModelRef(
   );
   const isMain =
     agent?.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG;
+  const agentSuspended = isSuspendedProjectAgent(agent);
   const versionId = isMain ? "" : selectedAgentVersionId(agent);
   const versionQuery = useProjectAssetVersions(
     scope.accountId,
     scope.projectId,
     "agents",
     agent?.id ?? "",
-    Boolean(agent && !isMain && versionId),
+    enabled && Boolean(agent && !isMain && !agentSuspended && versionId),
   );
   const modelRef = resolveThreadAgentModelRef(
     catalog,
@@ -190,12 +197,13 @@ export function useThreadAgentModelRef(
     );
   const refetch = useCallback(async () => {
     await agentQuery.refetch();
-    if (agent && !isMain && versionId) {
+    if (agent && !isMain && !agentSuspended && versionId) {
       await versionQuery.refetch();
     }
-  }, [agent, agentQuery, isMain, versionId, versionQuery]);
+  }, [agent, agentQuery, agentSuspended, isMain, versionId, versionQuery]);
   return {
     modelRef,
+    agentSuspended,
     isLoading,
     error: agentQuery.error ?? versionQuery.error,
     refetch,

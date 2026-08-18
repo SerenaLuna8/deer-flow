@@ -10,6 +10,7 @@ from openai import APIStatusError, AuthenticationError
 from deerflow.agents.middlewares.llm_error_handling_middleware import (
     LLMErrorHandlingMiddleware,
 )
+from deerflow.error_codes import CURRENT_UPLOAD_FAILURE_DETAIL
 
 
 def _middleware() -> LLMErrorHandlingMiddleware:
@@ -38,20 +39,20 @@ def test_local_runtime_error_text_does_not_impersonate_provider_authentication()
     assert "authentication or access is invalid" not in str(fallback.content)
 
 
-def test_current_upload_error_has_safe_attachment_message_and_generic_contract() -> None:
+def test_current_upload_error_has_safe_attachment_message_and_typed_contract() -> None:
     middleware = _middleware()
-    exc = RuntimeError("Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits")
+    exc = RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
 
-    assert middleware._classify_error(exc) == (False, "generic")
-    fallback = middleware._build_user_fallback_message(exc, "generic")
+    assert middleware._classify_error(exc) == (False, "current_upload")
+    fallback = middleware._build_user_fallback_message(exc, "current_upload")
     assert fallback.additional_kwargs == {
         "deerflow_error_fallback": True,
-        "error_code": "LLM_REQUEST_FAILED",
-        "error_type": "LLM_REQUEST_FAILED",
-        "error_reason": "generic",
-        "error_detail": "LLM_REQUEST_FAILED",
+        "error_code": "CURRENT_UPLOAD_UNAVAILABLE",
+        "error_type": "CURRENT_UPLOAD_UNAVAILABLE",
+        "error_reason": "current_upload",
+        "error_detail": "CURRENT_UPLOAD_UNAVAILABLE",
     }
-    assert fallback.content == ("The current image attachment could not be securely read or validated. Please attach the image again and retry.")
+    assert fallback.content == ("The current image attachment could not be securely read or validated. Please retry this Run; if the problem continues, remove and attach the image again.")
 
 
 def test_openai_authentication_error_is_classified_from_provider_structure() -> None:

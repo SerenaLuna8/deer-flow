@@ -56,6 +56,16 @@ export function projectMcpDeleteErrorMessage(error: unknown): string {
   return adminAssetErrorMessage(error);
 }
 
+export function projectSkillDeleteErrorMessage(error: unknown): string {
+  if (error instanceof SharedAssetApiError && error.code === "ASSET_IN_USE") {
+    return "无法删除此 Skill：仍有 Agent 或历史运行引用它的版本。可先停用以阻止后续使用；物理删除需解除 Agent 引用，并等待历史运行按保留策略清理后重试。";
+  }
+  if (error instanceof SharedAssetApiError && error.code === "ASSET_CONFLICT") {
+    return "Skill 状态已发生变化，请刷新后重试。";
+  }
+  return adminAssetErrorMessage(error);
+}
+
 export function projectAgentDeleteErrorMessage(error: unknown): string {
   if (error instanceof SharedAssetApiError && error.code === "ASSET_CONFLICT") {
     return "无法删除此 Agent：它可能是项目当前默认 Agent、已被对话、自动化或运行记录引用，或状态已经变化。请刷新页面并处理相关引用后重试。";
@@ -96,6 +106,19 @@ export function projectAgentVersionCanPublish(
     item.scope === "project" &&
     version?.workflow_status === "draft" &&
     version.supersedes_version_id === item.current_published_version_id &&
+    projectCapabilities.includes("shared_assets.manage_bindings") &&
+    item.capabilities.includes("shared_assets.manage_bindings")
+  );
+}
+
+export function projectSkillVersionCanPublish(
+  item: ProjectAgentPublishItem,
+  projectCapabilities: readonly Capability[],
+  version: { workflow_status: string } | null,
+): boolean {
+  return (
+    item.scope === "project" &&
+    version?.workflow_status === "draft" &&
     projectCapabilities.includes("shared_assets.manage_bindings") &&
     item.capabilities.includes("shared_assets.manage_bindings")
   );
@@ -241,8 +264,9 @@ export function projectAssetCanDelete(
     item.scope === "project" &&
     item.capabilities.includes("shared_assets.edit");
   if (!canEdit) return false;
+  const publishedPackageNeedsPublisher = kind === "agents" || kind === "skills";
   return (
-    kind !== "agents" ||
+    !publishedPackageNeedsPublisher ||
     item.current_published_version_id === null ||
     item.capabilities.includes("shared_assets.manage_bindings")
   );

@@ -153,9 +153,11 @@ class AgentDesignSessionRow(Base):
             "ix_agent_design_sessions_resume",
             "project_id",
             "owner_user_id",
-            "status",
-            updated_at.desc(),
+            created_at.desc(),
             id.desc(),
+            postgresql_where=text(
+                "status NOT IN ('completed', 'cancelled')",
+            ),
         ),
     )
 

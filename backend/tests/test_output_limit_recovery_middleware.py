@@ -22,6 +22,7 @@ from deerflow.agents.middlewares.output_limit_recovery_middleware import (
 )
 from deerflow.agents.middlewares.token_budget_middleware import (
     OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY,
+    TOKEN_BUDGET_STATUS_KEY,
     TokenBudgetMiddleware,
 )
 from deerflow.agents.thread_state import (
@@ -437,7 +438,14 @@ def test_token_budget_without_recovery_accepts_its_private_marker_channel() -> N
     )
 
     assert OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY not in result
-    assert "TOKEN BUDGET EXCEEDED" in str(result["messages"][-1].content)
+    final_message = result["messages"][-1]
+    assert final_message.content == "budget answer"
+    assert "TOKEN BUDGET EXCEEDED" not in str(final_message.content)
+    assert final_message.response_metadata[TOKEN_BUDGET_STATUS_KEY] == {
+        "version": 1,
+        "status": "exceeded",
+        "reason": "total",
+    }
 
 
 def _checkpoint_agent(

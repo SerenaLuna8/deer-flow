@@ -77,7 +77,6 @@ from app.worker.service import (
     JobSettlement,
     LeaseLost,
 )
-from deerflow.error_codes import PublicRunErrorCode
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -86,7 +85,10 @@ from deerflow.persistence.shared_assets import (
     SkillDesignSessionRow,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
-from deerflow.runtime.events.models import StoredStreamFrame
+from deerflow.runtime.events.models import (
+    STREAM_TERMINAL_ERROR_CODES,
+    StoredStreamFrame,
+)
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.trace_context import normalize_trace_id, request_trace_context
@@ -615,17 +617,15 @@ class PrivateRunJobHandler:
         if status in {"cancelled", "interrupted"}:
             return AgentExecutionResult.cancelled()
         if status in {"error", "failed", "timeout"}:
-            if isinstance(terminal.data, Mapping) and terminal.data.get(
-                "error_code",
-            ) in {
-                PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
-                PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
-            }:
+            if isinstance(terminal.data, Mapping) and terminal.data.get("error_code") in STREAM_TERMINAL_ERROR_CODES:
                 return AgentExecutionResult.failed(
                     str(terminal.data["error_code"]),
                     retryable=False,
                 )
-            return AgentExecutionResult.failed("AGENT_EXECUTION_FAILED")
+            return AgentExecutionResult.failed(
+                "AGENT_EXECUTION_FAILED",
+                retryable=False,
+            )
         return AgentExecutionResult.failed("DURABLE_STREAM_TERMINAL_INVALID")
 
     async def _heartbeat(

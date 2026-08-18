@@ -22,8 +22,10 @@ import {
 import { ThreadContext } from "@/components/workspace/messages/context";
 import { ExecutionApprovalCard } from "@/components/workspace/messages/execution-approval-card";
 import {
+  canRestoreRunFailureInput,
   canRetryModelOutputLimit,
   RunFailureAlert,
+  shouldShowRunFailureAlert,
 } from "@/components/workspace/run-failure-alert";
 import {
   SidecarProvider,
@@ -72,6 +74,8 @@ import type { AgentThread } from "@/core/threads";
 import { resolveAgentExecutionAvailability } from "@/core/threads/agent-mode";
 import {
   getLatestRegenerationTarget,
+  resolveFailedRunComposerInput,
+  resolveThreadAvailability,
   useBranchThread,
   useThreadMetadata,
   useThreadStream,
@@ -157,20 +161,25 @@ export function ScopedChatPage({
   const welcomeDismissedThreadIdsRef = useRef(new Set<string>());
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
-  const modelCatalog = useModels();
-  const { models, tokenUsageEnabled } = modelCatalog;
-  const threadTokenUsage = useThreadTokenUsage(threadId, {
-    enabled: tokenUsageEnabled && !isMock,
-    privateWork,
-  });
   const threadMetadata = useThreadMetadata(threadId, {
     enabled: !isMock,
     isMock,
     privateWork,
   });
-  const agentModel = useThreadAgentModelRef(threadMetadata.data?.metadata);
+  const threadAvailability = resolveThreadAvailability(threadMetadata);
+  const threadReady = threadAvailability === "available";
+  const threadMissing = threadAvailability === "not-found";
+  const modelCatalog = useModels({ enabled: threadReady });
+  const { models, tokenUsageEnabled } = modelCatalog;
+  const threadTokenUsage = useThreadTokenUsage(threadId, {
+    enabled: tokenUsageEnabled && !isMock && threadReady,
+    privateWork,
+  });
+  const agentModel = useThreadAgentModelRef(threadMetadata.data?.metadata, {
+    enabled: threadReady,
+  });
   const agentExecutionAvailability = resolveAgentExecutionAvailability({
-    required: true,
+    required: threadReady,
     agentModelRef: agentModel.modelRef,
     agentModelLoading:
       threadMetadata.isLoading ||
@@ -181,14 +190,27 @@ export function ScopedChatPage({
     modelsLoading: modelCatalog.isLoading || modelCatalog.isFetching,
     modelsError: modelCatalog.error,
   });
-  const agentModelBlocked = agentExecutionAvailability !== "ready";
-  const agentModelUnavailable = agentExecutionAvailability === "unavailable";
+  const agentModelBlocked =
+    !threadReady || agentExecutionAvailability !== "ready";
+  const agentSuspended = threadReady && agentModel.agentSuspended;
+  const agentModelUnavailable =
+    threadReady &&
+    !agentSuspended &&
+    agentExecutionAvailability === "unavailable";
   const handleAgentModelRetry = useCallback(() => {
     void Promise.all([agentModel.refetch(), modelCatalog.refetch()]);
   }, [agentModel, modelCatalog]);
   const branchThread = useBranchThread(privateWork);
   const backendTokenUsage = threadTokenUsageToTokenUsage(threadTokenUsage.data);
   const mountedRef = useRef(false);
+  const [composerRestoreRequest, setComposerRestoreRequest] = useState<{
+    threadId: string;
+    id: string;
+    text: string;
+    files: NonNullable<
+      ReturnType<typeof resolveFailedRunComposerInput>
+    >["files"];
+  } | null>(null);
 
   useEffect(() => {
     mountedRef.current = true;
@@ -220,6 +242,7 @@ export function ScopedChatPage({
     displayThreadId: threadId,
     context: settings.context,
     agentModelRef: agentModel.modelRef,
+    enabled: threadReady,
     isMock,
     privateWork,
     onSend: () => {
@@ -264,7 +287,7 @@ export function ScopedChatPage({
     privateWork,
     threadId,
     persistedApprovalId: persistedExecutionApproval?.approval_id,
-    enabled: !isMock,
+    enabled: !isMock && threadReady,
   });
 
   const approval = executionApproval.approval;
@@ -463,25 +486,13 @@ export function ScopedChatPage({
     void attachRun(continuationRunId);
   }, [attachRun, continuationRunId, thread.isLoading]);
 
-  const hasThreadMessages = thread.messages.length > 0;
   const visibleMessageCount = useMemo(
     () =>
       thread.messages.filter((message) => !isHiddenFromUIMessage(message))
         .length,
     [thread.messages],
   );
-  const metadataSettled =
-    !threadMetadata.isLoading && !threadMetadata.isFetching;
-  const historySettled =
-    !isHistoryLoading && !hasMoreHistory && historyError === null;
-  const hasUsableThreadState = hasThreadMessages || hasMoreHistory;
-  const threadMissing =
-    !isMock &&
-    threadMetadata.data === null &&
-    !threadMetadata.error &&
-    metadataSettled &&
-    historySettled &&
-    !hasUsableThreadState;
+  const metadataSettled = threadAvailability !== "loading";
 
   const shouldWelcome = shouldShowThreadWelcome({
     isHistoryLoading:
@@ -494,12 +505,7 @@ export function ScopedChatPage({
   useEffect(() => {
     setIsWelcomeMode(shouldWelcome);
   }, [shouldWelcome]);
-  const threadMetadataFailed =
-    !isMock &&
-    Boolean(threadMetadata.error) &&
-    metadataSettled &&
-    historySettled &&
-    !hasUsableThreadState;
+  const threadMetadataFailed = !isMock && threadAvailability === "error";
 
   useEffect(() => {
     if (threadMissing && missingThreadFallback == null) {
@@ -510,6 +516,7 @@ export function ScopedChatPage({
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
       if (
+        !threadReady ||
         !scope.canRun ||
         approvalBlocksSending ||
         (!scope.canUpload && message.files.length > 0)
@@ -522,6 +529,7 @@ export function ScopedChatPage({
     },
     [
       approvalBlocksSending,
+      threadReady,
       scope.canRun,
       scope.canUpload,
       sendMessage,
@@ -530,7 +538,7 @@ export function ScopedChatPage({
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
-      if (!scope.canRun || approvalBlocksSending) return false;
+      if (!threadReady || !scope.canRun || approvalBlocksSending) return false;
       let sent = false;
       await sendMessage(
         threadId,
@@ -551,12 +559,12 @@ export function ScopedChatPage({
       );
       return sent;
     },
-    [approvalBlocksSending, scope.canRun, sendMessage, threadId],
+    [approvalBlocksSending, scope.canRun, sendMessage, threadId, threadReady],
   );
   const handleStop = useCallback(async () => {
-    if (!scope.canRun) return;
+    if (!threadReady || !scope.canRun) return;
     await thread.stop();
-  }, [scope.canRun, thread]);
+  }, [scope.canRun, thread, threadReady]);
   const handleRegenerate = useCallback(
     (messageId: string, supersededMessageIds: string[]) =>
       regenerateMessage(threadId, messageId, supersededMessageIds),
@@ -606,7 +614,29 @@ export function ScopedChatPage({
       ),
     [thread.messages],
   );
-  const hasRunFailure = Boolean(thread.error) || hasTerminalRunFailure;
+  const hasRunFailure = shouldShowRunFailureAlert({
+    hasTerminalRunFailure,
+    streamError: thread.error,
+  });
+  const recoverableFailedInput = useMemo(() => {
+    if (
+      !hasRunFailure ||
+      !runFailureRunId ||
+      !canRestoreRunFailureInput(runFailureCode)
+    ) {
+      return null;
+    }
+    return resolveFailedRunComposerInput(thread.messages, runFailureRunId);
+  }, [hasRunFailure, runFailureCode, runFailureRunId, thread.messages]);
+  const handleRestoreFailedInput = useCallback(() => {
+    if (!recoverableFailedInput) return;
+    setComposerRestoreRequest({
+      threadId,
+      id: crypto.randomUUID(),
+      text: recoverableFailedInput.text,
+      files: recoverableFailedInput.files,
+    });
+  }, [recoverableFailedInput, threadId]);
   const failedRunRegenerationTarget = useMemo(
     () =>
       runFailureRunId
@@ -857,6 +887,11 @@ export function ScopedChatPage({
                       failureCode={runFailureCode}
                       retryDisabled={!canRetryFailedRun}
                       onRetryWithoutThinking={handleRetryWithoutThinking}
+                      onRestoreInput={
+                        recoverableFailedInput
+                          ? handleRestoreFailedInput
+                          : undefined
+                      }
                     />
                   )}
                   {agentModelUnavailable && (
@@ -883,6 +918,28 @@ export function ScopedChatPage({
                       </AlertDescription>
                     </Alert>
                   )}
+                  {agentSuspended && (
+                    <Alert
+                      variant="destructive"
+                      className="border-destructive/30 bg-destructive/5 mb-3"
+                      data-testid="agent-suspended-alert"
+                    >
+                      <AlertTitle>
+                        {t.conversation.agentSuspendedTitle}
+                      </AlertTitle>
+                      <AlertDescription className="flex items-center justify-between gap-3">
+                        <span>{t.conversation.agentSuspendedDescription}</span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={handleAgentModelRetry}
+                        >
+                          {t.common.retry}
+                        </Button>
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   {mountedRef.current ? (
                     <InputBox
                       className={cn(
@@ -895,6 +952,11 @@ export function ScopedChatPage({
                       agentMetadata={threadMetadata.data?.metadata}
                       agentModelRef={agentModel.modelRef}
                       draftConversationScope={threadId}
+                      restoreRequest={
+                        composerRestoreRequest?.threadId === threadId
+                          ? composerRestoreRequest
+                          : null
+                      }
                       autoFocus={isWelcomeMode}
                       status={
                         isUploading

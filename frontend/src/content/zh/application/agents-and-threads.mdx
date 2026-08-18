@@ -42,15 +42,20 @@ ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每�
 1. 打开 ActWeave 应用并进入一个项目。
 2. 点击项目菜单中的 **Agents**（Agent 管理）。
 3. 点击 **New Agent**（新建 Agent）。
-4. 填写名称、说明、四项指令文档、模型、工具组，以及精确的 Skill/MCP 版本。
-5. 创建后会得到一个停用的 Agent 和 Draft v1；创建者后续编辑指令、能力绑定或恢复历史版本，也只会创建新的 Draft。
-6. 具备资产绑定管理权限的项目管理员检查并发布 Draft，然后才能启用 Agent。发布和启用是两个独立操作，均使用资产版本号进行并发保护。
+4. 输入名称和用途说明，通过 AI 对话回答澄清问题。
+5. 审阅 AI 生成的 Blueprint、假设和冲突。错误级冲突会阻止创建，必须继续对话让 AI 重新生成；只手工修改文档不会解除冲突。可在当前会话修改四项指令文档和 Agent 名称，重名时无需丢弃已有对话和设计稿。
+6. Builder 会自动绑定项目中已启用的 System Skill/MCP；项目自建 Skill/MCP 在创建后从 Agent 详情页选择精确版本。
+7. 确认后会得到一个停用的 Agent 和 Draft v1；创建者后续编辑指令、能力绑定或恢复历史版本，也只会创建新的 Draft。
+8. 具备资产绑定管理权限的项目管理员检查并发布 Draft，然后才能启用 Agent。发布和启用是两个独立操作，均使用资产版本号进行并发保护。
 
 #### 通过 API
 
 `POST /api/projects/{project_id}/agents` 接受完整的 Agent 定义，而不是只有名称的空壳：`slug`、`display_name`、`description`、`agents_instructions`、`soul`、`identity`、`user_context`、`model_ref`、`model_settings`、`tool_groups`、`skill_version_ids` 和 `mcp_version_ids` 都必须显式提交。响应同时返回停用的 Agent 资产和 Draft v1；缺少完整定义会被拒绝。
 
 创建与编辑要求 `shared_assets.edit`。发布、启用和停用要求 `shared_assets.manage_bindings`：作者负责产生 Draft，发布者负责决定哪个 Draft 进入运行面。发布使用 `POST /api/projects/{project_id}/agents/{agent_id}/versions/{version_id}/publish`，请求包含当前 `expected_asset_version`。平台管理员的项目覆盖 API 采用相同的完整定义和分权契约；不存在全局 workspace Agent 客户端。
+
+如果会话所有者后来只保留 `shared_assets.read`，仍可只读查看本人已保存的 Builder 会话，但不能继续对话、编辑、取消或提交。
+每位用户在同一项目最多保留 8 个未完成的设计会话；达到上限时，请先恢复或取消已有设计。
 
 </Steps>
 
@@ -62,6 +67,7 @@ ActWeave 允许你创建多个具有不同专业领域的自定义 Agent。每�
 - `name`（slug）：用于 API 和文件路径的 ASCII 标识符（例如 `data-analyst`）
 
 如果派生的 slug 与同一资产作用域中的现有 Agent 冲突，服务端会返回冲突并要求选择唯一名称。
+Builder 创建时，审阅页中的规范化名称同时作为新 Agent 的显示名和 slug；通用 API 仍允许显式分别提交 `display_name` 与 `slug`。
 
 ### Agent 存储
 
@@ -80,6 +86,8 @@ Agent 定义、版本、发布状态和项目绑定存储在 PostgreSQL 中，�
 ### 执行
 
 每次你发送消息，LangGraph 从最新检查点恢复线程状态，运行 Lead Agent，并更新状态。流式事件在 Agent 工作时发送到浏览器。
+
+如果项目 Agent 被停用，旧线程历史仍可读取，但不能继续发送、重新生成、编辑后重跑或提交 human-input。请先重新启用该 Agent，或选择其他 Agent 新建线程。
 
 ### 线程持久化配置
 

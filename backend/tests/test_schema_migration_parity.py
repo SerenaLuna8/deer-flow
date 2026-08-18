@@ -15,10 +15,13 @@ from pathlib import Path
 import pytest
 import sqlalchemy
 from sqlalchemy import text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
+from sqlalchemy.schema import CreateIndex
 
 import deerflow.persistence.bootstrap as bootstrap_module
+from deerflow.persistence.base import Base
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
     KNOWN_CHAIN_REVISIONS,
@@ -73,6 +76,7 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
             "initial_schema",
             "approval_output_delivery",
             "model_catalog_simplify",
+            "agent_design_resume_index",
         )
     )
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
@@ -88,7 +92,7 @@ def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
-    assert CURRENT_SCHEMA_REVISION == "model_catalog_simplify"
+    assert CURRENT_SCHEMA_REVISION == "agent_design_resume_index"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -97,10 +101,24 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
     assert not list((MIGRATIONS_PATH / "baseline").glob("*.sql"))
     assert sorted(path.name for path in (MIGRATIONS_PATH / "versions").glob("*.py")) == [
+        "agent_design_resume_index.py",
         "approval_output_delivery.py",
         "initial_schema.py",
         "model_catalog_simplify.py",
     ]
+
+
+def test_agent_design_resume_index_matches_immutable_keyset_contract() -> None:
+    index = next(candidate for candidate in Base.metadata.tables["agent_design_sessions"].indexes if candidate.name == "ix_agent_design_sessions_resume")
+    expected = "CREATE INDEX ix_agent_design_sessions_resume ON agent_design_sessions (project_id, owner_user_id, created_at DESC, id DESC) WHERE status NOT IN ('completed', 'cancelled')"
+
+    compiled = " ".join(
+        str(CreateIndex(index).compile(dialect=postgresql.dialect())).split(),
+    )
+    full_schema = " ".join(FULL_SCHEMA_PATH.read_text(encoding="utf-8").split())
+
+    assert compiled == expected
+    assert expected in full_schema
 
 
 async def _catalog_signature(database_url: str):
@@ -612,7 +630,7 @@ async def test_upgrade_runner_is_a_noop_on_a_current_database(
     finally:
         await engine.dispose()
 
-    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    result = await upgrade_postgres(postgres_database_url)
     assert result.applied is False
     assert result.from_revision == CURRENT_SCHEMA_REVISION
     assert result.to_revision == CURRENT_SCHEMA_REVISION
@@ -639,7 +657,7 @@ async def test_pre_release_markers_are_not_supported_upgrade_ancestors(
         await engine.dispose()
 
     with pytest.raises(PostgresUpgradeError) as error:
-        await upgrade_postgres(postgres_database_url, assume_yes=True)
+        await upgrade_postgres(postgres_database_url)
     assert "显式重建" in str(error.value)
 
 
@@ -648,7 +666,7 @@ async def test_upgrade_runner_refuses_an_empty_database(
     postgres_database_url: str,
 ) -> None:
     with pytest.raises(PostgresUpgradeError) as error:
-        await upgrade_postgres(postgres_database_url, assume_yes=True)
+        await upgrade_postgres(postgres_database_url)
     assert "setup-db" in str(error.value)
 
 
@@ -687,7 +705,7 @@ async def test_upgrade_runner_upgrades_a_behind_database_and_verifies_the_result
 
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", _drill_upgrade)
 
-    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    result = await upgrade_postgres(postgres_database_url)
     assert applied_urls == [postgres_database_url]
     assert result.applied is True
     assert result.from_revision == CURRENT_SCHEMA_REVISION
@@ -719,13 +737,79 @@ async def test_output_delivery_migration_upgrades_initial_schema_catalog(
     finally:
         await engine.dispose()
 
-    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    result = await upgrade_postgres(postgres_database_url)
     assert result.applied is True
     assert result.from_revision == "initial_schema"
     assert result.to_revision == CURRENT_SCHEMA_REVISION
     state, signature = await _catalog_signature(postgres_database_url)
     assert state == "current"
     assert signature == FINAL_M7_CATALOG_SIGNATURE
+
+
+@pytest.mark.asyncio
+async def test_agent_design_resume_index_migration_supports_incomplete_keyset(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text("DROP INDEX ix_agent_design_sessions_resume"),
+            )
+            await connection.execute(
+                text(
+                    """CREATE INDEX ix_agent_design_sessions_resume
+                       ON agent_design_sessions
+                          (project_id, owner_user_id, status,
+                           updated_at DESC, id DESC)""",
+                ),
+            )
+            await connection.execute(
+                text(
+                    "UPDATE alembic_version SET version_num = 'model_catalog_simplify'",
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url)
+
+    assert result.applied is True
+    assert result.from_revision == "model_catalog_simplify"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION
+    state, signature = await _catalog_signature(postgres_database_url)
+    assert state == "current"
+    assert signature == FINAL_M7_CATALOG_SIGNATURE
+
+    engine = create_async_engine(postgres_database_url, poolclass=NullPool)
+    try:
+        async with engine.begin() as connection:
+            await connection.execute(text("SET LOCAL enable_seqscan = off"))
+            plan_rows = await connection.execute(
+                text(
+                    """EXPLAIN (COSTS OFF)
+                       SELECT id
+                         FROM agent_design_sessions
+                        WHERE project_id = :project_id
+                          AND owner_user_id = :owner_user_id
+                          AND status NOT IN (:completed, :cancelled)
+                        ORDER BY created_at DESC, id DESC
+                        LIMIT 20""",
+                ),
+                {
+                    "project_id": uuid.uuid4(),
+                    "owner_user_id": str(uuid.uuid4()),
+                    "completed": "completed",
+                    "cancelled": "cancelled",
+                },
+            )
+            plan = "\n".join(str(row[0]) for row in plan_rows)
+    finally:
+        await engine.dispose()
+
+    assert "ix_agent_design_sessions_resume" in plan
+    assert "Sort" not in plan
 
 
 @pytest.mark.asyncio
@@ -745,7 +829,7 @@ async def test_model_catalog_migration_removes_obsolete_fields(
     finally:
         await engine.dispose()
 
-    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    result = await upgrade_postgres(postgres_database_url)
 
     assert result.applied is True
     assert result.from_revision == "approval_output_delivery"
@@ -805,7 +889,7 @@ async def test_model_catalog_migration_rewrites_durable_model_references(
     finally:
         await engine.dispose()
 
-    result = await upgrade_postgres(postgres_database_url, assume_yes=True)
+    result = await upgrade_postgres(postgres_database_url)
     assert result.applied is True
     assert result.from_revision == "approval_output_delivery"
     assert result.to_revision == CURRENT_SCHEMA_REVISION
@@ -996,7 +1080,7 @@ async def test_model_catalog_migration_rejects_unknown_durable_reference(
         await engine.dispose()
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
-        await upgrade_postgres(postgres_database_url, assume_yes=True)
+        await upgrade_postgres(postgres_database_url)
 
     engine = create_async_engine(postgres_database_url, poolclass=NullPool)
     try:
@@ -1067,7 +1151,7 @@ async def test_model_catalog_migration_rejects_invalid_runtime_policy_reference(
         await engine.dispose()
 
     with pytest.raises(sqlalchemy.exc.IntegrityError):
-        await upgrade_postgres(postgres_database_url, assume_yes=True)
+        await upgrade_postgres(postgres_database_url)
 
     engine = create_async_engine(postgres_database_url, poolclass=NullPool)
     try:
@@ -1118,5 +1202,5 @@ async def test_upgrade_runner_fails_closed_when_the_migrated_catalog_does_not_ve
     monkeypatch.setattr(upgrade_module, "_run_alembic_upgrade_sync", lambda url: None)
 
     with pytest.raises(PostgresUpgradeError) as error:
-        await upgrade_postgres(postgres_database_url, assume_yes=True)
+        await upgrade_postgres(postgres_database_url)
     assert "升级后校验失败" in str(error.value)

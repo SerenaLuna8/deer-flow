@@ -23,8 +23,13 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 - 项目私有 Thread/Run、持久化 SSE、断线恢复、取消、重试和文件交付。删除会话会
   立即撤销该会话仍在运行的服务端执行权限并结束其 durable stream；已经发出的外部
   操作无法由平台召回。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
-  消息时复用同一上传结果，不会重复上传。
-- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill 可通过对话创建或修订新版本，修订草稿需显式发布后才生效。
+  消息时复用同一上传结果，不会重复上传。已经持久化的完整回复不会因运行时或沙箱
+  回收失败被改写为 Agent 执行失败；此类回收问题作为 Worker 运维错误重试和记录。
+- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill
+  仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz` 或 `.tgz`
+  包；常见 macOS 归档元数据会被忽略。新建 Skill 保持 suspended，修订草稿需由具备
+  资产发布权限的成员显式发布后才生效；超出上传、解压、单文件或成员数限制的包会以
+  明确的大小限制错误拒绝。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
@@ -40,12 +45,13 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 | -------- | -------------------- | ------------------------------------ |
 | Admin    | 工作、能力、项目管理 | 项目治理、成员、凭证、审计及资产发布 |
 | Editor   | 工作、能力           | 运行工作，并创建或编辑项目资产 Draft |
-| Runner   | 工作                 | 运行工作；不进入资产管理工作台       |
-| Viewer   | 工作（只读）         | 查看自己的既有工作；不能创建或运行   |
+| Runner   | 工作、Agent（只读）  | 运行工作；只读查看 Agent             |
+| Viewer   | 工作、Agent（只读）  | 查看自己的既有工作和 Agent；不能运行 |
 
 “工作”包含会话、Automation 和 Memory；渠道连接属于“项目管理”，只对具备
-`project.channels.manage` 的项目管理员显示。Runner 为执行选择 Agent 时保留必要的服务端
-资产读取，但 Agent/Skill/MCP 管理页面及所有写操作仍按编辑或治理 capability 拒绝。
+`project.channels.manage` 的项目管理员显示。Runner 和 Viewer 可只读查看 Agent 目录，以及
+本人已有且未完成的 Agent Builder 会话；创建、继续设计、编辑、取消、提交和生命周期操作仍
+按编辑或治理 capability 拒绝。Skill/MCP 作者工作台也不向只读角色开放。
 
 ## 运行架构
 
@@ -107,10 +113,10 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `model_catalog_simplify`。
+  `agent_design_resume_index`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
-- 已知旧版本必须先备份，再通过 `make upgrade-db` 显式升级。
+- 已知旧版本可直接通过 `make upgrade-db` 显式升级。
 - 未知 marker、未纳管的非空 schema 或 catalog drift 会安全失败。
 - Gateway、Worker 和 Scheduler 从不自动迁移或修复 schema。
 - 打包 System Asset 有新增不可变 release 时，先停止运行服务，在维护窗口执行

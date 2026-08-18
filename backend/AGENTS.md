@@ -95,6 +95,10 @@ import `app.*`.
   `403`, except where an existing route family deliberately hides both.
 - Repositories do not commit unless they explicitly own the complete operation.
   Preserve the established Project -> Membership -> resource lock order.
+- Agent Builder prepare, settlement, stale recovery, and cancellation use
+  Project -> Membership -> session advisory fence -> turn operation -> design
+  session. Locked rereads refresh ORM identity state, and cancellation
+  terminalizes active turn operations in the same transaction.
 - PostgreSQL RLS is not used. Isolation therefore depends on immutable contexts,
   scoped repositories, composite constraints, and a non-superuser app role.
 - Public request/response models reject unknown authority fields. Copy the error
@@ -120,7 +124,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `model_catalog_simplify`. Fresh setup runs that schema directly
+the current marker is `agent_design_resume_index`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -130,9 +134,8 @@ or downgrade an application database.
   Chinese comment. LangGraph comments are applied after its third-party setup,
   and each physical `run_events` partition copies the parent comments. Run
   `uv run python scripts/generate_schema_comments.py --check` after schema edits.
-- `make upgrade-db` is the sole path for a database at a known ancestor marker;
-  back up first. It runs the migration chain and verifies parity with a fresh
-  install.
+- `make upgrade-db` is the sole path for a database at a known ancestor marker.
+  It runs the migration chain and verifies parity with a fresh install.
 - `make check-db` is read-only and reports ready, upgrade-required, or a
   fail-closed recreate/unavailable state without exposing credentials.
 - `make upgrade-system-assets` is an explicit maintenance-window action for a
@@ -163,6 +166,10 @@ or downgrade an application database.
 - Durable events are committed before notification. PostgreSQL `NOTIFY` is only
   a wake-up hint; correctness comes from scoped reads, monotonic cursors, and one
   durable terminal outcome.
+- Once a private Run has durably completed its assistant response and required
+  file finalization, teardown failure is a Worker operational fault, not an
+  Agent-execution failure. Keep its in-process resource-cleanup barrier and
+  record the fault, but never downgrade that successful business terminal state.
 - Public event and message sequence values remain canonical signed-BIGINT decimal
   strings at browser boundaries; never coerce them to JavaScript numbers.
 - Checkpoint mode is process-frozen. All Gateway and Worker processes sharing a
@@ -199,6 +206,12 @@ or downgrade an application database.
   a new draft without moving the live pointer, while a binding manager explicitly
   publishes the selected draft and controls activation. No flow mutates history
   or moves a pointer backward to an old row.
+- Project Skill creation is available only through a validated archive upload
+  or an AI Builder commit; there is no metadata-only or template-create API.
+- Runtime-visible Skill names are unique case-insensitively within a project,
+  across active Project Skills and enabled System Skill bindings. Activation and
+  binding enable enforce the inverse checks under the project lock; Run
+  resolution rejects any legacy conflicting closure.
 - A newly admitted Run pins exact versions and checksums. Unrelated catalog
   changes do not invalidate it, while revoked membership, capability, binding,
   Credential, or lease fails at the applicable execution boundary.
@@ -216,6 +229,23 @@ or downgrade an application database.
   immutable version fields, not files in this repository.
 - Agent payload checksums are recomputed at resolution and Worker materialization.
   Legacy schema v1 fields outside its historical digest must remain empty.
+- Incomplete Agent Builder pagination uses an opaque, immutable `created_at + id`
+  keyset; `updated_at` is presentation ordering only. Each project/owner may
+  retain at most eight incomplete sessions, enforced under the create-admission
+  lock after idempotency replay. Commit's optional slug is normalized,
+  secret-checked, and included in the idempotency checksum; the effective slug
+  becomes both the new Agent slug/display name and is synced back to the session.
+  `AGENT_DESIGN_SECRET_DETECTED` (422),
+  `AGENT_DESIGN_SLUG_CONFLICT` (409), and
+  `AGENT_DESIGN_CONFLICT_UNRESOLVED` (409) are domain errors, not generic CAS
+  conflicts; `AGENT_DESIGN_SESSION_LIMIT_EXCEEDED` (429) instructs the owner to
+  resume or cancel an existing design. Builder HTTP responses default to the
+  strict v1 shape for already-open clients; the current frontend explicitly
+  requests `contract_version=2` for assumptions, conflicts, and pagination.
+- Project Agent deletion treats non-revoked legacy Channel Connections and
+  unconsumed, unexpired OAuth states as live references alongside relational
+  references. OAuth begin/callback revalidate the project, capability, and
+  executable Agent inside the transaction that writes the state or connection.
 
 ### Memory, audit, quota, and retention
 
@@ -339,8 +369,9 @@ source constant changes, update this section and the owning detailed document.
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
 - SkillScan rejects unsafe archives while retaining the final 100 MiB and the
   16384-file, bounded-log contract.
-- Project Skill archives remain limited to 100 MiB and 16384 regular files; the
-  archive-create routes have a scoped 160 MiB wire limit.
+- Project Skill archives remain limited to 100 MiB total, 64 MiB per regular
+  file, and 16384 regular files; archive-create routes have a scoped
+  160 MiB wire limit.
 - Current-message vision injects at most four unique images with a 20 MiB per-image limit.
 - Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
 - Verified Skill reads remain active for `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12).

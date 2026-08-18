@@ -437,7 +437,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--replace",
         action="store_true",
-        help="显式允许替换同 slug 的 active Project Skill；相同 checksum 不写入",
+        help="显式允许绑定管理员替换同 slug 的 active Project Skill；相同 checksum 不写入",
     )
     return parser
 

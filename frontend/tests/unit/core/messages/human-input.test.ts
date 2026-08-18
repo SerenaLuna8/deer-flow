@@ -2,16 +2,18 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { expect, test } from "@rstest/core";
 
 import {
-  buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildInitialHumanInputFormValues,
   buildHumanInputResponseText,
+  createHumanInputFormResponse,
+  humanInputResponseDisplayValue,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
   deriveHumanInputThreadState,
   extractHumanInputRequest,
   extractHumanInputResponse,
   hasOpenHumanInputRequest,
+  parseHumanInputRequest,
   readHumanInputFormValue,
   shouldClearPendingHumanInputOnThreadError,
 } from "@/core/messages/human-input";
@@ -74,6 +76,29 @@ test("extractHumanInputResponse reads valid human message metadata", () => {
   const message = {
     type: "human",
     content: "For your clarification, my answer is: staging",
+    additional_kwargs: {
+      hide_from_ui: true,
+      human_input_response: response,
+    },
+  } as unknown as Message;
+
+  expect(extractHumanInputResponse(message)).toEqual(response);
+});
+
+test("extractHumanInputResponse preserves structured form values separately", () => {
+  const response = {
+    version: 1,
+    kind: "human_input_response",
+    source: "ask_clarification",
+    request_id: "clarification:call-form",
+    response_kind: "text",
+    value: "Environment: staging",
+    form_values: { environment: "staging", smoke_test: true },
+  };
+  const message = {
+    type: "human",
+    content:
+      'For your clarification "Provide deployment details", my answer is: Environment: staging [values: {"environment":"staging","smoke_test":true}]',
     additional_kwargs: {
       hide_from_ui: true,
       human_input_response: response,
@@ -430,7 +455,7 @@ test("form values use own-property reads and seed checkbox false", () => {
   });
 });
 
-test("builds a stable collision-free form summary including checkbox false", () => {
+test("separates the visible form summary from structured submission values", () => {
   const request = extractHumanInputRequest(toolMessage(formPayload))!;
   const values = {
     receipts: ["A-1", "A-2"],
@@ -445,9 +470,90 @@ test("builds a stable collision-free form summary including checkbox false", () 
   expect(buildHumanInputFormSummary(request, values)).toBe(
     "Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30",
   );
-  expect(buildHumanInputFormSubmissionValue(request, values)).toBe(
-    'Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30 [values: {"title":"Taxi","amount":"300","category":"travel","receipts":["A-1","A-2"],"urgent":false,"spent_on":"2026-07-30"}]',
+  const response = createHumanInputFormResponse(request, values);
+  expect(response.value).toBe(
+    "Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30",
   );
+  expect(response.form_values).toEqual({
+    title: "Taxi",
+    amount: "300",
+    category: "travel",
+    receipts: ["A-1", "A-2"],
+    urgent: false,
+    spent_on: "2026-07-30",
+  });
+  expect(buildHumanInputResponseText(request, response)).toBe(
+    'For your clarification "Please provide the expense details.", my answer is: Title: Taxi; Amount: 300; Category: travel; Receipts: A-1, A-2; Urgent: no; Spent on: 2026-07-30 [values: {"title":"Taxi","amount":"300","category":"travel","receipts":["A-1","A-2"],"urgent":false,"spent_on":"2026-07-30"}]',
+  );
+});
+
+test("keeps an optional-only empty form response valid", () => {
+  const request = parseHumanInputRequest({
+    version: 2,
+    kind: "human_input_request",
+    source: "ask_clarification",
+    request_id: "clarification:optional-form",
+    question: "Add optional details",
+    input_mode: "form",
+    fields: [
+      {
+        name: "note",
+        label: "Note",
+        type: "textarea",
+        required: false,
+      },
+    ],
+  });
+  expect(request).not.toBeNull();
+
+  const response = createHumanInputFormResponse(request!, {});
+  expect(response.value).toBe("-");
+  expect(response.form_values).toEqual({});
+  expect(
+    extractHumanInputResponse({
+      type: "human",
+      content: "",
+      additional_kwargs: { human_input_response: response },
+    } as unknown as Message),
+  ).toEqual(response);
+  expect(
+    humanInputResponseDisplayValue(request!, {
+      ...response,
+      form_values: undefined,
+      value: " [values: {}]",
+    }),
+  ).toBe("-");
+});
+
+test("hides legacy inline form values from the answered-card display", () => {
+  const request = parseHumanInputRequest({
+    version: 2,
+    kind: "human_input_request",
+    source: "ask_clarification",
+    request_id: "clarification:legacy-form",
+    question: "Provide deployment details",
+    input_mode: "form",
+    fields: [
+      {
+        name: "environment",
+        label: "Environment",
+        type: "text",
+        required: true,
+      },
+    ],
+  });
+  expect(request).not.toBeNull();
+
+  expect(
+    humanInputResponseDisplayValue(request!, {
+      version: 1,
+      kind: "human_input_response",
+      source: "ask_clarification",
+      request_id: "clarification:legacy-form",
+      response_kind: "text",
+      value: 'Environment: staging [values: {"environment":"staging"}]',
+    }),
+  ).toBe("Environment: staging");
 });
 
 test("a visible plain human reply closes only the latest unanswered request", () => {

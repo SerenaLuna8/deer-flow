@@ -13,15 +13,14 @@ import {
 import { projectKeys } from "@/core/projects/query-keys";
 
 import {
+  SharedAssetApiError,
   approveAdminProjectMcpVersion,
   approveProjectMcpVersion,
   changeAdminProjectAssetStatus,
   changeProjectAssetStatus,
   configureAdminMcpCredentialGrants,
-  createAdminProjectAsset,
   createAdminProjectAssetVersion,
   createConfiguredProjectMcp,
-  createProjectAsset,
   createProjectAssetVersion,
   deleteProjectAgent,
   deleteProjectMcp,
@@ -82,6 +81,8 @@ import {
 } from "./query-keys";
 import type {
   AdminAssetList,
+  AssetMutationResponse,
+  AssetSummary,
   AgentCapabilityBindingsInput,
   AdminProjectAssetStatusAction,
   AdminCredentialList,
@@ -90,7 +91,6 @@ import type {
   AssetKind,
   AssetListKind,
   CreateConfiguredMcpInput,
-  CreateAssetInput,
   ConfigureSystemMcpCredentialGrantsInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
@@ -182,6 +182,61 @@ export function projectAgentMutationQueryKeys(
     projectAssetKey(accountId, projectId, "agents"),
     projectAssetVersionsKey(accountId, projectId, "agents", assetId),
   ] as const;
+}
+
+export function isProjectAgentCasConflict(error: unknown): boolean {
+  return (
+    error instanceof SharedAssetApiError && error.code === "ASSET_CONFLICT"
+  );
+}
+
+export function applyProjectAgentMutationToCatalog(
+  current: ProjectAssetList | undefined,
+  item: AssetSummary,
+): ProjectAssetList | undefined {
+  if (!current || item.scope !== "project") return current;
+  let changed = false;
+  const projectItems = current.project_items.map((existing) => {
+    if (existing.id !== item.id) return existing;
+    changed = true;
+    return { ...existing, ...item };
+  });
+  return changed ? { ...current, project_items: projectItems } : current;
+}
+
+export function invalidateProjectAgentConflictQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId?: string | null,
+) {
+  return Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: projectAssetKey(accountId, projectId, "agents"),
+      exact: true,
+    }),
+    ...(assetId
+      ? [
+          queryClient.invalidateQueries({
+            queryKey: projectAssetVersionsKey(
+              accountId,
+              projectId,
+              "agents",
+              assetId,
+            ),
+            exact: true,
+          }),
+        ]
+      : []),
+    queryClient.invalidateQueries({
+      queryKey: projectDefaultAgentKey(accountId, projectId),
+      exact: true,
+    }),
+    invalidateProjectAgentRuntimeAssessments(queryClient, accountId, projectId),
+    queryClient.invalidateQueries({
+      queryKey: projectKeys.workspace(accountId),
+    }),
+  ]);
 }
 
 function invalidateProjectAgentMutationQueries(
@@ -358,6 +413,17 @@ export function useSetProjectDefaultAgent(
     onSuccess: whenActive((data: ProjectDefaultAgent) => {
       queryClient.setQueryData(key, data);
     }),
+    onError: whenActive(
+      async (error: unknown, input: ProjectDefaultAgentInput) => {
+        if (!isProjectAgentCasConflict(error)) return;
+        await invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          input.agent_asset_id,
+        );
+      },
+    ),
   });
 }
 
@@ -597,26 +663,6 @@ export function useAdminProjectAssetVersions(
   });
 }
 
-export function useCreateProjectAsset(
-  accountId: string,
-  projectId: string,
-  kind: MutableAssetKind,
-) {
-  const invalidate = useProjectInvalidation(accountId, projectId, kind);
-  const { runMutation, whenActive } = useProjectMutationRunner(
-    accountId,
-    projectId,
-  );
-  return useMutation({
-    mutationKey: projectAssetMutationKey(accountId, projectId, kind, "create"),
-    mutationFn: (input: CreateAssetInput) =>
-      runMutation((signal) =>
-        createProjectAsset(projectId, kind, input, signal),
-      ),
-    onSuccess: whenActive(invalidate),
-  });
-}
-
 export function useCreateConfiguredProjectMcp(
   accountId: string,
   projectId: string,
@@ -700,19 +746,6 @@ export function useImportProjectSkillArchive(
         importProjectSkillArchive(projectId, archive, signal),
       ),
     onSuccess: whenActive(invalidate),
-  });
-}
-
-export function useCreateAdminProjectAsset(
-  accountId: string,
-  projectId: string,
-  kind: MutableAssetKind,
-) {
-  const invalidate = useAdminProjectInvalidation(accountId, projectId, kind);
-  return useMutation({
-    mutationFn: (input: CreateAssetInput) =>
-      createAdminProjectAsset(projectId, kind, input),
-    onSuccess: invalidate,
   });
 }
 
@@ -1002,6 +1035,7 @@ export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
   projectId: string,
   kind: Kind,
 ) {
+  const queryClient = useQueryClient();
   const invalidate = useProjectAssetListInvalidation(
     accountId,
     projectId,
@@ -1037,7 +1071,34 @@ export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
           signal,
         ),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(async (response: AssetMutationResponse) => {
+      if (kind === "agents") {
+        queryClient.setQueryData<ProjectAssetList>(
+          projectAssetKey(accountId, projectId, "agents"),
+          (current) =>
+            applyProjectAgentMutationToCatalog(current, response.item),
+        );
+      }
+      await invalidate();
+    }),
+    onError: whenActive(
+      async (
+        error: unknown,
+        variables: {
+          assetId: string;
+          action: ProjectAssetStatusAction<Kind>;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;
+        await invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        );
+      },
+    ),
   });
 }
 
@@ -1152,6 +1213,23 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
           ),
         });
         void invalidate();
+      },
+    ),
+    onError: whenActive(
+      async (
+        error: unknown,
+        variables: {
+          assetId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        if (!isProjectAgentCasConflict(error)) return;
+        await invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        );
       },
     ),
   });
@@ -1296,6 +1374,24 @@ export function usePublishProjectAssetVersion(
               variables.assetId,
             )
           : invalidate(),
+    ),
+    onError: whenActive(
+      async (
+        error: unknown,
+        variables: {
+          assetId: string;
+          versionId: string;
+          input: PublishAssetVersionInput;
+        },
+      ) => {
+        if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;
+        await invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        );
+      },
     ),
   });
 }

@@ -25,11 +25,12 @@ import {
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  buildHumanInputFormSubmissionValue,
   buildHumanInputFormSummary,
   buildInitialHumanInputFormValues,
+  createHumanInputFormResponse,
   createHumanInputOptionResponse,
   createHumanInputTextResponse,
+  humanInputResponseDisplayValue,
   readHumanInputFormValue,
   type HumanInputField,
   type HumanInputFormValue,
@@ -317,12 +318,7 @@ export function HumanInputCard({
         setError(t.humanInput.emptyError);
         return;
       }
-      void submitResponse(
-        createHumanInputTextResponse(
-          request,
-          buildHumanInputFormSubmissionValue(request, formValues),
-        ),
-      );
+      void submitResponse(createHumanInputFormResponse(request, formValues));
       return;
     }
     if (selectedOption) {
@@ -346,6 +342,10 @@ export function HumanInputCard({
   };
 
   if (answeredResponse) {
+    const displayValue = humanInputResponseDisplayValue(
+      request,
+      answeredResponse,
+    );
     return (
       <section
         aria-label={t.humanInput.answered}
@@ -361,7 +361,7 @@ export function HumanInputCard({
               className="text-success size-5 shrink-0"
             />
             <span className="min-w-0 flex-1 break-words">
-              {t.humanInput.answeredValue(answeredResponse.value)}
+              {t.humanInput.answeredValue(displayValue)}
             </span>
             <ChevronDownIcon
               aria-hidden
@@ -477,7 +477,7 @@ export function HumanInputCard({
                 {t.humanInput.yourAnswer}
               </p>
               <p className="mt-1 text-sm leading-6 break-words whitespace-pre-wrap">
-                {answeredResponse.value}
+                {displayValue}
               </p>
             </div>
           </div>

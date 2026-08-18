@@ -29,6 +29,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import {
+  CREDENTIAL_NAME_PATTERN,
   CREDENTIAL_PAYLOAD_GROUPS,
   isSafeConfiguredProjectMcpUrl,
 } from "@/core/shared-assets";
@@ -68,6 +69,7 @@ export type CredentialSecretFieldRow = CredentialSecretInitialField & {
 };
 
 type CredentialFieldInputErrorCode =
+  | "invalid_name"
   | "empty_fields"
   | "unsupported_group"
   | "empty_field"
@@ -75,7 +77,12 @@ type CredentialFieldInputErrorCode =
   | "duplicate_field"
   | "empty_value";
 
-type CredentialFieldInputTarget = "form" | "group" | "field" | "value";
+type CredentialFieldInputTarget =
+  | "form"
+  | "credential_name"
+  | "group"
+  | "field"
+  | "value";
 
 type CredentialValidationCopy =
   Translations["adminAssets"]["dialogs"]["validation"];
@@ -84,6 +91,8 @@ const CREDENTIAL_FIELD_ERROR_MESSAGES: Record<
   CredentialFieldInputErrorCode,
   string
 > = {
+  invalid_name:
+    "凭据标识需为 1–63 位小写字母、数字、点、下划线或连字符，并以字母或数字开头和结尾。",
   empty_fields: "请至少添加一个凭据字段。",
   unsupported_group: "请选择支持的凭据字段分组。",
   empty_field: "请输入字段名。",
@@ -98,6 +107,7 @@ function credentialFieldErrorMessage(
 ): string {
   if (!copy) return CREDENTIAL_FIELD_ERROR_MESSAGES[code];
   return {
+    invalid_name: copy.invalidCredentialName,
     empty_fields: copy.emptyFields,
     unsupported_group: copy.unsupportedGroup,
     empty_field: copy.emptyField,
@@ -221,7 +231,7 @@ export function submitCredentialSecretForm({
   fixedCredentialType,
   expectedVersion,
   validationCopy,
-  clear,
+  clearSecrets,
   onCreate,
   onReplace,
 }: {
@@ -231,31 +241,47 @@ export function submitCredentialSecretForm({
   fixedCredentialType?: string;
   expectedVersion: number | undefined;
   validationCopy?: CredentialValidationCopy;
-  clear: () => void;
+  clearSecrets: () => void;
   onCreate?: (input: CreateCredentialInput) => void;
   onReplace?: (input: ReplaceCredentialInput) => void;
 }) {
-  const payload = buildCredentialPayload(rows, form, validationCopy);
   if (mode === "create") {
+    const name = field(form, "name").trim();
+    if (!CREDENTIAL_NAME_PATTERN.test(name)) {
+      throw new CredentialFieldInputError(
+        "invalid_name",
+        null,
+        "credential_name",
+        validationCopy,
+      );
+    }
+    const payload = buildCredentialPayload(rows, form, validationCopy);
     const input: CreateCredentialInput = {
-      name: field(form, "name").trim(),
+      name,
       display_name: field(form, "display_name").trim(),
       credential_type: (
         fixedCredentialType ?? field(form, "credential_type")
       ).trim(),
       payload,
     };
-    clear();
-    onCreate?.(input);
+    try {
+      onCreate?.(input);
+    } finally {
+      clearSecrets();
+    }
     return;
   }
 
+  const payload = buildCredentialPayload(rows, form, validationCopy);
   const input: ReplaceCredentialInput = {
     payload,
     expected_credential_version: expectedVersion ?? 1,
   };
-  clear();
-  onReplace?.(input);
+  try {
+    onReplace?.(input);
+  } finally {
+    clearSecrets();
+  }
 }
 
 function initialCredentialFieldRows(
@@ -283,15 +309,21 @@ function showCredentialFieldError(
   form: HTMLFormElement,
   error: CredentialFieldInputError,
 ) {
-  if (!error.rowId || error.target === "form") {
+  if (
+    error.target === "form" ||
+    (error.target !== "credential_name" && !error.rowId)
+  ) {
     return;
   }
+  const rowId = error.rowId ?? "";
   const name =
-    error.target === "group"
-      ? credentialGroupInputName(error.rowId)
-      : error.target === "field"
-        ? credentialFieldInputName(error.rowId)
-        : credentialValueInputName(error.rowId);
+    error.target === "credential_name"
+      ? "name"
+      : error.target === "group"
+        ? credentialGroupInputName(rowId)
+        : error.target === "field"
+          ? credentialFieldInputName(rowId)
+          : credentialValueInputName(rowId);
   const control = form.elements.namedItem(name);
   if (
     control &&
@@ -495,83 +527,6 @@ description: ${copy.description}
 
 ${copy.instructions}
 `;
-}
-
-export function CreateAssetDialog({
-  kind,
-  scope = "system",
-  open,
-  pending,
-  errorMessage,
-  onOpenChange,
-  onSubmit,
-}: {
-  kind: MutableKind;
-  scope?: "system" | "project";
-  open: boolean;
-  pending: boolean;
-  errorMessage: string | null;
-  onOpenChange: (open: boolean) => void;
-  onSubmit: (input: { slug: string; display_name: string }) => void;
-}) {
-  const { t } = useI18n();
-  const label = KIND_LABEL[kind];
-  return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent closeLabel={t.adminOperations.ui.close}>
-        <DialogHeader>
-          <DialogTitle>
-            {t.adminAssets.dialogs.createAssetTitle(label)}
-          </DialogTitle>
-          <DialogDescription>
-            {scope === "project" && kind === "skills"
-              ? t.adminAssets.dialogs.skillCreationDescription
-              : t.adminAssets.dialogs.assetCreationDescription(scope)}
-          </DialogDescription>
-        </DialogHeader>
-        <form
-          className="space-y-4"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const form = new FormData(event.currentTarget);
-            onSubmit({
-              display_name: field(form, "display_name").trim(),
-              slug: field(form, "slug").trim(),
-            });
-          }}
-        >
-          <label className="grid gap-2 text-sm">
-            {t.adminAssets.dialogs.name}
-            <Input name="display_name" required maxLength={120} />
-          </label>
-          <label className="grid gap-2 text-sm">
-            {t.adminAssets.dialogs.assetSlug}
-            <Input
-              name="slug"
-              required
-              minLength={3}
-              maxLength={63}
-              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-              placeholder={t.adminAssets.dialogs.slugHelp}
-              title={t.adminAssets.dialogs.slugTitle}
-            />
-          </label>
-          {errorMessage && (
-            <p role="alert" className="text-destructive text-sm">
-              {errorMessage}
-            </p>
-          )}
-          <DialogFooter>
-            <Button type="submit" disabled={pending}>
-              {pending
-                ? t.adminAssets.common.creating
-                : t.adminAssets.common.create}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 export function SkillVersionFields({ assetSlug }: { assetSlug: string }) {
@@ -1596,6 +1551,9 @@ export function CredentialSecretDialog({
   const fieldIdPrefix = useId();
   const nextFieldId = useRef(0);
   const [formKey, setFormKey] = useState(0);
+  const [credentialNameError, setCredentialNameError] = useState<string | null>(
+    null,
+  );
   const [rows, setRows] = useState<CredentialSecretFieldRow[]>(() =>
     initialCredentialFieldRows(fieldIdPrefix, initialFields),
   );
@@ -1608,6 +1566,7 @@ export function CredentialSecretDialog({
   latestInitialFields.current = initialFields;
 
   const resetForm = useCallback(() => {
+    setCredentialNameError(null);
     setRows(
       initialCredentialFieldRows(fieldIdPrefix, latestInitialFields.current),
     );
@@ -1663,15 +1622,24 @@ export function CredentialSecretDialog({
                 fixedCredentialType,
                 expectedVersion,
                 validationCopy: t.adminAssets.dialogs.validation,
-                clear: () => {
-                  event.currentTarget.reset();
-                  resetForm();
+                clearSecrets: () => {
+                  for (const row of rows) {
+                    const control = formElement.elements.namedItem(
+                      credentialValueInputName(row.id),
+                    );
+                    if (control instanceof HTMLInputElement) {
+                      control.value = "";
+                    }
+                  }
                 },
                 onCreate,
                 onReplace,
               });
             } catch (error) {
               if (error instanceof CredentialFieldInputError) {
+                if (error.target === "credential_name") {
+                  setCredentialNameError(error.message);
+                }
                 showCredentialFieldError(formElement, error);
                 return;
               }
@@ -1691,9 +1659,37 @@ export function CredentialSecretDialog({
                   name="name"
                   required
                   maxLength={63}
-                  pattern="[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?"
+                  pattern={CREDENTIAL_NAME_PATTERN.source}
                   placeholder="github-token"
+                  aria-invalid={credentialNameError ? true : undefined}
+                  aria-describedby={`${fieldIdPrefix}-credential-name-help${credentialNameError ? ` ${fieldIdPrefix}-credential-name-error` : ""}`}
+                  onInput={(event) => {
+                    event.currentTarget.setCustomValidity("");
+                    setCredentialNameError(null);
+                  }}
+                  onInvalid={(event) => {
+                    if (!event.currentTarget.validity.patternMismatch) return;
+                    const message =
+                      t.adminAssets.dialogs.validation.invalidCredentialName;
+                    event.currentTarget.setCustomValidity(message);
+                    setCredentialNameError(message);
+                  }}
                 />
+                <span
+                  id={`${fieldIdPrefix}-credential-name-help`}
+                  className="text-muted-foreground text-xs"
+                >
+                  {t.adminAssets.dialogs.credentialSlugHelp}
+                </span>
+                {credentialNameError ? (
+                  <span
+                    id={`${fieldIdPrefix}-credential-name-error`}
+                    role="alert"
+                    className="text-destructive text-xs"
+                  >
+                    {credentialNameError}
+                  </span>
+                ) : null}
               </label>
               {fixedCredentialType ? null : (
                 <label className="grid gap-2 text-sm">

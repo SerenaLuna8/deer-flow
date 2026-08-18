@@ -24,7 +24,13 @@ _TERMINAL_STATUSES = frozenset(
         "timeout",
     }
 )
-_TERMINAL_ERROR_CODES = frozenset({"MODEL_OUTPUT_LIMIT"})
+STREAM_TERMINAL_ERROR_CODES = frozenset(
+    {
+        "MODEL_OUTPUT_LIMIT",
+        "OUTPUT_DELIVERY_INCOMPLETE",
+        "CURRENT_UPLOAD_UNAVAILABLE",
+    }
+)
 
 
 def _is_valid_stream_event(event: object) -> bool:
@@ -117,7 +123,7 @@ class StreamFrame:
             if self.data.get("status") not in _TERMINAL_STATUSES:
                 raise ValueError("terminal stream status is invalid")
             error_code = self.data.get("error_code")
-            if error_code is not None and error_code not in _TERMINAL_ERROR_CODES:
+            if error_code is not None and error_code not in STREAM_TERMINAL_ERROR_CODES:
                 raise ValueError("terminal stream error code is invalid")
 
     @classmethod
@@ -160,6 +166,7 @@ class StoredStreamFrame:
 
 
 __all__ = [
+    "STREAM_TERMINAL_ERROR_CODES",
     "StoredStreamFrame",
     "StreamClosed",
     "StreamCursorOutOfRange",

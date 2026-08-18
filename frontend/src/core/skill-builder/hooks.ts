@@ -1,6 +1,11 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -41,6 +46,30 @@ export type CancelSkillBuilderSessionFromListInput =
   CancelSkillBuilderSessionInput & {
     session_id: string;
   };
+
+type SkillBuilderSessionCacheUpdate = (
+  current: SkillBuilderSession | undefined,
+) => SkillBuilderSession | undefined;
+
+/**
+ * Cancel an older exact-session read before committing mutation authority.
+ *
+ * A turn admission can add `activeRun` without returning the new durable
+ * session revision. Without cancellation, a GET started before the mutation
+ * can arrive afterwards and remove that admission from the cache, which also
+ * stops polling when the stale session was otherwise idle.
+ */
+export async function updateSkillBuilderSessionCacheAfterMutation(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+  update: SkillBuilderSessionCacheUpdate,
+): Promise<void> {
+  const key = skillBuilderSessionKey(accountId, projectId, sessionId);
+  await queryClient.cancelQueries({ queryKey: key, exact: true });
+  queryClient.setQueryData<SkillBuilderSession>(key, update);
+}
 
 function useSkillBuilderMutationRunner(accountId: string, projectId: string) {
   const access = usePrivateWorkAccess();
@@ -134,10 +163,13 @@ function useSessionMutation<
     mutationKey: skillBuilderMutationKey(accountId, projectId, action),
     mutationFn: (input: TInput) =>
       runMutation((signal) => operation(projectId, sessionId, input, signal)),
-    onSuccess: (response) => {
-      queryClient.setQueryData(
-        skillBuilderSessionKey(accountId, projectId, sessionId),
-        response.data,
+    onSuccess: async (response) => {
+      await updateSkillBuilderSessionCacheAfterMutation(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
+        () => response.data,
       );
       void queryClient.invalidateQueries(
         skillBuilderSessionsInvalidation(accountId, projectId),
@@ -215,14 +247,24 @@ export function useSubmitSkillBuilderTurn(
       runMutation((signal) =>
         submitSkillBuilderTurn(projectId, sessionId, input, signal),
       ),
-    onSuccess: (response) => {
-      const key = skillBuilderSessionKey(accountId, projectId, sessionId);
+    onSuccess: async (response) => {
       if (isSkillBuilderRunAdmission(response)) {
-        queryClient.setQueryData<SkillBuilderSession>(key, (current) =>
-          current ? { ...current, activeRun: response } : current,
+        await updateSkillBuilderSessionCacheAfterMutation(
+          queryClient,
+          accountId,
+          projectId,
+          sessionId,
+          (current) =>
+            current ? { ...current, activeRun: response } : current,
         );
       } else {
-        queryClient.setQueryData(key, response.data);
+        await updateSkillBuilderSessionCacheAfterMutation(
+          queryClient,
+          accountId,
+          projectId,
+          sessionId,
+          () => response.data,
+        );
       }
       void queryClient.invalidateQueries(
         skillBuilderSessionsInvalidation(accountId, projectId),
@@ -272,10 +314,13 @@ export function useCancelSkillBuilderSessionFromList(
       runMutation((signal) =>
         cancelSkillBuilderSession(projectId, sessionId, input, signal),
       ),
-    onSuccess: (response, input) => {
-      queryClient.setQueryData(
-        skillBuilderSessionKey(accountId, projectId, input.session_id),
-        response.data,
+    onSuccess: async (response, input) => {
+      await updateSkillBuilderSessionCacheAfterMutation(
+        queryClient,
+        accountId,
+        projectId,
+        input.session_id,
+        () => response.data,
       );
       queryClient.setQueryData<SkillBuilderSessionSummary[]>(
         skillBuilderSessionsKey(accountId, projectId),
@@ -302,10 +347,13 @@ export function useCommitSkillBuilderSession(
       runMutation((signal) =>
         commitSkillBuilderSession(projectId, sessionId, input, signal),
       ),
-    onSuccess: (response) => {
-      queryClient.setQueryData(
-        skillBuilderSessionKey(accountId, projectId, sessionId),
-        response.data.session,
+    onSuccess: async (response) => {
+      await updateSkillBuilderSessionCacheAfterMutation(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
+        () => response.data.session,
       );
       void Promise.all([
         queryClient.invalidateQueries(

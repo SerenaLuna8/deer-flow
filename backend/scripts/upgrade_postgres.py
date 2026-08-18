@@ -1,8 +1,8 @@
 """显式升级 ActWeave PostgreSQL 数据库到迁移链头（唯一升级入口，见 D3）。
 
 Gateway/Worker/Scheduler 永不自动迁移：behind 库在运行时只会 fail-closed 并指向
-本脚本。升级流程为 分类 → 备份确认 → 会话级 advisory lock → ``alembic upgrade
-head`` → 升级后重算 catalog digest 校验（必须与全新安装完全一致）。
+本脚本。升级流程为 分类 → 会话级 advisory lock → ``alembic upgrade head`` →
+升级后重算 catalog digest 校验（必须与全新安装完全一致）。
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def _run_alembic_upgrade_sync(database_url: str) -> None:
     command.upgrade(config, "head")
 
 
-async def upgrade_postgres(database_url: str, *, assume_yes: bool = False) -> UpgradeResult:
+async def upgrade_postgres(database_url: str) -> UpgradeResult:
     """升级 behind 库到链头；current 库为幂等空操作。"""
     target = parse_target(database_url)
     engine = create_async_engine(
@@ -90,7 +90,6 @@ async def upgrade_postgres(database_url: str, *, assume_yes: bool = False) -> Up
                     target_host=target.host,
                     target_port=target.port,
                     target_database=target.database,
-                    assume_yes=assume_yes,
                 )
             finally:
                 try:
@@ -112,7 +111,6 @@ async def _upgrade_locked(
     target_host: str,
     target_port: int,
     target_database: str,
-    assume_yes: bool,
 ) -> UpgradeResult:
     async with engine.connect() as connection:
         try:
@@ -133,9 +131,6 @@ async def _upgrade_locked(
             applied=False,
         )
 
-    if not assume_yes and not _confirm_interactively(current_marker):
-        raise PostgresUpgradeError('升级已取消；请先完成数据库备份，再运行 `make upgrade-db`（或传入 ARGS="--yes" 跳过确认）')
-
     await asyncio.to_thread(_run_alembic_upgrade_sync, database_url)
 
     async with engine.connect() as connection:
@@ -144,7 +139,7 @@ async def _upgrade_locked(
         except M7RecreateRequired:
             post_state = "drifted"
         if post_state != "current":
-            raise PostgresUpgradeError("升级后校验失败：catalog 与全新安装不一致；请从升级前备份恢复并报告该问题")
+            raise PostgresUpgradeError("升级后校验失败：catalog 与全新安装不一致；请停止运行并按数据库恢复流程处理")
     return UpgradeResult(
         host=target_host,
         port=target_port,
@@ -153,15 +148,6 @@ async def _upgrade_locked(
         to_revision=CURRENT_SCHEMA_REVISION,
         applied=True,
     )
-
-
-def _confirm_interactively(current_marker: str) -> bool:
-    if not sys.stdin.isatty():
-        return False
-    print(f"目标库 marker: {current_marker}，将升级到链头: {CURRENT_SCHEMA_REVISION}")
-    print("升级不支持 downgrade；继续前必须已完成数据库备份（例如 pg_dump）。")
-    answer = input("已完成备份并确认升级？输入 yes 继续: ")
-    return answer.strip().lower() == "yes"
 
 
 def print_result(result: UpgradeResult) -> None:
@@ -174,23 +160,17 @@ def print_result(result: UpgradeResult) -> None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="显式升级 ActWeave PostgreSQL 数据库到迁移链头")
-    parser.add_argument(
-        "--yes",
-        action="store_true",
-        help="跳过交互确认（自动化场景；调用方自行保证已备份）",
-    )
-    return parser
+    return argparse.ArgumentParser(description="显式升级 ActWeave PostgreSQL 数据库到迁移链头")
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    _parser().parse_args(argv)
     database_url = os.getenv("DATABASE_URL")
     if not database_url:
         print("错误: 必须显式设置 DATABASE_URL", file=sys.stderr)
         return 2
     try:
-        result = asyncio.run(upgrade_postgres(database_url, assume_yes=args.yes))
+        result = asyncio.run(upgrade_postgres(database_url))
     except (PostgresUpgradeError, ValueError) as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1

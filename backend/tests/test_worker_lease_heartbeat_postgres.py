@@ -178,6 +178,45 @@ async def _job_heartbeat(seed, active: _ActiveRun):
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method_name", "expected_status"),
+    (
+        ("settle_success", "succeeded"),
+        ("settle_cancelled", "cancelled"),
+    ),
+)
+async def test_owned_terminal_settlement_clears_prior_retry_error(
+    migrated_postgres_database_url: str,
+    method_name: str,
+    expected_status: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    try:
+        active = await _seed_active_run(seed, lease_seconds=5)
+        async with seed.factory() as session, session.begin():
+            job = await session.get(JobRow, active.job_id, with_for_update=True)
+            assert job is not None
+            job.public_error_code = "MEMORY_DREAM_MODEL_FAILED"
+
+        async with seed.factory() as session, session.begin():
+            repository = JobRepository(session)
+            settled = await getattr(repository, method_name)(
+                active.job_id,
+                lease_token=active.lease_token,
+            )
+            assert settled is True
+
+        async with seed.factory() as session:
+            job = await session.get(JobRow, active.job_id)
+            assert job is not None
+            assert job.status == expected_status
+            assert job.public_error_code is None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_run_heartbeat_cannot_revive_run_after_authority_lock_wait(
     migrated_postgres_database_url: str,
 ) -> None:

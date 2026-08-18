@@ -9,6 +9,7 @@ import { ProjectQuotaLimitsEditor } from "@/components/projects/governance/proje
 import { ProjectUsageStateView } from "@/components/projects/governance/project-usage-page";
 import { usageViewCopy } from "@/components/projects/governance/project-usage-view-model";
 import {
+  AdminOperationsApiError,
   useAdminProjectUsage,
   useUpdateAdminProjectQuotaLimits,
 } from "@/core/admin-operations/api";
@@ -27,6 +28,18 @@ function AuthorizedAdminProjectQuotaPage({
   const copy = usageViewCopy[locale];
   const usage = useAdminProjectUsage(accountId, projectId);
   const update = useUpdateAdminProjectQuotaLimits(accountId, projectId);
+  const updateErrorMessage = update.error
+    ? update.error instanceof AdminOperationsApiError
+      ? update.error.code === "RELIABILITY_INVALID"
+        ? labels.platformLimitRule
+        : update.error.code === "RELIABILITY_CONFLICT"
+          ? labels.updateConflict
+          : update.error.code === "DATABASE_UNAVAILABLE" ||
+              update.error.code === "NETWORK_ERROR"
+            ? labels.updateUnavailable
+            : labels.updateError
+      : labels.updateError
+    : null;
 
   const state = usage.isLoading
     ? ({ status: "loading" } as const)
@@ -54,7 +67,7 @@ function AuthorizedAdminProjectQuotaPage({
             <ProjectQuotaLimitsEditor
               data={usage.data}
               pending={update.isPending}
-              error={Boolean(update.error)}
+              errorMessage={updateErrorMessage}
               onSubmit={(input) => update.mutate(input)}
             />
           </div>

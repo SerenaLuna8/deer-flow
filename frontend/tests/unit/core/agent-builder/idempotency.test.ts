@@ -3,6 +3,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   agentBuilderSemanticallyEqual,
   agentBuilderSemanticSignature,
+  createAgentBuilderIdempotencyRegistry,
 } from "@/core/agent-builder/idempotency";
 
 describe("Agent Builder semantic values", () => {
@@ -27,5 +28,24 @@ describe("Agent Builder semantic values", () => {
     expect(
       agentBuilderSemanticallyEqual(["read", "task"], ["task", "read"]),
     ).toBe(false);
+  });
+
+  test("issues a fresh command after a stale command is released", () => {
+    let nextKey = 0;
+    const registry = createAgentBuilderIdempotencyRegistry(
+      () => `key-${++nextKey}`,
+    );
+    const signature = agentBuilderSemanticSignature({ message: "review" });
+    const first = registry.acquire("message-turn", signature, (key) => ({
+      key,
+    }));
+
+    registry.complete("message-turn", signature);
+
+    const retried = registry.acquire("message-turn", signature, (key) => ({
+      key,
+    }));
+    expect(first).toEqual({ key: "key-1" });
+    expect(retried).toEqual({ key: "key-2" });
   });
 });

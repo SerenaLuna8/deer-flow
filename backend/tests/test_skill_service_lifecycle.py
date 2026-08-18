@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -19,6 +18,7 @@ from app.shared_assets.errors import (
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     SkillPublishBaseStale,
+    SkillRuntimeNameConflict,
 )
 from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
 from app.shared_assets.skill_repository import SkillVersionRecord
@@ -77,6 +77,7 @@ class _Store:
         self.governance: list[dict[str, object]] = []
         self.persist_attempts = 0
         self.fail_create_version = False
+        self.system_skill_name_conflict = False
 
 
 @dataclass(frozen=True)
@@ -215,6 +216,16 @@ class _Repository:
             default=0,
         )
 
+    async def ensure_project_skill_runtime_name_available(
+        self,
+        context: ProjectContext,
+        asset: SkillRow,
+    ) -> None:
+        if asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        if self.store.system_skill_name_conflict:
+            raise SkillRuntimeNameConflict(context.request_id)
+
     async def create_project_version(
         self,
         context: ProjectContext,
@@ -255,6 +266,10 @@ class _Repository:
             raise AssetNotFound(context.request_id)
         return record
 
+    get_override_asset = get_project_asset
+    next_override_version_number = next_project_version_number
+    create_override_version = create_project_version
+
 
 class _Quota:
     def __init__(self, *, failure: Exception | None = None) -> None:
@@ -278,6 +293,8 @@ class _Quota:
 class _GovernanceSink:
     async def append_project(self, session: _Session, **kwargs: object) -> None:
         session.store.governance.append(dict(kwargs))
+
+    append_override = append_project
 
 
 @dataclass(frozen=True)
@@ -330,49 +347,19 @@ def _persisted_payload(record: SkillVersionRecord) -> tuple[object, ...]:
     )
 
 
-@pytest.mark.asyncio
-async def test_template_create_atomically_persists_draft_v1_and_quota_reservation(
+async def _create_draft(
     harness: _Harness,
-) -> None:
-    actor = _admin_context()
-
-    created = await harness.service.create_project_with_template(
+    actor: ProjectContext,
+    slug: str,
+) -> tuple[SkillRow, SkillVersionRecord]:
+    asset = _seed_asset(harness.store, actor, slug=slug)
+    version = await harness.service.create_version_from_archive(
         actor,
-        skill_service_module.CreateSkill("meeting-brief", "Meeting Brief"),
+        asset.id,
+        _files(slug),
+        expected_asset_version=1,
     )
-
-    assert created.status == "suspended"
-    assert created.current_published_version_id is None
-    assert created.version == 2
-    assert harness.session.commit_count == 1
-    assert harness.session.rollback_count == 0
-    assert len(harness.store.assets) == 1
-    assert len(harness.store.versions) == 1
-
-    record = next(iter(harness.store.versions.values()))
-    assert record.row.skill_id == created.id
-    assert record.row.version_number == 1
-    assert record.row.workflow_status == WorkflowStatus.DRAFT.value
-    assert record.row.supersedes_version_id is None
-    assert len(record.files) == 1
-    template = record.files[0]
-    expected_content = b"---\nname: meeting-brief\ndescription: Describe when and how to use this skill.\n---\n\n# meeting-brief\n\nAdd instructions for this skill here.\n"
-    assert template.path == "SKILL.md"
-    assert template.media_type == "text/markdown"
-    assert template.content == expected_content
-    assert template.size_bytes == len(expected_content)
-    assert template.sha256 == hashlib.sha256(expected_content).hexdigest()
-    expected_reservation = _Reservation(
-        actor.project_id,
-        record.row.id,
-        len(expected_content),
-    )
-    assert harness.store.reservation_attempts == [expected_reservation]
-    assert harness.store.reservations == [expected_reservation]
-    assert [event["action"] for event in harness.store.governance] == [
-        "skill.create",
-        "skill.version.create",
-    ]
+    return asset, harness.store.versions[version.id]
 
 
 @pytest.mark.asyncio
@@ -380,11 +367,11 @@ async def test_publish_preserves_version_payload_history_and_moves_current_point
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset = await harness.service.create_project_with_template(
+    asset, first_draft = await _create_draft(
+        harness,
         actor,
-        skill_service_module.CreateSkill("history-skill", "History Skill"),
+        "history-skill",
     )
-    first_draft = next(iter(harness.store.versions.values()))
     first = await harness.service.publish(
         actor,
         asset.id,
@@ -426,11 +413,11 @@ async def test_suspended_skill_can_publish_activate_and_suspend(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    created = await harness.service.create_project_with_template(
+    created, draft = await _create_draft(
+        harness,
         actor,
-        skill_service_module.CreateSkill("toggle-skill", "Toggle Skill"),
+        "toggle-skill",
     )
-    draft = next(iter(harness.store.versions.values()))
 
     published = await harness.service.publish(
         actor,
@@ -455,7 +442,6 @@ async def test_suspended_skill_can_publish_activate_and_suspend(
     assert suspended.status == "suspended"
     assert suspended.version == 5
     assert [event["action"] for event in harness.store.governance] == [
-        "skill.create",
         "skill.version.create",
         "skill.publish",
         "skill.activate",
@@ -464,15 +450,45 @@ async def test_suspended_skill_can_publish_activate_and_suspend(
 
 
 @pytest.mark.asyncio
+async def test_project_skill_activation_rejects_enabled_system_name_conflict(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    created, draft = await _create_draft(
+        harness,
+        actor,
+        "conflicting-skill",
+    )
+    await harness.service.publish(
+        actor,
+        created.id,
+        draft.row.id,
+        expected_asset_version=2,
+    )
+    harness.store.system_skill_name_conflict = True
+
+    with pytest.raises(SkillRuntimeNameConflict):
+        await harness.service.activate(
+            actor,
+            created.id,
+            expected_asset_version=3,
+        )
+
+    assert harness.store.assets[created.id].status == "suspended"
+    assert harness.store.assets[created.id].version == 3
+    assert harness.session.rollback_count == 1
+
+
+@pytest.mark.asyncio
 async def test_stale_publish_expected_version_has_no_side_effects(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    created = await harness.service.create_project_with_template(
+    created, draft = await _create_draft(
+        harness,
         actor,
-        skill_service_module.CreateSkill("stale-skill", "Stale Skill"),
+        "stale-skill",
     )
-    draft = next(iter(harness.store.versions.values()))
     reservations_before = tuple(harness.store.reservations)
     reservation_attempts_before = tuple(harness.store.reservation_attempts)
     governance_before = tuple(harness.store.governance)
@@ -527,22 +543,26 @@ async def test_quota_failure_stops_version_persistence_without_side_effects(
 
 
 @pytest.mark.asyncio
-async def test_template_persistence_failure_rolls_back_asset_quota_and_governance(
+async def test_version_persistence_failure_rolls_back_quota_and_governance(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
+    asset = _seed_asset(harness.store, actor, slug="atomic-skill")
     harness.store.fail_create_version = True
 
     with pytest.raises(AssetStorageUnavailable) as exc_info:
-        await harness.service.create_project_with_template(
+        await harness.service.create_version_from_archive(
             actor,
-            skill_service_module.CreateSkill("atomic-skill", "Atomic Skill"),
+            asset.id,
+            _files(asset.slug),
+            expected_asset_version=1,
         )
 
     assert exc_info.value.request_id == actor.request_id
     assert harness.store.persist_attempts == 1
     assert len(harness.store.reservation_attempts) == 1
-    assert harness.store.assets == {}
+    assert harness.store.assets == {asset.id: asset}
+    assert asset.version == 1
     assert harness.store.versions == {}
     assert harness.store.reservations == []
     assert harness.store.governance == []
@@ -555,11 +575,11 @@ async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset = await harness.service.create_project_with_template(
+    asset, first_draft = await _create_draft(
+        harness,
         actor,
-        skill_service_module.CreateSkill("lineage-skill", "Lineage Skill"),
+        "lineage-skill",
     )
-    first_draft = next(iter(harness.store.versions.values()))
     first = await harness.service.publish(
         actor,
         asset.id,
@@ -616,11 +636,11 @@ async def test_create_project_version_from_preview_pins_supersedes_without_publi
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset = await harness.service.create_project_with_template(
+    asset, first_draft = await _create_draft(
+        harness,
         actor,
-        skill_service_module.CreateSkill("revise-skill", "Revise Skill"),
+        "revise-skill",
     )
-    first_draft = next(iter(harness.store.versions.values()))
     published = await harness.service.publish(
         actor,
         asset.id,

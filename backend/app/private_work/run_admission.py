@@ -338,6 +338,20 @@ def _matches_server_promoted_human_input_retry(
     return normalized == retry_kwargs
 
 
+def _human_input_continuation_run_id(
+    promotion: HumanInputResponsePromotion,
+    *,
+    request_id: str,
+) -> str | None:
+    if promotion.continuation_verified and promotion.continuation_run_id is None:
+        raise PrivateWorkConflict(request_id)
+    if promotion.continuation_run_id is not None and not promotion.continuation_verified:
+        raise PrivateWorkConflict(request_id)
+    if promotion.response_candidate_present and not promotion.continuation_verified:
+        raise PrivateWorkConflict(request_id)
+    return promotion.continuation_run_id
+
+
 def _strip_client_memory_archive_receipt(
     payload: object,
     *,
@@ -921,19 +935,18 @@ class PrivateRunAdmissionService:
                     )
                     if type(promotion) is not HumanInputResponsePromotion:
                         raise PrivateWorkConflict(context.request_id)
-                    if promotion.continuation_verified and promotion.continuation_run_id is None:
-                        raise PrivateWorkConflict(context.request_id)
-                    if promotion.continuation_run_id is not None and not promotion.continuation_verified:
-                        raise PrivateWorkConflict(context.request_id)
+                    continuation_source_run_id = _human_input_continuation_run_id(
+                        promotion,
+                        request_id=context.request_id,
+                    )
                     try:
                         server_request = replace(
                             server_request,
                             kwargs=promotion.kwargs,
-                            follow_up_to_run_id=promotion.continuation_run_id,
+                            follow_up_to_run_id=continuation_source_run_id,
                         )
                     except ValueError:
                         raise PrivateWorkConflict(context.request_id) from None
-                    continuation_source_run_id = promotion.continuation_run_id
 
                 resolved = await self._resolver.resolve_run_asset_closure_in_session(
                     session,

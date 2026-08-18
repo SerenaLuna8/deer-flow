@@ -99,7 +99,12 @@ class BindingService:
             if existing is not None:
                 if existing.enabled or expected_binding_version is None or existing.version != self._validate_expected(actor, expected_binding_version):
                     raise AssetConflict(actor.request_id)
-                await repository.lock_target(actor, selection)
+                target = await repository.lock_target(actor, selection)
+                if selection.kind is AssetKind.SKILL:
+                    await repository.ensure_system_skill_runtime_name_available(
+                        actor,
+                        target,
+                    )
                 await repository.validate_target_dependencies(actor, selection)
                 version_column = {
                     AssetKind.AGENT: "agent_version_id",
@@ -114,7 +119,12 @@ class BindingService:
                 return self._view(selection.kind, existing)
             if expected_binding_version is not None:
                 raise AssetConflict(actor.request_id)
-            await repository.lock_target(actor, selection)
+            target = await repository.lock_target(actor, selection)
+            if selection.kind is AssetKind.SKILL:
+                await repository.ensure_system_skill_runtime_name_available(
+                    actor,
+                    target,
+                )
             await repository.validate_target_dependencies(actor, selection)
             return self._view(selection.kind, await repository.add_binding(actor, selection))
 

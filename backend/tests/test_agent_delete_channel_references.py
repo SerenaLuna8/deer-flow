@@ -15,15 +15,15 @@ from app.shared_assets.errors import AssetConflict
 
 
 class _ScalarRows:
-    def __init__(self, values: tuple[uuid.UUID, ...]) -> None:
+    def __init__(self, values: tuple[object, ...]) -> None:
         self._values = values
 
-    def all(self) -> tuple[uuid.UUID, ...]:
+    def all(self) -> tuple[object, ...]:
         return self._values
 
 
 class _VersionResult:
-    def __init__(self, values: tuple[uuid.UUID, ...]) -> None:
+    def __init__(self, values: tuple[object, ...]) -> None:
         self._values = values
 
     def scalars(self) -> _ScalarRows:
@@ -36,9 +36,13 @@ class _Session:
         *,
         version_ids: tuple[uuid.UUID, ...],
         retained_reference_exists: bool,
+        locked_connection_ids: tuple[str, ...] = (),
+        locked_oauth_state_hashes: tuple[str, ...] = (),
     ) -> None:
         self._version_ids = version_ids
         self._retained_reference_exists = retained_reference_exists
+        self._locked_connection_ids = locked_connection_ids
+        self._locked_oauth_state_hashes = locked_oauth_state_hashes
         self.executed: list[object] = []
         self.scalar_statements: list[object] = []
 
@@ -46,6 +50,10 @@ class _Session:
         self.executed.append(statement)
         if len(self.executed) == 1:
             return _VersionResult(self._version_ids)
+        if len(self.executed) == 3:
+            return _VersionResult(self._locked_connection_ids)
+        if len(self.executed) == 4:
+            return _VersionResult(self._locked_oauth_state_hashes)
         return SimpleNamespace()
 
     async def scalar(self, statement):
@@ -97,7 +105,7 @@ async def test_deletion_plan_cleans_only_released_challenges() -> None:
     )
 
     assert planned == version_ids
-    assert len(session.executed) == 2
+    assert len(session.executed) == 4
     challenge_cleanup = _sql(session.executed[1])
     assert challenge_cleanup.startswith("DELETE FROM project_channel_group_binding_challenges")
     assert f"project_channel_group_binding_challenges.project_id = '{context.project_id}'" in challenge_cleanup
@@ -136,6 +144,23 @@ async def test_deletion_plan_retains_original_and_live_channel_references() -> N
     assert "project_channel_group_binding_challenges.consumed_at IS NULL" in retained
     assert "project_channel_group_binding_challenges.expires_at > now()" in retained
 
+    connection_lock = _sql(session.executed[2])
+    assert connection_lock.startswith("SELECT channel_connections.id FROM channel_connections")
+    assert f"channel_connections.project_id = '{context.project_id}'" in connection_lock
+    assert "channel_connections.status != 'revoked'" in connection_lock
+    assert "CAST((channel_connections.metadata_json ->> 'agent_scope') AS VARCHAR) = 'project'" in connection_lock
+    assert f"CAST((channel_connections.metadata_json ->> 'agent_asset_id') AS VARCHAR) = '{asset.id}'" in connection_lock
+    assert connection_lock.endswith("FOR UPDATE OF channel_connections")
+
+    oauth_lock = _sql(session.executed[3])
+    assert oauth_lock.startswith("SELECT channel_oauth_states.state_hash FROM channel_oauth_states")
+    assert f"channel_oauth_states.project_id = '{context.project_id}'" in oauth_lock
+    assert "channel_oauth_states.consumed_at IS NULL" in oauth_lock
+    assert "channel_oauth_states.expires_at >= now()" in oauth_lock
+    assert "CAST((channel_oauth_states.metadata_json ->> 'agent_scope') AS VARCHAR) = 'project'" in oauth_lock
+    assert f"CAST((channel_oauth_states.metadata_json ->> 'agent_asset_id') AS VARCHAR) = '{asset.id}'" in oauth_lock
+    assert oauth_lock.endswith("FOR UPDATE OF channel_oauth_states")
+
 
 @pytest.mark.asyncio
 async def test_deletion_plan_cleans_released_rows_before_reporting_retained_conflict() -> None:
@@ -153,5 +178,32 @@ async def test_deletion_plan_cleans_released_rows_before_reporting_retained_conf
         )
 
     assert exc_info.value.request_id == context.request_id
-    assert len(session.executed) == 2
+    assert len(session.executed) == 4
     assert len(session.scalar_statements) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locked_connections", "locked_oauth_states"),
+    ((("connection-1",), ()), ((), ("oauth-state-1",))),
+)
+async def test_deletion_plan_rejects_locked_legacy_connection_references(
+    locked_connections: tuple[str, ...],
+    locked_oauth_states: tuple[str, ...],
+) -> None:
+    context = _context()
+    asset = _asset(context)
+    session = _Session(
+        version_ids=(),
+        retained_reference_exists=False,
+        locked_connection_ids=locked_connections,
+        locked_oauth_state_hashes=locked_oauth_states,
+    )
+
+    with pytest.raises(AssetConflict) as exc_info:
+        await AgentRepository(session).plan_project_asset_deletion(  # type: ignore[arg-type]
+            context,
+            asset,
+        )
+
+    assert exc_info.value.request_id == context.request_id

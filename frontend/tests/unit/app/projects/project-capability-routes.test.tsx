@@ -47,7 +47,7 @@ describe("project capability workspace routes", () => {
     [
       "Agent catalog",
       () => ProjectAgentsPage({ params, searchParams: Promise.resolve({}) }),
-      ["shared_assets.edit", "shared_assets.manage_bindings"],
+      "shared_assets.read",
     ],
     ["new Agent", () => NewProjectAgentPage({ params }), "shared_assets.edit"],
     [
@@ -59,7 +59,7 @@ describe("project capability workspace routes", () => {
             session_id: "agent-session",
           }),
         }),
-      "shared_assets.edit",
+      "shared_assets.read",
     ],
     [
       "Skill catalog",

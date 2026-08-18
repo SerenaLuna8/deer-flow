@@ -102,6 +102,35 @@ function isThreadMissingError(error: unknown): boolean {
   return status === 403 || status === 404;
 }
 
+export type ThreadAvailability =
+  | "loading"
+  | "available"
+  | "not-found"
+  | "error";
+
+/**
+ * Classify the authoritative Thread metadata read before deriving any
+ * thread-scoped UI state. A null result is intentionally shared by 403 and
+ * 404 so the UI never reveals whether an inaccessible Thread exists.
+ */
+export function resolveThreadAvailability({
+  data,
+  error,
+  isLoading,
+  isFetching,
+}: {
+  data: unknown | null | undefined;
+  error: unknown;
+  isLoading: boolean;
+  isFetching: boolean;
+}): ThreadAvailability {
+  if (isLoading || isFetching) return "loading";
+  if (error) return "error";
+  if (data === null) return "not-found";
+  if (data === undefined) return "loading";
+  return "available";
+}
+
 export function useThreadMetadata(
   threadId?: string | null,
   {

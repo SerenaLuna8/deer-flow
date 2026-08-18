@@ -24,6 +24,7 @@ from langgraph.errors import GraphBubbleUp
 
 from deerflow.config.app_config import AppConfig
 from deerflow.error_codes import (
+    CURRENT_UPLOAD_FAILURE_DETAIL,
     llm_error_code_for_reason,
     normalize_llm_error_reason,
 )
@@ -70,7 +71,6 @@ _AUTH_PATTERNS = (
     "无权",
     "未授权",
 )
-_CURRENT_UPLOAD_ERROR_DETAIL = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
 _PROVIDER_MODULE_PREFIXES = (
     "anthropic",
     "cohere",
@@ -242,7 +242,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # bounded error text must never be interpreted as a provider response
         # merely because it contains words such as "unauthorized".
         if _is_current_upload_error(exc):
-            return False, "generic"
+            return False, "current_upload"
 
         # Proxy authentication is an egress transport failure, not evidence
         # that the model Credential itself is invalid. Handle it before any
@@ -318,7 +318,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
     def _build_user_message(self, exc: BaseException, reason: str) -> str:
         if _is_current_upload_error(exc):
-            return "The current image attachment could not be securely read or validated. Please attach the image again and retry."
+            return "The current image attachment could not be securely read or validated. Please retry this Run; if the problem continues, remove and attach the image again."
         if reason == "quota":
             return "The configured LLM provider rejected the request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         if reason == "auth":
@@ -505,7 +505,7 @@ def _is_provider_auth_exception(exc: BaseException) -> bool:
 
 
 def _is_current_upload_error(exc: BaseException) -> bool:
-    return type(exc) is RuntimeError and str(exc).strip() == _CURRENT_UPLOAD_ERROR_DETAIL
+    return type(exc) is RuntimeError and str(exc).strip() == CURRENT_UPLOAD_FAILURE_DETAIL
 
 
 def _is_transport_or_proxy_error(exc: BaseException) -> bool:

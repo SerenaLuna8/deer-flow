@@ -4,16 +4,20 @@ export {
   countHumanMessagesExcludingSuperseded,
   filterMessagesBySupersededRunIds,
   getLatestRegenerationTarget,
+  resolveFailedRunComposerInput,
   getSummarizationMiddlewareMessages,
   getVisibleOptimisticMessages,
   mergeMessages,
   overlayThreadProjection,
   projectThreadMessages,
   pruneConfirmedArchivedMessages,
+  retainOptimisticHumanMessagesAfterFailure,
+  retainUnacknowledgedOptimisticHumanMessages,
   resolveActiveRunIdForMessages,
   resolvePreservedHistory,
 } from "./message-projection";
 export type {
+  FailedRunComposerInput,
   RegenerationTarget,
   ThreadMessageProjectionInput,
 } from "./message-projection";
@@ -28,6 +32,7 @@ export {
 export type { PendingPreparedReplayMask } from "./prepared-replay";
 export {
   buildVisibleHistoryMessages,
+  findTerminalFailureRunIdsToReload,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
@@ -41,6 +46,7 @@ export {
   resolveRunFailureRunId,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
+  shouldReloadEmptyRunAfterTerminalFailure,
 } from "./run-history";
 export {
   buildThreadSubmitCheckpointOptions,
@@ -62,6 +68,7 @@ export {
   isProjectThreadDeleteConflict,
   privateWorkThreadVersion,
   projectThreadDeleteErrorMessage,
+  resolveThreadAvailability,
   useBranchThread,
   useDeleteThread,
   useRenameThread,
@@ -70,6 +77,7 @@ export {
   useThreadMetadata,
   useThreadTokenUsage,
 } from "./thread-actions";
+export type { ThreadAvailability } from "./thread-actions";
 export {
   fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,

@@ -129,7 +129,7 @@ describe("project shell navigation", () => {
     );
 
     expect(new Set(runnerItems.map((item) => item.section))).toEqual(
-      new Set([null, "work"]),
+      new Set([null, "work", "capabilities"]),
     );
     expect(
       runnerItems
@@ -137,8 +137,18 @@ describe("project shell navigation", () => {
         .map((item) => item.label),
     ).toEqual(["会话", "Automations", "Memory"]);
     expect(new Set(viewerItems.map((item) => item.section))).toEqual(
-      new Set([null, "work"]),
+      new Set([null, "work", "capabilities"]),
     );
+    expect(
+      runnerItems
+        .filter((item) => item.section === "capabilities")
+        .map((item) => item.label),
+    ).toEqual(["Agent"]);
+    expect(
+      viewerItems
+        .filter((item) => item.section === "capabilities")
+        .map((item) => item.label),
+    ).toEqual(["Agent"]);
     expect(new Set(editorItems.map((item) => item.section))).toEqual(
       new Set([null, "work", "capabilities"]),
     );
@@ -160,13 +170,17 @@ describe("project shell navigation", () => {
     }
   });
 
-  test("keeps capability management cards out of runner and viewer overviews", () => {
-    expect(
-      renderToStaticMarkup(<ProjectHome project={runnerProject} />),
-    ).not.toContain("共享资产");
-    expect(
-      renderToStaticMarkup(<ProjectHome project={viewerProject} />),
-    ).not.toContain("共享资产");
+  test("shows the readable Agent catalog without exposing Skill or MCP management", () => {
+    const runnerHome = renderToStaticMarkup(
+      <ProjectHome project={runnerProject} />,
+    );
+    const viewerHome = renderToStaticMarkup(
+      <ProjectHome project={viewerProject} />,
+    );
+    expect(runnerHome).toContain("共享 Agent");
+    expect(viewerHome).toContain("共享 Agent");
+    expect(runnerHome).not.toContain("共享 Skill");
+    expect(runnerHome).not.toContain("共享 MCP");
     expect(
       renderToStaticMarkup(<ProjectHome project={editorProject} />),
     ).toContain("共享资产");
@@ -380,7 +394,7 @@ describe("project shell navigation", () => {
     expect(renderShell(roleOnlyAdmin)).not.toContain("渠道连接");
     expect(renderShell(channelManager)).toContain("渠道连接");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
-    expect(renderShell(sharedAssetReader)).not.toContain("Agent");
+    expect(renderShell(sharedAssetReader)).toContain("Agent");
     expect(renderShell(sharedAssetEditor)).toContain("Agent");
     expect(renderShell(sharedAssetReader)).not.toContain("项目凭证");
     expect(renderShell(memberManager)).toContain("项目设置");

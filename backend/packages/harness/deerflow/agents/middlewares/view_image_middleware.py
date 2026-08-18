@@ -32,6 +32,7 @@ from deerflow.agents.thread_state import (
     ViewedImageData,
     normalize_viewed_images,
 )
+from deerflow.error_codes import CURRENT_UPLOAD_FAILURE_DETAIL
 from deerflow.file_authority import (
     AuthorityManifestEntry,
     require_private_file_authority,
@@ -45,6 +46,7 @@ from deerflow.vision.image_input import (
     detect_image_mime,
     is_allowed_image_virtual_path,
     read_bounded_image_bytes,
+    validate_image_payload,
 )
 
 logger = logging.getLogger(__name__)
@@ -53,7 +55,6 @@ _IMAGE_CONTEXT_MESSAGE_ID_PREFIX = "view-image-context:"
 _IMAGE_CONTEXT_MESSAGE_MARKER_KEY = "deerflow_view_image_context"
 _MAX_CURRENT_UPLOAD_IMAGES = 4
 _MAX_CURRENT_UPLOAD_TOTAL_BYTES = MAX_IMAGE_BYTES
-_CURRENT_UPLOAD_ERROR = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
 
 
 class ViewImageMiddlewareState(ThreadState):
@@ -311,6 +312,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
 
         if len(image_bytes) != expected_size or hashlib.sha256(image_bytes).hexdigest() != expected_sha256 or detect_image_mime(image_bytes) != mime_type:
             return None
+        try:
+            validate_image_payload(image_bytes, mime_type)
+        except ValueError:
+            return None
         encoded = base64.b64encode(image_bytes).decode("ascii")
         return f"data:{mime_type};base64,{encoded}"
 
@@ -387,10 +392,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     @staticmethod
     def _current_upload_virtual_path(entry: AuthorityManifestEntry) -> str:
         if type(entry.logical_path) is not str:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
         logical_path = PurePosixPath(entry.logical_path)
         if entry.logical_path != logical_path.as_posix() or len(logical_path.parts) < 2 or logical_path.parts[0] != "uploads" or any(part in {"", ".", ".."} for part in logical_path.parts):
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
         return f"/mnt/user-data/uploads/{PurePosixPath(*logical_path.parts[1:]).as_posix()}"
 
     @staticmethod
@@ -400,21 +405,21 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
     ) -> dict[str, str]:
         context = runtime.context
         if not isinstance(context, Mapping):
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
         private_scope = context.get("private_scope")
         run_id = context.get("run_id")
         if type(private_scope) is not PrivateResourceScope or not isinstance(run_id, str) or not run_id:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
         try:
             authority = require_private_file_authority(
                 context,
                 method="current_uploads",
             )
         except RuntimeError:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL) from None
         sandbox_id = getattr(authority, "sandbox_id", None)
         if not isinstance(sandbox_id, str) or not sandbox_id:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
         return {
             "path": image_path,
             "sandbox_id": sandbox_id,
@@ -436,15 +441,15 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 method="current_uploads",
             )
         except RuntimeError:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL) from None
         if authority is None:
             return ()
         try:
             entries = authority.current_uploads()
         except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR) from None
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL) from None
         if type(entries) is not tuple:
-            raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+            raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
 
         images: list[tuple[str, ViewedImageData]] = []
         seen_ids: set[str] = set()
@@ -452,10 +457,10 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
         total_bytes = 0
         for entry in entries:
             if type(entry) is not AuthorityManifestEntry or not isinstance(entry.file_id, UUID) or entry.kind != "upload" or type(entry.version) is not int or isinstance(entry.version, bool) or entry.version < 1:
-                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+                raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
             file_id = str(entry.file_id)
             if file_id in seen_ids:
-                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+                raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
             seen_ids.add(file_id)
 
             image_path = self._current_upload_virtual_path(entry)
@@ -474,7 +479,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 or len(entry.sha256) != 64
                 or any(character not in "0123456789abcdef" for character in entry.sha256)
             ):
-                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+                raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
 
             identity = (entry.sha256, entry.size, entry.media_type)
             if identity in seen_content:
@@ -482,7 +487,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
             seen_content.add(identity)
             total_bytes += entry.size
             if len(images) >= _MAX_CURRENT_UPLOAD_IMAGES or total_bytes > _MAX_CURRENT_UPLOAD_TOTAL_BYTES:
-                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+                raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
             images.append(
                 (
                     image_path,
@@ -523,7 +528,7 @@ class ViewImageMiddleware(AgentMiddleware[ViewImageMiddlewareState]):
                 cancel_event=cancel_event,
             )
             if data_url is None:
-                raise RuntimeError(_CURRENT_UPLOAD_ERROR)
+                raise RuntimeError(CURRENT_UPLOAD_FAILURE_DETAIL)
             content.extend(
                 (
                     {

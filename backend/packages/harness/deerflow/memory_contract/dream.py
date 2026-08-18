@@ -13,7 +13,7 @@ from typing import Literal
 from deerflow.memory_contract.common import MemoryDocumentScope
 
 BUDGET_REWRITE_HISTORY_DIGEST = hashlib.sha256(b"deerflow.dream.budget_rewrite.empty.v1").hexdigest()
-DREAM_PROMPT_VERSION = "dream-prompt-v4"
+DREAM_PROMPT_VERSION = "dream-prompt-v5"
 
 MemoryDreamTrigger = Literal["auto_dream", "manual_dream", "budget_rewrite"]
 MemoryDreamAdmissionDisposition = Literal[

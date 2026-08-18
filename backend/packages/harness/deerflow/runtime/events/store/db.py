@@ -22,6 +22,7 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.runtime.events.models import (
+    STREAM_TERMINAL_ERROR_CODES,
     StoredStreamFrame,
     StreamClosed,
     StreamCursorOutOfRange,
@@ -669,8 +670,8 @@ class DbRunEventStore(RunEventStore):
             "interrupted": "interrupted",
         }.get(run.status)
         expected_data: dict[str, str] = {"status": expected_status or ""}
-        if run.error == "MODEL_OUTPUT_LIMIT":
-            expected_data["error_code"] = "MODEL_OUTPUT_LIMIT"
+        if run.error in STREAM_TERMINAL_ERROR_CODES:
+            expected_data["error_code"] = run.error
         if expected_status is None or frame.data != expected_data:
             raise StreamWriteAuthorityRequired(
                 "stream terminal repair requires the exact settled Run state",

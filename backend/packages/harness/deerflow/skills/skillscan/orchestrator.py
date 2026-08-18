@@ -770,13 +770,65 @@ def _decode_text_for_analysis(file_bytes: bytes) -> str | None:
         return None
 
 
+def _is_extensionless_skill_script(rel_path: str) -> bool:
+    path = PurePosixPath(rel_path)
+    return len(path.parts) >= 2 and path.parts[0].casefold() == "scripts" and "." not in path.name
+
+
+def _looks_like_extensionless_python(text: str) -> bool:
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return False
+    # A bare word is valid Python, so parsing alone would misclassify prose.
+    # These nodes are executable program structure rather than data literals.
+    executable_nodes = (
+        ast.Import,
+        ast.ImportFrom,
+        ast.FunctionDef,
+        ast.AsyncFunctionDef,
+        ast.ClassDef,
+        ast.Assign,
+        ast.AnnAssign,
+        ast.AugAssign,
+        ast.Call,
+        ast.Delete,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.If,
+        ast.With,
+        ast.AsyncWith,
+        ast.Try,
+        ast.Raise,
+        ast.Assert,
+    )
+    return any(isinstance(node, executable_nodes) for node in ast.walk(tree))
+
+
+def _looks_like_extensionless_shell(text: str) -> bool:
+    # Keep the fallback deterministic and conservative: require a shell grammar
+    # marker or a command relevant to the shell security rules. This avoids
+    # treating extensionless prose/data under scripts/ as executable shell.
+    command_signal = re.search(
+        r"(?m)^\s*(?:set\s+-|export\s+[A-Za-z_][A-Za-z0-9_]*=|readonly\b|local\b|source\b|"
+        r"if\b|then\b|elif\b|else\b|fi\b|for\b|while\b|until\b|case\b|esac\b|function\b|"
+        r"bash\b|sh\b|zsh\b|curl\b|wget\b|nc\b|ncat\b|socat\b|rm\b|dd\b|env\b|printenv\b)",
+        text,
+    )
+    grammar_signal = re.search(r"(?:&&|\|\||\$\(|\$\{|`|(?:^|[ \t])(?:\||>>?|<<?|>&|<&)(?:[ \t]|/|\$))", text, re.MULTILINE)
+    return command_signal is not None or grammar_signal is not None
+
+
 def _is_python_path(rel_path: str, text: str) -> bool:
-    return PurePosixPath(rel_path).suffix.lower() == ".py" or text.startswith("#!") and "python" in text.splitlines()[0].lower()
+    return PurePosixPath(rel_path).suffix.lower() == ".py" or text.startswith("#!") and "python" in text.splitlines()[0].lower() or _is_extensionless_skill_script(rel_path) and _looks_like_extensionless_python(text)
 
 
 def _is_shell_path(rel_path: str, text: str) -> bool:
     suffix = PurePosixPath(rel_path).suffix.lower()
-    return suffix in {".sh", ".bash"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh"))
+    if suffix in {".sh", ".bash"} or text.startswith("#!") and any(shell in text.splitlines()[0].lower() for shell in ("sh", "bash", "zsh")):
+        return True
+    return _is_extensionless_skill_script(rel_path) and not _looks_like_extensionless_python(text) and _looks_like_extensionless_shell(text)
 
 
 def _looks_like_placeholder(value: str) -> bool:

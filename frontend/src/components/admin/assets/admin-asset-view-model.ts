@@ -299,12 +299,18 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
   ASSET_NOT_FOUND: "资产不存在或已不可见。",
   ASSET_FORBIDDEN: "当前账户没有执行此操作的权限。",
   ASSET_CONFLICT: "资产状态已变化，请刷新后重试。",
+  ASSET_IN_USE:
+    "资产仍被其他记录引用。可先停用以阻止后续使用；物理删除需解除可管理的引用，并等待历史记录按保留策略清理后重试。",
   ASSET_VALIDATION_FAILED: "提交内容不符合资产要求。",
   ASSET_STORAGE_QUOTA_EXCEEDED:
     "项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。",
   ASSET_STORAGE_UNAVAILABLE: "资产存储暂时不可用，请稍后重试。",
+  ASSET_UPLOAD_TOO_LARGE:
+    "Skill 包超过上传、解压大小或文件数量限制，请缩小后重试。",
   SKILL_PUBLISH_BASE_STALE:
     "线上已发布更新的版本，本版本基于较旧的基线。请确认覆盖后再发布。",
+  SKILL_RUNTIME_NAME_CONFLICT:
+    "与已启用 Skill 的运行名称冲突，请先停用其中一个 Skill 后重试。",
   AUTH_REQUIRED: "登录状态已失效，请重新登录。",
   ASSET_NETWORK_ERROR: "暂时无法连接资产服务，请稍后重试。",
   ASSET_RESPONSE_INVALID: "资产服务返回了无效数据。",

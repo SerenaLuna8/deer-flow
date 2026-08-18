@@ -7,6 +7,7 @@ import {
   MessageCircleIcon,
   MessageSquarePlusIcon,
   RefreshCcwIcon,
+  TriangleAlertIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -44,6 +45,10 @@ import {
 } from "@/core/messages/human-input";
 import { filterLeadAgentStreamMessages } from "@/core/messages/lead-stream-visibility";
 import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
+import {
+  projectTokenBudgetMessages,
+  readTokenBudgetNotice,
+} from "@/core/messages/token-budget";
 import {
   buildTokenDebugSteps,
   type TokenUsageInlineMode,
@@ -126,6 +131,37 @@ type MessageEditSession = {
   messageId: string;
   draft: string;
 };
+
+function TokenBudgetNotice({ messages }: { messages: Message[] }) {
+  const { t } = useI18n();
+  const notice = messages.find(
+    (message) => readTokenBudgetNotice(message) !== null,
+  );
+  if (!notice) {
+    return null;
+  }
+  return (
+    <div
+      aria-live="polite"
+      className="text-foreground mt-3 flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3"
+      data-testid="token-budget-notice"
+      role="status"
+    >
+      <TriangleAlertIcon
+        aria-hidden
+        className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+      />
+      <div className="min-w-0 space-y-1">
+        <p className="text-sm font-medium">
+          {t.conversation.tokenBudgetReachedTitle}
+        </p>
+        <p className="text-muted-foreground text-sm leading-5">
+          {t.conversation.tokenBudgetReachedDescription}
+        </p>
+      </div>
+    </div>
+  );
+}
 
 function getPresentFilesProcessMessages(messages: Message[]): Message[] {
   const visibleToolCallIds = new Set(
@@ -385,9 +421,11 @@ export function MessageList({
   const prevIsLoading = useRef(thread.isLoading);
   const messages = useMemo(
     () =>
-      filterLeadAgentStreamMessages(
-        thread.messages,
-        thread.getMessagesMetadata,
+      projectTokenBudgetMessages(
+        filterLeadAgentStreamMessages(
+          thread.messages,
+          thread.getMessagesMetadata,
+        ),
       ),
     [thread.getMessagesMetadata, thread.messages],
   );
@@ -1424,6 +1462,9 @@ export function MessageList({
                         </div>
                       );
                     })}
+                    {group.type === "assistant" && (
+                      <TokenBudgetNotice messages={group.messages} />
+                    )}
                     {group.type === "assistant" &&
                       turnDisplay &&
                       artifactsEnabled &&
@@ -1470,6 +1511,8 @@ export function MessageList({
                       <HumanInputCard
                         answeredResponse={answeredResponse}
                         disabled={
+                          isHistoryLoading === true ||
+                          historyError != null ||
                           thread.isLoading ||
                           pending ||
                           Boolean(answeredResponse) ||

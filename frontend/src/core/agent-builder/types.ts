@@ -6,7 +6,21 @@ import {
 } from "@/core/shared-assets/types";
 
 const uuidSchema = z.string().uuid();
+const exactModelUuidSchema = uuidSchema.refine(
+  (value) => value === value.toLowerCase(),
+  "Model UUID must use its canonical lowercase form",
+);
 const timestampSchema = z.string().datetime({ offset: true });
+export const AGENT_BUILDER_SLUG_MIN_LENGTH = 3;
+export const AGENT_BUILDER_SLUG_MAX_LENGTH = 63;
+export const AGENT_BUILDER_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+
+export const agentBuilderSlugSchema = z
+  .string()
+  .trim()
+  .min(AGENT_BUILDER_SLUG_MIN_LENGTH)
+  .max(AGENT_BUILDER_SLUG_MAX_LENGTH)
+  .regex(AGENT_BUILDER_SLUG_PATTERN);
 
 export const agentBuilderStatusSchema = z.enum([
   "interviewing",
@@ -40,6 +54,22 @@ export const agentBuilderMessageSchema = z
     role: z.enum(["user", "assistant"]),
     content: z.string(),
     created_at: timestampSchema,
+  })
+  .strict();
+
+export const agentBuilderConflictFieldSchema = z.enum([
+  "agents_instructions",
+  "soul",
+  "identity",
+  "user_context",
+]);
+
+export const agentBuilderConflictSchema = z
+  .object({
+    code: z.string().trim().min(1),
+    fields: z.array(agentBuilderConflictFieldSchema),
+    message: z.string().trim().min(1),
+    severity: z.enum(["warning", "error"]),
   })
   .strict();
 
@@ -106,6 +136,8 @@ export const agentBuilderSessionSchema = z
     revision: z.number().int().positive(),
     blueprint: agentBuilderBlueprintSchema.nullable(),
     blueprint_checksum: z.string().trim().min(1).nullable(),
+    assumptions: z.array(z.string().trim().min(1)).default([]),
+    conflicts: z.array(agentBuilderConflictSchema).default([]),
     messages: z.array(agentBuilderMessageSchema),
     active_clarification: humanInputRequestSchema.nullable(),
     active_clarifications: z.array(humanInputRequestSchema),
@@ -138,14 +170,22 @@ export const agentBuilderSessionResponseSchema = z
 
 export const agentBuilderSessionListResponseSchema = z
   .object({
-    data: z.array(agentBuilderSessionSummarySchema),
+    data: z.array(agentBuilderSessionSummarySchema).max(100),
+    next_cursor: z.string().min(1).max(256).nullable().default(null),
     request_id: z.string().trim().min(1),
+  })
+  .strict();
+
+export const agentBuilderSessionListInputSchema = z
+  .object({
+    limit: z.number().int().min(1).max(100).optional(),
+    cursor: z.string().min(1).max(256).optional(),
   })
   .strict();
 
 export const createAgentBuilderSessionInputSchema = z
   .object({
-    slug: z.string().trim().min(1),
+    slug: agentBuilderSlugSchema,
     display_name: z.string().trim().min(1),
     idempotency_key: z.string().trim().min(1),
   })
@@ -190,11 +230,7 @@ export const agentBuilderTurnInputSchema = z
       agentBuilderBlueprintTurnInputSchema,
     ]),
     generation_model_ref: z
-      .string()
-      .trim()
-      .min(1)
-      .max(128)
-      .regex(/^(?:default|[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?)$/u)
+      .union([z.literal("default"), exactModelUuidSchema])
       .optional(),
     expected_revision: z.number().int().positive(),
     idempotency_key: z.string().trim().min(1),
@@ -203,6 +239,7 @@ export const agentBuilderTurnInputSchema = z
 
 export const commitAgentBuilderSessionInputSchema = z
   .object({
+    slug: agentBuilderSlugSchema.optional(),
     expected_revision: z.number().int().positive(),
     expected_blueprint_checksum: z.string().trim().min(1),
     idempotency_key: z.string().trim().min(1),
@@ -233,10 +270,20 @@ export type AgentBuilderProgressItem = z.infer<
   typeof agentBuilderProgressItemSchema
 >;
 export type AgentBuilderMessage = z.infer<typeof agentBuilderMessageSchema>;
+export type AgentBuilderConflictField = z.infer<
+  typeof agentBuilderConflictFieldSchema
+>;
+export type AgentBuilderConflict = z.infer<typeof agentBuilderConflictSchema>;
 export type AgentBuilderBlueprint = z.infer<typeof agentBuilderBlueprintSchema>;
 export type AgentBuilderSession = z.infer<typeof agentBuilderSessionSchema>;
 export type AgentBuilderSessionSummary = z.infer<
   typeof agentBuilderSessionSummarySchema
+>;
+export type AgentBuilderSessionListInput = z.input<
+  typeof agentBuilderSessionListInputSchema
+>;
+export type AgentBuilderSessionListResponse = z.output<
+  typeof agentBuilderSessionListResponseSchema
 >;
 export type CreateAgentBuilderSessionInput = z.input<
   typeof createAgentBuilderSessionInputSchema

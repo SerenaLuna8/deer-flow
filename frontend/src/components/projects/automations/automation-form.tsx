@@ -324,8 +324,16 @@ export function AutomationForm({
     mode === "edit" || Boolean(initialDefaultAgent),
   );
   const [scheduleRevision, setScheduleRevision] = useState(0);
-  const [formError, setFormError] = useState<string | null>(null);
+  const [validationVisible, setValidationVisible] = useState(false);
   const defaultAgent = defaultAutomationAgent(agents);
+  const submission: FormSubmission =
+    mode === "edit"
+      ? initial
+        ? buildAutomationFormSubmission({ mode, draft, initial })
+        : { ok: false, message: "Automation 版本无效，请刷新。" }
+      : buildAutomationFormSubmission({ mode, draft });
+  const formError =
+    validationVisible && !submission.ok ? submission.message : null;
   const selectedThreadIsMissing =
     Boolean(draft.threadId) &&
     !threads.some((thread) => thread.id === draft.threadId);
@@ -366,22 +374,12 @@ export function AutomationForm({
       data-testid="automation-form"
       onSubmit={(event) => {
         event.preventDefault();
-        let result: FormSubmission;
-        if (mode === "edit") {
-          if (!initial) {
-            setFormError("Automation 版本无效，请刷新。");
-            return;
-          }
-          result = buildAutomationFormSubmission({ mode, draft, initial });
-        } else {
-          result = buildAutomationFormSubmission({ mode, draft });
-        }
-        if (!result.ok) {
-          setFormError(result.message);
+        if (!submission.ok) {
+          setValidationVisible(true);
           return;
         }
-        setFormError(null);
-        void onSubmit(result.input);
+        setValidationVisible(false);
+        void onSubmit(submission.input);
       }}
     >
       {createMode ? (

@@ -92,7 +92,7 @@ def _response(item: AdminJobRecord) -> AdminJobResponse:
         status=item.status,
         retry_safety=item.retry_safety,
         safe_to_requeue=item.safe_to_requeue,
-        public_error_code=item.public_error_code,
+        public_error_code=(None if item.status in {"succeeded", "cancelled"} else item.public_error_code),
         predecessor_dead_job_id=item.predecessor_dead_job_id,
     )
 

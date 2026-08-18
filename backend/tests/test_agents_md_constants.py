@@ -15,6 +15,7 @@ import pytest
 
 from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_BYTES,
+    MAX_SKILL_ARCHIVE_FILE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
     MAX_SKILL_ARCHIVE_UPLOAD_BYTES,
 )
@@ -134,12 +135,17 @@ DOCUMENTED_CONSTANTS = (
         source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_BYTES",
     ),
     DocumentedConstant(
-        pattern=r"archives remain limited to \d+ MiB and (\d+) regular files",
+        pattern=r"archives remain limited to \d+ MiB total, (\d+) MiB\s+per regular",
+        expected=str(MAX_SKILL_ARCHIVE_FILE_BYTES // MIB),
+        source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_FILE_BYTES",
+    ),
+    DocumentedConstant(
+        pattern=r"file, and (\d+) regular files",
         expected=str(MAX_SKILL_ARCHIVE_FILES),
         source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_FILES",
     ),
     DocumentedConstant(
-        pattern=r"scoped (\d+) MiB wire limit",
+        pattern=r"scoped\s+(\d+) MiB\s+wire limit",
         expected=str(MAX_SKILL_ARCHIVE_UPLOAD_BYTES // MIB),
         source="app.shared_assets.skill_archive.MAX_SKILL_ARCHIVE_UPLOAD_BYTES",
     ),

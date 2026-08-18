@@ -19,6 +19,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import {
+  AgentBuilderApiError,
   agentBuilderSemanticSignature,
   createAgentBuilderIdempotencyRegistry,
   useCancelAgentBuilderSessionFromList,
@@ -29,13 +30,24 @@ import { useI18n } from "@/core/i18n/hooks";
 import { agentBuilderErrorMessage } from "./agent-builder-start";
 import { agentBuilderSessionPath } from "./agent-builder-workspace";
 
+export function resolveAgentBuilderDeleteTarget(
+  selected: AgentBuilderSessionSummary,
+  sessions: readonly AgentBuilderSessionSummary[],
+): AgentBuilderSessionSummary | null {
+  const refreshed = sessions.find((session) => session.id === selected.id);
+  if (!refreshed) return null;
+  return refreshed.revision > selected.revision ? refreshed : selected;
+}
+
 export function AgentBuilderResumeBannerView({
   projectSlug,
   sessions,
+  canAuthor,
   onDelete,
 }: {
   projectSlug: string;
   sessions: AgentBuilderSessionSummary[];
+  canAuthor: boolean;
   onDelete: (session: AgentBuilderSessionSummary) => Promise<void>;
 }) {
   const { locale, t } = useI18n();
@@ -57,10 +69,20 @@ export function AgentBuilderResumeBannerView({
 
   async function confirmDelete() {
     if (!deleteTarget || deleting) return;
+    const currentTarget = resolveAgentBuilderDeleteTarget(
+      deleteTarget,
+      sessions,
+    );
+    if (!currentTarget) {
+      setDeleteTarget(null);
+      setDeleteError(null);
+      return;
+    }
+    if (currentTarget !== deleteTarget) setDeleteTarget(currentTarget);
     setDeleting(true);
     setDeleteError(null);
     try {
-      await onDelete(deleteTarget);
+      await onDelete(currentTarget);
       setDeleteTarget(null);
     } catch (error) {
       setDeleteError(agentBuilderErrorMessage(error, t.agents.builder.errors));
@@ -110,20 +132,22 @@ export function AgentBuilderResumeBannerView({
                 </span>
                 <ArrowRightIcon aria-hidden className="size-4 shrink-0" />
               </Link>
-              <div className="border-border/70 flex items-center border-l px-2">
-                <Button
-                  type="button"
-                  size="icon"
-                  variant="ghost"
-                  aria-label={copy.deleteAria(session.display_name)}
-                  onClick={() => {
-                    setDeleteError(null);
-                    setDeleteTarget(session);
-                  }}
-                >
-                  <Trash2Icon aria-hidden className="size-4" />
-                </Button>
-              </div>
+              {canAuthor ? (
+                <div className="border-border/70 flex items-center border-l px-2">
+                  <Button
+                    type="button"
+                    size="icon"
+                    variant="ghost"
+                    aria-label={copy.deleteAria(session.display_name)}
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteTarget(session);
+                    }}
+                  >
+                    <Trash2Icon aria-hidden className="size-4" />
+                  </Button>
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -177,11 +201,13 @@ export function AgentBuilderResumeBanner({
   projectId,
   projectSlug,
   sessions,
+  canAuthor,
 }: {
   accountId: string;
   projectId: string;
   projectSlug: string;
   sessions: AgentBuilderSessionSummary[];
+  canAuthor: boolean;
 }) {
   const cancel = useCancelAgentBuilderSessionFromList(accountId, projectId);
   const [idempotency] = useState(() => createAgentBuilderIdempotencyRegistry());
@@ -196,14 +222,25 @@ export function AgentBuilderResumeBanner({
       expected_revision: session.revision,
       idempotency_key: key,
     }));
-    await cancel.mutateAsync(command);
-    idempotency.complete("cancel", signature);
+    try {
+      await cancel.mutateAsync(command);
+      idempotency.complete("cancel", signature);
+    } catch (error) {
+      if (
+        error instanceof AgentBuilderApiError &&
+        error.code === "AGENT_BUILDER_CONFLICT"
+      ) {
+        idempotency.complete("cancel", signature);
+      }
+      throw error;
+    }
   }
 
   return (
     <AgentBuilderResumeBannerView
       projectSlug={projectSlug}
       sessions={sessions}
+      canAuthor={canAuthor}
       onDelete={deleteSession}
     />
   );

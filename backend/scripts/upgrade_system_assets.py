@@ -78,7 +78,7 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
                 if state == "empty":
                     raise SystemAssetUpgradeError("目标库尚未初始化；请先运行 `make setup-db`")
                 if state == "behind":
-                    raise SystemAssetUpgradeError("目标库 schema 不是当前链头；请先备份并运行 `make upgrade-db`")
+                    raise SystemAssetUpgradeError("目标库 schema 不是当前链头；请运行 `make upgrade-db`")
                 if state != "current":
                     raise SystemAssetUpgradeError("目标库 schema 状态不受支持；未应用任何 System Asset release")
 

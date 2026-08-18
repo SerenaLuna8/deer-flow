@@ -57,7 +57,7 @@ help:
 	@echo ""
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装首版 initial_schema 并初始化"
-	@echo "  make upgrade-db                       显式升级存量库到迁移链头（先备份）"
+	@echo "  make upgrade-db                       显式升级存量库到迁移链头"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make upgrade-system-assets            在维护窗口应用新增 System Asset release"
 	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"

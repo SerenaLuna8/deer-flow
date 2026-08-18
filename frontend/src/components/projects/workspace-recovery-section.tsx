@@ -34,13 +34,11 @@ import { projectErrorMessage } from "./project-view-model";
 export function formatRecoveryDeadline(
   value: string | null | undefined,
   locale: string,
+  fallback: string,
 ): string {
-  if (!value)
-    return locale === "zh-CN" ? "恢复窗口结束" : "recovery window end";
+  if (!value) return fallback;
   const timestamp = new Date(value);
-  if (Number.isNaN(timestamp.getTime())) {
-    return locale === "zh-CN" ? "恢复窗口结束" : "recovery window end";
-  }
+  if (Number.isNaN(timestamp.getTime())) return fallback;
   return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
     timeStyle: "short",
@@ -54,7 +52,8 @@ function RecoverableProjectRow({
   project: Project;
   userId: string;
 }) {
-  const { locale } = useI18n();
+  const { locale, t } = useI18n();
+  const copy = t.projectWorkspace.recovery;
   const restore = useRestoreProject(userId, project.id);
   const [confirmOpen, setConfirmOpen] = useState(false);
   return (
@@ -63,12 +62,17 @@ function RecoverableProjectRow({
         <div>
           <p className="font-medium">{project.display_name}</p>
           <p className="text-muted-foreground mt-1 text-xs">
-            可恢复至{" "}
-            {formatRecoveryDeadline(project.deletion_effective_at, locale)}
+            {copy.recoverableUntil(
+              formatRecoveryDeadline(
+                project.deletion_effective_at,
+                locale,
+                copy.windowEnd,
+              ),
+            )}
           </p>
           {restore.error && (
             <p role="alert" className="text-destructive mt-2 text-sm">
-              {projectErrorMessage(restore.error)}
+              {projectErrorMessage(restore.error, t.projectWorkspace.errors)}
             </p>
           )}
         </div>
@@ -79,16 +83,15 @@ function RecoverableProjectRow({
           onClick={() => setConfirmOpen(true)}
         >
           <RotateCcwIcon aria-hidden className="size-4" />
-          恢复项目
+          {copy.recover}
         </Button>
       </li>
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认恢复项目？</DialogTitle>
+            <DialogTitle>{copy.confirmTitle}</DialogTitle>
             <DialogDescription>
-              将恢复“{project.display_name}
-              ”的成员访问和冻结的私有工作区。自动化恢复后仍保持暂停。
+              {copy.confirmDescription(project.display_name)}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -97,7 +100,7 @@ function RecoverableProjectRow({
               variant="outline"
               onClick={() => setConfirmOpen(false)}
             >
-              取消
+              {copy.cancel}
             </Button>
             <Button
               type="button"
@@ -108,7 +111,7 @@ function RecoverableProjectRow({
                 })
               }
             >
-              {restore.isPending ? "正在恢复…" : "确认恢复"}
+              {restore.isPending ? copy.restoring : copy.confirm}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -118,6 +121,8 @@ function RecoverableProjectRow({
 }
 
 export function WorkspaceRecoverySection({ userId }: { userId: string }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace.recovery;
   const projects = useRecoverableProjects(userId);
   const recoverable =
     projects.data?.items.filter(
@@ -137,7 +142,7 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
           >
             <span className="flex items-center gap-2 font-semibold">
               <ArchiveRestoreIcon aria-hidden className="text-primary size-5" />
-              可恢复项目
+              {copy.title}
             </span>
             <ChevronDownIcon
               aria-hidden
@@ -151,7 +156,7 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
               <Skeleton className="h-16 rounded-xl" />
             ) : projects.error ? (
               <p role="alert" className="text-muted-foreground text-sm">
-                {projectErrorMessage(projects.error)}
+                {projectErrorMessage(projects.error, t.projectWorkspace.errors)}
               </p>
             ) : recoverable.length ? (
               <ul className="space-y-3">
@@ -164,7 +169,7 @@ export function WorkspaceRecoverySection({ userId }: { userId: string }) {
                 ))}
               </ul>
             ) : (
-              <p className="text-muted-foreground text-sm">暂无可恢复项目。</p>
+              <p className="text-muted-foreground text-sm">{copy.empty}</p>
             )}
           </div>
         </CollapsibleContent>

@@ -2,14 +2,17 @@ import type { Message, Run } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import {
+  CURRENT_UPLOAD_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
 } from "@/core/private-work/api-client";
 import {
+  findTerminalFailureRunIdsToReload,
   getLatestRegenerationTarget,
   latestRunFailureCode,
   resolveRunFailureCode,
   resolveRunFailureRunId,
+  shouldReloadEmptyRunAfterTerminalFailure,
 } from "@/core/threads/hooks";
 
 function run(status: string, error: string | null): Run {
@@ -27,6 +30,53 @@ function run(status: string, error: string | null): Run {
 }
 
 describe("run failure recovery", () => {
+  test("reloads an already-seen Run when it becomes a terminal failure", () => {
+    const previousStatuses = new Map<string, string>([
+      ["run-1", "running"],
+      ["run-2", "error"],
+    ]);
+
+    expect(
+      findTerminalFailureRunIdsToReload(previousStatuses, [
+        run("error", "MCP_CONNECTION_FAILED"),
+      ]),
+    ).toEqual(["run-1"]);
+    expect(
+      findTerminalFailureRunIdsToReload(previousStatuses, [
+        { ...run("error", "still failed"), run_id: "run-2" },
+      ]),
+    ).toEqual([]);
+    expect(
+      findTerminalFailureRunIdsToReload(previousStatuses, [
+        run("success", null),
+      ]),
+    ).toEqual([]);
+  });
+
+  test("retries an empty message request that raced with terminal failure", () => {
+    expect(
+      shouldReloadEmptyRunAfterTerminalFailure({
+        statusAtRequest: "running",
+        currentStatus: "error",
+        visibleMessageCount: 0,
+      }),
+    ).toBe(true);
+    expect(
+      shouldReloadEmptyRunAfterTerminalFailure({
+        statusAtRequest: "running",
+        currentStatus: "error",
+        visibleMessageCount: 1,
+      }),
+    ).toBe(false);
+    expect(
+      shouldReloadEmptyRunAfterTerminalFailure({
+        statusAtRequest: "error",
+        currentStatus: "error",
+        visibleMessageCount: 0,
+      }),
+    ).toBe(false);
+  });
+
   test("recognizes the stable code from live and refreshed durable failures", () => {
     const durableFailure = [run("error", MODEL_OUTPUT_LIMIT)];
 
@@ -51,6 +101,11 @@ describe("run failure recovery", () => {
     expect(
       latestRunFailureCode([run("success", MODEL_OUTPUT_LIMIT)]),
     ).toBeNull();
+    expect(
+      resolveRunFailureRunId(undefined, null, [
+        run("error", "NEW_BACKEND_ERROR"),
+      ]),
+    ).toBe("run-1");
   });
 
   test("recognizes incomplete output delivery without offering a model replay", () => {
@@ -62,14 +117,37 @@ describe("run failure recovery", () => {
     expect(resolveRunFailureCode(undefined, durableFailure)).toBe(
       OUTPUT_DELIVERY_INCOMPLETE,
     );
-    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBeNull();
+    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBe(
+      "run-1",
+    );
 
     const liveError = new Error(OUTPUT_DELIVERY_INCOMPLETE);
     liveError.name = OUTPUT_DELIVERY_INCOMPLETE;
     expect(resolveRunFailureCode(liveError, [])).toBe(
       OUTPUT_DELIVERY_INCOMPLETE,
     );
-    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBeNull();
+    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
+  });
+
+  test("recognizes a current-upload failure from live and durable terminals", () => {
+    const durableFailure = [run("error", CURRENT_UPLOAD_UNAVAILABLE)];
+
+    expect(latestRunFailureCode(durableFailure)).toBe(
+      CURRENT_UPLOAD_UNAVAILABLE,
+    );
+    expect(resolveRunFailureCode(undefined, durableFailure)).toBe(
+      CURRENT_UPLOAD_UNAVAILABLE,
+    );
+    expect(resolveRunFailureRunId(undefined, null, durableFailure)).toBe(
+      "run-1",
+    );
+
+    const liveError = new Error(CURRENT_UPLOAD_UNAVAILABLE);
+    liveError.name = CURRENT_UPLOAD_UNAVAILABLE;
+    expect(resolveRunFailureCode(liveError, [])).toBe(
+      CURRENT_UPLOAD_UNAVAILABLE,
+    );
+    expect(resolveRunFailureRunId(liveError, "run-live", [])).toBe("run-live");
   });
 
   test("reuses the latest assistant turn as the existing regenerate target", () => {

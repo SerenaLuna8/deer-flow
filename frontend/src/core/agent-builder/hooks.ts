@@ -1,6 +1,11 @@
 "use client";
 
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -10,11 +15,12 @@ import {
 import { projectAssetKey } from "@/core/shared-assets/query-keys";
 
 import {
+  AgentBuilderApiError,
   cancelAgentBuilderSession,
   finalizeAgentBuilderSession,
   createAgentBuilderSession,
   getAgentBuilderSession,
-  listAgentBuilderSessions,
+  listAllAgentBuilderSessions,
   submitAgentBuilderTurn,
 } from "./api";
 import {
@@ -36,6 +42,16 @@ export type CancelAgentBuilderSessionFromListInput =
   CancelAgentBuilderSessionInput & {
     session_id: string;
   };
+
+export type AgentBuilderPollingOptions = {
+  canAuthor: boolean;
+  requestPending?: boolean;
+};
+
+export type AgentBuilderSessionQueryOptions = {
+  canAuthor: boolean;
+  pollWhileRequestPending?: boolean;
+};
 
 function useAgentBuilderMutationRunner(accountId: string, projectId: string) {
   const access = usePrivateWorkAccess();
@@ -70,10 +86,45 @@ function useAgentBuilderMutationRunner(accountId: string, projectId: string) {
 
 export function agentBuilderPollingInterval(
   session: AgentBuilderSession | undefined,
+  { canAuthor, requestPending = false }: AgentBuilderPollingOptions,
 ) {
-  return session?.status === "generating" || session?.status === "committing"
+  return canAuthor &&
+    (requestPending ||
+      session?.status === "generating" ||
+      session?.status === "committing")
     ? 1_000
     : false;
+}
+
+export function newestAgentBuilderSession(
+  current: AgentBuilderSession | undefined,
+  incoming: AgentBuilderSession,
+): AgentBuilderSession {
+  return !current || incoming.revision >= current.revision ? incoming : current;
+}
+
+function isAgentBuilderRevisionConflict(error: unknown) {
+  return (
+    error instanceof AgentBuilderApiError &&
+    error.code === "AGENT_BUILDER_CONFLICT"
+  );
+}
+
+async function invalidateAgentBuilderConflictQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  await Promise.all([
+    queryClient.invalidateQueries(
+      agentBuilderSessionsInvalidation(accountId, projectId),
+    ),
+    queryClient.invalidateQueries({
+      queryKey: agentBuilderSessionKey(accountId, projectId, sessionId),
+      exact: true,
+    }),
+  ]);
 }
 
 export function useAgentBuilderSessions(
@@ -83,10 +134,7 @@ export function useAgentBuilderSessions(
 ) {
   return useQuery({
     queryKey: agentBuilderSessionsKey(accountId, projectId),
-    queryFn: ({ signal }) =>
-      listAgentBuilderSessions(projectId, signal).then(
-        (response) => response.data,
-      ),
+    queryFn: ({ signal }) => listAllAgentBuilderSessions(projectId, signal),
     enabled,
   });
 }
@@ -95,14 +143,27 @@ export function useAgentBuilderSession(
   accountId: string,
   projectId: string,
   sessionId: string,
+  {
+    canAuthor,
+    pollWhileRequestPending = false,
+  }: AgentBuilderSessionQueryOptions,
 ) {
+  const queryClient = useQueryClient();
+  const key = agentBuilderSessionKey(accountId, projectId, sessionId);
   return useQuery({
-    queryKey: agentBuilderSessionKey(accountId, projectId, sessionId),
+    queryKey: key,
     queryFn: ({ signal }) =>
-      getAgentBuilderSession(projectId, sessionId, signal).then(
-        (response) => response.data,
+      getAgentBuilderSession(projectId, sessionId, signal).then((response) =>
+        newestAgentBuilderSession(
+          queryClient.getQueryData<AgentBuilderSession>(key),
+          response.data,
+        ),
       ),
-    refetchInterval: (query) => agentBuilderPollingInterval(query.state.data),
+    refetchInterval: (query) =>
+      agentBuilderPollingInterval(query.state.data, {
+        canAuthor,
+        requestPending: pollWhileRequestPending,
+      }),
   });
 }
 
@@ -148,12 +209,21 @@ export function useSubmitAgentBuilderTurn(
         submitAgentBuilderTurn(projectId, sessionId, input, signal),
       ),
     onSuccess: (response) => {
-      queryClient.setQueryData(
+      queryClient.setQueryData<AgentBuilderSession>(
         agentBuilderSessionKey(accountId, projectId, sessionId),
-        response.data,
+        (current) => newestAgentBuilderSession(current, response.data),
       );
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+    onError: async (error) => {
+      if (!isAgentBuilderRevisionConflict(error)) return;
+      await invalidateAgentBuilderConflictQueries(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
       );
     },
   });
@@ -177,9 +247,9 @@ export function useCommitAgentBuilderSession(
         finalizeAgentBuilderSession(projectId, sessionId, input, signal),
       ),
     onSuccess: (response) => {
-      queryClient.setQueryData(
+      queryClient.setQueryData<AgentBuilderSession>(
         agentBuilderSessionKey(accountId, projectId, sessionId),
-        response.data.session,
+        (current) => newestAgentBuilderSession(current, response.data.session),
       );
       void Promise.all([
         queryClient.invalidateQueries(
@@ -189,6 +259,15 @@ export function useCommitAgentBuilderSession(
           queryKey: projectAssetKey(accountId, projectId, "agents"),
         }),
       ]);
+    },
+    onError: async (error) => {
+      if (!isAgentBuilderRevisionConflict(error)) return;
+      await invalidateAgentBuilderConflictQueries(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
+      );
     },
   });
 }
@@ -211,12 +290,21 @@ export function useCancelAgentBuilderSession(
         cancelAgentBuilderSession(projectId, sessionId, input, signal),
       ),
     onSuccess: (response) => {
-      queryClient.setQueryData(
+      queryClient.setQueryData<AgentBuilderSession>(
         agentBuilderSessionKey(accountId, projectId, sessionId),
-        response.data,
+        (current) => newestAgentBuilderSession(current, response.data),
       );
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+    onError: async (error) => {
+      if (!isAgentBuilderRevisionConflict(error)) return;
+      await invalidateAgentBuilderConflictQueries(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
       );
     },
   });
@@ -242,9 +330,9 @@ export function useCancelAgentBuilderSessionFromList(
         cancelAgentBuilderSession(projectId, sessionId, input, signal),
       ),
     onSuccess: (response, input) => {
-      queryClient.setQueryData(
+      queryClient.setQueryData<AgentBuilderSession>(
         agentBuilderSessionKey(accountId, projectId, input.session_id),
-        response.data,
+        (current) => newestAgentBuilderSession(current, response.data),
       );
       queryClient.setQueryData<AgentBuilderSessionSummary[]>(
         agentBuilderSessionsKey(accountId, projectId),
@@ -253,6 +341,15 @@ export function useCancelAgentBuilderSessionFromList(
       );
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+    onError: async (error, input) => {
+      if (!isAgentBuilderRevisionConflict(error)) return;
+      await invalidateAgentBuilderConflictQueries(
+        queryClient,
+        accountId,
+        projectId,
+        input.session_id,
       );
     },
   });

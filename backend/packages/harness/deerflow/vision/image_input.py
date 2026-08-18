@@ -111,6 +111,34 @@ def detect_image_mime(image_data: bytes) -> str | None:
     return None
 
 
+def validate_image_payload(
+    image_data: bytes,
+    declared_mime_type: str,
+) -> None:
+    """Fully decode-check one model-bound image without rewriting its bytes."""
+
+    detected_mime_type = detect_image_mime(image_data)
+    if detected_mime_type is None or detected_mime_type != declared_mime_type:
+        raise ImageNormalizationError("UNSUPPORTED_MEDIA")
+    try:
+        with Image.open(io.BytesIO(image_data)) as probe:
+            width, height = probe.size
+            if width < 1 or height < 1 or width > MAX_IMAGE_DIMENSION or height > MAX_IMAGE_DIMENSION or width * height > MAX_IMAGE_PIXELS:
+                raise ImageNormalizationError("IMAGE_PIXEL_LIMIT_EXCEEDED")
+            probe.verify()
+        # ``verify()`` validates container structure but Pillow can still accept
+        # JPEGs whose compressed pixel stream is truncated. Reopen because
+        # ``verify()`` invalidates the decoder, then force a complete decode.
+        with Image.open(io.BytesIO(image_data)) as decoded:
+            decoded.load()
+    except ImageNormalizationError:
+        raise
+    except Image.DecompressionBombError:
+        raise ImageNormalizationError("IMAGE_PIXEL_LIMIT_EXCEEDED") from None
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError):
+        raise ImageNormalizationError("UNSUPPORTED_MEDIA") from None
+
+
 def sanitize_image_error(
     error: Exception,
     thread_data: ThreadDataState | None,
@@ -276,4 +304,5 @@ __all__ = [
     "normalize_image",
     "read_bounded_image_bytes",
     "sanitize_image_error",
+    "validate_image_payload",
 ]

@@ -31,10 +31,61 @@ class AssetConflict(SharedAssetError):
     public_message = "Asset state conflict"
 
 
+class AssetInUse(AssetConflict):
+    """The asset has immutable references that forbid physical deletion."""
+
+    code = "ASSET_IN_USE"
+    public_message = "Asset is still referenced"
+
+
 class AssetValidationFailed(SharedAssetError):
     code = "asset_validation_failed"
     status_code = 422
     public_message = "Asset validation failed"
+
+
+class SkillArchiveLimitExceeded(AssetValidationFailed):
+    """An uploaded Skill archive exceeded a bounded parsing limit."""
+
+    code = "SKILL_ARCHIVE_LIMIT_EXCEEDED"
+    status_code = 413
+    public_message = "Skill archive exceeds the allowed size or member limit"
+
+
+class SkillRuntimeNameConflict(AssetConflict):
+    """A runtime-visible Skill already owns the requested normalized name."""
+
+    code = "SKILL_RUNTIME_NAME_CONFLICT"
+    public_message = "A runtime-visible Skill already uses this name"
+
+
+class AgentDesignSecretDetected(AssetValidationFailed):
+    """Agent Builder input contained secret-like material."""
+
+    code = "AGENT_DESIGN_SECRET_DETECTED"
+    public_message = "Agent design input contains secret-like material"
+
+
+class AgentDesignSlugConflict(AssetConflict):
+    """A project Agent already owns the requested Builder slug."""
+
+    code = "AGENT_DESIGN_SLUG_CONFLICT"
+    public_message = "A project Agent already uses this slug"
+
+
+class AgentDesignConflictUnresolved(AssetConflict):
+    """A generated candidate still has an unresolved error conflict."""
+
+    code = "AGENT_DESIGN_CONFLICT_UNRESOLVED"
+    public_message = "Agent design has unresolved error conflicts"
+
+
+class AgentDesignSessionLimitExceeded(SharedAssetError):
+    """An owner already has the maximum incomplete Builder sessions."""
+
+    code = "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED"
+    status_code = 429
+    public_message = "Agent Builder incomplete session limit exceeded"
 
 
 class AssetStorageUnavailable(SharedAssetError):

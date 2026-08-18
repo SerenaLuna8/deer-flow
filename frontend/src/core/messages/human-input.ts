@@ -64,6 +64,7 @@ export type HumanInputResponse =
       request_id: string;
       response_kind: "text";
       value: string;
+      form_values?: Record<string, HumanInputFormValue>;
     };
 
 export type HumanInputThreadState = {
@@ -354,6 +355,10 @@ export function parseHumanInputResponse(
   }
 
   if (value.response_kind === "text") {
+    const formValues = parseHumanInputFormValues(value.form_values);
+    if (value.form_values !== undefined && formValues === undefined) {
+      return null;
+    }
     return {
       version: 1,
       kind: "human_input_response",
@@ -361,10 +366,44 @@ export function parseHumanInputResponse(
       request_id: value.request_id,
       response_kind: "text",
       value: value.value,
+      ...(formValues ? { form_values: formValues } : {}),
     };
   }
 
   return null;
+}
+
+function parseHumanInputFormValues(
+  value: unknown,
+): Record<string, HumanInputFormValue> | undefined {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  const entries = Object.entries(value);
+  const parsed: Record<string, HumanInputFormValue> = {};
+  for (const [name, fieldValue] of entries) {
+    if (!isNonEmptyString(name) || RESERVED_FIELD_NAMES.has(name)) {
+      return undefined;
+    }
+    if (
+      typeof fieldValue === "string" ||
+      typeof fieldValue === "boolean" ||
+      (typeof fieldValue === "number" && Number.isFinite(fieldValue))
+    ) {
+      parsed[name] = fieldValue;
+      continue;
+    }
+    if (
+      Array.isArray(fieldValue) &&
+      fieldValue.length > 0 &&
+      fieldValue.every(isNonEmptyString)
+    ) {
+      parsed[name] = [...fieldValue];
+      continue;
+    }
+    return undefined;
+  }
+  return parsed;
 }
 
 export function extractHumanInputRequest(
@@ -451,6 +490,27 @@ function isResponseValidForRequest(
           option.id === response.option_id && option.value === response.value,
       ),
     );
+  }
+  if (response.form_values !== undefined) {
+    if (request.input_mode !== "form") {
+      return false;
+    }
+    const fields = new Map(
+      (request.fields ?? []).map((field) => [field.name, field]),
+    );
+    if (
+      Object.keys(response.form_values).some((name) => !fields.has(name)) ||
+      [...fields.values()].some(
+        (field) =>
+          field.required &&
+          !Object.prototype.hasOwnProperty.call(
+            response.form_values,
+            field.name,
+          ),
+      )
+    ) {
+      return false;
+    }
   }
   return (
     request.input_mode === "free_text" ||
@@ -654,10 +714,10 @@ export function buildHumanInputFormSummary(
   return parts.join("; ");
 }
 
-export function buildHumanInputFormSubmissionValue(
+export function createHumanInputFormResponse(
   request: HumanInputRequest,
   values: Record<string, HumanInputFormValue>,
-) {
+): Extract<HumanInputResponse, { response_kind: "text" }> {
   const record: Record<string, HumanInputFormValue> = {};
   for (const field of request.fields ?? []) {
     const value = readHumanInputFormValue(values, field.name);
@@ -666,7 +726,15 @@ export function buildHumanInputFormSubmissionValue(
     }
     record[field.name] = value!;
   }
-  return `${buildHumanInputFormSummary(request, values)} [values: ${JSON.stringify(record)}]`;
+  return {
+    version: 1,
+    kind: "human_input_response",
+    source: request.source,
+    request_id: request.request_id,
+    response_kind: "text",
+    value: buildHumanInputFormSummary(request, values) || "-",
+    form_values: record,
+  };
 }
 
 export function createHumanInputTextResponse(
@@ -687,5 +755,50 @@ export function buildHumanInputResponseText(
   request: HumanInputRequest,
   response: HumanInputResponse,
 ) {
-  return `For your clarification "${request.question}", my answer is: ${response.value}`;
+  const structuredValues =
+    response.response_kind === "text" && response.form_values !== undefined
+      ? ` [values: ${JSON.stringify(response.form_values)}]`
+      : "";
+  return `For your clarification "${request.question}", my answer is: ${response.value}${structuredValues}`;
+}
+
+export function humanInputResponseDisplayValue(
+  request: HumanInputRequest,
+  response: HumanInputResponse,
+) {
+  if (
+    request.input_mode !== "form" ||
+    response.response_kind !== "text" ||
+    response.form_values !== undefined
+  ) {
+    return response.value;
+  }
+
+  const marker = " [values: ";
+  const markerIndex = response.value.lastIndexOf(marker);
+  if (markerIndex < 0 || !response.value.endsWith("]")) {
+    return response.value;
+  }
+
+  const summary = response.value.slice(0, markerIndex) || "-";
+  const serializedValues = response.value.slice(
+    markerIndex + marker.length,
+    -1,
+  );
+  try {
+    const formValues = parseHumanInputFormValues(JSON.parse(serializedValues));
+    if (
+      formValues === undefined ||
+      !isResponseValidForRequest(request, {
+        ...response,
+        value: summary,
+        form_values: formValues,
+      })
+    ) {
+      return response.value;
+    }
+  } catch {
+    return response.value;
+  }
+  return summary;
 }

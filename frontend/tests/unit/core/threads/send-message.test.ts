@@ -13,6 +13,7 @@ import {
   createUploadedAttachmentRefCache,
   forgetUploadedAttachmentRefs,
   isCurrentMessageSendAttempt,
+  isRunAdmissionNotConfirmedError,
   isCurrentThreadCallback,
   monitorRunAdmissionLifecycle,
   planAttachmentUploadRetry,
@@ -275,20 +276,26 @@ test("consumes a terminal failure after admission without reopening the composer
 test("fails closed when the submit lifecycle ends without an admission event", async () => {
   const admission = createRunAdmissionLatch();
   let admissionFailures = 0;
+  let admissionError: unknown;
   const admissionFailure = expect(admission.promise).rejects.toThrow(
     "Run ended before admission was confirmed",
   );
   await monitorRunAdmissionLifecycle({
     admission,
     lifecycle: Promise.resolve(),
-    onAdmissionFailure: () => {
+    onAdmissionFailure: (error) => {
       admissionFailures += 1;
+      admissionError = error;
     },
     onSettled: () => undefined,
   });
 
   await admissionFailure;
   expect(admissionFailures).toBe(1);
+  expect(isRunAdmissionNotConfirmedError(admissionError)).toBe(true);
+  expect(isRunAdmissionNotConfirmedError(new Error("another failure"))).toBe(
+    false,
+  );
 });
 
 test("keeps stale thread attempts and callbacks isolated from the new owner", () => {

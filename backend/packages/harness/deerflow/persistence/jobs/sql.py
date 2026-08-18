@@ -33,7 +33,13 @@ JobType = Literal[
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
-_DETERMINISTIC_NONRETRYABLE_ERROR_CODES = frozenset({"MODEL_OUTPUT_LIMIT"})
+_DETERMINISTIC_NONRETRYABLE_ERROR_CODES = frozenset(
+    {
+        "MODEL_OUTPUT_LIMIT",
+        "OUTPUT_DELIVERY_INCOMPLETE",
+        "CURRENT_UPLOAD_UNAVAILABLE",
+    }
+)
 
 
 def _dead_error_code_for_failure(
@@ -627,6 +633,7 @@ class JobRepository:
         row.lease_token_hash = None
         row.lease_expires_at = None
         row.heartbeat_at = None
+        row.public_error_code = None
         row.completed_at = now
         row.updated_at = now
         await self._publish_terminal(
@@ -1041,6 +1048,7 @@ class JobRepository:
             )
             .values(
                 status=status,
+                public_error_code=None,
                 lease_owner_id=None,
                 lease_token_hash=None,
                 lease_expires_at=None,

@@ -21,6 +21,7 @@ import { fetch } from "../api/fetcher";
 import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import {
+  isCurrentUploadUnavailableError,
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
   isProjectRunTerminalFailure,
@@ -44,7 +45,9 @@ import type {
 import {
   AttachmentUploadCoordinator,
   deleteUploadedFile,
+  isReadyPromptInputFilePart,
   promptInputFilePartToFile,
+  readyPromptInputFileToMessage,
   uploadFailureMessage,
   uploadFiles,
 } from "../uploads";
@@ -63,6 +66,8 @@ import {
   overlayThreadProjection,
   projectThreadMessages,
   pruneConfirmedArchivedMessages,
+  retainOptimisticHumanMessagesAfterFailure,
+  retainUnacknowledgedOptimisticHumanMessages,
   resolveActiveRunIdForMessages,
   type ThreadMessageProjectionInput,
 } from "./message-projection";
@@ -89,6 +94,7 @@ import {
   createMessageSendAttempt,
   createRunAdmissionLatch,
   isCurrentMessageSendAttempt,
+  isRunAdmissionNotConfirmedError,
   isCurrentThreadCallback,
   monitorRunAdmissionLifecycle,
   shouldIgnoreMetadataLessStreamError,
@@ -129,6 +135,7 @@ export type ThreadStreamOptions = {
   displayThreadId?: string | null | undefined;
   context: LocalSettings["context"];
   agentModelRef?: string | null;
+  enabled?: boolean;
   isMock?: boolean;
   privateWork?: ProjectPrivateWorkScope;
   onSend?: (threadId: string) => void;
@@ -293,6 +300,7 @@ export function useThreadStream({
   displayThreadId,
   context,
   agentModelRef,
+  enabled = true,
   isMock,
   privateWork: explicitPrivateWork,
   onSend,
@@ -301,9 +309,10 @@ export function useThreadStream({
   onToolEnd,
 }: ThreadStreamOptions) {
   const privateWork = usePrivateWorkAccess(explicitPrivateWork);
+  const streamEnabled = enabled && !isMock;
   const uploadScopeKey = `${privateWork.scope.accountId}:${privateWork.scope.projectId}`;
   const { t } = useI18n();
-  const { models: executionModels } = useModels({ enabled: !isMock });
+  const { models: executionModels } = useModels({ enabled: streamEnabled });
   const executionModelSelection = useMemo(
     () =>
       resolveAgentExecutionModelSelection(
@@ -346,9 +355,18 @@ export function useThreadStream({
   currentUploadStatusScopeKeyRef.current = uploadScopeKey;
   // Optimistic messages shown before the server stream responds.
   const [optimisticMessages, setOptimisticMessages] = useState<Message[]>([]);
+  const optimisticMessagesRef = useRef<Message[]>(optimisticMessages);
+  optimisticMessagesRef.current = optimisticMessages;
   const [optimisticThreadId, setOptimisticThreadId] = useState<string | null>(
     null,
   );
+  const optimisticRunIdRef = useRef<string | null>(null);
+  const [failedOptimisticMessages, setFailedOptimisticMessages] = useState<
+    Message[]
+  >([]);
+  const [failedOptimisticThreadId, setFailedOptimisticThreadId] = useState<
+    string | null
+  >(null);
   const [liveMessagesThreadId, setLiveMessagesThreadId] = useState<
     string | null
   >(null);
@@ -449,7 +467,7 @@ export function useThreadStream({
     retry: retryHistory,
     appendMessages,
   } = useThreadHistory(onStreamThreadId ?? "", {
-    enabled: !isMock,
+    enabled: streamEnabled,
     pendingSupersededRunIds,
     privateWork,
   });
@@ -579,7 +597,7 @@ export function useThreadStream({
   const thread = useStream<AgentThreadState>({
     client: privateWork.client,
     assistantId: "lead_agent",
-    threadId: onStreamThreadId,
+    threadId: streamEnabled ? onStreamThreadId : null,
     reconnectOnMount: privateWork.reconnectOnMount,
     fetchStateHistory: { limit: 1 },
     throttle: true,
@@ -634,8 +652,12 @@ export function useThreadStream({
         );
         setLiveMessagesThreadId(meta.thread_id);
         if (pendingAdmission.optimisticMessages.length > 0) {
+          optimisticRunIdRef.current = meta.run_id;
+          optimisticMessagesRef.current = pendingAdmission.optimisticMessages;
           setOptimisticThreadId(meta.thread_id);
           setOptimisticMessages(pendingAdmission.optimisticMessages);
+        } else {
+          optimisticRunIdRef.current = null;
         }
         // `onCreated` is the server admission boundary. Resolve the composer
         // in this same React batch so the accepted user turn replaces, rather
@@ -923,6 +945,26 @@ export function useThreadStream({
       }
 
       if (!leavesReplayProjectionIntact) {
+        const failedRunId =
+          callbackOptions?.run_id ?? currentRunIdRef.current ?? null;
+        const retainsAdmittedHuman =
+          failedRunId !== null && optimisticRunIdRef.current === failedRunId;
+        if (retainsAdmittedHuman) {
+          setFailedOptimisticThreadId(
+            callbackOptions?.thread_id ?? threadIdRef.current,
+          );
+          setFailedOptimisticMessages((current) =>
+            dedupeMessagesByIdentity([
+              ...current,
+              ...retainOptimisticHumanMessagesAfterFailure(
+                optimisticMessagesRef.current,
+                failedRunId,
+              ),
+            ]),
+          );
+        }
+        optimisticRunIdRef.current = null;
+        optimisticMessagesRef.current = [];
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -933,9 +975,11 @@ export function useThreadStream({
             ? t.conversation.modelOutputLimitDescription
             : isOutputDeliveryIncompleteError(error)
               ? t.conversation.outputDeliveryIncompleteDescription
-              : isProjectRunTerminalFailure(error)
-                ? t.conversation.runFailedDescription
-                : getStreamErrorMessage(error),
+              : isCurrentUploadUnavailableError(error)
+                ? t.conversation.currentUploadUnavailableDescription
+                : isProjectRunTerminalFailure(error)
+                  ? t.conversation.runFailedDescription
+                  : getStreamErrorMessage(error),
         );
       }
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -1254,13 +1298,27 @@ export function useThreadStream({
 
   useEffect(() => {
     if (optimisticThreadId && optimisticThreadId !== currentViewThreadId) {
+      optimisticRunIdRef.current = null;
+      optimisticMessagesRef.current = [];
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
+    }
+    if (
+      failedOptimisticThreadId &&
+      failedOptimisticThreadId !== currentViewThreadId
+    ) {
+      setFailedOptimisticMessages([]);
+      setFailedOptimisticThreadId(null);
     }
     if (liveMessagesThreadId && liveMessagesThreadId !== currentViewThreadId) {
       setLiveMessagesThreadId(null);
     }
-  }, [currentViewThreadId, liveMessagesThreadId, optimisticThreadId]);
+  }, [
+    currentViewThreadId,
+    failedOptimisticThreadId,
+    liveMessagesThreadId,
+    optimisticThreadId,
+  ]);
 
   // When streaming starts without a baseline (e.g. reconnection, run started
   // from another client, or page reload mid-stream), snapshot the current
@@ -1296,6 +1354,14 @@ export function useThreadStream({
       ]),
     [optimisticMessages, persistedMessages, visibleHistory],
   );
+  const unacknowledgedFailedOptimisticMessages = useMemo(
+    () =>
+      retainUnacknowledgedOptimisticHumanMessages(failedOptimisticMessages, [
+        ...visibleHistory,
+        ...persistedMessages,
+      ]),
+    [failedOptimisticMessages, persistedMessages, visibleHistory],
+  );
   useEffect(() => {
     if (optimisticMessageCount === 0) return;
 
@@ -1306,6 +1372,8 @@ export function useThreadStream({
       newHumanMsgArrived ||
       optimisticHumanAcknowledged
     ) {
+      optimisticRunIdRef.current = null;
+      optimisticMessagesRef.current = [];
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
     }
@@ -1315,6 +1383,18 @@ export function useThreadStream({
     optimisticHumanAcknowledged,
     optimisticMessageCount,
   ]);
+  useEffect(() => {
+    if (
+      unacknowledgedFailedOptimisticMessages.length ===
+      failedOptimisticMessages.length
+    ) {
+      return;
+    }
+    setFailedOptimisticMessages(unacknowledgedFailedOptimisticMessages);
+    if (unacknowledgedFailedOptimisticMessages.length === 0) {
+      setFailedOptimisticThreadId(null);
+    }
+  }, [failedOptimisticMessages, unacknowledgedFailedOptimisticMessages]);
 
   const updateAttachmentUploadStatus = useCallback(
     (
@@ -1532,6 +1612,20 @@ export function useThreadStream({
       const humanMessageId = `human-${crypto.randomUUID()}`;
       let uploadedFileInfo: UploadedFileInfo[] = [];
       let uploadedClientIds: string[] = [];
+      const attachmentClientIds = message.files.map(
+        (filePart, index) =>
+          filePart.clientId ?? `send-${attempt.generation}-${index}`,
+      );
+      const uploadEntries = message.files.flatMap((filePart, index) =>
+        isReadyPromptInputFilePart(filePart)
+          ? []
+          : [
+              {
+                filePart,
+                clientId: attachmentClientIds[index]!,
+              },
+            ],
+      );
       let lifecycleStarted = false;
       const uploadCoordinatorScopeKey = attachmentUploadCoordinatorScopeKey(
         privateWork.scope.accountId,
@@ -1553,13 +1647,10 @@ export function useThreadStream({
 
       try {
         // Upload files first if any
-        if (message.files && message.files.length > 0) {
+        if (uploadEntries.length > 0) {
           setIsUploading(true);
           try {
-            uploadedClientIds = message.files.map(
-              (filePart, index) =>
-                filePart.clientId ?? `send-${attempt.generation}-${index}`,
-            );
+            uploadedClientIds = uploadEntries.map((entry) => entry.clientId);
             if (
               !attachmentUploadCoordinator.claim(
                 uploadCoordinatorScopeKey,
@@ -1578,8 +1669,8 @@ export function useThreadStream({
                 cleanupUploadedAttachment(threadId, uploaded),
             });
             const prepared = await preparePromptAttachments(
-              message.files,
-              (index) => uploadedClientIds[index]!,
+              uploadEntries.map((entry) => entry.filePart),
+              (index) => uploadEntries[index]!.clientId,
             );
             requireCurrentAttempt();
             uploadedFileInfo = await ensureAttachmentCandidates({
@@ -1615,8 +1706,19 @@ export function useThreadStream({
 
         requireCurrentAttempt();
 
-        const filesForSubmit: FileInMessage[] = uploadedFileInfo.map(
-          uploadedFileInfoToMessage,
+        let uploadedIndex = 0;
+        const filesForSubmit: FileInMessage[] = message.files.map(
+          (filePart) => {
+            if (isReadyPromptInputFilePart(filePart)) {
+              return readyPromptInputFileToMessage(filePart);
+            }
+            const uploaded = uploadedFileInfo[uploadedIndex];
+            uploadedIndex += 1;
+            if (!uploaded) {
+              throw new Error("An uploaded attachment reference is missing.");
+            }
+            return uploadedFileInfoToMessage(uploaded);
+          },
         );
         const submitMessages = buildThreadSubmitMessages({
           text,
@@ -1707,13 +1809,17 @@ export function useThreadStream({
                 )
               ) {
                 toast.error(
-                  isModelOutputLimitError(error)
-                    ? t.conversation.modelOutputLimitDescription
-                    : isOutputDeliveryIncompleteError(error)
-                      ? t.conversation.outputDeliveryIncompleteDescription
-                      : isProjectRunTerminalFailure(error)
-                        ? t.conversation.runFailedDescription
-                        : getStreamErrorMessage(error),
+                  isRunAdmissionNotConfirmedError(error)
+                    ? t.conversation.runAdmissionNotConfirmedDescription
+                    : isModelOutputLimitError(error)
+                      ? t.conversation.modelOutputLimitDescription
+                      : isOutputDeliveryIncompleteError(error)
+                        ? t.conversation.outputDeliveryIncompleteDescription
+                        : isCurrentUploadUnavailableError(error)
+                          ? t.conversation.currentUploadUnavailableDescription
+                          : isProjectRunTerminalFailure(error)
+                            ? t.conversation.runFailedDescription
+                            : getStreamErrorMessage(error),
                 );
               }
             }
@@ -1779,8 +1885,10 @@ export function useThreadStream({
       t.uploads.serverTooLarge,
       t.uploads.storageQuotaExceeded,
       t.uploads.uploadFailed,
+      t.conversation.runAdmissionNotConfirmedDescription,
       t.conversation.modelOutputLimitDescription,
       t.conversation.outputDeliveryIncompleteDescription,
+      t.conversation.currentUploadUnavailableDescription,
       t.conversation.runFailedDescription,
       context,
       attachmentUploadCoordinator,
@@ -2066,23 +2174,28 @@ export function useThreadStream({
     messagesRef.current = persistedMessages;
   }
   const previousHumanMessageCount = prevHumanMsgCountRef.current;
-  const visibleOptimisticMessages = useMemo(
-    () =>
-      getVisibleOptimisticMessages(
-        optimisticThreadId === currentViewThreadId
-          ? optimisticMessages
-          : EMPTY_MESSAGES,
-        previousHumanMessageCount,
-        humanMessageCount,
-      ),
-    [
-      currentViewThreadId,
-      humanMessageCount,
-      optimisticMessages,
-      optimisticThreadId,
+  const visibleOptimisticMessages = useMemo(() => {
+    const pendingMessages = getVisibleOptimisticMessages(
+      optimisticThreadId === currentViewThreadId
+        ? optimisticMessages
+        : EMPTY_MESSAGES,
       previousHumanMessageCount,
-    ],
-  );
+      humanMessageCount,
+    );
+    const failedMessages =
+      failedOptimisticThreadId === currentViewThreadId
+        ? failedOptimisticMessages
+        : EMPTY_MESSAGES;
+    return dedupeMessagesByIdentity([...failedMessages, ...pendingMessages]);
+  }, [
+    currentViewThreadId,
+    failedOptimisticMessages,
+    failedOptimisticThreadId,
+    humanMessageCount,
+    optimisticMessages,
+    optimisticThreadId,
+    previousHumanMessageCount,
+  ]);
 
   const explicitActiveRunId =
     currentRunThreadIdRef.current === threadId ? currentRunIdRef.current : null;

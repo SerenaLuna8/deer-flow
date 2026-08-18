@@ -247,14 +247,39 @@ async def test_ordinary_event_writers_lock_parent_before_sequence(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("job_status", "run_status", "run_error", "terminal_status", "error_code"),
+    [
+        ("succeeded", "success", None, "completed", None),
+        (
+            "dead",
+            "error",
+            "OUTPUT_DELIVERY_INCOMPLETE",
+            "error",
+            "OUTPUT_DELIVERY_INCOMPLETE",
+        ),
+        (
+            "dead",
+            "error",
+            "CURRENT_UPLOAD_UNAVAILABLE",
+            "error",
+            "CURRENT_UPLOAD_UNAVAILABLE",
+        ),
+    ],
+)
 async def test_terminal_repair_locks_governance_job_run_before_sequence(
     monkeypatch: pytest.MonkeyPatch,
+    job_status: str,
+    run_status: str,
+    run_error: str | None,
+    terminal_status: str,
+    error_code: str | None,
 ) -> None:
     calls: list[str] = []
     store = DbRunEventStore(AsyncMock(), run_event_notify_enabled=False)
     job_id = uuid.uuid4()
-    job = SimpleNamespace(status="succeeded")
-    run = SimpleNamespace(job_id=job_id, status="success", error=None)
+    job = SimpleNamespace(status=job_status)
+    run = SimpleNamespace(job_id=job_id, status=run_status, error=run_error)
 
     async def governance(*_args, **_kwargs):
         calls.append("project-membership")
@@ -295,7 +320,8 @@ async def test_terminal_repair_locks_governance_job_run_before_sequence(
         scope=_scope(),
         thread_id="thread-1",
         run_id="run-1",
-        status="completed",
+        status=terminal_status,
+        error_code=error_code,
     )
 
     assert calls == [

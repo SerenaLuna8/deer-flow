@@ -31,6 +31,7 @@ import {
   WorkspaceContainer,
 } from "@/components/workspace/workspace-container";
 import type { User } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateProject,
   usePinProject,
@@ -81,6 +82,8 @@ export function ProjectWorkbench({
   systemRole: User["system_role"];
   onLogout: () => Promise<void>;
 }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace;
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ProjectListFilter>("all");
   const [createOpen, setCreateOpen] = useState(false);
@@ -118,14 +121,14 @@ export function ProjectWorkbench({
         <div className="flex min-w-0 items-center gap-3">
           <span className="text-primary font-serif text-lg">ActWeave</span>
           <span className="text-muted-foreground hidden text-sm sm:inline">
-            工作空间
+            {copy.title}
           </span>
         </div>
         <div className="flex items-center gap-1">
           <SystemNotificationCenter userId={userId} />
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button type="button" variant="ghost" aria-label="账户">
+              <Button type="button" variant="ghost" aria-label={copy.account}>
                 <UserRoundIcon className="size-4" />
                 <span className="hidden max-w-56 truncate sm:inline">
                   {accountUsername}
@@ -146,7 +149,7 @@ export function ProjectWorkbench({
                   <DropdownMenuItem asChild>
                     <Link href="/admin/operations">
                       <ShieldCheckIcon aria-hidden className="size-4" />
-                      平台管理
+                      {copy.platformAdministration}
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
@@ -154,19 +157,19 @@ export function ProjectWorkbench({
               ) : null}
               <DropdownMenuItem onSelect={() => setSettingsOpen(true)}>
                 <SettingsIcon aria-hidden className="size-4" />
-                系统设置
+                {copy.systemSettings}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem asChild>
                 <Link href="/workspace/privacy">
                   <ShieldUserIcon aria-hidden className="size-4" />
-                  个人数据中心
+                  {copy.privacyCenter}
                 </Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onSelect={() => void onLogout()}>
                 <LogOutIcon className="size-4" />
-                退出登录
+                {copy.logout}
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
@@ -181,16 +184,16 @@ export function ProjectWorkbench({
             <div className="relative min-w-0 flex-1">
               <SearchIcon className="text-muted-foreground absolute top-1/2 left-3 size-4 -translate-y-1/2" />
               <Input
-                aria-label="搜索项目"
+                aria-label={copy.searchProjects}
                 className="h-12 pl-9 text-base shadow-none"
-                placeholder="搜索名称或项目标识"
+                placeholder={copy.searchPlaceholder}
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
               />
             </div>
             <div
               role="group"
-              aria-label="筛选项目"
+              aria-label={copy.filterProjects}
               className="bg-muted grid grid-cols-2 rounded-lg p-1"
             >
               <Button
@@ -200,7 +203,7 @@ export function ProjectWorkbench({
                 aria-pressed={filter === "all"}
                 onClick={() => setFilter("all")}
               >
-                全部项目
+                {copy.allProjects}
               </Button>
               <Button
                 type="button"
@@ -209,7 +212,7 @@ export function ProjectWorkbench({
                 aria-pressed={filter === "pinned"}
                 onClick={() => setFilter("pinned")}
               >
-                仅看置顶
+                {copy.pinnedOnly}
               </Button>
             </div>
             <div className="flex items-center justify-between gap-4 lg:justify-end">
@@ -219,7 +222,7 @@ export function ProjectWorkbench({
                 className="text-muted-foreground flex min-h-9 min-w-20 items-center text-base"
               >
                 {!projectsQuery.isLoading && !projectsQuery.error
-                  ? `${projects.length} 个项目`
+                  ? copy.projectCount(projects.length)
                   : null}
               </div>
               <Button
@@ -228,15 +231,16 @@ export function ProjectWorkbench({
                 className="h-12 shrink-0 px-6"
                 onClick={() => setCreateOpen(true)}
               >
-                <PlusIcon size={16} /> 创建项目
+                <PlusIcon size={16} /> {copy.createProject}
               </Button>
             </div>
           </div>
 
-          <section aria-label="项目列表">
+          <section aria-label={copy.projectList}>
             {projectsQuery.isLoading ? (
               <div
                 data-testid="project-loading"
+                aria-label={copy.loadingProjects}
                 className="grid gap-6 md:grid-cols-2 xl:grid-cols-3 xl:gap-8"
               >
                 {[0, 1, 2].map((item) => (
@@ -249,9 +253,9 @@ export function ProjectWorkbench({
                 role="alert"
                 className="border-destructive/30 bg-destructive/5 rounded-xl border p-6"
               >
-                <h2 className="font-semibold">项目加载失败</h2>
+                <h2 className="font-semibold">{copy.projectLoadFailed}</h2>
                 <p className="text-muted-foreground mt-2 text-sm">
-                  {projectErrorMessage(projectsQuery.error)}
+                  {projectErrorMessage(projectsQuery.error, copy.errors)}
                 </p>
                 <Button
                   type="button"
@@ -259,7 +263,7 @@ export function ProjectWorkbench({
                   variant="outline"
                   onClick={() => void projectsQuery.refetch()}
                 >
-                  重试
+                  {copy.retry}
                 </Button>
               </div>
             ) : projects.length === 0 ? (
@@ -296,7 +300,9 @@ export function ProjectWorkbench({
         open={createOpen}
         onOpenChange={setCreateOpen}
         pending={create.isPending}
-        errorMessage={create.error ? projectErrorMessage(create.error) : null}
+        errorMessage={
+          create.error ? projectErrorMessage(create.error, copy.errors) : null
+        }
         onSubmit={(input: CreateProjectInput) => create.mutate(input)}
       />
       <EditProjectDialog
@@ -304,7 +310,9 @@ export function ProjectWorkbench({
         open={editingProject !== null}
         onOpenChange={(open) => !open && setEditingProject(null)}
         pending={update.isPending}
-        errorMessage={update.error ? projectErrorMessage(update.error) : null}
+        errorMessage={
+          update.error ? projectErrorMessage(update.error, copy.errors) : null
+        }
         onSubmit={(input) => update.mutate(input)}
       />
     </WorkspaceContainer>

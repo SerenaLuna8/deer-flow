@@ -11,6 +11,25 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 
+export const PROJECT_THREAD_TITLE_MAX_LENGTH = 200;
+
+export function projectThreadRenameTitleState(value: string): {
+  canSubmit: boolean;
+  characterCount: number;
+  normalizedTitle: string;
+  tooLong: boolean;
+} {
+  const characterCount = Array.from(value).length;
+  const normalizedTitle = value.trim();
+  const tooLong = characterCount > PROJECT_THREAD_TITLE_MAX_LENGTH;
+  return {
+    canSubmit: Boolean(normalizedTitle) && !tooLong,
+    characterCount,
+    normalizedTitle,
+    tooLong,
+  };
+}
+
 export function ProjectThreadRenameDialog({
   open,
   value,
@@ -26,7 +45,8 @@ export function ProjectThreadRenameDialog({
   onOpenChange: (open: boolean) => void;
   onConfirm: (title: string) => void;
 }) {
-  const normalizedTitle = value.trim();
+  const { canSubmit, characterCount, normalizedTitle, tooLong } =
+    projectThreadRenameTitleState(value);
 
   return (
     <Dialog
@@ -49,24 +69,40 @@ export function ProjectThreadRenameDialog({
           className="space-y-5"
           onSubmit={(event) => {
             event.preventDefault();
-            if (normalizedTitle) onConfirm(normalizedTitle);
+            if (canSubmit) onConfirm(normalizedTitle);
           }}
         >
           <DialogHeader>
             <DialogTitle>重命名会话</DialogTitle>
             <DialogDescription>
-              输入一个便于在会话列表中识别的标题。
+              {`输入一个便于在会话列表中识别的标题，最多 ${PROJECT_THREAD_TITLE_MAX_LENGTH} 个字符。`}
             </DialogDescription>
           </DialogHeader>
-          <Input
-            autoFocus
-            value={value}
-            maxLength={256}
-            aria-label="会话标题"
-            disabled={pending}
-            onChange={(event) => onValueChange(event.target.value)}
-            onFocus={(event) => event.currentTarget.select()}
-          />
+          <div className="space-y-2">
+            <Input
+              autoFocus
+              value={value}
+              aria-label="会话标题"
+              aria-describedby="project-thread-title-length"
+              aria-invalid={tooLong || undefined}
+              disabled={pending}
+              onChange={(event) => onValueChange(event.target.value)}
+              onFocus={(event) => event.currentTarget.select()}
+            />
+            <p
+              id="project-thread-title-length"
+              role={tooLong ? "alert" : undefined}
+              className={
+                tooLong
+                  ? "text-destructive text-sm"
+                  : "text-muted-foreground text-xs"
+              }
+            >
+              {tooLong
+                ? `会话标题不能超过 ${PROJECT_THREAD_TITLE_MAX_LENGTH} 个字符，当前 ${characterCount} 个字符。`
+                : `${characterCount} / ${PROJECT_THREAD_TITLE_MAX_LENGTH}`}
+            </p>
+          </div>
           <DialogFooter>
             <Button
               type="button"
@@ -79,7 +115,7 @@ export function ProjectThreadRenameDialog({
             <Button
               type="submit"
               data-testid="project-thread-rename-confirm"
-              disabled={pending || !normalizedTitle}
+              disabled={pending || !canSubmit}
             >
               {pending ? "正在保存…" : "保存"}
             </Button>

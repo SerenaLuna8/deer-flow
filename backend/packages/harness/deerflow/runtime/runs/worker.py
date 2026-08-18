@@ -1736,13 +1736,16 @@ async def run_agent(
             cleanup_succeeded = await private_files.release() and cleanup_succeeded
 
             if not cleanup_succeeded and record.status is RunStatus.success:
-                await private_files.join_cleanup(
-                    lambda: run_manager.set_status(
-                        run_id,
-                        RunStatus.error,
-                        error="Private run cleanup failed",
-                    ),
-                    failure_message=f"Failed to record private cleanup error for run {run_id}",
+                # The assistant response, checkpoints, and file finalization
+                # are already durable at this point.  A best-effort teardown
+                # failure must not rewrite that completed user-visible result
+                # into an Agent-execution failure.  Keep ``finalizing`` set so
+                # the in-process resource barrier is not cleared; the warning
+                # remains actionable in Worker logs without misleading the
+                # user into retrying an already completed request.
+                logger.error(
+                    "Private cleanup failed after completed Run %s; preserving successful terminal state",
+                    run_id,
                 )
 
             if record.finalizing and cleanup_succeeded:

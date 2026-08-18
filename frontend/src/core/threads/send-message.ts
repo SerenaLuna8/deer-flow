@@ -41,6 +41,22 @@ export function staleMessageSendError(): Error {
   return error;
 }
 
+const RUN_ADMISSION_NOT_CONFIRMED_ERROR = "RunAdmissionNotConfirmedError";
+
+function runAdmissionNotConfirmedError(): Error {
+  const error = new Error("The Run ended before admission was confirmed.");
+  error.name = RUN_ADMISSION_NOT_CONFIRMED_ERROR;
+  return error;
+}
+
+export function isRunAdmissionNotConfirmedError(
+  error: unknown,
+): error is Error {
+  return (
+    error instanceof Error && error.name === RUN_ADMISSION_NOT_CONFIRMED_ERROR
+  );
+}
+
 export type UploadedAttachmentRefCache = Map<
   string,
   Map<string, UploadedFileInfo>
@@ -222,7 +238,7 @@ export async function monitorRunAdmissionLifecycle({
   try {
     await lifecycle;
     if (admission.isPending()) {
-      const error = new Error("The Run ended before admission was confirmed.");
+      const error = runAdmissionNotConfirmedError();
       admission.reject(error);
       onAdmissionFailure(error);
     }

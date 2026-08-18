@@ -4,7 +4,7 @@ import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import exists, select
+from sqlalchemy import exists, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
@@ -14,7 +14,12 @@ from app.shared_assets.credential_closure import (
     McpCredentialClosureTarget,
     lock_mcp_credential_closures,
 )
-from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetValidationFailed
+from app.shared_assets.errors import (
+    AssetForbidden,
+    AssetNotFound,
+    AssetValidationFailed,
+    SkillRuntimeNameConflict,
+)
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
@@ -229,6 +234,35 @@ class BindingRepository:
         if version is None:
             raise AssetValidationFailed(context.request_id)
         return BindingTarget(asset, version)
+
+    async def ensure_system_skill_runtime_name_available(
+        self,
+        context: _Actor,
+        target: BindingTarget,
+    ) -> None:
+        """Reject a System Skill whose runtime name is already active in-project.
+
+        The caller owns the project lock before reaching this check.  Project
+        Skill activation takes the same project lock before performing the
+        inverse check, so concurrent enable/activate operations cannot both
+        commit a duplicate runtime name.
+        """
+
+        project_id = self._project_id(context)
+        if not isinstance(target.asset, SkillRow) or target.asset.scope != "system":
+            raise AssetValidationFailed(context.request_id)
+        conflict = await self.session.scalar(
+            select(
+                exists().where(
+                    SkillRow.scope == "project",
+                    SkillRow.project_id == project_id,
+                    SkillRow.status == "active",
+                    func.lower(SkillRow.slug) == target.asset.slug.casefold(),
+                )
+            )
+        )
+        if conflict:
+            raise SkillRuntimeNameConflict(context.request_id)
 
     async def lock_current_system_mcp_target(
         self,

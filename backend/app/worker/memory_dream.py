@@ -354,6 +354,10 @@ class MemoryDreamJobHandler:
             return self._release_settlement(claim, cancelled=True)
         try:
             result = await self._runner_factory(model).run(dream_input)
+            if type(result) is not MemoryDreamResult or result.replaced is not True:
+                raise MemoryDreamError(
+                    "MEMORY_DREAM_REPLACEMENT_REQUIRED",
+                )
             validate_memory_document(
                 result.content,
                 frozen_policy.memory.max_injection_tokens,

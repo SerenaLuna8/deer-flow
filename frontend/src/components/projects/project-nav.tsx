@@ -40,7 +40,10 @@ import {
   useProjectPrivateWorkReadiness,
 } from "@/core/private-work/readiness";
 import { useProjectAutomationReadiness } from "@/core/project-automations/readiness";
-import { canOpenProjectCapabilitiesWorkspace } from "@/core/projects/capabilities";
+import {
+  canOpenProjectCapabilitiesWorkspace,
+  canReadProjectAgents,
+} from "@/core/projects/capabilities";
 import {
   PROJECT_AUTOMATION,
   PROJECT_PRIVATE_WORKSPACE,
@@ -138,15 +141,17 @@ export function projectNavigationItems(
   const capabilityWorkspaceVisible = canOpenProjectCapabilitiesWorkspace(
     project.capabilities,
   );
+  if (canReadProjectAgents(project.capabilities)) {
+    items.push({
+      href: `${base}/agents`,
+      icon: BotIcon,
+      i18nKey: "agents",
+      label: "Agent",
+      section: "capabilities",
+    });
+  }
   if (capabilityWorkspaceVisible) {
     items.push(
-      {
-        href: `${base}/agents`,
-        icon: BotIcon,
-        i18nKey: "agents",
-        label: "Agent",
-        section: "capabilities",
-      },
       {
         href: `${base}/skills`,
         icon: SparklesIcon,

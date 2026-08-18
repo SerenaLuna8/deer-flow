@@ -9,8 +9,12 @@ const AGENT_ID = "30000000-0000-4000-8000-000000000001";
 const MODEL_ID = "30000000-0000-4000-8000-000000000002";
 const FILE_ID = "40000000-0000-4000-8000-000000000001";
 const RUN_ID = "50000000-0000-4000-8000-000000000001";
+const SECOND_RUN_ID = "50000000-0000-4000-8000-000000000002";
 const FILE_NAME = "preupload-notes.txt";
 const FILE_CONTENT = "Upload this before the message is sent.";
+const CLIPBOARD_IMAGE_NAME = "clipboard.png";
+const CLIPBOARD_IMAGE_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC";
 const TIMESTAMP = "2026-08-16T00:00:00Z";
 
 const project: Project = {
@@ -95,14 +99,30 @@ function json(route: Route, body: unknown, status = 200) {
   });
 }
 
-async function mockProjectChat(page: Page) {
+async function mockProjectChat(
+  page: Page,
+  upload: {
+    filename: string;
+    mediaType: string;
+    size: number;
+    firstRunError?: string;
+  } = {
+    filename: FILE_NAME,
+    mediaType: "text/plain",
+    size: Buffer.byteLength(FILE_CONTENT),
+  },
+) {
   const privateWorkBase = `/api/projects/${PROJECT_ID}/private-work`;
   const uploadPath = `${privateWorkBase}/threads/${THREAD_ID}/uploads`;
   const releaseUpload = deferred<void>();
   const unexpectedRequests: string[] = [];
   const uploadRequests: string[] = [];
+  const runRequestBodies: unknown[] = [];
   let uploadPostCount = 0;
   let runPostCount = 0;
+  let runListGetCount = 0;
+  let runMessagesGetCount = 0;
+  let failedRunVisible = false;
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -141,7 +161,7 @@ async function mockProjectChat(page: Page) {
             display_name: "Mock model",
             supports_thinking: false,
             supports_reasoning_effort: false,
-            supports_vision: false,
+            supports_vision: true,
             supports_vision_bridge: false,
             is_default: true,
           },
@@ -227,7 +247,66 @@ async function mockProjectChat(page: Page) {
       path === `${privateWorkBase}/threads/${THREAD_ID}/runs` &&
       method === "GET"
     ) {
-      return json(route, []);
+      runListGetCount += 1;
+      return json(
+        route,
+        failedRunVisible && upload.firstRunError
+          ? [
+              {
+                run_id: RUN_ID,
+                thread_id: THREAD_ID,
+                assistant_id: AGENT_ID,
+                created_at: TIMESTAMP,
+                updated_at: TIMESTAMP,
+                status: "error",
+                metadata: {},
+                multitask_strategy: "reject",
+                error: upload.firstRunError,
+                model_name: MODEL_ID,
+                execution_profile: {
+                  model_name: MODEL_ID,
+                  thinking_enabled: false,
+                  reasoning_effort: null,
+                  supports_vision: true,
+                },
+              },
+            ]
+          : [],
+      );
+    }
+    if (
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/runs/${RUN_ID}/messages` &&
+      method === "GET"
+    ) {
+      runMessagesGetCount += 1;
+      return json(route, {
+        data: [
+          {
+            run_id: RUN_ID,
+            seq: "1",
+            content: {
+              type: "human",
+              id: "human-failed-clipboard",
+              content: "",
+              additional_kwargs: {
+                files: [
+                  {
+                    file_id: FILE_ID,
+                    filename: upload.filename,
+                    size: upload.size,
+                    path: `uploads/${upload.filename}`,
+                    status: "uploaded",
+                  },
+                ],
+              },
+            },
+            metadata: { caller: "lead_agent", source: "run_admission" },
+            created_at: TIMESTAMP,
+          },
+        ],
+        has_more: false,
+      });
     }
     if (
       path === `${privateWorkBase}/threads/${THREAD_ID}/context-usage` &&
@@ -281,11 +360,11 @@ async function mockProjectChat(page: Page) {
         route,
         {
           id: FILE_ID,
-          logical_path: `uploads/${FILE_NAME}`,
-          display_name: FILE_NAME,
+          logical_path: `uploads/${upload.filename}`,
+          display_name: upload.filename,
           kind: "upload",
-          media_type: "text/plain",
-          size: Buffer.byteLength(FILE_CONTENT),
+          media_type: upload.mediaType,
+          size: upload.size,
           sha256: "a".repeat(64),
           status: "ready",
           created_at: TIMESTAMP,
@@ -299,16 +378,28 @@ async function mockProjectChat(page: Page) {
       method === "POST"
     ) {
       runPostCount += 1;
+      runRequestBodies.push(request.postDataJSON());
+      const shouldFail = runPostCount === 1 && Boolean(upload.firstRunError);
+      failedRunVisible = shouldFail;
+      const currentRunId = runPostCount === 1 ? RUN_ID : SECOND_RUN_ID;
       return route.fulfill({
         status: 200,
         contentType: "text/event-stream",
+        headers: {
+          "Content-Location": `${privateWorkBase}/threads/${THREAD_ID}/runs/${currentRunId}`,
+          Location: `/threads/${THREAD_ID}/runs/${currentRunId}/stream`,
+        },
         body: [
           "event: metadata",
-          `data: ${JSON.stringify({ run_id: RUN_ID, thread_id: THREAD_ID })}`,
+          `data: ${JSON.stringify({ run_id: currentRunId, thread_id: THREAD_ID })}`,
           "id: 1",
           "",
           "event: end",
-          'data: {"status":"success"}',
+          `data: ${JSON.stringify(
+            shouldFail
+              ? { status: "error", error_code: upload.firstRunError }
+              : { status: "success" },
+          )}`,
           "id: 2",
           "",
           "",
@@ -338,6 +429,9 @@ async function mockProjectChat(page: Page) {
   return {
     releaseUpload: () => releaseUpload.resolve(),
     runPostCount: () => runPostCount,
+    runListGetCount: () => runListGetCount,
+    runMessagesGetCount: () => runMessagesGetCount,
+    runRequestBodies,
     unexpectedRequests,
     uploadPostCount: () => uploadPostCount,
     uploadRequests,
@@ -387,6 +481,149 @@ test("uploads an attachment before send while keeping the composer interactive",
     await composer.press("Enter");
     await expect.poll(requests.runPostCount).toBe(1);
     expect(requests.uploadPostCount()).toBe(1);
+    expect(requests.unexpectedRequests).toEqual([]);
+  } finally {
+    requests.releaseUpload();
+  }
+});
+
+test("pastes an image, uploads it, and submits only its opaque file reference", async ({
+  page,
+}) => {
+  const imageBytes = Buffer.from(CLIPBOARD_IMAGE_BASE64, "base64");
+  const requests = await mockProjectChat(page, {
+    filename: CLIPBOARD_IMAGE_NAME,
+    mediaType: "image/png",
+    size: imageBytes.byteLength,
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await expect(composer).toBeVisible();
+  await expect(composer).toBeEnabled();
+
+  await composer.evaluate(
+    (element, image) => {
+      const binary = atob(image.base64);
+      const bytes = Uint8Array.from(binary, (character) =>
+        character.charCodeAt(0),
+      );
+      const clipboard = new DataTransfer();
+      clipboard.items.add(
+        new File([bytes], image.filename, { type: "image/png" }),
+      );
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    },
+    { base64: CLIPBOARD_IMAGE_BASE64, filename: CLIPBOARD_IMAGE_NAME },
+  );
+
+  try {
+    await expect.poll(requests.uploadPostCount).toBe(1);
+    const attachment = page.locator("[data-upload-status]", {
+      hasText: CLIPBOARD_IMAGE_NAME,
+    });
+    await expect(attachment).toHaveAttribute("data-upload-status", "uploading");
+
+    requests.releaseUpload();
+    await expect(attachment).toHaveAttribute("data-upload-status", "ready");
+    await composer.press("Enter");
+
+    await expect.poll(requests.runPostCount).toBe(1);
+    expect(requests.uploadPostCount()).toBe(1);
+    expect(requests.runRequestBodies).toHaveLength(1);
+    const serializedRun = JSON.stringify(requests.runRequestBodies[0]);
+    expect(serializedRun).toContain(FILE_ID);
+    expect(serializedRun).toContain(CLIPBOARD_IMAGE_NAME);
+    expect(serializedRun).not.toContain("data:image/");
+    expect(serializedRun).not.toContain(CLIPBOARD_IMAGE_BASE64);
+    expect(requests.unexpectedRequests).toEqual([]);
+  } finally {
+    requests.releaseUpload();
+  }
+});
+
+test("restores a failed pasted image and resubmits without another upload", async ({
+  page,
+}) => {
+  const imageBytes = Buffer.from(CLIPBOARD_IMAGE_BASE64, "base64");
+  const requests = await mockProjectChat(page, {
+    filename: CLIPBOARD_IMAGE_NAME,
+    mediaType: "image/png",
+    size: imageBytes.byteLength,
+    firstRunError: "CURRENT_UPLOAD_UNAVAILABLE",
+  });
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await expect(composer).toBeVisible();
+  await composer.evaluate(
+    (element, image) => {
+      const binary = atob(image.base64);
+      const bytes = Uint8Array.from(binary, (character) =>
+        character.charCodeAt(0),
+      );
+      const clipboard = new DataTransfer();
+      clipboard.items.add(
+        new File([bytes], image.filename, { type: "image/png" }),
+      );
+      element.dispatchEvent(
+        new ClipboardEvent("paste", {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: clipboard,
+        }),
+      );
+    },
+    { base64: CLIPBOARD_IMAGE_BASE64, filename: CLIPBOARD_IMAGE_NAME },
+  );
+
+  try {
+    await expect.poll(requests.uploadPostCount).toBe(1);
+    requests.releaseUpload();
+    const attachment = page.locator("[data-upload-status]", {
+      hasText: CLIPBOARD_IMAGE_NAME,
+    });
+    await expect(attachment).toHaveAttribute("data-upload-status", "ready");
+    await composer.press("Enter");
+
+    await expect.poll(requests.runPostCount).toBe(1);
+    await expect.poll(requests.runListGetCount).toBeGreaterThan(1);
+    await expect.poll(requests.runMessagesGetCount).toBeGreaterThan(0);
+    const failureAlert = page.getByTestId("run-failure-alert");
+    await expect(failureAlert).toHaveAttribute(
+      "data-run-failure-code",
+      "CURRENT_UPLOAD_UNAVAILABLE",
+    );
+    await expect(failureAlert).toContainText(
+      /Image attachment could not be read|当前图片附件不可用/u,
+    );
+    await page
+      .getByRole("button", {
+        name: /Restore to composer|恢复到输入框/u,
+      })
+      .click();
+
+    const restoredAttachment = page.locator("[data-upload-status]", {
+      hasText: CLIPBOARD_IMAGE_NAME,
+    });
+    await expect(restoredAttachment).toHaveAttribute(
+      "data-upload-status",
+      "ready",
+    );
+    await composer.press("Enter");
+
+    await expect.poll(requests.runPostCount).toBe(2);
+    expect(requests.uploadPostCount()).toBe(1);
+    const replay = JSON.stringify(requests.runRequestBodies[1]);
+    expect(replay).toContain(FILE_ID);
+    expect(replay).not.toContain("data:image/");
+    expect(replay).not.toContain(CLIPBOARD_IMAGE_BASE64);
     expect(requests.unexpectedRequests).toEqual([]);
   } finally {
     requests.releaseUpload();

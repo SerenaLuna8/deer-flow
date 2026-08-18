@@ -1,6 +1,8 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 
 import {
+  CURRENT_UPLOAD_UNAVAILABLE,
+  isCurrentUploadUnavailableError,
   isOutputDeliveryIncompleteError,
   isModelOutputLimitError,
   MODEL_OUTPUT_LIMIT,
@@ -106,7 +108,43 @@ export function getSupersededRunIds(
 
 export function latestRunHasTerminalFailure(runs: Run[] | undefined) {
   const status = runs?.[0]?.status as string | undefined;
+  return isTerminalRunFailureStatus(status);
+}
+
+export function isTerminalRunFailureStatus(
+  status: string | undefined,
+): boolean {
   return status === "error" || status === "failed" || status === "timeout";
+}
+
+export function findTerminalFailureRunIdsToReload(
+  previousStatuses: ReadonlyMap<string, string>,
+  runs: Run[],
+): string[] {
+  return runs.flatMap((run) => {
+    const previousStatus = previousStatuses.get(run.run_id);
+    return previousStatus !== undefined &&
+      !isTerminalRunFailureStatus(previousStatus) &&
+      isTerminalRunFailureStatus(run.status as string)
+      ? [run.run_id]
+      : [];
+  });
+}
+
+export function shouldReloadEmptyRunAfterTerminalFailure({
+  statusAtRequest,
+  currentStatus,
+  visibleMessageCount,
+}: {
+  statusAtRequest: string;
+  currentStatus: string | undefined;
+  visibleMessageCount: number;
+}): boolean {
+  return (
+    visibleMessageCount === 0 &&
+    !isTerminalRunFailureStatus(statusAtRequest) &&
+    isTerminalRunFailureStatus(currentStatus)
+  );
 }
 
 export function latestRunFailureCode(
@@ -120,8 +158,11 @@ export function latestRunFailureCode(
   if (isModelOutputLimitError(error)) {
     return MODEL_OUTPUT_LIMIT;
   }
-  return isOutputDeliveryIncompleteError(error)
-    ? OUTPUT_DELIVERY_INCOMPLETE
+  if (isOutputDeliveryIncompleteError(error)) {
+    return OUTPUT_DELIVERY_INCOMPLETE;
+  }
+  return isCurrentUploadUnavailableError(error)
+    ? CURRENT_UPLOAD_UNAVAILABLE
     : null;
 }
 
@@ -132,8 +173,11 @@ export function resolveRunFailureCode(
   if (isModelOutputLimitError(streamError)) {
     return MODEL_OUTPUT_LIMIT;
   }
-  return isOutputDeliveryIncompleteError(streamError)
-    ? OUTPUT_DELIVERY_INCOMPLETE
+  if (isOutputDeliveryIncompleteError(streamError)) {
+    return OUTPUT_DELIVERY_INCOMPLETE;
+  }
+  return isCurrentUploadUnavailableError(streamError)
+    ? CURRENT_UPLOAD_UNAVAILABLE
     : latestRunFailureCode(runs);
 }
 
@@ -142,12 +186,15 @@ export function resolveRunFailureRunId(
   activeRunId: string | null,
   runs: Run[] | undefined,
 ): string | null {
-  if (isModelOutputLimitError(streamError) && activeRunId) {
+  if (
+    (isModelOutputLimitError(streamError) ||
+      isOutputDeliveryIncompleteError(streamError) ||
+      isCurrentUploadUnavailableError(streamError)) &&
+    activeRunId
+  ) {
     return activeRunId;
   }
-  return latestRunFailureCode(runs) === MODEL_OUTPUT_LIMIT
-    ? (runs?.[0]?.run_id ?? null)
-    : null;
+  return latestRunHasTerminalFailure(runs) ? (runs?.[0]?.run_id ?? null) : null;
 }
 
 export function rememberActiveRun(

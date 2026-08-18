@@ -362,3 +362,84 @@ async def test_private_cleanup_retries_and_defers_repeated_cancellation() -> Non
     assert events.index("status:success") < events.index("release:1:start")
     assert events.index("release:done") < events.index("finalizing:false")
     assert events.index("finalizing:false") < events.index("publish_end")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("failed_cleanup", ["runtime", "sandbox"])
+async def test_completed_private_response_remains_successful_when_cleanup_fails(
+    failed_cleanup: str,
+) -> None:
+    """A post-response teardown failure cannot invalidate a durable reply."""
+
+    events: list[str] = []
+
+    class Authority:
+        def __init__(self) -> None:
+            self.release_attempts = 0
+
+        async def restore(self) -> object:
+            return object()
+
+        async def finalize(self) -> object:
+            return SimpleNamespace(workspace_changes=None, artifacts=())
+
+        async def mark_failed(self) -> None:
+            pytest.fail("a completed response must not be marked failed")
+
+        async def release(self) -> None:
+            self.release_attempts += 1
+            if failed_cleanup == "sandbox":
+                raise RuntimeError("sandbox cleanup unavailable")
+
+    class PrivateRuntime:
+        def __init__(self) -> None:
+            self.close_attempts = 0
+
+        async def aclose(self) -> None:
+            self.close_attempts += 1
+            if failed_cleanup == "runtime":
+                raise RuntimeError("runtime cleanup unavailable")
+
+    authority = Authority()
+    private_runtime = PrivateRuntime() if failed_cleanup == "runtime" else None
+    run_manager = RunManager()
+    record = await run_manager.create(f"thread-private-cleanup-{failed_cleanup}")
+    _record_manager_events(run_manager, events)
+
+    def agent_factory(**_kwargs: object) -> _SuccessfulAgent:
+        return _SuccessfulAgent()
+
+    def private_runtime_agent_factory(
+        *,
+        config: object,
+        private_runtime: object,
+    ) -> _SuccessfulAgent:
+        del config, private_runtime
+        return _SuccessfulAgent()
+
+    await run_agent(
+        _bridge(events),
+        run_manager,
+        record,
+        ctx=RunContext(
+            checkpointer=None,
+            file_authority=authority,
+            private_agent_runtime=private_runtime,
+        ),
+        agent_factory=(private_runtime_agent_factory if private_runtime is not None else agent_factory),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.success
+    assert record.error is None
+    assert record.finalizing is True
+    assert "status:error" not in events
+    assert events.count("status:success") == 1
+    assert authority.release_attempts == (3 if failed_cleanup == "sandbox" else 1)
+    if failed_cleanup == "runtime":
+        assert private_runtime is not None
+        assert private_runtime.close_attempts == 3
+    else:
+        assert private_runtime is None
+    assert events[-1] == "publish_end"

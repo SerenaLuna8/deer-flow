@@ -114,6 +114,14 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
         return isinstance(additional_kwargs, dict) and additional_kwargs.get("hide_from_ui") is True
 
     @staticmethod
+    def _is_error_fallback_message(message: object) -> bool:
+        if isinstance(message, dict):
+            additional_kwargs = message.get("additional_kwargs")
+        else:
+            additional_kwargs = getattr(message, "additional_kwargs", None)
+        return isinstance(additional_kwargs, Mapping) and additional_kwargs.get("deerflow_error_fallback") is True
+
+    @staticmethod
     def _is_user_message_for_title(message: object) -> bool:
         return TitleMiddleware._message_type(message) == "human" and not TitleMiddleware._is_dynamic_context_reminder_message(message) and not TitleMiddleware._is_hidden_from_ui_message(message)
 
@@ -159,7 +167,7 @@ class TitleMiddleware(AgentMiddleware[TitleMiddlewareState]):
             return False
 
         final_assistant = assistant_messages[-1]
-        if self._message_has_tool_calls(final_assistant):
+        if self._message_has_tool_calls(final_assistant) or self._is_error_fallback_message(final_assistant):
             return False
         final_content = self._strip_think_tags(
             self._normalize_content(

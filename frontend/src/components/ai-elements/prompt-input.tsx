@@ -37,8 +37,12 @@ import {
 import type {
   AttachmentUploadStatus,
   PromptInputFilePart,
+  ReadyPromptInputFile,
 } from "@/core/uploads";
-import { splitUnsupportedUploadFiles } from "@/core/uploads";
+import {
+  readyPromptInputFileToPart,
+  splitUnsupportedUploadFiles,
+} from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 import type { ChatStatus } from "ai";
@@ -92,6 +96,7 @@ import {
 export type AttachmentsContext = {
   files: (PromptInputFilePart & { id: string })[];
   add: (files: File[] | FileList) => void;
+  restoreReady: (files: readonly ReadyPromptInputFile[]) => void;
   remove: (id: string) => void;
   clear: () => void;
   openFileDialog: () => void;
@@ -205,6 +210,28 @@ export function PromptInputProvider({
     });
   }, []);
 
+  const restoreReady = useCallback((files: readonly ReadyPromptInputFile[]) => {
+    setAttachmentFiles((previous) => {
+      const existingIds = new Set(
+        previous.flatMap((file) =>
+          file.readyFile ? [file.readyFile.file_id] : [],
+        ),
+      );
+      return previous.concat(
+        files.flatMap((readyFile) => {
+          if (existingIds.has(readyFile.file_id)) return [];
+          existingIds.add(readyFile.file_id);
+          return [
+            {
+              id: nanoid(),
+              ...readyPromptInputFileToPart(readyFile),
+            },
+          ];
+        }),
+      );
+    });
+  }, []);
+
   const clear = useCallback(() => {
     setAttachmentFiles((prev) => {
       for (const f of prev) {
@@ -239,12 +266,13 @@ export function PromptInputProvider({
     () => ({
       files: attachmentFiles,
       add,
+      restoreReady,
       remove,
       clear,
       openFileDialog,
       fileInputRef,
     }),
-    [attachmentFiles, add, remove, clear, openFileDialog],
+    [attachmentFiles, add, restoreReady, remove, clear, openFileDialog],
   );
 
   const __registerFileInput = useCallback(
@@ -643,6 +671,31 @@ export const PromptInput = ({
     [],
   );
 
+  const restoreReadyLocal = useCallback(
+    (readyFiles: readonly ReadyPromptInputFile[]) => {
+      setItems((previous) => {
+        const existingIds = new Set(
+          previous.flatMap((file) =>
+            file.readyFile ? [file.readyFile.file_id] : [],
+          ),
+        );
+        return previous.concat(
+          readyFiles.flatMap((readyFile) => {
+            if (existingIds.has(readyFile.file_id)) return [];
+            existingIds.add(readyFile.file_id);
+            return [
+              {
+                id: nanoid(),
+                ...readyPromptInputFileToPart(readyFile),
+              },
+            ];
+          }),
+        );
+      });
+    },
+    [],
+  );
+
   const clearLocal = useCallback(
     () =>
       setItems((prev) => {
@@ -657,6 +710,9 @@ export const PromptInput = ({
   );
 
   const add = usingProvider ? controller.attachments.add : addLocal;
+  const restoreReady = usingProvider
+    ? controller.attachments.restoreReady
+    : restoreReadyLocal;
   const remove = usingProvider ? controller.attachments.remove : removeLocal;
   const clear = usingProvider ? controller.attachments.clear : clearLocal;
   const openFileDialog = usingProvider
@@ -795,12 +851,13 @@ export const PromptInput = ({
     () => ({
       files: files.map((item) => ({ ...item, id: item.id })),
       add,
+      restoreReady,
       remove,
       clear,
       openFileDialog,
       fileInputRef: inputRef,
     }),
-    [files, add, remove, clear, openFileDialog],
+    [files, add, restoreReady, remove, clear, openFileDialog],
   );
 
   const handleSubmit: FormEventHandler<HTMLFormElement> = (event) => {

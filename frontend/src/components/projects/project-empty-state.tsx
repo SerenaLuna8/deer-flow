@@ -1,6 +1,7 @@
 import { FolderPlusIcon, SearchXIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 
 export function ProjectEmptyState({
   search,
@@ -13,6 +14,8 @@ export function ProjectEmptyState({
   onClearFilter: () => void;
   onClearSearch: () => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace.empty;
   const searching = search.trim().length > 0;
   const narrowed = searching || filtered;
   return (
@@ -26,12 +29,10 @@ export function ProjectEmptyState({
         <FolderPlusIcon className="text-primary mb-4 size-10" />
       )}
       <h2 className="text-xl font-semibold">
-        {narrowed ? "没有匹配的项目" : "创建你的第一个项目"}
+        {narrowed ? copy.noMatchesTitle : copy.firstProjectTitle}
       </h2>
       <p className="text-muted-foreground mt-2 max-w-md text-sm">
-        {narrowed
-          ? "换一个关键词，或清除筛选查看全部项目。"
-          : "项目用于组织成员和共享的 Agent、Skill 与 MCP。"}
+        {narrowed ? copy.noMatchesDescription : copy.firstProjectDescription}
       </p>
       {narrowed ? (
         <Button
@@ -43,7 +44,7 @@ export function ProjectEmptyState({
             onClearFilter();
           }}
         >
-          清除筛选
+          {copy.clearFilters}
         </Button>
       ) : null}
     </div>

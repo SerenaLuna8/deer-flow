@@ -13,6 +13,7 @@ import {
   overlayThreadProjection,
   projectThreadMessages,
   pruneConfirmedArchivedMessages,
+  retainOptimisticHumanMessagesAfterFailure,
   resolveActiveRunIdForMessages,
   resolvePreservedHistory,
 } from "@/core/threads/message-projection";
@@ -26,6 +27,7 @@ import {
 } from "@/core/threads/prepared-replay";
 import {
   buildVisibleHistoryMessages,
+  findTerminalFailureRunIdsToReload,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getOldestRunMessageSeq,
@@ -39,6 +41,7 @@ import {
   resolveRunFailureRunId,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
+  shouldReloadEmptyRunAfterTerminalFailure,
 } from "@/core/threads/run-history";
 import {
   buildThreadSubmitCheckpointOptions,
@@ -100,6 +103,7 @@ const compatibilityExports = {
   fetchInfiniteThreadsPage,
   filterInfiniteThreadsCache,
   filterMessagesBySupersededRunIds,
+  findTerminalFailureRunIdsToReload,
   findSidecarThreadIdsForParent,
   findLatestUnloadedRunIndex,
   getInfiniteThreadsNextPageParam,
@@ -124,6 +128,7 @@ const compatibilityExports = {
   overlayThreadProjection,
   projectThreadMessages,
   pruneConfirmedArchivedMessages,
+  retainOptimisticHumanMessagesAfterFailure,
   rememberActiveRun,
   removeSetItems,
   resolveActiveRunIdForMessages,
@@ -132,6 +137,7 @@ const compatibilityExports = {
   resolveRunFailureRunId,
   runMessagesPageHasMore,
   shouldAutoContinueOnEmptyRun,
+  shouldReloadEmptyRunAfterTerminalFailure,
   STOP_THREAD_FINALIZATION_REFETCH_DELAY_MS,
   stopThreadAndInvalidateCaches,
   THREAD_RUNS_MAX_OFFSET,

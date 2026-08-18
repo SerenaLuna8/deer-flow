@@ -12,6 +12,7 @@ RUN_EXECUTION_FAILED_ERROR_CODE: Final = "RUN_EXECUTION_FAILED"
 ROLLBACK_FAILED_ERROR_CODE: Final = "ROLLBACK_FAILED"
 PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE: Final = "PRIVATE_RUN_EXECUTION_FAILED"
 MEMORY_AUTHORITY_UNAVAILABLE_MESSAGE: Final = "Memory authority unavailable"
+CURRENT_UPLOAD_FAILURE_DETAIL: Final = "Current image upload is unavailable, unauthorized, invalid, changed, or exceeds vision input limits"
 
 SUBAGENT_EXECUTION_FAILED_ERROR_CODE: Final = "SUBAGENT_EXECUTION_FAILED"
 SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE: Final = "SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE"
@@ -23,6 +24,7 @@ _LLM_ERROR_CODE_BY_REASON: Final[Mapping[str, str]] = MappingProxyType(
         "busy": "LLM_PROVIDER_BUSY",
         "transient": "LLM_PROVIDER_UNAVAILABLE",
         "generic": "LLM_REQUEST_FAILED",
+        "current_upload": "CURRENT_UPLOAD_UNAVAILABLE",
         "circuit_open": "LLM_CIRCUIT_OPEN",
     }
 )
@@ -50,6 +52,7 @@ class PublicRunErrorCode(StrEnum):
     PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE = "PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE"
     MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT"
     OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE"
+    CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE"
     SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED = "SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED"
     LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED = "LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED"
 
@@ -59,6 +62,7 @@ _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = Map
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
         PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
         PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE: ("The required output file was not presented"),
+        PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
     }

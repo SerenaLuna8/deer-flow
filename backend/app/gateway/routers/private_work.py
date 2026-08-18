@@ -97,6 +97,7 @@ from app.reliability.errors import (
     ReliabilityError,
     ReliabilityInvalidStreamCursor,
 )
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.private_work.file_repository import (
     PRIVATE_FILE_CHUNK_SIZE,
@@ -104,6 +105,7 @@ from deerflow.persistence.private_work.file_repository import (
 )
 from deerflow.runtime import DisconnectMode, RunRecord, serialize_channel_values_for_api
 from deerflow.runtime.events.models import (
+    STREAM_TERMINAL_ERROR_CODES,
     StoredStreamFrame,
     StreamCursorOutOfRange,
 )
@@ -124,13 +126,17 @@ router = APIRouter(
 )
 
 _POSTGRES_BIGINT_MAX = (1 << 63) - 1
+PRIVATE_THREAD_TITLE_MAX_LENGTH = 200
 
 
 class PrivateThreadCreateRequest(StrictPrivateWorkRequest):
     thread_id: uuid.UUID
     agent_asset_id: uuid.UUID | None = None
     agent_scope: Literal["project", "system"] | None = None
-    display_name: str | None = Field(default=None, max_length=256)
+    display_name: str | None = Field(
+        default=None,
+        max_length=PRIVATE_THREAD_TITLE_MAX_LENGTH,
+    )
     metadata: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
@@ -164,7 +170,10 @@ class PrivateThreadPatchRequest(StrictPrivateWorkRequest):
             "x-postgres-bigint-maximum": str(_POSTGRES_BIGINT_MAX),
         },
     )
-    display_name: str | None = Field(default=None, max_length=256)
+    display_name: str | None = Field(
+        default=None,
+        max_length=PRIVATE_THREAD_TITLE_MAX_LENGTH,
+    )
 
 
 class PrivateThreadResponse(StrictPrivateWorkResponse):
@@ -483,7 +492,10 @@ class PrivateThreadCompactResponse(StrictPrivateWorkResponse):
 class PrivateThreadBranchRequest(StrictPrivateWorkRequest):
     message_id: str = Field(min_length=1, max_length=128)
     message_ids: list[str] = Field(default_factory=list, max_length=20)
-    title: str | None = Field(default=None, max_length=256)
+    title: str | None = Field(
+        default=None,
+        max_length=PRIVATE_THREAD_TITLE_MAX_LENGTH,
+    )
 
     @model_validator(mode="after")
     def validate_message_ids(self) -> PrivateThreadBranchRequest:
@@ -873,6 +885,49 @@ def _admitted_failure_message(
     return None
 
 
+def _prepend_admitted_human_input_response(
+    record: PrivateRunRecord,
+    records: list[dict[str, Any]],
+    *,
+    include_admission: bool,
+) -> list[dict[str, Any]]:
+    """Recover a promoted response when the Worker journal omitted its input."""
+
+    if not include_admission:
+        return records
+    graph_input = record.kwargs.get("input")
+    if not isinstance(graph_input, Mapping):
+        return records
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list) or len(messages) != 1:
+        return records
+    message = messages[0]
+    if not isinstance(message, Mapping):
+        return records
+    message_type = message.get("type") or message.get("role")
+    additional_kwargs = message.get("additional_kwargs")
+    if message_type not in {"human", "user"} or not isinstance(additional_kwargs, Mapping) or additional_kwargs.get("hide_from_ui") is not True:
+        return records
+    response = read_human_input_response(additional_kwargs)
+    if response is None:
+        return records
+    for existing in records:
+        content = existing.get("content")
+        if not isinstance(content, Mapping):
+            continue
+        existing_additional = content.get("additional_kwargs")
+        if isinstance(existing_additional, Mapping) and read_human_input_response(existing_additional) == response:
+            return records
+    recovered = {
+        "run_id": record.run_id,
+        "seq": 0,
+        "content": copy.deepcopy(dict(message)),
+        "metadata": {"caller": "lead_agent", "source": "run_admission"},
+        "created_at": _timestamp(record.created_at),
+    }
+    return [recovered, *records]
+
+
 def _runtime_dependency(request: Request, request_id: str, name: str) -> object:
     dependency = getattr(request.app.state, name, None)
     if dependency is None:
@@ -1031,15 +1086,7 @@ async def _durable_private_sse_consumer(
                     thread_id,
                     run_id,
                     status=_fallback_terminal_status(record.status),
-                    error_code=(
-                        record.error
-                        if record.error
-                        in {
-                            "MODEL_OUTPUT_LIMIT",
-                            "OUTPUT_DELIVERY_INCOMPLETE",
-                        }
-                        else None
-                    ),
+                    error_code=(record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None),
                 )
                 terminal_cursor = int(terminal.id)
                 if terminal_cursor > cursor:
@@ -1959,6 +2006,11 @@ async def list_private_run_messages(
             )
             if admitted_message is not None:
                 records = [admitted_message]
+        records = _prepend_admitted_human_input_response(
+            run,
+            records,
+            include_admission=(after_sequence is None and (before_sequence is None or before_sequence > 0) and len(records) < limit + 1),
+        )
     except PrivateWorkError as error:
         _raise_http(error)
 

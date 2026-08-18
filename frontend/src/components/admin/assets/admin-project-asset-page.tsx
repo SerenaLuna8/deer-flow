@@ -5,7 +5,6 @@ import { PlusIcon, SearchIcon, XIcon } from "lucide-react";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 import {
-  CreateAssetDialog,
   CreateVersionDialog,
   CredentialGrantMigrationDialog,
   CredentialRevokeDialog,
@@ -59,7 +58,6 @@ import {
   useAdminProjectAssetVersions,
   useApproveAdminProjectMcpVersion,
   useChangeAdminProjectAssetStatus,
-  useCreateAdminProjectAsset,
   useCreateAdminProjectAssetVersion,
   usePublishAdminProjectAssetVersion,
   useSubmitAdminProjectMcpVersion,
@@ -649,13 +647,11 @@ function MutableAdminProjectAssets({
 }) {
   const { t } = useI18n();
   const query = useAdminProjectAssets(accountId, projectId, kind);
-  const createAsset = useCreateAdminProjectAsset(accountId, projectId, kind);
   const createVersion = useCreateAdminProjectAssetVersion(
     accountId,
     projectId,
     kind === "agents" ? null : kind,
   );
-  const [createOpen, setCreateOpen] = useState(false);
   const [versionAsset, setVersionAsset] = useState<ProjectAssetItem | null>(
     null,
   );
@@ -668,9 +664,6 @@ function MutableAdminProjectAssets({
     selectedProjectAssetId,
   );
 
-  useEffect(() => {
-    if (createAsset.isSuccess) setCreateOpen(false);
-  }, [createAsset.isSuccess]);
   useEffect(() => {
     if (createVersion.isSuccess) setVersionAsset(null);
   }, [createVersion.isSuccess]);
@@ -730,14 +723,6 @@ function MutableAdminProjectAssets({
         data={data}
         projectId={projectId}
         selectedProjectAssetId={selectedProjectAssetId}
-        actions={
-          kind === "skills" ? (
-            <Button type="button" onClick={() => setCreateOpen(true)}>
-              <PlusIcon aria-hidden className="size-4" />
-              {t.adminAssets.common.createProjectAsset}
-            </Button>
-          ) : undefined
-        }
         onCreateVersion={(item) => setVersionAsset(item)}
         onInspectProject={(item, trigger) => {
           selectedProjectAssetTriggerRef.current = trigger;
@@ -784,21 +769,6 @@ function MutableAdminProjectAssets({
             item={selectedProjectAsset}
           />
         </AdminSection>
-      ) : null}
-      {kind === "skills" ? (
-        <CreateAssetDialog
-          kind={kind}
-          scope="project"
-          open={createOpen}
-          pending={createAsset.isPending}
-          errorMessage={
-            createAsset.error
-              ? adminAssetErrorMessage(createAsset.error, t.adminAssets.errors)
-              : null
-          }
-          onOpenChange={setCreateOpen}
-          onSubmit={(input) => createAsset.mutate(input)}
-        />
       ) : null}
       {versionAsset && kind === "skills" ? (
         <CreateVersionDialog

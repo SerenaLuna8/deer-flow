@@ -56,9 +56,12 @@ rewrite session: the current document exceeds its token budget. Do not invent
 new facts. Rewrite the existing document to fit the target limits by pruning
 lower-priority, stale, superseded, or duplicate facts.
 
-Read the current document before editing. If changes are needed, call
-replace_memory_document with the complete new document. The tool only changes an
-in-memory draft. If no change is needed, finish normally without calling replace.
+Read the current document before editing, then always call
+replace_memory_document with one complete valid document before finishing. The
+tool only changes an in-memory draft. If every history entry is already
+represented and no text change is needed, submit the unchanged complete document
+explicitly. A text-only response never proves that a frozen history batch was
+processed and must not consume it.
 
 Your final message is not an audit record. Only a successful tool result and the
 server-computed document diff prove a change.

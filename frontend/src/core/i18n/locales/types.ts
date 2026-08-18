@@ -70,7 +70,6 @@ export interface Translations {
 
   home: {
     docs: string;
-    blog: string;
   };
 
   // Welcome
@@ -268,6 +267,10 @@ export interface Translations {
         limit: string;
         tightenTitle: string;
         updateError: string;
+        updateConflict: string;
+        updateUnavailable: string;
+        platformLimitRule: string;
+        platformLimitExceeded: (dimension: string, limit: string) => string;
         saving: string;
         save: string;
         dimensions: {
@@ -680,11 +683,8 @@ export interface Translations {
       delete: string;
       createCredential: string;
       createProjectCredential: string;
-      createProjectAsset: string;
       retry: string;
       retrying: string;
-      create: string;
-      creating: string;
       createVersion: string;
       creatingVersion: string;
       reload: string;
@@ -896,9 +896,6 @@ export interface Translations {
       systemRemoteCredentialsOnly: string;
     };
     dialogs: {
-      createAssetTitle: (kind: string) => string;
-      skillCreationDescription: string;
-      assetCreationDescription: (scope: "system" | "project") => string;
       addMcpTitle: string;
       addMcpDescription: string;
       addMcpSubmit: string;
@@ -991,6 +988,7 @@ export interface Translations {
       secretReplaceTitle: string;
       secretDescription: string;
       credentialSlug: string;
+      credentialSlugHelp: string;
       credentialFields: string;
       credentialFieldsHelp: string;
       fixedCredentialFieldsHelp: string;
@@ -1005,6 +1003,7 @@ export interface Translations {
       writing: string;
       encryptWrite: string;
       validation: {
+        invalidCredentialName: string;
         emptyFields: string;
         unsupportedGroup: string;
         emptyField: string;
@@ -1465,6 +1464,10 @@ export interface Translations {
         validationFailed: string;
         invalidResponse: string;
         network: string;
+        slugConflict: string;
+        unresolvedConflict: string;
+        sessionLimitExceeded: string;
+        secretDetected: string;
         commitUncertain: string;
         stale: string;
       };
@@ -1502,6 +1505,9 @@ export interface Translations {
         description: string;
         runtime: string;
         noDescription: string;
+        nameLabel: string;
+        nameHint: string;
+        savedAs: (value: string) => string;
         model: string;
         capabilities: string;
         dependencySummary: (
@@ -1510,6 +1516,12 @@ export interface Translations {
           mcps: number,
         ) => string;
         checkingMcp: string;
+        modelUnavailable: string;
+        modelRecovery: string;
+        assumptionsTitle: string;
+        conflictsTitle: string;
+        conflictDocuments: string;
+        blockingConflictHint: string;
         createHint: string;
         creating: string;
         createDraft: string;
@@ -1994,6 +2006,121 @@ export interface Translations {
     gatewayUnavailableRetrying: string;
   };
 
+  // Account-wide project workspace
+  projectWorkspace: {
+    title: string;
+    account: string;
+    platformAdministration: string;
+    systemSettings: string;
+    privacyCenter: string;
+    logout: string;
+    searchProjects: string;
+    searchPlaceholder: string;
+    filterProjects: string;
+    allProjects: string;
+    pinnedOnly: string;
+    projectCount: (count: number) => string;
+    createProject: string;
+    projectList: string;
+    projectLoadFailed: string;
+    loadingProjects: string;
+    retry: string;
+    card: {
+      edit: string;
+      pin: string;
+      unpin: string;
+      noDescription: string;
+      open: string;
+    };
+    empty: {
+      noMatchesTitle: string;
+      firstProjectTitle: string;
+      noMatchesDescription: string;
+      firstProjectDescription: string;
+      clearFilters: string;
+    };
+    createDialog: {
+      title: string;
+      description: string;
+      projectName: string;
+      projectSlug: string;
+      descriptionLabel: string;
+      slugHelp: string;
+      slugRequired: string;
+      slugTooShort: string;
+      slugTooLong: string;
+      slugInvalid: string;
+      cancel: string;
+      creating: string;
+      create: string;
+    };
+    editDialog: {
+      title: string;
+      slugImmutable: string;
+      projectName: string;
+      descriptionLabel: string;
+      saving: string;
+      save: string;
+    };
+    recovery: {
+      title: string;
+      windowEnd: string;
+      recoverableUntil: (deadline: string) => string;
+      recover: string;
+      confirmTitle: string;
+      confirmDescription: (projectName: string) => string;
+      cancel: string;
+      restoring: string;
+      confirm: string;
+      empty: string;
+    };
+    notifications: {
+      trigger: string;
+      unreadTrigger: (count: number) => string;
+      title: string;
+      description: string;
+      loading: string;
+      empty: string;
+      retry: string;
+      loadingMore: string;
+      loadMore: string;
+      readSyncPending: string;
+      operationFailed: string;
+      invitationTitle: string;
+      invitedBy: (actor: string, projectName: string) => string;
+      role: (role: string) => string;
+      accepting: string;
+      accept: string;
+      joined: string;
+      statuses: {
+        pending: string;
+        redeemed: string;
+        revoked: string;
+        expired: string;
+      };
+      roles: {
+        editor: string;
+        runner: string;
+        viewer: string;
+      };
+    };
+    errors: {
+      slugConflict: string;
+      unavailable: string;
+      lastAdmin: string;
+      memberQuotaExceeded: string;
+      membershipVersionConflict: string;
+      quotaStateConflict: string;
+      invitationConflict: string;
+      invitationInvalid: string;
+      deletionStateConflict: string;
+      validationFailed: string;
+      authRequired: string;
+      serviceUnavailable: string;
+      requestFailed: string;
+    };
+  };
+
   // Conversation
   conversation: {
     noMessages: string;
@@ -2002,12 +2129,21 @@ export interface Translations {
     branchFailed: string;
     runFailedTitle: string;
     runFailedDescription: string;
+    runAdmissionNotConfirmedDescription: string;
+    restoreFailedInput: string;
+    restoreFailedInputBlocked: string;
     modelOutputLimitTitle: string;
     modelOutputLimitDescription: string;
     modelOutputLimitRetry: string;
     modelOutputLimitRetrying: string;
+    tokenBudgetReachedTitle: string;
+    tokenBudgetReachedDescription: string;
     outputDeliveryIncompleteTitle: string;
     outputDeliveryIncompleteDescription: string;
+    currentUploadUnavailableTitle: string;
+    currentUploadUnavailableDescription: string;
+    agentSuspendedTitle: string;
+    agentSuspendedDescription: string;
     agentModelUnavailableTitle: string;
     agentModelUnavailableDescription: string;
     runExecutionProfile: (
@@ -2105,6 +2241,7 @@ export interface Translations {
     writeTodos: string;
     rememberMemory: string;
     remembered: string;
+    memoryDisabledNotSaved: string;
     skillInstallTooltip: string;
   };
 

@@ -241,6 +241,10 @@ class ProjectAssetResolver:
             if not self._is_canonical_main_record(lead_record):
                 skill_records = lead_skill_records
                 mcp_records = lead_mcp_records
+                self._assert_unique_skill_runtime_names(
+                    skill_records,
+                    context.request_id,
+                )
                 self._assert_one_version_per_asset(
                     skill_records,
                     context.request_id,
@@ -335,6 +339,10 @@ class ProjectAssetResolver:
             self._append_delegate_only_dependencies(
                 tuple(delegated_mcp_records),
                 mcp_records,
+                context.request_id,
+            )
+            self._assert_unique_skill_runtime_names(
+                skill_records,
                 context.request_id,
             )
             skills = tuple([await self._skill_snapshot(session, context, record, 0) for record in skill_records])
@@ -673,6 +681,22 @@ class ProjectAssetResolver:
     ) -> None:
         if len({record.asset.id for record in records}) != len(records):
             raise AssetResolutionUnavailable(request_id)
+
+    @staticmethod
+    def _assert_unique_skill_runtime_names(
+        records: Sequence[_ResolvedRecord],
+        request_id: str,
+    ) -> None:
+        assets_by_name: dict[str, uuid.UUID] = {}
+        for record in records:
+            if not isinstance(record.asset, SkillRow):
+                raise AssetResolutionUnavailable(request_id)
+            asset_id = uuid.UUID(str(record.asset.id))
+            runtime_name = record.asset.slug.casefold()
+            existing = assets_by_name.get(runtime_name)
+            if existing is not None and existing != asset_id:
+                raise AssetResolutionUnavailable(request_id)
+            assets_by_name[runtime_name] = asset_id
 
     async def _finalize_run_closure(
         self,

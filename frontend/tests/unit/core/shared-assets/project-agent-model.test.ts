@@ -124,3 +124,35 @@ test("fails closed when the selected Agent version is absent from history", () =
     ),
   ).toBeNull();
 });
+
+test("fails closed when an existing Thread points at a suspended project Agent", () => {
+  const catalog = {
+    project_items: [
+      {
+        id: AGENT_ID,
+        scope: "project",
+        status: "suspended",
+        current_published_version_id: VERSION_ID,
+      },
+    ],
+    system_items: [],
+  } as unknown as ProjectAssetList;
+  const history = {
+    data: [
+      {
+        id: VERSION_ID,
+        agent_id: AGENT_ID,
+        workflow_status: "published",
+        model_ref: "deepseek-v4-flash",
+      },
+    ],
+  } as unknown as VersionHistoryResponse;
+
+  expect(
+    resolveThreadAgentModelRef(
+      catalog,
+      { agent_asset_id: AGENT_ID, agent_scope: "project" },
+      history,
+    ),
+  ).toBeNull();
+});

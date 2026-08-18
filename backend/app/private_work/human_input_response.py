@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -30,12 +31,19 @@ class _HumanInputOption:
 
 
 @dataclass(frozen=True, slots=True)
+class _HumanInputField:
+    name: str
+    required: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _HumanInputRequest:
     request_id: str
     tool_call_id: str
     question: str
     input_mode: str
     options: tuple[_HumanInputOption, ...]
+    fields: tuple[_HumanInputField, ...]
     source_run_id: str | None = None
 
 
@@ -46,6 +54,7 @@ class HumanInputResponsePromotion:
     kwargs: dict[str, object]
     continuation_run_id: str | None = None
     continuation_verified: bool = False
+    response_candidate_present: bool = False
 
 
 def _message_value(message: object, key: str) -> object:
@@ -114,9 +123,25 @@ def _read_request(message: object) -> _HumanInputRequest | None:
     if input_mode not in choice_modes and options:
         return None
     raw_fields = payload.get("fields")
+    fields: list[_HumanInputField] = []
     if input_mode == "form":
         if version != 2 or not isinstance(raw_fields, list) or not raw_fields:
             return None
+        seen_field_names: set[str] = set()
+        for raw_field in raw_fields:
+            if not isinstance(raw_field, Mapping):
+                return None
+            field_name = _non_empty_string(raw_field.get("name"))
+            required = raw_field.get("required", False)
+            if field_name is None or field_name in seen_field_names or not isinstance(required, bool):
+                return None
+            seen_field_names.add(field_name)
+            fields.append(
+                _HumanInputField(
+                    name=field_name,
+                    required=required,
+                )
+            )
     elif version != 1 or "fields" in payload:
         return None
     source_run_id = None
@@ -130,6 +155,7 @@ def _read_request(message: object) -> _HumanInputRequest | None:
         question=question,
         input_mode=input_mode,
         options=tuple(options),
+        fields=tuple(fields),
         source_run_id=source_run_id,
     )
 
@@ -231,6 +257,15 @@ def _response_matches_request(
         if request.input_mode not in {"single_choice", "choice_with_other"}:
             return False
         return any(option.option_id == response["option_id"] and option.value == response["value"] for option in request.options)
+    form_values = response.get("form_values")
+    if form_values is not None:
+        if request.input_mode != "form":
+            return False
+        field_names = {field.name for field in request.fields}
+        required_names = {field.name for field in request.fields if field.required}
+        submitted_names = set(form_values)
+        if not submitted_names.issubset(field_names) or not required_names.issubset(submitted_names):
+            return False
     return response["response_kind"] == "text" and request.input_mode in {
         "free_text",
         "choice_with_other",
@@ -242,7 +277,9 @@ def _canonical_response_text(
     request: _HumanInputRequest,
     response: HumanInputResponse,
 ) -> str:
-    return f'{_CANONICAL_RESPONSE_PREFIX}{request.question}", my answer is: {response["value"]}'
+    form_values = response.get("form_values")
+    structured_values = f" [values: {json.dumps(form_values, ensure_ascii=False, separators=(',', ':'))}]" if form_values is not None else ""
+    return f'{_CANONICAL_RESPONSE_PREFIX}{request.question}", my answer is: {response["value"]}{structured_values}'
 
 
 def _has_canonical_content(message: Mapping[str, object], expected: str) -> bool:
@@ -264,25 +301,44 @@ def authorize_matching_human_input_response(
 
     result = copy.deepcopy(dict(kwargs))
     candidate = _candidate_message(kwargs)
+    response_candidate_present = candidate is not None
     request = _latest_open_request(checkpoint_messages)
     if candidate is None or request is None:
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
     response = read_human_input_response(_additional_kwargs(candidate))
     if response is None or not _response_matches_request(response, request):
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
     candidate_id = _non_empty_string(candidate.get("id"))
     if candidate_id is not None and any(_non_empty_string(_message_value(message, "id")) == candidate_id for message in checkpoint_messages):
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
     expected_content = _canonical_response_text(request, response)
     if not _has_canonical_content(candidate, expected_content):
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
 
     graph_input = result.get("input")
     if not isinstance(graph_input, dict):
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
     messages = graph_input.get("messages")
     if not isinstance(messages, list) or len(messages) != 1:
-        return HumanInputResponsePromotion(result)
+        return HumanInputResponsePromotion(
+            result,
+            response_candidate_present=response_candidate_present,
+        )
     promoted_message: dict[str, object] = {
         "type": "human",
         "content": [{"type": "text", "text": expected_content}],
@@ -298,6 +354,7 @@ def authorize_matching_human_input_response(
         result,
         continuation_run_id=request.source_run_id,
         continuation_verified=True,
+        response_candidate_present=True,
     )
 
 
@@ -332,7 +389,7 @@ class CheckpointHumanInputResponsePromoter:
         thread_id: str,
         kwargs: Mapping[str, object],
     ) -> HumanInputResponsePromotion:
-        if not has_human_input_response_candidate(kwargs):
+        if _candidate_message(kwargs) is None:
             return HumanInputResponsePromotion(copy.deepcopy(dict(kwargs)))
         accessor = bind_transaction_checkpoint_state(
             self._project_checkpointer.for_context(context),

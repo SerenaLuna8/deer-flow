@@ -7,6 +7,6 @@ export default async function ProjectAgentBuilderSessionPage({
   params: Promise<{ project_slug: string; session_id: string }>;
 }) {
   const { project_slug: slug, session_id: sessionId } = await params;
-  await requireServerProjectCapability(slug, "shared_assets.edit");
+  await requireServerProjectCapability(slug, "shared_assets.read");
   return <AgentBuilderWorkspace sessionId={sessionId} />;
 }

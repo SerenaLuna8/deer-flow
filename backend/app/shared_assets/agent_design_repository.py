@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import and_, exists, func, literal, select, union_all
+from sqlalchemy import and_, exists, func, literal, or_, select, text, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
@@ -13,6 +15,7 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
     AgentDesignSessionRow,
+    AgentRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectSystemMcpBindingRow,
@@ -84,6 +87,48 @@ class AgentDesignRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
+    async def lock_session_create_scope(
+        self,
+        context: ProjectContext,
+    ) -> None:
+        """Serialize per-project Builder admission before counting sessions."""
+
+        self._require_context(context)
+        statement = (
+            select(ProjectRow.id)
+            .join(ProjectMembershipRow, ProjectMembershipRow.project_id == ProjectRow.id)
+            .where(
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+                ProjectMembershipRow.id == context.membership_id,
+                ProjectMembershipRow.project_id == context.project_id,
+                ProjectMembershipRow.user_id == str(context.user_id),
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.version == context.membership_version,
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if (await self.session.execute(statement)).scalar_one_or_none() is None:
+            raise AssetNotFound(context.request_id)
+
+    async def count_incomplete(
+        self,
+        context: ProjectContext,
+    ) -> int:
+        self._require_context(context)
+        value = await self.session.scalar(
+            select(func.count())
+            .select_from(AgentDesignSessionRow)
+            .where(
+                AgentDesignSessionRow.project_id == context.project_id,
+                AgentDesignSessionRow.owner_user_id == str(context.user_id),
+                AgentDesignSessionRow.status.not_in(("completed", "cancelled")),
+                self._context_exists(context),
+            )
+        )
+        return int(value or 0)
+
     async def create(
         self,
         context: ProjectContext,
@@ -113,7 +158,7 @@ class AgentDesignRepository:
             self._context_exists(context),
         )
         if for_update:
-            statement = statement.with_for_update(of=AgentDesignSessionRow)
+            statement = statement.with_for_update(of=AgentDesignSessionRow).execution_options(populate_existing=True)
         return (await self.session.execute(statement)).scalar_one_or_none()
 
     async def get(
@@ -133,7 +178,7 @@ class AgentDesignRepository:
             self._context_exists(context),
         )
         if for_update:
-            statement = statement.with_for_update(of=AgentDesignSessionRow)
+            statement = statement.with_for_update(of=AgentDesignSessionRow).execution_options(populate_existing=True)
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
@@ -144,23 +189,58 @@ class AgentDesignRepository:
         context: ProjectContext,
         *,
         limit: int = 20,
+        before_created_at: datetime | None = None,
+        before_id: uuid.UUID | None = None,
     ) -> tuple[AgentDesignSessionRow, ...]:
         self._require_context(context)
+        filters = [
+            AgentDesignSessionRow.project_id == context.project_id,
+            AgentDesignSessionRow.owner_user_id == str(context.user_id),
+            AgentDesignSessionRow.status.notin_(("completed", "cancelled")),
+            self._context_exists(context),
+        ]
+        if before_created_at is not None and before_id is not None:
+            filters.append(
+                or_(
+                    AgentDesignSessionRow.created_at < before_created_at,
+                    and_(
+                        AgentDesignSessionRow.created_at == before_created_at,
+                        AgentDesignSessionRow.id < before_id,
+                    ),
+                )
+            )
         statement = (
             select(AgentDesignSessionRow)
-            .where(
-                AgentDesignSessionRow.project_id == context.project_id,
-                AgentDesignSessionRow.owner_user_id == str(context.user_id),
-                AgentDesignSessionRow.status.notin_(("completed", "cancelled")),
-                self._context_exists(context),
-            )
+            .where(*filters)
             .order_by(
-                AgentDesignSessionRow.updated_at.desc(),
+                AgentDesignSessionRow.created_at.desc(),
                 AgentDesignSessionRow.id.desc(),
             )
             .limit(limit)
         )
         return tuple((await self.session.execute(statement)).scalars())
+
+    async def project_agent_slug_exists(
+        self,
+        context: ProjectContext,
+        slug: str,
+        *,
+        for_update: bool = False,
+    ) -> bool:
+        """Check the exact project Agent namespace under current authority."""
+
+        self._require_context(context)
+        if for_update:
+            await self.lock_context(context)
+        statement = select(AgentRow.id).where(
+            AgentRow.scope == "project",
+            AgentRow.project_id == context.project_id,
+            func.lower(AgentRow.slug) == slug.casefold(),
+            self._context_exists(context),
+        )
+        if for_update:
+            statement = statement.with_for_update(of=AgentRow)
+        return (await self.session.execute(statement)).scalar_one_or_none() is not None
 
     async def list_allowed_assets(
         self,
@@ -365,6 +445,51 @@ class AgentDesignRepository:
         if for_update:
             statement = statement.with_for_update(of=AgentDesignOperationRow)
         return (await self.session.execute(statement)).scalar_one_or_none()
+
+    async def lock_in_progress_turn_operations(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> tuple[AgentDesignOperationRow, ...]:
+        """Fence generation, then lock active operations before the session."""
+
+        self._require_context(context)
+        await self.lock_context(context)
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {
+                "lock_key": self._session_fence_lock_key(
+                    context.project_id,
+                    session_id,
+                )
+            },
+        )
+        statement = (
+            select(AgentDesignOperationRow)
+            .where(
+                AgentDesignOperationRow.project_id == context.project_id,
+                AgentDesignOperationRow.owner_user_id == str(context.user_id),
+                AgentDesignOperationRow.session_id == session_id,
+                AgentDesignOperationRow.operation_kind == "turn",
+                AgentDesignOperationRow.status == "in_progress",
+                self._context_exists(context),
+            )
+            .order_by(
+                AgentDesignOperationRow.created_at,
+                AgentDesignOperationRow.id,
+            )
+            .with_for_update(of=AgentDesignOperationRow)
+        )
+        return tuple((await self.session.execute(statement)).scalars())
+
+    @staticmethod
+    def _session_fence_lock_key(
+        project_id: uuid.UUID,
+        session_id: uuid.UUID,
+    ) -> int:
+        digest = hashlib.sha256(f"agent-design-session\x00{project_id}\x00{session_id}".encode()).digest()
+        # Match the repository-wide pg_advisory_xact_lock(bigint) convention.
+        return int.from_bytes(digest[:8], "big") & 0x7FFFFFFFFFFFFFFF
 
     async def create_operation(
         self,

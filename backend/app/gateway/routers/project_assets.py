@@ -42,12 +42,17 @@ from app.projects.errors import (
 from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     AgentCapabilityBindings,
+    AgentDesignConflictUnresolved,
+    AgentDesignSecretDetected,
+    AgentDesignSessionLimitExceeded,
+    AgentDesignSlugConflict,
     AgentInstructions,
     AgentModelSettings,
     AgentPayload,
     AgentService,
     AssetConflict,
     AssetForbidden,
+    AssetInUse,
     AssetKind,
     AssetNotFound,
     AssetRunQuotaExceeded,
@@ -60,7 +65,6 @@ from app.shared_assets import (
     CreateAgent,
     CreateCredential,
     CreateMcpServer,
-    CreateSkill,
     CredentialService,
     McpCredentialSlot,
     McpDefinition,
@@ -68,6 +72,7 @@ from app.shared_assets import (
     ProjectDefaultAgentService,
     SharedAssetError,
     SkillArchiveFile,
+    SkillArchiveLimitExceeded,
     SkillCredentialBindingInput,
     SkillCredentialBindingService,
     SkillDesignBaseStale,
@@ -77,6 +82,7 @@ from app.shared_assets import (
     SkillDesignTargetUnsupported,
     SkillFileChange,
     SkillPublishBaseStale,
+    SkillRuntimeNameConflict,
     SkillService,
     WorkflowStatus,
 )
@@ -804,6 +810,7 @@ class CredentialVersionHistoryResponse(_StrictModel):
 ASSET_ERRORS = (
     AssetNotFound,
     AssetForbidden,
+    AssetInUse,
     AssetConflict,
     AssetValidationFailed,
     AssetStorageUnavailable,
@@ -815,6 +822,12 @@ ASSET_ERRORS = (
     SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillPublishBaseStale,
+    SkillRuntimeNameConflict,
+    AgentDesignSecretDetected,
+    AgentDesignSessionLimitExceeded,
+    AgentDesignSlugConflict,
+    AgentDesignConflictUnresolved,
+    SkillArchiveLimitExceeded,
 )
 
 
@@ -822,6 +835,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
     known = {
         AssetNotFound: 404,
         AssetForbidden: 403,
+        AssetInUse: 409,
         AssetConflict: 409,
         AssetValidationFailed: 422,
         AssetStorageQuotaExceeded: 429,
@@ -833,6 +847,12 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         SkillDesignBaseStale: 409,
         SkillDesignNoChanges: 409,
         SkillPublishBaseStale: 409,
+        SkillRuntimeNameConflict: 409,
+        AgentDesignSecretDetected: 422,
+        AgentDesignSessionLimitExceeded: 429,
+        AgentDesignSlugConflict: 409,
+        AgentDesignConflictUnresolved: 409,
+        SkillArchiveLimitExceeded: 413,
     }
     status_code = known.get(type(exc))
     if status_code is None:
@@ -1314,7 +1334,7 @@ async def _read_skill_archive_upload(
                 break
             payload.extend(chunk)
             if len(payload) > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
-                raise AssetValidationFailed(request_id)
+                raise SkillArchiveLimitExceeded(request_id)
     finally:
         await archive.close()
     if not payload:
@@ -1471,17 +1491,6 @@ def register_asset_routes(
             raise_asset_domain(exc)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    async def create_skill(body: CreateAssetRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        if isinstance(actor, ProjectContext):
-            return await _asset_call(
-                actor,
-                lambda: service.create_project_with_template(
-                    actor,
-                    CreateSkill(body.slug, body.display_name),
-                ),
-            )
-        return await _asset_call(actor, lambda: service.create_asset(actor, CreateSkill(body.slug, body.display_name)))
-
     async def get_skill(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _asset_call(actor, lambda: service.get(actor, asset_id))
 
@@ -1626,7 +1635,6 @@ def register_asset_routes(
         ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentVersionResponse, 200),
         ("/agents/{asset_id}/versions/{version_id}/restore", restore_agent_version, ["POST"], AgentVersionResponse, 200),
         ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent_version, ["POST"], AgentVersionResponse, 200),
-        ("/skills", create_skill, ["POST"], AssetMutationResponse, 201),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
         ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill, ["POST"], SkillVersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),

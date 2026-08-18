@@ -885,7 +885,7 @@ CREATE TABLE agent_design_sessions (
     CONSTRAINT uq_agent_design_sessions_thread_scope UNIQUE (project_id, owner_user_id, thread_id)
 );
 
-CREATE INDEX ix_agent_design_sessions_resume ON agent_design_sessions (project_id, owner_user_id, status, updated_at DESC, id DESC);
+CREATE INDEX ix_agent_design_sessions_resume ON agent_design_sessions (project_id, owner_user_id, created_at DESC, id DESC) WHERE status NOT IN ('completed', 'cancelled');
 
 CREATE TABLE agent_design_operations (
     id UUID NOT NULL,
@@ -4768,6 +4768,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('model_catalog_simplify');
+INSERT INTO alembic_version (version_num) VALUES ('agent_design_resume_index');
 
 COMMIT;

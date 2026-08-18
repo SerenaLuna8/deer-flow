@@ -183,6 +183,20 @@ _SECRET_PATTERNS = (
         re.IGNORECASE,
     ),
 )
+
+
+def contains_agent_design_secret(value: object) -> bool:
+    """Return whether a bounded Builder value contains secret-like material."""
+
+    if isinstance(value, str):
+        return any(pattern.search(value) for pattern in _SECRET_PATTERNS)
+    if isinstance(value, dict):
+        return any(contains_agent_design_secret(key) or contains_agent_design_secret(item) for key, item in value.items())
+    if isinstance(value, list | tuple):
+        return any(contains_agent_design_secret(item) for item in value)
+    return False
+
+
 _UNSAFE_DOCUMENT_PATTERNS = (
     re.compile(
         r"\bignore\b.{0,80}\b(?:platform|system|security|authorization)\b.{0,80}\binstructions?\b",
@@ -1018,13 +1032,7 @@ class AgentDesignGenerationService:
 
     @staticmethod
     def _contains_secret(value: object) -> bool:
-        if isinstance(value, str):
-            return any(pattern.search(value) for pattern in _SECRET_PATTERNS)
-        if isinstance(value, dict):
-            return any(AgentDesignGenerationService._contains_secret(key) or AgentDesignGenerationService._contains_secret(item) for key, item in value.items())
-        if isinstance(value, list | tuple):
-            return any(AgentDesignGenerationService._contains_secret(item) for item in value)
-        return False
+        return contains_agent_design_secret(value)
 
     @staticmethod
     def _contains_unsafe_document(documents: AgentDesignDraft) -> bool:
@@ -1061,6 +1069,7 @@ __all__ = [
     "AllowedProjectAssetMetadata",
     "CandidateResult",
     "ClarificationQuestion",
+    "contains_agent_design_secret",
     "NeedsClarificationResult",
     "RunOneshotAgentDesignModelCaller",
 ]

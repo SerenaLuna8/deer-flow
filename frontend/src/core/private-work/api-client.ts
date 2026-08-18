@@ -57,10 +57,12 @@ export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
 export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
 export const MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT";
 export const OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE";
+export const CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE";
 
 export type ProjectRunFailureCode =
   | typeof MODEL_OUTPUT_LIMIT
-  | typeof OUTPUT_DELIVERY_INCOMPLETE;
+  | typeof OUTPUT_DELIVERY_INCOMPLETE
+  | typeof CURRENT_UPLOAD_UNAVAILABLE;
 
 const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "error",
@@ -84,6 +86,7 @@ export function projectStreamFailureName(
   for (const failureCode of [
     MODEL_OUTPUT_LIMIT,
     OUTPUT_DELIVERY_INCOMPLETE,
+    CURRENT_UPLOAD_UNAVAILABLE,
   ] as const) {
     if (
       name === failureCode ||
@@ -127,6 +130,10 @@ export function isModelOutputLimitError(error: unknown): boolean {
 
 export function isOutputDeliveryIncompleteError(error: unknown): boolean {
   return isProjectRunFailureCode(error, OUTPUT_DELIVERY_INCOMPLETE);
+}
+
+export function isCurrentUploadUnavailableError(error: unknown): boolean {
+  return isProjectRunFailureCode(error, CURRENT_UPLOAD_UNAVAILABLE);
 }
 
 export function projectStreamFrameForUI<T extends ProjectStreamFrame>(

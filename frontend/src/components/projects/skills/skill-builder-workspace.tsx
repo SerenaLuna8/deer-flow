@@ -580,6 +580,68 @@ function skillBuilderAttachmentError(
   return copy.attachmentTotalTooLarge;
 }
 
+type SkillBuilderAttachmentFile = Pick<File, "name" | "size" | "arrayBuffer">;
+
+export type SkillBuilderAttachmentIngestResult =
+  | { ok: true }
+  | { ok: false; kind: "not_utf8"; fileName: string }
+  | {
+      ok: false;
+      kind: "merge";
+      error: SkillBuilderMergeAttachmentError;
+    };
+
+/**
+ * Read a batch first, then merge and commit against the latest queue as one
+ * synchronous step. The late `getCurrent` prevents an async File read from
+ * resurrecting a removed attachment, while the synchronous commit prevents
+ * concurrent batches from overwriting one another.
+ */
+export async function ingestSkillBuilderAttachmentFiles(
+  files: readonly SkillBuilderAttachmentFile[],
+  getCurrent: () => readonly SkillBuilderAttachment[],
+  commit: (attachments: SkillBuilderAttachment[]) => void,
+): Promise<SkillBuilderAttachmentIngestResult> {
+  const loaded: SkillBuilderAttachment[] = [];
+  for (const file of files) {
+    if (file.size > SKILL_BUILDER_MAX_ATTACHMENT_BYTES) {
+      return { ok: false, kind: "merge", error: "too_large" };
+    }
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", { fatal: true }).decode(
+        await file.arrayBuffer(),
+      );
+    } catch {
+      return { ok: false, kind: "not_utf8", fileName: file.name };
+    }
+    loaded.push({ name: file.name, content });
+  }
+
+  let next = [...getCurrent()];
+  for (const attachment of loaded) {
+    const merged = skillBuilderMergeAttachment(next, attachment);
+    if (!merged.ok) {
+      return { ok: false, kind: "merge", error: merged.error };
+    }
+    next = merged.attachments;
+  }
+  commit(next);
+  return { ok: true };
+}
+
+export function SkillBuilderDialogError({
+  message,
+}: {
+  message: string | null;
+}) {
+  return message ? (
+    <p role="alert" className="text-destructive text-sm">
+      {message}
+    </p>
+  ) : null;
+}
+
 export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const { user } = useAuth();
   const { t } = useI18n();
@@ -611,6 +673,8 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const [composerAttachments, setComposerAttachments] = useState<
     SkillBuilderAttachment[]
   >([]);
+  const composerAttachmentsRef = useRef<SkillBuilderAttachment[]>([]);
+  const [attachmentIngestions, setAttachmentIngestions] = useState(0);
   const [selectedModelName, setSelectedModelName] = useState<string | null>(
     null,
   );
@@ -691,7 +755,8 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     submitTurn.isPending ||
     validate.isPending ||
     commit.isPending ||
-    cancel.isPending;
+    cancel.isPending ||
+    attachmentIngestions > 0;
   const selectedFile =
     session?.files.find((file) => file.path === selectedPath) ?? null;
   const draftContent = selectedFile
@@ -887,34 +952,39 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     return options;
   }
 
-  async function addAttachmentFiles(files: File[]) {
-    let next = composerAttachments;
-    for (const file of files) {
-      if (file.size > SKILL_BUILDER_MAX_ATTACHMENT_BYTES) {
-        setLocalError(errors.attachmentTooLarge);
-        return;
-      }
-      let content: string;
-      try {
-        content = new TextDecoder("utf-8", { fatal: true }).decode(
-          await file.arrayBuffer(),
-        );
-      } catch {
-        setLocalError(errors.attachmentNotUtf8(file.name));
-        return;
-      }
-      const merged = skillBuilderMergeAttachment(next, {
-        name: file.name,
-        content,
-      });
-      if (!merged.ok) {
-        setLocalError(skillBuilderAttachmentError(merged.error, errors));
-        return;
-      }
-      next = merged.attachments;
-    }
+  function updateComposerAttachments(
+    update:
+      | SkillBuilderAttachment[]
+      | ((current: SkillBuilderAttachment[]) => SkillBuilderAttachment[]),
+  ) {
+    const next =
+      typeof update === "function"
+        ? update(composerAttachmentsRef.current)
+        : update;
+    composerAttachmentsRef.current = next;
     setComposerAttachments(next);
-    setLocalError(null);
+  }
+
+  async function addAttachmentFiles(files: File[]) {
+    setAttachmentIngestions((current) => current + 1);
+    try {
+      const result = await ingestSkillBuilderAttachmentFiles(
+        files,
+        () => composerAttachmentsRef.current,
+        updateComposerAttachments,
+      );
+      if (!result.ok) {
+        setLocalError(
+          result.kind === "not_utf8"
+            ? errors.attachmentNotUtf8(result.fileName)
+            : skillBuilderAttachmentError(result.error, errors),
+        );
+        return;
+      }
+      setLocalError(null);
+    } finally {
+      setAttachmentIngestions((current) => Math.max(0, current - 1));
+    }
   }
 
   function refreshAfterConflict(
@@ -995,7 +1065,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           return;
         }
         idempotency.complete("message-turn", signature);
-        setComposerAttachments([]);
+        updateComposerAttachments([]);
       },
       onError: (error) => {
         setAdmittedUserMessage(null);
@@ -1341,7 +1411,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 onSubmitClarification={submitClarification}
                 onAddAttachmentFiles={(files) => void addAttachmentFiles(files)}
                 onRemoveAttachment={(name) => {
-                  setComposerAttachments((current) =>
+                  updateComposerAttachments((current) =>
                     current.filter((item) => item.name !== name),
                   );
                 }}
@@ -1455,6 +1525,17 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : dialogs.fileMetaCreate(session?.files.length ?? 0)}
             </p>
           </div>
+          <SkillBuilderDialogError
+            message={
+              commit.error &&
+              !(
+                commit.error instanceof SkillBuilderApiError &&
+                commit.error.serverCode === "SKILL_DESIGN_BASE_STALE"
+              )
+                ? skillBuilderWorkspaceErrorMessage(commit.error, errors, true)
+                : null
+            }
+          />
           <DialogFooter>
             <Button
               type="button"
@@ -1553,6 +1634,13 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : dialogs.abandonDescriptionCreate}
             </DialogDescription>
           </DialogHeader>
+          <SkillBuilderDialogError
+            message={
+              cancel.error
+                ? skillBuilderWorkspaceErrorMessage(cancel.error, errors)
+                : null
+            }
+          />
           <DialogFooter>
             <Button
               type="button"

@@ -4,6 +4,7 @@ import {
   extractHumanInputRequest,
   inferLegacyHumanInputControlMessageIndexes,
 } from "@/core/messages/human-input";
+import { readTokenBudgetNotice } from "@/core/messages/token-budget";
 
 interface GenericMessageGroup<T = string> {
   type: T;
@@ -189,7 +190,8 @@ export function getMessageGroups(messages: Message[]): MessageGroup[] {
       // (#3868). Intermediate reasoning (no content) and tool-calling steps
       // still belong in the processing group.
       const becomesAssistantBubble =
-        hasContent(message) && !hasToolCalls(message);
+        (hasContent(message) || readTokenBudgetNotice(message) !== null) &&
+        !hasToolCalls(message);
       let toolCallGroup: MessageGroup | null = null;
 
       if (hasPresentFiles(message)) {

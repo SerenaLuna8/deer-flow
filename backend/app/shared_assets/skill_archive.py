@@ -14,10 +14,11 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import PurePosixPath, PureWindowsPath
 
-from app.shared_assets.errors import AssetValidationFailed
+from app.shared_assets.errors import AssetValidationFailed, SkillArchiveLimitExceeded
 from app.shared_assets.models import SkillArchiveFile
 
 MAX_SKILL_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_SKILL_ARCHIVE_FILE_BYTES = 64 * 1024 * 1024
 MAX_SKILL_ARCHIVE_FILES = 16_384
 MAX_SKILL_ARCHIVE_MEMBERS = MAX_SKILL_ARCHIVE_FILES
 MAX_SKILL_ARCHIVE_UPLOAD_BYTES = 160 * 1024 * 1024
@@ -82,6 +83,10 @@ def _invalid(request_id: str) -> AssetValidationFailed:
     return AssetValidationFailed(request_id)
 
 
+def _limit_exceeded(request_id: str) -> SkillArchiveLimitExceeded:
+    return SkillArchiveLimitExceeded(request_id)
+
+
 def _archive_kind(filename: str, request_id: str) -> str:
     if not isinstance(filename, str) or not filename.strip() or "\x00" in filename:
         raise _invalid(request_id)
@@ -119,7 +124,7 @@ def _bounded_read(
     request_id: str,
 ) -> bytes:
     if expected_size < 0 or expected_size > remaining_bytes:
-        raise _invalid(request_id)
+        raise _limit_exceeded(request_id)
     content = source.read(expected_size + 1)
     if len(content) != expected_size:
         raise _invalid(request_id)
@@ -140,7 +145,7 @@ def _validate_tar_extended_metadata(
         except UnicodeError:
             raise _invalid(request_id) from None
         if total_bytes > _MAX_TAR_PAX_METADATA_BYTES:
-            raise _invalid(request_id)
+            raise _limit_exceeded(request_id)
 
 
 def _zip_member_file_type(info: zipfile.ZipInfo) -> int:
@@ -274,15 +279,9 @@ def _preflight_zip_central_directory(
         payload,
         request_id,
     )
-    if (
-        metadata.entry_count < 1
-        or metadata.entry_count > MAX_SKILL_ARCHIVE_MEMBERS
-        or metadata.size_bytes < _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES
-        or metadata.size_bytes > _MAX_ZIP_CENTRAL_DIRECTORY_BYTES
-        or metadata.offset < 0
-        or metadata.offset + metadata.size_bytes != directory_end
-        or directory_end > len(payload)
-    ):
+    if metadata.entry_count > MAX_SKILL_ARCHIVE_MEMBERS or metadata.size_bytes > _MAX_ZIP_CENTRAL_DIRECTORY_BYTES:
+        raise _limit_exceeded(request_id)
+    if metadata.entry_count < 1 or metadata.size_bytes < _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES or metadata.offset < 0 or metadata.offset + metadata.size_bytes != directory_end or directory_end > len(payload):
         raise _invalid(request_id)
 
     directory = memoryview(payload)[metadata.offset : directory_end]
@@ -318,8 +317,10 @@ def _load_zip(
         _preflight_zip_central_directory(payload, request_id)
         with zipfile.ZipFile(io.BytesIO(payload), mode="r") as archive:
             members = archive.infolist()
-            if not members or len(members) > MAX_SKILL_ARCHIVE_MEMBERS:
+            if not members:
                 raise _invalid(request_id)
+            if len(members) > MAX_SKILL_ARCHIVE_MEMBERS:
+                raise _limit_exceeded(request_id)
 
             regular_members: list[tuple[zipfile.ZipInfo, str]] = []
             total_bytes = 0
@@ -336,9 +337,11 @@ def _load_zip(
                     raise _invalid(request_id)
                 if info.file_size < 0:
                     raise _invalid(request_id)
+                if info.file_size > MAX_SKILL_ARCHIVE_FILE_BYTES:
+                    raise _limit_exceeded(request_id)
                 total_bytes += info.file_size
                 if len(regular_members) >= MAX_SKILL_ARCHIVE_FILES or total_bytes > MAX_SKILL_ARCHIVE_BYTES:
-                    raise _invalid(request_id)
+                    raise _limit_exceeded(request_id)
                 regular_members.append((info, path))
 
             if not regular_members:
@@ -383,7 +386,7 @@ def _load_tar(
             for member in archive:
                 member_count += 1
                 if member_count > MAX_SKILL_ARCHIVE_MEMBERS:
-                    raise _invalid(request_id)
+                    raise _limit_exceeded(request_id)
                 path = _canonical_member_path(member.name, request_id)
                 _validate_tar_extended_metadata(member, request_id)
                 if member.isdir():
@@ -392,9 +395,11 @@ def _load_tar(
                     raise _invalid(request_id)
                 if member.size < 0:
                     raise _invalid(request_id)
+                if member.size > MAX_SKILL_ARCHIVE_FILE_BYTES:
+                    raise _limit_exceeded(request_id)
                 total_bytes += member.size
                 if len(loaded) >= MAX_SKILL_ARCHIVE_FILES or total_bytes > MAX_SKILL_ARCHIVE_BYTES:
-                    raise _invalid(request_id)
+                    raise _limit_exceeded(request_id)
                 source = archive.extractfile(member)
                 if source is None:
                     raise _invalid(request_id)
@@ -410,12 +415,15 @@ def _load_tar(
         while bounded_stream.read(1024 * 1024):
             pass
         structural_limit = padded_content_bytes + member_count * _TAR_MEMBER_OVERHEAD_BUDGET + _TAR_END_RECORD_BUDGET
-        if bounded_stream.bytes_read > structural_limit or not loaded:
+        if bounded_stream.bytes_read > structural_limit:
+            raise _limit_exceeded(request_id)
+        if not loaded:
             raise _invalid(request_id)
     except AssetValidationFailed:
         raise
+    except _ArchiveStreamLimitExceeded:
+        raise _limit_exceeded(request_id) from None
     except (
-        _ArchiveStreamLimitExceeded,
         OSError,
         EOFError,
         ValueError,
@@ -425,6 +433,17 @@ def _load_tar(
     finally:
         decompressed_stream.close()
     return tuple(loaded)
+
+
+def _is_macos_metadata_path(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    return bool(parts) and (parts[0] == "__MACOSX" or parts[-1] == ".DS_Store" or parts[-1].startswith("._"))
+
+
+def _without_macos_metadata(
+    files: tuple[_LoadedArchiveFile, ...],
+) -> tuple[_LoadedArchiveFile, ...]:
+    return tuple(item for item in files if not _is_macos_metadata_path(item.path))
 
 
 def _strip_single_wrapper(
@@ -476,8 +495,10 @@ def load_skill_archive_package(
 ) -> tuple[SkillArchiveFile, ...]:
     """Parse one supported archive without writing untrusted paths to disk."""
 
-    if not isinstance(payload, bytes) or not payload or len(payload) > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
+    if not isinstance(payload, bytes) or not payload:
         raise _invalid(request_id)
+    if len(payload) > MAX_SKILL_ARCHIVE_UPLOAD_BYTES:
+        raise _limit_exceeded(request_id)
     kind = _archive_kind(filename, request_id)
     if kind == "zip":
         loaded = _load_zip(payload, request_id=request_id)
@@ -487,7 +508,7 @@ def load_skill_archive_package(
             gzip=kind == "tar.gz",
             request_id=request_id,
         )
-    normalized = _strip_single_wrapper(loaded, request_id)
+    normalized = _strip_single_wrapper(_without_macos_metadata(loaded), request_id)
     return tuple(
         SkillArchiveFile(
             path=item.path,
@@ -500,6 +521,7 @@ def load_skill_archive_package(
 
 __all__ = [
     "MAX_SKILL_ARCHIVE_BYTES",
+    "MAX_SKILL_ARCHIVE_FILE_BYTES",
     "MAX_SKILL_ARCHIVE_FILES",
     "MAX_SKILL_ARCHIVE_MEMBERS",
     "MAX_SKILL_ARCHIVE_UPLOAD_BYTES",

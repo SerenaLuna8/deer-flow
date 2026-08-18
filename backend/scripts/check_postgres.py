@@ -188,7 +188,7 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
                     error = ""
                 elif database_state == "behind":
                     schema_state = "upgrade_required"
-                    error = f"数据库处于已知历史 revision（{current_revision}），链头为 {expected_marker}；请先备份数据库，再运行 `make upgrade-db`"
+                    error = f"数据库处于已知历史 revision（{current_revision}），链头为 {expected_marker}；请运行 `make upgrade-db`"
                 else:
                     schema_state = "uninitialized"
                     error = "数据库尚未初始化；请运行 `make setup-db`"

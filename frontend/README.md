@@ -28,7 +28,7 @@ make dev
 | `/workspace`                 | 账户级多项目工作区                                     |
 | `/projects/[project_slug]/*` | 项目会话、资产、Memory、Connections、Automation 和设置 |
 | `/admin/*`                   | system admin 平台治理                                  |
-| `/[lang]/docs/*`、`/blog/*`  | 静态文档与博客                                         |
+| `/[lang]/docs/*`             | 静态产品文档                                           |
 
 ## 目录
 
@@ -38,7 +38,7 @@ frontend/
 │   ├── app/          # App Router 页面和 layout
 │   ├── build/        # production/static 构建边界
 │   ├── components/   # 项目、Workspace、资产、Admin 和 UI 组件
-│   ├── content/      # 产品文档和博客
+│   ├── content/      # 产品文档
 │   ├── core/         # API、Auth、Project、Thread、Stream 和 Asset 领域逻辑
 │   ├── hooks/        # 可复用 React hooks
 │   ├── lib/          # 通用工具

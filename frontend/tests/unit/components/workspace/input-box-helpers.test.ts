@@ -1,14 +1,47 @@
 import { expect, test } from "@rstest/core";
 
 import {
+  canRestoreComposerInput,
   canPolishInput,
   completeLatestCheckpointContinuation,
   createLatestCheckpointContinuationState,
   getInputSubmitAction,
   markLatestCheckpointContinuation,
   resetLatestCheckpointContinuation,
+  shouldSubmitExactBuiltinSlashCommand,
   shouldContinueFromLatestCheckpoint,
 } from "@/components/workspace/input-box-helpers";
+
+test("restores a failed input only into an empty composer", () => {
+  expect(
+    canRestoreComposerInput({
+      text: "",
+      hasSelectedSkill: false,
+      attachmentCount: 0,
+    }),
+  ).toBe(true);
+  expect(
+    canRestoreComposerInput({
+      text: "new draft",
+      hasSelectedSkill: false,
+      attachmentCount: 0,
+    }),
+  ).toBe(false);
+  expect(
+    canRestoreComposerInput({
+      text: "",
+      hasSelectedSkill: true,
+      attachmentCount: 0,
+    }),
+  ).toBe(false);
+  expect(
+    canRestoreComposerInput({
+      text: "",
+      hasSelectedSkill: false,
+      attachmentCount: 1,
+    }),
+  ).toBe(false);
+});
 
 test("routes Dream strictly as a builtin command", () => {
   expect(
@@ -81,6 +114,27 @@ test("routes Dream history and restore commands without sending chat text", () =
   });
   expect(canPolishInput("/dream-log 3")).toBe(false);
   expect(canPolishInput("/dream-restore 3")).toBe(false);
+});
+
+test("submits an exact builtin slash command instead of accepting it again", () => {
+  const builtin = {
+    name: "dream-log",
+    description: "View Dream history",
+    kind: "builtin" as const,
+  };
+  const skill = { ...builtin, kind: "skill" as const };
+
+  expect(shouldSubmitExactBuiltinSlashCommand("/dream-log", builtin)).toBe(
+    true,
+  );
+  expect(shouldSubmitExactBuiltinSlashCommand(" /DREAM-LOG ", builtin)).toBe(
+    true,
+  );
+  expect(shouldSubmitExactBuiltinSlashCommand("/dream-l", builtin)).toBe(false);
+  expect(shouldSubmitExactBuiltinSlashCommand("/dream-log", skill)).toBe(false);
+  expect(shouldSubmitExactBuiltinSlashCommand("/dream-log", undefined)).toBe(
+    false,
+  );
 });
 
 test("keeps latest-checkpoint continuation until one send succeeds", () => {

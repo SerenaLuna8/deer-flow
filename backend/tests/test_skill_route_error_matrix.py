@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Callable
+from io import BytesIO
 
 import httpx
 import pytest
 from fastapi import FastAPI
+from starlette.datastructures import UploadFile
 
 from app.gateway.routers import project_assets
 from app.projects.capabilities import capabilities_for
@@ -14,9 +16,12 @@ from app.projects.models import ProjectRole
 from app.shared_assets import (
     AssetConflict,
     AssetForbidden,
+    AssetInUse,
     AssetNotFound,
     AssetValidationFailed,
     SharedAssetError,
+    SkillArchiveLimitExceeded,
+    SkillRuntimeNameConflict,
 )
 
 _PROJECT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -77,12 +82,25 @@ async def _get(application: FastAPI, asset_id: str) -> httpx.Response:
     [
         (AssetForbidden, 403, "asset_forbidden", "Asset capability required"),
         (AssetNotFound, 404, "asset_not_found", "Asset not found"),
+        (AssetInUse, 409, "ASSET_IN_USE", "Asset is still referenced"),
         (AssetConflict, 409, "asset_conflict", "Asset state conflict"),
+        (
+            SkillRuntimeNameConflict,
+            409,
+            "SKILL_RUNTIME_NAME_CONFLICT",
+            "A runtime-visible Skill already uses this name",
+        ),
         (
             AssetValidationFailed,
             422,
             "asset_validation_failed",
             "Asset validation failed",
+        ),
+        (
+            SkillArchiveLimitExceeded,
+            413,
+            "SKILL_ARCHIVE_LIMIT_EXCEEDED",
+            "Skill archive exceeds the allowed size or member limit",
         ),
     ],
 )
@@ -120,3 +138,19 @@ async def test_project_skill_route_maps_request_validation_to_asset_contract() -
     assert isinstance(detail["request_id"], str)
     assert detail["request_id"]
     assert service.calls == []
+
+
+@pytest.mark.asyncio
+async def test_archive_stream_limit_uses_dedicated_413_domain_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(project_assets, "MAX_SKILL_ARCHIVE_UPLOAD_BYTES", 3)
+    upload = UploadFile(BytesIO(b"four"), filename="example.zip")
+
+    with pytest.raises(SkillArchiveLimitExceeded):
+        await project_assets._read_skill_archive_upload(  # noqa: SLF001 - route boundary contract
+            upload,
+            _REQUEST_ID,
+        )
+
+    assert upload.file.closed

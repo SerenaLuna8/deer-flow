@@ -81,6 +81,74 @@ describe("HumanInputCard", () => {
     expect(html).not.toContain("<form");
   });
 
+  it("renders only the human-readable summary for an answered form", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Provide deployment details",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          {
+            name: "environment",
+            label: "Environment",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      answeredResponse: {
+        version: 1,
+        kind: "human_input_response",
+        source: "ask_clarification",
+        request_id: "clarification:call-form",
+        response_kind: "text",
+        value: "Environment: staging",
+        form_values: { environment: "staging" },
+      },
+    });
+
+    expect(html).toContain("Answered: Environment: staging");
+    expect(html).not.toContain("[values:");
+    expect(html).not.toContain("&quot;environment&quot;");
+    expect(html).not.toContain("Submit answer");
+  });
+
+  it("does not expose inline values from a legacy answered form", () => {
+    const html = renderCard({
+      request: {
+        ...request,
+        version: 2,
+        request_id: "clarification:call-form",
+        question: "Provide deployment details",
+        input_mode: "form",
+        options: undefined,
+        fields: [
+          {
+            name: "environment",
+            label: "Environment",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      answeredResponse: {
+        version: 1,
+        kind: "human_input_response",
+        source: "ask_clarification",
+        request_id: "clarification:call-form",
+        response_kind: "text",
+        value: 'Environment: staging [values: {"environment":"staging"}]',
+      },
+    });
+
+    expect(html).toContain("Answered: Environment: staging");
+    expect(html).not.toContain("[values:");
+    expect(html).not.toContain("&quot;environment&quot;");
+  });
+
   it("renders read-only state when no submit handler is available", () => {
     const html = renderCard({ onSubmit: undefined });
 

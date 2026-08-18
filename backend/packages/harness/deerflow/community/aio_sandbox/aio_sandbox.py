@@ -343,10 +343,20 @@ class AioSandbox(Sandbox):
                     command=command,
                     env={PRIVATE_GUEST_REQUEST_ENV: encoded},
                     hard_timeout=self._DEFAULT_HARD_TIMEOUT,
+                    # The AIO API otherwise truncates stdout/stderr to 50,000
+                    # characters.  A single bounded 1 MiB private read expands
+                    # beyond that after JSON/base64 encoding.  The fixed guest
+                    # protocol and ``decode_guest_response`` retain the host-side
+                    # 16 MiB response bound, so transport truncation must be off.
+                    max_output_length=0,
                 )
             except Exception as exc:
                 raise OSError("AIO private file helper failed") from exc
         data = result.data if result else None
+        status = getattr(data, "status", None)
+        exit_code = getattr(data, "exit_code", None)
+        if status != "completed" or type(exit_code) is not int or exit_code != 0:
+            raise OSError("AIO private file helper did not complete successfully")
         stdout = (data.stdout or "") if data else ""
         stderr = (data.stderr or "") if data else ""
         if stderr and not stdout:

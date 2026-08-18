@@ -19,7 +19,6 @@ import {
   assetListKindSchema,
   assetMutationResponseSchema,
   configuredMcpResponseSchema,
-  createAssetInputSchema,
   createAgentInputSchema,
   createConfiguredMcpInputSchema,
   createCredentialInputSchema,
@@ -72,7 +71,6 @@ import {
   type AssetListKind,
   type AssetMutationResponse,
   type ConfiguredMcpResponse,
-  type CreateAssetInput,
   type CreateAgentInput,
   type CreateConfiguredMcpInput,
   type CreateCredentialInput,
@@ -118,10 +116,13 @@ const serverErrorCodeSchema = z.enum([
   "asset_not_found",
   "asset_forbidden",
   "asset_conflict",
+  "ASSET_IN_USE",
   "asset_validation_failed",
   "asset_storage_quota_exceeded",
   "asset_storage_unavailable",
+  "SKILL_ARCHIVE_LIMIT_EXCEEDED",
   "SKILL_PUBLISH_BASE_STALE",
+  "SKILL_RUNTIME_NAME_CONFLICT",
 ]);
 
 const errorEnvelopeSchema = z
@@ -140,6 +141,7 @@ const SAFE_SERVER_ERRORS = {
   asset_not_found: ["ASSET_NOT_FOUND", "Asset not found"],
   asset_forbidden: ["ASSET_FORBIDDEN", "Asset capability required"],
   asset_conflict: ["ASSET_CONFLICT", "Asset state conflict"],
+  ASSET_IN_USE: ["ASSET_IN_USE", "Asset is still referenced"],
   asset_validation_failed: [
     "ASSET_VALIDATION_FAILED",
     "Asset validation failed",
@@ -152,9 +154,17 @@ const SAFE_SERVER_ERRORS = {
     "ASSET_STORAGE_UNAVAILABLE",
     "Asset storage unavailable",
   ],
+  SKILL_ARCHIVE_LIMIT_EXCEEDED: [
+    "ASSET_UPLOAD_TOO_LARGE",
+    "Skill archive exceeds the allowed size or member limit",
+  ],
   SKILL_PUBLISH_BASE_STALE: [
     "SKILL_PUBLISH_BASE_STALE",
     "The version being published was not based on the live published version",
+  ],
+  SKILL_RUNTIME_NAME_CONFLICT: [
+    "SKILL_RUNTIME_NAME_CONFLICT",
+    "Skill runtime name conflict",
   ],
 } as const;
 
@@ -162,10 +172,12 @@ export const SHARED_ASSET_ERROR_CODES = [
   "ASSET_NOT_FOUND",
   "ASSET_FORBIDDEN",
   "ASSET_CONFLICT",
+  "ASSET_IN_USE",
   "ASSET_VALIDATION_FAILED",
   "ASSET_STORAGE_QUOTA_EXCEEDED",
   "ASSET_STORAGE_UNAVAILABLE",
   "SKILL_PUBLISH_BASE_STALE",
+  "SKILL_RUNTIME_NAME_CONFLICT",
   "ASSET_UPLOAD_TOO_LARGE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
@@ -417,30 +429,6 @@ export async function listSystemAssetCatalog(
 ): Promise<AdminAssetList> {
   const response = await request(systemCatalogUrl(kind), { signal });
   return parseResponse(response, adminAssetListSchema);
-}
-
-async function createAsset(
-  url: string,
-  input: CreateAssetInput,
-  signal?: AbortSignal,
-): Promise<AssetMutationResponse> {
-  const body = parseInput(createAssetInputSchema, input);
-  const response = await request(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  return parseResponse(response, assetMutationResponseSchema);
-}
-
-export async function createProjectAsset(
-  projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
-  input: CreateAssetInput,
-  signal?: AbortSignal,
-): Promise<AssetMutationResponse> {
-  return await createAsset(projectAssetUrl(projectId, kind), input, signal);
 }
 
 export async function createProjectAgent(
@@ -724,19 +712,6 @@ export async function importProjectSkillArchive(
     );
   }
   return parseResponse(response, projectSkillImportResponseSchema);
-}
-
-export async function createAdminProjectAsset(
-  projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
-  input: CreateAssetInput,
-  signal?: AbortSignal,
-): Promise<AssetMutationResponse> {
-  return await createAsset(
-    adminProjectAssetUrl(projectId, kind),
-    input,
-    signal,
-  );
 }
 
 export async function createAdminProjectAgent(

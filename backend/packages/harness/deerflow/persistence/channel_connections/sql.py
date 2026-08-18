@@ -7,7 +7,7 @@ import hashlib
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -43,6 +43,7 @@ ExternalIdentityCandidateFactory = Callable[
     [str, uuid.UUID, str, str],
     tuple[tuple[str, str], ...],
 ]
+TransactionGuard = Callable[[AsyncSession], Awaitable[None]]
 
 
 class ChannelCredentialCipher:
@@ -208,6 +209,7 @@ class ChannelConnectionRepository:
         metadata: dict[str, Any] | None = None,
         status: str = "connected",
         channel_instance_id: uuid.UUID | str | None = None,
+        transaction_guard: TransactionGuard | None = None,
     ) -> dict[str, Any]:
         project_id, owner_user_id = self._coordinates(scope)
         instance_id = self._channel_instance_uuid(channel_instance_id)
@@ -259,6 +261,8 @@ class ChannelConnectionRepository:
             last_error: IntegrityError | None = None
             for _ in range(_UPSERT_MAX_ATTEMPTS):
                 try:
+                    if transaction_guard is not None:
+                        await transaction_guard(session)
                     await lock_channel_identities(
                         session,
                         ((provider, external_account_id_value, workspace_id_value),),
@@ -499,6 +503,7 @@ class ChannelConnectionRepository:
         requested_scopes: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
         channel_instance_id: uuid.UUID | str | None = None,
+        transaction_guard: TransactionGuard | None = None,
     ) -> bool:
         """Atomically enforce the per-private-scope/provider pending cap."""
         project_id, owner_user_id = self._coordinates(scope)
@@ -506,6 +511,8 @@ class ChannelConnectionRepository:
 
         current_time = now or datetime.now(UTC)
         async with self.session_factory() as session:
+            if transaction_guard is not None:
+                await transaction_guard(session)
             await self._serialize_oauth_scope(
                 session,
                 project_id,

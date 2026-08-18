@@ -90,7 +90,6 @@ export const enUS: Translations = {
   // Home
   home: {
     docs: "Docs",
-    blog: "Blog",
   },
 
   // Welcome
@@ -352,7 +351,15 @@ export const enUS: Translations = {
         reserved: "Reserved",
         limit: "Limit",
         tightenTitle: "Tighten project limits",
-        updateError: "Limits were not updated. Refresh and retry.",
+        updateError: "Limits were not updated. Check the values and retry.",
+        updateConflict:
+          "Another administrator updated these limits. Refresh before saving again.",
+        updateUnavailable:
+          "The quota service is temporarily unavailable. Try again later.",
+        platformLimitRule:
+          "Project limits must be equal to or stricter than the platform limits. Check the values.",
+        platformLimitExceeded: (dimension, limit) =>
+          `${dimension} cannot exceed the platform limit of ${limit}. Project limits must be equal to or stricter than platform limits.`,
         saving: "Saving…",
         save: "Save limits",
         dimensions: {
@@ -1041,11 +1048,8 @@ export const enUS: Translations = {
       delete: "Delete",
       createCredential: "Create Credential",
       createProjectCredential: "Create project Credential",
-      createProjectAsset: "Create project asset",
       retry: "Retry",
       retrying: "Retrying…",
-      create: "Create",
-      creating: "Creating…",
       createVersion: "Create version",
       creatingVersion: "Creating…",
       reload: "Reload",
@@ -1293,11 +1297,6 @@ export const enUS: Translations = {
         "Remote system MCP Credential slots support headers, query parameters, or oauth only and cannot otherwise be bound or used by an Agent.",
     },
     dialogs: {
-      createAssetTitle: (kind) => `Create ${kind}`,
-      skillCreationDescription:
-        "Creates a draft SKILL.md from the starter template. The Skill starts disabled.",
-      assetCreationDescription: (scope) =>
-        `Create the ${scope === "system" ? "system" : "project"} asset first, then create and publish a version.`,
       addMcpTitle: "Add MCP",
       addMcpDescription:
         "Enter connection and authentication details. Secret values stay encrypted in Project Credentials.",
@@ -1417,6 +1416,8 @@ export const enUS: Translations = {
       secretDescription:
         "Secret values are used only for this encrypted write and are never returned after submission.",
       credentialSlug: "Credential slug",
+      credentialSlugHelp:
+        "Use 1–63 lowercase letters, numbers, dots, underscores, or hyphens; start and end with a letter or number.",
       credentialFields: "Credential fields",
       credentialFieldsHelp:
         "Add environment, header, query, or OAuth fields. Each secret value is written once.",
@@ -1433,6 +1434,8 @@ export const enUS: Translations = {
       writing: "Writing…",
       encryptWrite: "Encrypt and save",
       validation: {
+        invalidCredentialName:
+          "Use 1–63 lowercase letters, numbers, dots, underscores, or hyphens; start and end with a letter or number.",
         emptyFields: "Add at least one Credential field.",
         unsupportedGroup: "Select a supported Credential field group.",
         emptyField: "Enter a field name.",
@@ -1720,6 +1723,14 @@ export const enUS: Translations = {
           "The model returned an invalid result. Retry this operation.",
         network:
           "Could not reach the Agent design service. Check your connection and retry.",
+        slugConflict:
+          "An Agent in this project already uses this name. Change the Agent name in the blueprint and retry.",
+        unresolvedConflict:
+          "The blueprint still has unresolved conflicts. Continue the conversation and have the Agent regenerate it before creating the draft.",
+        sessionLimitExceeded:
+          "You have reached the unfinished Agent design limit. Resume or cancel an existing design before starting another.",
+        secretDetected:
+          "The input appears to contain a secret or other sensitive value. Remove it and retry.",
         commitUncertain:
           "The creation result could not be confirmed. Do not create a duplicate. Check the Agent list first, then retry only if it is absent.",
         stale:
@@ -1758,14 +1769,26 @@ export const enUS: Translations = {
         result: "Generated result",
         title: "Agent blueprint",
         description:
-          "Review the four generated settings. You can edit them before creating the Agent.",
+          "Review the generated settings and Agent name before creating the Agent.",
         runtime: "Runtime configuration",
         noDescription: "No Agent description has been generated.",
+        nameLabel: "Agent name",
+        nameHint:
+          "The created Agent uses this value for both its name and slug.",
+        savedAs: (value) => `Normalized as: ${value}`,
         model: "Model",
         capabilities: "Capabilities and dependencies",
         dependencySummary: (toolGroups, skills, mcps) =>
           `${toolGroups} tool groups · ${skills} Skills · ${mcps} MCPs`,
         checkingMcp: "Checking MCP dependencies…",
+        modelUnavailable: "Agent model unavailable",
+        modelRecovery:
+          "Continue the conversation and ask the Agent to use a currently available model before creating it.",
+        assumptionsTitle: "Design assumptions",
+        conflictsTitle: "Conflicts to resolve",
+        conflictDocuments: "Related documents",
+        blockingConflictHint:
+          "Continue the conversation so the Agent regenerates the blueprint. The draft cannot be created until all red conflicts disappear.",
         createHint:
           "Creates an inactive Agent draft. An administrator must publish it before activation.",
         creating: "Creating…",
@@ -1995,11 +2018,10 @@ export const enUS: Translations = {
       createProjectAgent: "Create project Agent",
       contactEditor: "Contact project editor",
       alternateTitle: "Choose another Agent",
-      alternateDescription:
-        "The default Agent is unavailable. Choose another available Agent.",
+      alternateDescription: "Choose another available Agent for a new chat.",
       alternateEmptyTitle: "No other Agent available",
       alternateEmptyDescription:
-        "Repair the default Agent or configure another Agent.",
+        "No other Agent is currently available for a new chat.",
       dependencyLoadFailed: "Agent dependency status could not be loaded.",
       createChatFailed: "Could not create the Agent chat.",
       enableFailed: "Could not enable the system Agent.",
@@ -2335,6 +2357,137 @@ export const enUS: Translations = {
     gatewayUnavailableRetrying: "Retrying in the background…",
   },
 
+  projectWorkspace: {
+    title: "Workspace",
+    account: "Account",
+    platformAdministration: "Platform administration",
+    systemSettings: "System settings",
+    privacyCenter: "Privacy center",
+    logout: "Log out",
+    searchProjects: "Search projects",
+    searchPlaceholder: "Search by name or project slug",
+    filterProjects: "Filter projects",
+    allProjects: "All projects",
+    pinnedOnly: "Pinned only",
+    projectCount: (count) => `${count} ${count === 1 ? "project" : "projects"}`,
+    createProject: "Create project",
+    projectList: "Project list",
+    projectLoadFailed: "Projects could not be loaded",
+    loadingProjects: "Loading projects",
+    retry: "Retry",
+    card: {
+      edit: "Edit project",
+      pin: "Pin project",
+      unpin: "Unpin project",
+      noDescription: "No project description",
+      open: "Open project",
+    },
+    empty: {
+      noMatchesTitle: "No matching projects",
+      firstProjectTitle: "Create your first project",
+      noMatchesDescription:
+        "Try another keyword, or clear the filters to view all projects.",
+      firstProjectDescription:
+        "Projects organize members and shared Agents, Skills, and MCPs.",
+      clearFilters: "Clear filters",
+    },
+    createDialog: {
+      title: "Create project",
+      description:
+        "You will become the project Admin and can then invite members and configure shared assets.",
+      projectName: "Project name",
+      projectSlug: "Project slug",
+      descriptionLabel: "Description",
+      slugHelp:
+        "Use 3–63 lowercase letters, numbers, or hyphens. A hyphen cannot appear first or last or be repeated.",
+      slugRequired: "Enter a project slug.",
+      slugTooShort: "The project slug must have at least 3 characters.",
+      slugTooLong: "The project slug cannot exceed 63 characters.",
+      slugInvalid:
+        "The project slug can contain only lowercase letters, numbers, and single hyphens, and cannot start or end with a hyphen.",
+      cancel: "Cancel",
+      creating: "Creating…",
+      create: "Create project",
+    },
+    editDialog: {
+      title: "Edit project",
+      slugImmutable: "The project slug cannot be changed.",
+      projectName: "Project name",
+      descriptionLabel: "Description",
+      saving: "Saving…",
+      save: "Save changes",
+    },
+    recovery: {
+      title: "Recoverable projects",
+      windowEnd: "recovery window end",
+      recoverableUntil: (deadline) => `Recoverable until ${deadline}`,
+      recover: "Recover project",
+      confirmTitle: "Recover this project?",
+      confirmDescription: (projectName) =>
+        `Member access and frozen private work in “${projectName}” will be restored. Automations remain paused after recovery.`,
+      cancel: "Cancel",
+      restoring: "Restoring…",
+      confirm: "Recover",
+      empty: "No projects are currently recoverable.",
+    },
+    notifications: {
+      trigger: "Notifications",
+      unreadTrigger: (count) =>
+        `Notifications, ${count} unread ${count === 1 ? "item" : "items"}`,
+      title: "Notifications",
+      description: "Review system messages and respond to project invitations.",
+      loading: "Loading notifications…",
+      empty: "No notifications",
+      retry: "Retry",
+      loadingMore: "Loading…",
+      loadMore: "Load more",
+      readSyncPending: "Some notification read states have not synced yet.",
+      operationFailed: "The notification action failed. Try again later.",
+      invitationTitle: "Project invitation",
+      invitedBy: (actor, projectName) =>
+        `${actor} invited you to join ${projectName}`,
+      role: (role) => `Role: ${role}`,
+      accepting: "Joining…",
+      accept: "Join project",
+      joined: "Joined project",
+      statuses: {
+        pending: "Pending",
+        redeemed: "Joined",
+        revoked: "Revoked",
+        expired: "Expired",
+      },
+      roles: {
+        editor: "Editor",
+        runner: "Runner",
+        viewer: "Viewer",
+      },
+    },
+    errors: {
+      slugConflict: "That project slug already exists. Choose another one.",
+      unavailable:
+        "The project is unavailable or your membership has expired. Return to the workspace.",
+      lastAdmin:
+        "The last Admin cannot be removed or downgraded. Assign another Admin first.",
+      memberQuotaExceeded:
+        "This project has reached its member limit. Ask a project administrator to increase the limit, then reopen the invitation link.",
+      membershipVersionConflict:
+        "Member information changed. Refresh and try again.",
+      quotaStateConflict:
+        "The member quota state is inconsistent. Refresh and try again; contact an administrator if the problem continues.",
+      invitationConflict:
+        "This invitation already exists or was just handled. Refresh and try again.",
+      invitationInvalid:
+        "This invitation is expired, revoked, or does not apply to this account.",
+      deletionStateConflict:
+        "The project state changed. Refresh the workspace and try again.",
+      validationFailed: "Check the project information and try again.",
+      authRequired: "Your sign-in has expired. Sign in again.",
+      serviceUnavailable:
+        "The project service is temporarily unavailable. Try again later.",
+      requestFailed: "The project request failed. Try again later.",
+    },
+  },
+
   // Conversation
   conversation: {
     noMessages: "No messages yet",
@@ -2344,14 +2497,28 @@ export const enUS: Translations = {
     runFailedTitle: "Run did not finish",
     runFailedDescription:
       "The agent could not produce a response. Check the selected model, asset dependencies, and credentials, then edit or send the message again.",
+    runAdmissionNotConfirmedDescription:
+      "The Run did not start because the conversation may already be running or its state changed. Your draft was preserved; try again shortly.",
+    restoreFailedInput: "Restore to composer",
+    restoreFailedInputBlocked:
+      "The composer already has unsent content or attachments. Clear it before restoring this message.",
     modelOutputLimitTitle: "Model output limit reached",
     modelOutputLimitDescription:
       "The model reached its per-request output limit, so this response is incomplete.",
     modelOutputLimitRetry: "Retry without deep thinking",
     modelOutputLimitRetrying: "Retrying…",
+    tokenBudgetReachedTitle: "Run token budget reached",
+    tokenBudgetReachedDescription:
+      "This run stopped early, so the response may be incomplete.",
     outputDeliveryIncompleteTitle: "Output file was not delivered",
     outputDeliveryIncompleteDescription:
       "A required output file was created but was not published to this conversation. Resending may repeat an already completed command, so review the run first.",
+    currentUploadUnavailableTitle: "Image attachment could not be read",
+    currentUploadUnavailableDescription:
+      "This Run could not securely read or validate the current image attachment. Restore the original input and retry; if it still fails, remove and paste the image again.",
+    agentSuspendedTitle: "Agent suspended",
+    agentSuspendedDescription:
+      "The project Agent bound to this chat is suspended, so new messages cannot be sent. Ask a project administrator to reactivate it or start a new chat with another Agent.",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
       "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",
@@ -2459,6 +2626,7 @@ export const enUS: Translations = {
     writeTodos: "Update to-do list",
     rememberMemory: "Save to memory",
     remembered: "Remembered:",
+    memoryDisabledNotSaved: "Memory is disabled; not saved",
     skillInstallTooltip: "Install skill and make it available to ActWeave",
   },
 

@@ -11,7 +11,14 @@ from sqlalchemy.orm import aliased
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
-from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
+from app.shared_assets.errors import (
+    AssetConflict,
+    AssetForbidden,
+    AssetInUse,
+    AssetNotFound,
+    AssetValidationFailed,
+    SkillRuntimeNameConflict,
+)
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -138,6 +145,37 @@ class SkillRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
+    async def lock_project_delete_scope(self, context: ProjectContext) -> None:
+        """Serialize Skill deletion with every Builder mutation in a project.
+
+        Builder writes take at least a Project-row SHARE lock before locking an
+        Operation, Session, or target Skill.  Deletion takes this stronger gate
+        first so its later Skill -> Session -> Operation cleanup cannot overlap
+        the Builder's Operation -> Skill/Session paths.
+        """
+
+        self._require_project_actor(context)
+        statement = (
+            select(ProjectRow.id)
+            .join(
+                ProjectMembershipRow,
+                ProjectMembershipRow.project_id == ProjectRow.id,
+            )
+            .where(
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+                ProjectMembershipRow.id == context.membership_id,
+                ProjectMembershipRow.project_id == context.project_id,
+                ProjectMembershipRow.user_id == str(context.user_id),
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.version == context.membership_version,
+            )
+            .with_for_update(of=ProjectRow)
+        )
+        if (await self.session.execute(statement)).scalar_one_or_none() is None:
+            raise AssetNotFound(context.request_id)
+
     async def _lock_override_project(self, context: SystemAssetGovernanceContext) -> None:
         self._require_system_actor(context)
         if context.project_id is None:
@@ -157,43 +195,6 @@ class SkillRepository:
     async def create_project_asset(self, context: ProjectContext, command: SkillCreateCommand) -> SkillRow:
         self._require_project_actor(context)
         await self._lock_project_context(context)
-        row = SkillRow(
-            scope="project",
-            project_id=context.project_id,
-            slug=command.slug,
-            display_name=command.display_name,
-            status="suspended",
-            created_by_user_id=str(context.user_id),
-        )
-        self.session.add(row)
-        await self.session.flush()
-        return row
-
-    async def create_system_asset(
-        self,
-        context: SystemAssetGovernanceContext,
-        command: SkillCreateCommand,
-    ) -> SkillRow:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetForbidden(context.request_id)
-        row = SkillRow(
-            scope="system",
-            project_id=None,
-            slug=command.slug,
-            display_name=command.display_name,
-            created_by_user_id=str(context.user_id),
-        )
-        self.session.add(row)
-        await self.session.flush()
-        return row
-
-    async def create_override_asset(
-        self,
-        context: SystemAssetGovernanceContext,
-        command: SkillCreateCommand,
-    ) -> SkillRow:
-        await self._lock_override_project(context)
         row = SkillRow(
             scope="project",
             project_id=context.project_id,
@@ -240,7 +241,7 @@ class SkillRepository:
             )
         )
         if agent_reference_exists or run_reference_exists:
-            raise AssetConflict(context.request_id)
+            raise AssetInUse(context.request_id)
         size_rows = (
             await self.session.execute(
                 select(
@@ -259,6 +260,36 @@ class SkillRepository:
             )
             for version_id in version_ids
         )
+
+    async def ensure_project_skill_runtime_name_available(
+        self,
+        context: ProjectContext | SystemAssetGovernanceContext,
+        asset: SkillRow,
+    ) -> None:
+        """Reject activation when an enabled System Skill owns the same name.
+
+        Project Skill activation already holds the project row lock before this
+        check. System binding enable takes the same lock before its inverse
+        check, which serializes the two state transitions.
+        """
+
+        project_id = getattr(context, "project_id", None)
+        if not isinstance(project_id, uuid.UUID) or asset.scope != "project" or asset.project_id != project_id:
+            raise AssetValidationFailed(_request_id(context))
+        conflict = await self.session.scalar(
+            select(
+                exists().where(
+                    ProjectSystemSkillBindingRow.project_id == project_id,
+                    ProjectSystemSkillBindingRow.enabled.is_(True),
+                    SkillRow.id == ProjectSystemSkillBindingRow.system_skill_id,
+                    SkillRow.scope == "system",
+                    SkillRow.project_id.is_(None),
+                    func.lower(SkillRow.slug) == asset.slug.casefold(),
+                )
+            )
+        )
+        if conflict:
+            raise SkillRuntimeNameConflict(_request_id(context))
 
     async def delete_project_asset(
         self,

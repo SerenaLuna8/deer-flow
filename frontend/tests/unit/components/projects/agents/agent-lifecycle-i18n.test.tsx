@@ -81,6 +81,9 @@ describe("Agent lifecycle translations", () => {
             identity: "# Identity",
             user_context: "# User",
           }}
+          agentName="reviewer"
+          agentSlug="reviewer"
+          agentSlugError={null}
           models={[]}
           canAuthor={false}
           editing={false}
@@ -94,6 +97,7 @@ describe("Agent lifecycle translations", () => {
           onSelectedFieldChange={() => undefined}
           onDisplayModeChange={() => undefined}
           onBlueprintChange={() => undefined}
+          onAgentNameChange={() => undefined}
           onEdit={() => undefined}
           onSave={() => undefined}
           onDiscard={() => undefined}
@@ -126,6 +130,8 @@ describe("Agent lifecycle translations", () => {
 
     expect(html).toContain("Name your new Agent");
     expect(html).toContain("Agent blueprint");
+    expect(html).toContain("Agent name");
+    expect(html).toContain("both its name and slug");
     expect(html).toContain("Project Agents");
     expect(html).toContain("Choose an Agent");
     expect(html).toContain("Waiting for the service");

@@ -128,6 +128,7 @@ from deerflow.runtime import (
     run_agent,
 )
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
+from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.host_execution_approval import (
     HOST_EXECUTION_MAX_CHANNEL_USER_ID_LENGTH,
 )
@@ -295,6 +296,22 @@ class RunAgentPrivateExecutor:
             subagent_tokens=record.subagent_tokens,
             middleware_tokens=record.middleware_tokens,
             token_usage_by_model=record.token_usage_by_model,
+        )
+
+    @staticmethod
+    def _terminal_failure_result(
+        record: RunRecord,
+        *,
+        attempt_usage: PrivateRunUsageSnapshot,
+    ) -> AgentExecutionResult:
+        error_code = record.error if record.error in STREAM_TERMINAL_ERROR_CODES else "AGENT_EXECUTION_FAILED"
+        # ``run_agent`` publishes the durable error terminal before returning.
+        # Re-executing after that point cannot replace the closed stream and can
+        # duplicate already-persisted messages or tool side effects.
+        return AgentExecutionResult.failed(
+            error_code,
+            retryable=False,
+            attempt_usage=attempt_usage,
         )
 
     @classmethod
@@ -853,15 +870,7 @@ class RunAgentPrivateExecutor:
                         scope=execution.context.resource_scope,
                         thread_id=execution.run.thread_id,
                         terminal_status=lambda: str(record.status),
-                        terminal_error_code=lambda: (
-                            record.error
-                            if record.error
-                            in {
-                                PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
-                                PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
-                            }
-                            else None
-                        ),
+                        terminal_error_code=lambda: record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None,
                     ),
                     run_manager,
                     record,
@@ -899,24 +908,17 @@ class RunAgentPrivateExecutor:
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
                 )
-            if record.status is RunStatus.error and record.error == PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value:
-                return AgentExecutionResult.failed(
-                    PublicRunErrorCode.MODEL_OUTPUT_LIMIT.value,
-                    retryable=False,
-                    attempt_usage=attempt_usage,
-                )
-            if record.status is RunStatus.error and record.error == PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value:
-                return AgentExecutionResult.failed(
-                    PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
-                    retryable=False,
+            if record.status is RunStatus.error and record.error in STREAM_TERMINAL_ERROR_CODES:
+                return self._terminal_failure_result(
+                    record,
                     attempt_usage=attempt_usage,
                 )
             if boundary.ambiguous_side_effect:
                 raise AmbiguousExternalSideEffect(
                     attempt_usage=attempt_usage,
                 )
-            return AgentExecutionResult.failed(
-                "AGENT_EXECUTION_FAILED",
+            return self._terminal_failure_result(
+                record,
                 attempt_usage=attempt_usage,
             )
         except asyncio.CancelledError:

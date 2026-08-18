@@ -11,6 +11,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { useI18n } from "@/core/i18n/hooks";
 import type { Project } from "@/core/projects/types";
 import { cn } from "@/lib/utils";
 
@@ -27,6 +28,8 @@ export function ProjectCard({
   onEdit: () => void;
   pinPending?: boolean;
 }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace.card;
   return (
     <Card
       data-testid="project-card"
@@ -49,7 +52,7 @@ export function ProjectCard({
                 type="button"
                 variant="ghost"
                 size="icon"
-                aria-label="编辑项目"
+                aria-label={copy.edit}
                 onClick={onEdit}
               >
                 <PencilIcon size={16} />
@@ -59,7 +62,7 @@ export function ProjectCard({
               type="button"
               variant="ghost"
               size="icon"
-              aria-label={project.is_pinned ? "取消置顶" : "置顶项目"}
+              aria-label={project.is_pinned ? copy.unpin : copy.pin}
               aria-pressed={project.is_pinned}
               disabled={pinPending}
               onClick={onPin}
@@ -82,13 +85,13 @@ export function ProjectCard({
           </p>
         </div>
         <CardDescription className="mt-8 line-clamp-2 min-h-10">
-          {project.description || "暂无项目描述"}
+          {project.description || copy.noDescription}
         </CardDescription>
       </CardHeader>
       <CardFooter className="mt-auto p-6 pt-0">
         <Button asChild size="lg" className="relative h-14 w-full text-base">
           <Link href={`/projects/${encodeURIComponent(project.slug)}`}>
-            进入项目
+            {copy.open}
             <ArrowRightIcon aria-hidden className="absolute right-4 size-4" />
           </Link>
         </Button>

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ import pytest
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
+from PIL import Image
 
 from app.private_work import sandbox_files as sandbox_module
 from app.private_work.context import PrivateWorkContext
@@ -39,7 +41,7 @@ from deerflow.runtime.private_scope import PrivateResourceScope
 from deerflow.sandbox import tools as sandbox_tools
 from deerflow.sandbox.sandbox_provider import PrivateSandboxLease
 
-_PNG = b"\x89PNG\r\n\x1a\ncurrent-upload-image"
+_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP8z8Dwn4GBgYEJRIAwAB8XAgICR7MUAAAAAElFTkSuQmCC")
 
 
 class _Sandbox:
@@ -859,6 +861,52 @@ def test_invalid_current_private_image_fails_closed(
 
     with pytest.raises(RuntimeError, match="Current image upload is unavailable"):
         ViewImageMiddleware()._inject_request(request)
+
+
+def test_truncated_current_private_png_fails_before_model_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    corrupt_png = b"\x89PNG\r\n\x1a\nnot-a-decodable-png"
+    entry = _entry(content=corrupt_png)
+    authority = _Authority((entry,))
+    sandbox = _Sandbox({"/mnt/user-data/uploads/current.png": corrupt_png})
+    request, _runtime = _request(authority)
+    monkeypatch.setattr(
+        view_module,
+        "sandbox_from_runtime",
+        lambda _runtime, **_kwargs: sandbox,
+    )
+
+    with pytest.raises(RuntimeError, match="Current image upload is unavailable"):
+        ViewImageMiddleware()._inject_request(request)
+
+    assert _image_urls(request) == []
+
+
+def test_truncated_current_private_jpeg_fails_before_model_injection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    buffer = io.BytesIO()
+    Image.new("RGB", (100, 100), "white").save(buffer, format="JPEG")
+    corrupt_jpeg = buffer.getvalue()[:-50]
+    entry = _entry(
+        logical_path="uploads/current.jpg",
+        media_type="image/jpeg",
+        content=corrupt_jpeg,
+    )
+    authority = _Authority((entry,))
+    sandbox = _Sandbox({"/mnt/user-data/uploads/current.jpg": corrupt_jpeg})
+    request, _runtime = _request(authority)
+    monkeypatch.setattr(
+        view_module,
+        "sandbox_from_runtime",
+        lambda _runtime, **_kwargs: sandbox,
+    )
+
+    with pytest.raises(RuntimeError, match="Current image upload is unavailable"):
+        ViewImageMiddleware()._inject_request(request)
+
+    assert _image_urls(request) == []
 
 
 def test_current_image_count_limit_fails_closed() -> None:

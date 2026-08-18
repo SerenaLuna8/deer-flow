@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import io
 import json
 import uuid
+import zipfile
 from datetime import UTC, datetime
 
 import pytest
@@ -28,9 +30,11 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
 from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
+from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.shared_assets.skill_design_service import (
     CommitSkillDesignSession,
     CreateSkillDesignRevisionSession,
+    CreateSkillDesignSession,
     SkillDesignDraftUpdateTurn,
     SkillDesignMessageTurn,
     SkillDesignService,
@@ -38,8 +42,8 @@ from app.shared_assets.skill_design_service import (
     SubmitSkillDesignTurn,
     ValidateSkillDesignSession,
 )
+from app.shared_assets.skill_repository import SkillRepository
 from app.shared_assets.skill_service import (
-    CreateSkill,
     SkillArchiveFile,
     SkillFileChange,
     SkillService,
@@ -50,6 +54,7 @@ from deerflow.persistence.jobs.model import WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
+    SkillDesignDraftFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
     SkillRow,
@@ -219,17 +224,18 @@ async def _seed_default_model(seed: PrivateThreadSeed) -> None:
 
 
 async def _publish_template(skills: SkillService, context: ProjectContext, slug: str):
-    asset = await skills.create_project_with_template(context, CreateSkill(slug, slug))
-    history = await skills.get_version_history(context, asset.id)
-    draft = next(item for item in history if item.version_number == 1)
-    published = await skills.publish(
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
+        package.writestr(
+            "SKILL.md",
+            _skill_md(slug, _template_body()).content,
+        )
+    created = await skills.create_project_from_archive_upload(
         context,
-        asset.id,
-        draft.id,
-        expected_asset_version=asset.version,
+        archive.getvalue(),
+        filename=f"{slug}.zip",
     )
-    current = await skills.get(context, asset.id)
-    return current, published
+    return created.asset, created.version
 
 
 async def _open_revision(design: SkillDesignService, context: ProjectContext, skill_id: uuid.UUID, key: str):
@@ -279,6 +285,32 @@ async def _validate_session(design: SkillDesignService, context: ProjectContext,
             idempotency_key=key,
         ),
     )
+
+
+async def _seed_create_draft(
+    seed: PrivateThreadSeed,
+    context: ProjectContext,
+    skills: SkillService,
+    design: SkillDesignService,
+    session_id: uuid.UUID,
+    files: tuple[SkillArchiveFile, ...],
+):
+    preview = await skills.preview_archive(context, files)
+    async with seed.factory() as session, session.begin():
+        repository = SkillDesignRepository(session)
+        row = await repository.get(context, session_id, for_update=True)
+        assert row.session_kind == "create"
+        assert row.status == SkillDesignStatus.INTERVIEWING.value
+        await repository.replace_draft_files(context, row.id, files)
+        row.status = SkillDesignStatus.DRAFT_READY.value
+        row.draft_checksum = preview.checksum
+        row.progress_json = [
+            {"id": "interview", "label": "确认需求", "status": "completed"},
+            {"id": "package", "label": "生成候选文件", "status": "completed"},
+            {"id": "validate", "label": "检查 Skill", "status": "pending"},
+        ]
+        row.revision += 1
+    return await design.get(context, session_id), preview
 
 
 async def _commit_session(
@@ -409,6 +441,97 @@ async def _claim_and_begin(seed: PrivateThreadSeed, *, now: datetime):
             now=now,
         )
     return claim
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_create_session_validate_and_commit_publishes_suspended_v1(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, quota = await _environment(migrated_postgres_database_url)
+    slug = "builder-create-commit"
+    files = (
+        _skill_md(
+            slug,
+            "Use this Skill to turn a short request into a checked project summary.\n",
+        ),
+    )
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug=slug,
+                display_name="Builder Create Commit",
+                idempotency_key="builder-create-open",
+            ),
+        )
+        assert opened.session_kind == "create"
+        assert opened.status is SkillDesignStatus.INTERVIEWING
+        assert opened.created_skill_id is None
+
+        ready, preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            files,
+        )
+        assert ready.status is SkillDesignStatus.DRAFT_READY
+        assert ready.draft_checksum == preview.checksum
+
+        validated = await _validate_session(
+            design,
+            context,
+            ready,
+            "builder-create-validate",
+        )
+        assert validated.status is SkillDesignStatus.VALIDATED
+        assert validated.validation is not None
+        assert validated.validation.draft_checksum == preview.checksum
+
+        committed = await _commit_session(
+            design,
+            context,
+            validated,
+            "builder-create-commit",
+        )
+        assert committed.session.status is SkillDesignStatus.COMPLETED
+        assert committed.session.session_kind == "create"
+        assert committed.session.created_skill_id == committed.skill.id
+        assert committed.session.files == ()
+        assert committed.skill.slug == slug
+        assert committed.skill.status == "suspended"
+        assert committed.skill.current_published_version_id is not None
+        assert committed.version is None
+
+        async with seed.factory() as session:
+            design_row = await session.get(SkillDesignSessionRow, opened.id)
+            assert design_row is not None
+            assert design_row.created_skill_version_id is not None
+            asset = await session.get(SkillRow, committed.skill.id)
+            version = await session.get(
+                SkillVersionRow,
+                design_row.created_skill_version_id,
+            )
+            version_files = (await session.execute(sa.select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == design_row.created_skill_version_id))).scalars().all()
+            draft_file_count = await session.scalar(sa.select(sa.func.count()).select_from(SkillDesignDraftFileRow).where(SkillDesignDraftFileRow.session_id == opened.id))
+
+        assert asset is not None
+        assert version is not None
+        assert asset.status == "suspended"
+        assert asset.current_published_version_id == version.id
+        assert version.version_number == 1
+        assert version.workflow_status == "published"
+        assert version.supersedes_version_id is None
+        assert version.payload_checksum == preview.checksum
+        assert len(version_files) == 1
+        assert version_files[0].path == "SKILL.md"
+        assert version_files[0].content == files[0].content
+        assert draft_file_count == 0
+        assert quota.reserved == [version.id]
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.postgres
@@ -876,6 +999,131 @@ async def test_revision_delete_fails_open_sessions_and_revokes_in_flight_tools(
                 ),
             )
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_revision_delete_project_gate_prevents_builder_lock_cycle(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+        with_model=True,
+    )
+    builder_operation_locked = asyncio.Event()
+    delete_reached_project_gate = asyncio.Event()
+    release_builder = asyncio.Event()
+    retry_task: asyncio.Task | None = None
+    delete_task: asyncio.Task | None = None
+    try:
+        asset, _published = await _publish_template(
+            skills,
+            context,
+            "delete-builder-lock-order",
+        )
+        opened = await _open_revision(
+            design,
+            context,
+            asset.id,
+            "delete-builder-lock-open",
+        )
+        turn = SubmitSkillDesignTurn(
+            input=SkillDesignMessageTurn(kind="message", message="继续修订"),
+            expected_revision=opened.revision,
+            idempotency_key="delete-builder-lock-turn",
+        )
+        admitted = await design.submit_turn(
+            context,
+            opened.id,
+            turn,
+        )
+        current = await skills.get(context, asset.id)
+
+        original_get_operation = SkillDesignRepository.get_operation
+        original_delete_gate = SkillRepository.lock_project_delete_scope
+
+        async def hold_builder_operation(
+            self,
+            actor,
+            *,
+            operation_kind,
+            idempotency_key_hash,
+            for_update=False,
+        ):
+            operation = await original_get_operation(
+                self,
+                actor,
+                operation_kind=operation_kind,
+                idempotency_key_hash=idempotency_key_hash,
+                for_update=for_update,
+            )
+            if for_update and operation is not None:
+                builder_operation_locked.set()
+                await asyncio.wait_for(release_builder.wait(), timeout=5)
+            return operation
+
+        async def observe_delete_project_gate(self, actor):
+            delete_reached_project_gate.set()
+            return await original_delete_gate(self, actor)
+
+        monkeypatch.setattr(
+            SkillDesignRepository,
+            "get_operation",
+            hold_builder_operation,
+        )
+        monkeypatch.setattr(
+            SkillRepository,
+            "lock_project_delete_scope",
+            observe_delete_project_gate,
+        )
+
+        retry_task = asyncio.create_task(
+            design.submit_turn(context, opened.id, turn),
+        )
+        await asyncio.wait_for(builder_operation_locked.wait(), timeout=5)
+        delete_task = asyncio.create_task(
+            skills.delete(
+                context,
+                asset.id,
+                expected_asset_version=current.version,
+            )
+        )
+        await asyncio.wait_for(delete_reached_project_gate.wait(), timeout=5)
+        release_builder.set()
+        retry_result, delete_result = await asyncio.wait_for(
+            asyncio.gather(
+                retry_task,
+                delete_task,
+                return_exceptions=True,
+            ),
+            timeout=20,
+        )
+
+        assert not isinstance(retry_result, Exception), retry_result
+        assert retry_result.run_id == admitted.run_id
+        assert delete_result is None
+        closed = await design.get(context, opened.id)
+        assert closed.status is SkillDesignStatus.FAILED
+        assert closed.target_skill_deleted is True
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admitted.run_id,
+                    )
+                )
+            ).scalar_one()
+        assert operation.status == "failed"
+        assert operation.public_error_code == "SKILL_DESIGN_TARGET_DELETED"
+    finally:
+        release_builder.set()
+        pending = tuple(task for task in (retry_task, delete_task) if task is not None and not task.done())
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         await seed.engine.dispose()
 
 

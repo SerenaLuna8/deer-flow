@@ -18,10 +18,7 @@ export default async function ProjectAgentsPage({
   }>;
 }) {
   const { project_slug: slug } = await params;
-  await requireServerProjectCapability(slug, [
-    "shared_assets.edit",
-    "shared_assets.manage_bindings",
-  ]);
+  await requireServerProjectCapability(slug, "shared_assets.read");
   const { intent, intent_id: intentId, agent_id: agentId } = await searchParams;
   const selectedAsset = assetIdSchema.safeParse(agentId);
   return (

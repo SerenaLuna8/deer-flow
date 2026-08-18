@@ -248,6 +248,17 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
       });
     }
     if (
+      path ===
+        `${privateWorkBase}/threads/${THREAD_ID}/execution-approvals/active` &&
+      method === "GET"
+    ) {
+      return json(route, {
+        schema_version: 1,
+        server_time: TIMESTAMP,
+        approval: null,
+      });
+    }
+    if (
       path === `${privateWorkBase}/threads/${THREAD_ID}/uploads/limits` &&
       method === "GET"
     ) {
@@ -302,6 +313,25 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
         202,
       );
     }
+    if (path === memoryBase && method === "GET") {
+      return json(route, {
+        content: "",
+        version: 0,
+        updatedAt: null,
+        pendingCount: 0,
+        dreamRunning: false,
+        injectionStatus: "ok",
+      });
+    }
+    if (path === `${memoryBase}/pending` && method === "GET") {
+      return json(route, { items: [] });
+    }
+    if (path === `${memoryBase}/episodes` && method === "GET") {
+      return json(route, { items: [], nextCursor: null });
+    }
+    if (path === `${memoryBase}/versions` && method === "GET") {
+      return json(route, { items: [] });
+    }
     if (
       preparation !== null &&
       path === `${memoryBase}/dream-preparations/${preparation.jobId}/cancel` &&
@@ -349,6 +379,55 @@ async function mockProjectChatWithDreamPreparation(page: Page) {
   };
 }
 
+test("an exact Dream log command submits with one Enter press", async ({
+  page,
+}) => {
+  const preparation = await mockProjectChatWithDreamPreparation(page);
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  await composer.fill("/dream-log");
+  await expect(
+    page.getByRole("listbox", { name: "Skill suggestions" }),
+  ).toBeVisible();
+
+  await composer.press("Enter");
+
+  await expect(page).toHaveURL(/\/projects\/alpha\/memory$/u);
+  await expect(
+    page.getByRole("heading", { name: "No long-term memory yet" }),
+  ).toBeVisible();
+  expect(preparation.unexpectedRequests).toEqual([]);
+});
+
+test("Dream log remains submittable when the mouse moves focus to Submit", async ({
+  page,
+}) => {
+  const preparation = await mockProjectChatWithDreamPreparation(page);
+  await page.goto(`/projects/alpha/chats/${THREAD_ID}`);
+
+  const composer = page.getByPlaceholder(/how can i assist you today/i);
+  const suggestions = page.getByRole("listbox", {
+    name: "Skill suggestions",
+  });
+  const submit = page.getByRole("button", { name: "Submit" });
+  await composer.fill("/dream-log");
+  await expect(suggestions).toBeVisible();
+
+  const box = await submit.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  await page.mouse.down();
+  await expect(suggestions).toBeVisible();
+  await page.mouse.up();
+
+  await expect(page).toHaveURL(/\/projects\/alpha\/memory$/u);
+  await expect(
+    page.getByRole("heading", { name: "No long-term memory yet" }),
+  ).toBeVisible();
+  expect(preparation.unexpectedRequests).toEqual([]);
+});
+
 test("a durable Dream preparation recovers, cancels, and completes through the chat composer", async ({
   page,
 }) => {
@@ -359,9 +438,7 @@ test("a durable Dream preparation recovers, cancels, and completes through the c
   await expect(composer).toBeVisible();
   await expect(composer).toBeEnabled();
 
-  // Keep the trailing space so Enter submits the built-in command instead of
-  // accepting the slash-command autocomplete first.
-  await composer.fill("/dream ");
+  await composer.fill("/dream");
   await composer.press("Enter");
   const status = page.getByTestId("dream-preparation-status");
   await expect(status).toContainText("Dream preparation is queued.");
@@ -394,7 +471,7 @@ test("a durable Dream preparation recovers, cancels, and completes through the c
     "Dream preparation was cancelled.",
   );
 
-  await composer.fill("/dream ");
+  await composer.fill("/dream");
   await composer.press("Enter");
   await expect(page.getByTestId("dream-preparation-status")).toContainText(
     "Dream preparation is queued.",

@@ -33,7 +33,7 @@ import logging
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, NotRequired, override
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -54,8 +54,27 @@ logger = logging.getLogger(__name__)
 _BUDGET_WARNING_MSG = (
     "[TOKEN BUDGET WARNING] You have used {used:,} of your {budget:,} {reason} token budget ({percent:.0f}%). Wrap up your current work and produce a final answer. Avoid starting new tool calls unless absolutely necessary."
 )
-_BUDGET_EXCEEDED_MSG = "[TOKEN BUDGET EXCEEDED] The {reason} token usage ({used:,}) has exceeded the safety limit ({budget:,}). Producing final answer with results collected so far."
 OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY = "output_limit_budget_hard_stop"
+TOKEN_BUDGET_STATUS_KEY = "token_budget_status"
+
+
+class TokenBudgetStatus(TypedDict):
+    version: Literal[1]
+    status: Literal["exceeded"]
+    reason: Literal["total", "input", "output"]
+
+
+def read_token_budget_status(value: object) -> TokenBudgetStatus | None:
+    if not isinstance(value, dict) or set(value) != {"version", "status", "reason"}:
+        return None
+    reason = value.get("reason")
+    if value.get("version") != 1 or value.get("status") != "exceeded" or reason not in {"total", "input", "output"}:
+        return None
+    return {
+        "version": 1,
+        "status": "exceeded",
+        "reason": reason,
+    }
 
 
 class TokenBudgetState(AgentState):
@@ -170,36 +189,24 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:
         self.after_agent(state, runtime)
 
-    @staticmethod
-    def _append_text(content: str | list[dict | None] | None, stop_msg: str) -> str | list[dict | str]:
-        """Append a stop message to an AIMessage.content field."""
-        if content is None:
-            return stop_msg
-        if isinstance(content, str):
-            if content:
-                return f"{content}\n\n{stop_msg}"
-            return f"\n\n{stop_msg}"
-        if isinstance(content, list):
-            new_content = list(content)
-            new_content.append({"type": "text", "text": f"\n\n{stop_msg}"})
-            return new_content
-        return f"{content}\n\n{stop_msg}"
-
-    def _build_hard_stop_update(self, msg: AIMessage, stop_msg: str) -> dict[str, Any]:
+    def _build_hard_stop_update(self, msg: AIMessage, reason: str) -> dict[str, Any]:
         """Build the state update dictionary for a hard stop."""
-        updated_content = self._append_text(msg.content, stop_msg)
         kwargs = dict(msg.additional_kwargs) if msg.additional_kwargs else {}
         if "tool_calls" in kwargs:
             del kwargs["tool_calls"]
         if "function_call" in kwargs:
             del kwargs["function_call"]
-
         response_metadata = dict(getattr(msg, "response_metadata", {}) or {})
+        response_metadata[TOKEN_BUDGET_STATUS_KEY] = {
+            "version": 1,
+            "status": "exceeded",
+            "reason": reason,
+        }
 
         if response_metadata.get("finish_reason") == "tool_calls":
             response_metadata["finish_reason"] = "stop"
 
-        stopped_msg = msg.model_copy(update={"content": updated_content, "tool_calls": [], "additional_kwargs": kwargs, "response_metadata": response_metadata})
+        stopped_msg = msg.model_copy(update={"tool_calls": [], "additional_kwargs": kwargs, "response_metadata": response_metadata})
         return {"messages": [stopped_msg]}
 
     def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -269,9 +276,8 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
                 # returns (the hard stop itself does not raise). See
                 # ``consume_stop_reason``.
                 self._stop_reason[run_id] = "token_capped"
-                stop_text = _BUDGET_EXCEEDED_MSG.format(reason=trigger_reason, used=trigger_used, budget=trigger_budget)
                 return {
-                    **self._build_hard_stop_update(last_msg, stop_text),
+                    **self._build_hard_stop_update(last_msg, trigger_reason),
                     OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY: {"run_id": run_id},
                 }
 

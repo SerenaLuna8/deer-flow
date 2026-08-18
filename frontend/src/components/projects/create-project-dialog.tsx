@@ -13,11 +13,8 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  normalizeProjectSlug,
-  PROJECT_SLUG_HELP,
-  projectSlugError,
-} from "@/core/projects/slug";
+import { useI18n } from "@/core/i18n/hooks";
+import { normalizeProjectSlug, projectSlugError } from "@/core/projects/slug";
 import type { CreateProjectInput } from "@/core/projects/types";
 
 export function CreateProjectDialog({
@@ -33,11 +30,13 @@ export function CreateProjectDialog({
   pending: boolean;
   errorMessage: string | null;
 }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace.createDialog;
   const [displayName, setDisplayName] = useState("");
   const [slug, setSlug] = useState("");
   const [slugTouched, setSlugTouched] = useState(false);
   const [description, setDescription] = useState("");
-  const slugValidationError = projectSlugError(slug);
+  const slugValidationError = projectSlugError(slug, copy);
   const showSlugError = slugTouched && slugValidationError !== null;
 
   useEffect(() => {
@@ -53,17 +52,15 @@ export function CreateProjectDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>创建项目</DialogTitle>
-          <DialogDescription>
-            创建后你将成为项目 Admin，可继续邀请成员和配置共享资产。
-          </DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-4"
           onSubmit={(event) => {
             event.preventDefault();
             const normalizedSlug = normalizeProjectSlug(slug);
-            const validationError = projectSlugError(normalizedSlug);
+            const validationError = projectSlugError(normalizedSlug, copy);
             setSlug(normalizedSlug);
             if (validationError) {
               setSlugTouched(true);
@@ -78,7 +75,7 @@ export function CreateProjectDialog({
           }}
         >
           <label className="grid gap-2 text-sm">
-            项目名称
+            {copy.projectName}
             <Input
               autoFocus
               required
@@ -88,7 +85,7 @@ export function CreateProjectDialog({
             />
           </label>
           <label className="grid gap-2 text-sm">
-            项目标识
+            {copy.projectSlug}
             <Input
               maxLength={63}
               placeholder="research-lab"
@@ -110,7 +107,7 @@ export function CreateProjectDialog({
               id="project-slug-help"
               className="text-muted-foreground text-xs"
             >
-              {PROJECT_SLUG_HELP}
+              {copy.slugHelp}
             </span>
             {showSlugError && (
               <span
@@ -123,7 +120,7 @@ export function CreateProjectDialog({
             )}
           </label>
           <label className="grid gap-2 text-sm">
-            描述
+            {copy.descriptionLabel}
             <Textarea
               maxLength={500}
               value={description}
@@ -141,10 +138,10 @@ export function CreateProjectDialog({
               variant="outline"
               onClick={() => onOpenChange(false)}
             >
-              取消
+              {copy.cancel}
             </Button>
             <Button type="submit" disabled={pending}>
-              {pending ? "创建中…" : "创建项目"}
+              {pending ? copy.creating : copy.create}
             </Button>
           </DialogFooter>
         </form>

@@ -1,6 +1,9 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 
 import { isHiddenFromUIMessage } from "../messages/utils";
+import type { ReadyPromptInputFile } from "../uploads/prompt-input-files";
+
+import { textOfMessage } from "./utils";
 
 const SUMMARIZATION_MIDDLEWARE_UPDATE_KEYS = new Set([
   "SummarizationMiddleware.before_model",
@@ -140,6 +143,18 @@ export function hasAcknowledgedOptimisticHuman(
   // and moves the visible canonical user message to `<submitted-id>__user`.
   // Match only this server-owned id relationship; equal text can be a distinct
   // user turn and must never acknowledge an optimistic message.
+  return (
+    retainUnacknowledgedOptimisticHumanMessages(
+      optimisticMessages,
+      canonicalMessages,
+    ).length !== optimisticMessages.length
+  );
+}
+
+export function retainUnacknowledgedOptimisticHumanMessages(
+  optimisticMessages: Message[],
+  canonicalMessages: Message[],
+): Message[] {
   const canonicalHumanIds = new Set(
     canonicalMessages.flatMap((message) => {
       const id = message.id;
@@ -151,15 +166,97 @@ export function hasAcknowledgedOptimisticHuman(
         : [];
     }),
   );
-  return optimisticMessages.some((message) => {
+  return optimisticMessages.filter((message) => {
     const id = message.id;
-    return (
+    return !(
       message.type === "human" &&
       typeof id === "string" &&
       id.length > 0 &&
       (canonicalHumanIds.has(id) || canonicalHumanIds.has(`${id}__user`))
     );
   });
+}
+
+export function retainOptimisticHumanMessagesAfterFailure(
+  optimisticMessages: Message[],
+  runId?: string,
+): Message[] {
+  return optimisticMessages
+    .filter((message) => message.type === "human")
+    .map((message) =>
+      runId && !messageRunId(message)
+        ? ({ ...message, run_id: runId } as Message)
+        : message,
+    );
+}
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
+
+function restorableReadyFiles(message: Message): ReadyPromptInputFile[] {
+  const value = message.additional_kwargs?.files;
+  if (!Array.isArray(value)) return [];
+
+  const seenIds = new Set<string>();
+  return value.flatMap((candidate) => {
+    if (!candidate || typeof candidate !== "object") return [];
+    const fileId = Reflect.get(candidate, "file_id");
+    const filename = Reflect.get(candidate, "filename");
+    const size = Reflect.get(candidate, "size");
+    const path = Reflect.get(candidate, "path");
+    if (
+      typeof fileId !== "string" ||
+      !UUID_PATTERN.test(fileId) ||
+      seenIds.has(fileId) ||
+      typeof filename !== "string" ||
+      filename.length === 0 ||
+      typeof size !== "number" ||
+      !Number.isSafeInteger(size) ||
+      size < 0 ||
+      (path !== undefined && typeof path !== "string")
+    ) {
+      return [];
+    }
+    seenIds.add(fileId);
+    return [
+      {
+        file_id: fileId,
+        filename,
+        size,
+        ...(typeof path === "string" && path.length > 0 ? { path } : {}),
+        status: "uploaded" as const,
+      },
+    ];
+  });
+}
+
+export type FailedRunComposerInput = {
+  runId: string;
+  messageId: string;
+  text: string;
+  files: ReadyPromptInputFile[];
+};
+
+export function resolveFailedRunComposerInput(
+  messages: readonly Message[],
+  runId: string,
+): FailedRunComposerInput | null {
+  if (!runId) return null;
+  const message = [...messages]
+    .reverse()
+    .find(
+      (candidate) =>
+        candidate.type === "human" &&
+        !isHiddenFromUIMessage(candidate) &&
+        messageRunId(candidate) === runId,
+    );
+  if (!message || typeof message.id !== "string" || message.id.length === 0) {
+    return null;
+  }
+  const text = textOfMessage(message) ?? "";
+  const files = restorableReadyFiles(message);
+  if (!text.trim() && files.length === 0) return null;
+  return { runId, messageId: message.id, text, files };
 }
 
 function isRunAdmissionMessage(message: Message): boolean {
@@ -449,12 +546,10 @@ export function mergeMessages(
     historyMessages,
     scopedThreadMessages,
   );
-  const visibleOptimisticMessages = hasAcknowledgedOptimisticHuman(
+  const visibleOptimisticMessages = retainUnacknowledgedOptimisticHumanMessages(
     optimisticMessages,
     [...projectedHistoryMessages, ...scopedThreadMessages],
-  )
-    ? []
-    : optimisticMessages;
+  );
   const threadMessageIds = new Set(
     scopedThreadMessages
       .filter((message) => !isHiddenFromUIMessage(message))

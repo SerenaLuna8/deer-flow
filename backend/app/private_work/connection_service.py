@@ -25,7 +25,9 @@ from app.private_work.errors import (
     PrivateWorkNotFound,
     PrivateWorkUnavailable,
 )
+from app.private_work.executable_agent import require_executable_agent
 from app.private_work.revalidation import PrivateWorkRevalidator
+from app.private_work.thread_repository import ThreadAgentRef
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext, resolve_project_context_in_transaction
 from app.projects.errors import ProjectDatabaseUnavailable, ProjectNotFound
@@ -95,6 +97,37 @@ class ProjectConnectionService:
             return value if isinstance(value, uuid.UUID) else uuid.UUID(str(value))
         except (AttributeError, TypeError, ValueError):
             raise PrivateWorkInvalid(request_id) from None
+
+    @classmethod
+    def _agent_ref(
+        cls,
+        asset_id: object,
+        scope: object,
+        request_id: str,
+    ) -> ThreadAgentRef:
+        canonical_scope = cls._required_text(scope, request_id)
+        if canonical_scope not in {"project", "system"}:
+            raise PrivateWorkInvalid(request_id)
+        return ThreadAgentRef(
+            asset_id=cls._canonical_uuid(asset_id, request_id),
+            scope=canonical_scope,
+        )
+
+    def _agent_transaction_guard(
+        self,
+        context: PrivateWorkContext,
+        agent: ThreadAgentRef,
+    ) -> Callable[[AsyncSession], Awaitable[None]]:
+        async def guard(session: AsyncSession) -> None:
+            await self._revalidator.require(
+                session,
+                context,
+                Capability.PROJECT_CHANNELS_MANAGE,
+                lock=True,
+            )
+            await require_executable_agent(session, context, agent)
+
+        return guard
 
     @staticmethod
     def _repository_error(request_id: str, exc: Exception) -> PrivateWorkError:
@@ -171,14 +204,17 @@ class ProjectConnectionService:
             Capability.PROJECT_CHANNELS_MANAGE,
         )
         provider = self._required_text(provider, context.request_id)
-        agent_id = self._canonical_uuid(agent_asset_id, context.request_id)
-        agent_scope = self._required_text(agent_scope, context.request_id)
+        agent = self._agent_ref(
+            agent_asset_id,
+            agent_scope,
+            context.request_id,
+        )
         now = self._clock()
         expires_at = now + timedelta(seconds=self._state_ttl_seconds)
         state = self._state_factory()
         metadata = {
-            "agent_asset_id": str(agent_id),
-            "agent_scope": agent_scope,
+            "agent_asset_id": str(agent.asset_id),
+            "agent_scope": agent.scope,
             "membership_id": str(context.membership_id),
             "membership_version": context.membership_version,
             "request_id": context.request_id,
@@ -194,6 +230,7 @@ class ProjectConnectionService:
                 now=now,
                 redirect_after=redirect_after,
                 metadata=metadata,
+                transaction_guard=self._agent_transaction_guard(context, agent),
             )
         except Exception as exc:
             raise self._repository_error(context.request_id, exc) from None
@@ -294,13 +331,14 @@ class ProjectConnectionService:
             connection_metadata = dict(raw_connection_metadata)
         else:
             raise PrivateWorkInvalid(context.request_id)
-        agent_asset_id = state_metadata.get("agent_asset_id")
-        agent_scope = state_metadata.get("agent_scope")
-        if not isinstance(agent_asset_id, str) or not isinstance(agent_scope, str):
-            raise PrivateWorkInvalid(context.request_id)
+        agent = self._agent_ref(
+            state_metadata.get("agent_asset_id"),
+            state_metadata.get("agent_scope"),
+            context.request_id,
+        )
         connection_metadata.update(
-            agent_asset_id=agent_asset_id,
-            agent_scope=agent_scope,
+            agent_asset_id=str(agent.asset_id),
+            agent_scope=agent.scope,
         )
         try:
             return await self._repository.upsert_connection(
@@ -310,6 +348,7 @@ class ProjectConnectionService:
                 external_account_id=external_account_id,
                 workspace_id=workspace_id,
                 metadata=connection_metadata,
+                transaction_guard=self._agent_transaction_guard(context, agent),
                 **connection_fields,
             )
         except Exception as exc:

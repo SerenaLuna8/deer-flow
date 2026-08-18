@@ -89,7 +89,6 @@ export const zhCN: Translations = {
   // Home
   home: {
     docs: "文档",
-    blog: "博客",
   },
 
   // Welcome
@@ -332,7 +331,12 @@ export const zhCN: Translations = {
         reserved: "已预留",
         limit: "上限",
         tightenTitle: "收紧项目配额",
-        updateError: "配额未更新，请刷新后重试。",
+        updateError: "配额未更新，请检查输入值后重试。",
+        updateConflict: "配额已被其他管理员更新，请刷新后再保存。",
+        updateUnavailable: "配额服务暂时不可用，请稍后重试。",
+        platformLimitRule: "项目配额只能比平台上限更严格或相等，请检查输入值。",
+        platformLimitExceeded: (dimension, limit) =>
+          `${dimension}不能超过平台上限 ${limit}。项目配额只能比平台上限更严格或相等。`,
         saving: "正在保存…",
         save: "保存配额",
         dimensions: {
@@ -993,11 +997,8 @@ export const zhCN: Translations = {
       delete: "删除",
       createCredential: "创建凭据",
       createProjectCredential: "创建项目凭据",
-      createProjectAsset: "创建项目资产",
       retry: "重试",
       retrying: "重试中…",
-      create: "创建",
-      creating: "创建中…",
       createVersion: "创建版本",
       creatingVersion: "创建中…",
       reload: "重新加载",
@@ -1232,11 +1233,6 @@ export const zhCN: Translations = {
         "当前远程系统 MCP 凭据槽位仅支持请求头、查询参数或 OAuth，不能绑定或用于 Agent。",
     },
     dialogs: {
-      createAssetTitle: (kind) => `创建 ${kind}`,
-      skillCreationDescription:
-        "创建后会自动生成 SKILL.md 草稿版本（已填入基础模板），Skill 默认停用。",
-      assetCreationDescription: (scope) =>
-        `先创建${scope === "system" ? "系统级" : "项目级"}资产，再在资产中创建并发布版本。`,
       addMcpTitle: "添加 MCP",
       addMcpDescription:
         "填写连接与身份认证信息；敏感值只在项目凭据中加密保存。",
@@ -1344,6 +1340,8 @@ export const zhCN: Translations = {
       secretReplaceTitle: "替换凭据",
       secretDescription: "凭据值只用于本次加密写入，提交后不会回显。",
       credentialSlug: "凭据标识",
+      credentialSlugHelp:
+        "使用 1–63 位小写字母、数字、点、下划线或连字符，并以字母或数字开头和结尾。",
       credentialFields: "凭据字段",
       credentialFieldsHelp:
         "可添加多个环境变量、请求头、查询参数或 OAuth 字段；每个值仅写入一次。",
@@ -1360,6 +1358,8 @@ export const zhCN: Translations = {
       writing: "写入中…",
       encryptWrite: "加密写入",
       validation: {
+        invalidCredentialName:
+          "凭据标识需为 1–63 位小写字母、数字、点、下划线或连字符，并以字母或数字开头和结尾。",
         emptyFields: "请至少添加一个凭据字段。",
         unsupportedGroup: "请选择支持的凭据字段分组。",
         emptyField: "请输入字段名。",
@@ -1634,6 +1634,13 @@ export const zhCN: Translations = {
         validationFailed: "提交内容不符合要求，请检查后重试。",
         invalidResponse: "模型生成结果格式异常，请重试本次操作。",
         network: "无法连接 Agent 设计服务，请检查网络后重试。",
+        slugConflict:
+          "当前项目中已有 Agent 使用这个名称，请在设计稿中修改 Agent 名称后重试。",
+        unresolvedConflict:
+          "设计稿仍有未解决的冲突，请继续对话，让 Agent 重新生成设计稿后再创建。",
+        sessionLimitExceeded:
+          "未完成的 Agent 设计已达到上限。请先恢复或取消一个已有设计，再新建设计。",
+        secretDetected: "输入中疑似包含密钥或其他敏感信息，请移除后重试。",
         commitUncertain:
           "创建结果暂时无法确认。请勿重复创建，先返回列表检查同名 Agent；若未出现再重试。",
         stale: "设计内容已发生变化，请刷新到最新状态后再继续。",
@@ -1671,14 +1678,24 @@ export const zhCN: Translations = {
         result: "生成结果",
         title: "Agent 设计稿",
         description:
-          "请检查模型生成的四项设置。你可以先编辑，确认后再创建 Agent。",
+          "请检查模型生成的设置和 Agent 名称。确认无误后再创建 Agent。",
         runtime: "运行配置",
         noDescription: "暂未生成 Agent 简介。",
+        nameLabel: "Agent 名称",
+        nameHint: "创建成功后，显示名称与 slug 均使用此值。",
+        savedAs: (value) => `规范化后：${value}`,
         model: "模型",
         capabilities: "能力与依赖",
         dependencySummary: (toolGroups, skills, mcps) =>
           `${toolGroups} 个工具组 · ${skills} 个 Skill · ${mcps} 个 MCP`,
         checkingMcp: "正在检查 MCP 依赖…",
+        modelUnavailable: "Agent 模型不可用",
+        modelRecovery: "请继续对话，让 Agent 改用当前可用模型后再创建。",
+        assumptionsTitle: "设计假设",
+        conflictsTitle: "待解决冲突",
+        conflictDocuments: "涉及文档",
+        blockingConflictHint:
+          "请继续对话，让 Agent 重新生成设计稿；红色冲突消失后才能创建 Agent 草稿。",
         createHint: "创建停用的 Agent 草稿；管理员发布草稿后才能启用",
         creating: "正在创建…",
         createDraft: "创建 Agent 草稿",
@@ -1888,9 +1905,9 @@ export const zhCN: Translations = {
       createProjectAgent: "创建项目 Agent",
       contactEditor: "联系项目编辑者",
       alternateTitle: "选择其他 Agent",
-      alternateDescription: "默认 Agent 不可用，可以选择其他可用 Agent。",
+      alternateDescription: "选择另一个可用 Agent 新建对话。",
       alternateEmptyTitle: "没有其他可用 Agent",
-      alternateEmptyDescription: "请修复默认 Agent 或配置新的 Agent。",
+      alternateEmptyDescription: "当前没有可用于新对话的其他 Agent。",
       dependencyLoadFailed: "无法加载 Agent 依赖状态。",
       createChatFailed: "创建 Agent 对话失败。",
       enableFailed: "启用系统 Agent 失败。",
@@ -2208,6 +2225,125 @@ export const zhCN: Translations = {
     gatewayUnavailableRetrying: "正在后台重试…",
   },
 
+  projectWorkspace: {
+    title: "工作空间",
+    account: "账户",
+    platformAdministration: "平台管理",
+    systemSettings: "系统设置",
+    privacyCenter: "个人数据中心",
+    logout: "退出登录",
+    searchProjects: "搜索项目",
+    searchPlaceholder: "搜索名称或项目标识",
+    filterProjects: "筛选项目",
+    allProjects: "全部项目",
+    pinnedOnly: "仅看置顶",
+    projectCount: (count) => `${count} 个项目`,
+    createProject: "创建项目",
+    projectList: "项目列表",
+    projectLoadFailed: "项目加载失败",
+    loadingProjects: "正在加载项目",
+    retry: "重试",
+    card: {
+      edit: "编辑项目",
+      pin: "置顶项目",
+      unpin: "取消置顶",
+      noDescription: "暂无项目描述",
+      open: "进入项目",
+    },
+    empty: {
+      noMatchesTitle: "没有匹配的项目",
+      firstProjectTitle: "创建你的第一个项目",
+      noMatchesDescription: "换一个关键词，或清除筛选查看全部项目。",
+      firstProjectDescription: "项目用于组织成员和共享的 Agent、Skill 与 MCP。",
+      clearFilters: "清除筛选",
+    },
+    createDialog: {
+      title: "创建项目",
+      description: "创建后你将成为项目 Admin，可继续邀请成员和配置共享资产。",
+      projectName: "项目名称",
+      projectSlug: "项目标识",
+      descriptionLabel: "描述",
+      slugHelp:
+        "仅支持小写英文字母、数字和连字符（-），长度为 3–63 位；连字符不能位于开头或结尾，也不能连续使用。",
+      slugRequired: "请输入项目标识。",
+      slugTooShort: "项目标识至少需要 3 个字符。",
+      slugTooLong: "项目标识不能超过 63 个字符。",
+      slugInvalid:
+        "项目标识只能使用小写英文字母、数字和单个连字符（-），且不能以连字符开头或结尾。",
+      cancel: "取消",
+      creating: "创建中…",
+      create: "创建项目",
+    },
+    editDialog: {
+      title: "编辑项目",
+      slugImmutable: "项目标识不可修改。",
+      projectName: "项目名称",
+      descriptionLabel: "描述",
+      saving: "保存中…",
+      save: "保存修改",
+    },
+    recovery: {
+      title: "可恢复项目",
+      windowEnd: "恢复窗口结束",
+      recoverableUntil: (deadline) => `可恢复至 ${deadline}`,
+      recover: "恢复项目",
+      confirmTitle: "确认恢复项目？",
+      confirmDescription: (projectName) =>
+        `将恢复“${projectName}”的成员访问和冻结的私有工作区。自动化恢复后仍保持暂停。`,
+      cancel: "取消",
+      restoring: "正在恢复…",
+      confirm: "确认恢复",
+      empty: "暂无可恢复项目。",
+    },
+    notifications: {
+      trigger: "通知",
+      unreadTrigger: (count) => `通知，${count} 条未读`,
+      title: "通知",
+      description: "查看系统消息，并处理你的项目邀请。",
+      loading: "正在加载通知…",
+      empty: "暂无通知",
+      retry: "重试",
+      loadingMore: "正在加载…",
+      loadMore: "加载更多",
+      readSyncPending: "部分通知的已读状态暂未同步。",
+      operationFailed: "通知操作失败，请稍后重试。",
+      invitationTitle: "项目邀请",
+      invitedBy: (actor, projectName) => `${actor} 邀请你加入 ${projectName}`,
+      role: (role) => `角色：${role}`,
+      accepting: "正在加入…",
+      accept: "同意加入项目",
+      joined: "已加入项目",
+      statuses: {
+        pending: "待处理",
+        redeemed: "已加入",
+        revoked: "已撤销",
+        expired: "已过期",
+      },
+      roles: {
+        editor: "编辑者",
+        runner: "执行者",
+        viewer: "查看者",
+      },
+    },
+    errors: {
+      slugConflict: "这个项目标识已存在，请换一个后重试。",
+      unavailable: "项目不可用或成员关系已失效，请返回工作空间。",
+      lastAdmin: "不能移除或降级最后一名 Admin，请先指定其他 Admin。",
+      memberQuotaExceeded:
+        "项目成员容量已满，请联系项目管理员调整成员上限后，重新打开邀请链接。",
+      membershipVersionConflict: "成员信息已更新，请刷新后重试。",
+      quotaStateConflict:
+        "成员配额状态不一致，请刷新后重试；若问题持续，请联系管理员。",
+      invitationConflict: "该邀请已存在或刚刚被处理，请刷新后重试。",
+      invitationInvalid: "邀请已失效、撤销或不适用于当前账户。",
+      deletionStateConflict: "项目状态已变化，请刷新工作空间后重试。",
+      validationFailed: "项目信息不符合要求，请检查后重试。",
+      authRequired: "登录状态已失效，请重新登录。",
+      serviceUnavailable: "项目服务暂时不可用，请稍后重试。",
+      requestFailed: "项目请求失败，请稍后重试。",
+    },
+  },
+
   // Conversation
   conversation: {
     noMessages: "还没有消息",
@@ -2217,13 +2353,25 @@ export const zhCN: Translations = {
     runFailedTitle: "运行未完成",
     runFailedDescription:
       "Agent 未能生成回复。请检查所选模型、依赖资产和凭据后，修改或重新发送消息。",
+    runAdmissionNotConfirmedDescription:
+      "运行未开始：会话可能正在运行或状态已变化。草稿已保留，请稍后重试。",
+    restoreFailedInput: "恢复到输入框",
+    restoreFailedInputBlocked: "输入框已有未发送内容或附件，请先处理后再恢复。",
     modelOutputLimitTitle: "已达到模型输出上限",
     modelOutputLimitDescription: "模型达到单次输出上限，当前回复未完成。",
     modelOutputLimitRetry: "关闭深度思考后重试",
     modelOutputLimitRetrying: "正在重试…",
+    tokenBudgetReachedTitle: "已达到本次运行的 Token 预算",
+    tokenBudgetReachedDescription: "本次运行已提前停止，当前回复可能不完整。",
     outputDeliveryIncompleteTitle: "结果文件未完成交付",
     outputDeliveryIncompleteDescription:
       "需要交付的结果文件已经生成，但没有发布到当前对话。重新发送可能重复执行已经完成的命令，请先检查运行记录。",
+    currentUploadUnavailableTitle: "当前图片附件不可用",
+    currentUploadUnavailableDescription:
+      "本次运行无法安全读取或校验当前图片附件。请恢复原输入并重试；若仍失败，请移除后重新粘贴图片。",
+    agentSuspendedTitle: "Agent 已停用",
+    agentSuspendedDescription:
+      "当前对话绑定的项目 Agent 已停用，暂时不能继续发送消息。请联系项目管理员重新启用，或使用其他 Agent 新建对话。",
     agentModelUnavailableTitle: "Agent 模型不可用",
     agentModelUnavailableDescription:
       "无法解析 Agent 配置的模型。请检查其启用绑定、已发布版本和模型目录中的启用状态后重试。",
@@ -2330,6 +2478,7 @@ export const zhCN: Translations = {
     writeTodos: "更新 To-do 列表",
     rememberMemory: "写入记忆",
     remembered: "已记住：",
+    memoryDisabledNotSaved: "记忆已关闭，未保存",
     skillInstallTooltip: "安装技能并使其可在 ActWeave 中使用",
   },
 

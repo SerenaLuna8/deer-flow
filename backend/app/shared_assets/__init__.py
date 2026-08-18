@@ -25,8 +25,13 @@ from app.shared_assets.default_agent_service import (
     ProjectDefaultAgentService,
 )
 from app.shared_assets.errors import (
+    AgentDesignConflictUnresolved,
+    AgentDesignSecretDetected,
+    AgentDesignSessionLimitExceeded,
+    AgentDesignSlugConflict,
     AssetConflict,
     AssetForbidden,
+    AssetInUse,
     AssetNotFound,
     AssetResolutionUnavailable,
     AssetRunQuotaExceeded,
@@ -34,12 +39,14 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillArchiveLimitExceeded,
     SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
     SkillPublishBaseStale,
+    SkillRuntimeNameConflict,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.mcp_service import (
@@ -81,7 +88,6 @@ from app.shared_assets.skill_credential_service import (
     SkillCredentialRequirementView,
 )
 from app.shared_assets.skill_service import (
-    CreateSkill,
     ProjectSkillArchiveCreateResult,
     SkillArchivePreview,
     SkillAssetView,
@@ -95,6 +101,10 @@ from app.shared_assets.skill_service import (
 
 __all__ = [
     "AGENT_INSTRUCTION_FIELDS",
+    "AgentDesignConflictUnresolved",
+    "AgentDesignSecretDetected",
+    "AgentDesignSessionLimitExceeded",
+    "AgentDesignSlugConflict",
     "AgentModelSettings",
     "AgentPayload",
     "AgentAssetView",
@@ -104,6 +114,7 @@ __all__ = [
     "AgentVersionView",
     "AssetConflict",
     "AssetForbidden",
+    "AssetInUse",
     "AssetKind",
     "AssetNotFound",
     "AssetResolutionUnavailable",
@@ -118,7 +129,6 @@ __all__ = [
     "ProjectAgentCreateResult",
     "CreateCredential",
     "CreateMcpServer",
-    "CreateSkill",
     "CredentialGrantMigrationView",
     "CredentialGrantView",
     "CredentialService",
@@ -145,12 +155,14 @@ __all__ = [
     "ResolvedMcpSnapshot",
     "ResolvedSkillSnapshot",
     "SharedAssetError",
+    "SkillArchiveLimitExceeded",
     "SkillDesignBaseStale",
     "SkillDesignNoChanges",
     "SkillDesignTargetDeleted",
     "SkillDesignTargetSessionExists",
     "SkillDesignTargetUnsupported",
     "SkillPublishBaseStale",
+    "SkillRuntimeNameConflict",
     "SharedAssetGovernanceEventSink",
     "SkillArchiveFile",
     "SkillArchivePreview",

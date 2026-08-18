@@ -48,6 +48,18 @@ export function agentBuilderErrorMessage(
   if (error.code === "AGENT_BUILDER_NETWORK_ERROR") {
     return copy.network;
   }
+  if (error.code === "AGENT_DESIGN_SLUG_CONFLICT") {
+    return copy.slugConflict;
+  }
+  if (error.code === "AGENT_DESIGN_CONFLICT_UNRESOLVED") {
+    return copy.unresolvedConflict;
+  }
+  if (error.code === "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED") {
+    return copy.sessionLimitExceeded;
+  }
+  if (error.code === "AGENT_DESIGN_SECRET_DETECTED") {
+    return copy.secretDetected;
+  }
   return error.message || copy.unavailable;
 }
 
@@ -184,6 +196,11 @@ export function AgentBuilderStart() {
       onSuccess: (response) => {
         idempotency.complete("create", signature);
         router.push(agentBuilderSessionPath(project.slug, response.data.id));
+      },
+      onError: (error) => {
+        if (error instanceof AgentBuilderApiError && error.status === 409) {
+          idempotency.complete("create", signature);
+        }
       },
     });
   }

@@ -8,7 +8,7 @@ import zipfile
 
 import pytest
 
-from app.shared_assets.errors import AssetValidationFailed
+from app.shared_assets.errors import AssetValidationFailed, SkillArchiveLimitExceeded
 from app.shared_assets.skill_archive import load_skill_archive_package
 
 
@@ -137,6 +137,48 @@ def test_load_skill_archive_accepts_bounded_standard_formats(
     ("filename", "payload"),
     [
         (
+            "meeting-brief.zip",
+            _zip(
+                {
+                    "__MACOSX/meeting-brief/._SKILL.md": b"apple-double",
+                    "meeting-brief/.DS_Store": b"finder",
+                    "meeting-brief/._SKILL.md": b"apple-double",
+                    "meeting-brief/SKILL.md": _manifest(),
+                    "meeting-brief/scripts/run": b"print('ok')\n",
+                }
+            ),
+        ),
+        (
+            "meeting-brief.tar",
+            _tar(
+                {
+                    "__MACOSX/meeting-brief/._SKILL.md": b"apple-double",
+                    "meeting-brief/.DS_Store": b"finder",
+                    "meeting-brief/._SKILL.md": b"apple-double",
+                    "meeting-brief/SKILL.md": _manifest(),
+                    "meeting-brief/scripts/run": b"print('ok')\n",
+                }
+            ),
+        ),
+    ],
+)
+def test_load_skill_archive_filters_macos_metadata_before_wrapper_detection(
+    filename: str,
+    payload: bytes,
+) -> None:
+    files = load_skill_archive_package(
+        payload,
+        filename=filename,
+        request_id="req-macos-metadata",
+    )
+
+    assert [item.path for item in files] == ["SKILL.md", "scripts/run"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "payload"),
+    [
+        (
             "traversal.zip",
             _zip(
                 {
@@ -178,6 +220,15 @@ def test_load_skill_archive_accepts_bounded_standard_formats(
                 {
                     "skill/SKILL.md": _manifest(),
                     "skill/scripts/run.sh:hidden.txt": b"hidden",
+                }
+            ),
+        ),
+        (
+            "macos-traversal.zip",
+            _zip(
+                {
+                    "skill/SKILL.md": _manifest(),
+                    "__MACOSX/../outside": b"no",
                 }
             ),
         ),
@@ -303,7 +354,7 @@ def test_load_skill_archive_enforces_file_and_uncompressed_byte_caps(
     from app.shared_assets import skill_archive
 
     monkeypatch.setattr(skill_archive, "MAX_SKILL_ARCHIVE_FILES", 2)
-    with pytest.raises(AssetValidationFailed):
+    with pytest.raises(SkillArchiveLimitExceeded):
         load_skill_archive_package(
             _zip(
                 {
@@ -322,7 +373,7 @@ def test_load_skill_archive_enforces_file_and_uncompressed_byte_caps(
         "MAX_SKILL_ARCHIVE_BYTES",
         len(_manifest()) + 1,
     )
-    with pytest.raises(AssetValidationFailed):
+    with pytest.raises(SkillArchiveLimitExceeded):
         load_skill_archive_package(
             _tar(
                 {
@@ -332,6 +383,15 @@ def test_load_skill_archive_enforces_file_and_uncompressed_byte_caps(
             ),
             filename="too-large.tar",
             request_id="req-byte-cap",
+        )
+
+    monkeypatch.setattr(skill_archive, "MAX_SKILL_ARCHIVE_BYTES", 100 * 1024 * 1024)
+    monkeypatch.setattr(skill_archive, "MAX_SKILL_ARCHIVE_FILE_BYTES", 1)
+    with pytest.raises(SkillArchiveLimitExceeded):
+        load_skill_archive_package(
+            _zip({"SKILL.md": _manifest()}),
+            filename="file-too-large.zip",
+            request_id="req-file-cap",
         )
 
 
@@ -356,7 +416,7 @@ def test_zip_member_count_is_rejected_before_zipfile_allocates_rows(
 
     monkeypatch.setattr(skill_archive.zipfile, "ZipFile", fail_if_constructed)
 
-    with pytest.raises(AssetValidationFailed):
+    with pytest.raises(SkillArchiveLimitExceeded):
         load_skill_archive_package(
             bytes(payload),
             filename="too-many-files.zip",
@@ -397,7 +457,7 @@ def test_compressed_tar_metadata_counts_toward_stream_cap(
     assert len(payload) < 16 * 1024
     monkeypatch.setattr(skill_archive, "MAX_SKILL_ARCHIVE_BYTES", 1_000)
 
-    with pytest.raises(AssetValidationFailed):
+    with pytest.raises(SkillArchiveLimitExceeded):
         load_skill_archive_package(
             payload,
             filename="metadata-bomb.tar.gz",

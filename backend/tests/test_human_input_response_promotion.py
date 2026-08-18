@@ -21,10 +21,12 @@ from app.private_work.human_input_response import (
 )
 from app.private_work.run_admission import (
     PrivateRunAdmissionService,
+    _human_input_continuation_run_id,
     _matches_server_promoted_human_input_retry,
 )
 from app.private_work.run_repository import PrivateRunCreate, PrivateRunRepository
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
+from deerflow.agents.human_input import read_human_input_response
 from deerflow.config.app_config import AppConfig
 from deerflow.runtime import checkpoint_mode as checkpoint_mode_state
 
@@ -94,6 +96,18 @@ def _response() -> dict[str, object]:
         "response_kind": "option",
         "option_id": "option-2",
         "value": "staging",
+    }
+
+
+def _form_response() -> dict[str, object]:
+    return {
+        "version": 1,
+        "kind": "human_input_response",
+        "source": "ask_clarification",
+        "request_id": REQUEST_ID,
+        "response_kind": "text",
+        "value": "Environment: staging",
+        "form_values": {"environment": "staging"},
     }
 
 
@@ -202,9 +216,47 @@ def test_unmatched_response_does_not_authorize_a_source_run() -> None:
 
     assert promotion.continuation_run_id is None
     assert promotion.continuation_verified is False
+    assert promotion.response_candidate_present is True
     additional_kwargs = _input_message(promotion.kwargs)["additional_kwargs"]
     assert isinstance(additional_kwargs, dict)
     assert "hide_from_ui" not in additional_kwargs
+
+    with pytest.raises(PrivateWorkConflict):
+        _human_input_continuation_run_id(
+            promotion,
+            request_id="duplicate-response",
+        )
+
+
+def test_form_response_keeps_summary_and_structured_values_separate() -> None:
+    response = _form_response()
+    content = f'For your clarification "{QUESTION}", my answer is: Environment: staging [values: {{"environment":"staging"}}]'
+
+    parsed = read_human_input_response({"human_input_response": response})
+    promotion = authorize_matching_human_input_response(
+        _request_kwargs(response=response, content=content),
+        checkpoint_messages=[
+            _request_message(input_mode="form"),
+        ],
+    )
+
+    assert parsed == response
+    assert promotion.continuation_verified is True
+    assert promotion.response_candidate_present is True
+    assert _input_message(promotion.kwargs)["additional_kwargs"] == {
+        "hide_from_ui": True,
+        "human_input_response": response,
+    }
+
+
+def test_empty_structured_values_remain_valid_for_an_optional_only_form() -> None:
+    response = {
+        **_form_response(),
+        "value": "-",
+        "form_values": {},
+    }
+
+    assert read_human_input_response({"human_input_response": response}) == response
 
 
 def _promoted_message(
@@ -563,6 +615,16 @@ async def test_run_admission_persists_gateway_authorized_visibility(
         )
         assert answered_retry.run.run_id == admitted.run.run_id
         assert answered_retry.job.job_id == admitted.job.job_id
+
+        with pytest.raises(PrivateWorkConflict):
+            await service.admit(
+                seed.owner_a,
+                thread_id,
+                PrivateRunCreate(
+                    run_id=f"human-input-duplicate-{uuid.uuid4()}",
+                    kwargs=_request_kwargs(),
+                ),
+            )
 
         for kind in ("content", "request_id", "value", "message_id"):
             with pytest.raises(PrivateWorkConflict):

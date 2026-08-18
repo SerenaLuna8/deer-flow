@@ -58,6 +58,7 @@ def test_public_run_error_codes_have_closed_stable_payloads() -> None:
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
         PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
         PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE: ("The required output file was not presented"),
+        PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
         PublicRunErrorCode.LOCAL_HOST_BASH_READ_ONLY_MOUNTS_UNSUPPORTED: ("Local private runtime cannot enforce read-only mounts when host bash is enabled"),
     }

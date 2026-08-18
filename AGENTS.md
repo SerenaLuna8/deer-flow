@@ -69,7 +69,7 @@ Run whole-application commands from the repository root:
 | `make doctor`             | Check tools, configuration, and database readiness                |
 | `make install`            | Install backend and frontend dependencies                         |
 | `make setup-db`           | Initialize a new empty PostgreSQL target                          |
-| `make upgrade-db`         | Explicitly upgrade a known older schema after backup              |
+| `make upgrade-db`         | Explicitly upgrade a known older schema                            |
 | `make check-db`           | Read-only schema/readiness check                                  |
 | `make upgrade-system-assets` | Apply packaged System Asset releases during maintenance        |
 | `make dev` / `make start` | Start the local full stack                                        |

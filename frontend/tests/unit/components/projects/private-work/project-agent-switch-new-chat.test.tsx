@@ -2,11 +2,14 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  AgentSelectorDialog,
   createProjectChatForAgent,
   otherProjectAgents,
+  projectAgentCreatePath,
 } from "@/components/projects/private-work/agent-selector-dialog";
 import { ThreadAgentIndicator } from "@/components/workspace/thread-agent-indicator";
 import { I18nProvider } from "@/core/i18n/context";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 import type { ProjectClientScope } from "@/core/private-work/types";
 import type { ProjectAssetItem } from "@/core/shared-assets";
 
@@ -108,5 +111,34 @@ describe("use another Agent for a new project chat", () => {
       'aria-label="用其他 Agent 新建对话；当前 Agent：Reviewer"',
     );
     expect(html).not.toContain("替换当前");
+  });
+
+  test("describes an empty alternate list without declaring the working Agent unavailable", () => {
+    const copy = zhCN.agents.selector;
+    const agentsPath = projectAgentCreatePath("alpha project");
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <AgentSelectorDialog
+          open
+          agents={[]}
+          canAuthorProjectAgent
+          agentsPath={agentsPath}
+          title={copy.alternateTitle}
+          description={copy.alternateDescription}
+          emptyTitle={copy.alternateEmptyTitle}
+          emptyDescription={copy.alternateEmptyDescription}
+          isCreating={false}
+          onOpenChange={() => undefined}
+          onSelect={() => undefined}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("选择另一个可用 Agent 新建对话。");
+    expect(html).toContain("当前没有可用于新对话的其他 Agent。");
+    expect(html).not.toContain("默认 Agent 不可用");
+    expect(html).not.toContain("请修复默认 Agent");
+    expect(html).toContain('href="/projects/alpha%20project/agents/new"');
+    expect(html).not.toContain("intent=start_chat");
   });
 });

@@ -1,6 +1,5 @@
 "use client";
 
-import type { Thread } from "@langchain/langgraph-sdk";
 import { useCallback, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -53,23 +52,6 @@ export function projectChatRouteScope(
     artifactsVisible: canRead,
     followupSuggestionsEnabled: canRun,
   };
-}
-
-export type ProjectThreadMetadataState = {
-  data: Thread | null | undefined;
-  error: Error | null;
-  isLoading: boolean;
-  isFetching: boolean;
-};
-
-export function projectThreadAvailability(
-  state: ProjectThreadMetadataState,
-): "loading" | "available" | "not-found" | "error" {
-  if (state.isLoading || state.isFetching) return "loading";
-  if (state.error) return "error";
-  if (state.data === null) return "not-found";
-  if (state.data === undefined) return "loading";
-  return "available";
 }
 
 export function ProjectChatNotFound({ chatsPath }: { chatsPath: string }) {

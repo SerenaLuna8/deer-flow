@@ -77,7 +77,6 @@ _ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SYMLINK_MEDIA_TYPES = frozenset({"application/symlink", "application/x-symlink", "inode/symlink"})
 _WIN32_INVALID_SEGMENT_CHARS = frozenset('<>:"|?*')
-_PROJECT_SKILL_TEMPLATE_DESCRIPTION = "Describe when and how to use this skill."
 _WIN32_RESERVED_BASENAMES = frozenset(
     {
         "con",
@@ -114,15 +113,6 @@ _CONFLICT_CONSTRAINTS = frozenset(
 )
 _Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
 _T = TypeVar("_T")
-
-
-def _project_skill_template_file(slug: str) -> SkillArchiveFile:
-    content = (f"---\nname: {slug}\ndescription: {_PROJECT_SKILL_TEMPLATE_DESCRIPTION}\n---\n\n# {slug}\n\nAdd instructions for this skill here.\n").encode()
-    return SkillArchiveFile(
-        path="SKILL.md",
-        content=content,
-        media_type="text/markdown",
-    )
 
 
 class _DuplicateKeySafeLoader(yaml.SafeLoader):
@@ -905,6 +895,11 @@ class SkillService:
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
         if type(execute) is not bool or type(replace) is not bool:
             raise AssetValidationFailed(actor.request_id)
+        if execute and replace:
+            self._require_capability(
+                actor,
+                Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+            )
         prepared = await self._prepare_project_archive_imports(actor, imports)
 
         async def operation(repository: SkillRepository) -> ProjectSkillArchiveImportResult:
@@ -1015,73 +1010,6 @@ class SkillService:
 
         return await self._execute(actor, operation)
 
-    async def create_asset(self, actor: _Actor, command: CreateSkill) -> SkillAssetView:
-        command = self._validate_create(actor, command)
-        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-
-        async def operation(repository: SkillRepository) -> SkillAssetView:
-            return await self._create_asset_in_transaction(repository, actor, command)
-
-        return await self._execute(
-            actor,
-            operation,
-            governance=lambda session, result: self._record_governance(session, actor, result.id, None, "skill.create"),
-        )
-
-    async def create_project_with_template(
-        self,
-        actor: ProjectContext,
-        command: CreateSkill,
-    ) -> SkillAssetView:
-        """Atomically create one suspended Project Skill and its template Draft v1."""
-
-        command = self._validate_create(actor, command)
-        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        if not isinstance(actor, ProjectContext):
-            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
-        preview = await self.preview_archive(
-            actor,
-            (_project_skill_template_file(command.slug),),
-        )
-
-        async def operation(repository: SkillRepository) -> SkillAssetView:
-            created = await self._create_asset_in_transaction(
-                repository,
-                actor,
-                command,
-            )
-            await self._record_governance(
-                repository.session,
-                actor,
-                created.id,
-                None,
-                "skill.create",
-            )
-            draft = await self._create_version_from_preview_in_transaction(
-                repository,
-                actor,
-                created.id,
-                preview,
-                expected_asset_version=created.version,
-            )
-            await self._record_governance(
-                repository.session,
-                actor,
-                created.id,
-                draft.id,
-                "skill.version.create",
-            )
-            if draft.workflow_status is not WorkflowStatus.DRAFT or draft.version_number != 1 or draft.supersedes_version_id is not None:
-                raise AssetValidationFailed(actor.request_id)
-            current = await repository.get_project_asset(
-                actor,
-                created.id,
-                for_update=False,
-            )
-            return self._asset_view(current)
-
-        return await self._execute(actor, operation)
-
     async def create_version_from_archive(
         self,
         actor: _Actor,
@@ -1176,7 +1104,10 @@ class SkillService:
         expected_asset_version: int,
         acknowledge_stale_base: bool = False,
     ) -> SkillVersionView:
-        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        self._require_capability(
+            actor,
+            Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+        )
         if type(acknowledge_stale_base) is not bool:
             raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
 
@@ -1208,6 +1139,7 @@ class SkillService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: SkillRepository) -> None:
+            await repository.lock_project_delete_scope(actor)
             asset = await repository.get_project_asset(
                 actor,
                 asset_id,
@@ -1218,6 +1150,11 @@ class SkillService:
                 asset,
                 expected_asset_version,
             )
+            if asset.current_published_version_id is not None:
+                self._require_capability(
+                    actor,
+                    Capability.SHARED_ASSETS_MANAGE_BINDINGS,
+                )
             versions = await repository.plan_project_asset_deletion(actor, asset)
             quota = self._quota
             if versions and quota is None:
@@ -1298,6 +1235,11 @@ class SkillService:
             )
             if asset.status != "suspended" or asset.current_published_version_id is None:
                 raise AssetConflict(actor.request_id)
+            if asset.scope == "project":
+                await repository.ensure_project_skill_runtime_name_available(
+                    actor,
+                    asset,
+                )
             current = await self._get_version(
                 repository,
                 actor,
@@ -1716,15 +1658,10 @@ class SkillService:
     async def _create_asset_in_transaction(
         self,
         repository: SkillRepository,
-        actor: _Actor,
+        actor: ProjectContext,
         command: CreateSkill,
     ) -> SkillAssetView:
-        if isinstance(actor, ProjectContext):
-            row = await repository.create_project_asset(actor, command)
-        elif actor.project_id is not None:
-            row = await repository.create_override_asset(actor, command)
-        else:
-            row = await repository.create_system_asset(actor, command)
+        row = await repository.create_project_asset(actor, command)
         return self._asset_view(row)
 
     async def _create_version_from_preview_in_transaction(

@@ -50,6 +50,10 @@ import {
   ThinkingDisclosureContent,
 } from "./thinking-disclosure";
 
+const REMEMBERED_RESULT_PREFIX = "Remembered for the next organization pass: ";
+const MEMORY_DISABLED_RESULT =
+  "Project memory is currently disabled, so nothing can be remembered.";
+
 export function MessageGroup({
   className,
   messages,
@@ -730,17 +734,21 @@ function ToolCall({
       ></ChainOfThoughtStep>
     );
   } else if (name === "remember") {
-    // Fixed phrase written by the backend remember tool on success; the
-    // remembered line follows it verbatim.
-    const rememberedPrefix = "Remembered for the next organization pass: ";
+    // These are fixed outcomes from the backend remember tool. A pending
+    // proposal has no result yet, so retain the action label while streaming.
     const rememberedLine =
-      typeof result === "string" && result.startsWith(rememberedPrefix)
-        ? result.slice(rememberedPrefix.length)
+      typeof result === "string" && result.startsWith(REMEMBERED_RESULT_PREFIX)
+        ? result.slice(REMEMBERED_RESULT_PREFIX.length)
         : null;
+    const memoryDisabled = result === MEMORY_DISABLED_RESULT;
     return (
       <ChainOfThoughtStep
         key={id}
-        label={resolveLabel(t.toolCalls.rememberMemory)}
+        label={resolveLabel(
+          memoryDisabled
+            ? t.toolCalls.memoryDisabledNotSaved
+            : t.toolCalls.rememberMemory,
+        )}
         icon={BrainIcon}
       >
         {rememberedLine && (

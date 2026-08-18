@@ -1,8 +1,12 @@
 import type { Capability } from "@/core/projects/types";
 
-import type { AgentBuilderBlueprint, AgentBuilderSession } from "./types";
-
-const AGENT_SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u;
+import {
+  AGENT_BUILDER_SLUG_MAX_LENGTH,
+  AGENT_BUILDER_SLUG_MIN_LENGTH,
+  AGENT_BUILDER_SLUG_PATTERN,
+  type AgentBuilderBlueprint,
+  type AgentBuilderSession,
+} from "./types";
 
 export type AgentBuilderDisplayState =
   | "interviewing"
@@ -27,9 +31,9 @@ export type AgentBuilderSlugErrorCode = "too-short" | "too-long" | "invalid";
 export function agentBuilderSlugErrorCode(
   value: string,
 ): AgentBuilderSlugErrorCode | null {
-  if (value.length < 3) return "too-short";
-  if (value.length > 63) return "too-long";
-  if (!AGENT_SLUG_PATTERN.test(value)) return "invalid";
+  if (value.length < AGENT_BUILDER_SLUG_MIN_LENGTH) return "too-short";
+  if (value.length > AGENT_BUILDER_SLUG_MAX_LENGTH) return "too-long";
+  if (!AGENT_BUILDER_SLUG_PATTERN.test(value)) return "invalid";
   return null;
 }
 
@@ -50,6 +54,49 @@ export function agentBuilderCanAuthor(
   capabilities: readonly Capability[],
 ): boolean {
   return capabilities.includes("shared_assets.edit");
+}
+
+export function agentBuilderCanRead(
+  capabilities: readonly Capability[],
+): boolean {
+  return capabilities.includes("shared_assets.read");
+}
+
+export function agentBuilderCancelActionDisabled(
+  session: Pick<AgentBuilderSession, "status"> | null | undefined,
+  state: {
+    generationPending: boolean;
+    commitPending: boolean;
+    cancelPending: boolean;
+    cancelPreparing: boolean;
+  },
+): boolean {
+  return (
+    !session ||
+    state.commitPending ||
+    state.cancelPending ||
+    state.cancelPreparing ||
+    session.status === "committing" ||
+    session.status === "completed" ||
+    session.status === "cancelled"
+  );
+}
+
+export async function prepareAgentBuilderCancelSession(
+  session: AgentBuilderSession,
+  shouldRefresh: boolean,
+  refetch: () => Promise<AgentBuilderSession | undefined>,
+): Promise<AgentBuilderSession> {
+  if (!shouldRefresh) return session;
+  try {
+    const refreshed = await refetch();
+    return refreshed && refreshed.revision >= session.revision
+      ? refreshed
+      : session;
+  } catch {
+    // A stale CAS is recovered by the cancel mutation's conflict handler.
+    return session;
+  }
 }
 
 export function agentBuilderBlueprintValidationError(

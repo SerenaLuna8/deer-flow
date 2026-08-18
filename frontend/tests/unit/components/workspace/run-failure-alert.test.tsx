@@ -4,9 +4,11 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   canRetryModelOutputLimit,
   RunFailureAlert,
+  shouldShowRunFailureAlert,
 } from "@/components/workspace/run-failure-alert";
 import { I18nProvider } from "@/core/i18n/context";
 import {
+  CURRENT_UPLOAD_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   type ProjectRunFailureCode,
@@ -16,6 +18,7 @@ function render(
   failureCode: ProjectRunFailureCode | null,
   locale: "zh-CN" | "en-US",
   retryDisabled = false,
+  restoreAvailable = false,
 ) {
   return renderToStaticMarkup(
     <I18nProvider initialLocale={locale}>
@@ -23,12 +26,28 @@ function render(
         failureCode={failureCode}
         retryDisabled={retryDisabled}
         onRetryWithoutThinking={() => true}
+        onRestoreInput={restoreAvailable ? () => undefined : undefined}
       />
     </I18nProvider>,
   );
 }
 
 describe("RunFailureAlert", () => {
+  test("does not classify a pre-admission stream error as a terminal Run failure", () => {
+    expect(
+      shouldShowRunFailureAlert({
+        hasTerminalRunFailure: false,
+        streamError: new Error("Run admission conflict"),
+      }),
+    ).toBe(false);
+    expect(
+      shouldShowRunFailureAlert({
+        hasTerminalRunFailure: true,
+        streamError: undefined,
+      }),
+    ).toBe(true);
+  });
+
   test("renders the dedicated Chinese output-limit recovery state", () => {
     const html = render(MODEL_OUTPUT_LIMIT, "zh-CN");
 
@@ -55,6 +74,19 @@ describe("RunFailureAlert", () => {
     expect(html).not.toContain("Retry without deep thinking");
   });
 
+  test("offers a non-submitting input restore action for recoverable generic failures", () => {
+    const chinese = render(null, "zh-CN", false, true);
+    const english = render(null, "en-US", false, true);
+
+    expect(chinese).toContain("恢复到输入框");
+    expect(english).toContain("Restore to composer");
+    expect(chinese).not.toContain("关闭深度思考后重试");
+  });
+
+  test("does not offer input restore when no failed user input is available", () => {
+    expect(render(null, "zh-CN")).not.toContain("恢复到输入框");
+  });
+
   test("renders the dedicated Chinese output-delivery warning without a replay action", () => {
     const html = render(OUTPUT_DELIVERY_INCOMPLETE, "zh-CN");
 
@@ -74,6 +106,21 @@ describe("RunFailureAlert", () => {
     expect(html).toContain("Resending may repeat an already completed command");
     expect(html).not.toContain("Check the selected model");
     expect(html).not.toContain("Retry without deep thinking");
+  });
+
+  test("renders a diagnosable current-upload failure with input recovery", () => {
+    const chinese = render(CURRENT_UPLOAD_UNAVAILABLE, "zh-CN", false, true);
+    const english = render(CURRENT_UPLOAD_UNAVAILABLE, "en-US", false, true);
+
+    expect(chinese).toContain(
+      `data-run-failure-code="${CURRENT_UPLOAD_UNAVAILABLE}"`,
+    );
+    expect(chinese).toContain("当前图片附件不可用");
+    expect(chinese).toContain("恢复原输入并重试");
+    expect(chinese).toContain("恢复到输入框");
+    expect(english).toContain("Image attachment could not be read");
+    expect(english).toContain("Restore the original input and retry");
+    expect(english).toContain("Restore to composer");
   });
 
   test("disables retry without Run authority or while a Run is active", () => {

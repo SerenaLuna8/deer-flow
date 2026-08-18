@@ -130,4 +130,41 @@ describe("MessageGroup deterministic Memory tool frame replay", () => {
     expect(html).toContain("recall_memory");
     expect(html.match(/data-testid="remember-chip"/gu)).toHaveLength(1);
   });
+
+  test("shows that a rejected remember call was not saved when memory is disabled", () => {
+    const messages: Message[] = [
+      {
+        type: "ai",
+        id: "remember-disabled-ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "remember-disabled-1",
+            name: "remember",
+            args: { kind: "durable", content: "DISABLED-MEM-0817" },
+          },
+        ],
+      },
+      {
+        type: "tool",
+        id: "remember-disabled-tool",
+        name: "remember",
+        tool_call_id: "remember-disabled-1",
+        content:
+          "Project memory is currently disabled, so nothing can be remembered.",
+      },
+    ];
+
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <StandaloneArtifactsProvider enabled={false}>
+          <MessageGroup messages={messages} showAllSteps />
+        </StandaloneArtifactsProvider>
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("记忆已关闭，未保存");
+    expect(html).not.toContain("写入记忆");
+    expect(html).not.toContain('data-testid="remember-chip"');
+  });
 });

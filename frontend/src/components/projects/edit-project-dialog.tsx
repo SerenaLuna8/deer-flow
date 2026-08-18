@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
 import type { PatchProjectInput, Project } from "@/core/projects/types";
 
 export function EditProjectDialog({
@@ -30,6 +31,8 @@ export function EditProjectDialog({
   pending: boolean;
   errorMessage: string | null;
 }) {
+  const { t } = useI18n();
+  const copy = t.projectWorkspace.editDialog;
   const [displayName, setDisplayName] = useState("");
   const [description, setDescription] = useState("");
 
@@ -43,8 +46,8 @@ export function EditProjectDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>编辑项目</DialogTitle>
-          <DialogDescription>项目标识不可修改。</DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.slugImmutable}</DialogDescription>
         </DialogHeader>
         <form
           className="space-y-4"
@@ -57,7 +60,7 @@ export function EditProjectDialog({
           }}
         >
           <label className="grid gap-2 text-sm">
-            项目名称
+            {copy.projectName}
             <Input
               required
               maxLength={120}
@@ -66,7 +69,7 @@ export function EditProjectDialog({
             />
           </label>
           <label className="grid gap-2 text-sm">
-            描述
+            {copy.descriptionLabel}
             <Textarea
               maxLength={500}
               value={description}
@@ -80,7 +83,7 @@ export function EditProjectDialog({
           )}
           <DialogFooter>
             <Button type="submit" disabled={pending}>
-              {pending ? "保存中…" : "保存修改"}
+              {pending ? copy.saving : copy.save}
             </Button>
           </DialogFooter>
         </form>

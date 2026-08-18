@@ -378,7 +378,7 @@ async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() ->
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, model_materializer = _handler(
@@ -409,6 +409,33 @@ async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() ->
 
 
 @pytest.mark.asyncio
+async def test_dream_worker_does_not_consume_history_without_explicit_replacement() -> None:
+    factory = _SessionFactory()
+    state = _RepositoryState(_work())
+    runner = _Runner(
+        factory,
+        result=MemoryDreamResult(
+            content=EMPTY_MEMORY_DOCUMENT,
+            replaced=False,
+        ),
+    )
+    handler, _materializer = _handler(
+        factory=factory,
+        state=state,
+        runner=runner,
+    )
+
+    settlement = await handler(_claim(), _Authority())
+
+    assert isinstance(settlement, JobSettlement)
+    assert settlement.outcome.public_error_code == ("MEMORY_DREAM_REPLACEMENT_REQUIRED")
+    await settlement.commit()
+    assert state.finalized == []
+    assert state.released[0]["cancelled"] is False
+    assert state.released[0]["retryable"] is True
+
+
+@pytest.mark.asyncio
 async def test_dream_worker_audits_published_version_in_finalize_transaction() -> None:
     factory = _SessionFactory()
     state = _RepositoryState(_work())
@@ -417,7 +444,7 @@ async def test_dream_worker_audits_published_version_in_finalize_transaction() -
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -464,7 +491,7 @@ async def test_dream_worker_audits_only_terminal_typed_release_results(
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -505,7 +532,7 @@ async def test_dream_worker_does_not_duplicate_already_published_audit() -> None
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -597,7 +624,7 @@ async def test_dream_worker_uses_frozen_custom_sections_for_input_and_settlement
     state = _RepositoryState(work)
     runner = _Runner(
         factory,
-        result=MemoryDreamResult(content=content, replaced=False),
+        result=MemoryDreamResult(content=content, replaced=True),
     )
     handler, _materializer = _handler(
         factory=factory,
@@ -652,7 +679,7 @@ async def test_success_commit_policy_drift_persists_cancellation_not_version() -
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -682,7 +709,7 @@ async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> N
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -710,7 +737,7 @@ async def test_success_commit_policy_unavailable_rolls_back_then_retries() -> No
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -743,7 +770,7 @@ async def test_success_commit_model_lookup_failure_rolls_back_then_retries() -> 
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -776,7 +803,7 @@ async def test_success_commit_audit_failure_rolls_back_version_then_retries() ->
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     audit = _Audit(error=RuntimeError("audit storage unavailable"))
@@ -811,7 +838,7 @@ async def test_published_lifecycle_audit_failure_rolls_back_then_retries() -> No
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     audit = _Audit(
@@ -846,7 +873,7 @@ async def test_success_commit_invariant_conflict_rolls_back_then_dies() -> None:
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -877,7 +904,7 @@ async def test_success_commit_stale_conflict_rolls_back_then_cancels() -> None:
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -907,7 +934,7 @@ async def test_success_commit_lease_conflict_does_not_retry() -> None:
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -936,7 +963,7 @@ async def test_release_settlement_maps_only_lease_conflict_to_lease_lost() -> No
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -963,7 +990,7 @@ async def test_release_settlement_preserves_invariant_conflict() -> None:
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -1126,7 +1153,7 @@ async def test_dream_worker_cancel_releases_processing_history_without_model() -
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, _materializer = _handler(
@@ -1158,7 +1185,7 @@ async def test_dream_worker_prompt_version_drift_cancels_without_retry_or_model(
         factory,
         result=MemoryDreamResult(
             content=EMPTY_MEMORY_DOCUMENT,
-            replaced=False,
+            replaced=True,
         ),
     )
     handler, model_materializer = _handler(

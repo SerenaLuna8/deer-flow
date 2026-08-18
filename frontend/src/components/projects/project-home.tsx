@@ -7,7 +7,10 @@ import {
 import Link from "next/link";
 import type { ReactNode } from "react";
 
-import { canOpenProjectCapabilitiesWorkspace } from "@/core/projects/capabilities";
+import {
+  canOpenProjectCapabilitiesWorkspace,
+  canReadProjectAgents,
+} from "@/core/projects/capabilities";
 import type { Project } from "@/core/projects/types";
 
 import { ProjectHeader } from "./project-header";
@@ -49,13 +52,21 @@ export function ProjectHome({
   usageDimensionsSection?: ReactNode;
 }) {
   const base = `/projects/${encodeURIComponent(project.slug)}`;
+  const canManageCapabilities = canOpenProjectCapabilitiesWorkspace(
+    project.capabilities,
+  );
+  const visibleAssets = assets.filter(({ key }) =>
+    key === "agent"
+      ? canReadProjectAgents(project.capabilities)
+      : canManageCapabilities,
+  );
   return (
     <div data-testid="project-home" className="bg-background min-h-screen">
       <ProjectHeader project={project} />
       <main className="mx-auto max-w-6xl space-y-8 px-4 py-8 sm:px-6 lg:px-8">
         {tokenUsageSection}
         {usageDimensionsSection}
-        {canOpenProjectCapabilitiesWorkspace(project.capabilities) && (
+        {visibleAssets.length > 0 && (
           <section>
             <div className="mb-4">
               <h2 className="text-xl font-semibold">共享资产</h2>
@@ -64,7 +75,7 @@ export function ProjectHome({
               </p>
             </div>
             <div className="grid gap-4 sm:grid-cols-3">
-              {assets.map(
+              {visibleAssets.map(
                 ({ key, label, description, path, countKey, icon: Icon }) => (
                   <Link
                     key={key}

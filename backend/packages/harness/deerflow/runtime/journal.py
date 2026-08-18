@@ -32,6 +32,10 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.token_budget_middleware import (
+    TOKEN_BUDGET_STATUS_KEY,
+    read_token_budget_status,
+)
 from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
@@ -196,8 +200,16 @@ class RunJournal(BaseCallbackHandler):
         # represents the user-visible run lifecycle.
         if parent_run_id is not None:
             return
+        self._reconcile_final_error_fallback(outputs)
+        self._reconcile_final_token_budget_message(outputs)
         self._reconcile_final_tool_messages(outputs)
-        self._put(event_type="run.end", category="outputs", content=outputs, metadata={"status": "success"})
+        terminal_status = "error" if self._had_llm_error_fallback else "success"
+        self._put(
+            event_type="run.end",
+            category="outputs",
+            content=outputs,
+            metadata={"status": terminal_status},
+        )
         self._flush_sync()
 
     def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
@@ -364,18 +376,7 @@ class RunJournal(BaseCallbackHandler):
             # Token usage from message
             usage = getattr(message, "usage_metadata", None)
             usage_dict = dict(usage) if usage else {}
-            additional_kwargs = getattr(message, "additional_kwargs", None) or {}
-            if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
-                self._had_llm_error_fallback = True
-                detail = additional_kwargs.get("error_detail")
-                reason = additional_kwargs.get("error_reason")
-                fallback_text = self._message_text(message).strip()
-                if isinstance(detail, str) and detail.strip():
-                    self._llm_error_fallback_message = detail.strip()
-                elif isinstance(reason, str) and reason.strip():
-                    self._llm_error_fallback_message = reason.strip()
-                elif fallback_text:
-                    self._llm_error_fallback_message = fallback_text[:2000]
+            self._remember_error_fallback(message)
 
             # Resolve call index
             call_index = self._llm_call_index
@@ -695,6 +696,40 @@ class RunJournal(BaseCallbackHandler):
             return messages if isinstance(messages, list) else []
         return []
 
+    def _remember_error_fallback(self, message: Any) -> bool:
+        if isinstance(message, Mapping):
+            additional_kwargs = message.get("additional_kwargs")
+            content = message.get("content")
+            fallback_text = content.strip() if isinstance(content, str) else ""
+        else:
+            additional_kwargs = getattr(message, "additional_kwargs", None)
+            fallback_text = self._message_text(message).strip() if isinstance(message, BaseMessage) else ""
+        if not (isinstance(additional_kwargs, Mapping) and additional_kwargs.get("deerflow_error_fallback") is True):
+            return False
+        self._had_llm_error_fallback = True
+        detail = additional_kwargs.get("error_detail")
+        reason = additional_kwargs.get("error_reason")
+        if isinstance(detail, str) and detail.strip():
+            self._llm_error_fallback_message = detail.strip()
+        elif isinstance(reason, str) and reason.strip():
+            self._llm_error_fallback_message = reason.strip()
+        elif fallback_text:
+            self._llm_error_fallback_message = fallback_text[:2000]
+        return True
+
+    def _reconcile_final_error_fallback(self, outputs: Any) -> None:
+        for message in reversed(self._final_output_messages(outputs)):
+            if isinstance(message, Mapping):
+                message_type = message.get("type") or message.get("role")
+            else:
+                message_type = getattr(message, "type", None)
+            if message_type in {"human", "user"}:
+                return
+            if message_type not in {"ai", "assistant"}:
+                continue
+            self._remember_error_fallback(message)
+            return
+
     def _should_reconcile_tool_message(self, message: ToolMessage) -> bool:
         if message.additional_kwargs.get("hide_from_ui") is True:
             return False
@@ -716,6 +751,27 @@ class RunJournal(BaseCallbackHandler):
                 continue
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message, caller="lead_agent")
+
+    def _reconcile_final_token_budget_message(self, outputs: Any) -> None:
+        for message in reversed(self._final_output_messages(outputs)):
+            if not isinstance(message, AIMessage):
+                continue
+            response_metadata = message.response_metadata
+            status = read_token_budget_status(
+                response_metadata.get(TOKEN_BUDGET_STATUS_KEY),
+            )
+            if status is None:
+                continue
+            self._put(
+                event_type="llm.ai.response",
+                category="message",
+                content=message.model_dump(),
+                metadata={
+                    "caller": "lead_agent",
+                    "source": "token_budget_status",
+                },
+            )
+            return
 
     def _put(self, *, event_type: str, category: str, content: str | dict = "", metadata: dict | None = None) -> None:
         self._buffer.append(

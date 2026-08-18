@@ -48,7 +48,7 @@ def _document(*lines: str) -> str:
 
 
 def test_dream_prompt_and_document_sections_are_fixed() -> None:
-    assert DREAM_PROMPT_VERSION == "dream-prompt-v4"
+    assert DREAM_PROMPT_VERSION == "dream-prompt-v5"
     assert "Use only read_memory_document and replace_memory_document." in DREAM_PROMPT
     assert "You must not create or update an account-global profile" in DREAM_PROMPT
     assert "transfer memory from another project or namespace." in DREAM_PROMPT
@@ -330,7 +330,8 @@ async def test_dream_runner_exposes_exactly_two_tools_and_returns_complete_draft
 
 
 @pytest.mark.asyncio
-async def test_dream_runner_no_replace_is_a_successful_unchanged_result() -> None:
+async def test_dream_runner_requires_explicit_replacement_for_history_batch() -> None:
+    replacement = _document("- User prefers concise Chinese.")
     model = _Model(
         AIMessage(
             content="",
@@ -344,12 +345,29 @@ async def test_dream_runner_no_replace_is_a_successful_unchanged_result() -> Non
             ],
         ),
         AIMessage(content="no change"),
+        AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "replace_memory_document",
+                    "args": {"content": replacement},
+                    "id": "replace-1",
+                    "type": "tool_call",
+                }
+            ],
+        ),
     )
 
     result = await _runner(model).run(_input())
 
-    assert result.content == EMPTY_MEMORY_DOCUMENT
-    assert result.replaced is False
+    assert result == MemoryDreamResult(content=replacement, replaced=True)
+    assert model.bound.messages[2][-1].content == (
+        "This Dream owns a frozen history batch. It must call "
+        "replace_memory_document with one complete valid document before "
+        "finishing. If every history entry is already represented, submit the "
+        "unchanged complete document explicitly; a text-only response cannot "
+        "consume history."
+    )
 
 
 @pytest.mark.asyncio

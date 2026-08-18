@@ -58,7 +58,7 @@ frontend/src/
 │   ├── assets/                  # shared asset presentation
 │   ├── admin/                   # platform administration
 │   └── ui/                      # shared primitives
-├── content/                     # product docs and blog content
+├── content/                     # product documentation content
 ├── core/
 │   ├── auth/                    # account identity and account query client
 │   ├── projects/                # project contracts and context
@@ -86,10 +86,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
   gate improves UX but does not replace scoped API authorization.
 - Project navigation groups follow issued capabilities: owner-private Memory
   remains under Work; Connections is project-admin configuration guarded by
-  `project.channels.manage`; the Agent/Skill/MCP capability workspace requires
-  `shared_assets.edit` or binding-management authority; each Project Management
-  destination requires its exact governance capability. Runner-side execution
-  reads remain available to chat/Automation and are not authoring access.
+  `project.channels.manage`; the Agent catalog and an owner's existing Builder
+  sessions require `shared_assets.read`, while starting or mutating a design
+  requires `shared_assets.edit`. Skill/MCP authoring still requires edit or
+  binding-management authority, and each Project Management destination requires
+  its exact governance capability. Runner-side execution reads remain available
+  to chat/Automation and are not authoring access.
 - Use the canonical account UUID returned by Gateway for identity and cache keys;
   never key authority by email, route slug, or display name.
 - Authentication distinguishes `authenticated`, `unauthenticated`, and
@@ -113,6 +115,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
   the new client only after both UUIDs are known.
 - Every request-capable query forwards TanStack's `AbortSignal`. Late callbacks
   from a disposed client or old generation may not update the new scope.
+- Before a Skill Builder mutation writes its exact-session cache, cancel the
+  in-flight exact-session query so an older GET cannot erase a newly admitted
+  Run or newer revision and accidentally stop polling.
 - Declare response schemas as strict Zod objects and reject unknown authority,
   owner, trace, secret, or storage fields before data reaches the UI.
 - Secret-bearing create/replace operations are imperative authenticated calls,
@@ -138,6 +143,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Thread/Run/file catalogs must page to completion with strict schemas, abort
   support, duplicate/progress checks, and a bounded page/offset limit. Never rely
   on SDK default page sizes or silently return a truncated catalog.
+- Agent Builder resume catalogs follow the same rule over the server's opaque
+  cursor. A revision `409` refreshes the authoritative session, preserves local
+  blueprint/name edits, and releases the stale idempotency entry. Session cache
+  merges are revision-monotonic, so late responses cannot overwrite a newer
+  cancelled tombstone.
 - Mutations that carry `expected_version` treat `409` as an explicit concurrent
   edit. Preserve the local draft and refresh authoritative state; never silently
   overwrite it.
@@ -150,15 +160,22 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Project Agent/Skill/MCP versions are immutable server objects. The UI authors
   through aggregate mutations and optimistic revisions; it never fabricates a
   published pointer, capability, binding, or dependency closure.
-- Agent authors save drafts; only a user with binding-management authority may
-  publish and activate them. A `409` recovery must reload both the Agent catalog
-  and complete version history, preserve the local draft, and adopt the backend's
-  live-pointer authoring base only after the returned CAS revision is newer.
+- Agent and Skill draft revisions do not move their live pointer; only a user
+  with binding-management authority may explicitly publish or activate them. An
+  Agent `409` recovery must reload both the Agent catalog and complete version
+  history, preserve the local draft, and adopt the backend's live-pointer
+  authoring base only after the returned CAS revision is newer.
 - Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are four logical
   version fields, not a filesystem editor.
 - Builder sessions are account/project/owner scoped. Candidate edits remain
   revision/checksum-bound; final confirmation is one server transaction and does
   not imply activation or binding unless the response says so.
+- An error-severity Builder conflict blocks commit until a later AI turn
+  regenerates the candidate; editing a document alone does not resolve it. Commit
+  includes `slug` only when the normalized review name differs from
+  `session.slug`, and its idempotency signature must match that request body.
+- Project Skill creation exposes exactly two user flows: AI Builder and validated
+  archive upload. Do not reintroduce a manual metadata or starter-template form.
 - System asset definitions are read-only in global admin views. Project binding
   and Credential-grant operations are separate, narrow mutations.
 - System Skill version history keeps revoked releases visible and labels them as
@@ -173,6 +190,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Model/thinking selections are preferences. Gateway returns the effective
   execution profile; UI history and status use that server result rather than
   claiming the local selection was accepted.
+- If a Thread's project Agent becomes suspended, history remains readable but
+  send, retry/regenerate, edited rerun, and human-input submission all fail
+  closed until the user re-enables the Agent or starts a new Thread with another
+  Agent.
 - Upload messages carry opaque ready-file IDs and safe metadata, not browser-made
   image data URLs. Vision admission and file integrity remain Worker authority.
 - A persisted Thread composer eagerly uploads accepted attachments on selection,

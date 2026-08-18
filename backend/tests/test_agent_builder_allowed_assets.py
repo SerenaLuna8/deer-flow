@@ -15,6 +15,8 @@ from app.shared_assets.agent_design_repository import (
     AgentDesignRepository,
 )
 from app.shared_assets.agent_design_service import (
+    AgentDesignClarificationResponse,
+    AgentDesignClarificationTurn,
     AgentDesignMessageTurn,
     AgentDesignService,
     AgentDesignStatus,
@@ -111,6 +113,13 @@ async def test_prepare_turn_injects_only_server_loaded_exact_asset_versions() ->
     class _Repository:
         session = fake_session
 
+        async def lock_in_progress_turn_operations(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[object, ...]:
+            return ()
+
         async def get_operation(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -170,6 +179,136 @@ async def test_prepare_turn_injects_only_server_loaded_exact_asset_versions() ->
             True,
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_clarification_enters_generating_before_catalog_query() -> None:
+    now = datetime.now(UTC)
+    context = _context(
+        Capability.SHARED_ASSETS_READ,
+        Capability.SHARED_ASSETS_EDIT,
+    )
+    row = AgentDesignSessionRow(
+        id=uuid.uuid4(),
+        project_id=context.project_id,
+        owner_user_id=str(context.user_id),
+        thread_id=uuid.uuid4(),
+        slug="browser-test-agent",
+        display_name="Browser Test Agent",
+        status=AgentDesignStatus.AWAITING_CLARIFICATION.value,
+        revision=3,
+        messages_json=[
+            {
+                "id": "brief-1",
+                "role": "user",
+                "content": "设计浏览器测试 Agent",
+                "created_at": now.isoformat(),
+            }
+        ],
+        progress_json=[],
+        active_clarification_json={
+            "version": 1,
+            "kind": "human_input_request",
+            "source": "agent_builder",
+            "request_id": "scope",
+            "clarification_type": "agent_design",
+            "title": "问题 1/3",
+            "question": "主要职责范围是什么？",
+            "context": "明确职责边界",
+            "input_mode": "choice_with_other",
+            "options": [
+                {
+                    "id": "scope-1",
+                    "label": "测试设计、执行与报告",
+                    "value": "测试设计、执行与报告",
+                }
+            ],
+        },
+        blueprint_json=None,
+        blueprint_checksum=None,
+        error_code=None,
+        error_message=None,
+        created_agent_id=None,
+        created_agent_version_id=None,
+        create_idempotency_key_hash="a" * 64,
+        create_request_checksum="b" * 64,
+        created_at=now,
+        updated_at=now,
+    )
+    fake_session = _TransactionSession()
+
+    class _Repository:
+        session = fake_session
+
+        async def lock_in_progress_turn_operations(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[object, ...]:
+            return ()
+
+        async def get_operation(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+        async def get(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AgentDesignSessionRow:
+            return row
+
+        async def create_operation(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            return None
+
+        async def list_allowed_assets(
+            self,
+            _context: ProjectContext,
+            *,
+            limit: int,
+        ) -> tuple[AgentDesignAllowedAssetRecord, ...]:
+            assert limit == 50
+            # A real SELECT autoflushes pending ORM changes.  The row must
+            # already satisfy ck_agent_design_sessions_clarification here.
+            assert row.status == AgentDesignStatus.GENERATING.value
+            assert row.active_clarification_json is None
+            return ()
+
+    service = AgentDesignService(
+        lambda: fake_session,  # type: ignore[arg-type]
+        generator=SimpleNamespace(),  # type: ignore[arg-type]
+        repository_factory=lambda _session: _Repository(),  # type: ignore[arg-type]
+    )
+    command = SubmitAgentDesignTurn(
+        input=AgentDesignClarificationTurn(
+            kind="clarification",
+            response=AgentDesignClarificationResponse(
+                version=1,
+                kind="human_input_response",
+                source="agent_builder",
+                request_id="scope",
+                response_kind="option",
+                option_id="scope-1",
+                value="测试设计、执行与报告",
+            ),
+        ),
+        expected_revision=3,
+        idempotency_key="clarification-turn-1",
+    )
+
+    prepared = await service._prepare_turn(  # noqa: SLF001 - transaction ordering contract
+        context,
+        row.id,
+        command,
+        operation_hash="c" * 64,
+        request_checksum="d" * 64,
+    )
+
+    assert isinstance(prepared, tuple)
+    assert prepared[1].answers == {"scope": "测试设计、执行与报告"}
 
 
 @pytest.mark.asyncio

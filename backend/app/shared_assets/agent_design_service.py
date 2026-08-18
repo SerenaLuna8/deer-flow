@@ -8,6 +8,8 @@ transaction, and the second transaction applies only the validated result.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import hashlib
 import json
 import re
@@ -29,6 +31,7 @@ from app.shared_assets.agent_design_generation import (
     DEFAULT_GENERATION_TIMEOUT_SECONDS,
     MAX_AGENT_DESIGN_CONTEXT_ASSETS,
     REQUIRED_INTERVIEW_QUESTIONS,
+    AgentDesignConflict,
     AgentDesignDraft,
     AgentDesignGenerationContext,
     AgentDesignGenerationError,
@@ -40,6 +43,7 @@ from app.shared_assets.agent_design_generation import (
     CandidateResult,
     ClarificationQuestion,
     NeedsClarificationResult,
+    contains_agent_design_secret,
 )
 from app.shared_assets.agent_design_repository import (
     AgentDesignAllowedAssetRecord,
@@ -53,6 +57,10 @@ from app.shared_assets.agent_service import (
     CreateAgent,
 )
 from app.shared_assets.errors import (
+    AgentDesignConflictUnresolved,
+    AgentDesignSecretDetected,
+    AgentDesignSessionLimitExceeded,
+    AgentDesignSlugConflict,
     AssetConflict,
     AssetForbidden,
     AssetStorageUnavailable,
@@ -66,7 +74,11 @@ from deerflow.persistence.shared_assets import (
     AgentDesignSessionRow,
 )
 
-_SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
+AGENT_DESIGN_SLUG_MIN_LENGTH = 3
+AGENT_DESIGN_SLUG_MAX_LENGTH = 63
+AGENT_DESIGN_SLUG_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*"
+MAX_INCOMPLETE_AGENT_DESIGN_SESSIONS_PER_OWNER_PROJECT = 8
+_SLUG_PATTERN = re.compile(AGENT_DESIGN_SLUG_PATTERN)
 _CAPABILITY_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 _PUBLIC_ERROR_PATTERN = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _MAX_IDEMPOTENCY_KEY_CHARS = 255
@@ -106,6 +118,10 @@ def _constraint_name(exc: BaseException) -> str | None:
     return None
 
 
+def _valid_agent_design_slug(value: str) -> bool:
+    return AGENT_DESIGN_SLUG_MIN_LENGTH <= len(value) <= AGENT_DESIGN_SLUG_MAX_LENGTH and _SLUG_PATTERN.fullmatch(value) is not None
+
+
 class AgentDesignStatus(StrEnum):
     INTERVIEWING = "interviewing"
     GENERATING = "generating"
@@ -130,6 +146,7 @@ class AgentDesignServiceErrorCode(StrEnum):
     GENERATION_INTERRUPTED = "AGENT_DESIGN_GENERATION_INTERRUPTED"
     GENERATION_UNAVAILABLE = "AGENT_DESIGN_GENERATION_UNAVAILABLE"
     INVALID_MODEL_OUTPUT = "AGENT_DESIGN_INVALID_MODEL_OUTPUT"
+    SESSION_CANCELLED = "AGENT_DESIGN_SESSION_CANCELLED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +251,7 @@ class CommitAgentDesignSession:
     expected_revision: int
     expected_blueprint_checksum: str
     idempotency_key: str
+    slug: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,6 +272,8 @@ class AgentDesignSessionView:
     revision: int
     blueprint: AgentDesignBlueprint | None
     blueprint_checksum: str | None
+    assumptions: tuple[str, ...]
+    conflicts: tuple[AgentDesignConflict, ...]
     messages: tuple[AgentDesignMessage, ...]
     active_clarification: AgentDesignClarificationRequest | None
     active_clarifications: tuple[AgentDesignClarificationRequest, ...]
@@ -273,6 +293,12 @@ class AgentDesignSessionSummary:
     status: AgentDesignStatus
     revision: int
     updated_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class AgentDesignSessionPage:
+    items: tuple[AgentDesignSessionSummary, ...]
+    next_cursor: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,14 +353,27 @@ class AgentDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    await repository.lock_session_create_scope(context)
                     existing = await repository.get_by_create_idempotency(
                         context,
                         idempotency_hash,
-                        for_update=True,
+                        for_update=False,
                     )
                     if existing is not None:
                         if existing.create_request_checksum != request_checksum:
                             raise AssetConflict(context.request_id)
+                        if self._is_stale_generating(existing, now=now):
+                            await repository.lock_in_progress_turn_operations(
+                                context,
+                                existing.id,
+                            )
+                            existing = await repository.get_by_create_idempotency(
+                                context,
+                                idempotency_hash,
+                                for_update=True,
+                            )
+                            if existing is None or existing.create_request_checksum != request_checksum:
+                                raise AssetConflict(context.request_id)
                         await self._recover_stale_generating(
                             repository,
                             context,
@@ -342,6 +381,14 @@ class AgentDesignService:
                             now=now,
                         )
                         return self._session_view(existing)
+                    if await repository.count_incomplete(context) >= MAX_INCOMPLETE_AGENT_DESIGN_SESSIONS_PER_OWNER_PROJECT:
+                        raise AgentDesignSessionLimitExceeded(context.request_id)
+                    if await repository.project_agent_slug_exists(
+                        context,
+                        command.slug,
+                        for_update=True,
+                    ):
+                        raise AgentDesignSlugConflict(context.request_id)
                     row = AgentDesignSessionRow(
                         id=uuid.uuid4(),
                         project_id=context.project_id,
@@ -376,7 +423,10 @@ class AgentDesignService:
         except SharedAssetError:
             raise
         except IntegrityError as exc:
-            if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
+            constraint = _constraint_name(exc)
+            if constraint == "uq_agents_project_slug":
+                raise AgentDesignSlugConflict(context.request_id) from None
+            if constraint in _CONFLICT_CONSTRAINTS:
                 raise AssetConflict(context.request_id) from None
             raise AssetStorageUnavailable(context.request_id) from None
         except DBAPIError:
@@ -387,21 +437,38 @@ class AgentDesignService:
         context: ProjectContext,
         *,
         limit: int = 20,
-    ) -> tuple[AgentDesignSessionSummary, ...]:
+        cursor: str | None = None,
+    ) -> AgentDesignSessionPage:
         self._require_context(context)
         self._require_capability(context, Capability.SHARED_ASSETS_READ)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             raise AssetValidationFailed(context.request_id)
+        before_created_at, before_id = self._decode_session_cursor(
+            context,
+            cursor,
+        )
         try:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
-                    rows = await repository.list_incomplete(context, limit=limit)
+                    rows = await repository.list_incomplete(
+                        context,
+                        limit=limit + 1,
+                        before_created_at=before_created_at,
+                        before_id=before_id,
+                    )
+                    selected = rows[:limit]
+                    next_position = (selected[-1].created_at, selected[-1].id) if len(rows) > limit and selected else None
                     now = self._now()
+                    can_recover = Capability.SHARED_ASSETS_EDIT in context.capabilities
                     resolved: list[AgentDesignSessionSummary] = []
-                    for listed in rows:
+                    for listed in selected:
                         row = listed
-                        if self._is_stale_generating(row, now=now):
+                        if can_recover and self._is_stale_generating(row, now=now):
+                            await repository.lock_in_progress_turn_operations(
+                                context,
+                                row.id,
+                            )
                             row = await repository.get(
                                 context,
                                 row.id,
@@ -413,8 +480,19 @@ class AgentDesignService:
                                 row,
                                 now=now,
                             )
+                        if row.status in (
+                            AgentDesignStatus.COMPLETED.value,
+                            AgentDesignStatus.CANCELLED.value,
+                        ):
+                            continue
                         resolved.append(self._session_summary(row))
-                    return tuple(resolved)
+                    next_cursor = None
+                    if next_position is not None:
+                        next_cursor = self._encode_session_cursor(*next_position)
+                    return AgentDesignSessionPage(
+                        items=tuple(resolved),
+                        next_cursor=next_cursor,
+                    )
         except SharedAssetError:
             raise
         except DBAPIError:
@@ -435,14 +513,27 @@ class AgentDesignService:
                     row = await repository.get(
                         context,
                         session_id,
-                        for_update=True,
+                        for_update=False,
                     )
-                    await self._recover_stale_generating(
-                        repository,
-                        context,
-                        row,
-                        now=self._now(),
-                    )
+                    now = self._now()
+                    can_recover = Capability.SHARED_ASSETS_EDIT in context.capabilities
+                    if can_recover and self._is_stale_generating(row, now=now):
+                        await repository.lock_in_progress_turn_operations(
+                            context,
+                            session_id,
+                        )
+                        row = await repository.get(
+                            context,
+                            session_id,
+                            for_update=True,
+                        )
+                    if can_recover:
+                        await self._recover_stale_generating(
+                            repository,
+                            context,
+                            row,
+                            now=now,
+                        )
                     return self._session_view(row)
         except SharedAssetError:
             raise
@@ -522,13 +613,14 @@ class AgentDesignService:
         self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
         session_id = self._validate_uuid(context, session_id)
         operation_hash = self._idempotency_hash(command.idempotency_key)
-        request_checksum = self._request_checksum(
-            {
-                "session_id": session_id,
-                "expected_revision": command.expected_revision,
-                "expected_blueprint_checksum": command.expected_blueprint_checksum,
-            }
-        )
+        checksum_payload: dict[str, object] = {
+            "session_id": session_id,
+            "expected_revision": command.expected_revision,
+            "expected_blueprint_checksum": command.expected_blueprint_checksum,
+        }
+        if command.slug is not None:
+            checksum_payload["slug"] = command.slug
+        request_checksum = self._request_checksum(checksum_payload)
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -560,7 +652,7 @@ class AgentDesignService:
                         if operation.status == "in_progress":
                             raise AssetConflict(context.request_id)
                     if row.status == AgentDesignStatus.COMPLETED.value:
-                        if row.blueprint_checksum != command.expected_blueprint_checksum:
+                        if row.blueprint_checksum != command.expected_blueprint_checksum or (command.slug is not None and command.slug != row.slug):
                             raise AssetConflict(context.request_id)
                         return await self._committed_result(
                             session,
@@ -574,6 +666,22 @@ class AgentDesignService:
                     )
                     if row.status != AgentDesignStatus.PROPOSAL_READY.value or row.blueprint_json is None or row.blueprint_checksum != command.expected_blueprint_checksum:
                         raise AssetConflict(context.request_id)
+                    if self._has_blocking_conflicts(row.blueprint_json):
+                        raise AgentDesignConflictUnresolved(context.request_id)
+                    effective_slug = command.slug or row.slug
+                    if not _valid_agent_design_slug(effective_slug):
+                        raise AssetValidationFailed(context.request_id)
+                    if contains_agent_design_secret(effective_slug):
+                        raise AgentDesignSecretDetected(context.request_id)
+                    blueprint = self._blueprint_from_json(row.blueprint_json)
+                    if contains_agent_design_secret(self._jsonable(blueprint)):
+                        raise AgentDesignSecretDetected(context.request_id)
+                    if await repository.project_agent_slug_exists(
+                        context,
+                        effective_slug,
+                        for_update=True,
+                    ):
+                        raise AgentDesignSlugConflict(context.request_id)
                     if operation is None:
                         operation = self._new_operation(
                             context,
@@ -585,7 +693,6 @@ class AgentDesignService:
                         await repository.create_operation(context, operation)
                     else:
                         self._reset_operation(operation)
-                    blueprint = self._blueprint_from_json(row.blueprint_json)
                     row.status = AgentDesignStatus.COMMITTING.value
                     row.error_code = None
                     row.error_message = None
@@ -594,12 +701,14 @@ class AgentDesignService:
                         session,
                         context,
                         CreateAgent(
-                            slug=row.slug,
-                            display_name=row.display_name,
+                            slug=effective_slug,
+                            display_name=effective_slug,
                         ),
                         self._agent_payload(blueprint),
                     )
                     row.status = AgentDesignStatus.COMPLETED.value
+                    row.slug = created.asset.slug
+                    row.display_name = created.asset.display_name
                     row.created_agent_id = created.asset.id
                     row.created_agent_version_id = created.version.id
                     row.revision += 1
@@ -616,7 +725,10 @@ class AgentDesignService:
         except SharedAssetError:
             raise
         except IntegrityError as exc:
-            if _constraint_name(exc) in _CONFLICT_CONSTRAINTS:
+            constraint = _constraint_name(exc)
+            if constraint == "uq_agents_project_slug":
+                raise AgentDesignSlugConflict(context.request_id) from None
+            if constraint in _CONFLICT_CONSTRAINTS:
                 raise AssetConflict(context.request_id) from None
             raise AssetStorageUnavailable(context.request_id) from None
         except DBAPIError:
@@ -642,6 +754,10 @@ class AgentDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    active_turn_operations = await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="cancel",
@@ -665,7 +781,7 @@ class AgentDesignService:
                         if operation.status == "in_progress":
                             raise AssetConflict(context.request_id)
                     if row.status == AgentDesignStatus.CANCELLED.value:
-                        return self._session_view(row)
+                        raise AssetConflict(context.request_id)
                     if row.status == AgentDesignStatus.COMPLETED.value:
                         raise AssetConflict(context.request_id)
                     self._require_expected_revision(
@@ -684,11 +800,12 @@ class AgentDesignService:
                         await repository.create_operation(context, operation)
                     else:
                         self._reset_operation(operation)
-                    row.status = AgentDesignStatus.CANCELLED.value
-                    row.active_clarification_json = None
-                    row.error_code = None
-                    row.error_message = None
+                    self._clear_cancelled_session(row)
                     row.revision += 1
+                    self._terminalize_cancelled_turn_operations(
+                        active_turn_operations,
+                        result_revision=row.revision,
+                    )
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     operation.public_error_code = None
@@ -715,6 +832,32 @@ class AgentDesignService:
         ).encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
+    @staticmethod
+    def _clear_cancelled_session(row: AgentDesignSessionRow) -> None:
+        """Retain an idempotency tombstone while deleting private draft content."""
+
+        row.slug = f"deleted-{row.id.hex}"
+        row.display_name = "Deleted Agent design"
+        row.status = AgentDesignStatus.CANCELLED.value
+        row.messages_json = []
+        row.progress_json = []
+        row.active_clarification_json = None
+        row.blueprint_json = None
+        row.blueprint_checksum = None
+        row.error_code = None
+        row.error_message = None
+
+    @staticmethod
+    def _terminalize_cancelled_turn_operations(
+        operations: tuple[AgentDesignOperationRow, ...],
+        *,
+        result_revision: int,
+    ) -> None:
+        for operation in operations:
+            operation.status = "failed"
+            operation.result_revision = result_revision
+            operation.public_error_code = AgentDesignServiceErrorCode.SESSION_CANCELLED.value
+
     async def _prepare_turn(
         self,
         context: ProjectContext,
@@ -735,6 +878,10 @@ class AgentDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="turn",
@@ -805,11 +952,23 @@ class AgentDesignService:
                     if isinstance(command.input, AgentDesignBlueprintTurn):
                         if retry_existing and operation.status == "completed":
                             return self._session_view(row)
+                        current_blueprint = self._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else None
                         blueprint = self._validate_blueprint(
                             context,
                             command.input.blueprint,
                         )
-                        row.blueprint_json = self._blueprint_json(blueprint)
+                        assumptions, conflicts = self._candidate_metadata_from_json(
+                            row.blueprint_json,
+                        )
+                        row.blueprint_json = self._blueprint_json(
+                            blueprint,
+                            assumptions=assumptions,
+                            conflicts=self._remaining_conflicts_after_blueprint_update(
+                                current_blueprint,
+                                blueprint,
+                                conflicts,
+                            ),
+                        )
                         row.blueprint_checksum = self.blueprint_checksum(blueprint)
                         row.status = AgentDesignStatus.PROPOSAL_READY.value
                         row.active_clarification_json = None
@@ -857,6 +1016,16 @@ class AgentDesignService:
                         blueprint,
                         command.input,
                     )
+                    # Keep the ORM row valid before the catalog SELECT below.
+                    # SQLAlchemy may autoflush pending clarification changes
+                    # before executing that query.
+                    row.status = AgentDesignStatus.GENERATING.value
+                    row.active_clarification_json = None
+                    row.error_code = None
+                    row.error_message = None
+                    row.progress_json = self._progress_json(AgentDesignProgressStatus.RUNNING)
+                    row.revision += 1
+                    self._reset_operation(operation)
                     allowed_assets = await self._generation_allowed_assets(
                         repository,
                         context,
@@ -865,13 +1034,6 @@ class AgentDesignService:
                         allowed_assets=allowed_assets,
                         allowed_capabilities=blueprint.tool_groups,
                     )
-                    row.status = AgentDesignStatus.GENERATING.value
-                    row.active_clarification_json = None
-                    row.error_code = None
-                    row.error_message = None
-                    row.progress_json = self._progress_json(AgentDesignProgressStatus.RUNNING)
-                    row.revision += 1
-                    self._reset_operation(operation)
                     await session.flush()
                     return (
                         row.revision,
@@ -939,6 +1101,10 @@ class AgentDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="turn",
@@ -981,7 +1147,11 @@ class AgentDesignService:
                             current,
                             result,
                         )
-                        row.blueprint_json = self._blueprint_json(blueprint)
+                        row.blueprint_json = self._blueprint_json(
+                            blueprint,
+                            assumptions=result.assumptions,
+                            conflicts=result.conflicts,
+                        )
                         row.blueprint_checksum = self.blueprint_checksum(blueprint)
                         row.status = AgentDesignStatus.PROPOSAL_READY.value
                         row.active_clarification_json = None
@@ -1026,6 +1196,10 @@ class AgentDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="turn",
@@ -1143,7 +1317,14 @@ class AgentDesignService:
             if row.active_clarification_json is not None:
                 raise AssetConflict(context.request_id)
             content = turn.message
-            messages = [self._message_json("user", content, now=self._now())]
+            messages = [
+                self._message_json(
+                    "user",
+                    content,
+                    now=self._now(),
+                    authoritative_brief=(row.blueprint_json is None and not self._clarification_answers(row)),
+                )
+            ]
             ready_to_generate = True
         elif isinstance(turn, AgentDesignClarificationTurn):
             active = row.active_clarification_json
@@ -1231,6 +1412,7 @@ class AgentDesignService:
         answers = cls._clarification_answers(row)
         interview_history = cls._clarification_history(row)
         phase = "composition" if len(interview_history) >= REQUIRED_INTERVIEW_QUESTIONS else "discovery"
+        brief = blueprint.description
         if isinstance(turn, AgentDesignClarificationTurn):
             if not answers:
                 raise AssetValidationFailed("unknown")
@@ -1247,9 +1429,10 @@ class AgentDesignService:
             answers["retry_request"] = turn.message
         else:
             answers = {}
+            brief = turn.message
         return AgentDesignGenerationRequest(
             agent_name=row.display_name,
-            brief=blueprint.description,
+            brief=brief,
             answers=answers,
             interview_history=interview_history,
             current_draft=current,
@@ -1286,8 +1469,13 @@ class AgentDesignService:
 
     @staticmethod
     def _first_user_message(row: AgentDesignSessionRow) -> str:
-        for message in row.messages_json:
-            if message.get("role") == "user":
+        for message in reversed(row.messages_json):
+            if message.get("role") == "user" and message.get("authoritative_brief") is True:
+                content = message.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        for message in reversed(row.messages_json):
+            if message.get("role") == "user" and "clarification_request_id" not in message:
                 content = message.get("content")
                 if isinstance(content, str) and content.strip():
                     return content.strip()
@@ -1317,8 +1505,10 @@ class AgentDesignService:
             context,
             command.idempotency_key,
         )
-        if _SLUG_PATTERN.fullmatch(slug) is None or not display_name or len(display_name) > 120:
+        if not _valid_agent_design_slug(slug) or not display_name or len(display_name) > 120:
             raise AssetValidationFailed(context.request_id)
+        if contains_agent_design_secret((slug, display_name)):
+            raise AgentDesignSecretDetected(context.request_id)
         return CreateAgentDesignSession(
             slug=slug,
             display_name=display_name,
@@ -1402,6 +1592,8 @@ class AgentDesignService:
             )
         else:
             raise AssetValidationFailed(context.request_id)
+        if contains_agent_design_secret(cls._jsonable(normalized)):
+            raise AgentDesignSecretDetected(context.request_id)
         return SubmitAgentDesignTurn(
             input=normalized,
             expected_revision=command.expected_revision,
@@ -1427,6 +1619,15 @@ class AgentDesignService:
             is None
         ):
             raise AssetValidationFailed(context.request_id)
+        slug = command.slug
+        if slug is not None:
+            if not isinstance(slug, str):
+                raise AssetValidationFailed(context.request_id)
+            slug = slug.strip()
+            if not _valid_agent_design_slug(slug):
+                raise AssetValidationFailed(context.request_id)
+            if contains_agent_design_secret(slug):
+                raise AgentDesignSecretDetected(context.request_id)
         return CommitAgentDesignSession(
             expected_revision=command.expected_revision,
             expected_blueprint_checksum=command.expected_blueprint_checksum,
@@ -1434,6 +1635,7 @@ class AgentDesignService:
                 context,
                 command.idempotency_key,
             ),
+            slug=slug,
         )
 
     @classmethod
@@ -1695,6 +1897,55 @@ class AgentDesignService:
         return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
     @staticmethod
+    def _encode_session_cursor(
+        created_at: datetime,
+        session_id: uuid.UUID,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "created_at": created_at.isoformat(),
+                "id": str(session_id),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    @staticmethod
+    def _decode_session_cursor(
+        context: ProjectContext,
+        cursor: str | None,
+    ) -> tuple[datetime | None, uuid.UUID | None]:
+        if cursor is None:
+            return None, None
+        if not isinstance(cursor, str) or not 1 <= len(cursor) <= 256:
+            raise AssetValidationFailed(context.request_id)
+        try:
+            padding = b"=" * (-len(cursor) % 4)
+            raw = base64.b64decode(
+                cursor.encode("ascii") + padding,
+                altchars=b"-_",
+                validate=True,
+            )
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise ValueError
+            created_at = datetime.fromisoformat(payload["created_at"])
+            session_id = uuid.UUID(payload["id"])
+            if created_at.tzinfo is None:
+                raise ValueError
+        except (
+            UnicodeEncodeError,
+            binascii.Error,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ):
+            raise AssetValidationFailed(context.request_id) from None
+        return created_at, session_id
+
+    @staticmethod
     def _request_checksum(value: object) -> str:
         canonical = json.dumps(
             AgentDesignService._jsonable(value),
@@ -1735,6 +1986,7 @@ class AgentDesignService:
         now: datetime,
         clarification_request_id: str | None = None,
         clarification_question: str | None = None,
+        authoritative_brief: bool = False,
     ) -> dict[str, object]:
         message: dict[str, object] = {
             "id": str(uuid.uuid4()),
@@ -1746,6 +1998,8 @@ class AgentDesignService:
             message["clarification_request_id"] = clarification_request_id
         if clarification_question is not None:
             message["clarification_question"] = clarification_question
+        if authoritative_brief:
+            message["authoritative_brief"] = True
         return message
 
     @staticmethod
@@ -1769,6 +2023,9 @@ class AgentDesignService:
     @staticmethod
     def _blueprint_json(
         blueprint: AgentDesignBlueprint,
+        *,
+        assumptions: tuple[str, ...] = (),
+        conflicts: tuple[AgentDesignConflict, ...] = (),
     ) -> dict[str, object]:
         document: dict[str, object] = {
             "description": blueprint.description,
@@ -1783,7 +2040,65 @@ class AgentDesignService:
         }
         if not blueprint.model_settings.is_empty:
             document["model_settings"] = blueprint.model_settings.model_dump(exclude_none=True)
+        if assumptions:
+            document["assumptions"] = list(assumptions)
+        if conflicts:
+            document["conflicts"] = [conflict.model_dump(mode="json") for conflict in conflicts]
         return document
+
+    @staticmethod
+    def _candidate_metadata_from_json(
+        raw: Mapping[str, object] | None,
+    ) -> tuple[tuple[str, ...], tuple[AgentDesignConflict, ...]]:
+        if raw is None:
+            return (), ()
+        assumptions_raw = raw.get("assumptions", [])
+        conflicts_raw = raw.get("conflicts", [])
+        if not isinstance(assumptions_raw, list) or not isinstance(
+            conflicts_raw,
+            list,
+        ):
+            raise AssetValidationFailed("unknown")
+        assumptions: list[str] = []
+        try:
+            for item in assumptions_raw:
+                if not isinstance(item, str):
+                    raise ValueError
+                value = item.strip()
+                if not value or len(value) > 500:
+                    raise ValueError
+                assumptions.append(value)
+            conflicts = tuple(
+                AgentDesignConflict.model_validate_json(
+                    json.dumps(item, ensure_ascii=False),
+                    strict=True,
+                )
+                for item in conflicts_raw
+            )
+        except (TypeError, ValueError, ValidationError):
+            raise AssetValidationFailed("unknown") from None
+        if len(assumptions) > 12 or len(conflicts) > 12:
+            raise AssetValidationFailed("unknown")
+        return tuple(assumptions), conflicts
+
+    @classmethod
+    def _has_blocking_conflicts(
+        cls,
+        raw: Mapping[str, object] | None,
+    ) -> bool:
+        _, conflicts = cls._candidate_metadata_from_json(raw)
+        return any(conflict.severity == "error" for conflict in conflicts)
+
+    @staticmethod
+    def _remaining_conflicts_after_blueprint_update(
+        current: AgentDesignBlueprint | None,
+        updated: AgentDesignBlueprint,
+        conflicts: tuple[AgentDesignConflict, ...],
+    ) -> tuple[AgentDesignConflict, ...]:
+        """Preserve findings until a newly generated candidate replaces them."""
+
+        del current, updated
+        return conflicts
 
     @staticmethod
     def _blueprint_from_json(
@@ -1960,6 +2275,9 @@ class AgentDesignService:
         row: AgentDesignSessionRow,
     ) -> AgentDesignSessionView:
         blueprint = AgentDesignService._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else None
+        assumptions, conflicts = AgentDesignService._candidate_metadata_from_json(
+            row.blueprint_json,
+        )
         messages = tuple(
             AgentDesignMessage(
                 id=str(item["id"]),
@@ -1994,6 +2312,8 @@ class AgentDesignService:
             revision=row.revision,
             blueprint=blueprint,
             blueprint_checksum=row.blueprint_checksum,
+            assumptions=assumptions,
+            conflicts=conflicts,
             messages=messages,
             active_clarification=active,
             active_clarifications=active_clarifications,
@@ -2054,9 +2374,14 @@ __all__ = [
     "AgentDesignProgressStatus",
     "AgentDesignService",
     "AgentDesignServiceErrorCode",
+    "AgentDesignSessionPage",
     "AgentDesignSessionSummary",
     "AgentDesignSessionView",
     "AgentDesignStatus",
+    "AGENT_DESIGN_SLUG_MAX_LENGTH",
+    "AGENT_DESIGN_SLUG_MIN_LENGTH",
+    "AGENT_DESIGN_SLUG_PATTERN",
+    "MAX_INCOMPLETE_AGENT_DESIGN_SESSIONS_PER_OWNER_PROJECT",
     "CancelAgentDesignSession",
     "CommitAgentDesignSession",
     "CreateAgentDesignSession",

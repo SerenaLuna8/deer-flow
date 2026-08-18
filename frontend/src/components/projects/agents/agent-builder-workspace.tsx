@@ -51,11 +51,15 @@ import {
 import {
   AgentBuilderApiError,
   agentBuilderCanAuthor,
+  agentBuilderCancelActionDisabled,
   agentBuilderCanComplete,
   agentBuilderComposerDisabled,
   agentBuilderSemanticallyEqual,
   agentBuilderSemanticSignature,
+  agentBuilderSlugErrorCode,
   createAgentBuilderIdempotencyRegistry,
+  normalizeAgentBuilderSlug,
+  prepareAgentBuilderCancelSession,
   useAgentBuilderSession,
   useCancelAgentBuilderSession,
   useCommitAgentBuilderSession,
@@ -68,6 +72,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import type { HumanInputResponse } from "@/core/messages/human-input";
 import { useModels } from "@/core/models/hooks";
+import { resolveModelDisplayName } from "@/core/models/presentation";
 import type { Model } from "@/core/models/types";
 import { SafeStreamdown } from "@/core/streamdown/components";
 import { isIMEComposing } from "@/lib/ime";
@@ -121,9 +126,58 @@ function sameBlueprint(
   return agentBuilderSemanticallyEqual(left, right);
 }
 
+export function rebaseAgentBuilderBlueprint(
+  localDraft: AgentBuilderBlueprint | null,
+  serverBlueprint: AgentBuilderBlueprint,
+  preserveLocalDraft: boolean,
+): {
+  baseline: AgentBuilderBlueprint;
+  draft: AgentBuilderBlueprint;
+} {
+  return {
+    baseline: serverBlueprint,
+    draft: preserveLocalDraft && localDraft ? localDraft : serverBlueprint,
+  };
+}
+
+export function agentBuilderCommitSlugFields(
+  normalizedSlug: string,
+  sessionSlug: string,
+): { slug?: string } {
+  return normalizedSlug === sessionSlug ? {} : { slug: normalizedSlug };
+}
+
+export function rebaseAgentBuilderName(
+  localDraft: string | null,
+  serverSlug: string,
+  preserveLocalDraft: boolean,
+): { baseline: string; draft: string } {
+  return {
+    baseline: serverSlug,
+    draft: preserveLocalDraft && localDraft !== null ? localDraft : serverSlug,
+  };
+}
+
+export async function recoverAgentBuilderConflict(
+  error: unknown,
+  releaseStaleCommand: () => void,
+  refetchSession: () => Promise<unknown>,
+): Promise<boolean> {
+  if (
+    !(error instanceof AgentBuilderApiError) ||
+    error.code !== "AGENT_BUILDER_CONFLICT"
+  ) {
+    return false;
+  }
+  releaseStaleCommand();
+  await refetchSession();
+  return true;
+}
+
 export async function submitAgentBuilderClarificationMutation(
   operation: () => Promise<unknown>,
   onResolved: () => void = () => undefined,
+  onRejected: (error: unknown) => void | Promise<void> = () => undefined,
 ): Promise<boolean> {
   try {
     const response = await operation();
@@ -140,7 +194,8 @@ export async function submitAgentBuilderClarificationMutation(
     }
     onResolved();
     return true;
-  } catch {
+  } catch (error) {
+    await onRejected(error);
     return false;
   }
 }
@@ -176,6 +231,9 @@ function AgentBuilderMessageBubble({
 export function AgentBuilderConversationView({
   session,
   composerText,
+  agentName = session.slug,
+  agentSlug = session.slug,
+  agentSlugError = null,
   pendingUserMessage = null,
   canAuthor,
   mutationPending,
@@ -201,6 +259,7 @@ export function AgentBuilderConversationView({
   onSelectedFieldChange,
   onDisplayModeChange,
   onBlueprintChange,
+  onAgentNameChange = () => undefined,
   onBlueprintEdit,
   onBlueprintSave,
   onBlueprintDiscard,
@@ -208,6 +267,9 @@ export function AgentBuilderConversationView({
 }: {
   session: AgentBuilderSession;
   composerText: string;
+  agentName?: string;
+  agentSlug?: string;
+  agentSlugError?: string | null;
   pendingUserMessage?: string | null;
   canAuthor: boolean;
   mutationPending: boolean;
@@ -235,6 +297,7 @@ export function AgentBuilderConversationView({
   onSelectedFieldChange: (field: AgentInstructionField) => void;
   onDisplayModeChange: (mode: "source" | "preview") => void;
   onBlueprintChange: (blueprint: AgentBuilderBlueprint) => void;
+  onAgentNameChange?: (value: string) => void;
   onBlueprintEdit: () => void;
   onBlueprintSave: () => void;
   onBlueprintDiscard: () => void;
@@ -347,7 +410,14 @@ export function AgentBuilderConversationView({
             {blueprintDraft ? (
               <AgentBuilderBlueprintReview
                 blueprint={blueprintDraft}
+                agentName={agentName}
+                agentSlug={agentSlug}
+                agentSlugError={agentSlugError}
                 models={models}
+                assumptions={session.assumptions}
+                conflicts={session.conflicts}
+                modelsLoading={modelsLoading}
+                modelsError={modelsError}
                 canAuthor={canAuthor}
                 editing={blueprintEditing}
                 pending={mutationPending}
@@ -362,6 +432,7 @@ export function AgentBuilderConversationView({
                 onSelectedFieldChange={onSelectedFieldChange}
                 onDisplayModeChange={onDisplayModeChange}
                 onBlueprintChange={onBlueprintChange}
+                onAgentNameChange={onAgentNameChange}
                 onEdit={onBlueprintEdit}
                 onSave={onBlueprintSave}
                 onDiscard={onBlueprintDiscard}
@@ -525,8 +596,8 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const project = useCurrentProject();
   const router = useRouter();
   const accountId = user?.id ?? "";
+  const canAuthor = agentBuilderCanAuthor(project.capabilities);
   const modelsQuery = useModels({ enabled: Boolean(user) });
-  const sessionQuery = useAgentBuilderSession(accountId, project.id, sessionId);
   const submitTurn = useSubmitAgentBuilderTurn(
     accountId,
     project.id,
@@ -534,6 +605,15 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   );
   const commit = useCommitAgentBuilderSession(accountId, project.id, sessionId);
   const cancel = useCancelAgentBuilderSession(accountId, project.id, sessionId);
+  const sessionQuery = useAgentBuilderSession(
+    accountId,
+    project.id,
+    sessionId,
+    {
+      canAuthor,
+      pollWhileRequestPending: submitTurn.isPending || commit.isPending,
+    },
+  );
   const [composerText, setComposerText] = useState("");
   const [selectedGenerationModelName, setSelectedGenerationModelName] =
     useState<string | null>(null);
@@ -541,6 +621,10 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     useState<AgentBuilderBlueprint | null>(null);
   const [blueprintDraft, setBlueprintDraft] =
     useState<AgentBuilderBlueprint | null>(null);
+  const [agentSlugBaseline, setAgentSlugBaseline] = useState<string | null>(
+    null,
+  );
+  const [agentNameDraft, setAgentNameDraft] = useState<string | null>(null);
   const [blueprintEditing, setBlueprintEditing] = useState(false);
   const [selectedField, setSelectedField] = useState<AgentInstructionField>(
     "agents_instructions",
@@ -549,6 +633,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     "preview",
   );
   const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelPreparing, setCancelPreparing] = useState(false);
   const [pendingLeaveHref, setPendingLeaveHref] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [idempotency] = useState(() => createAgentBuilderIdempotencyRegistry());
@@ -569,14 +654,44 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     session?.revision === submitTurn.variables.expected_revision
       ? submitTurn.variables.input.message
       : null;
-  const canAuthor = agentBuilderCanAuthor(project.capabilities);
   const blueprintDirty = useMemo(
     () => !sameBlueprint(blueprintBaseline, blueprintDraft),
     [blueprintBaseline, blueprintDraft],
   );
+  const effectiveAgentName = agentNameDraft ?? session?.slug ?? "";
+  const normalizedAgentSlug = normalizeAgentBuilderSlug(effectiveAgentName);
+  const agentSlugDirty =
+    agentSlugBaseline !== null && normalizedAgentSlug !== agentSlugBaseline;
+  const agentSlugValidationError = (() => {
+    switch (agentBuilderSlugErrorCode(normalizedAgentSlug)) {
+      case "too-short":
+        return t.agents.builder.start.nameTooShort;
+      case "too-long":
+        return t.agents.builder.start.nameTooLong;
+      case "invalid":
+        return t.agents.builder.start.nameInvalid;
+      default:
+        return null;
+    }
+  })();
   const mutationPending =
-    submitTurn.isPending || commit.isPending || cancel.isPending;
+    submitTurn.isPending ||
+    commit.isPending ||
+    cancel.isPending ||
+    cancelPreparing;
   const effectiveBlueprint = blueprintDraft ?? session?.blueprint ?? null;
+  const blueprintModelAvailable = Boolean(
+    effectiveBlueprint &&
+    !modelsQuery.isLoading &&
+    !modelsQuery.error &&
+    resolveModelDisplayName(effectiveBlueprint.model_ref, modelsQuery.models),
+  );
+  const cancelActionDisabled = agentBuilderCancelActionDisabled(session, {
+    generationPending: submitTurn.isPending,
+    commitPending: commit.isPending,
+    cancelPending: cancel.isPending,
+    cancelPreparing,
+  });
   const mcpDependencyRuntime = useMcpDependencyRuntime({
     accountId,
     projectId: project.id,
@@ -585,10 +700,26 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   });
 
   useEffect(() => {
-    if (!session?.blueprint || blueprintEditing || blueprintDirty) return;
-    setBlueprintBaseline(session.blueprint);
-    setBlueprintDraft(session.blueprint);
-  }, [blueprintDirty, blueprintEditing, session?.blueprint]);
+    if (!session?.blueprint) return;
+    const rebased = rebaseAgentBuilderBlueprint(
+      blueprintDraft,
+      session.blueprint,
+      blueprintEditing || blueprintDirty,
+    );
+    setBlueprintBaseline(rebased.baseline);
+    setBlueprintDraft(rebased.draft);
+  }, [blueprintDirty, blueprintDraft, blueprintEditing, session?.blueprint]);
+
+  useEffect(() => {
+    if (!session) return;
+    const rebased = rebaseAgentBuilderName(
+      agentNameDraft,
+      session.slug,
+      agentSlugDirty,
+    );
+    setAgentSlugBaseline(rebased.baseline);
+    setAgentNameDraft(rebased.draft);
+  }, [agentNameDraft, agentSlugDirty, session, session?.slug]);
 
   useEffect(() => {
     if (!session) return;
@@ -608,7 +739,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   ]);
 
   useEffect(() => {
-    if (!blueprintDirty) return;
+    if (!blueprintDirty && !agentSlugDirty) return;
     const preventDirtyUnload = (event: BeforeUnloadEvent) => {
       if (allowLeaveRef.current) return;
       event.preventDefault();
@@ -616,10 +747,10 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     };
     window.addEventListener("beforeunload", preventDirtyUnload);
     return () => window.removeEventListener("beforeunload", preventDirtyUnload);
-  }, [blueprintDirty]);
+  }, [agentSlugDirty, blueprintDirty]);
 
   useEffect(() => {
-    if (!blueprintDirty) return;
+    if (!blueprintDirty && !agentSlugDirty) return;
     const preventDirtyNavigation = (event: MouseEvent) => {
       if (
         allowLeaveRef.current ||
@@ -651,7 +782,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     document.addEventListener("click", preventDirtyNavigation, true);
     return () =>
       document.removeEventListener("click", preventDirtyNavigation, true);
-  }, [blueprintDirty]);
+  }, [agentSlugDirty, blueprintDirty]);
 
   function resetErrors() {
     setLocalError(null);
@@ -694,8 +825,13 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
         }
         idempotency.complete("message-turn", signature);
       },
-      onError: () => {
+      onError: (error) => {
         setComposerText((current) => current || message);
+        void recoverAgentBuilderConflict(
+          error,
+          () => idempotency.complete("message-turn", signature),
+          () => sessionQuery.refetch(),
+        ).catch(() => undefined);
       },
     });
   }
@@ -734,6 +870,14 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       () => {
         idempotency.complete("clarification-turn", signature);
       },
+      (error) =>
+        recoverAgentBuilderConflict(
+          error,
+          () => idempotency.complete("clarification-turn", signature),
+          () => sessionQuery.refetch(),
+        )
+          .then(() => undefined)
+          .catch(() => undefined),
     );
   }
 
@@ -777,6 +921,13 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
         setBlueprintEditing(false);
         setDisplayMode("preview");
       },
+      onError: (error) => {
+        void recoverAgentBuilderConflict(
+          error,
+          () => idempotency.complete("blueprint-turn", signature),
+          () => sessionQuery.refetch(),
+        ).catch(() => undefined);
+      },
     });
   }
 
@@ -790,15 +941,25 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       blueprintDirty ||
       mcpDependencyRuntime.isLoading ||
       Boolean(mcpDependencyRuntime.blockReason) ||
+      !blueprintModelAvailable ||
+      Boolean(agentSlugValidationError) ||
+      !normalizedAgentSlug ||
+      session.conflicts.some((conflict) => conflict.severity === "error") ||
       !agentBuilderCanComplete(session)
     ) {
       return;
     }
     resetErrors();
+    const slugFields = agentBuilderCommitSlugFields(
+      normalizedAgentSlug,
+      session.slug,
+    );
     const signature = agentBuilderSemanticSignature({
       blueprint_checksum: blueprintChecksum,
+      ...slugFields,
     });
     const command = idempotency.acquire("commit", signature, (key) => ({
+      ...slugFields,
       idempotency_key: key,
       expected_revision: session.revision,
       expected_blueprint_checksum: blueprintChecksum,
@@ -810,6 +971,13 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
           `/projects/${encodeURIComponent(project.slug)}/agents?agent_id=${encodeURIComponent(response.data.agent.id)}`,
         );
       },
+      onError: (error) => {
+        void recoverAgentBuilderConflict(
+          error,
+          () => idempotency.complete("commit", signature),
+          () => sessionQuery.refetch(),
+        ).catch(() => undefined);
+      },
     });
   }
 
@@ -820,15 +988,31 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     setLocalError(null);
   }
 
-  function confirmCancel() {
-    if (!session || !canAuthor || mutationPending) return;
-    resetErrors();
+  async function confirmCancel() {
+    if (!session || !canAuthor || cancelActionDisabled) return;
+    setLocalError(null);
+    cancel.reset();
+    setCancelPreparing(true);
+    const authoritativeSession = await prepareAgentBuilderCancelSession(
+      session,
+      submitTurn.isPending || session.status === "generating",
+      async () => (await sessionQuery.refetch()).data,
+    );
+    if (
+      authoritativeSession.status === "committing" ||
+      authoritativeSession.status === "completed" ||
+      authoritativeSession.status === "cancelled"
+    ) {
+      setCancelPreparing(false);
+      return;
+    }
     const signature = agentBuilderSemanticSignature({
-      session_id: session.id,
+      session_id: authoritativeSession.id,
+      expected_revision: authoritativeSession.revision,
     });
     const command = idempotency.acquire("cancel", signature, (key) => ({
       idempotency_key: key,
-      expected_revision: session.revision,
+      expected_revision: authoritativeSession.revision,
     }));
     cancel.mutate(command, {
       onSuccess: () => {
@@ -836,9 +1020,27 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
         setCancelOpen(false);
         router.replace(`/projects/${encodeURIComponent(project.slug)}/agents`);
       },
+      onError: (error) => {
+        void recoverAgentBuilderConflict(
+          error,
+          () => idempotency.complete("cancel", signature),
+          () => sessionQuery.refetch(),
+        ).catch(() => undefined);
+      },
+      onSettled: () => setCancelPreparing(false),
     });
   }
 
+  const commitSlugConflictError =
+    commit.error instanceof AgentBuilderApiError &&
+    commit.error.code === "AGENT_DESIGN_SLUG_CONFLICT"
+      ? agentBuilderWorkspaceErrorMessage(
+          commit.error,
+          t.agents.builder.errors,
+          true,
+        )
+      : null;
+  const agentSlugError = agentSlugValidationError ?? commitSlugConflictError;
   const requestError =
     localError ??
     (submitTurn.error
@@ -846,7 +1048,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
           submitTurn.error,
           t.agents.builder.errors,
         )
-      : commit.error
+      : commit.error && !commitSlugConflictError
         ? agentBuilderWorkspaceErrorMessage(
             commit.error,
             t.agents.builder.errors,
@@ -890,7 +1092,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   size="icon"
                   variant="ghost"
                   aria-label={t.agents.builder.conversation.more}
-                  disabled={!session || mutationPending}
+                  disabled={cancelActionDisabled}
                 >
                   <MoreHorizontalIcon aria-hidden className="size-4" />
                 </Button>
@@ -940,6 +1142,9 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <AgentBuilderConversationView
               session={session}
               composerText={composerText}
+              agentName={effectiveAgentName}
+              agentSlug={normalizedAgentSlug}
+              agentSlugError={agentSlugError}
               pendingUserMessage={pendingUserMessage}
               canAuthor={canAuthor}
               mutationPending={mutationPending}
@@ -968,6 +1173,11 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               onSelectedFieldChange={setSelectedField}
               onDisplayModeChange={setDisplayMode}
               onBlueprintChange={setBlueprintDraft}
+              onAgentNameChange={(value) => {
+                setAgentNameDraft(value);
+                setLocalError(null);
+                commit.reset();
+              }}
               onBlueprintEdit={() => {
                 setBlueprintEditing(true);
                 setDisplayMode("source");
@@ -994,7 +1204,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <Button
               type="button"
               variant="outline"
-              disabled={cancel.isPending}
+              disabled={cancel.isPending || cancelPreparing}
               onClick={() => setCancelOpen(false)}
             >
               {t.agents.builder.conversation.continueDesign}
@@ -1002,13 +1212,13 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <Button
               type="button"
               variant="destructive"
-              disabled={!canAuthor || cancel.isPending}
-              onClick={confirmCancel}
+              disabled={!canAuthor || cancelActionDisabled}
+              onClick={() => void confirmCancel()}
             >
-              {cancel.isPending ? (
+              {cancel.isPending || cancelPreparing ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
               ) : null}
-              {cancel.isPending
+              {cancel.isPending || cancelPreparing
                 ? t.agents.builder.conversation.abandoning
                 : t.agents.builder.conversation.confirmAbandon}
             </Button>

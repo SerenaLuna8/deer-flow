@@ -46,6 +46,10 @@ import {
 export { projectAgentsStartChatPath };
 export { MAIN_PROJECT_AGENT_SLUG };
 
+export function projectAgentCreatePath(projectSlug: string): string {
+  return `/projects/${encodeURIComponent(projectSlug)}/agents/new`;
+}
+
 export type ExecutableProjectAgent = ProjectAssetItem;
 
 export type ProjectThreadAgentSelection = {
@@ -770,8 +774,6 @@ export function ProjectAgentSelectorDialog({
     "agent",
   );
   const [isCreating, setIsCreating] = useState(false);
-  const startChatIntentIdRef = useRef<string | null>(null);
-  startChatIntentIdRef.current ??= uuid();
 
   const handleSelect = async (agent: ExecutableProjectAgent) => {
     const scope = privateWork.scope;
@@ -835,10 +837,7 @@ export function ProjectAgentSelectorDialog({
       canAuthorProjectAgent={project.capabilities.includes(
         "shared_assets.edit",
       )}
-      agentsPath={projectAgentsStartChatPath(
-        project.slug,
-        startChatIntentIdRef.current,
-      )}
+      agentsPath={projectAgentCreatePath(project.slug)}
       isCreating={isCreating || enableSystemAgent.isPending}
       isLoading={assets.isLoading || dependencyLoading}
       error={assets.error ?? dependencyError}

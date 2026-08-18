@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import json
 import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -382,6 +384,8 @@ def test_aio_private_guest_uses_isolated_absolute_python() -> None:
                 data=SimpleNamespace(
                     stdout='{"ok":true,"data":{"initialized":true}}',
                     stderr="",
+                    status="completed",
+                    exit_code=0,
                 )
             )
 
@@ -404,6 +408,96 @@ def test_aio_private_guest_uses_isolated_absolute_python() -> None:
     command = calls[0]["command"]
     assert isinstance(command, str)
     assert command.startswith("/usr/bin/python3 -I -S -c ")
+    assert calls[0]["max_output_length"] == 0
+
+
+def test_aio_private_guest_disables_truncation_for_clipboard_sized_image_read() -> None:
+    image_bytes = b"x" * 445_553
+    response = json.dumps(
+        {
+            "ok": True,
+            "data": {"content": base64.b64encode(image_bytes).decode("ascii")},
+        },
+        separators=(",", ":"),
+    )
+    calls: list[dict[str, object]] = []
+
+    class Bash:
+        def exec(self, **kwargs: object) -> SimpleNamespace:
+            calls.append(kwargs)
+            output = response if kwargs.get("max_output_length") == 0 else response[:50_000]
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout=output,
+                    stderr="",
+                    status="completed",
+                    exit_code=0,
+                )
+            )
+
+    sandbox = object.__new__(AioSandbox)
+    sandbox._lock = threading.Lock()
+    sandbox._client = SimpleNamespace(bash=Bash())
+
+    result = sandbox._execute_private_guest(
+        {
+            "version": 1,
+            "action": "read",
+            "root": "/mnt/user-data",
+            "path": "/mnt/user-data/uploads/image.png",
+            "display_path": "/mnt/user-data/uploads/image.png",
+            "offset": 0,
+            "size": len(image_bytes),
+            "expected": {"dev": 1, "ino": 2, "size": len(image_bytes)},
+        }
+    )
+
+    encoded = result["data"]["content"]
+    assert isinstance(encoded, str)
+    assert base64.b64decode(encoded, validate=True) == image_bytes
+    assert calls[0]["max_output_length"] == 0
+
+
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [
+        ("running", None),
+        ("timed_out", None),
+        ("killed", None),
+        ("completed", 7),
+    ],
+)
+def test_aio_private_guest_rejects_unsuccessful_command_state(
+    status: str,
+    exit_code: int | None,
+) -> None:
+    class Bash:
+        def exec(self, **_kwargs: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                data=SimpleNamespace(
+                    stdout='{"ok":true,"data":{"initialized":true}}',
+                    stderr="provider detail that must stay private",
+                    status=status,
+                    exit_code=exit_code,
+                )
+            )
+
+    sandbox = object.__new__(AioSandbox)
+    sandbox._lock = threading.Lock()
+    sandbox._client = SimpleNamespace(bash=Bash())
+
+    with pytest.raises(OSError, match="AIO private file helper did not complete successfully") as exc_info:
+        sandbox._execute_private_guest(
+            {
+                "version": 1,
+                "action": "init_private_roots",
+                "root": "/mnt/user-data",
+                "path": "/mnt/user-data",
+                "display_path": "/mnt/user-data",
+            }
+        )
+
+    assert "provider detail" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

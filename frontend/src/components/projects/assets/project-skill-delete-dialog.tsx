@@ -19,7 +19,7 @@ export function projectAssetDeleteDescription(
   assetName: string,
 ): string {
   if (assetKind === "Skill") {
-    return `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复。`;
+    return `将永久删除整个 Skill 包“${assetName}”，包括包内所有版本与文件。此操作不可恢复；若 Agent 或历史运行仍引用该 Skill 的任一版本，将无法删除。此时可先停用以阻止后续使用；物理删除需解除 Agent 引用，并等待历史运行按保留策略清理。`;
   }
   if (assetKind === "Agent") {
     return `将永久删除整个 Agent“${assetName}”及其全部设置。此操作不可恢复；若该 Agent 是项目当前默认 Agent，请先将 Main 或其他 Agent 设为默认；若已有对话、自动化或运行记录引用该 Agent，将无法删除。`;

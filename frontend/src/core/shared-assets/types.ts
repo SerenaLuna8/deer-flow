@@ -1054,13 +1054,6 @@ export const credentialGrantMigrationResponseSchema = z
   })
   .strict();
 
-export const createAssetInputSchema = z
-  .object({
-    slug: z.string().trim().min(1),
-    display_name: z.string().trim().min(1),
-  })
-  .strict();
-
 export const createAgentInputSchema = z
   .object({
     slug: z.string().trim().min(1),
@@ -1364,11 +1357,20 @@ export const credentialPayloadSchema = z
     message: "Credential payload cannot be empty",
   });
 
+export const CREDENTIAL_NAME_PATTERN =
+  /^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/u;
+const CREDENTIAL_TYPE_PATTERN = /^[a-z][a-z0-9._-]{0,31}$/u;
+
 export const createCredentialInputSchema = z
   .object({
-    name: z.string().trim().min(1),
-    display_name: z.string().trim().min(1),
-    credential_type: z.string().trim().min(1),
+    name: z.string().trim().min(1).max(63).regex(CREDENTIAL_NAME_PATTERN),
+    display_name: z.string().trim().min(1).max(120),
+    credential_type: z
+      .string()
+      .trim()
+      .min(1)
+      .max(32)
+      .regex(CREDENTIAL_TYPE_PATTERN),
     payload: credentialPayloadSchema,
   })
   .strict();
@@ -1507,7 +1509,6 @@ export type CredentialPendingMigration = z.infer<
 export type CredentialReplacementResponse = z.infer<
   typeof credentialReplacementResponseSchema
 >;
-export type CreateAssetInput = z.input<typeof createAssetInputSchema>;
 export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
 export type AgentCreateResponse = z.infer<typeof agentCreateResponseSchema>;
 export type AgentInstructionsInput = z.input<

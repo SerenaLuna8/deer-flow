@@ -1,13 +1,27 @@
-import { describe, expect, test } from "@rstest/core";
+import { describe, expect, rs, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { AgentBuilderBlueprintReview } from "@/components/projects/agents/agent-builder-blueprint-review";
-import { AgentBuilderConversationView } from "@/components/projects/agents/agent-builder-workspace";
-import type {
-  AgentBuilderBlueprint,
-  AgentBuilderSession,
+import {
+  AgentBuilderResumeBannerView,
+  resolveAgentBuilderDeleteTarget,
+} from "@/components/projects/agents/agent-builder-resume-banner";
+import { agentBuilderErrorMessage } from "@/components/projects/agents/agent-builder-start";
+import {
+  AgentBuilderConversationView,
+  agentBuilderCommitSlugFields,
+  rebaseAgentBuilderName,
+  rebaseAgentBuilderBlueprint,
+  recoverAgentBuilderConflict,
+} from "@/components/projects/agents/agent-builder-workspace";
+import {
+  AgentBuilderApiError,
+  type AgentBuilderBlueprint,
+  type AgentBuilderSession,
+  type AgentBuilderSessionSummary,
 } from "@/core/agent-builder";
 import { I18nProvider } from "@/core/i18n/context";
+import { enUS, zhCN } from "@/core/i18n/locales";
 import type { Model } from "@/core/models/types";
 
 const TIMESTAMP = "2026-08-07T00:00:00Z";
@@ -45,6 +59,8 @@ function session(): AgentBuilderSession {
     revision: 1,
     blueprint: null,
     blueprint_checksum: null,
+    assumptions: [],
+    conflicts: [],
     messages: [],
     active_clarification: null,
     active_clarifications: [],
@@ -98,6 +114,30 @@ const MODELS: Model[] = [
 ];
 
 describe("Agent Builder workspace", () => {
+  test("explains how to recover after reaching the unfinished-session limit", () => {
+    const error = new AgentBuilderApiError(
+      429,
+      "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED",
+      "Too many unfinished Agent design sessions",
+    );
+
+    expect(agentBuilderErrorMessage(error, zhCN.agents.builder.errors)).toBe(
+      "未完成的 Agent 设计已达到上限。请先恢复或取消一个已有设计，再新建设计。",
+    );
+    expect(agentBuilderErrorMessage(error, enUS.agents.builder.errors)).toBe(
+      "You have reached the unfinished Agent design limit. Resume or cancel an existing design before starting another.",
+    );
+  });
+
+  test("omits the commit slug by default and includes it only for a rename", () => {
+    expect(agentBuilderCommitSlugFields("code-review", "code-review")).toEqual(
+      {},
+    );
+    expect(
+      agentBuilderCommitSlugFields("available-agent", "code-review"),
+    ).toEqual({ slug: "available-agent" });
+  });
+
   test("renders only the current dynamic question as the chat human-input card", () => {
     const html = renderAgentUi(
       <AgentBuilderConversationView
@@ -212,6 +252,9 @@ describe("Agent Builder workspace", () => {
     const html = renderAgentUi(
       <AgentBuilderBlueprintReview
         blueprint={blueprint()}
+        agentName="Code Review"
+        agentSlug="code-review"
+        agentSlugError={null}
         models={MODELS}
         canAuthor
         editing={false}
@@ -225,6 +268,7 @@ describe("Agent Builder workspace", () => {
         onSelectedFieldChange={() => undefined}
         onDisplayModeChange={() => undefined}
         onBlueprintChange={() => undefined}
+        onAgentNameChange={() => undefined}
         onEdit={() => undefined}
         onSave={() => undefined}
         onDiscard={() => undefined}
@@ -233,8 +277,195 @@ describe("Agent Builder workspace", () => {
     );
 
     expect(html).toContain("GPT-5.6 Luna");
+    expect(html).toContain('value="Code Review"');
+    expect(html).toContain("code-review");
+    const inputId = html.indexOf('id="agent-builder-commit-name"');
+    const inputStart = html.lastIndexOf("<input", inputId);
+    expect(inputStart).toBeGreaterThanOrEqual(0);
+    const nameInput = html.slice(inputStart, html.indexOf(">", inputStart));
+    expect(nameInput).not.toMatch(/\sdisabled(?:=|\s|\/|>)/u);
     expect(html).not.toContain(">default<");
     expect(html).not.toContain(MODEL_ID);
     expect(html).not.toContain('aria-label="选择 Agent 模型"');
+  });
+
+  test("blocks creation and explains recovery when the blueprint model is unavailable", () => {
+    const html = renderAgentUi(
+      <AgentBuilderBlueprintReview
+        blueprint={{ ...blueprint(), model_ref: "retired-model" }}
+        agentName="Code Review"
+        agentSlug="code-review"
+        agentSlugError={null}
+        models={MODELS}
+        canAuthor
+        editing={false}
+        pending={false}
+        creating={false}
+        dirty={false}
+        canCreate
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onAgentNameChange={() => undefined}
+        onEdit={() => undefined}
+        onSave={() => undefined}
+        onDiscard={() => undefined}
+        onCreate={() => undefined}
+      />,
+    );
+    const labelIndex = html.lastIndexOf("创建 Agent 草稿");
+    const buttonStart = html.lastIndexOf("<button", labelIndex);
+    const buttonEnd = html.indexOf(">", buttonStart);
+
+    expect(html).toContain("Agent 模型不可用");
+    expect(html).toContain("请继续对话，让 Agent 改用当前可用模型");
+    expect(html.slice(buttonStart, buttonEnd)).toContain("disabled");
+  });
+
+  test("shows conflict fields and blocks creation until AI regeneration clears errors", () => {
+    const html = renderAgentUi(
+      <AgentBuilderBlueprintReview
+        blueprint={blueprint()}
+        agentName="Code Review"
+        agentSlug="code-review"
+        agentSlugError={null}
+        models={MODELS}
+        assumptions={["仅审查当前项目代码"]}
+        conflicts={[
+          {
+            code: "IDENTITY_SCOPE",
+            fields: ["soul", "identity"],
+            message: "人格设定与身份定位冲突",
+            severity: "error",
+          },
+        ]}
+        canAuthor
+        editing={false}
+        pending={false}
+        creating={false}
+        dirty={false}
+        canCreate
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onAgentNameChange={() => undefined}
+        onEdit={() => undefined}
+        onSave={() => undefined}
+        onDiscard={() => undefined}
+        onCreate={() => undefined}
+      />,
+    );
+    const labelIndex = html.lastIndexOf("创建 Agent 草稿");
+    const buttonStart = html.lastIndexOf("<button", labelIndex);
+    const buttonEnd = html.indexOf(">", buttonStart);
+
+    expect(html).toContain("仅审查当前项目代码");
+    expect(html).toContain("人格设定与身份定位冲突");
+    expect(html).toContain("SOUL.md");
+    expect(html).toContain("IDENTITY.md");
+    expect(html).toContain("请继续对话，让 Agent 重新生成设计稿");
+    expect(html.slice(buttonStart, buttonEnd)).toContain("disabled");
+  });
+
+  test("releases stale commands and reloads the session after a Builder conflict", async () => {
+    const release = rs.fn();
+    const refetch = rs.fn(async () => undefined);
+
+    await expect(
+      recoverAgentBuilderConflict(
+        new AgentBuilderApiError(
+          409,
+          "AGENT_BUILDER_CONFLICT",
+          "stale revision",
+        ),
+        release,
+        refetch,
+      ),
+    ).resolves.toBe(true);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("does not misclassify a domain 409 as a revision conflict", async () => {
+    const release = rs.fn();
+    const refetch = rs.fn(async () => undefined);
+
+    await expect(
+      recoverAgentBuilderConflict(
+        new AgentBuilderApiError(
+          409,
+          "AGENT_DESIGN_CONFLICT_UNRESOLVED",
+          "unresolved conflict",
+        ),
+        release,
+        refetch,
+      ),
+    ).resolves.toBe(false);
+    expect(release).not.toHaveBeenCalled();
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  test("rebases the server baseline without overwriting a local blueprint draft", () => {
+    const localDraft = { ...blueprint(), description: "本地尚未保存的修改" };
+    const serverBlueprint = { ...blueprint(), description: "其他页面的修改" };
+
+    expect(
+      rebaseAgentBuilderBlueprint(localDraft, serverBlueprint, true),
+    ).toEqual({ baseline: serverBlueprint, draft: localDraft });
+  });
+
+  test("keeps a locally renamed Agent when a conflict refetches the session", () => {
+    expect(
+      rebaseAgentBuilderName("Available Agent", "duplicate-agent", true),
+    ).toEqual({ baseline: "duplicate-agent", draft: "Available Agent" });
+  });
+
+  test("lets readers resume a session without exposing the cancel mutation", () => {
+    const summary = {
+      id: session().id,
+      slug: session().slug,
+      display_name: session().display_name,
+      status: "generating",
+      revision: 2,
+      updated_at: TIMESTAMP,
+    } satisfies AgentBuilderSessionSummary;
+    const html = renderAgentUi(
+      <AgentBuilderResumeBannerView
+        projectSlug="alpha"
+        sessions={[summary]}
+        canAuthor={false}
+        onDelete={async () => undefined}
+      />,
+    );
+
+    expect(html).toContain(`/projects/alpha/agents/new/${summary.id}`);
+    expect(html).not.toContain(`aria-label="删除 ${summary.display_name}"`);
+  });
+
+  test("uses the refreshed resume-list revision after a cancel CAS conflict", () => {
+    const selected = {
+      id: session().id,
+      slug: session().slug,
+      display_name: session().display_name,
+      status: "generating",
+      revision: 2,
+      updated_at: TIMESTAMP,
+    } satisfies AgentBuilderSessionSummary;
+    const refreshed = {
+      ...selected,
+      status: "proposal_ready",
+      revision: 4,
+    } satisfies AgentBuilderSessionSummary;
+
+    expect(resolveAgentBuilderDeleteTarget(selected, [refreshed])).toBe(
+      refreshed,
+    );
+    expect(resolveAgentBuilderDeleteTarget(selected, [])).toBeNull();
   });
 });

@@ -31,6 +31,7 @@ KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
     "initial_schema",
     "approval_output_delivery",
     "model_catalog_simplify",
+    "agent_design_resume_index",
 )
 
 # The migration-chain head revision id. ``full_schema.sql`` stamps exactly

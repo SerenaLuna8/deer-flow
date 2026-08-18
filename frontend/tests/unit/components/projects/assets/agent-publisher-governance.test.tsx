@@ -105,6 +105,9 @@ describe("Agent author and publisher governance", () => {
           user_context: "# USER",
           model_settings: {},
         }}
+        agentName="reviewer"
+        agentSlug="reviewer"
+        agentSlugError={null}
         models={[]}
         canAuthor
         editing={false}
@@ -118,6 +121,7 @@ describe("Agent author and publisher governance", () => {
         onSelectedFieldChange={() => undefined}
         onDisplayModeChange={() => undefined}
         onBlueprintChange={() => undefined}
+        onAgentNameChange={() => undefined}
         onEdit={() => undefined}
         onSave={() => undefined}
         onDiscard={() => undefined}

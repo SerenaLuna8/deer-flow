@@ -4,6 +4,9 @@ import { expect, test } from "@rstest/core";
 import {
   buildVisibleHistoryMessages,
   mergeMessages,
+  resolveFailedRunComposerInput,
+  retainOptimisticHumanMessagesAfterFailure,
+  retainUnacknowledgedOptimisticHumanMessages,
 } from "@/core/threads/hooks";
 import type { RunMessage } from "@/core/threads/types";
 
@@ -186,6 +189,173 @@ test("keeps a genuinely different optimistic user with the same text", () => {
     "human-canonical-1",
     "human-optimistic-2",
   ]);
+});
+
+test("retains only the submitted optimistic user when its Run fails", () => {
+  const optimistic = [
+    {
+      type: "human",
+      id: "human-failed",
+      content: "原始输入",
+    },
+    {
+      type: "ai",
+      id: "ai-partial",
+      content: "partial",
+    },
+    {
+      type: "tool",
+      id: "tool-partial",
+      content: "partial tool result",
+      tool_call_id: "call-1",
+    },
+  ] as Message[];
+
+  expect(
+    retainOptimisticHumanMessagesAfterFailure(optimistic, "run-failed"),
+  ).toEqual([{ ...optimistic[0], run_id: "run-failed" }]);
+});
+
+test("removes only the failed optimistic user acknowledged by canonical history", () => {
+  const failed = [
+    {
+      type: "human",
+      id: "human-failed-1",
+      content: "same text",
+      additional_kwargs: { run_id: "run-failed-1" },
+    },
+    {
+      type: "human",
+      id: "human-failed-2",
+      content: "same text",
+      additional_kwargs: { run_id: "run-failed-2" },
+    },
+  ] as Message[];
+
+  expect(
+    retainUnacknowledgedOptimisticHumanMessages(failed, [
+      {
+        type: "human",
+        id: "human-failed-1__user",
+        content: "same text",
+        additional_kwargs: { run_id: "run-failed-1" },
+      } as Message,
+    ]),
+  ).toEqual([failed[1]]);
+
+  const merged = mergeMessages(
+    [],
+    [
+      {
+        type: "human",
+        id: "human-failed-1__user",
+        content: "same text",
+        additional_kwargs: { run_id: "run-failed-1" },
+      } as Message,
+    ],
+    failed,
+  );
+  expect(
+    merged
+      .filter((message) => message.type === "human")
+      .map((message) => message.id),
+  ).toEqual(["human-failed-1__user", "human-failed-2"]);
+});
+
+test("restores text and ready opaque attachments from the exact failed Run", () => {
+  const restored = resolveFailedRunComposerInput(
+    [
+      {
+        type: "human",
+        id: "human-old",
+        content: "older input",
+        additional_kwargs: { run_id: "run-old" },
+      },
+      {
+        type: "human",
+        id: "human-failed",
+        content: [{ type: "text", text: "describe this" }],
+        additional_kwargs: {
+          run_id: "run-failed",
+          files: [
+            {
+              file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+              filename: "clipboard.png",
+              size: 445_553,
+              path: "/mnt/user-data/uploads/clipboard.png",
+              status: "uploaded",
+            },
+            {
+              file_id: "not-a-uuid",
+              filename: "forged.png",
+              size: 12,
+              status: "uploaded",
+            },
+          ],
+        },
+      },
+    ] as Message[],
+    "run-failed",
+  );
+
+  expect(restored).toEqual({
+    runId: "run-failed",
+    messageId: "human-failed",
+    text: "describe this",
+    files: [
+      {
+        file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+        filename: "clipboard.png",
+        size: 445_553,
+        path: "/mnt/user-data/uploads/clipboard.png",
+        status: "uploaded",
+      },
+    ],
+  });
+  expect(
+    resolveFailedRunComposerInput(
+      [
+        {
+          type: "human",
+          id: "human-old",
+          content: "older input",
+          additional_kwargs: { run_id: "run-old" },
+        } as Message,
+      ],
+      "run-missing",
+    ),
+  ).toBeNull();
+});
+
+test("restores an attachment-only failed Run", () => {
+  expect(
+    resolveFailedRunComposerInput(
+      [
+        {
+          type: "human",
+          id: "human-image-only",
+          content: [{ type: "text", text: "" }],
+          additional_kwargs: {
+            run_id: "run-image-only",
+            files: [
+              {
+                file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af",
+                filename: "clipboard.png",
+                size: 445_553,
+                status: "uploaded",
+              },
+            ],
+          },
+        } as Message,
+      ],
+      "run-image-only",
+    ),
+  ).toMatchObject({
+    runId: "run-image-only",
+    messageId: "human-image-only",
+    text: "",
+    files: [{ file_id: "8f31eef3-0662-42c5-809c-3bbbe2c663af" }],
+  });
 });
 
 test("shows original user text when only the sanitized journal row remains", () => {

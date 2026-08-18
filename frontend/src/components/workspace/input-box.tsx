@@ -74,6 +74,7 @@ import {
   validateUploadLimits,
   type AttachmentUploadStatus,
   type PromptInputFilePart,
+  type ReadyPromptInputFile,
   type UploadLimitViolation,
 } from "@/core/uploads";
 import { isIMEComposing } from "@/lib/ime";
@@ -95,6 +96,7 @@ import {
 } from "./input-box-dom";
 import { FollowupSuggestions } from "./input-box-followups";
 import {
+  canRestoreComposerInput,
   canPolishInput,
   completeLatestCheckpointContinuation,
   createLatestCheckpointContinuationState,
@@ -105,6 +107,7 @@ import {
   isAbortError,
   markLatestCheckpointContinuation,
   resetLatestCheckpointContinuation,
+  shouldSubmitExactBuiltinSlashCommand,
   shouldContinueFromLatestCheckpoint,
   type SlashSuggestion,
 } from "./input-box-helpers";
@@ -143,6 +146,7 @@ export function InputBox({
   agentModelRef,
   draftConversationScope = threadId,
   initialValue,
+  restoreRequest,
   onContextChange,
   onFollowupsVisibilityChange,
   onGoalChange,
@@ -187,6 +191,11 @@ export function InputBox({
   agentModelRef?: string | null;
   draftConversationScope?: string;
   initialValue?: string;
+  restoreRequest?: {
+    id: string;
+    text: string;
+    files: ReadyPromptInputFile[];
+  } | null;
   onContextChange?: (
     context: Omit<
       AgentThreadContext,
@@ -280,6 +289,7 @@ export function InputBox({
     draft: ComposerDraft;
   } | null>(null);
   const draftSaveTimerRef = useRef<number | null>(null);
+  const handledRestoreRequestIdRef = useRef<string | null>(null);
   const commandRequestsCleanupRef = useRef<() => void>(() => undefined);
 
   const [followups, setFollowups] = useState<string[]>([]);
@@ -732,6 +742,40 @@ export function InputBox({
       writeComposerDraft(getSessionComposerDraftStorage(), draftKey, draft);
     }, COMPOSER_DRAFT_SAVE_DELAY_MS);
   }, [draftKey, hydratedDraftKey, selectedSlashSkill, textInput.value]);
+
+  useEffect(() => {
+    if (
+      !restoreRequest ||
+      hydratedDraftKey !== draftKey ||
+      handledRestoreRequestIdRef.current === restoreRequest.id
+    ) {
+      return;
+    }
+    handledRestoreRequestIdRef.current = restoreRequest.id;
+    if (
+      !canRestoreComposerInput({
+        text: textInput.value,
+        hasSelectedSkill: selectedSlashSkill !== null,
+        attachmentCount: attachmentParts.length,
+      })
+    ) {
+      toast.error(t.conversation.restoreFailedInputBlocked);
+      return;
+    }
+    setTextInput(restoreRequest.text);
+    attachments.restoreReady(restoreRequest.files);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, [
+    attachmentParts.length,
+    attachments,
+    draftKey,
+    hydratedDraftKey,
+    restoreRequest,
+    selectedSlashSkill,
+    setTextInput,
+    t.conversation.restoreFailedInputBlocked,
+    textInput.value,
+  ]);
 
   useEffect(() => {
     const handlePageHide = () => flushLatestDraft();
@@ -1291,12 +1335,25 @@ export function InputBox({
         return;
       }
 
+      const selectedSkill = skillSuggestions[skillSuggestionIndex];
+      if (
+        event.key === "Enter" &&
+        shouldSubmitExactBuiltinSlashCommand(
+          textInput.value ?? "",
+          selectedSkill,
+        )
+      ) {
+        // Let PromptInputTextarea perform the native form submission. Exact
+        // builtin commands are already complete and must not require a second
+        // Enter press merely to accept the autocomplete suggestion.
+        return;
+      }
+
       if (event.key === "Enter" || event.key === "Tab") {
         if (event.shiftKey) {
           return;
         }
         event.preventDefault();
-        const selectedSkill = skillSuggestions[skillSuggestionIndex];
         if (selectedSkill) {
           applySkillSuggestion(selectedSkill);
         }
@@ -1879,17 +1936,27 @@ export function InputBox({
                   data={attachment}
                   removable={!composerLocked}
                   onRemove={() =>
-                    onDiscardAttachment?.(threadId, attachment.id)
+                    attachment.readyFile
+                      ? true
+                      : onDiscardAttachment?.(threadId, attachment.id)
                   }
-                  uploadStatus={attachmentUploadStatuses?.[attachment.id]}
+                  uploadStatus={
+                    attachment.readyFile
+                      ? "ready"
+                      : attachmentUploadStatuses?.[attachment.id]
+                  }
                   uploadStatusLabel={
-                    attachmentUploadStatuses?.[attachment.id] === "uploading"
-                      ? t.uploads.uploading
-                      : attachmentUploadStatuses?.[attachment.id] === "ready"
-                        ? t.uploads.ready
-                        : attachmentUploadStatuses?.[attachment.id] === "error"
-                          ? t.uploads.uploadFailed
-                          : undefined
+                    attachment.readyFile
+                      ? t.uploads.ready
+                      : attachmentUploadStatuses?.[attachment.id] ===
+                          "uploading"
+                        ? t.uploads.uploading
+                        : attachmentUploadStatuses?.[attachment.id] === "ready"
+                          ? t.uploads.ready
+                          : attachmentUploadStatuses?.[attachment.id] ===
+                              "error"
+                            ? t.uploads.uploadFailed
+                            : undefined
                   }
                 />
               </div>
@@ -2073,6 +2140,15 @@ export function InputBox({
               disabled={composerLocked}
               variant="outline"
               status={status}
+              onMouseDown={(event) => {
+                if (showSkillSuggestions) {
+                  // Preserve textarea focus until the click submits the form.
+                  // Otherwise the autocomplete can unmount between mousedown
+                  // and click in embedded browsers, turning the first click
+                  // into a silent dismissal.
+                  event.preventDefault();
+                }
+              }}
               onClick={(e) => {
                 if (status === "streaming") {
                   e.preventDefault();

@@ -60,6 +60,58 @@ def _title_state() -> dict[str, object]:
     }
 
 
+def _failed_title_state() -> dict[str, object]:
+    return {
+        "messages": [
+            HumanMessage(content="What is in this image?"),
+            AIMessage(
+                content="The image could not be read.",
+                additional_kwargs={
+                    "deerflow_error_fallback": True,
+                    "error_code": "CURRENT_UPLOAD_UNAVAILABLE",
+                },
+            ),
+        ],
+    }
+
+
+def test_sync_title_skips_fatal_error_fallback() -> None:
+    middleware = TitleMiddleware(
+        app_config=SimpleNamespace(),
+        title_config=TitleConfig(enabled=True, model_name=None),
+    )
+
+    assert (
+        middleware.after_model(
+            _failed_title_state(),
+            SimpleNamespace(context={}),
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_title_skips_fatal_error_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "deerflow.agents.middlewares.title_middleware.ModelRuntime.build_chat_model",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("fatal fallback must not call the title model")),
+    )
+    middleware = TitleMiddleware(
+        app_config=SimpleNamespace(),
+        title_config=TitleConfig(enabled=True, model_name=None),
+    )
+
+    assert (
+        await middleware.aafter_model(
+            _failed_title_state(),
+            SimpleNamespace(context={}),
+        )
+        is None
+    )
+
+
 @pytest.mark.asyncio
 async def test_async_title_calls_default_model_when_unset(
     monkeypatch: pytest.MonkeyPatch,

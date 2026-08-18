@@ -73,6 +73,7 @@ from deerflow.persistence.private_work.model import (
     PrivateFileRow,
 )
 from deerflow.persistence.run.model import RunRow
+from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.private_scope import PrivateResourceScope
 
@@ -949,7 +950,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
                     run.status = "error"
                     run.error = terminal_authority.public_error_code
                     stream_status = "error"
-                    stream_error_code = "MODEL_OUTPUT_LIMIT" if terminal_authority.public_error_code == "MODEL_OUTPUT_LIMIT" else None
+                    stream_error_code = terminal_authority.public_error_code if terminal_authority.public_error_code in STREAM_TERMINAL_ERROR_CODES else None
                 else:
                     run.status = "interrupted"
                     run.error = (None if terminal_authority is None else terminal_authority.cancel_reason) or run.authorization_cancel_reason or run.cancel_reason

@@ -33,6 +33,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   agentBuilderCanAuthor,
+  agentBuilderCanRead,
   useAgentBuilderSessions,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -1129,21 +1130,23 @@ function ProjectAgentBuilderLead({
   startChatIntentId: string | null;
 }) {
   const { user } = useAuth();
-  const canCreate = agentBuilderCanAuthor(project.capabilities);
+  const canRead = agentBuilderCanRead(project.capabilities);
+  const canAuthor = agentBuilderCanAuthor(project.capabilities);
   const sessions = useAgentBuilderSessions(
     user?.id ?? "",
     project.id,
-    Boolean(user && canCreate),
+    Boolean(user && canRead),
   );
 
   return (
     <>
-      {user && canCreate ? (
+      {user && canRead ? (
         <AgentBuilderResumeBanner
           accountId={user.id}
           projectId={project.id}
           projectSlug={project.slug}
           sessions={sessions.data ?? []}
+          canAuthor={canAuthor}
         />
       ) : null}
       <ProjectAgentStartContinuation

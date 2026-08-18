@@ -100,6 +100,16 @@ def _revision_instruction(
     )
 
 
+def _replacement_required_instruction() -> str:
+    return (
+        "This Dream owns a frozen history batch. It must call "
+        "replace_memory_document with one complete valid document before "
+        "finishing. If every history entry is already represented, submit the "
+        "unchanged complete document explicitly; a text-only response cannot "
+        "consume history."
+    )
+
+
 def _fresh_regeneration_instruction(
     *,
     over_budget_count: int,
@@ -350,6 +360,13 @@ class MemoryDreamRunner:
                             continue
                         if not draft.read:
                             raise MemoryDreamError("MEMORY_DREAM_READ_REQUIRED")
+                        if not draft.replaced:
+                            messages.append(
+                                HumanMessage(
+                                    content=_replacement_required_instruction(),
+                                )
+                            )
+                            continue
                         validate_memory_document(
                             draft.content,
                             value.max_tokens,

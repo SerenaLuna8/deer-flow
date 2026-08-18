@@ -6,6 +6,7 @@ import { getBackendBaseURL } from "@/core/config";
 import {
   agentBuilderCommitResponseSchema,
   agentBuilderSessionListResponseSchema,
+  agentBuilderSessionListInputSchema,
   agentBuilderSessionResponseSchema,
   agentBuilderTurnInputSchema,
   cancelAgentBuilderSessionInputSchema,
@@ -15,9 +16,23 @@ import {
   type CancelAgentBuilderSessionInput,
   type CommitAgentBuilderSessionInput,
   type CreateAgentBuilderSessionInput,
+  type AgentBuilderSessionListInput,
+  type AgentBuilderSessionSummary,
 } from "./types";
 
 const uuidSchema = z.string().uuid();
+const MAX_AGENT_BUILDER_SESSION_PAGES = 100;
+const AGENT_BUILDER_CONTRACT_VERSION = "2";
+
+function sortAgentBuilderSessionsForResume(
+  sessions: AgentBuilderSessionSummary[],
+): AgentBuilderSessionSummary[] {
+  return sessions.sort((left, right) => {
+    const updatedOrder =
+      Date.parse(right.updated_at) - Date.parse(left.updated_at);
+    return updatedOrder || right.id.localeCompare(left.id);
+  });
+}
 
 const serverErrorSchema = z
   .object({
@@ -42,7 +57,11 @@ export type AgentBuilderApiErrorCode =
   | "AGENT_BUILDER_VALIDATION_FAILED"
   | "AGENT_BUILDER_UNAVAILABLE"
   | "AGENT_BUILDER_NETWORK_ERROR"
-  | "AGENT_BUILDER_RESPONSE_INVALID";
+  | "AGENT_BUILDER_RESPONSE_INVALID"
+  | "AGENT_DESIGN_SLUG_CONFLICT"
+  | "AGENT_DESIGN_CONFLICT_UNRESOLVED"
+  | "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED"
+  | "AGENT_DESIGN_SECRET_DETECTED";
 
 export class AgentBuilderApiError extends Error {
   constructor(
@@ -63,7 +82,24 @@ function sessionURL(projectId: string, sessionId: string) {
   return `${baseURL(projectId)}/${uuidSchema.parse(sessionId)}`;
 }
 
-function safeCode(status: number): AgentBuilderApiErrorCode {
+function contractURL(url: string, input?: URLSearchParams) {
+  const query = new URLSearchParams(input);
+  query.set("contract_version", AGENT_BUILDER_CONTRACT_VERSION);
+  return `${url}?${query.toString()}`;
+}
+
+function safeCode(
+  status: number,
+  serverCode?: string,
+): AgentBuilderApiErrorCode {
+  if (
+    serverCode === "AGENT_DESIGN_SLUG_CONFLICT" ||
+    serverCode === "AGENT_DESIGN_CONFLICT_UNRESOLVED" ||
+    serverCode === "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED" ||
+    serverCode === "AGENT_DESIGN_SECRET_DETECTED"
+  ) {
+    return serverCode;
+  }
   if (status === 401) return "AUTH_REQUIRED";
   if (status === 403) return "AGENT_BUILDER_FORBIDDEN";
   if (status === 404) return "AGENT_BUILDER_NOT_FOUND";
@@ -119,7 +155,10 @@ async function request<TSchema extends z.ZodType>(
         : (detail?.message ?? "Agent 设计请求失败");
     throw new AgentBuilderApiError(
       response.status,
-      safeCode(response.status),
+      safeCode(
+        response.status,
+        typeof detail === "string" ? undefined : detail?.code,
+      ),
       message,
     );
   }
@@ -141,21 +180,83 @@ export function createAgentBuilderSession(
   signal?: AbortSignal,
 ) {
   const body = createAgentBuilderSessionInputSchema.parse(input);
-  return request(baseURL(projectId), agentBuilderSessionResponseSchema, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
+  return request(
+    contractURL(baseURL(projectId)),
+    agentBuilderSessionResponseSchema,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
 }
 
 export function listAgentBuilderSessions(
   projectId: string,
+  input: AgentBuilderSessionListInput = {},
   signal?: AbortSignal,
 ) {
-  return request(baseURL(projectId), agentBuilderSessionListResponseSchema, {
-    signal,
-  });
+  const parsed = agentBuilderSessionListInputSchema.parse(input);
+  const query = new URLSearchParams();
+  if (parsed.limit !== undefined) query.set("limit", String(parsed.limit));
+  if (parsed.cursor !== undefined) query.set("cursor", parsed.cursor);
+  return request(
+    contractURL(baseURL(projectId), query),
+    agentBuilderSessionListResponseSchema,
+    {
+      signal,
+    },
+  );
+}
+
+export async function listAllAgentBuilderSessions(
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<AgentBuilderSessionSummary[]> {
+  const sessions: AgentBuilderSessionSummary[] = [];
+  const seenSessionIds = new Set<string>();
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (
+    let pageNumber = 0;
+    pageNumber < MAX_AGENT_BUILDER_SESSION_PAGES;
+    pageNumber += 1
+  ) {
+    const page = await listAgentBuilderSessions(
+      projectId,
+      { limit: 100, ...(cursor ? { cursor } : {}) },
+      signal,
+    );
+    for (const session of page.data) {
+      if (seenSessionIds.has(session.id)) {
+        throw new AgentBuilderApiError(
+          200,
+          "AGENT_BUILDER_RESPONSE_INVALID",
+          "Agent 设计服务返回了重复的设计会话",
+        );
+      }
+      seenSessionIds.add(session.id);
+      sessions.push(session);
+    }
+    if (page.next_cursor === null) {
+      return sortAgentBuilderSessionsForResume(sessions);
+    }
+    if (seenCursors.has(page.next_cursor)) {
+      throw new AgentBuilderApiError(
+        200,
+        "AGENT_BUILDER_RESPONSE_INVALID",
+        "Agent 设计服务返回了重复分页游标",
+      );
+    }
+    seenCursors.add(page.next_cursor);
+    cursor = page.next_cursor;
+  }
+  throw new AgentBuilderApiError(
+    200,
+    "AGENT_BUILDER_RESPONSE_INVALID",
+    "Agent 设计会话分页超过安全上限",
+  );
 }
 
 export function getAgentBuilderSession(
@@ -164,7 +265,7 @@ export function getAgentBuilderSession(
   signal?: AbortSignal,
 ) {
   return request(
-    sessionURL(projectId, sessionId),
+    contractURL(sessionURL(projectId, sessionId)),
     agentBuilderSessionResponseSchema,
     { signal },
   );
@@ -178,7 +279,7 @@ export function submitAgentBuilderTurn(
 ) {
   const body = agentBuilderTurnInputSchema.parse(input);
   return request(
-    `${sessionURL(projectId, sessionId)}/turns`,
+    contractURL(`${sessionURL(projectId, sessionId)}/turns`),
     agentBuilderSessionResponseSchema,
     {
       method: "POST",
@@ -197,7 +298,7 @@ export function finalizeAgentBuilderSession(
 ) {
   const body = commitAgentBuilderSessionInputSchema.parse(input);
   return request(
-    `${sessionURL(projectId, sessionId)}/commit`,
+    contractURL(`${sessionURL(projectId, sessionId)}/commit`),
     agentBuilderCommitResponseSchema,
     {
       method: "POST",
@@ -216,7 +317,7 @@ export function cancelAgentBuilderSession(
 ) {
   const body = cancelAgentBuilderSessionInputSchema.parse(input);
   return request(
-    `${sessionURL(projectId, sessionId)}/cancel`,
+    contractURL(`${sessionURL(projectId, sessionId)}/cancel`),
     agentBuilderSessionResponseSchema,
     {
       method: "POST",

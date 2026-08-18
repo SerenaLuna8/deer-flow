@@ -13,10 +13,12 @@ import { dedupeMessagesByIdentity } from "./message-projection";
 import {
   buildVisibleHistoryMessages,
   filterVisibleHistoryRows,
+  findTerminalFailureRunIdsToReload,
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getSupersededRunIds,
   mergeRunMessageRows,
+  shouldReloadEmptyRunAfterTerminalFailure,
   shouldAutoContinueOnEmptyRun,
 } from "./run-history";
 import { useThreadRuns } from "./thread-runs";
@@ -45,6 +47,7 @@ export function useThreadHistory(
   const pendingLoadRef = useRef(false);
   const loadingRunIdRef = useRef<string | null>(null);
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
+  const runStatusesRef = useRef<Map<string, string>>(new Map());
   const runBeforeSeqRef = useRef<Map<string, EventSequence>>(new Map());
   const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
@@ -107,6 +110,7 @@ export function useThreadHistory(
 
         const requestThreadId = threadIdRef.current;
         loadingRunIdRef.current = run.run_id;
+        const runStatusAtRequest = run.status as string;
         const beforeSeq = runBeforeSeqRef.current.get(run.run_id);
         const result = await runPrivateWorkAbortable(privateWork, (signal) =>
           fetchRunMessagesPage(
@@ -137,8 +141,22 @@ export function useThreadHistory(
           );
         } else {
           runBeforeSeqRef.current.delete(run.run_id);
-          loadedRunIdsRef.current.add(run.run_id);
+          const currentRunStatus = runsRef.current.find(
+            (candidate) => candidate.run_id === run.run_id,
+          )?.status as string | undefined;
+          const failedWhileLoading = shouldReloadEmptyRunAfterTerminalFailure({
+            statusAtRequest: runStatusAtRequest,
+            currentStatus: currentRunStatus,
+            visibleMessageCount: filterVisibleHistoryRows(_messages).length,
+          });
+          if (failedWhileLoading) {
+            loadedRunIdsRef.current.delete(run.run_id);
+            pendingLoadRef.current = true;
+          } else {
+            loadedRunIdsRef.current.add(run.run_id);
+          }
           if (
+            !failedWhileLoading &&
             shouldAutoContinueOnEmptyRun(
               filterVisibleHistoryRows(_messages).length,
               consecutiveEmptyLoads,
@@ -183,6 +201,7 @@ export function useThreadHistory(
       pendingLoadRef.current = false;
       loadingRunIdRef.current = null;
       loadedRunIdsRef.current = new Set();
+      runStatusesRef.current = new Map();
       runBeforeSeqRef.current = new Map();
       loadingRef.current = false;
       setLoading(false);
@@ -196,6 +215,20 @@ export function useThreadHistory(
     }
 
     if (runs.data && runs.data.length > 0) {
+      const terminalReloadRunIds = findTerminalFailureRunIdsToReload(
+        runStatusesRef.current,
+        runs.data,
+      );
+      for (const runId of terminalReloadRunIds) {
+        loadedRunIdsRef.current.delete(runId);
+        runBeforeSeqRef.current.delete(runId);
+      }
+      if (terminalReloadRunIds.length > 0 && loadingRef.current) {
+        pendingLoadRef.current = true;
+      }
+      runStatusesRef.current = new Map(
+        runs.data.map((run) => [run.run_id, run.status as string]),
+      );
       runsRef.current = runs.data ?? [];
       indexRef.current = findLatestUnloadedRunIndex(
         runs.data,

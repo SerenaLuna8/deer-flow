@@ -21,6 +21,10 @@ from deerflow.persistence.channel_connections.group_challenge_model import (
 from deerflow.persistence.channel_connections.group_model import (
     ProjectChannelGroupBindingRow,
 )
+from deerflow.persistence.channel_connections.model import (
+    ChannelConnectionRow,
+    ChannelOAuthStateRow,
+)
 from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import (
     ProjectDefaultAgentRow,
@@ -299,6 +303,47 @@ class AgentRepository:
                 ),
             )
         )
+
+        # Legacy owner Connections and pending OAuth states retain their Agent
+        # target in JSON metadata instead of a relational foreign key. Lock the
+        # matching live rows while the Project and Agent are already locked so
+        # callback completion, reconnect, and deletion serialize in the same
+        # Project -> Agent -> connection/state order.
+        connection_ids = tuple(
+            (
+                await self.session.execute(
+                    select(ChannelConnectionRow.id)
+                    .where(
+                        ChannelConnectionRow.project_id == context.project_id,
+                        ChannelConnectionRow.status != "revoked",
+                        ChannelConnectionRow.metadata_json["agent_scope"].as_string() == "project",
+                        ChannelConnectionRow.metadata_json["agent_asset_id"].as_string() == str(asset.id),
+                    )
+                    .order_by(ChannelConnectionRow.id)
+                    .with_for_update(of=ChannelConnectionRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        oauth_state_hashes = tuple(
+            (
+                await self.session.execute(
+                    select(ChannelOAuthStateRow.state_hash)
+                    .where(
+                        ChannelOAuthStateRow.project_id == context.project_id,
+                        ChannelOAuthStateRow.consumed_at.is_(None),
+                        ChannelOAuthStateRow.expires_at >= func.now(),
+                        ChannelOAuthStateRow.metadata_json["agent_scope"].as_string() == "project",
+                        ChannelOAuthStateRow.metadata_json["agent_asset_id"].as_string() == str(asset.id),
+                    )
+                    .order_by(ChannelOAuthStateRow.state_hash)
+                    .with_for_update(of=ChannelOAuthStateRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
         retained_reference_exists = bool(
             await self.session.scalar(
                 select(
@@ -336,7 +381,7 @@ class AgentRepository:
                 )
             )
         )
-        if retained_reference_exists:
+        if connection_ids or oauth_state_hashes or retained_reference_exists:
             raise AssetConflict(context.request_id)
         return version_ids
 
