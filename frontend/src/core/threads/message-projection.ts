@@ -290,6 +290,28 @@ export function attachRunIdToNewMessages(
   });
 }
 
+/**
+ * Snapshot the visible, durably identifiable messages created by a Run before
+ * the SDK releases its terminal live projection. The caller keeps this small
+ * bridge only until the Run journal returns the same message identities.
+ */
+export function captureTerminalRunMessages(
+  messages: Message[],
+  runId: string | null,
+  baselineMessageIds: ReadonlySet<string>,
+): Message[] {
+  if (!runId) return [];
+
+  return dedupeMessagesByIdentity(
+    attachRunIdToNewMessages(messages, runId, baselineMessageIds).filter(
+      (message) =>
+        !isHiddenFromUIMessage(message) &&
+        messageIdentity(message) !== undefined &&
+        messageRunId(message) === runId,
+    ),
+  );
+}
+
 export function dedupeMessagesByIdentity(messages: Message[]): Message[] {
   const firstIndexByIdentity = new Map<string, number>();
   const lastIndexByIdentity = new Map<string, number>();

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import io
 import json
+import logging
 import sys
 import threading
 import time
@@ -39,6 +41,50 @@ def _executor(*, trace_id: str, timeout: float = 2.0) -> SubagentExecutor:
         tools=[],
         trace_id=trace_id,
     )
+
+
+class _ProbeExecutionFailure(RuntimeError):
+    pass
+
+
+def _execution_failure_log() -> dict[str, object]:
+    executor = _executor(trace_id="execution-failure-trace")
+    secret_detail = "must-not-appear-in-subagent-log"
+
+    async def fail_execution(
+        _self: SubagentExecutor,
+        _task: str,
+        _result: SubagentResult | None = None,
+    ) -> SubagentResult:
+        raise _ProbeExecutionFailure(secret_detail)
+
+    executor._aexecute = MethodType(fail_execution, executor)  # type: ignore[method-assign]
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
+    previous_level = executor_module.logger.level
+    executor_module.logger.addHandler(handler)
+    executor_module.logger.setLevel(logging.ERROR)
+    task_id = executor.execute_async("private task content", task_id="failure-log")
+    try:
+        _wait_until(
+            lambda: _status(task_id) is SubagentStatus.FAILED,
+        )
+        result = get_background_task_result(task_id)
+        assert result is not None
+        rendered = stream.getvalue()
+        return {
+            "status": result.status.value,
+            "error": result.error,
+            "has_trace_id": "trace=execution-failure-trace" in rendered,
+            "has_exception_type": "exception_type=_ProbeExecutionFailure" in rendered,
+            "has_traceback": "Traceback (most recent call last)" in rendered,
+            "secret_present": secret_detail in rendered,
+        }
+    finally:
+        executor_module.logger.removeHandler(handler)
+        executor_module.logger.setLevel(previous_level)
+        _shutdown_isolated_subagent_loop()
 
 
 def _wait_until(predicate, *, timeout: float = 3.0) -> None:
@@ -479,6 +525,7 @@ _SCENARIOS = {
     "shutdown": _shutdown,
     "shutdown-during-submit": _shutdown_during_submit,
     "submission-failure": _submission_failure,
+    "execution-failure-log": _execution_failure_log,
     "shutdown-reload": _shutdown_reload,
 }
 

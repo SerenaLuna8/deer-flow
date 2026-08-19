@@ -7,18 +7,26 @@ import { accumulateUsage, formatTokenCount } from "@/core/messages/usage";
 import type { TokenDebugStep } from "@/core/messages/usage-model";
 import { cn } from "@/lib/utils";
 
+import { RunDuration } from "./run-duration";
+
 function TokenUsageSummary({
   className,
+  durationSeconds,
   inputTokens,
   outputTokens,
   totalTokens,
 }: {
   className?: string;
+  durationSeconds: number[];
   inputTokens?: number;
   outputTokens?: number;
   totalTokens?: number;
 }) {
   const { t } = useI18n();
+  const hasTokenUsage =
+    inputTokens !== undefined &&
+    outputTokens !== undefined &&
+    totalTokens !== undefined;
 
   return (
     <div
@@ -26,31 +34,41 @@ function TokenUsageSummary({
         "text-muted-foreground border-border/60 mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 border-t pt-2 text-[11px]",
         className,
       )}
+      data-testid="turn-metrics"
     >
-      <span className="inline-flex items-center gap-1 font-medium">
-        <CoinsIcon className="size-3" />
-        {t.tokenUsage.label}
-      </span>
-      <span>
-        {t.tokenUsage.input}: {formatTokenCount(inputTokens ?? 0)}
-      </span>
-      <span>
-        {t.tokenUsage.output}: {formatTokenCount(outputTokens ?? 0)}
-      </span>
-      <span className="font-medium">
-        {t.tokenUsage.total}: {formatTokenCount(totalTokens ?? 0)}
-      </span>
+      {durationSeconds.map((duration, index) => (
+        <RunDuration key={`${duration}:${index}`} durationSeconds={duration} />
+      ))}
+      {hasTokenUsage && (
+        <div className="contents" data-testid="message-token-usage">
+          <span className="inline-flex items-center gap-1 font-medium">
+            <CoinsIcon className="size-3" />
+            {t.tokenUsage.label}
+          </span>
+          <span>
+            {t.tokenUsage.input}: {formatTokenCount(inputTokens)}
+          </span>
+          <span>
+            {t.tokenUsage.output}: {formatTokenCount(outputTokens)}
+          </span>
+          <span className="font-medium">
+            {t.tokenUsage.total}: {formatTokenCount(totalTokens)}
+          </span>
+        </div>
+      )}
     </div>
   );
 }
 
 export function MessageTokenUsageList({
   className,
+  durationSeconds = [],
   enabled = false,
   isLoading = false,
   messages,
 }: {
   className?: string;
+  durationSeconds?: number[];
   enabled?: boolean;
   isLoading?: boolean;
   messages: Message[];
@@ -60,23 +78,19 @@ export function MessageTokenUsageList({
   }
 
   const aiMessages = messages.filter((message) => message.type === "ai");
-
-  if (aiMessages.length === 0) {
-    return null;
-  }
-
   const usage = accumulateUsage(aiMessages);
 
-  if (!usage) {
+  if (!usage && durationSeconds.length === 0) {
     return null;
   }
 
   return (
     <TokenUsageSummary
       className={className}
-      inputTokens={usage.inputTokens}
-      outputTokens={usage.outputTokens}
-      totalTokens={usage.totalTokens}
+      durationSeconds={durationSeconds}
+      inputTokens={usage?.inputTokens}
+      outputTokens={usage?.outputTokens}
+      totalTokens={usage?.totalTokens}
     />
   );
 }

@@ -56,6 +56,7 @@ import {
 import { useCoalescedStreamMessages } from "./coalesce";
 import {
   attachRunIdToNewMessages,
+  captureTerminalRunMessages,
   computeSummarizationMovedMessages,
   countHumanMessagesExcludingSuperseded,
   dedupeMessagesByIdentity,
@@ -948,6 +949,23 @@ export function useThreadStream({
       if (!leavesReplayProjectionIntact) {
         const failedRunId =
           callbackOptions?.run_id ?? currentRunIdRef.current ?? null;
+        const failedThreadId =
+          callbackOptions?.thread_id ?? threadIdRef.current ?? null;
+        const terminalMessages = captureTerminalRunMessages(
+          messagesRef.current,
+          failedRunId,
+          currentRunBaselineMessageIdsRef.current,
+        );
+        if (failedThreadId && terminalMessages.length > 0) {
+          // The SDK may release its live messages before the durable Run
+          // journal refetch completes. Reuse the same transient history bridge
+          // as summarization so the terminal frame cannot disappear in between.
+          pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
+            ...pendingArchivedMessagesRef.current,
+            ...terminalMessages,
+          ]);
+          pendingArchiveThreadIdRef.current = failedThreadId;
+        }
         const retainsAdmittedHuman =
           failedRunId !== null && optimisticRunIdRef.current === failedRunId;
         if (retainsAdmittedHuman) {
@@ -1167,16 +1185,15 @@ export function useThreadStream({
   );
   const latestMessageCountsRef = useRef({ humanMessageCount });
   const sendInFlightRef = useRef(false);
-  // Synchronous bridge for messages rescued from context summarization. The
-  // archived-history `setState` (via appendMessages) lands on a different
-  // schedule than the live thread external store, so the merge reads this buffer
-  // to avoid dropping rescued messages in the render window before history
-  // catches up (#3825).
+  // Synchronous bridge for messages waiting to enter canonical history. This
+  // covers both context-summarization rescue and the terminal live-to-journal
+  // handoff, whose state updates can land on a different schedule than the SDK
+  // external store. The projection reads this buffer so neither transition can
+  // briefly drop visible messages (#3825).
   const pendingArchivedMessagesRef = useRef<Message[]>([]);
-  // The thread the rescue buffer belongs to, captured when onUpdateEvent fills
-  // it. The merge only overlays the buffer when this matches the viewed
-  // `threadId`, so a previous thread's rescued messages can never flash into
-  // another thread or the new-chat screen (#3825).
+  // The thread the bridge belongs to. The merge only overlays the buffer when
+  // this matches the viewed `threadId`, so messages can never flash into another
+  // thread or the new-chat screen (#3825).
   const pendingArchiveThreadIdRef = useRef<string | null>(null);
   const summarizedRef = useRef<Set<string>>(null);
   // Track human message count before sending to prevent clearing optimistic
@@ -1289,9 +1306,9 @@ export function useThreadStream({
     };
   }, [attachmentUploadCoordinator, threadId, uploadScopeKey]);
 
-  // Release archive-buffer entries once the canonical history state has absorbed
-  // them, so the synchronous bridge stays transient and never resurrects a
-  // message that history later filters out (e.g. a superseded run) (#3825).
+  // Release bridge entries once canonical history has absorbed them, so the
+  // buffer stays transient and never resurrects a message that history later
+  // filters out (e.g. a superseded run) (#3825).
   useEffect(() => {
     pendingArchivedMessagesRef.current = pruneConfirmedArchivedMessages(
       pendingArchivedMessagesRef.current,

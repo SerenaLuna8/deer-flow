@@ -17,6 +17,7 @@ import {
   findLatestUnloadedRunIndex,
   getNextRunMessagesBeforeSeq,
   getSupersededRunIds,
+  isInitialHistoryWindowLoaded,
   mergeRunMessageRows,
   shouldReloadEmptyRunAfterTerminalFailure,
   shouldAutoContinueOnEmptyRun,
@@ -49,6 +50,8 @@ export function useThreadHistory(
   const loadedRunIdsRef = useRef<Set<string>>(new Set());
   const runStatusesRef = useRef<Map<string, string>>(new Map());
   const runBeforeSeqRef = useRef<Map<string, EventSequence>>(new Map());
+  const initialHistoryPublishedRef = useRef(false);
+  const initialHistoryStagedRowsRef = useRef<RunMessage[]>([]);
   const loadGenerationRef = useRef(0);
   const [loading, setLoading] = useState(false);
   const [messageLoadError, setMessageLoadError] = useState<Error | null>(null);
@@ -87,6 +90,7 @@ export function useThreadHistory(
       return;
     }
 
+    const stagingInitialHistory = !initialHistoryPublishedRef.current;
     loadingRef.current = true;
     setMessageLoadError(null);
     setLoading(true);
@@ -128,9 +132,17 @@ export function useThreadHistory(
           return;
         }
         const _messages = result.data;
-        setMessageRows((prev) =>
-          mergeRunMessageRows(prev, _messages, runsRef.current),
-        );
+        if (stagingInitialHistory) {
+          initialHistoryStagedRowsRef.current = mergeRunMessageRows(
+            initialHistoryStagedRowsRef.current,
+            _messages,
+            runsRef.current,
+          );
+        } else {
+          setMessageRows((prev) =>
+            mergeRunMessageRows(prev, _messages, runsRef.current),
+          );
+        }
         const nextBeforeSeq = getNextRunMessagesBeforeSeq(result);
         if (typeof nextBeforeSeq === "string") {
           runBeforeSeqRef.current.set(run.run_id, nextBeforeSeq);
@@ -155,7 +167,12 @@ export function useThreadHistory(
           } else {
             loadedRunIdsRef.current.add(run.run_id);
           }
-          if (
+          if (stagingInitialHistory) {
+            pendingLoadRef.current = !isInitialHistoryWindowLoaded(
+              runsRef.current,
+              loadedRunIdsRef.current,
+            );
+          } else if (
             !failedWhileLoading &&
             shouldAutoContinueOnEmptyRun(
               filterVisibleHistoryRows(_messages).length,
@@ -173,6 +190,18 @@ export function useThreadHistory(
           loadedRunIdsRef.current,
         );
       } while (pendingLoadRef.current);
+
+      if (
+        stagingInitialHistory &&
+        isInitialHistoryWindowLoaded(runsRef.current, loadedRunIdsRef.current)
+      ) {
+        const stagedRows = initialHistoryStagedRowsRef.current;
+        initialHistoryStagedRowsRef.current = [];
+        initialHistoryPublishedRef.current = true;
+        setMessageRows((prev) =>
+          mergeRunMessageRows(prev, stagedRows, runsRef.current),
+        );
+      }
     } catch (err) {
       pendingLoadRef.current = false;
       if (loadGenerationRef.current === loadGeneration) {
@@ -203,6 +232,8 @@ export function useThreadHistory(
       loadedRunIdsRef.current = new Set();
       runStatusesRef.current = new Map();
       runBeforeSeqRef.current = new Map();
+      initialHistoryPublishedRef.current = false;
+      initialHistoryStagedRowsRef.current = [];
       loadingRef.current = false;
       setLoading(false);
       setMessageLoadError(null);

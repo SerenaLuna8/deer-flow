@@ -117,6 +117,10 @@ export function isTerminalRunFailureStatus(
   return status === "error" || status === "failed" || status === "timeout";
 }
 
+function isTerminalRunHistoryStatus(status: string | undefined): boolean {
+  return isTerminalRunFailureStatus(status) || status === "interrupted";
+}
+
 export function findTerminalFailureRunIdsToReload(
   previousStatuses: ReadonlyMap<string, string>,
   runs: Run[],
@@ -124,8 +128,8 @@ export function findTerminalFailureRunIdsToReload(
   return runs.flatMap((run) => {
     const previousStatus = previousStatuses.get(run.run_id);
     return previousStatus !== undefined &&
-      !isTerminalRunFailureStatus(previousStatus) &&
-      isTerminalRunFailureStatus(run.status as string)
+      !isTerminalRunHistoryStatus(previousStatus) &&
+      isTerminalRunHistoryStatus(run.status as string)
       ? [run.run_id]
       : [];
   });
@@ -142,8 +146,8 @@ export function shouldReloadEmptyRunAfterTerminalFailure({
 }): boolean {
   return (
     visibleMessageCount === 0 &&
-    !isTerminalRunFailureStatus(statusAtRequest) &&
-    isTerminalRunFailureStatus(currentStatus)
+    !isTerminalRunHistoryStatus(statusAtRequest) &&
+    isTerminalRunHistoryStatus(currentStatus)
   );
 }
 
@@ -339,6 +343,25 @@ export function findLatestUnloadedRunIndex(
     }
   }
   return -1;
+}
+
+export const INITIAL_HISTORY_RUN_WINDOW_SIZE = 10;
+
+export function getInitialHistoryRunIds(
+  runs: Run[],
+  windowSize: number = INITIAL_HISTORY_RUN_WINDOW_SIZE,
+): string[] {
+  return runs.slice(0, Math.max(0, windowSize)).map((run) => run.run_id);
+}
+
+export function isInitialHistoryWindowLoaded(
+  runs: Run[],
+  loadedRunIds: ReadonlySet<string>,
+  windowSize: number = INITIAL_HISTORY_RUN_WINDOW_SIZE,
+): boolean {
+  return getInitialHistoryRunIds(runs, windowSize).every((runId) =>
+    loadedRunIds.has(runId),
+  );
 }
 
 export const MAX_CONSECUTIVE_EMPTY_RUN_LOADS = 5;

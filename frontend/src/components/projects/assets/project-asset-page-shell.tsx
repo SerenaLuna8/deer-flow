@@ -828,6 +828,7 @@ function ProjectAssetCatalog({
   selectionQueryParam,
   onCreateOpenChange,
   renderList,
+  renderDetailActions,
   renderAssetEditor,
   renderVersion,
   renderLead,
@@ -841,6 +842,10 @@ function ProjectAssetCatalog({
   selectionQueryParam?: string;
   onCreateOpenChange: (open: boolean) => void;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
+  renderDetailActions?: (context: {
+    item: ProjectAssetItem;
+    editing: boolean;
+  }) => ReactNode;
   renderAssetEditor?: (
     effectiveVersion: AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
@@ -1639,6 +1644,7 @@ function ProjectAssetCatalog({
           onDirtyChange={handleDetailDirtyChange}
           onVersionCreated={rememberVersion}
           onRequestedVersionHandled={handleRequestedVersionHandled}
+          renderDetailActions={renderDetailActions}
           renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
         />
@@ -1790,6 +1796,7 @@ export function ProjectAssetPageShell({
   initialSelectedAssetId = null,
   selectionQueryParam,
   renderList,
+  renderDetailActions,
   renderAssetEditor,
   renderVersion,
   renderLead,
@@ -1801,6 +1808,10 @@ export function ProjectAssetPageShell({
   initialSelectedAssetId?: string | null;
   selectionQueryParam?: string;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
+  renderDetailActions?: (context: {
+    item: ProjectAssetItem;
+    editing: boolean;
+  }) => ReactNode;
   renderAssetEditor?: (
     effectiveVersion: AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
@@ -1857,6 +1868,7 @@ export function ProjectAssetPageShell({
         selectionQueryParam={selectionQueryParam}
         onCreateOpenChange={setCreateOpen}
         renderList={renderList}
+        renderDetailActions={renderDetailActions}
         renderAssetEditor={renderAssetEditor}
         renderVersion={renderVersion}
         renderLead={renderLead}

@@ -143,8 +143,15 @@ make check-db
 ```bash
 make dev      # 热更新开发模式
 make start    # 本地优化构建模式
+make dev-daemon    # 后台开发模式
+make start-daemon  # 后台本地生产模式
 make stop
 ```
+
+在 macOS 上，两个 `*-daemon` 命令会交由当前登录用户的 `launchd` 持续托管一个前台
+启动器；命令返回后服务仍由该启动器负责，避免终端或自动化执行会话结束时一并回收子进程。
+用 `make stop` 停止服务并卸载该托管任务。服务日志仍在 `logs/`，启动器日志为
+`logs/{dev,prod}-daemon-supervisor.{out,err}.log`。
 
 浏览器访问 <http://localhost:2026>。常见入口：
 

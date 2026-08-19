@@ -2030,9 +2030,8 @@ export const zhCN: Translations = {
         confirmDelete: "确认删除",
       },
       revision: {
-        button: "对话修改",
+        button: "AI修改",
         opening: "正在打开修订会话…",
-        hint: "以当前发布版本为基线，通过对话创建新版本草稿；发布后才会生效。",
         saveLocalChangesFirst: "请先保存或放弃当前未保存修改",
       },
       conversation: {

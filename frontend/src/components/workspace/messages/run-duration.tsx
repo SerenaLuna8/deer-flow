@@ -48,11 +48,11 @@ export function RunDuration({ durationSeconds }: { durationSeconds: number }) {
 
   return (
     <div
-      className="text-muted-foreground flex items-center gap-2 text-sm"
+      className="inline-flex items-center gap-1"
       data-testid="run-duration"
       title={t.runDuration.description}
     >
-      <Clock3Icon className="size-4" />
+      <Clock3Icon className="size-3" />
       <span>{t.runDuration.completedIn(formatted)}</span>
     </div>
   );

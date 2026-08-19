@@ -1,7 +1,10 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { skillPublishStaleBaseMessage } from "@/components/projects/assets/project-asset-detail-sheet";
+import {
+  ProjectSkillDetailActions,
+  skillPublishStaleBaseMessage,
+} from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   SkillBuilderConversationView,
   SkillBuilderRevisionCommitSuccess,
@@ -92,6 +95,30 @@ describe("skillRevisionEntryVisible", () => {
         current_published_version_id: "55555555-5555-4555-8555-555555555555",
       }),
     ).toBe(false);
+  });
+});
+
+describe("ProjectSkillDetailActions", () => {
+  test("places the AI revision action after the existing top actions", () => {
+    const html = renderUi(
+      <ProjectSkillDetailActions
+        actionPending={false}
+        canAuthor
+        canDelete
+        editing={false}
+        hasSelectedVersion
+        versionDirty={false}
+        versionSelectionPending={false}
+        onCreateVersion={() => undefined}
+        onDelete={() => undefined}
+        additionalActions={<button type="button">AI修改</button>}
+      />,
+    );
+
+    expect(zhCN.skills.builder.revision.button).toBe("AI修改");
+    expect(html.indexOf("创建新版本")).toBeLessThan(html.indexOf("删除 Skill"));
+    expect(html.indexOf("删除 Skill")).toBeLessThan(html.indexOf("AI修改"));
+    expect(html).not.toContain("以当前发布版本为基线");
   });
 });
 

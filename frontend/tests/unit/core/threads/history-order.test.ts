@@ -8,6 +8,11 @@ import {
   retainOptimisticHumanMessagesAfterFailure,
   retainUnacknowledgedOptimisticHumanMessages,
 } from "@/core/threads/hooks";
+import {
+  captureTerminalRunMessages,
+  projectThreadMessages,
+  pruneConfirmedArchivedMessages,
+} from "@/core/threads/message-projection";
 import type { RunMessage } from "@/core/threads/types";
 
 test("keeps a sanitized run input before its output after a late dynamic-context injection", () => {
@@ -214,6 +219,126 @@ test("retains only the submitted optimistic user when its Run fails", () => {
   expect(
     retainOptimisticHumanMessagesAfterFailure(optimistic, "run-failed"),
   ).toEqual([{ ...optimistic[0], run_id: "run-failed" }]);
+});
+
+test("captures only stable visible messages from the terminal Run", () => {
+  const previous = {
+    type: "ai",
+    id: "ai-previous",
+    content: "previous answer",
+    run_id: "run-previous",
+  } as Message;
+  const currentHuman = {
+    type: "human",
+    id: "human-current",
+    content: "current question",
+  } as Message;
+  const currentAssistant = {
+    type: "ai",
+    id: "ai-current",
+    content: "partial answer",
+    additional_kwargs: {},
+  } as Message;
+  const hiddenControl = {
+    type: "system",
+    id: "control-current",
+    content: "hidden",
+    additional_kwargs: { hide_from_ui: true },
+  } as Message;
+  const identityLess = {
+    type: "ai",
+    content: "cannot be durably acknowledged",
+  } as Message;
+
+  expect(
+    captureTerminalRunMessages(
+      [previous, currentHuman, currentAssistant, hiddenControl, identityLess],
+      "run-current",
+      new Set(["message:ai-previous"]),
+    ),
+  ).toEqual([
+    { ...currentHuman, run_id: "run-current" },
+    { ...currentAssistant, run_id: "run-current" },
+  ]);
+});
+
+test("keeps terminal live messages visible until canonical history absorbs them", () => {
+  const terminalMessages = [
+    {
+      type: "human",
+      id: "human-terminal",
+      content: "question",
+      run_id: "run-terminal",
+    },
+    {
+      type: "ai",
+      id: "ai-terminal",
+      content: "partial execution details",
+      run_id: "run-terminal",
+    },
+  ] as unknown as Message[];
+  const input = {
+    threadId: "thread-a",
+    visibleHistory: [] as Message[],
+    pendingArchivedMessages: terminalMessages,
+    pendingArchiveThreadId: "thread-a",
+    renderMessages: [] as Message[],
+    activeRunId: null,
+    runBaselineMessageIds: new Set<string>(),
+    pendingSupersededRunIds: new Set<string>(),
+    visibleOptimisticMessages: [] as Message[],
+  };
+
+  expect(projectThreadMessages(input).map((message) => message.id)).toEqual([
+    "human-terminal",
+    "ai-terminal",
+  ]);
+
+  const canonicalHistory = [
+    { ...terminalMessages[0], content: "question (persisted)" },
+    {
+      ...terminalMessages[1],
+      content: "partial execution details (persisted)",
+    },
+  ] as unknown as Message[];
+  const remaining = pruneConfirmedArchivedMessages(
+    terminalMessages,
+    canonicalHistory,
+  );
+  expect(remaining).toEqual([]);
+  expect(
+    projectThreadMessages({
+      ...input,
+      visibleHistory: canonicalHistory,
+      pendingArchivedMessages: remaining,
+    }).map((message) => [message.id, message.content]),
+  ).toEqual([
+    ["human-terminal", "question (persisted)"],
+    ["ai-terminal", "partial execution details (persisted)"],
+  ]);
+});
+
+test("never overlays a terminal handoff onto another thread", () => {
+  expect(
+    projectThreadMessages({
+      threadId: "thread-b",
+      visibleHistory: [],
+      pendingArchivedMessages: [
+        {
+          type: "ai",
+          id: "ai-thread-a",
+          content: "must stay in thread A",
+          run_id: "run-a",
+        } as Message,
+      ],
+      pendingArchiveThreadId: "thread-a",
+      renderMessages: [],
+      activeRunId: null,
+      runBaselineMessageIds: new Set(),
+      pendingSupersededRunIds: new Set(),
+      visibleOptimisticMessages: [],
+    }),
+  ).toEqual([]);
 });
 
 test("removes only the failed optimistic user acknowledged by canonical history", () => {

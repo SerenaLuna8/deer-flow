@@ -48,32 +48,28 @@ export function ProjectSkillsPage({
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />
       )}
+      renderDetailActions={({ item, editing }) => (
+        <SkillRevisionEntry project={project} item={item} disabled={editing} />
+      )}
       renderVersion={(version, context) =>
         "skill_id" in version ? (
-          <div className="space-y-5">
-            <SkillRevisionEntry
-              project={project}
-              item={context.item}
-              disabled={context.editing}
-            />
-            <SkillAssetDetail
-              version={version}
-              workspace={{
-                accountId: context.accountId,
-                projectId: context.projectId,
-                item: context.item,
-                canAuthor: context.canAuthor,
-                editing: context.editing,
-                onEditingChange: context.onEditingChange,
-                onDirtyChange: context.onDirtyChange,
-                onVersionCreated: context.onVersionCreated,
-                canManageCredentials: project.capabilities.includes(
-                  "mcp.credentials.approve",
-                ),
-                credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
-              }}
-            />
-          </div>
+          <SkillAssetDetail
+            version={version}
+            workspace={{
+              accountId: context.accountId,
+              projectId: context.projectId,
+              item: context.item,
+              canAuthor: context.canAuthor,
+              editing: context.editing,
+              onEditingChange: context.onEditingChange,
+              onDirtyChange: context.onDirtyChange,
+              onVersionCreated: context.onVersionCreated,
+              canManageCredentials: project.capabilities.includes(
+                "mcp.credentials.approve",
+              ),
+              credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
+            }}
+          />
         ) : (
           <p role="alert" className="text-destructive text-sm">
             Skill 版本数据无效。

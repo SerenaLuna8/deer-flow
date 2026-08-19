@@ -20,6 +20,11 @@ from pydantic import BaseModel
 
 from deerflow.config import get_app_config
 from deerflow.error_codes import SUBAGENT_EXECUTION_FAILED_ERROR_CODE
+from deerflow.file_authority import (
+    AuthorityManifest,
+    AuthorityManifestEntry,
+    RunFileAuthority,
+)
 from deerflow.guardrails.provider import (
     GUARDRAIL_ATTRIBUTION_CONTEXT_KEY,
     copy_guardrail_attribution,
@@ -109,6 +114,115 @@ class _OwnerLoopAuthorityProxy:
             )
 
         return invoke
+
+
+class _OwnerLoopFileAuthorityProxy:
+    """Keep async private Run file operations on their owning Worker loop."""
+
+    def __init__(
+        self,
+        target: RunFileAuthority,
+        owner_loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        self._target = target
+        self._owner_loop = owner_loop
+
+    @property
+    def sandbox_id(self) -> str | None:
+        return self._target.sandbox_id
+
+    async def restore(self) -> AuthorityManifest:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.restore,
+        )
+
+    def thread_data_paths(self) -> dict[str, str]:
+        return self._target.thread_data_paths()
+
+    def visible_uploads(self) -> tuple[dict[str, object], ...]:
+        return self._target.visible_uploads()
+
+    def record_current_upload_ids(self, file_ids: tuple[str, ...]) -> None:
+        self._target.record_current_upload_ids(file_ids)
+
+    def current_upload_ids(self) -> tuple[str, ...]:
+        return self._target.current_upload_ids()
+
+    def current_uploads(self) -> tuple[AuthorityManifestEntry, ...]:
+        return self._target.current_uploads()
+
+    def authorizes_run_read_only_mount_path(
+        self,
+        *,
+        run_id: str,
+        path: str,
+    ) -> bool:
+        return self._target.authorizes_run_read_only_mount_path(
+            run_id=run_id,
+            path=path,
+        )
+
+    async def write_output(
+        self,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.write_output,
+            relative_path,
+            content,
+        )
+
+    async def write_internal(
+        self,
+        relative_path: str,
+        content: bytes,
+    ) -> str:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.write_internal,
+            relative_path,
+            content,
+        )
+
+    async def record_presented_paths(
+        self,
+        presented_paths: tuple[str, ...],
+        *,
+        tool_call_id: str,
+    ) -> None:
+        await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.record_presented_paths,
+            presented_paths,
+            tool_call_id=tool_call_id,
+        )
+
+    async def output_delivery_status(self) -> str:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.output_delivery_status,
+        )
+
+    async def finalize(self) -> object:
+        return await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.finalize,
+        )
+
+    async def mark_failed(self) -> None:
+        await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.mark_failed,
+        )
+
+    async def release(self) -> None:
+        await _invoke_on_owner_loop(
+            self._owner_loop,
+            self._target.release,
+        )
 
 
 class _OwnerLoopHostExecutionApprovalProxy:
@@ -796,8 +910,16 @@ async def task_tool(
     # parent's private sandbox when delegated execution finishes.
     if "private_scope" in parent_context:
         executor_kwargs["private_scope"] = parent_context["private_scope"]
-        executor_kwargs["file_authority"] = parent_context.get("__file_authority")
         owner_loop = asyncio.get_running_loop()
+        file_authority = parent_context.get("__file_authority")
+        executor_kwargs["file_authority"] = (
+            _OwnerLoopFileAuthorityProxy(
+                cast(RunFileAuthority, file_authority),
+                owner_loop,
+            )
+            if file_authority is not None
+            else None
+        )
         authorization_boundary = parent_context.get("__authorization_boundary")
         if authorization_boundary is not None:
             executor_kwargs["authorization_boundary"] = _OwnerLoopAuthorityProxy(

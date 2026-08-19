@@ -559,6 +559,7 @@ export function ProjectAssetDetailHeader({
 
 export function ProjectSkillDetailActions({
   actionPending,
+  additionalActions,
   canAuthor,
   canDelete,
   editing,
@@ -569,6 +570,7 @@ export function ProjectSkillDetailActions({
   onDelete,
 }: {
   actionPending: boolean;
+  additionalActions?: ReactNode;
   canAuthor: boolean;
   canDelete: boolean;
   editing: boolean;
@@ -606,6 +608,7 @@ export function ProjectSkillDetailActions({
           删除 Skill
         </Button>
       ) : null}
+      {additionalActions}
     </>
   );
 }
@@ -667,6 +670,7 @@ export function ProjectAssetDetailSheet({
   onDirtyChange,
   onVersionCreated,
   onRequestedVersionHandled,
+  renderDetailActions,
   renderAssetEditor,
   renderVersion,
 }: {
@@ -687,6 +691,10 @@ export function ProjectAssetDetailSheet({
   onDirtyChange?: (dirty: boolean) => void;
   onVersionCreated: (assetId: string, versionId: string) => void;
   onRequestedVersionHandled: (assetId: string, versionId: string) => void;
+  renderDetailActions?: (context: {
+    item: ProjectAssetItem;
+    editing: boolean;
+  }) => ReactNode;
   renderAssetEditor?: (
     effectiveVersion: AssetVersion | null,
     context: ProjectAssetVersionRenderContext,
@@ -1195,7 +1203,7 @@ export function ProjectAssetDetailSheet({
               ) : null}
 
               {showDetailActions ? (
-                <div className="flex flex-wrap items-center gap-2">
+                <div className="flex flex-wrap items-start gap-2">
                   {canCreateVersion && (
                     <Button
                       type="button"
@@ -1250,6 +1258,10 @@ export function ProjectAssetDetailSheet({
                   {kind === "skills" ? (
                     <ProjectSkillDetailActions
                       actionPending={actionPending}
+                      additionalActions={renderDetailActions?.({
+                        item,
+                        editing: versionEditing,
+                      })}
                       canAuthor={canAuthor}
                       canDelete={canDeleteAsset}
                       editing={versionEditing}

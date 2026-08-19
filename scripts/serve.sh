@@ -8,7 +8,8 @@
 # Modes:
 #   --dev       Development mode with hot-reload (default)
 #   --prod      Production mode, pre-built frontend, no hot-reload
-#   --daemon    Run all services in background (nohup), exit after startup
+#   --daemon    Run all services in background. On macOS, launchd keeps a
+#               foreground supervisor alive after this command returns.
 #
 # Actions:
 #   --skip-install  Skip dependency installation (faster restart)
@@ -280,8 +281,28 @@ _kill_repo_nginx() {
     fi
 }
 
+# `launchctl submit` jobs are scoped to the current login, so the fixed labels
+# below cannot collide across users. The application itself uses fixed local
+# ports, which already limits a login to one dev and one prod stack.
+_macos_daemon_labels() {
+    printf '%s\n' \
+        "com.actweave.deerflow.dev" \
+        "com.actweave.deerflow.prod"
+}
+
+_stop_macos_daemon_supervisors() {
+    [ "$(uname -s)" = "Darwin" ] || return 0
+    command -v launchctl >/dev/null 2>&1 || return 0
+
+    local label
+    while IFS= read -r label; do
+        launchctl remove "$label" >/dev/null 2>&1 || true
+    done < <(_macos_daemon_labels)
+}
+
 stop_all() {
     echo "Stopping all services..."
+    _stop_macos_daemon_supervisors
     _report_reclaimed_ports
     _kill_repo_processes "uvicorn app.gateway.app:app"
     _kill_repo_processes "python -m app.worker.app"
@@ -395,6 +416,90 @@ fi
 RUNTIME_ROOT="$REPO_ROOT"
 LOG_ROOT="$RUNTIME_ROOT/logs"
 
+_macos_daemon_label() {
+    if $DEV_MODE; then
+        printf '%s\n' "com.actweave.deerflow.dev"
+    else
+        printf '%s\n' "com.actweave.deerflow.prod"
+    fi
+}
+
+_start_macos_daemon() {
+    local label mode_flag stdout_log stderr_log service_target port
+    local -a start_args launch_env
+
+    label="$(_macos_daemon_label)"
+    if $DEV_MODE; then
+        mode_flag="--dev"
+    else
+        mode_flag="--prod"
+    fi
+
+    start_args=()
+    if $SKIP_INSTALL; then
+        start_args+=("--skip-install")
+    fi
+
+    for port in 8001 3000 2026; do
+        if _is_port_listening "$port"; then
+            echo "✗ Cannot start the background supervisor because port $port is already in use."
+            echo "  Run 'make stop' first, or free the unrelated process manually."
+            return 1
+        fi
+    done
+
+    mkdir -p "$LOG_ROOT"
+    if $DEV_MODE; then
+        stdout_log="$LOG_ROOT/dev-daemon-supervisor.out.log"
+        stderr_log="$LOG_ROOT/dev-daemon-supervisor.err.log"
+    else
+        stdout_log="$LOG_ROOT/prod-daemon-supervisor.out.log"
+        stderr_log="$LOG_ROOT/prod-daemon-supervisor.err.log"
+    fi
+    service_target="gui/$(id -u)/$label"
+
+    if launchctl print "$service_target" >/dev/null 2>&1; then
+        echo "✗ The background supervisor is already registered ($label)."
+        echo "  Run 'make stop' before starting it again."
+        return 1
+    fi
+
+    # launchd does not reliably inherit the interactive shell's PATH. Pass
+    # only non-secret runtime paths here; the supervised launcher loads .env
+    # itself, so database and credential values never appear in launchctl args.
+    launch_env=(
+        /usr/bin/env
+        "PATH=$PATH"
+        "DEER_FLOW_CONFIG_PATH=$DEER_FLOW_CONFIG_PATH"
+        "DEER_FLOW_HOME=$DEER_FLOW_HOME"
+        "DEER_FLOW_PROJECT_ROOT=$DEER_FLOW_PROJECT_ROOT"
+    )
+    if [ -n "${GATEWAY_WORKERS:-}" ]; then
+        launch_env+=("GATEWAY_WORKERS=$GATEWAY_WORKERS")
+    fi
+    if [ -n "${UV_EXTRAS:-}" ]; then
+        launch_env+=("UV_EXTRAS=$UV_EXTRAS")
+    fi
+
+    echo "Registering macOS background supervisor ($label)..."
+    launchctl submit -l "$label" -o "$stdout_log" -e "$stderr_log" -- \
+        "${launch_env[@]}" /bin/bash "$REPO_ROOT/scripts/serve.sh" "$mode_flag" "${start_args[@]}"
+
+    if ! ./scripts/wait-for-port.sh 8001 30 "Gateway" || \
+        ! ./scripts/wait-for-port.sh 3000 120 "Frontend" || \
+        ! ./scripts/wait-for-port.sh 2026 10 "Nginx"; then
+        echo "✗ Background supervisor did not finish starting the full stack."
+        launchctl remove "$label" >/dev/null 2>&1 || true
+        [ -f "$stderr_log" ] && tail -20 "$stderr_log"
+        return 1
+    fi
+
+    echo "✓ Background supervisor is running ($label)"
+    echo "  🌐 http://localhost:2026"
+    echo "  📋 Supervisor logs: $stdout_log and $stderr_log"
+    echo "  🛑 Stop: make stop"
+}
+
 if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
     echo "✗ No ActWeave config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
@@ -402,6 +507,15 @@ if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
 fi
 
 # ── Install dependencies ────────────────────────────────────────────────────
+
+# macOS terminal/process runners may tear down nohup descendants when their
+# owning execution session exits. Keep the existing POSIX fallback below for
+# other hosts, but use launchd here so a foreground parent remains responsible
+# for the complete local stack and its cleanup.
+if $DAEMON_MODE && [ "$(uname -s)" = "Darwin" ]; then
+    _start_macos_daemon
+    exit $?
+fi
 
 # Pick a runnable Python for the extras detector. On Windows/Git Bash,
 # `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
@@ -501,7 +615,7 @@ trap 'cleanup 143' TERM
 # ── Helper: start a service ──────────────────────────────────────────────────
 
 # run_service NAME COMMAND PORT TIMEOUT
-# In daemon mode, wraps with nohup. Waits for port to be ready.
+# On non-macOS hosts, daemon mode wraps with nohup. Waits for port to be ready.
 run_service() {
     local name="$1" cmd="$2" port="$3" timeout="$4"
 

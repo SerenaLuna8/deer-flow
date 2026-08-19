@@ -2156,9 +2156,8 @@ export const enUS: Translations = {
         confirmDelete: "Delete draft",
       },
       revision: {
-        button: "Revise in conversation",
+        button: "AI revise",
         opening: "Opening revision session…",
-        hint: "Starts from the current published version and creates a new draft. It takes effect only after you publish.",
         saveLocalChangesFirst: "Save or discard unsaved changes first",
       },
       conversation: {

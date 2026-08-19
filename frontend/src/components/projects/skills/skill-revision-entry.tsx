@@ -102,24 +102,20 @@ export function SkillRevisionEntry({
 
   return (
     <div className="space-y-2">
-      <div className="flex flex-wrap items-center gap-2">
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={disabled || pending}
-          title={disabled ? copy.saveLocalChangesFirst : undefined}
-          onClick={startRevision}
-        >
-          {pending ? (
-            <Loader2Icon aria-hidden className="size-4 animate-spin" />
-          ) : (
-            <MessagesSquareIcon aria-hidden className="size-4" />
-          )}
-          {pending ? copy.opening : copy.button}
-        </Button>
-        <p className="text-muted-foreground text-xs">{copy.hint}</p>
-      </div>
+      <Button
+        type="button"
+        variant="outline"
+        disabled={disabled || pending}
+        title={disabled ? copy.saveLocalChangesFirst : undefined}
+        onClick={startRevision}
+      >
+        {pending ? (
+          <Loader2Icon aria-hidden className="size-4 animate-spin" />
+        ) : (
+          <MessagesSquareIcon aria-hidden className="size-4" />
+        )}
+        {pending ? copy.opening : copy.button}
+      </Button>
       {create.error ? (
         <p role="alert" className="text-destructive text-sm">
           {skillRevisionEntryErrorMessage(

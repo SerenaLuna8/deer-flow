@@ -101,6 +101,17 @@ def test_submission_failure_closes_the_never_scheduled_coroutine() -> None:
     assert result["coroutine_closed"] is True
 
 
+def test_execution_failure_log_is_traceable_without_exposing_exception_detail() -> None:
+    result = _run_probe("execution-failure-log")
+
+    assert result["status"] == "failed"
+    assert result["error"] == "SUBAGENT_EXECUTION_FAILED"
+    assert result["has_trace_id"] is True
+    assert result["has_exception_type"] is True
+    assert result["has_traceback"] is True
+    assert result["secret_present"] is False
+
+
 def test_module_reload_reopens_a_fresh_scheduler_generation_after_shutdown() -> None:
     result = _run_probe("shutdown-reload")
 

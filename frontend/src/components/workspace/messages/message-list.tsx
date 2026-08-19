@@ -105,7 +105,7 @@ import {
   MessageTokenUsageDebugList,
   MessageTokenUsageList,
 } from "./message-token-usage";
-import { RunActivity, RunDuration } from "./run-duration";
+import { RunActivity } from "./run-duration";
 import { RunFeedbackButtons } from "./run-feedback-buttons";
 import { MessageListSkeleton } from "./skeleton";
 import { SubtaskCard } from "./subtask-card";
@@ -967,11 +967,13 @@ export function MessageList({
     ({
       messages,
       turnUsageMessages,
+      durationSeconds = [],
       inlineDebug = true,
       debugMessageIds,
     }: {
       messages: Message[];
       turnUsageMessages?: Message[] | null;
+      durationSeconds?: number[];
       inlineDebug?: boolean;
       debugMessageIds?: string[];
     }) => {
@@ -981,6 +983,7 @@ export function MessageList({
             enabled={true}
             isLoading={thread.isLoading}
             messages={turnUsageMessages ?? []}
+            durationSeconds={durationSeconds}
           />
         );
       }
@@ -1082,11 +1085,13 @@ export function MessageList({
       includeTokenUsage = true,
       showAllSteps = false,
       turnUsageMessages,
+      durationSeconds = [],
     }: {
       groupIsLoading: boolean;
       includeTokenUsage?: boolean;
       showAllSteps?: boolean;
       turnUsageMessages?: Message[] | null;
+      durationSeconds?: number[];
     },
   ): ReactNode => {
     if (group.type !== "assistant:subagent") {
@@ -1146,6 +1151,7 @@ export function MessageList({
           renderTokenUsage({
             messages: group.messages,
             turnUsageMessages,
+            durationSeconds,
             debugMessageIds: subagentDebugMessageIds,
           })}
       </div>
@@ -1253,32 +1259,6 @@ export function MessageList({
             },
           ]
         : [];
-  };
-
-  const withRunDuration = (
-    group: (typeof groupedMessages)[number],
-    groupIndex: number,
-    content: ReactNode,
-    displays: ReturnType<typeof resolveRunDurationDisplays>,
-  ) => {
-    if (!content && displays.length === 0) {
-      return null;
-    }
-
-    return (
-      <div
-        key={`duration-group:${group.id ?? group.messages[0]?.id ?? groupIndex}`}
-        className="flex w-full flex-col gap-2"
-      >
-        {content}
-        {displays.map((display) => (
-          <RunDuration
-            key={display.runId}
-            durationSeconds={display.durationSeconds}
-          />
-        ))}
-      </div>
-    );
   };
 
   return (
@@ -1479,6 +1459,9 @@ export function MessageList({
                     {renderTokenUsage({
                       messages: group.messages,
                       turnUsageMessages,
+                      durationSeconds: durationDisplays.map(
+                        (display) => display.durationSeconds,
+                      ),
                     })}
                     {group.type === "assistant" &&
                       renderAssistantActions(
@@ -1535,6 +1518,9 @@ export function MessageList({
                       {renderTokenUsage({
                         messages: group.messages,
                         turnUsageMessages,
+                        durationSeconds: durationDisplays.map(
+                          (display) => display.durationSeconds,
+                        ),
                       })}
                     </div>
                   );
@@ -1551,6 +1537,9 @@ export function MessageList({
                       {renderTokenUsage({
                         messages: group.messages,
                         turnUsageMessages,
+                        durationSeconds: durationDisplays.map(
+                          (display) => display.durationSeconds,
+                        ),
                       })}
                     </div>
                   );
@@ -1626,6 +1615,9 @@ export function MessageList({
                     {renderTokenUsage({
                       messages: group.messages,
                       turnUsageMessages,
+                      durationSeconds: durationDisplays.map(
+                        (display) => display.durationSeconds,
+                      ),
                     })}
                   </div>
                 );
@@ -1633,6 +1625,9 @@ export function MessageList({
                 return renderSubagentGroup(group, {
                   groupIsLoading,
                   turnUsageMessages,
+                  durationSeconds: durationDisplays.map(
+                    (display) => display.durationSeconds,
+                  ),
                 });
               }
               return (
@@ -1652,17 +1647,15 @@ export function MessageList({
                   {renderTokenUsage({
                     messages: group.messages,
                     turnUsageMessages,
+                    durationSeconds: durationDisplays.map(
+                      (display) => display.durationSeconds,
+                    ),
                     inlineDebug: false,
                   })}
                 </div>
               );
             })();
-            return withRunDuration(
-              group,
-              groupIndex,
-              content,
-              durationDisplays,
-            );
+            return content;
           })}
           {visualRunIsLoading &&
             !hasActiveAssistantText &&

@@ -1824,7 +1824,6 @@ export interface Translations {
       revision: {
         button: string;
         opening: string;
-        hint: string;
         saveLocalChangesFirst: string;
       };
       conversation: {

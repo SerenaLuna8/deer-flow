@@ -32,28 +32,37 @@ function normalizeDuration(value: unknown) {
 
 export function getRunDurationDisplaysByGroupIndex(groups: MessageGroup[]) {
   const displays = groups.map(() => [] as RunDurationDisplay[]);
-  const durations = new Map<string, number>();
-  const lastGroupIndices = new Map<string, number>();
+  let turnDurations = new Map<string, number>();
 
   groups.forEach((group, groupIndex) => {
+    if (group.type === "human") {
+      turnDurations = new Map();
+      return;
+    }
+
     for (const message of group.messages) {
       const runId = getMessageRunId(message);
       if (!runId) continue;
-      lastGroupIndices.set(runId, groupIndex);
       if (message.type !== "ai") continue;
       const duration = normalizeDuration(
         message.additional_kwargs?.turn_duration,
       );
-      if (duration !== undefined) durations.set(runId, duration);
+      if (duration !== undefined) turnDurations.set(runId, duration);
+    }
+
+    const nextGroup = groups[groupIndex + 1];
+    const isTurnEnd = !nextGroup || nextGroup.type === "human";
+    if (isTurnEnd) {
+      displays[groupIndex]?.push(
+        ...Array.from(turnDurations, ([runId, durationSeconds]) => ({
+          runId,
+          durationSeconds,
+        })),
+      );
+      turnDurations = new Map();
     }
   });
 
-  for (const [runId, durationSeconds] of durations) {
-    const groupIndex = lastGroupIndices.get(runId);
-    if (groupIndex !== undefined) {
-      displays[groupIndex]?.push({ runId, durationSeconds });
-    }
-  }
   return displays;
 }
 

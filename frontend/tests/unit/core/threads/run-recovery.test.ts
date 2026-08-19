@@ -51,6 +51,11 @@ describe("run failure recovery", () => {
         run("success", null),
       ]),
     ).toEqual([]);
+    expect(
+      findTerminalFailureRunIdsToReload(previousStatuses, [
+        run("interrupted", null),
+      ]),
+    ).toEqual(["run-1"]);
   });
 
   test("retries an empty message request that raced with terminal failure", () => {
@@ -75,6 +80,20 @@ describe("run failure recovery", () => {
         visibleMessageCount: 0,
       }),
     ).toBe(false);
+    expect(
+      shouldReloadEmptyRunAfterTerminalFailure({
+        statusAtRequest: "running",
+        currentStatus: "interrupted",
+        visibleMessageCount: 0,
+      }),
+    ).toBe(true);
+  });
+
+  test("does not present an interrupted Run as a failed Run", () => {
+    expect(latestRunFailureCode([run("interrupted", null)])).toBeNull();
+    expect(
+      resolveRunFailureRunId(undefined, null, [run("interrupted", null)]),
+    ).toBeNull();
   });
 
   test("recognizes the stable code from live and refreshed durable failures", () => {
