@@ -15,10 +15,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, Literal, TypeVar
 
-import yaml
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
-from yaml.events import AliasEvent
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
@@ -32,6 +30,9 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillCredentialBindingInvalid,
+    SkillCredentialBindingsIncomplete,
+    SkillCredentialSelectionStale,
     SkillPublishBaseStale,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
@@ -45,12 +46,27 @@ from app.shared_assets.skill_credential_closure import (
     SkillCredentialClosureInvalid,
     lock_skill_credential_closure,
 )
+from app.shared_assets.skill_credential_policy import (
+    SkillCredentialBindingInput,
+    normalize_binding_inputs,
+)
+from app.shared_assets.skill_credential_repository import (
+    SkillCredentialRepository,
+    SkillCredentialTarget,
+)
+from app.shared_assets.skill_credential_service import (
+    prepare_skill_credential_bindings_in_transaction,
+)
 from app.shared_assets.skill_repository import (
     SkillRepository,
     SkillVersionFileMetadataRecord,
     SkillVersionRecord,
 )
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
+from deerflow.skills.frontmatter import (
+    MAX_SKILL_FRONTMATTER_BYTES,
+    parse_skill_frontmatter_document,
+)
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.skillscan import (
     StaticScanBlockedError,
@@ -69,12 +85,7 @@ MAX_SKILL_FILE_CHANGES = 256
 MAX_PROJECT_SKILL_BATCH_ITEMS = 256
 MAX_PROJECT_SKILL_BATCH_FILES = MAX_SKILL_ARCHIVE_FILES
 MAX_PROJECT_SKILL_BATCH_BYTES = MAX_SKILL_ARCHIVE_BYTES
-MAX_SKILL_FRONTMATTER_BYTES = 256 * 1024
-MAX_SKILL_FRONTMATTER_NODES = 2048
-MAX_SKILL_FRONTMATTER_DEPTH = 32
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")
-_ENV_VAR_NAME_PATTERN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-_FRONTMATTER_PATTERN = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _SYMLINK_MEDIA_TYPES = frozenset({"application/symlink", "application/x-symlink", "inode/symlink"})
 _WIN32_INVALID_SEGMENT_CHARS = frozenset('<>:"|?*')
 _WIN32_RESERVED_BASENAMES = frozenset(
@@ -109,83 +120,13 @@ _CONFLICT_CONSTRAINTS = frozenset(
         "uq_skills_project_slug",
         "uq_skills_system_slug",
         "uq_skill_versions_asset_number",
+        "pk_project_skill_credential_configs",
+        "uq_project_skill_credential_configs_revision",
+        "uq_project_skill_credential_bindings_active_name",
     }
 )
 _Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
 _T = TypeVar("_T")
-
-
-class _DuplicateKeySafeLoader(yaml.SafeLoader):
-    """Safe YAML loader with bounded structure and no aliases."""
-
-    def __init__(self, stream) -> None:
-        super().__init__(stream)
-        self._skill_node_count = 0
-        self._skill_depth = 0
-
-    def compose_node(self, parent, index):
-        if self.check_event(AliasEvent):
-            raise yaml.composer.ComposerError(
-                None,
-                None,
-                "YAML aliases are not allowed",
-                self.peek_event().start_mark,
-            )
-        self._skill_node_count += 1
-        if self._skill_node_count > MAX_SKILL_FRONTMATTER_NODES:
-            raise yaml.composer.ComposerError(
-                None,
-                None,
-                "YAML node limit exceeded",
-                self.peek_event().start_mark,
-            )
-        self._skill_depth += 1
-        if self._skill_depth > MAX_SKILL_FRONTMATTER_DEPTH:
-            raise yaml.composer.ComposerError(
-                None,
-                None,
-                "YAML depth limit exceeded",
-                self.peek_event().start_mark,
-            )
-        try:
-            return super().compose_node(parent, index)
-        finally:
-            self._skill_depth -= 1
-
-
-def _construct_unique_mapping(
-    loader: _DuplicateKeySafeLoader,
-    node: yaml.MappingNode,
-    deep: bool = False,
-):
-    loader.flatten_mapping(node)
-    seen: set[object] = set()
-    for key_node, _ in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in seen
-        except TypeError:
-            raise yaml.constructor.ConstructorError(
-                None,
-                None,
-                "unhashable mapping key",
-                key_node.start_mark,
-            ) from None
-        if duplicate:
-            raise yaml.constructor.ConstructorError(
-                None,
-                None,
-                "duplicate mapping key",
-                key_node.start_mark,
-            )
-        seen.add(key)
-    return yaml.constructor.BaseConstructor.construct_mapping(loader, node, deep=deep)
-
-
-_DuplicateKeySafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
 
 
 def _constraint_name(exc: BaseException) -> str | None:
@@ -553,45 +494,10 @@ def _preflight_skill_frontmatter(
     request_id: str,
 ) -> tuple[dict[str, object], tuple[tuple[str, bool], ...]]:
     manifest_text = skill_file.read_text(encoding="utf-8")
-    match = _FRONTMATTER_PATTERN.match(manifest_text)
-    if match is None:
+    parsed = parse_skill_frontmatter_document(manifest_text)
+    if not parsed.valid or parsed.frontmatter is None or parsed.projection is None:
         raise AssetValidationFailed(request_id)
-    serialized_frontmatter = match.group(1)
-    if len(serialized_frontmatter.encode("utf-8")) > MAX_SKILL_FRONTMATTER_BYTES:
-        raise AssetValidationFailed(request_id)
-    frontmatter = yaml.load(serialized_frontmatter, Loader=_DuplicateKeySafeLoader)
-    if not isinstance(frontmatter, dict) or any(not isinstance(key, str) for key in frontmatter):
-        raise AssetValidationFailed(request_id)
-
-    raw_requirements = frontmatter.get("required-secrets")
-    canonical_requirements: list[tuple[str, bool]] = []
-    if "required-secrets" in frontmatter:
-        if not isinstance(raw_requirements, list):
-            raise AssetValidationFailed(request_id)
-        for item in raw_requirements:
-            if isinstance(item, str):
-                name = item.strip()
-                optional = False
-            elif isinstance(item, dict) and all(isinstance(key, str) for key in item):
-                if not set(item).issubset({"name", "optional"}):
-                    raise AssetValidationFailed(request_id)
-                raw_name = item.get("name")
-                optional = item.get("optional", False)
-                if not isinstance(raw_name, str) or not isinstance(optional, bool):
-                    raise AssetValidationFailed(request_id)
-                name = raw_name.strip()
-            else:
-                raise AssetValidationFailed(request_id)
-            if _ENV_VAR_NAME_PATTERN.fullmatch(name) is None:
-                raise AssetValidationFailed(request_id)
-            canonical_requirements.append((name, optional))
-    if len({name for name, _ in canonical_requirements}) != len(canonical_requirements):
-        raise AssetValidationFailed(request_id)
-
-    secrets_autonomous = frontmatter.get("secrets-autonomous")
-    if "secrets-autonomous" in frontmatter and not isinstance(secrets_autonomous, bool):
-        raise AssetValidationFailed(request_id)
-    return frontmatter, tuple(canonical_requirements)
+    return dict(parsed.frontmatter), tuple((requirement.name, requirement.optional) for requirement in parsed.projection.required_secrets)
 
 
 def _analyze_skill_files(
@@ -657,7 +563,14 @@ def _analyze_skill_files(
                 findings = []
     except AssetValidationFailed:
         raise
-    except (OSError, RecursionError, UnicodeError, yaml.YAMLError, StaticScanBlockedError, StaticScannerError, ValueError):
+    except (
+        OSError,
+        RecursionError,
+        UnicodeError,
+        StaticScanBlockedError,
+        StaticScannerError,
+        ValueError,
+    ):
         raise AssetValidationFailed(request_id) from None
 
     views = _file_views(files)
@@ -1103,6 +1016,9 @@ class SkillService:
         *,
         expected_asset_version: int,
         acknowledge_stale_base: bool = False,
+        expected_payload_checksum: str | None = None,
+        expected_binding_revision: int | None = None,
+        credential_bindings: Sequence[SkillCredentialBindingInput] | None = None,
     ) -> SkillVersionView:
         self._require_capability(
             actor,
@@ -1110,6 +1026,27 @@ class SkillService:
         )
         if type(acknowledge_stale_base) is not bool:
             raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
+        request_id = getattr(actor, "request_id", "unknown")
+        if expected_payload_checksum is not None and (not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None):
+            raise SkillCredentialBindingInvalid(request_id)
+        if expected_binding_revision is not None and (not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0):
+            raise SkillCredentialBindingInvalid(request_id)
+        normalized_bindings: tuple[SkillCredentialBindingInput, ...] | None = None
+        if credential_bindings is not None:
+            if not isinstance(actor, ProjectContext):
+                raise AssetForbidden(request_id)
+            self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+            normalized_bindings = normalize_binding_inputs(
+                credential_bindings,
+                request_id=request_id,
+            )
+            if expected_payload_checksum is None or expected_binding_revision is None:
+                raise SkillCredentialBindingInvalid(request_id)
+        elif expected_binding_revision is not None and not isinstance(
+            actor,
+            ProjectContext,
+        ):
+            raise AssetForbidden(request_id)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
             return await self._publish_in_transaction(
@@ -1119,6 +1056,10 @@ class SkillService:
                 version_id,
                 expected_asset_version=expected_asset_version,
                 acknowledge_stale_base=acknowledge_stale_base,
+                expected_payload_checksum=expected_payload_checksum,
+                expected_binding_revision=expected_binding_revision,
+                credential_bindings=normalized_bindings,
+                record_credential_governance=True,
             )
 
         return await self._execute(
@@ -1261,7 +1202,9 @@ class SkillService:
                         current.row.id,
                     )
                 except SkillCredentialClosureInvalid:
-                    raise AssetValidationFailed(actor.request_id) from None
+                    raise SkillCredentialBindingsIncomplete(
+                        actor.request_id,
+                    ) from None
             asset.status = "active"
             asset.version += 1
             await repository.session.flush()
@@ -1695,6 +1638,10 @@ class SkillService:
         *,
         expected_asset_version: int,
         acknowledge_stale_base: bool = False,
+        expected_payload_checksum: str | None = None,
+        expected_binding_revision: int | None = None,
+        credential_bindings: Sequence[SkillCredentialBindingInput] | None = None,
+        record_credential_governance: bool = False,
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
@@ -1727,10 +1674,38 @@ class SkillService:
             or dict(current.scan_summary) != record.row.scan_summary
         ):
             raise AssetValidationFailed(actor.request_id)
+        if expected_payload_checksum is not None and record.row.payload_checksum != expected_payload_checksum:
+            if isinstance(actor, ProjectContext):
+                raise SkillCredentialSelectionStale(actor.request_id)
+            raise AssetConflict(actor.request_id)
+        credential_bindings_changed = False
+        project_binding_actor: ProjectContext | SystemAssetGovernanceContext | None
+        if isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None):
+            project_binding_actor = actor
+        else:
+            project_binding_actor = None
+        if project_binding_actor is not None and (bool(record.row.secret_requirements) or credential_bindings is not None or expected_binding_revision is not None):
+            prepared = await prepare_skill_credential_bindings_in_transaction(
+                SkillCredentialRepository(repository.session),
+                project_binding_actor,
+                SkillCredentialTarget(asset, record.row),
+                credential_bindings,
+                expected_revision=expected_binding_revision,
+                require_complete=asset.status == "active",
+            )
+            credential_bindings_changed = prepared.changed
         record.row.workflow_status = WorkflowStatus.PUBLISHED.value
         asset.current_published_version_id = record.row.id
         asset.version += 1
         await repository.session.flush()
+        if credential_bindings_changed and record_credential_governance:
+            await self._record_governance(
+                repository.session,
+                actor,
+                asset.id,
+                record.row.id,
+                "skill.credential_bindings.configure",
+            )
         return self._version_view(record)
 
     async def _create_version(

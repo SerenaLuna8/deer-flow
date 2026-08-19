@@ -1762,6 +1762,89 @@ export interface Translations {
   };
 
   skills: {
+    secrets: {
+      workbenchAria: string;
+      filesTab: string;
+      secretsTab: string;
+      aria: string;
+      title: string;
+      description: string;
+      viewSource: string;
+      checking: string;
+      syncing: string;
+      retry: string;
+      sourceStale: string;
+      invalidDeclaration: string;
+      forbidden: string;
+      notFound: string;
+      invalidResponse: string;
+      unavailable: string;
+      invalidSource: string;
+      openSource: string;
+      managedComments: string;
+      shorthand: (count: number) => string;
+      empty: string;
+      optional: string;
+      required: string;
+      setOptional: (name: string) => string;
+      remove: (name: string) => string;
+      addTitle: string;
+      nameLabel: string;
+      namePlaceholder: string;
+      newOptional: string;
+      add: string;
+      invalidName: string;
+      duplicateName: string;
+      autonomousTitle: string;
+      autonomousDescription: string;
+      autonomousAria: string;
+      location: (line: number, column: number | null) => string;
+      loadSourceFailed: string;
+      loadSource: string;
+      saveBlocked: string;
+      publishBlocked: string;
+      credentialLabel: string;
+      noCompatibleCredential: string;
+      optionalUnbound: string;
+      selectCredential: string;
+      credentialVersion: (name: string, version: number) => string;
+      requiredMissing: string;
+      createCredential: string;
+      manageCredential: string;
+    };
+    publishDialog: {
+      title: string;
+      description: (version: number) => string;
+      loading: string;
+      targetVersion: string;
+      bindingRevision: string;
+      noRequirements: string;
+      bindingsTitle: string;
+      noApprove: string;
+      approvalRequiredForActive: string;
+      optionalUnbound: (count: number) => string;
+      staleBase: string;
+      credentialChanged: string;
+      assetChanged: string;
+      cancel: string;
+      retry: string;
+      publishing: string;
+      publish: string;
+      confirmOverwrite: string;
+      discardTitle: string;
+      discardDescription: string;
+      continue: string;
+      discard: string;
+      createdInvalid: string;
+      createdIneligible: string;
+      incomplete: string;
+      invalidBinding: string;
+      staleSelection: string;
+      stalePublishBase: string;
+      invalidDeclaration: string;
+      forbidden: string;
+      credentialRequestOmitted: string;
+    };
     builder: {
       errors: {
         unavailable: string;
@@ -1870,6 +1953,9 @@ export interface Translations {
         packageAria: string;
         title: string;
         titleRevise: string;
+        filesSurface: string;
+        secretsSurface: string;
+        secretsUnavailable: string;
         fileCount: (count: number) => string;
         diffSummary: (
           version: string,
@@ -1979,6 +2065,8 @@ export interface Translations {
         withVersion: (version: number) => string;
         withoutVersion: string;
         goPublish: string;
+        createdWithSecrets: (count: number) => string;
+        configureCredentials: string;
       };
       publish: {
         staleTitle: string;

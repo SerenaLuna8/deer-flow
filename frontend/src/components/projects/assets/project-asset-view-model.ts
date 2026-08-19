@@ -28,6 +28,13 @@ type ProjectSkillStatusItem = Pick<
 >;
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 
+export function projectSkillCredentialSetupRequired(error: unknown): boolean {
+  return (
+    error instanceof SharedAssetApiError &&
+    error.code === "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE"
+  );
+}
+
 export function projectAssetCreateErrorMessage(
   kind: MutableAssetKind,
   error: unknown,

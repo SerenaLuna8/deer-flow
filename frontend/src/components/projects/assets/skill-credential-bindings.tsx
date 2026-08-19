@@ -1,10 +1,9 @@
 "use client";
 
-import { AlertCircleIcon, KeyRoundIcon, PlusIcon, XIcon } from "lucide-react";
+import { AlertCircleIcon, KeyRoundIcon } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
@@ -15,9 +14,22 @@ import {
   type SkillCredentialBindingsInput,
   type SkillCredentialBindingsResponse,
   type SkillCredentialRequirement,
+  type ProjectAssetItem,
 } from "@/core/shared-assets";
 
-type BindingSelections = Record<string, string>;
+import {
+  SkillCredentialOptionSelect,
+  skillCredentialRequirementOptions,
+} from "./skill-credential-option-select";
+
+export type BindingSelections = Record<string, string>;
+
+export function skillCredentialBindingCanUnbind(
+  skillActive: boolean,
+  requirement: Pick<SkillCredentialRequirement, "optional">,
+): boolean {
+  return !skillActive || requirement.optional;
+}
 
 function configuredSelections(
   data: SkillCredentialBindingsResponse,
@@ -49,6 +61,31 @@ function selectionsEqual(
   );
 }
 
+export function skillCredentialSelectionsAfterServerRefresh(
+  current: BindingSelections,
+  previousOriginal: BindingSelections,
+  nextOriginal: BindingSelections,
+  nextRequirementNames: readonly string[],
+): {
+  selections: BindingSelections;
+  preservedLocalChanges: boolean;
+} {
+  const selections: BindingSelections = {};
+  let preservedLocalChanges = false;
+  for (const name of nextRequirementNames) {
+    const currentValue = current[name] ?? "";
+    const previousValue = previousOriginal[name] ?? "";
+    const nextValue = nextOriginal[name] ?? "";
+    const locallyChanged = currentValue !== previousValue;
+    const selectedValue = locallyChanged ? currentValue : nextValue;
+    if (locallyChanged && currentValue !== nextValue) {
+      preservedLocalChanges = true;
+    }
+    if (selectedValue) selections[name] = selectedValue;
+  }
+  return { selections, preservedLocalChanges };
+}
+
 export function skillCredentialBindingsPayload(
   expectedRevision: number,
   selections: BindingSelections,
@@ -62,48 +99,6 @@ export function skillCredentialBindingsPayload(
       }),
     ),
   });
-}
-
-function credentialOptionLabel(
-  requirement: SkillCredentialRequirement,
-  credentialVersionId: string,
-): string {
-  const eligible = requirement.eligible_credentials.find(
-    (credential) => credential.credential_version_id === credentialVersionId,
-  );
-  if (eligible) {
-    return `${eligible.display_name} · 版本 ${eligible.version_number}`;
-  }
-  if (
-    requirement.configured &&
-    requirement.credential_version_id === credentialVersionId
-  ) {
-    return `${requirement.credential_display_name} · 版本 ${requirement.credential_version_number}（当前绑定）`;
-  }
-  return "不可用的 Credential 版本";
-}
-
-function requirementOptions(
-  requirement: SkillCredentialRequirement,
-  selectedVersionId: string,
-) {
-  const options = [...requirement.eligible_credentials];
-  if (
-    selectedVersionId !== "" &&
-    !options.some(
-      (credential) => credential.credential_version_id === selectedVersionId,
-    ) &&
-    requirement.configured &&
-    requirement.credential_version_id === selectedVersionId
-  ) {
-    options.unshift({
-      credential_id: requirement.credential_id,
-      credential_version_id: requirement.credential_version_id,
-      display_name: requirement.credential_display_name,
-      version_number: requirement.credential_version_number,
-    });
-  }
-  return options;
 }
 
 function bindingErrorMessage(
@@ -126,81 +121,62 @@ function bindingErrorMessage(
     : "环境变量配置保存失败，请稍后重试。";
 }
 
-function RequirementBadge({
-  requirement,
-}: {
-  requirement: SkillCredentialRequirement;
-}) {
-  return (
-    <Badge variant="secondary">{requirement.optional ? "可选" : "必需"}</Badge>
-  );
-}
-
 export function SkillCredentialBindingEditor({
   data,
+  skillActive,
   canManage,
   credentialsHref,
   pending,
   errorMessage,
   onReload,
   onSave,
+  onDirtyChange,
 }: {
   data: SkillCredentialBindingsResponse;
+  skillActive: boolean;
   canManage: boolean;
   credentialsHref: string;
   pending: boolean;
   errorMessage: string | null;
   onReload: () => void;
   onSave: (input: SkillCredentialBindingsInput) => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const originalSelections = useMemo(() => configuredSelections(data), [data]);
   const [selections, setSelections] =
     useState<BindingSelections>(originalSelections);
-  const [addName, setAddName] = useState("");
-  const [addCredentialVersionId, setAddCredentialVersionId] = useState("");
+  const [serverRefreshPreserved, setServerRefreshPreserved] = useState(false);
   const sourceIdentity = `${data.skill_version_id}:${data.revision}`;
   const appliedSourceIdentityRef = useRef(sourceIdentity);
+  const baselineSelectionsRef = useRef(originalSelections);
+  const selectionsRef = useRef(selections);
+  selectionsRef.current = selections;
 
   useEffect(() => {
     if (appliedSourceIdentityRef.current === sourceIdentity) return;
     appliedSourceIdentityRef.current = sourceIdentity;
-    setSelections(originalSelections);
-    setAddName("");
-    setAddCredentialVersionId("");
-  }, [originalSelections, sourceIdentity]);
-
-  const requirementsByName = useMemo(
-    () =>
-      new Map(
-        data.requirements.map((requirement) => [requirement.name, requirement]),
-      ),
-    [data.requirements],
-  );
-  const boundRequirements = data.requirements.filter(
-    (requirement) => selections[requirement.name],
-  );
-  const unboundRequirements = data.requirements.filter(
-    (requirement) => !selections[requirement.name],
-  );
-  const selectedAddRequirement = requirementsByName.get(addName);
+    const reconciled = skillCredentialSelectionsAfterServerRefresh(
+      selectionsRef.current,
+      baselineSelectionsRef.current,
+      originalSelections,
+      data.requirements.map((requirement) => requirement.name),
+    );
+    baselineSelectionsRef.current = originalSelections;
+    setSelections(reconciled.selections);
+    setServerRefreshPreserved(reconciled.preservedLocalChanges);
+  }, [data.requirements, originalSelections, sourceIdentity]);
   const dirty = !selectionsEqual(selections, originalSelections);
 
-  function selectAddRequirement(name: string) {
-    setAddName(name);
-    const firstCredential =
-      requirementsByName.get(name)?.eligible_credentials[0];
-    setAddCredentialVersionId(firstCredential?.credential_version_id ?? "");
-  }
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
-  function addBinding() {
-    if (!addName || !addCredentialVersionId) return;
-    setSelections((current) => ({
-      ...current,
-      [addName]: addCredentialVersionId,
-    }));
-    setAddName("");
-    setAddCredentialVersionId("");
-  }
+  useEffect(
+    () => () => {
+      onDirtyChange?.(false);
+    },
+    [onDirtyChange],
+  );
 
   return (
     <section className="border-border/70 space-y-4 rounded-xl border p-4">
@@ -215,7 +191,7 @@ export function SkillCredentialBindingEditor({
             中，此页面不会输入或回显密钥值。
           </p>
         </div>
-        {canManage ? (
+        {canManage && !dirty ? (
           <Button asChild type="button" variant="outline" size="sm">
             <Link href={credentialsHref}>管理 Credential</Link>
           </Button>
@@ -227,170 +203,64 @@ export function SkillCredentialBindingEditor({
           当前发布版本没有声明环境变量。
         </p>
       ) : (
-        <>
-          {boundRequirements.length === 0 ? (
-            <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-              尚未绑定环境变量。
-            </p>
-          ) : (
-            <div className="space-y-3">
-              {boundRequirements.map((requirement) => {
-                const selectedVersionId = selections[requirement.name] ?? "";
-                return (
-                  <div
-                    key={requirement.name}
-                    className="bg-muted/25 grid gap-3 rounded-lg border p-3 sm:grid-cols-[minmax(0,1fr)_minmax(240px,1fr)_auto]"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <code className="text-sm font-medium break-all">
-                          {requirement.name}
-                        </code>
-                        <RequirementBadge requirement={requirement} />
-                      </div>
-                      <p className="text-muted-foreground mt-1 text-xs">
-                        {credentialOptionLabel(requirement, selectedVersionId)}
-                      </p>
-                    </div>
-
-                    {canManage ? (
-                      <label className="space-y-1">
-                        <span className="text-muted-foreground text-xs">
-                          替换 Credential
-                        </span>
-                        <select
-                          aria-label={`${requirement.name} Credential`}
-                          className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                          value={selectedVersionId}
-                          disabled={pending}
-                          onChange={(event) =>
-                            setSelections((current) => ({
-                              ...current,
-                              [requirement.name]: event.target.value,
-                            }))
-                          }
-                        >
-                          {requirementOptions(
-                            requirement,
-                            selectedVersionId,
-                          ).map((credential) => (
-                            <option
-                              key={credential.credential_version_id}
-                              value={credential.credential_version_id}
-                            >
-                              {credential.display_name} · 版本{" "}
-                              {credential.version_number}
-                            </option>
-                          ))}
-                        </select>
-                      </label>
-                    ) : null}
-
-                    {canManage ? (
-                      <Button
-                        type="button"
-                        size="icon"
-                        variant="ghost"
-                        aria-label={`解除 ${requirement.name} 绑定`}
-                        disabled={pending}
-                        onClick={() =>
-                          setSelections((current) => {
-                            const next = { ...current };
-                            delete next[requirement.name];
-                            return next;
-                          })
-                        }
-                      >
-                        <XIcon aria-hidden className="size-4" />
-                      </Button>
-                    ) : null}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-
-          {canManage && unboundRequirements.length > 0 ? (
-            <div className="space-y-3 rounded-lg border border-dashed p-3">
-              <div className="flex items-center gap-2 text-sm font-medium">
-                <PlusIcon aria-hidden className="size-4" />
-                添加环境变量
-              </div>
-              <div className="grid gap-3 sm:grid-cols-[minmax(180px,0.8fr)_minmax(240px,1fr)_auto]">
-                <label className="space-y-1">
-                  <span className="text-muted-foreground text-xs">
-                    Skill 声明
-                  </span>
-                  <select
-                    aria-label="选择 Skill 环境变量"
-                    className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                    value={addName}
-                    disabled={pending}
-                    onChange={(event) =>
-                      selectAddRequirement(event.target.value)
-                    }
-                  >
-                    <option value="">请选择变量</option>
-                    {unboundRequirements.map((requirement) => (
-                      <option key={requirement.name} value={requirement.name}>
-                        {requirement.name}
-                        {requirement.optional ? "（可选）" : "（必需）"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="space-y-1">
-                  <span className="text-muted-foreground text-xs">
-                    Credential
-                  </span>
-                  <select
-                    aria-label="选择 Credential"
-                    className="border-input bg-background h-9 w-full rounded-md border px-3 text-sm"
-                    value={addCredentialVersionId}
-                    disabled={!selectedAddRequirement || pending}
-                    onChange={(event) =>
-                      setAddCredentialVersionId(event.target.value)
-                    }
-                  >
-                    <option value="">
-                      {selectedAddRequirement?.eligible_credentials.length === 0
-                        ? "没有包含同名 env 字段的 Credential"
-                        : "请选择 Credential"}
-                    </option>
-                    {selectedAddRequirement?.eligible_credentials.map(
-                      (credential) => (
-                        <option
-                          key={credential.credential_version_id}
-                          value={credential.credential_version_id}
-                        >
-                          {credential.display_name} · 版本{" "}
-                          {credential.version_number}
-                        </option>
-                      ),
-                    )}
-                  </select>
-                </label>
-                <Button
-                  type="button"
-                  variant="outline"
-                  className="self-end"
-                  disabled={!addName || !addCredentialVersionId || pending}
-                  onClick={addBinding}
-                >
-                  添加
-                </Button>
-              </div>
-              {selectedAddRequirement?.eligible_credentials.length === 0 ? (
-                <p className="text-muted-foreground text-xs">
-                  请先在 Credential 页面创建一个包含{" "}
-                  <code>{selectedAddRequirement.name}</code> env 字段的项目
-                  Credential。
-                </p>
-              ) : null}
+        <div className="space-y-3">
+          {skillActive &&
+          data.requirements.some(
+            (requirement) =>
+              !requirement.optional && !selections[requirement.name],
+          ) ? (
+            <div className="border-destructive/30 rounded-lg border p-3 text-sm">
+              <p role="alert" className="text-destructive">
+                当前活跃 Skill
+                存在未绑定的必需环境变量。请先修复；必需绑定不能在活跃状态下解除。
+              </p>
             </div>
           ) : null}
-        </>
+          {data.requirements.map((requirement) => {
+            const selectedVersionId = selections[requirement.name] ?? "";
+            return (
+              <SkillCredentialOptionSelect
+                key={requirement.name}
+                name={requirement.name}
+                optional={requirement.optional}
+                options={skillCredentialRequirementOptions(
+                  requirement,
+                  selectedVersionId,
+                )}
+                value={selectedVersionId}
+                disabled={!canManage || pending}
+                error={
+                  skillActive &&
+                  !requirement.optional &&
+                  selectedVersionId === ""
+                }
+                allowEmpty={
+                  skillCredentialBindingCanUnbind(skillActive, requirement) ||
+                  selectedVersionId === ""
+                }
+                manageHref={canManage && !dirty ? credentialsHref : undefined}
+                onChange={(credentialVersionId) =>
+                  setSelections((current) => {
+                    const next = { ...current };
+                    if (credentialVersionId) {
+                      next[requirement.name] = credentialVersionId;
+                    } else {
+                      delete next[requirement.name];
+                    }
+                    return next;
+                  })
+                }
+              />
+            );
+          })}
+        </div>
       )}
+
+      {serverRefreshPreserved ? (
+        <p role="status" className="text-muted-foreground text-sm">
+          服务器上的环境变量配置已更新；你的未保存选择已保留，并已合并未修改项。请核对后保存或撤销。
+        </p>
+      ) : null}
 
       {errorMessage ? (
         <div
@@ -404,7 +274,12 @@ export function SkillCredentialBindingEditor({
             variant="link"
             size="sm"
             className="h-auto p-0"
-            onClick={onReload}
+            onClick={() => {
+              setSelections(originalSelections);
+              baselineSelectionsRef.current = originalSelections;
+              setServerRefreshPreserved(false);
+              onReload();
+            }}
           >
             重新加载
           </Button>
@@ -417,7 +292,11 @@ export function SkillCredentialBindingEditor({
             type="button"
             variant="outline"
             disabled={!dirty || pending}
-            onClick={() => setSelections(originalSelections)}
+            onClick={() => {
+              setSelections(originalSelections);
+              baselineSelectionsRef.current = originalSelections;
+              setServerRefreshPreserved(false);
+            }}
           >
             撤销修改
           </Button>
@@ -441,16 +320,25 @@ export function SkillCredentialBindings({
   projectId,
   skillId,
   currentPublishedVersionId,
+  skillStatus,
   canManage,
   credentialsHref,
+  focus = false,
+  onFocused,
+  onDirtyChange,
 }: {
   accountId: string;
   projectId: string;
   skillId: string;
   currentPublishedVersionId: string | null;
+  skillStatus: ProjectAssetItem["status"];
   canManage: boolean;
   credentialsHref: string;
+  focus?: boolean;
+  onFocused?: () => void;
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const sectionRef = useRef<HTMLElement | null>(null);
   const bindings = useProjectSkillCredentialBindings(
     accountId,
     projectId,
@@ -463,9 +351,24 @@ export function SkillCredentialBindings({
     skillId,
   );
 
+  useEffect(() => {
+    if (!focus) return;
+    const frame = requestAnimationFrame(() => {
+      sectionRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      onFocused?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focus, onFocused]);
+
   if (currentPublishedVersionId === null) {
     return (
-      <section className="border-border/70 space-y-2 rounded-xl border p-4">
+      <section
+        ref={sectionRef}
+        className="border-border/70 space-y-2 rounded-xl border p-4"
+      >
         <div className="flex items-center gap-2">
           <KeyRoundIcon aria-hidden className="size-4" />
           <h3 className="text-sm font-semibold">环境变量</h3>
@@ -480,6 +383,7 @@ export function SkillCredentialBindings({
   if (bindings.isLoading) {
     return (
       <section
+        ref={sectionRef}
         aria-busy="true"
         aria-label="正在加载环境变量配置"
         className="border-border/70 space-y-3 rounded-xl border p-4"
@@ -492,7 +396,10 @@ export function SkillCredentialBindings({
 
   if (bindings.error || !bindings.data) {
     return (
-      <section className="border-border/70 space-y-3 rounded-xl border p-4">
+      <section
+        ref={sectionRef}
+        className="border-border/70 space-y-3 rounded-xl border p-4"
+      >
         <div className="flex items-center gap-2">
           <KeyRoundIcon aria-hidden className="size-4" />
           <h3 className="text-sm font-semibold">环境变量</h3>
@@ -514,17 +421,25 @@ export function SkillCredentialBindings({
   }
 
   return (
-    <SkillCredentialBindingEditor
-      data={bindings.data}
-      canManage={canManage}
-      credentialsHref={credentialsHref}
-      pending={update.isPending}
-      errorMessage={bindingErrorMessage(update.error, "save")}
-      onReload={() => {
-        update.reset();
-        void bindings.refetch();
+    <div
+      ref={(element) => {
+        sectionRef.current = element;
       }}
-      onSave={(input) => update.mutate(input)}
-    />
+    >
+      <SkillCredentialBindingEditor
+        data={bindings.data}
+        skillActive={skillStatus === "active"}
+        canManage={canManage}
+        credentialsHref={credentialsHref}
+        pending={update.isPending}
+        errorMessage={bindingErrorMessage(update.error, "save")}
+        onDirtyChange={onDirtyChange}
+        onReload={() => {
+          update.reset();
+          void bindings.refetch();
+        }}
+        onSave={(input) => update.mutate(input)}
+      />
+    </div>
   );
 }

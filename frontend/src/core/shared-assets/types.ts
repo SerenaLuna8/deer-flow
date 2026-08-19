@@ -230,15 +230,15 @@ export const agentVersionSchema = z
   })
   .strict();
 
-const skillSecretRequirementSchema = z
+export const skillSecretRequirementSchema = z
   .object({ name: z.string().min(1), optional: z.boolean() })
   .strict();
-const skillSecretNameSchema = z
+export const skillSecretDeclarationNameSchema = z
   .string()
   .min(1)
-  .max(255)
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
-const eligibleSkillCredentialSchema = z
+export const skillSecretNameSchema = skillSecretDeclarationNameSchema.max(255);
+export const eligibleSkillCredentialSchema = z
   .object({
     credential_id: assetIdSchema,
     credential_version_id: assetIdSchema,
@@ -247,7 +247,7 @@ const eligibleSkillCredentialSchema = z
   })
   .strict();
 const skillCredentialRequirementBaseSchema = z.object({
-  name: skillSecretNameSchema,
+  name: skillSecretDeclarationNameSchema,
   optional: z.boolean(),
   eligible_credentials: z.array(eligibleSkillCredentialSchema),
 });
@@ -310,7 +310,7 @@ export const skillCredentialBindingsResponseSchema = z
       }
     });
   });
-const skillCredentialBindingInputSchema = z
+export const skillCredentialBindingInputSchema = z
   .object({
     name: skillSecretNameSchema,
     credential_version_id: assetIdSchema,
@@ -1122,6 +1122,47 @@ export const expectedAssetVersionInputSchema = z
 export const publishAssetVersionInputSchema = expectedAssetVersionInputSchema
   .extend({ acknowledge_stale_base: z.boolean().optional() })
   .strict();
+export const skillPublishAssetVersionInputSchema =
+  expectedAssetVersionInputSchema
+    .extend({
+      acknowledge_stale_base: z.boolean().optional(),
+      expected_payload_checksum: z
+        .string()
+        .regex(/^[a-f0-9]{64}$/u)
+        .optional(),
+      expected_binding_revision: z.number().int().nonnegative().optional(),
+      credential_bindings: z
+        .array(skillCredentialBindingInputSchema)
+        .max(256)
+        .optional(),
+    })
+    .strict()
+    .superRefine((value, context) => {
+      const bindings = value.credential_bindings;
+      if (
+        bindings &&
+        new Set(bindings.map((binding) => binding.name)).size !==
+          bindings.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential binding names must be unique",
+          path: ["credential_bindings"],
+        });
+      }
+      if (
+        bindings !== undefined &&
+        (value.expected_payload_checksum === undefined ||
+          value.expected_binding_revision === undefined)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Atomic Skill Credential publish requires payload checksum and binding revision",
+          path: ["credential_bindings"],
+        });
+      }
+    });
 export const projectDefaultAgentSchema = z
   .object({
     agent_asset_id: assetIdSchema.nullable(),
@@ -1551,6 +1592,9 @@ export type ExpectedAssetVersionInput = z.input<
 >;
 export type PublishAssetVersionInput = z.input<
   typeof publishAssetVersionInputSchema
+>;
+export type SkillPublishAssetVersionInput = z.input<
+  typeof skillPublishAssetVersionInputSchema
 >;
 export type ProjectDefaultAgentInput = z.input<
   typeof projectDefaultAgentInputSchema

@@ -1959,6 +1959,109 @@ export const zhCN: Translations = {
   },
 
   skills: {
+    secrets: {
+      workbenchAria: "Skill 编辑区域",
+      filesTab: "文件",
+      secretsTab: "凭证环境变量",
+      aria: "凭证环境变量声明",
+      title: "凭证环境变量",
+      description:
+        "此表单由服务端解析并回写当前 SKILL.md 编辑副本，只保存变量名和是否必需；Credential 明文不会写入 Skill。",
+      viewSource: "查看 SKILL.md",
+      checking: "正在检查 SKILL.md…",
+      syncing: "正在同步到当前编辑副本…",
+      retry: "重新检查",
+      sourceStale:
+        "SKILL.md 在处理期间发生了变化，当前编辑内容已保留，请重试。",
+      invalidDeclaration: "环境变量声明无效。请切换到源码并根据校验提示修复。",
+      forbidden: "你没有编辑 Skill 声明的权限。",
+      notFound: "当前项目已不存在。",
+      invalidResponse: "Skill 声明服务返回了无效响应，已停止应用修改。",
+      unavailable: "暂时无法处理 Skill 环境变量声明，请稍后重试。",
+      invalidSource:
+        "SKILL.md frontmatter 无效。当前源码已保留，请在源码视图中修复后重试。",
+      openSource: "打开源码修复",
+      managedComments:
+        "托管字段包含无法安全保留的注释。表单已切换为只读，请通过源码修改。",
+      shorthand: (count) =>
+        `检测到 ${count} 条历史简写声明；只有实际修改后才会规范化。`,
+      empty: "当前编辑副本没有声明凭证环境变量。",
+      optional: "可选",
+      required: "必需",
+      setOptional: (name) => `${name} 设为可选`,
+      remove: (name) => `删除 ${name} 声明`,
+      addTitle: "添加环境变量声明",
+      nameLabel: "变量名",
+      namePlaceholder: "API_KEY",
+      newOptional: "新环境变量设为可选",
+      add: "添加",
+      invalidName:
+        "环境变量名必须以字母或下划线开头，并且只能包含字母、数字和下划线。",
+      duplicateName: "这个环境变量已经声明。名称区分大小写。",
+      autonomousTitle: "允许自主使用凭证",
+      autonomousDescription:
+        "对应 SKILL.md 的 secrets-autonomous；这不会绕过运行时授权和 Credential 绑定。",
+      autonomousAria: "允许自主使用凭证",
+      location: (line, column) =>
+        `第 ${line} 行${column === null ? "" : `，第 ${column} 列`}：`,
+      loadSourceFailed: "无法加载根目录 SKILL.md，环境变量表单已停止编辑。",
+      loadSource: "正在加载 SKILL.md…",
+      saveBlocked: "请等待 SKILL.md 检查完成，或修复环境变量声明错误",
+      publishBlocked:
+        "请等待 SKILL.md 检查完成，并先修复环境变量声明错误再发布。",
+      credentialLabel: "项目 Credential",
+      noCompatibleCredential: "没有兼容的 Credential",
+      optionalUnbound: "不绑定（可选）",
+      selectCredential: "请选择 Credential",
+      credentialVersion: (name, version) => `${name} · 版本 ${version}`,
+      requiredMissing: "必需环境变量尚未选择 Credential。",
+      createCredential: "创建 Credential",
+      manageCredential: "管理 Credential",
+    },
+    publishDialog: {
+      title: "发布 Skill 版本",
+      description: (version) =>
+        `发布版本 ${version}，并为该不可变版本选择精确的项目 Credential。发布请求只包含 Credential version ID，不包含密钥值。`,
+      loading: "正在执行发布检查…",
+      targetVersion: "目标版本：",
+      bindingRevision: "绑定修订：",
+      noRequirements: "目标版本没有声明凭证环境变量，可以直接发布。",
+      bindingsTitle: "版本凭证绑定",
+      noApprove:
+        "你没有选择 Credential 的权限。本次请求不会提交绑定；停用状态的 Skill 可以先发布，启用前仍需管理员完成配置。",
+      approvalRequiredForActive:
+        "活跃 Skill 的新版本必须原子提交全部必需绑定。请由具有 Credential 审批权限的成员完成发布，或先停用 Skill。",
+      optionalUnbound: (count) =>
+        `${count} 个可选环境变量未绑定；发布后这些变量不会注入运行环境。`,
+      staleBase:
+        "此草稿基于旧的已发布版本。再次确认将使用最新发布计划覆盖 live pointer；本地 Credential 选择已保留。",
+      credentialChanged:
+        "Credential 已发生变化；仍然兼容的选择已保留，请检查后重新发布。",
+      assetChanged: "Skill 已发生变化，请检查最新发布计划。",
+      cancel: "取消",
+      retry: "重新检查",
+      publishing: "发布中…",
+      publish: "发布版本",
+      confirmOverwrite: "确认覆盖并发布",
+      discardTitle: "放弃尚未发布的 Credential 选择？",
+      discardDescription:
+        "关闭后将清除本次发布对话框中的选择；Skill 版本和现有绑定不会改变。",
+      continue: "继续配置",
+      discard: "放弃并关闭",
+      createdInvalid: "Credential 创建成功，但返回的版本信息无效。",
+      createdIneligible:
+        "Credential 已创建，但最新版本尚未被发布检查判定为兼容。请检查字段后重试。",
+      incomplete: "活跃 Skill 的必需环境变量尚未全部绑定。请完成选择后重试。",
+      invalidBinding:
+        "所选 Credential 与 Skill 声明不兼容，请刷新发布检查后重试。",
+      staleSelection: "Credential 已发生轮换、停用或撤销。已重新加载可用选项。",
+      stalePublishBase: "这个草稿基于旧的已发布版本。确认后可以覆盖并发布。",
+      invalidDeclaration:
+        "目标版本的环境变量声明无效，无法发布。请创建新草稿修复 SKILL.md。",
+      forbidden: "你没有发布此 Skill 的权限。",
+      credentialRequestOmitted:
+        "你没有选择 Credential 的权限，本次发布不会提交凭证绑定。",
+    },
     builder: {
       errors: {
         unavailable: "Skill 设计服务暂时不可用，请稍后重试。",
@@ -2082,6 +2185,9 @@ export const zhCN: Translations = {
         packageAria: "候选文件包",
         title: "候选文件包",
         titleRevise: "候选文件包（修订）",
+        filesSurface: "文件",
+        secretsSurface: "凭证环境变量",
+        secretsUnavailable: "候选包缺少根 SKILL.md，无法编辑凭证环境变量声明。",
         fileCount: (count) => `${count} 个 UTF-8 文本文件`,
         diffSummary: (version, added, modified, deleted) =>
           ` · 较基线${version}：新增 ${added} · 修改 ${modified} · 删除 ${deleted}`,
@@ -2196,6 +2302,9 @@ export const zhCN: Translations = {
         withVersion: (version) => `已创建草稿版本 v${version}，前往发布`,
         withoutVersion: "已创建草稿版本，前往发布",
         goPublish: "前往发布",
+        createdWithSecrets: (count) =>
+          `Skill 已创建并默认停用，检测到 ${count} 项凭证环境变量声明。请先配置凭证。`,
+        configureCredentials: "配置凭证",
       },
       publish: {
         staleTitle: "线上已发布更新的版本",

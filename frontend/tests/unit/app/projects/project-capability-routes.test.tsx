@@ -107,4 +107,37 @@ describe("project capability workspace routes", () => {
       "project.channels.manage",
     );
   });
+
+  test("validates the exact Skill version and Credential-focus deep link", async () => {
+    const skillId = "11111111-1111-4111-8111-111111111111";
+    const versionId = "22222222-2222-4222-8222-222222222222";
+    const rendered = await ProjectSkillsPage({
+      params,
+      searchParams: Promise.resolve({
+        skill_id: skillId,
+        skill_version_id: versionId,
+        configure_credentials: "1",
+      }),
+    });
+
+    expect(rendered.props).toMatchObject({
+      selectedAssetId: skillId,
+      selectedVersionId: versionId,
+      focusSelectedSkillCredentials: true,
+    });
+
+    const rejected = await ProjectSkillsPage({
+      params,
+      searchParams: Promise.resolve({
+        skill_id: skillId,
+        skill_version_id: [versionId, versionId],
+        configure_credentials: "true",
+      }),
+    });
+    expect(rejected.props).toMatchObject({
+      selectedAssetId: skillId,
+      selectedVersionId: null,
+      focusSelectedSkillCredentials: false,
+    });
+  });
 });

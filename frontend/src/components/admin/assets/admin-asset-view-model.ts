@@ -311,6 +311,8 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
     "线上已发布更新的版本，本版本基于较旧的基线。请确认覆盖后再发布。",
   SKILL_RUNTIME_NAME_CONFLICT:
     "与已启用 Skill 的运行名称冲突，请先停用其中一个 Skill 后重试。",
+  SKILL_CREDENTIAL_BINDINGS_INCOMPLETE:
+    "启用前请先配置必需的 Credential 环境变量；已打开 Skill 详情中的环境变量区域。",
   AUTH_REQUIRED: "登录状态已失效，请重新登录。",
   ASSET_NETWORK_ERROR: "暂时无法连接资产服务，请稍后重试。",
   ASSET_RESPONSE_INVALID: "资产服务返回了无效数据。",

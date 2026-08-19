@@ -7,12 +7,22 @@ import {
   FilePlus2Icon,
   FileWarningIcon,
   FolderPlusIcon,
+  FilesIcon,
+  KeyRoundIcon,
   Loader2Icon,
   RotateCcwIcon,
   SaveIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from "react";
 
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
@@ -27,6 +37,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   SharedAssetApiError,
   useForkProjectSkillVersion,
@@ -53,8 +64,22 @@ import {
   renameSkillFile,
   type SkillFileTreeSelection,
 } from "./skill-file-workbench-state";
+import { SkillSecretDeclarationsEditor } from "./skill-secret-declarations-editor";
 
 type PathDialogMode = "add" | "rename";
+type WorkbenchSurface = "files" | "secrets";
+
+export function skillVersionWorkbenchTabForKey(
+  current: WorkbenchSurface,
+  key: string,
+): WorkbenchSurface | null {
+  if (key === "Home") return "files";
+  if (key === "End") return "secrets";
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    return current === "files" ? "secrets" : "files";
+  }
+  return null;
+}
 
 function formatBytes(value: number): string {
   if (value < 1024) return `${value} B`;
@@ -190,6 +215,7 @@ export function SkillVersionWorkbench({
   editing,
   onEditingChange,
   onDirtyChange,
+  onPublishValidityChange,
   onVersionCreated,
 }: {
   accountId: string;
@@ -200,8 +226,11 @@ export function SkillVersionWorkbench({
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
+  onPublishValidityChange: (valid: boolean) => void;
   onVersionCreated: (versionId: string) => void;
 }) {
+  const { t } = useI18n();
+  const secretCopy = t.skills.secrets;
   const initialPath = initialSkillFilePath(version.file_views);
   const [selection, setSelection] = useState<SkillFileTreeSelection | null>(
     initialPath ? { kind: "file", path: initialPath } : null,
@@ -217,6 +246,13 @@ export function SkillVersionWorkbench({
   const [displayMode, setDisplayMode] = useState<"source" | "preview">(
     "source",
   );
+  const [surface, setSurface] = useState<WorkbenchSurface>("files");
+  const tabIdPrefix = useId();
+  const filesTabId = `${tabIdPrefix}-files-tab`;
+  const secretsTabId = `${tabIdPrefix}-secrets-tab`;
+  const filesPanelId = `${tabIdPrefix}-files-panel`;
+  const secretsPanelId = `${tabIdPrefix}-secrets-panel`;
+  const [secretDeclarationValid, setSecretDeclarationValid] = useState(false);
   const [pathDialog, setPathDialog] = useState<PathDialogMode | null>(null);
   const [pathInput, setPathInput] = useState("");
   const [fileNameInput, setFileNameInput] = useState("");
@@ -240,6 +276,19 @@ export function SkillVersionWorkbench({
   const pendingSavedVersionRef = useRef<PendingSavedSkillVersion | null>(null);
   const queryClient = useQueryClient();
   const fork = useForkProjectSkillVersion(accountId, projectId);
+
+  function handleSurfaceKeyDown(
+    current: WorkbenchSurface,
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) {
+    const next = skillVersionWorkbenchTabForKey(current, event.key);
+    if (!next) return;
+    event.preventDefault();
+    setSurface(next);
+    event.currentTarget.ownerDocument
+      .getElementById(next === "files" ? filesTabId : secretsTabId)
+      ?.focus();
+  }
 
   function replaceChanges(next: SkillFileChange[]) {
     changesRef.current = next;
@@ -274,6 +323,18 @@ export function SkillVersionWorkbench({
     queryPath,
     selectedPath !== "" && selectedFile !== null && !selectedIsLocal,
   );
+  const skillMdChange = changes.find(
+    (change) => change.path === "SKILL.md" && change.op !== "delete",
+  );
+  const skillMdSource = useProjectSkillVersionFile(
+    accountId,
+    projectId,
+    item.id,
+    version.id,
+    "SKILL.md",
+    selectedPath !== "SKILL.md" &&
+      ((canAuthor && editing) || surface === "secrets"),
+  );
   const serverFile = source.data?.data;
   const sourceContent =
     selectedChange && selectedChange.op !== "delete"
@@ -287,6 +348,12 @@ export function SkillVersionWorkbench({
   );
   const dirty = changes.length > 0;
   const isEditing = canAuthor && editing;
+  const skillMdServerFile =
+    selectedPath === "SKILL.md" ? serverFile : skillMdSource.data?.data;
+  const skillMdContent =
+    skillMdChange && skillMdChange.op !== "delete"
+      ? skillMdChange.content
+      : (loadedSources["SKILL.md"] ?? skillMdServerFile?.content ?? null);
   const serverState = `${item.id}:${item.version}:${version.id}`;
   const emptyExplicitFolders = explicitFolders.filter(
     (folder) =>
@@ -302,6 +369,20 @@ export function SkillVersionWorkbench({
         : { ...current, [serverFile.path]: serverFile.content ?? "" },
     );
   }, [serverFile]);
+
+  useEffect(() => {
+    if (
+      skillMdServerFile?.preview_status !== "ready" ||
+      skillMdServerFile.content === null
+    ) {
+      return;
+    }
+    setLoadedSources((current) =>
+      current["SKILL.md"] === skillMdServerFile.content
+        ? current
+        : { ...current, "SKILL.md": skillMdServerFile.content ?? "" },
+    );
+  }, [skillMdServerFile]);
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -368,10 +449,46 @@ export function SkillVersionWorkbench({
   );
 
   function selectFile(path: string) {
+    setSurface("files");
     setSelection({ kind: "file", path });
     expandFolder(directoryPath(path));
     setDisplayMode("source");
     setLocalError(null);
+  }
+
+  const handleSecretValidityChange = useCallback(
+    (valid: boolean) => {
+      setSecretDeclarationValid(valid);
+      onPublishValidityChange(valid);
+    },
+    [onPublishValidityChange],
+  );
+
+  useEffect(() => {
+    handleSecretValidityChange(false);
+  }, [handleSecretValidityChange, version.id]);
+
+  function applySkillMdContent(content: string) {
+    try {
+      setSecretDeclarationValid(false);
+      replaceChanges(
+        editSkillFile(
+          changesRef.current,
+          version.file_views,
+          "SKILL.md",
+          content,
+        ),
+      );
+      setLocalError(null);
+    } catch (error) {
+      setLocalError(pathErrorMessage(error));
+    }
+  }
+
+  function openSkillMdSource() {
+    setSurface("files");
+    setSelection({ kind: "file", path: "SKILL.md" });
+    setDisplayMode("source");
   }
 
   function selectFolder(path: string) {
@@ -647,6 +764,43 @@ export function SkillVersionWorkbench({
         </p>
       </div>
 
+      <div
+        className="bg-muted flex w-fit rounded-lg p-1"
+        role="tablist"
+        aria-label={secretCopy.workbenchAria}
+      >
+        <Button
+          id={filesTabId}
+          type="button"
+          size="sm"
+          variant={surface === "files" ? "secondary" : "ghost"}
+          role="tab"
+          aria-selected={surface === "files"}
+          aria-controls={filesPanelId}
+          tabIndex={surface === "files" ? 0 : -1}
+          onClick={() => setSurface("files")}
+          onKeyDown={(event) => handleSurfaceKeyDown("files", event)}
+        >
+          <FilesIcon aria-hidden className="size-4" />
+          {secretCopy.filesTab}
+        </Button>
+        <Button
+          id={secretsTabId}
+          type="button"
+          size="sm"
+          variant={surface === "secrets" ? "secondary" : "ghost"}
+          role="tab"
+          aria-selected={surface === "secrets"}
+          aria-controls={secretsPanelId}
+          tabIndex={surface === "secrets" ? 0 : -1}
+          onClick={() => setSurface("secrets")}
+          onKeyDown={(event) => handleSurfaceKeyDown("secrets", event)}
+        >
+          <KeyRoundIcon aria-hidden className="size-4" />
+          {secretCopy.secretsTab}
+        </Button>
+      </div>
+
       {isEditing && (
         <div className="border-primary/20 bg-primary/5 rounded-xl border px-4 py-3">
           <div>
@@ -666,248 +820,307 @@ export function SkillVersionWorkbench({
         </div>
       )}
 
-      {workingFiles.length === 0 && folderPaths.length === 0 ? (
-        <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
-          这个版本没有可显示的文件。
-        </p>
-      ) : (
-        <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[260px_minmax(0,1fr)]">
-          <div className="bg-muted/20 border-border/70 border-b p-3 md:border-r md:border-b-0">
-            <div className="mb-3 flex items-center justify-between gap-2 px-1">
-              <p className="text-sm font-semibold">
-                文件{" "}
-                <span className="text-muted-foreground font-normal">
-                  · {workingFiles.length}
-                </span>
-              </p>
-            </div>
-            {isEditing && (
-              <div className="mb-3 grid grid-cols-2 gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="bg-background min-w-0 px-2"
-                  disabled={fork.isPending}
-                  onClick={() => beginPathDialog("add")}
-                >
-                  <FilePlus2Icon aria-hidden className="size-4" />
-                  新建文件
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  className="bg-background min-w-0 px-2"
-                  disabled={fork.isPending}
-                  onClick={beginFolderDialog}
-                >
-                  <FolderPlusIcon aria-hidden className="size-4" />
-                  新建文件夹
-                </Button>
+      <div
+        id={filesPanelId}
+        hidden={surface !== "files"}
+        role="tabpanel"
+        aria-labelledby={filesTabId}
+      >
+        {workingFiles.length === 0 && folderPaths.length === 0 ? (
+          <p className="text-muted-foreground rounded-xl border border-dashed p-5 text-sm">
+            这个版本没有可显示的文件。
+          </p>
+        ) : (
+          <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[260px_minmax(0,1fr)]">
+            <div className="bg-muted/20 border-border/70 border-b p-3 md:border-r md:border-b-0">
+              <div className="mb-3 flex items-center justify-between gap-2 px-1">
+                <p className="text-sm font-semibold">
+                  文件{" "}
+                  <span className="text-muted-foreground font-normal">
+                    · {workingFiles.length}
+                  </span>
+                </p>
               </div>
-            )}
-            <SkillFileTree
-              nodes={fileTree}
-              selection={selection}
-              expandedFolders={expandedFolders}
-              onSelectFile={selectFile}
-              onSelectFolder={selectFolder}
-              onToggleFolder={toggleFolder}
-            />
-            {isEditing && emptyExplicitFolders.length > 0 && (
-              <p
-                role="status"
-                className="text-muted-foreground mt-3 border-t px-1 pt-3 text-[11px] leading-4"
-              >
-                空文件夹不会写入版本快照。
-              </p>
-            )}
-          </div>
-
-          <div className="min-w-0">
-            {selectedFile && (
-              <>
-                <div className="border-border/70 flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="min-w-0">
-                    <p className="truncate font-mono text-sm font-semibold">
-                      {basename(selectedFile.path)}
-                    </p>
-                    <p className="text-muted-foreground mt-1 truncate text-[11px]">
-                      {selectedFile.media_type} ·{" "}
-                      {formatBytes(selectedFile.size_bytes)}
-                      {selectedFile.sha256
-                        ? ` · SHA-256 ${selectedFile.sha256.slice(0, 12)}…`
-                        : " · 尚未保存"}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {markdown && previewStatus === "ready" && (
-                      <div
-                        className="bg-muted flex rounded-lg p-1"
-                        role="group"
-                        aria-label="文件显示方式"
-                      >
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={
-                            displayMode === "source" ? "secondary" : "ghost"
-                          }
-                          className="h-7 px-2"
-                          aria-pressed={displayMode === "source"}
-                          onClick={() => setDisplayMode("source")}
-                        >
-                          <Code2Icon aria-hidden className="size-3.5" />
-                          源码
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant={
-                            displayMode === "preview" ? "secondary" : "ghost"
-                          }
-                          className="h-7 px-2"
-                          aria-pressed={displayMode === "preview"}
-                          onClick={() => setDisplayMode("preview")}
-                        >
-                          <EyeIcon aria-hidden className="size-3.5" />
-                          预览
-                        </Button>
-                      </div>
-                    )}
-                    {isEditing && selectedFile.path !== "SKILL.md" && (
-                      <>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={sourceContent === null || fork.isPending}
-                          onClick={() => beginPathDialog("rename")}
-                        >
-                          重命名
-                        </Button>
-                        <Button
-                          type="button"
-                          size="sm"
-                          variant="outline"
-                          disabled={fork.isPending}
-                          onClick={() => setDeletePath(selectedFile.path)}
-                        >
-                          <Trash2Icon aria-hidden className="size-4" />
-                          删除
-                        </Button>
-                      </>
-                    )}
-                  </div>
+              {isEditing && (
+                <div className="mb-3 grid grid-cols-2 gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="bg-background min-w-0 px-2"
+                    disabled={fork.isPending}
+                    onClick={() => beginPathDialog("add")}
+                  >
+                    <FilePlus2Icon aria-hidden className="size-4" />
+                    新建文件
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="bg-background min-w-0 px-2"
+                    disabled={fork.isPending}
+                    onClick={beginFolderDialog}
+                  >
+                    <FolderPlusIcon aria-hidden className="size-4" />
+                    新建文件夹
+                  </Button>
                 </div>
+              )}
+              <SkillFileTree
+                nodes={fileTree}
+                selection={selection}
+                expandedFolders={expandedFolders}
+                onSelectFile={selectFile}
+                onSelectFolder={selectFolder}
+                onToggleFolder={toggleFolder}
+              />
+              {isEditing && emptyExplicitFolders.length > 0 && (
+                <p
+                  role="status"
+                  className="text-muted-foreground mt-3 border-t px-1 pt-3 text-[11px] leading-4"
+                >
+                  空文件夹不会写入版本快照。
+                </p>
+              )}
+            </div>
 
-                {source.isLoading && !selectedIsLocal ? (
-                  <div className="space-y-3 p-4" aria-label="正在加载文件内容">
-                    <Skeleton className="h-5 w-48" />
-                    <Skeleton className="h-[50vh] min-h-80 w-full rounded-xl md:h-[520px]" />
-                  </div>
-                ) : source.error && !selectedIsLocal ? (
-                  <div className="m-4 rounded-xl border border-dashed p-6 text-center">
-                    <FileWarningIcon
-                      aria-hidden
-                      className="text-muted-foreground mx-auto size-6"
-                    />
-                    <p role="alert" className="mt-3 text-sm font-medium">
-                      文件内容加载失败
-                    </p>
-                    <p className="text-muted-foreground mt-1 text-xs">
-                      {adminAssetErrorMessage(source.error)}
-                    </p>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="outline"
-                      className="mt-4"
-                      disabled={source.isFetching}
-                      onClick={() => void source.refetch()}
-                    >
-                      <RotateCcwIcon aria-hidden className="size-4" />
-                      重试
-                    </Button>
-                  </div>
-                ) : previewStatus === "binary" ? (
-                  <div className="m-4 flex min-h-72 flex-col items-center justify-center rounded-xl border border-dashed px-6 text-center">
-                    <FileWarningIcon
-                      aria-hidden
-                      className="text-muted-foreground size-7"
-                    />
-                    <p className="mt-3 text-sm font-medium">
-                      二进制文件仅显示元数据
-                    </p>
-                    <p className="text-muted-foreground mt-1 max-w-sm text-xs leading-5">
-                      为避免执行或泄露不可读内容，这个版本不返回二进制正文。编辑副本时仍会完整保留该文件。
-                    </p>
-                  </div>
-                ) : previewStatus === "too_large" ? (
-                  <div className="m-4 flex min-h-72 flex-col items-center justify-center rounded-xl border border-dashed px-6 text-center">
-                    <FileWarningIcon
-                      aria-hidden
-                      className="text-muted-foreground size-7"
-                    />
-                    <p className="mt-3 text-sm font-medium">
-                      文件过大，无法在线预览
-                    </p>
-                    <p className="text-muted-foreground mt-1 text-xs">
-                      文件仍会保留在版本快照中。
-                    </p>
-                  </div>
-                ) : sourceContent !== null ? (
-                  displayMode === "preview" && markdown ? (
-                    <div className="prose prose-neutral dark:prose-invert min-h-[50vh] max-w-none overflow-auto p-5 text-sm md:min-h-[520px]">
-                      <SafeStreamdown>
-                        {markdownPreviewContent(sourceContent)}
-                      </SafeStreamdown>
+            <div className="min-w-0">
+              {selectedFile && (
+                <>
+                  <div className="border-border/70 flex flex-col gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0">
+                      <p className="truncate font-mono text-sm font-semibold">
+                        {basename(selectedFile.path)}
+                      </p>
+                      <p className="text-muted-foreground mt-1 truncate text-[11px]">
+                        {selectedFile.media_type} ·{" "}
+                        {formatBytes(selectedFile.size_bytes)}
+                        {selectedFile.sha256
+                          ? ` · SHA-256 ${selectedFile.sha256.slice(0, 12)}…`
+                          : " · 尚未保存"}
+                      </p>
                     </div>
-                  ) : isEditing ? (
-                    <Textarea
-                      aria-label={`编辑 ${selectedFile.path}`}
-                      value={sourceContent}
-                      disabled={fork.isPending}
-                      spellCheck={false}
-                      className="min-h-[50vh] resize-y rounded-none border-0 p-5 font-mono text-sm leading-6 shadow-none focus-visible:ring-0 md:min-h-[520px]"
-                      onChange={(event) => {
-                        if (fork.isPending) return;
-                        try {
-                          replaceChanges(
-                            editSkillFile(
-                              changes,
-                              version.file_views,
-                              selectedFile.path,
-                              event.target.value,
-                            ),
-                          );
-                          setLocalError(null);
-                        } catch (error) {
-                          setLocalError(pathErrorMessage(error));
-                        }
-                      }}
-                    />
-                  ) : (
-                    <pre className="bg-muted/15 min-h-[50vh] overflow-auto p-5 font-mono text-sm leading-6 whitespace-pre-wrap md:min-h-[520px]">
-                      <code>{sourceContent}</code>
-                    </pre>
-                  )
-                ) : (
-                  <div className="text-muted-foreground p-5 text-sm">
-                    文件正文不可用。
+                    <div className="flex flex-wrap gap-2">
+                      {markdown && previewStatus === "ready" && (
+                        <div
+                          className="bg-muted flex rounded-lg p-1"
+                          role="group"
+                          aria-label="文件显示方式"
+                        >
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={
+                              displayMode === "source" ? "secondary" : "ghost"
+                            }
+                            className="h-7 px-2"
+                            aria-pressed={displayMode === "source"}
+                            onClick={() => setDisplayMode("source")}
+                          >
+                            <Code2Icon aria-hidden className="size-3.5" />
+                            源码
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={
+                              displayMode === "preview" ? "secondary" : "ghost"
+                            }
+                            className="h-7 px-2"
+                            aria-pressed={displayMode === "preview"}
+                            onClick={() => setDisplayMode("preview")}
+                          >
+                            <EyeIcon aria-hidden className="size-3.5" />
+                            预览
+                          </Button>
+                        </div>
+                      )}
+                      {isEditing && selectedFile.path !== "SKILL.md" && (
+                        <>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={sourceContent === null || fork.isPending}
+                            onClick={() => beginPathDialog("rename")}
+                          >
+                            重命名
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={fork.isPending}
+                            onClick={() => setDeletePath(selectedFile.path)}
+                          >
+                            <Trash2Icon aria-hidden className="size-4" />
+                            删除
+                          </Button>
+                        </>
+                      )}
+                    </div>
                   </div>
-                )}
-              </>
-            )}
-            {!selectedFile && (
-              <div className="text-muted-foreground flex min-h-[50vh] items-center justify-center p-6 text-center text-sm md:min-h-[520px]">
-                选择一个文件查看内容。
-              </div>
-            )}
+
+                  {source.isLoading && !selectedIsLocal ? (
+                    <div
+                      className="space-y-3 p-4"
+                      aria-label="正在加载文件内容"
+                    >
+                      <Skeleton className="h-5 w-48" />
+                      <Skeleton className="h-[50vh] min-h-80 w-full rounded-xl md:h-[520px]" />
+                    </div>
+                  ) : source.error && !selectedIsLocal ? (
+                    <div className="m-4 rounded-xl border border-dashed p-6 text-center">
+                      <FileWarningIcon
+                        aria-hidden
+                        className="text-muted-foreground mx-auto size-6"
+                      />
+                      <p role="alert" className="mt-3 text-sm font-medium">
+                        文件内容加载失败
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        {adminAssetErrorMessage(source.error)}
+                      </p>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        className="mt-4"
+                        disabled={source.isFetching}
+                        onClick={() => void source.refetch()}
+                      >
+                        <RotateCcwIcon aria-hidden className="size-4" />
+                        重试
+                      </Button>
+                    </div>
+                  ) : previewStatus === "binary" ? (
+                    <div className="m-4 flex min-h-72 flex-col items-center justify-center rounded-xl border border-dashed px-6 text-center">
+                      <FileWarningIcon
+                        aria-hidden
+                        className="text-muted-foreground size-7"
+                      />
+                      <p className="mt-3 text-sm font-medium">
+                        二进制文件仅显示元数据
+                      </p>
+                      <p className="text-muted-foreground mt-1 max-w-sm text-xs leading-5">
+                        为避免执行或泄露不可读内容，这个版本不返回二进制正文。编辑副本时仍会完整保留该文件。
+                      </p>
+                    </div>
+                  ) : previewStatus === "too_large" ? (
+                    <div className="m-4 flex min-h-72 flex-col items-center justify-center rounded-xl border border-dashed px-6 text-center">
+                      <FileWarningIcon
+                        aria-hidden
+                        className="text-muted-foreground size-7"
+                      />
+                      <p className="mt-3 text-sm font-medium">
+                        文件过大，无法在线预览
+                      </p>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        文件仍会保留在版本快照中。
+                      </p>
+                    </div>
+                  ) : sourceContent !== null ? (
+                    displayMode === "preview" && markdown ? (
+                      <div className="prose prose-neutral dark:prose-invert min-h-[50vh] max-w-none overflow-auto p-5 text-sm md:min-h-[520px]">
+                        <SafeStreamdown>
+                          {markdownPreviewContent(sourceContent)}
+                        </SafeStreamdown>
+                      </div>
+                    ) : isEditing ? (
+                      <Textarea
+                        aria-label={`编辑 ${selectedFile.path}`}
+                        value={sourceContent}
+                        disabled={fork.isPending}
+                        spellCheck={false}
+                        className="min-h-[50vh] resize-y rounded-none border-0 p-5 font-mono text-sm leading-6 shadow-none focus-visible:ring-0 md:min-h-[520px]"
+                        onChange={(event) => {
+                          if (fork.isPending) return;
+                          try {
+                            if (selectedFile.path === "SKILL.md") {
+                              setSecretDeclarationValid(false);
+                            }
+                            replaceChanges(
+                              editSkillFile(
+                                changes,
+                                version.file_views,
+                                selectedFile.path,
+                                event.target.value,
+                              ),
+                            );
+                            setLocalError(null);
+                          } catch (error) {
+                            setLocalError(pathErrorMessage(error));
+                          }
+                        }}
+                      />
+                    ) : (
+                      <pre className="bg-muted/15 min-h-[50vh] overflow-auto p-5 font-mono text-sm leading-6 whitespace-pre-wrap md:min-h-[520px]">
+                        <code>{sourceContent}</code>
+                      </pre>
+                    )
+                  ) : (
+                    <div className="text-muted-foreground p-5 text-sm">
+                      文件正文不可用。
+                    </div>
+                  )}
+                </>
+              )}
+              {!selectedFile && (
+                <div className="text-muted-foreground flex min-h-[50vh] items-center justify-center p-6 text-center text-sm md:min-h-[520px]">
+                  选择一个文件查看内容。
+                </div>
+              )}
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
+
+      <div
+        id={secretsPanelId}
+        hidden={surface !== "secrets"}
+        role="tabpanel"
+        aria-labelledby={secretsTabId}
+      >
+        {skillMdContent !== null ? (
+          <SkillSecretDeclarationsEditor
+            projectId={projectId}
+            content={skillMdContent}
+            canEdit={isEditing}
+            disabled={fork.isPending}
+            onContentChange={applySkillMdContent}
+            onOpenSource={openSkillMdSource}
+            onValidityChange={handleSecretValidityChange}
+          />
+        ) : skillMdSource.error ||
+          (selectedPath === "SKILL.md" && source.error) ? (
+          <div className="border-destructive/30 space-y-3 rounded-lg border p-4">
+            <p role="alert" className="text-destructive text-sm">
+              {secretCopy.loadSourceFailed}
+            </p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void (selectedPath === "SKILL.md"
+                  ? source.refetch()
+                  : skillMdSource.refetch())
+              }
+            >
+              {secretCopy.retry}
+            </Button>
+          </div>
+        ) : (
+          <div
+            role="status"
+            className="text-muted-foreground flex items-center gap-2 rounded-lg border border-dashed p-4 text-sm"
+          >
+            <Loader2Icon aria-hidden className="size-4 animate-spin" />
+            {secretCopy.loadSource}
+          </div>
+        )}
+      </div>
 
       {(localError ?? fork.error) && (
         <p role="alert" className="text-destructive text-sm">
@@ -933,7 +1146,17 @@ export function SkillVersionWorkbench({
             <Button
               type="button"
               className="min-h-11 flex-1 sm:flex-none"
-              disabled={!dirty || fork.isPending}
+              disabled={
+                !dirty ||
+                fork.isPending ||
+                skillMdContent === null ||
+                !secretDeclarationValid
+              }
+              title={
+                dirty && !secretDeclarationValid
+                  ? secretCopy.saveBlocked
+                  : undefined
+              }
               onClick={() => void saveAsDraft()}
             >
               {fork.isPending ? (

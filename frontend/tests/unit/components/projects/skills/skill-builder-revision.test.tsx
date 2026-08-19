@@ -325,13 +325,13 @@ describe("SkillBuilderRevisionCommitSuccess", () => {
     const html = renderUi(
       <SkillBuilderRevisionCommitSuccess
         versionNumber={4}
-        href="/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555"
+        href="/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555&skill_version_id=66666666-6666-4666-8666-666666666666"
       />,
     );
     expect(html).toContain("已创建草稿版本 v4，前往发布");
     expect(html).toContain("前往发布");
     expect(html).toContain(
-      "/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555",
+      "/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555&amp;skill_version_id=66666666-6666-4666-8666-666666666666",
     );
   });
 });

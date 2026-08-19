@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -31,6 +33,7 @@ from deerflow.runtime.host_execution_approval import (
     HostExecutionFrozenClaim,
     HostExecutionOutcome,
     HostExecutionPlan,
+    HostExecutionSkillSecretSource,
 )
 from deerflow.runtime.runs.worker import _build_runtime_context
 from deerflow.sandbox.exceptions import SandboxRuntimeError
@@ -40,7 +43,11 @@ from deerflow.sandbox.security import (
     is_host_bash_available,
     resolve_host_bash_execution_mode,
 )
-from deerflow.sandbox.tools import _prepare_local_host_execution, bash_tool
+from deerflow.sandbox.tools import (
+    _host_execution_skill_secret_sources,
+    _prepare_local_host_execution,
+    bash_tool,
+)
 from deerflow.subagents.registry import get_available_subagent_names
 from deerflow.tools.builtins.task_tool import (
     _host_execution_approval_command,
@@ -425,6 +432,71 @@ def test_execution_digest_binds_execution_shape_not_authority_coordinates() -> N
         ).execution_digest
     )
     assert "count.py" not in repr(plan)
+
+
+def test_execution_digest_and_private_payload_bind_exact_skill_secret_sources() -> None:
+    explicit = HostExecutionSkillSecretSource(
+        skill_path="/mnt/skills/demo/SKILL.md",
+        secret_names=("TOKEN",),
+        explicit=True,
+    )
+    autonomous = HostExecutionSkillSecretSource(
+        skill_path="/mnt/skills/demo/SKILL.md",
+        secret_names=("TOKEN",),
+        explicit=False,
+    )
+    plan = _plan(
+        skill_secret_sources=(explicit,),
+    )
+
+    assert (
+        plan.execution_digest
+        != _plan(
+            skill_secret_sources=(autonomous,),
+        ).execution_digest
+    )
+    restored = HostExecutionPlan.from_private_payload(
+        plan.to_private_payload(),
+        source_tool_call_id=plan.source_tool_call_id,
+        source_run_id=plan.source_run_id,
+        source_thread_id=plan.source_thread_id,
+    )
+    assert restored == plan
+    assert "credential" not in repr(plan).lower()
+
+    with pytest.raises(ValueError, match="skill secret source"):
+        HostExecutionSkillSecretSource(
+            skill_path="/mnt/skills/demo/../other/SKILL.md",
+            secret_names=("TOKEN",),
+            explicit=True,
+        )
+
+
+def test_skill_secret_source_freezing_rejects_noncanonical_path_and_canonicalizes_declaration_order() -> None:
+    assert _host_execution_skill_secret_sources(
+        {
+            "__active_skill_secret_sources": (
+                (
+                    "demo",
+                    "/mnt/skills/demo/../other/SKILL.md",
+                    ("TOKEN",),
+                    True,
+                ),
+                (
+                    "demo",
+                    "/mnt/skills/demo/SKILL.md",
+                    ("Z_TOKEN", "A_TOKEN"),
+                    True,
+                ),
+            ),
+        },
+    ) == (
+        HostExecutionSkillSecretSource(
+            skill_path="/mnt/skills/demo/SKILL.md",
+            secret_names=("A_TOKEN", "Z_TOKEN"),
+            explicit=True,
+        ),
+    )
 
 
 def test_execution_plan_binds_exact_channel_identity_state() -> None:
@@ -869,6 +941,97 @@ async def test_local_bash_plan_freezes_trusted_channel_identity(
 
 
 @pytest.mark.asyncio
+async def test_local_bash_plan_freezes_secret_free_exact_skill_sources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = _RecordingLocalSandbox()
+    artifact = HostExecutionApprovalArtifact(
+        approval_id="approval-1",
+        source_run_id="run-1",
+        source_tool_call_id="call-1",
+    )
+    port = _FakeApprovalPort(HostExecutionApprovalResult.pending(artifact))
+    runtime = _runtime(
+        _sandbox_config(approval_mode="approval_required"),
+        sandbox,
+        port,
+    )
+    runtime.context["private_scope"] = object()
+    runtime.context["__active_skill_secret_sources"] = (
+        (
+            "demo",
+            "/mnt/skills/demo/SKILL.md",
+            ("TOKEN",),
+            True,
+        ),
+    )
+    carrier = {
+        "/mnt/skills/demo/SKILL.md": {
+            "TOKEN": "credential-exact-v7",
+        },
+    }
+
+    async def skill_secret_provider(
+        _requested: dict[str, frozenset[str]],
+    ) -> dict[str, dict[str, str]]:
+        return carrier
+
+    runtime.context["__skill_secret_provider"] = skill_secret_provider
+
+    async def initialized(_runtime: object) -> _RecordingLocalSandbox:
+        return sandbox
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        initialized,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+
+    result = await bash_tool.coroutine(
+        runtime=runtime,
+        description="read exact credential",
+        command="python /mnt/skills/demo/run.py",
+    )
+
+    assert isinstance(result, Command)
+    assert len(port.plans) == 1
+    plan = port.plans[0]
+    assert plan.environment_keys == ("TOKEN",)
+    assert plan.legacy_environment_keys == ()
+    assert plan.skill_secret_sources == (
+        HostExecutionSkillSecretSource(
+            skill_path="/mnt/skills/demo/SKILL.md",
+            secret_names=("TOKEN",),
+            explicit=True,
+        ),
+    )
+    serialized = repr(plan.to_private_payload())
+    assert "credential-exact-v7" not in serialized
+    assert carrier == {}
+
+
+def test_v2_frozen_plan_round_trip_remains_digest_compatible() -> None:
+    plan = _plan(environment_keys=())
+    v2_payload = plan.to_private_payload()
+    v2_payload["schema_version"] = 2
+    v2_payload.pop("skill_secret_sources")
+    v2_payload.pop("legacy_environment_keys")
+    restored = HostExecutionPlan.from_private_payload(
+        v2_payload,
+        source_tool_call_id=plan.source_tool_call_id,
+        source_run_id=plan.source_run_id,
+        source_thread_id=plan.source_thread_id,
+    )
+
+    assert restored.schema_version == 2
+    assert restored.to_private_payload() == v2_payload
+    assert restored.execution_payload()["schema_version"] == 2
+
+
+@pytest.mark.asyncio
 async def test_local_bash_rejects_forged_inline_approval_without_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1026,6 +1189,208 @@ async def test_isolated_bash_executes_directly_without_approval_port(
     assert sandbox.commands == [
         "cd -- /mnt/user-data/workspace && printf ok",
     ]
+
+
+@pytest.mark.asyncio
+async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IsolatedSandbox:
+        def __init__(self) -> None:
+            self.envs: list[dict[str, str] | None] = []
+            self.last_env_reference: dict[str, str] | None = None
+
+        def execute_command(
+            self,
+            _command: str,
+            env: dict[str, str] | None = None,
+        ) -> str:
+            self.last_env_reference = env
+            self.envs.append(dict(env) if env is not None else None)
+            return env["TOKEN"] if env is not None else "missing"
+
+    sandbox = IsolatedSandbox()
+    config = _sandbox_config(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        approval_mode="approval_required",
+    )
+    carrier = {
+        "/mnt/skills/demo/SKILL.md": {
+            "TOKEN": "credential-exact-v7",
+        },
+    }
+    calls: list[dict[str, frozenset[str]]] = []
+
+    async def skill_secret_provider(
+        requested: dict[str, frozenset[str]],
+    ) -> dict[str, dict[str, str]]:
+        calls.append(requested)
+        return carrier
+
+    context = {
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "private_scope": object(),
+        "app_config": SimpleNamespace(sandbox=config),
+        "__skill_secret_provider": skill_secret_provider,
+        "__active_skill_secret_sources": (
+            (
+                "demo",
+                "/mnt/skills/demo/SKILL.md",
+                ("TOKEN",),
+                True,
+            ),
+        ),
+    }
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "aio:one"}},
+        context=context,
+        config={},
+        tool_call_id="call-1",
+    )
+
+    async def initialized(_runtime: object) -> IsolatedSandbox:
+        return sandbox
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        initialized,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+
+    result = await bash_tool.coroutine(
+        runtime=runtime,
+        description="read exact credential",
+        command='printf %s "$TOKEN"',
+    )
+
+    assert calls == [
+        {
+            "/mnt/skills/demo/SKILL.md": frozenset({"TOKEN"}),
+        },
+    ]
+    assert sandbox.envs == [{"TOKEN": "credential-exact-v7"}]
+    assert sandbox.last_env_reference == {}
+    assert carrier == {}
+    assert result == "[redacted]"
+    assert "__active_skill_secrets" not in context
+    assert "__skill_secret_exec_ready" not in context
+
+
+@pytest.mark.asyncio
+async def test_aio_bash_refreshes_skill_credential_after_executor_queue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class IsolatedSandbox:
+        def __init__(self) -> None:
+            self.envs: list[dict[str, str] | None] = []
+
+        def execute_command(
+            self,
+            _command: str,
+            env: dict[str, str] | None = None,
+        ) -> str:
+            self.envs.append(dict(env) if env is not None else None)
+            return "unexpected"
+
+    sandbox = IsolatedSandbox()
+    config = _sandbox_config(
+        use="deerflow.community.aio_sandbox:AioSandboxProvider",
+        approval_mode="approval_required",
+    )
+    revoked = False
+    provider_states: list[bool] = []
+
+    async def skill_secret_provider(
+        _requested: dict[str, frozenset[str]],
+    ) -> dict[str, dict[str, str]]:
+        provider_states.append(revoked)
+        if revoked:
+            raise RuntimeError("revoked credential detail")
+        return {
+            "/mnt/skills/demo/SKILL.md": {
+                "TOKEN": "credential-before-queue",
+            },
+        }
+
+    runtime = SimpleNamespace(
+        state={"sandbox": {"sandbox_id": "aio:one"}},
+        context={
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "private_scope": object(),
+            "app_config": SimpleNamespace(sandbox=config),
+            "__skill_secret_provider": skill_secret_provider,
+            "__active_skill_secret_sources": (
+                (
+                    "demo",
+                    "/mnt/skills/demo/SKILL.md",
+                    ("TOKEN",),
+                    True,
+                ),
+            ),
+        },
+        config={},
+        tool_call_id="call-1",
+    )
+
+    async def initialized(_runtime: object) -> IsolatedSandbox:
+        return sandbox
+
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized_async",
+        initialized,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_sandbox_initialized",
+        lambda _runtime: sandbox,
+    )
+    monkeypatch.setattr(
+        "deerflow.sandbox.tools.ensure_thread_directories_exist",
+        lambda _runtime: None,
+    )
+
+    loop = asyncio.get_running_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    loop.set_default_executor(executor)
+    queue_blocked = threading.Event()
+    release_queue = threading.Event()
+
+    def occupy_executor() -> None:
+        queue_blocked.set()
+        release_queue.wait(timeout=2)
+
+    blocker = loop.run_in_executor(None, occupy_executor)
+    try:
+        while not queue_blocked.is_set():
+            await asyncio.sleep(0)
+        execution = asyncio.create_task(
+            bash_tool.coroutine(
+                runtime=runtime,
+                description="read exact credential",
+                command='printf %s "$TOKEN"',
+            )
+        )
+        await asyncio.sleep(0.1)
+        revoked = True
+        release_queue.set()
+        result = await asyncio.wait_for(execution, timeout=2)
+
+        assert provider_states == [True]
+        assert sandbox.envs == []
+        assert result == "Error: Skill credential material is unavailable"
+        assert "revoked credential detail" not in result
+    finally:
+        release_queue.set()
+        await blocker
+        executor.shutdown(wait=True)
 
 
 @pytest.mark.asyncio

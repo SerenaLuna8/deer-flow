@@ -34,6 +34,7 @@ import {
   getProjectMcpToolInventory,
   getProjectDefaultAgent,
   getProjectSkillCredentialBindings,
+  getProjectSkillPublishPlan,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssetVersions,
@@ -76,9 +77,11 @@ import {
   projectMcpToolInventoryKey,
   projectSkillCredentialBindingsKey,
   projectSkillCredentialBindingsMutationKey,
+  projectSkillPublishPlanKey,
   projectSkillVersionFileKey,
   systemCatalogKey,
 } from "./query-keys";
+import type { SkillPublishPlanResponse } from "./skill-secret-declarations";
 import type {
   AdminAssetList,
   AssetMutationResponse,
@@ -110,6 +113,7 @@ import type {
   SkillFileForkInput,
   SkillCredentialBindingsInput,
   SkillCredentialBindingsResponse,
+  SkillPublishAssetVersionInput,
   SkillVersionFileContentResponse,
   SyncCurrentSystemMcpBindingInput,
   UpdateConfiguredMcpInput,
@@ -604,6 +608,27 @@ export function useProjectSkillCredentialBindings(
     queryFn: ({ signal }) =>
       getProjectSkillCredentialBindings(projectId, skillId, signal),
     enabled,
+  });
+}
+
+export function useProjectSkillPublishPlan(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+  versionId: string,
+  enabled = true,
+) {
+  return useQuery<SkillPublishPlanResponse>({
+    queryKey: projectSkillPublishPlanKey(
+      accountId,
+      projectId,
+      skillId,
+      versionId,
+    ),
+    queryFn: ({ signal }) =>
+      getProjectSkillPublishPlan(projectId, skillId, versionId, signal),
+    enabled: enabled && skillId !== "" && versionId !== "",
+    staleTime: 0,
   });
 }
 
@@ -1347,17 +1372,26 @@ export function usePublishProjectAssetVersion(
     }: {
       assetId: string;
       versionId: string;
-      input: PublishAssetVersionInput;
+      input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
     }) => {
       return runMutation((signal) =>
-        publishProjectAssetVersion(
-          projectId,
-          kind,
-          assetId,
-          versionId,
-          input,
-          signal,
-        ),
+        kind === "skills"
+          ? publishProjectAssetVersion(
+              projectId,
+              kind,
+              assetId,
+              versionId,
+              input as SkillPublishAssetVersionInput,
+              signal,
+            )
+          : publishProjectAssetVersion(
+              projectId,
+              kind,
+              assetId,
+              versionId,
+              input as PublishAssetVersionInput,
+              signal,
+            ),
       );
     },
     onSuccess: whenActive(
@@ -1366,7 +1400,7 @@ export function usePublishProjectAssetVersion(
         variables: {
           assetId: string;
           versionId: string;
-          input: PublishAssetVersionInput;
+          input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
         },
       ) =>
         kind === "agents"
@@ -1384,7 +1418,7 @@ export function usePublishProjectAssetVersion(
         variables: {
           assetId: string;
           versionId: string;
-          input: PublishAssetVersionInput;
+          input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
         },
       ) => {
         if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;

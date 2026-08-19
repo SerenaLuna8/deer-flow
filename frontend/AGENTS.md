@@ -180,6 +180,14 @@ generator. A necessary local patch needs focused coverage and an explanation.
   `session.slug`, and its idempotency signature must match that request body.
 - Project Skill creation exposes exactly two user flows: AI Builder and validated
   archive upload. Do not reintroduce a manual metadata or starter-template form.
+- Skill secret declaration forms are a server-parsed projection of the current
+  `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
+  Parse/patch races must preserve newer local edits; invalid or pending source
+  blocks save, validation, and publish without discarding the draft.
+- Skill publishing uses the server publish plan and submits only exact
+  Credential-version IDs. It never sends secret values or simulates atomic
+  publish with a later binding mutation. Archive and Builder create results with
+  declarations must lead to the exact created version's Credential controls.
 - System asset definitions are read-only in global admin views. Project binding
   and Credential-grant operations are separate, narrow mutations.
 - System Skill version history keeps revoked releases visible and labels them as

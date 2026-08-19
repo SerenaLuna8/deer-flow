@@ -93,6 +93,53 @@ export function skillBuilderValidationCurrent(
   );
 }
 
+export type SkillBuilderFrontmatterState = "pending" | "valid" | "invalid";
+
+/**
+ * Resolve one candidate file from the shared local-draft buffer. This keeps
+ * structured editors independent from whichever file happens to be selected.
+ */
+export function skillBuilderFileDraftContent(
+  files: readonly SkillBuilderFile[],
+  drafts: Readonly<Record<string, string>>,
+  path: string,
+): string | null {
+  const file = files.find((candidate) => candidate.path === path);
+  if (!file) return null;
+  return drafts[path] ?? file.content;
+}
+
+/**
+ * Apply a file edit to the existing draft buffer without discarding edits to
+ * other files. Returning to the server content removes only that file's draft.
+ */
+export function updateSkillBuilderFileDraft(
+  files: readonly SkillBuilderFile[],
+  drafts: Readonly<Record<string, string>>,
+  path: string,
+  content: string,
+): Record<string, string> {
+  const file = files.find((candidate) => candidate.path === path);
+  if (!file) return { ...drafts };
+  const next = { ...drafts };
+  if (content === file.content) delete next[path];
+  else next[path] = content;
+  return next;
+}
+
+/** A source edit or non-ready canonical parse makes the old validation stale. */
+export function skillBuilderCandidateValidationCurrent(
+  session: SkillBuilderSession,
+  drafts: Readonly<Record<string, string>>,
+  frontmatterState: SkillBuilderFrontmatterState,
+): boolean {
+  return (
+    frontmatterState === "valid" &&
+    Object.keys(drafts).length === 0 &&
+    skillBuilderValidationCurrent(session)
+  );
+}
+
 export function skillBuilderCanCommit(session: SkillBuilderSession): boolean {
   return (
     session.status === "validated" &&
@@ -100,6 +147,34 @@ export function skillBuilderCanCommit(session: SkillBuilderSession): boolean {
     !session.target_skill_deleted &&
     session.files.some((file) => file.path === "SKILL.md") &&
     skillBuilderValidationCurrent(session)
+  );
+}
+
+export function skillBuilderCanValidateCandidate(
+  session: SkillBuilderSession,
+  drafts: Readonly<Record<string, string>>,
+  frontmatterState: SkillBuilderFrontmatterState,
+  blocked: boolean,
+): boolean {
+  return Boolean(
+    !blocked &&
+    session.draft_checksum &&
+    session.files.some((file) => file.path === "SKILL.md") &&
+    (session.status === "draft_ready" || session.status === "validated") &&
+    Object.keys(drafts).length === 0 &&
+    frontmatterState === "valid",
+  );
+}
+
+export function skillBuilderCanCommitCandidate(
+  session: SkillBuilderSession,
+  drafts: Readonly<Record<string, string>>,
+  frontmatterState: SkillBuilderFrontmatterState,
+): boolean {
+  return (
+    Object.keys(drafts).length === 0 &&
+    frontmatterState === "valid" &&
+    skillBuilderCanCommit(session)
   );
 }
 

@@ -40,6 +40,7 @@ from app.gateway.routers import (
     project_members,
     project_memory,
     project_skill_builder,
+    project_skill_frontmatter,
     project_usage,
     projects,
 )
@@ -352,6 +353,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     app.include_router(project_assets.project_router)
     app.include_router(project_agent_builder.router)
     app.include_router(project_skill_builder.router)
+    app.include_router(project_skill_frontmatter.router)
     # Readiness must precede the dynamic /{task_id} project Automation route.
     app.include_router(project_automations.readiness_router)
     app.include_router(project_automations.router)

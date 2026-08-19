@@ -343,6 +343,7 @@ class SkillDesignSessionItemResponse(_StrictModel):
     error_code: str | None
     error_message: str | None
     created_skill_id: uuid.UUID | None
+    created_skill_version_id: uuid.UUID | None
     authoring_dependencies: SkillDesignDependencySnapshotResponse | None
     session_kind: Literal["create", "revise"]
     target_skill_id: uuid.UUID | None

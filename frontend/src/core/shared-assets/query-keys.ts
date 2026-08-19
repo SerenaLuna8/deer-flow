@@ -231,3 +231,22 @@ export function projectSkillCredentialBindingsMutationKey(
     "replace",
   ] as const;
 }
+
+export function projectSkillPublishPlanKey(
+  accountId: string,
+  projectId: string,
+  skillId: string,
+  versionId: string,
+) {
+  return [
+    ...projectAssetVersionsKey(
+      accountId,
+      projectId,
+      "skills",
+      assetIdSchema.parse(skillId),
+    ),
+    "version",
+    assetIdSchema.parse(versionId),
+    "publish-plan",
+  ] as const;
+}

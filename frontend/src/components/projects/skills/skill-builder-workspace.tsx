@@ -10,7 +10,14 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -47,12 +54,16 @@ import {
   isSkillBuilderRunAdmission,
   reconcileSkillBuilderFileSelection,
   skillBuilderCanAuthor,
-  skillBuilderCanCommit,
+  skillBuilderCanCommitCandidate,
+  skillBuilderCanValidateCandidate,
+  skillBuilderCandidateValidationCurrent,
   skillBuilderComposerDisabled,
+  skillBuilderFileDraftContent,
   skillBuilderMergeAttachment,
   skillBuilderRunPresentation,
   skillBuilderSemanticSignature,
   skillBuilderValidationCurrent,
+  updateSkillBuilderFileDraft,
   useCancelSkillBuilderSession,
   useCommitSkillBuilderSession,
   useSkillBuilderSession,
@@ -60,6 +71,7 @@ import {
   useSubmitSkillBuilderTurn,
   useValidateSkillBuilderSession,
   type SkillBuilderAttachment,
+  type SkillBuilderCommitResponse,
   type SkillBuilderMergeAttachmentError,
   type SkillBuilderFile,
   type SkillBuilderIdempotencyChannel,
@@ -151,6 +163,159 @@ export function SkillBuilderRevisionCommitSuccess({
       </p>
       <Button asChild type="button" className="mt-6 min-h-11">
         <Link href={href}>{copy.goPublish}</Link>
+      </Button>
+    </div>
+  );
+}
+
+export type SkillBuilderCreatedSecretSetup = {
+  skillId: string;
+  skillVersionId: string;
+  requirementNames: string[];
+};
+
+export function skillBuilderCreatedSecretSetupFromSession(
+  session: SkillBuilderSession,
+): SkillBuilderCreatedSecretSetup | null {
+  const validation = session.validation;
+  if (
+    session.session_kind !== "create" ||
+    session.status !== "completed" ||
+    !session.created_skill_id ||
+    !session.created_skill_version_id ||
+    !validation ||
+    !skillBuilderValidationCurrent(session) ||
+    validation.secret_requirements.length === 0
+  ) {
+    return null;
+  }
+  return {
+    skillId: session.created_skill_id,
+    skillVersionId: session.created_skill_version_id,
+    requirementNames: validation.secret_requirements.map(
+      (requirement) => requirement.name,
+    ),
+  };
+}
+
+function skillBuilderExactVersionHref(
+  listHref: string,
+  skillId: string,
+  skillVersionId: string,
+  configureCredentials: boolean,
+): string {
+  const params = new URLSearchParams({
+    skill_id: skillId,
+    skill_version_id: skillVersionId,
+  });
+  if (configureCredentials) {
+    params.set("configure_credentials", "1");
+  }
+  return `${listHref}?${params.toString()}`;
+}
+
+export function skillBuilderCreateCommitHref(
+  listHref: string,
+  response: SkillBuilderCommitResponse,
+): string | null {
+  const { session, skill, version } = response.data;
+  const exactVersionId = session.created_skill_version_id;
+  if (
+    session.session_kind !== "create" ||
+    session.status !== "completed" ||
+    session.created_skill_id !== skill.id ||
+    session.project_id !== skill.project_id ||
+    !exactVersionId ||
+    (version !== null &&
+      (version.id !== exactVersionId || version.skill_id !== skill.id))
+  ) {
+    return null;
+  }
+  return skillBuilderExactVersionHref(
+    listHref,
+    skill.id,
+    exactVersionId,
+    false,
+  );
+}
+
+export function skillBuilderCompletedVersionHref(
+  listHref: string,
+  session: SkillBuilderSession,
+  options: { configureCredentials: boolean },
+): string | null {
+  if (
+    session.status !== "completed" ||
+    !session.created_skill_id ||
+    !session.created_skill_version_id ||
+    (options.configureCredentials && session.session_kind !== "create")
+  ) {
+    return null;
+  }
+  return skillBuilderExactVersionHref(
+    listHref,
+    session.created_skill_id,
+    session.created_skill_version_id,
+    options.configureCredentials,
+  );
+}
+
+/**
+ * Prefer the exact committed version. The live Skill pointer is only a
+ * rolling-deployment fallback for an older Gateway create response.
+ */
+export function skillBuilderCreatedSecretSetup(
+  response: SkillBuilderCommitResponse,
+): SkillBuilderCreatedSecretSetup | null {
+  const { session, skill, version } = response.data;
+  const validation = session.validation;
+  const exactVersionId =
+    session.created_skill_version_id ??
+    version?.id ??
+    skill.current_published_version_id;
+  const requirements =
+    version?.secret_requirements ?? validation?.secret_requirements;
+  if (
+    session.session_kind !== "create" ||
+    session.status !== "completed" ||
+    session.created_skill_id !== skill.id ||
+    session.project_id !== skill.project_id ||
+    !exactVersionId ||
+    (version !== null &&
+      (version.id !== exactVersionId ||
+        version.skill_id !== skill.id ||
+        version.workflow_status !== "published" ||
+        version.payload_checksum !== session.draft_checksum)) ||
+    !validation ||
+    !skillBuilderValidationCurrent(session) ||
+    !requirements ||
+    requirements.length === 0
+  ) {
+    return null;
+  }
+  return {
+    skillId: skill.id,
+    skillVersionId: exactVersionId,
+    requirementNames: requirements.map((requirement) => requirement.name),
+  };
+}
+
+export function SkillBuilderCreateSecretSuccess({
+  requirementCount,
+  href,
+}: {
+  requirementCount: number;
+  href: string;
+}) {
+  const { t } = useI18n();
+  const copy = t.skills.builder.success;
+  return (
+    <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center px-4 py-16 text-center">
+      <p className="text-sm font-medium">
+        {copy.createdWithSecrets(requirementCount)}
+      </p>
+      <Button asChild type="button" className="mt-6 min-h-11">
+        <Link href={href}>{copy.configureCredentials}</Link>
       </Button>
     </div>
   );
@@ -550,6 +715,18 @@ export function skillBuilderDraftChanges(
   });
 }
 
+export function skillBuilderDraftMutationSnapshot(
+  session: SkillBuilderSession,
+  changes: ReturnType<typeof skillBuilderDraftChanges>,
+) {
+  if (!session.draft_checksum || changes.length === 0) return null;
+  return {
+    expectedRevision: session.revision,
+    expectedDraftChecksum: session.draft_checksum,
+    changes,
+  };
+}
+
 type SkillBuilderPendingLeave = {
   href: string;
   viaHistory: boolean;
@@ -698,9 +875,16 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const [cancelOpen, setCancelOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [baseStaleOpen, setBaseStaleOpen] = useState(false);
-  const [createdDraftVersion, setCreatedDraftVersion] = useState<number | null>(
-    null,
-  );
+  const [createdDraftVersion, setCreatedDraftVersion] = useState<{
+    id: string;
+    versionNumber: number;
+  } | null>(null);
+  const [createdSecretSetup, setCreatedSecretSetup] =
+    useState<SkillBuilderCreatedSecretSetup | null>(null);
+  const [validSecretSource, setValidSecretSource] = useState<{
+    sessionId: string;
+    content: string;
+  } | null>(null);
   const [pendingLeave, setPendingLeave] =
     useState<SkillBuilderPendingLeave | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
@@ -766,9 +950,22 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     attachmentIngestions > 0;
   const selectedFile =
     session?.files.find((file) => file.path === selectedPath) ?? null;
-  const draftContent = selectedFile
-    ? (drafts[selectedFile.path] ?? selectedFile.content)
+  const draftContent = session
+    ? (skillBuilderFileDraftContent(
+        session.files,
+        drafts,
+        selectedPath ?? "",
+      ) ?? "")
     : "";
+  const skillMdContent = session
+    ? skillBuilderFileDraftContent(session.files, drafts, "SKILL.md")
+    : null;
+  const secretDeclarationValid = Boolean(
+    session &&
+    skillMdContent !== null &&
+    validSecretSource?.sessionId === session.id &&
+    validSecretSource.content === skillMdContent,
+  );
   const fileEditingAllowed =
     (session?.status === "draft_ready" || session?.status === "validated") &&
     !session.target_skill_deleted;
@@ -784,7 +981,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     !fileEditingAllowed ||
     draftBaselineStale;
   const validationCurrent = session
-    ? skillBuilderValidationCurrent(session)
+    ? skillBuilderCandidateValidationCurrent(
+        session,
+        drafts,
+        secretDeclarationValid ? "valid" : "pending",
+      )
     : false;
   const validationToken = useMemo(
     () =>
@@ -796,13 +997,30 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const acknowledgeWarnings = Boolean(
     validationToken && acknowledgedValidationToken === validationToken,
   );
-  const canValidate = Boolean(
-    session?.draft_checksum &&
-    session?.files.some((file) => file.path === "SKILL.md") &&
-    (session.status === "draft_ready" || session.status === "validated") &&
-    !dirty &&
-    !builderReadOnly,
-  );
+  const canValidate = session
+    ? skillBuilderCanValidateCandidate(
+        session,
+        drafts,
+        secretDeclarationValid ? "valid" : "pending",
+        builderReadOnly,
+      )
+    : false;
+  const secretSourceRef = useRef<{
+    sessionId: string | null;
+    content: string | null;
+  }>({ sessionId: null, content: null });
+  secretSourceRef.current = {
+    sessionId: session?.id ?? null,
+    content: skillMdContent,
+  };
+  const handleSecretValidityChange = useCallback((valid: boolean) => {
+    const source = secretSourceRef.current;
+    setValidSecretSource(
+      valid && source.sessionId && source.content !== null
+        ? { sessionId: source.sessionId, content: source.content }
+        : null,
+    );
+  }, []);
   useEffect(() => {
     if (!session) return;
     const sameSession = observedFilesSessionRef.current === session.id;
@@ -1123,31 +1341,55 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     }
   }
 
-  function saveDraft() {
-    const draftChecksum = session?.draft_checksum;
+  function updateCandidateDraft(path: string, content: string): boolean {
+    if (!session) return false;
+    const file = session.files.find((candidate) => candidate.path === path);
+    if (!file) return false;
     if (
-      !session?.draft_checksum ||
+      new TextEncoder().encode(content).byteLength >
+      SKILL_BUILDER_MAX_FILE_BYTES
+    ) {
+      setLocalError(errors.fileTooLarge);
+      return false;
+    }
+    if (path === "SKILL.md") setValidSecretSource(null);
+    if (!dirty && content !== file.content) {
+      setDraftBaselineChecksum(session.draft_checksum);
+    }
+    setDrafts((current) =>
+      updateSkillBuilderFileDraft(session.files, current, path, content),
+    );
+    if (requestError) resetErrors();
+    return true;
+  }
+
+  function saveDraft() {
+    const snapshot = session
+      ? skillBuilderDraftMutationSnapshot(session, changes)
+      : null;
+    if (
+      !session ||
+      !snapshot ||
       !canAuthor ||
       !fileEditingAllowed ||
       draftBaselineStale ||
-      mutationPending ||
-      changes.length === 0
+      mutationPending
     ) {
       return;
     }
     resetErrors();
     const signature = skillBuilderSemanticSignature({
-      expected_draft_checksum: draftChecksum,
-      expected_revision: session.revision,
-      changes,
+      expected_draft_checksum: snapshot.expectedDraftChecksum,
+      expected_revision: snapshot.expectedRevision,
+      changes: snapshot.changes,
     });
     const command = idempotency.acquire("draft-turn", signature, (key) => ({
       input: {
         kind: "draft_update" as const,
-        expected_draft_checksum: draftChecksum!,
-        changes,
+        expected_draft_checksum: snapshot.expectedDraftChecksum,
+        changes: snapshot.changes,
       },
-      expected_revision: session.revision,
+      expected_revision: snapshot.expectedRevision,
       idempotency_key: key,
     }));
     submitTurn.mutate(command, {
@@ -1189,8 +1431,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     if (
       !draftChecksum ||
       !canAuthor ||
-      dirty ||
-      !skillBuilderCanCommit(session) ||
+      !skillBuilderCanCommitCandidate(
+        session,
+        drafts,
+        secretDeclarationValid ? "valid" : "pending",
+      ) ||
       (session.validation?.scan_decision === "warn" && !acknowledgeWarnings)
     ) {
       return;
@@ -1215,12 +1460,28 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
         setCommitOpen(false);
         setBaseStaleOpen(false);
         if (response.data.session.session_kind === "revise") {
-          setCreatedDraftVersion(response.data.version?.version_number ?? null);
+          const createdVersion = response.data.version;
+          setCreatedDraftVersion(
+            createdVersion
+              ? {
+                  id: createdVersion.id,
+                  versionNumber: createdVersion.version_number,
+                }
+              : null,
+          );
           return;
         }
-        router.replace(
-          `/projects/${encodeURIComponent(project.slug)}/skills?skill_id=${encodeURIComponent(response.data.skill.id)}`,
-        );
+        const secretSetup = skillBuilderCreatedSecretSetup(response);
+        if (secretSetup) {
+          setCreatedSecretSetup(secretSetup);
+          return;
+        }
+        const createdHref = skillBuilderCreateCommitHref(listHref, response);
+        if (!createdHref) {
+          setLocalError(errors.commitUncertain);
+          return;
+        }
+        router.replace(createdHref);
       },
       onError: (error) => {
         refreshAfterConflict("commit", signature, error);
@@ -1271,6 +1532,42 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   if (!user) return null;
 
   const listHref = `/projects/${encodeURIComponent(project.slug)}/skills`;
+  const durableSecretSetup = session
+    ? skillBuilderCreatedSecretSetupFromSession(session)
+    : null;
+  const effectiveSecretSetup = createdSecretSetup ?? durableSecretSetup;
+  const exactCreatedVersionId =
+    session?.created_skill_version_id ?? createdDraftVersion?.id ?? null;
+  const createSecretHref =
+    (session
+      ? skillBuilderCompletedVersionHref(listHref, session, {
+          configureCredentials: true,
+        })
+      : null) ??
+    (effectiveSecretSetup
+      ? skillBuilderExactVersionHref(
+          listHref,
+          effectiveSecretSetup.skillId,
+          effectiveSecretSetup.skillVersionId,
+          true,
+        )
+      : null);
+  const revisionHref =
+    (session
+      ? skillBuilderCompletedVersionHref(listHref, session, {
+          configureCredentials: false,
+        })
+      : null) ??
+    (session?.status === "completed" &&
+    session.created_skill_id &&
+    exactCreatedVersionId
+      ? skillBuilderExactVersionHref(
+          listHref,
+          session.created_skill_id,
+          exactCreatedVersionId,
+          false,
+        )
+      : null);
 
   return (
     <>
@@ -1375,12 +1672,22 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : conversation.retry}
             </Button>
           </div>
+        ) : effectiveSecretSetup &&
+          createSecretHref &&
+          session.status === "completed" &&
+          session.created_skill_id === effectiveSecretSetup.skillId ? (
+          <SkillBuilderCreateSecretSuccess
+            key={effectiveSecretSetup.skillVersionId}
+            requirementCount={effectiveSecretSetup.requirementNames.length}
+            href={createSecretHref}
+          />
         ) : revising &&
           session.status === "completed" &&
-          session.created_skill_id ? (
+          session.created_skill_id &&
+          revisionHref ? (
           <SkillBuilderRevisionCommitSuccess
-            versionNumber={createdDraftVersion}
-            href={`${listHref}?skill_id=${encodeURIComponent(session.created_skill_id)}`}
+            versionNumber={createdDraftVersion?.versionNumber ?? null}
+            href={revisionHref}
           />
         ) : (
           <div
@@ -1436,9 +1743,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 )}
               >
                 <SkillBuilderCandidateWorkbench
+                  projectId={project.id}
                   files={session.files}
                   selectedPath={selectedPath}
                   draftContent={draftContent}
+                  skillMdContent={skillMdContent}
                   displayMode={displayMode}
                   canAuthor={canAuthor}
                   readOnly={Boolean(builderReadOnly)}
@@ -1449,7 +1758,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                     validationCurrent && !dirty ? session.validation : null
                   }
                   canValidate={canValidate}
-                  canCommit={skillBuilderCanCommit(session) && !dirty}
+                  canCommit={skillBuilderCanCommitCandidate(
+                    session,
+                    drafts,
+                    secretDeclarationValid ? "valid" : "pending",
+                  )}
                   acknowledgeWarnings={acknowledgeWarnings}
                   baselineStale={draftBaselineStale}
                   sessionKind={session.session_kind}
@@ -1463,27 +1776,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   }}
                   onDraftContentChange={(content) => {
                     if (!selectedFile) return;
-                    if (
-                      new TextEncoder().encode(content).byteLength >
-                      SKILL_BUILDER_MAX_FILE_BYTES
-                    ) {
-                      setLocalError(errors.fileTooLarge);
-                      return;
-                    }
-                    if (!dirty && content !== selectedFile.content) {
-                      setDraftBaselineChecksum(session.draft_checksum);
-                    }
-                    setDrafts((current) => {
-                      const next = { ...current };
-                      if (content === selectedFile.content) {
-                        delete next[selectedFile.path];
-                      } else {
-                        next[selectedFile.path] = content;
-                      }
-                      return next;
-                    });
-                    if (requestError) resetErrors();
+                    updateCandidateDraft(selectedFile.path, content);
                   }}
+                  onSkillMdContentChange={(content) =>
+                    updateCandidateDraft("SKILL.md", content)
+                  }
+                  onSecretValidityChange={handleSecretValidityChange}
                   onDisplayModeChange={setDisplayMode}
                   onSave={saveDraft}
                   onDiscard={() => {
@@ -1555,7 +1853,15 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             </Button>
             <Button
               type="button"
-              disabled={commit.isPending}
+              disabled={
+                commit.isPending ||
+                !session ||
+                !skillBuilderCanCommitCandidate(
+                  session,
+                  drafts,
+                  secretDeclarationValid ? "valid" : "pending",
+                )
+              }
               onClick={() => confirmCommit(false)}
             >
               {commit.isPending ? (
@@ -1614,7 +1920,15 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <Button
               type="button"
               variant="destructive"
-              disabled={commit.isPending}
+              disabled={
+                commit.isPending ||
+                !session ||
+                !skillBuilderCanCommitCandidate(
+                  session,
+                  drafts,
+                  secretDeclarationValid ? "valid" : "pending",
+                )
+              }
               onClick={() => confirmCommit(true)}
             >
               {commit.isPending ? (

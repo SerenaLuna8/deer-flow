@@ -6,8 +6,7 @@ Pure-logic validation of SKILL.md frontmatter — no FastAPI or HTTP dependencie
 import re
 from pathlib import Path
 
-import yaml
-
+from deerflow.skills.frontmatter import parse_skill_frontmatter_document
 from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.types import SKILL_MD_FILE
 
@@ -40,23 +39,15 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
         return False, f"{SKILL_MD_FILE} not found", None
 
     content = skill_md.read_text(encoding="utf-8")
-    if not content.startswith("---"):
-        return False, "No YAML frontmatter found", None
-
-    # Extract frontmatter
-    match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
-    if not match:
-        return False, "Invalid frontmatter format", None
-
-    frontmatter_text = match.group(1)
-
-    # Parse YAML frontmatter
-    try:
-        frontmatter = yaml.safe_load(frontmatter_text)
-        if not isinstance(frontmatter, dict):
-            return False, "Frontmatter must be a YAML dictionary", None
-    except yaml.YAMLError as e:
-        return False, f"Invalid YAML in frontmatter: {e}", None
+    document = parse_skill_frontmatter_document(content)
+    if not document.valid:
+        diagnostic = next(
+            (item for item in document.diagnostics if item.severity == "error"),
+            document.diagnostics[0],
+        )
+        return False, diagnostic.public_message, None
+    frontmatter = document.frontmatter
+    assert frontmatter is not None
 
     # Check for unexpected properties
     unexpected_keys = set(frontmatter.keys()) - ALLOWED_FRONTMATTER_PROPERTIES

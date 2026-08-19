@@ -1,9 +1,9 @@
 # Skill 凭证环境变量声明与发布绑定改造方案
 
-状态：Proposed  
-日期：2026-08-19  
-范围：Project Skill、压缩包创建、AI Skill Builder、版本发布、Credential 绑定  
-本文件仅描述设计，不代表功能已经实现。
+状态：Implemented
+日期：2026-08-19
+范围：Project Skill、压缩包创建、AI Skill Builder、版本发布、Credential 绑定
+实现状态：本轮已完成并通过文末门禁
 
 ## 1. 背景
 
@@ -573,11 +573,14 @@ backend/tests/test_skill_frontmatter_document.py
 
 ```text
 backend/tests/test_skill_service_lifecycle.py
-backend/tests/test_skill_credential_bindings_postgres.py
+backend/tests/test_skill_credential_binding_service.py
+backend/tests/test_skill_credential_policy.py
+backend/tests/test_skill_publish_credentials_atomic.py
 backend/tests/test_skill_publish_credentials_postgres.py
 backend/tests/test_skill_publish_credential_route_contract.py
 backend/tests/test_skill_author_publish_policy.py
-backend/tests/test_skill_credential_run_snapshot_postgres.py
+backend/tests/test_host_execution_continuation_runner.py
+backend/tests/test_host_execution_approval.py
 ```
 
 覆盖：
@@ -600,11 +603,11 @@ backend/tests/test_skill_credential_run_snapshot_postgres.py
 
 ```text
 frontend/tests/unit/components/projects/assets/skill-secret-declarations-editor.test.tsx
-frontend/tests/unit/components/projects/assets/skill-publish-dialog.test.tsx
 frontend/tests/unit/components/projects/assets/skill-version-workbench.test.tsx
 frontend/tests/unit/components/projects/assets/skill-publisher-governance.test.ts
 frontend/tests/unit/core/shared-assets/hooks.test.ts
 frontend/tests/unit/components/projects/skills/skill-builder-workspace-actions.test.tsx
+frontend/tests/unit/components/projects/skills/skill-builder-secret-candidate.test.tsx
 ```
 
 覆盖：
@@ -707,12 +710,53 @@ AIO remote 不在本次验收范围内，除非目标部署已具备对应的私
 9. 409、无效 YAML、网络失败和权限错误均保留用户草稿。
 10. Canonical parser、PostgreSQL、前端单元和浏览器测试全部通过。
 
-## 15. 未验证项与实施前检查
+## 15. 实施结果
 
-1. 当前数据库是否存在超过拟议长度限制的历史环境变量名。
-2. packaged System Skills 是否存在托管字段内部复杂注释。
-3. 当前所有上传格式样本能否由 canonical parser 保持完全一致的解析结果。
-4. 真实 Local 和 AIO local Provider 的端到端环境变量注入，需要在实现后分别复测。
-5. 真实外部模型驱动的 Skill Builder E2E 属于独立外部 Provider gate。
+### 15.1 已完成
 
-以上检查未完成前，不应将兼容性假设描述为已验证事实。
+1. 新增 canonical frontmatter parser/patcher；上传、Builder、检查、review、发布和
+   runtime description 入口统一采用同一严格语义。重复 key、alias、非法声明和资源限制
+   均 fail closed，diagnostic 不回显源码行或非法值。
+2. 新增项目级 parse/patch 与 publish-plan API。响应设置 `private, no-store` 和
+   `nosniff`，前端只消费结构化 projection，不自行解析 YAML。
+3. Skill 版本工作台和 Builder 候选工作台均提供 `files | secrets` 表单；patch 写回同一
+   `SKILL.md` buffer，乱序响应不会覆盖新编辑，非法或待解析状态会阻止保存、检查和发布。
+4. 发布 Draft 与精确 Credential-version bindings 在同一 PostgreSQL 事务完成；Active
+   Skill 必需项不完整时稳定返回 `SKILL_CREDENTIAL_BINDINGS_INCOMPLETE`，Suspended
+   Skill 可以先创建后配置。
+5. 压缩包创建会在存在声明时自动打开精确版本的环境变量区域；AI Builder create/revise
+   会持久化并返回 `created_skill_version_id`，刷新或幂等重放后仍导航到真实创建版本。
+6. Local Provider 与 AIO local Provider 均在每条授权命令执行前按冻结 Skill closure
+   重新解析 Credential，按命令注入环境变量并清理引用；输出、异常和结果均经过掩码，
+   provider/closure 不匹配时不启动命令。
+7. 本实现没有新增数据库表、字段或 migration，也没有修改 packaged System Asset payload。
+8. 管理员项目覆盖发布同样校验 Active Skill 的精确 Credential closure，不能绕过必需
+   binding；管理员仍不能替项目成员提交新的 Credential 选择。
+9. 运行时兼容已持久化的 v2 审批，同时在 executor 真正出队后重新授权并解密；撤销、
+   轮换、取消和 AIO provider 异常均 fail closed，且不记录 provider 原始响应。
+10. Credential binding 后台刷新采用逐字段三方合并，版本/资产切换纳入未保存修改保护；
+    两个 files/secrets tab 组支持完整键盘导航和 ARIA 关联。
+
+### 15.2 已验证
+
+- Backend core gate：3083 passed，0 failed，0 skipped；其中新增管理员覆盖真实 PostgreSQL
+  发布回归与原子发布聚焦测试为 15 passed。
+- Runtime Credential/approval 扩展回归：310 passed。
+- Frontend unit：139 files、723 passed、0 skipped；`pnpm check` 0 errors；production build
+  成功。
+- Mocked Chromium：上传、工作台/发布、Builder 与激活修复四个场景全部通过。
+- 真实 Gateway + production frontend Chromium：archive 上传、Credential 创建与绑定、
+  canonical patch、Draft fork、publish-plan 和原子发布完整通过；发布请求经断言不含明文。
+- 真实 LocalSandbox 子进程和 Apple Container/AIO private container 均读取到绑定变量；
+  返回值仅为 `[redacted]`，下一条命令无残留，AIO 容器释放后不存在。
+
+### 15.3 保留边界
+
+1. 环境变量声明不设产品层长度上限以保持历史 frontmatter 兼容；当前绑定持久化列为
+   255 字符，因此超长声明可解析、但不会被列为可绑定 Credential，写入绑定时稳定拒绝。
+2. 托管字段自身包含注释时允许读取但 `patchable=false`，用户必须转源码模式，避免静默
+   丢失注释。
+3. AIO remote/provisioner 不在本轮范围内；该模式仍按现有私有投影能力 fail closed。
+4. 真实外部模型生成的 Skill Builder 会话仍属于 Provider 集成 gate；本轮以 durable
+   Builder 单元/PostgreSQL 合同和 mocked browser 场景验证候选编辑、重新检查、提交及
+   精确版本导航。

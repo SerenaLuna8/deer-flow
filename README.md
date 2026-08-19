@@ -31,7 +31,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   资产发布权限的成员显式发布后才生效；超出上传、解压、单文件或成员数限制的包会以
   明确的大小限制错误拒绝。项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
   Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
-  名称，同一名称可用于创建具有新 ID 的 Agent。
+  名称，同一名称可用于创建具有新 ID 的 Agent。Skill 可在 `SKILL.md` 中通过
+  `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
+  同一源码副本同步，发布时原子选择项目 Credential。明文只在授权命令执行边界解密
+  注入，Local Provider 与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选 Skill 仍只能经受管草稿工具、

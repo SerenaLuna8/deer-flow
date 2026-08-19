@@ -214,6 +214,15 @@ or downgrade an application database.
   or moves a pointer backward to an old row.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
+- A Skill's `SKILL.md` is the sole authority for `required-secrets` and
+  `secrets-autonomous`. Archive, Builder, validation, review, publish, and
+  runtime consumers use the canonical parser; form edits patch only those
+  managed frontmatter fields and preserve the rest of the document.
+- Publishing a Skill version and replacing its exact Credential bindings is one
+  transaction. An active Skill must cover every non-optional declaration;
+  suspended Skills may remain incomplete but activation fails with the stable
+  incomplete-binding error. Secret values never enter Skill bytes, publish
+  plans, snapshots, audit metadata, or API responses.
 - Runtime-visible Skill names are unique case-insensitively within a project,
   across active Project Skills and enabled System Skill bindings. Activation and
   binding enable enforce the inverse checks under the project lock; Run

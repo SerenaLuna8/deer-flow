@@ -4,18 +4,16 @@ from __future__ import annotations
 
 import logging
 import posixpath
-import re
 from collections.abc import Collection, Mapping
 from html import escape
 from typing import Any, TypedDict
 
-import yaml
 from langchain_core.messages import AIMessage, AnyMessage, ToolMessage
 
 from deerflow.agents.thread_state import _SKILL_DESCRIPTION_MAX_CHARS, SkillEntry
+from deerflow.skills.frontmatter import parse_skill_frontmatter_document
 
 _SKILL_FILE_NAME = "SKILL.md"
-_FRONT_MATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 SKILL_CONTEXT_ENTRY_KEY = "skill_context_entry"
 logger = logging.getLogger(__name__)
 
@@ -69,14 +67,9 @@ def _skill_name_from_path(skill_md_path: str) -> str:
 
 def _parse_description(content: str) -> str:
     """Extract frontmatter description from already-read SKILL.md content."""
-    match = _FRONT_MATTER_RE.match(content)
-    if not match:
-        return ""
-    try:
-        metadata = yaml.safe_load(match.group(1))
-    except yaml.YAMLError:
-        return ""
-    if not isinstance(metadata, dict):
+    parsed = parse_skill_frontmatter_document(content)
+    metadata = parsed.frontmatter if parsed.valid else None
+    if metadata is None:
         return ""
     description = metadata.get("description")
     if not isinstance(description, str):

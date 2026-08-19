@@ -5,6 +5,7 @@ import {
   skillVersionConflictHasLatestServerState,
   skillVersionDraftMatchesSubmittedChanges,
   skillVersionSaveIsPending,
+  skillVersionWorkbenchTabForKey,
 } from "@/components/projects/assets/skill-version-workbench";
 import type { SkillFileChange } from "@/core/shared-assets";
 import { invalidateProjectSkillConflictQueries } from "@/core/shared-assets/hooks";
@@ -15,6 +16,18 @@ const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("Skill version conflict recovery", () => {
+  test("maps the complete horizontal tab keyboard contract", () => {
+    expect(skillVersionWorkbenchTabForKey("files", "ArrowRight")).toBe(
+      "secrets",
+    );
+    expect(skillVersionWorkbenchTabForKey("secrets", "ArrowLeft")).toBe(
+      "files",
+    );
+    expect(skillVersionWorkbenchTabForKey("secrets", "Home")).toBe("files");
+    expect(skillVersionWorkbenchTabForKey("files", "End")).toBe("secrets");
+    expect(skillVersionWorkbenchTabForKey("files", "Enter")).toBeNull();
+  });
+
   test("accepts only a newer authoritative revision for the same asset and immutable source version", () => {
     const recovery = {
       assetId: ASSET_ID,

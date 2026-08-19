@@ -356,6 +356,10 @@ export const skillBuilderSessionSchema = z
     error_code: z.string().trim().min(1).nullable(),
     error_message: z.string().trim().min(1).nullable(),
     created_skill_id: uuidSchema.nullable(),
+    // Rolling-compatible durable commit identity. Current Gateways always
+    // return it; older responses may omit it while the commit payload still
+    // carries the exact version.
+    created_skill_version_id: uuidSchema.nullish(),
     authoring_dependencies: skillBuilderDependencySnapshotSchema.nullish(),
     session_kind: skillBuilderSessionKindSchema,
     target_skill_id: uuidSchema.nullable(),
@@ -623,8 +627,9 @@ export const skillBuilderCommitResponseSchema = z
       .object({
         session: skillBuilderSessionSchema,
         skill: assetSummarySchema,
-        // Revision commits return the exact created version; create commits
-        // return null.
+        // Current Gateway responses return the exact committed version for
+        // both create and revise. Nullable remains rolling-compatible with an
+        // older Gateway that omitted the create version.
         version: skillVersionSchema.nullable(),
       })
       .strict(),
@@ -689,6 +694,9 @@ export type ValidateSkillBuilderSessionInput = z.input<
 >;
 export type CommitSkillBuilderSessionInput = z.input<
   typeof commitSkillBuilderSessionInputSchema
+>;
+export type SkillBuilderCommitResponse = z.infer<
+  typeof skillBuilderCommitResponseSchema
 >;
 export type CancelSkillBuilderSessionInput = z.input<
   typeof cancelSkillBuilderSessionInputSchema

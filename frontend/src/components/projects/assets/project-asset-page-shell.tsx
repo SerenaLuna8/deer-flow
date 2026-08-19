@@ -76,6 +76,7 @@ import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import {
   projectMcpStatusToggleState,
+  projectSkillCredentialSetupRequired,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import { ProjectMcpCreateDialog } from "./project-mcp-create-dialog";
@@ -183,8 +184,12 @@ export function projectAssetSelectionHref(
   currentSearch: string,
   queryParam: string,
   assetId: string | null,
+  dependentQueryParams: readonly string[] = [],
 ): string {
   const params = new URLSearchParams(currentSearch);
+  for (const dependentQueryParam of dependentQueryParams) {
+    params.delete(dependentQueryParam);
+  }
   if (assetId) {
     params.set(queryParam, assetId);
   } else {
@@ -202,6 +207,24 @@ export function projectAssetSelectionFromSearch(
   if (values.length !== 1) return null;
   const parsed = assetIdSchema.safeParse(values[0]);
   return parsed.success ? parsed.data : null;
+}
+
+export function projectSkillExactVersionSelectionHref(
+  pathname: string,
+  currentSearch: string,
+  skillId: string,
+  skillVersionId: string,
+  configureCredentials: boolean,
+): string {
+  const params = new URLSearchParams(currentSearch);
+  params.set("skill_id", skillId);
+  params.set("skill_version_id", skillVersionId);
+  if (configureCredentials) {
+    params.set("configure_credentials", "1");
+  } else {
+    params.delete("configure_credentials");
+  }
+  return `${pathname}?${params.toString()}`;
 }
 
 export function projectAssetSelectionDecision(
@@ -449,6 +472,15 @@ export function importedSkillSelectionReady(
 }
 
 export const configuredMcpSelectionReady = importedSkillSelectionReady;
+
+export function projectSkillImportNeedsCredentialSetup(
+  version: Pick<
+    Extract<AssetVersion, { skill_id: string }>,
+    "secret_requirements"
+  >,
+): boolean {
+  return version.secret_requirements.length > 0;
+}
 
 export function configuredMcpSuccessMessage(
   workflowStatus: "published" | "pending_approval",
@@ -825,7 +857,10 @@ function ProjectAssetCatalog({
   layout,
   createOpen,
   initialSelectedAssetId,
+  initialSelectedVersionId,
+  initialFocusSkillCredentials,
   selectionQueryParam,
+  selectionDependentQueryParams,
   onCreateOpenChange,
   renderList,
   renderDetailActions,
@@ -839,7 +874,10 @@ function ProjectAssetCatalog({
   layout: ProjectAssetPageLayout;
   createOpen: boolean;
   initialSelectedAssetId: string | null;
+  initialSelectedVersionId: string | null;
+  initialFocusSkillCredentials: boolean;
   selectionQueryParam?: string;
+  selectionDependentQueryParams: readonly string[];
   onCreateOpenChange: (open: boolean) => void;
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderDetailActions?: (context: {
@@ -910,9 +948,33 @@ function ProjectAssetCatalog({
   const activeVersionDialog = useRef<VersionDialogSubmissionToken | null>(null);
   const [createdVersions, setCreatedVersions] = useState<
     Record<string, string>
-  >({});
+  >(() =>
+    initialSelectedAssetId && initialSelectedVersionId
+      ? { [initialSelectedAssetId]: initialSelectedVersionId }
+      : {},
+  );
   const [importedSkillSelection, setImportedSkillSelection] =
     useState<ImportedSkillSelection | null>(null);
+  const [credentialSetupAssetId, setCredentialSetupAssetId] = useState<
+    string | null
+  >(null);
+  const initialCredentialSetupSelectionRef =
+    useRef<ImportedSkillSelection | null>(
+      initialFocusSkillCredentials &&
+        kind === "skills" &&
+        initialSelectedAssetId &&
+        initialSelectedVersionId
+        ? {
+            assetId: initialSelectedAssetId,
+            versionId: initialSelectedVersionId,
+          }
+        : null,
+    );
+  const appliedInitialVersionSelectionRef = useRef(
+    initialSelectedAssetId && initialSelectedVersionId
+      ? `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillCredentials}`
+      : null,
+  );
   const [configuredMcpSelection, setConfiguredMcpSelection] =
     useState<ImportedSkillSelection | null>(null);
   const [configuredMcpStatus, setConfiguredMcpStatus] = useState<
@@ -982,6 +1044,16 @@ function ProjectAssetCatalog({
         if (intent.routeAlreadyChanged && intent.href) {
           currentSelectionHrefRef.current = intent.href;
           currentSelectionHistoryStateRef.current = window.history.state;
+        } else if (
+          intent.href &&
+          currentSelectionHrefRef.current !== intent.href
+        ) {
+          currentSelectionHrefRef.current = intent.href;
+          if (intent.history === "push") {
+            router.push(intent.href, { scroll: false });
+          } else {
+            router.replace(intent.href, { scroll: false });
+          }
         }
         return;
       }
@@ -1005,7 +1077,7 @@ function ProjectAssetCatalog({
         );
       }
     },
-    [applyAssetSelection],
+    [applyAssetSelection, router],
   );
 
   const cancelPendingSelection = useCallback(() => {
@@ -1072,6 +1144,36 @@ function ProjectAssetCatalog({
   ]);
 
   useEffect(() => {
+    if (!initialSelectedAssetId || !initialSelectedVersionId) {
+      appliedInitialVersionSelectionRef.current = null;
+      initialCredentialSetupSelectionRef.current = null;
+      return;
+    }
+    const identity = `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillCredentials}`;
+    if (appliedInitialVersionSelectionRef.current === identity) return;
+    appliedInitialVersionSelectionRef.current = identity;
+    setCreatedVersions((current) =>
+      rememberRequestedVersion(
+        current,
+        initialSelectedAssetId,
+        initialSelectedVersionId,
+      ),
+    );
+    initialCredentialSetupSelectionRef.current =
+      initialFocusSkillCredentials && kind === "skills"
+        ? {
+            assetId: initialSelectedAssetId,
+            versionId: initialSelectedVersionId,
+          }
+        : null;
+  }, [
+    initialFocusSkillCredentials,
+    initialSelectedAssetId,
+    initialSelectedVersionId,
+    kind,
+  ]);
+
+  useEffect(() => {
     if (!selectionQueryParam) return;
     const syncSelectionFromHistory = () => {
       requestAssetSelection({
@@ -1099,22 +1201,86 @@ function ProjectAssetCatalog({
               window.location.search,
               selectionQueryParam,
               assetId,
+              selectionDependentQueryParams,
             )
           : null,
         history,
         routeAlreadyChanged: false,
       });
     },
-    [pathname, requestAssetSelection, selectionQueryParam],
+    [
+      pathname,
+      requestAssetSelection,
+      selectionDependentQueryParams,
+      selectionQueryParam,
+    ],
+  );
+
+  const navigateToSkillVersion = useCallback(
+    (
+      assetId: string,
+      versionId: string,
+      configureCredentials: boolean,
+      history: "push" | "replace",
+    ) => {
+      requestAssetSelection({
+        assetId,
+        href: projectSkillExactVersionSelectionHref(
+          pathname,
+          window.location.search,
+          assetId,
+          versionId,
+          configureCredentials,
+        ),
+        history,
+        routeAlreadyChanged: false,
+      });
+    },
+    [pathname, requestAssetSelection],
   );
 
   const handleRequestedVersionHandled = useCallback(
-    (assetId: string, versionId: string) => {
+    (assetId: string, versionId: string, available: boolean) => {
+      const credentialSetupSelection =
+        initialCredentialSetupSelectionRef.current;
+      if (
+        available &&
+        credentialSetupSelection?.assetId === assetId &&
+        credentialSetupSelection.versionId === versionId
+      ) {
+        initialCredentialSetupSelectionRef.current = null;
+        setCredentialSetupAssetId(assetId);
+      } else if (
+        !available &&
+        credentialSetupSelection?.assetId === assetId &&
+        credentialSetupSelection.versionId === versionId
+      ) {
+        initialCredentialSetupSelectionRef.current = null;
+        setCredentialSetupAssetId((current) =>
+          current === assetId ? null : current,
+        );
+      }
       setCreatedVersions((current) =>
         handleRequestedVersion(current, assetId, versionId),
       );
+      if (
+        available ||
+        !selectionQueryParam ||
+        selectedAssetIdRef.current !== assetId
+      ) {
+        return;
+      }
+      const href = projectAssetSelectionHref(
+        pathname,
+        window.location.search,
+        selectionQueryParam,
+        assetId,
+        selectionDependentQueryParams,
+      );
+      currentSelectionHrefRef.current = href;
+      router.replace(href, { scroll: false });
     },
-    [],
+    [pathname, router, selectionDependentQueryParams, selectionQueryParam],
   );
 
   const rememberVersion = useCallback((assetId: string, versionId: string) => {
@@ -1241,8 +1407,18 @@ function ProjectAssetCatalog({
       ),
     );
     setImportedSkillSelection(null);
-    navigateToAsset(readySelection.assetId, "push");
-  }, [data, importedSkillSelection, navigateToAsset]);
+    navigateToSkillVersion(
+      readySelection.assetId,
+      readySelection.versionId,
+      credentialSetupAssetId === readySelection.assetId,
+      "push",
+    );
+  }, [
+    credentialSetupAssetId,
+    data,
+    importedSkillSelection,
+    navigateToSkillVersion,
+  ]);
 
   useEffect(() => {
     const readySelection = configuredMcpSelectionReady(
@@ -1349,6 +1525,20 @@ function ProjectAssetCatalog({
         input: { expected_asset_version: item.version },
       },
       {
+        onError: (error) => {
+          if (kind === "skills" && projectSkillCredentialSetupRequired(error)) {
+            setCredentialSetupAssetId(item.id);
+            const publishedVersionId = item.current_published_version_id;
+            if (publishedVersionId) {
+              setCreatedVersions((current) =>
+                rememberRequestedVersion(current, item.id, publishedVersionId),
+              );
+              navigateToSkillVersion(item.id, publishedVersionId, true, "push");
+            } else {
+              navigateToAsset(item.id, "push");
+            }
+          }
+        },
         onSettled: () =>
           setProjectStatusIntent((current) =>
             current?.assetId === item.id ? null : current,
@@ -1367,6 +1557,11 @@ function ProjectAssetCatalog({
         assetId: result.item.id,
         versionId: result.version.id,
       });
+      setCredentialSetupAssetId(
+        projectSkillImportNeedsCredentialSetup(result.version)
+          ? result.item.id
+          : null,
+      );
     } catch {
       // The dialog renders the mutation's mapped public error.
     }
@@ -1647,6 +1842,25 @@ function ProjectAssetCatalog({
           renderDetailActions={renderDetailActions}
           renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
+          credentialsHref={
+            kind === "skills"
+              ? `/projects/${encodeURIComponent(project.slug)}/credentials`
+              : undefined
+          }
+          focusSkillCredentials={credentialSetupAssetId === selectedItem.id}
+          onSkillCredentialsFocused={() =>
+            setCredentialSetupAssetId((current) =>
+              current === selectedItem.id ? null : current,
+            )
+          }
+          onSkillCredentialSetupRequired={(versionId) => {
+            setCredentialSetupAssetId(selectedItem.id);
+            if (!versionId) return;
+            setCreatedVersions((current) =>
+              rememberRequestedVersion(current, selectedItem.id, versionId),
+            );
+            navigateToSkillVersion(selectedItem.id, versionId, true, "replace");
+          }}
         />
       )}
 
@@ -1794,7 +2008,10 @@ export function ProjectAssetPageShell({
   layout = "default",
   headerActions,
   initialSelectedAssetId = null,
+  initialSelectedVersionId = null,
+  initialFocusSkillCredentials = false,
   selectionQueryParam,
+  selectionDependentQueryParams = [],
   renderList,
   renderDetailActions,
   renderAssetEditor,
@@ -1806,7 +2023,10 @@ export function ProjectAssetPageShell({
   layout?: ProjectAssetPageLayout;
   headerActions?: ReactNode;
   initialSelectedAssetId?: string | null;
+  initialSelectedVersionId?: string | null;
+  initialFocusSkillCredentials?: boolean;
   selectionQueryParam?: string;
+  selectionDependentQueryParams?: readonly string[];
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
   renderDetailActions?: (context: {
     item: ProjectAssetItem;
@@ -1865,7 +2085,10 @@ export function ProjectAssetPageShell({
         layout={layout}
         createOpen={createOpen}
         initialSelectedAssetId={initialSelectedAssetId}
+        initialSelectedVersionId={initialSelectedVersionId}
+        initialFocusSkillCredentials={initialFocusSkillCredentials}
         selectionQueryParam={selectionQueryParam}
+        selectionDependentQueryParams={selectionDependentQueryParams}
         onCreateOpenChange={setCreateOpen}
         renderList={renderList}
         renderDetailActions={renderDetailActions}

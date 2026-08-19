@@ -110,6 +110,18 @@ describe("Agent directory search and deep-link navigation", () => {
     ).toBe(`/projects/alpha/agents?agent_id=${AGENT_B_ID}&intent=start_chat`);
   });
 
+  test("clears selection-dependent deep-link intent when another asset is selected", () => {
+    expect(
+      projectAssetSelectionHref(
+        "/projects/alpha/skills",
+        `skill_id=${AGENT_A_ID}&skill_version_id=${AGENT_B_ID}&configure_credentials=1&tab=project`,
+        "skill_id",
+        AGENT_B_ID,
+        ["skill_version_id", "configure_credentials"],
+      ),
+    ).toBe(`/projects/alpha/skills?skill_id=${AGENT_B_ID}&tab=project`);
+  });
+
   test("reads the selected Agent from browser history query state", () => {
     expect(
       projectAssetSelectionFromSearch(

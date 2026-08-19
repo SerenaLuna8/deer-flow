@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import posixpath
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
 
@@ -39,6 +40,59 @@ HostExecutionChannelIdentityMode = Literal["absent", "unset", "set"]
 
 
 @dataclass(frozen=True, slots=True, repr=False)
+class HostExecutionSkillSecretSource:
+    """Secret-free identity of one Skill activation source.
+
+    The path and complete declared-name set select an exact admitted Skill in
+    the private Run. ``explicit`` preserves slash-activation precedence when
+    multiple active Skills declare the same environment name. Credential
+    values and Credential identifiers never enter this frozen plan.
+    """
+
+    skill_path: str
+    secret_names: tuple[str, ...]
+    explicit: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.skill_path, str) or not self.skill_path or not posixpath.isabs(self.skill_path) or posixpath.normpath(self.skill_path) != self.skill_path:
+            raise ValueError("skill secret source path must be canonical and absolute")
+        if not self.secret_names or any(not isinstance(name, str) or not name for name in self.secret_names) or tuple(sorted(set(self.secret_names))) != self.secret_names:
+            raise ValueError(
+                "skill secret source names must be non-empty, unique, and sorted",
+            )
+        if type(self.explicit) is not bool:
+            raise ValueError("skill secret source explicit flag must be a boolean")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "skill_path": self.skill_path,
+            "secret_names": list(self.secret_names),
+            "explicit": self.explicit,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: object) -> HostExecutionSkillSecretSource:
+        if not isinstance(payload, dict) or set(payload) != {
+            "skill_path",
+            "secret_names",
+            "explicit",
+        }:
+            raise ValueError("invalid frozen skill secret source")
+        names = payload.get("secret_names")
+        if not isinstance(names, list):
+            raise ValueError("invalid frozen skill secret source")
+        return cls(
+            skill_path=payload.get("skill_path"),
+            secret_names=tuple(names),
+            explicit=payload.get("explicit"),
+        )
+
+    @property
+    def sort_key(self) -> tuple[str, bool, tuple[str, ...]]:
+        return (self.skill_path, self.explicit, self.secret_names)
+
+
+@dataclass(frozen=True, slots=True, repr=False)
 class HostExecutionPlan:
     """One normalized Local shell launch plus its non-authority source anchors."""
 
@@ -52,10 +106,12 @@ class HostExecutionPlan:
     cwd: str | None
     timeout_seconds: int
     environment_keys: tuple[str, ...] = ()
+    skill_secret_sources: tuple[HostExecutionSkillSecretSource, ...] = ()
+    legacy_environment_keys: tuple[str, ...] = ()
     agent_path: tuple[str, ...] = ("lead",)
     channel_identity_mode: HostExecutionChannelIdentityMode = "absent"
     channel_user_id: str | None = None
-    schema_version: int = field(default=2, init=False)
+    schema_version: int = field(default=3, init=False)
     kind: Literal["local_shell"] = field(default="local_shell", init=False)
 
     def __post_init__(self) -> None:
@@ -86,6 +142,22 @@ class HostExecutionPlan:
             raise ValueError("environment_keys must contain non-empty strings")
         if tuple(sorted(set(self.environment_keys))) != self.environment_keys:
             raise ValueError("environment_keys must be unique and sorted")
+        if any(type(source) is not HostExecutionSkillSecretSource for source in self.skill_secret_sources):
+            raise ValueError("skill_secret_sources must contain typed sources")
+        if tuple(sorted(set(self.skill_secret_sources), key=lambda source: source.sort_key)) != self.skill_secret_sources:
+            raise ValueError("skill_secret_sources must be unique and sorted")
+        if any(not isinstance(name, str) or not name for name in self.legacy_environment_keys):
+            raise ValueError(
+                "legacy_environment_keys must contain non-empty strings",
+            )
+        if tuple(sorted(set(self.legacy_environment_keys))) != self.legacy_environment_keys:
+            raise ValueError(
+                "legacy_environment_keys must be unique and sorted",
+            )
+        if not set(self.legacy_environment_keys).issubset(self.environment_keys):
+            raise ValueError(
+                "legacy_environment_keys must be included in environment_keys",
+            )
         if not self.agent_path or any(not isinstance(part, str) or not part for part in self.agent_path):
             raise ValueError("agent_path must contain non-empty strings")
         if self.channel_identity_mode not in {"absent", "unset", "set"}:
@@ -110,7 +182,7 @@ class HostExecutionPlan:
         verifies that the source and continuation asset closures are identical.
         """
 
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "kind": self.kind,
             "requested_command": self.requested_command,
@@ -121,11 +193,17 @@ class HostExecutionPlan:
             "channel_identity_mode": self.channel_identity_mode,
             "channel_user_id": self.channel_user_id,
         }
+        if self.schema_version >= 3:
+            payload["skill_secret_sources"] = [source.to_payload() for source in self.skill_secret_sources]
+            payload["legacy_environment_keys"] = list(
+                self.legacy_environment_keys,
+            )
+        return payload
 
     def to_private_payload(self) -> dict[str, object]:
         """Return the complete secret-free plan for owner-private storage."""
 
-        return {
+        payload: dict[str, object] = {
             "schema_version": self.schema_version,
             "kind": "local_bash",
             "description": self.description,
@@ -139,6 +217,12 @@ class HostExecutionPlan:
             "channel_identity_mode": self.channel_identity_mode,
             "channel_user_id": self.channel_user_id,
         }
+        if self.schema_version >= 3:
+            payload["skill_secret_sources"] = [source.to_payload() for source in self.skill_secret_sources]
+            payload["legacy_environment_keys"] = list(
+                self.legacy_environment_keys,
+            )
+        return payload
 
     @classmethod
     def from_private_payload(
@@ -151,7 +235,7 @@ class HostExecutionPlan:
     ) -> HostExecutionPlan:
         """Strictly reconstruct one app-persisted frozen plan."""
 
-        expected_keys = {
+        v2_keys = {
             "schema_version",
             "kind",
             "description",
@@ -165,15 +249,34 @@ class HostExecutionPlan:
             "channel_identity_mode",
             "channel_user_id",
         }
-        if not isinstance(payload, dict) or set(payload) != expected_keys:
+        v3_keys = v2_keys | {
+            "skill_secret_sources",
+            "legacy_environment_keys",
+        }
+        if not isinstance(payload, dict):
             raise ValueError("invalid frozen host execution payload")
-        if payload.get("schema_version") != 2 or payload.get("kind") != "local_bash":
+        schema_version = payload.get("schema_version")
+        if (schema_version == 2 and set(payload) != v2_keys) or (schema_version == 3 and set(payload) != v3_keys) or schema_version not in {2, 3}:
+            raise ValueError("invalid frozen host execution payload")
+        if payload.get("kind") != "local_bash":
             raise ValueError("unsupported frozen host execution payload")
         environment_keys = payload.get("environment_keys")
         agent_path = payload.get("agent_path")
         if not isinstance(environment_keys, list) or not isinstance(agent_path, list):
             raise ValueError("invalid frozen host execution payload")
-        return cls(
+        skill_secret_sources: tuple[HostExecutionSkillSecretSource, ...] = ()
+        legacy_environment_keys: tuple[str, ...] = ()
+        if schema_version == 3:
+            raw_sources = payload.get("skill_secret_sources")
+            raw_legacy_keys = payload.get("legacy_environment_keys")
+            if not isinstance(raw_sources, list) or not isinstance(
+                raw_legacy_keys,
+                list,
+            ):
+                raise ValueError("invalid frozen host execution payload")
+            skill_secret_sources = tuple(HostExecutionSkillSecretSource.from_payload(source) for source in raw_sources)
+            legacy_environment_keys = tuple(raw_legacy_keys)
+        plan = cls(
             source_tool_call_id=source_tool_call_id,
             source_run_id=source_run_id,
             source_thread_id=source_thread_id,
@@ -184,15 +287,38 @@ class HostExecutionPlan:
             cwd=payload.get("cwd"),
             timeout_seconds=payload.get("timeout_seconds"),
             environment_keys=tuple(environment_keys),
+            skill_secret_sources=skill_secret_sources,
+            legacy_environment_keys=legacy_environment_keys,
             agent_path=tuple(agent_path),
             channel_identity_mode=payload.get("channel_identity_mode"),
             channel_user_id=payload.get("channel_user_id"),
         )
+        if schema_version == 2:
+            object.__setattr__(plan, "schema_version", 2)
+        return plan
 
     @property
     def execution_digest(self) -> str:
+        return self.execution_digest_for_schema(self.schema_version)
+
+    def execution_digest_for_schema(self, schema_version: int) -> str:
+        """Hash this logical launch using one supported persisted schema.
+
+        Rebased continuations are constructed by the current process, but an
+        already-approved v2 launch must still be compared with its original v2
+        shape. Secret-bearing v2 plans remain rejected by the runner because
+        they lack an exact Skill source closure.
+        """
+
+        if isinstance(schema_version, bool) or schema_version not in {2, 3}:
+            raise ValueError("unsupported host execution schema version")
+        payload = self.execution_payload()
+        payload["schema_version"] = schema_version
+        if schema_version == 2:
+            payload.pop("skill_secret_sources", None)
+            payload.pop("legacy_environment_keys", None)
         encoded = json.dumps(
-            self.execution_payload(),
+            payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -432,5 +558,6 @@ __all__ = [
     "HostExecutionOutcome",
     "HostExecutionOutputDeliveryPort",
     "HostExecutionPlan",
+    "HostExecutionSkillSecretSource",
     "HostExecutionRetrySafetyFencePort",
 ]

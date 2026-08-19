@@ -74,7 +74,10 @@ from app.shared_assets import (
     SkillArchiveFile,
     SkillArchiveLimitExceeded,
     SkillCredentialBindingInput,
+    SkillCredentialBindingInvalid,
     SkillCredentialBindingService,
+    SkillCredentialBindingsIncomplete,
+    SkillCredentialSelectionStale,
     SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
@@ -262,8 +265,30 @@ class ExpectedAssetVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
 
+class SkillPublishCredentialBindingRequest(_StrictModel):
+    name: str = Field(max_length=255, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+    credential_version_id: uuid.UUID
+
+
 class SkillPublishRequest(ExpectedAssetVersionRequest):
     acknowledge_stale_base: bool = False
+    expected_payload_checksum: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_binding_revision: int | None = Field(default=None, ge=0)
+    credential_bindings: list[SkillPublishCredentialBindingRequest] | None = Field(
+        default=None,
+        max_length=256,
+    )
+
+    @model_validator(mode="after")
+    def validate_credential_binding_cas(self) -> SkillPublishRequest:
+        if "credential_bindings" not in self.model_fields_set:
+            return self
+        if self.credential_bindings is None or self.expected_payload_checksum is None or self.expected_binding_revision is None or len({item.name for item in self.credential_bindings}) != len(self.credential_bindings):
+            raise ValueError("Skill publish credential binding CAS is invalid")
+        return self
 
 
 class ProjectDefaultAgentRequest(_StrictModel):
@@ -551,6 +576,24 @@ class SkillCredentialBindingSetResponse(_StrictModel):
     request_id: str
 
 
+class SkillCredentialPublishRequirementResponse(_StrictModel):
+    name: str
+    optional: bool
+    suggested_credential_version_id: uuid.UUID | None
+    eligible_credentials: list[EligibleSkillCredentialResponse]
+
+
+class SkillPublishPlanResponse(_StrictModel):
+    skill_id: uuid.UUID
+    skill_version_id: uuid.UUID
+    asset_version: int = Field(ge=1)
+    payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
+    binding_revision: int = Field(ge=0)
+    secrets_autonomous: bool
+    requirements: list[SkillCredentialPublishRequirementResponse]
+    request_id: str
+
+
 class SkillCredentialBindingRequest(_StrictModel):
     name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)
     credential_version_id: uuid.UUID
@@ -821,6 +864,9 @@ ASSET_ERRORS = (
     SkillDesignTargetDeleted,
     SkillDesignBaseStale,
     SkillDesignNoChanges,
+    SkillCredentialBindingInvalid,
+    SkillCredentialBindingsIncomplete,
+    SkillCredentialSelectionStale,
     SkillPublishBaseStale,
     SkillRuntimeNameConflict,
     AgentDesignSecretDetected,
@@ -846,6 +892,9 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         SkillDesignTargetDeleted: 409,
         SkillDesignBaseStale: 409,
         SkillDesignNoChanges: 409,
+        SkillCredentialBindingInvalid: 422,
+        SkillCredentialBindingsIncomplete: 422,
+        SkillCredentialSelectionStale: 409,
         SkillPublishBaseStale: 409,
         SkillRuntimeNameConflict: 409,
         AgentDesignSecretDetected: 422,
@@ -1502,7 +1551,30 @@ def register_asset_routes(
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), SkillVersionHistoryResponse)
 
     async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: SkillPublishRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        return await _version_call(actor, lambda: service.publish(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version, acknowledge_stale_base=body.acknowledge_stale_base), SkillVersionResponse)
+        return await _version_call(
+            actor,
+            lambda: service.publish(
+                actor,
+                asset_id,
+                version_id,
+                expected_asset_version=body.expected_asset_version,
+                acknowledge_stale_base=body.acknowledge_stale_base,
+                expected_payload_checksum=body.expected_payload_checksum,
+                expected_binding_revision=body.expected_binding_revision,
+                credential_bindings=(
+                    None
+                    if body.credential_bindings is None
+                    else tuple(
+                        SkillCredentialBindingInput(
+                            item.name,
+                            item.credential_version_id,
+                        )
+                        for item in body.credential_bindings
+                    )
+                ),
+            ),
+            SkillVersionResponse,
+        )
 
     async def delete_skill(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         try:
@@ -1795,6 +1867,32 @@ def _skill_credential_binding_response(
         **_response_data(value),
         request_id=request_id,
     )
+
+
+@project_router.get(
+    "/skills/{skill_id}/versions/{version_id}/publish-plan",
+    response_model=SkillPublishPlanResponse,
+)
+async def get_project_skill_publish_plan(
+    skill_id: uuid.UUID,
+    version_id: uuid.UUID,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[
+        SkillCredentialBindingService,
+        Depends(get_skill_credential_binding_service),
+    ],
+):
+    try:
+        value = await service.get_for_version(context, skill_id, version_id)
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return SkillPublishPlanResponse(
+            **_response_data(value),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
 
 
 @project_router.get(

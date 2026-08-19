@@ -17,10 +17,12 @@ from app.shared_assets.errors import (
     AssetNotFound,
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
+    SkillCredentialBindingsIncomplete,
     SkillPublishBaseStale,
     SkillRuntimeNameConflict,
 )
 from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
+from app.shared_assets.skill_credential_closure import SkillCredentialClosureInvalid
 from app.shared_assets.skill_repository import SkillVersionRecord
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 
@@ -447,6 +449,45 @@ async def test_suspended_skill_can_publish_activate_and_suspend(
         "skill.activate",
         "skill.suspend",
     ]
+
+
+@pytest.mark.asyncio
+async def test_activation_reports_incomplete_required_credential_bindings(
+    harness: _Harness,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _admin_context()
+    created, draft = await _create_draft(
+        harness,
+        actor,
+        "credential-gated-skill",
+    )
+    await harness.service.publish(
+        actor,
+        created.id,
+        draft.row.id,
+        expected_asset_version=2,
+    )
+    draft.row.secret_requirements = [{"name": "API_KEY", "optional": False}]
+
+    async def reject_incomplete(*_args: object, **_kwargs: object) -> None:
+        raise SkillCredentialClosureInvalid("incomplete")
+
+    monkeypatch.setattr(
+        skill_service_module,
+        "lock_skill_credential_closure",
+        reject_incomplete,
+    )
+
+    with pytest.raises(SkillCredentialBindingsIncomplete):
+        await harness.service.activate(
+            actor,
+            created.id,
+            expected_asset_version=3,
+        )
+
+    assert harness.store.assets[created.id].status == "suspended"
+    assert harness.store.assets[created.id].version == 3
 
 
 @pytest.mark.asyncio

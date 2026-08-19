@@ -5,12 +5,14 @@ import {
   Code2Icon,
   EyeIcon,
   FileWarningIcon,
+  FilesIcon,
+  KeyRoundIcon,
   Loader2Icon,
   SaveIcon,
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type KeyboardEvent } from "react";
 
 import { SkillFileTree } from "@/components/projects/assets/skill-file-tree";
 import {
@@ -19,6 +21,7 @@ import {
   type SkillFileTreeSelection,
   type WorkingSkillFile,
 } from "@/components/projects/assets/skill-file-workbench-state";
+import { SkillSecretDeclarationsEditor } from "@/components/projects/assets/skill-secret-declarations-editor";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
@@ -54,6 +57,20 @@ export type SkillBuilderRevisionDiff = {
   deletedPaths: string[];
   stateByPath: ReadonlyMap<string, "unchanged" | "modified" | "added">;
 };
+
+type SkillBuilderWorkbenchSurface = "files" | "secrets";
+
+export function skillBuilderWorkbenchTabForKey(
+  current: SkillBuilderWorkbenchSurface,
+  key: string,
+): SkillBuilderWorkbenchSurface | null {
+  if (key === "Home") return "files";
+  if (key === "End") return "secrets";
+  if (key === "ArrowLeft" || key === "ArrowRight") {
+    return current === "files" ? "secrets" : "files";
+  }
+  return null;
+}
 
 export function skillBuilderRevisionDiff(
   files: readonly Pick<
@@ -96,9 +113,11 @@ export function skillBuilderRevisionDiff(
 }
 
 export function SkillBuilderCandidateWorkbench({
+  projectId,
   files,
   selectedPath,
   draftContent,
+  skillMdContent,
   displayMode,
   canAuthor,
   readOnly,
@@ -116,6 +135,8 @@ export function SkillBuilderCandidateWorkbench({
   baseVersionNumber = null,
   onSelectPath,
   onDraftContentChange,
+  onSkillMdContentChange,
+  onSecretValidityChange,
   onDisplayModeChange,
   onSave,
   onDiscard,
@@ -124,9 +145,11 @@ export function SkillBuilderCandidateWorkbench({
   onCommit,
   onClose,
 }: {
+  projectId: string;
   files: SkillBuilderFile[];
   selectedPath: string | null;
   draftContent: string;
+  skillMdContent: string | null;
   displayMode: "source" | "preview";
   canAuthor: boolean;
   readOnly: boolean;
@@ -144,6 +167,8 @@ export function SkillBuilderCandidateWorkbench({
   baseVersionNumber?: number | null;
   onSelectPath: (path: string) => void;
   onDraftContentChange: (content: string) => void;
+  onSkillMdContentChange: (content: string) => boolean;
+  onSecretValidityChange: (valid: boolean) => void;
   onDisplayModeChange: (mode: "source" | "preview") => void;
   onSave: () => void;
   onDiscard: () => void;
@@ -157,6 +182,13 @@ export function SkillBuilderCandidateWorkbench({
   const [expandedFolders, setExpandedFolders] = useState<Set<string>>(
     () => new Set(ancestorFolders(selectedPath)),
   );
+  const [surface, setSurface] = useState<SkillBuilderWorkbenchSurface>("files");
+  const tabIdPrefix = useId();
+  const filesTabId = `${tabIdPrefix}-files-tab`;
+  const secretsTabId = `${tabIdPrefix}-secrets-tab`;
+  const filesPanelId = `${tabIdPrefix}-files-panel`;
+  const secretsPanelId = `${tabIdPrefix}-secrets-panel`;
+  const [secretEditorRevision, setSecretEditorRevision] = useState(0);
   const selectedFile = files.find((file) => file.path === selectedPath) ?? null;
   const markdown = selectedFile ? isMarkdown(selectedFile) : false;
   const warning = validation?.scan_decision === "warn";
@@ -197,6 +229,19 @@ export function SkillBuilderCandidateWorkbench({
       else next.add(path);
       return next;
     });
+  }
+
+  function handleSurfaceKeyDown(
+    current: SkillBuilderWorkbenchSurface,
+    event: KeyboardEvent<HTMLButtonElement>,
+  ) {
+    const next = skillBuilderWorkbenchTabForKey(current, event.key);
+    if (!next) return;
+    event.preventDefault();
+    setSurface(next);
+    event.currentTarget.ownerDocument
+      .getElementById(next === "files" ? filesTabId : secretsTabId)
+      ?.focus();
   }
 
   return (
@@ -244,7 +289,50 @@ export function SkillBuilderCandidateWorkbench({
         </div>
       </div>
 
-      <div className="grid min-h-0 flex-1 md:grid-cols-[15rem_minmax(0,1fr)]">
+      <div
+        className="border-border/70 bg-muted/10 flex shrink-0 gap-1 border-b p-2"
+        role="tablist"
+        aria-label={copy.packageAria}
+      >
+        <Button
+          id={filesTabId}
+          type="button"
+          size="sm"
+          variant={surface === "files" ? "secondary" : "ghost"}
+          role="tab"
+          aria-selected={surface === "files"}
+          aria-controls={filesPanelId}
+          tabIndex={surface === "files" ? 0 : -1}
+          onClick={() => setSurface("files")}
+          onKeyDown={(event) => handleSurfaceKeyDown("files", event)}
+        >
+          <FilesIcon aria-hidden className="size-4" />
+          {copy.filesSurface}
+        </Button>
+        <Button
+          id={secretsTabId}
+          type="button"
+          size="sm"
+          variant={surface === "secrets" ? "secondary" : "ghost"}
+          role="tab"
+          aria-selected={surface === "secrets"}
+          aria-controls={secretsPanelId}
+          tabIndex={surface === "secrets" ? 0 : -1}
+          onClick={() => setSurface("secrets")}
+          onKeyDown={(event) => handleSurfaceKeyDown("secrets", event)}
+        >
+          <KeyRoundIcon aria-hidden className="size-4" />
+          {copy.secretsSurface}
+        </Button>
+      </div>
+
+      <div
+        id={filesPanelId}
+        hidden={surface !== "files"}
+        className="grid min-h-0 flex-1 md:grid-cols-[15rem_minmax(0,1fr)]"
+        role="tabpanel"
+        aria-labelledby={filesTabId}
+      >
         <aside className="bg-muted/20 border-border/70 min-h-40 overflow-y-auto border-b p-2 md:border-r md:border-b-0">
           {tree.length > 0 ? (
             <SkillFileTree
@@ -345,6 +433,39 @@ export function SkillBuilderCandidateWorkbench({
             </div>
           )}
         </div>
+      </div>
+
+      <div
+        id={secretsPanelId}
+        hidden={surface !== "secrets"}
+        className="min-h-0 flex-1 overflow-y-auto p-4"
+        role="tabpanel"
+        aria-labelledby={secretsTabId}
+      >
+        {skillMdContent === null ? (
+          <p role="alert" className="text-destructive text-sm">
+            {copy.secretsUnavailable}
+          </p>
+        ) : (
+          <SkillSecretDeclarationsEditor
+            key={secretEditorRevision}
+            projectId={projectId}
+            content={skillMdContent}
+            canEdit={canAuthor}
+            disabled={readOnly || pending}
+            onContentChange={(content) => {
+              if (!onSkillMdContentChange(content)) {
+                setSecretEditorRevision((current) => current + 1);
+              }
+            }}
+            onOpenSource={() => {
+              setSurface("files");
+              onSelectPath("SKILL.md");
+              onDisplayModeChange("source");
+            }}
+            onValidityChange={onSecretValidityChange}
+          />
+        )}
       </div>
 
       {dirty && canAuthor ? (

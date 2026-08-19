@@ -4,6 +4,20 @@ import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import {
+  skillFrontmatterParseInputSchema,
+  skillFrontmatterParseResponseSchema,
+  skillFrontmatterDiagnosticSchema,
+  skillFrontmatterPatchInputSchema,
+  skillFrontmatterPatchResponseSchema,
+  skillPublishPlanResponseSchema,
+  type SkillFrontmatterDiagnostic,
+  type SkillFrontmatterParseInput,
+  type SkillFrontmatterParseResponse,
+  type SkillFrontmatterPatchInput,
+  type SkillFrontmatterPatchResponse,
+  type SkillPublishPlanResponse,
+} from "./skill-secret-declarations";
+import {
   adminAssetListSchema,
   adminCredentialListSchema,
   agentCapabilityBindingsInputSchema,
@@ -45,6 +59,7 @@ import {
   projectMcpEditableConfigurationResponseSchema,
   projectSkillImportResponseSchema,
   publishAssetVersionInputSchema,
+  skillPublishAssetVersionInputSchema,
   replaceCredentialInputSchema,
   revokeCredentialInputSchema,
   skillCredentialBindingsInputSchema,
@@ -84,6 +99,7 @@ import {
   type ExpectedAssetVersionInput,
   type MoveSystemBindingInput,
   type PublishAssetVersionInput,
+  type SkillPublishAssetVersionInput,
   type McpToolDiscoveryAttemptResponse,
   type McpVersionInput,
   type McpToolInventoryResponse,
@@ -123,6 +139,11 @@ const serverErrorCodeSchema = z.enum([
   "SKILL_ARCHIVE_LIMIT_EXCEEDED",
   "SKILL_PUBLISH_BASE_STALE",
   "SKILL_RUNTIME_NAME_CONFLICT",
+  "SKILL_SECRET_DECLARATION_INVALID",
+  "SKILL_FRONTMATTER_SOURCE_STALE",
+  "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
+  "SKILL_CREDENTIAL_BINDING_INVALID",
+  "SKILL_CREDENTIAL_SELECTION_STALE",
 ]);
 
 const errorEnvelopeSchema = z
@@ -132,6 +153,7 @@ const errorEnvelopeSchema = z
         code: serverErrorCodeSchema,
         message: z.string().min(1),
         request_id: z.string().min(1).optional(),
+        diagnostics: z.array(skillFrontmatterDiagnosticSchema).optional(),
       })
       .strict(),
   })
@@ -166,6 +188,26 @@ const SAFE_SERVER_ERRORS = {
     "SKILL_RUNTIME_NAME_CONFLICT",
     "Skill runtime name conflict",
   ],
+  SKILL_SECRET_DECLARATION_INVALID: [
+    "SKILL_SECRET_DECLARATION_INVALID",
+    "Skill secret declaration is invalid",
+  ],
+  SKILL_FRONTMATTER_SOURCE_STALE: [
+    "SKILL_FRONTMATTER_SOURCE_STALE",
+    "Skill frontmatter source changed",
+  ],
+  SKILL_CREDENTIAL_BINDINGS_INCOMPLETE: [
+    "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
+    "Required Skill Credential bindings are incomplete",
+  ],
+  SKILL_CREDENTIAL_BINDING_INVALID: [
+    "SKILL_CREDENTIAL_BINDING_INVALID",
+    "Skill Credential binding is invalid",
+  ],
+  SKILL_CREDENTIAL_SELECTION_STALE: [
+    "SKILL_CREDENTIAL_SELECTION_STALE",
+    "Skill Credential selection is stale",
+  ],
 } as const;
 
 export const SHARED_ASSET_ERROR_CODES = [
@@ -178,6 +220,11 @@ export const SHARED_ASSET_ERROR_CODES = [
   "ASSET_STORAGE_UNAVAILABLE",
   "SKILL_PUBLISH_BASE_STALE",
   "SKILL_RUNTIME_NAME_CONFLICT",
+  "SKILL_SECRET_DECLARATION_INVALID",
+  "SKILL_FRONTMATTER_SOURCE_STALE",
+  "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
+  "SKILL_CREDENTIAL_BINDING_INVALID",
+  "SKILL_CREDENTIAL_SELECTION_STALE",
   "ASSET_UPLOAD_TOO_LARGE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
@@ -190,12 +237,19 @@ export type SharedAssetErrorCode = (typeof SHARED_ASSET_ERROR_CODES)[number];
 export class SharedAssetApiError extends Error {
   readonly status: number;
   readonly code: SharedAssetErrorCode;
+  readonly diagnostics: readonly SkillFrontmatterDiagnostic[] | undefined;
 
-  constructor(status: number, code: SharedAssetErrorCode, message: string) {
+  constructor(
+    status: number,
+    code: SharedAssetErrorCode,
+    message: string,
+    diagnostics?: readonly SkillFrontmatterDiagnostic[],
+  ) {
     super(message);
     this.name = "SharedAssetApiError";
     this.status = status;
     this.code = code;
+    this.diagnostics = diagnostics;
   }
 }
 
@@ -265,7 +319,12 @@ async function throwResponseError(response: Response): Promise<never> {
     );
   }
   const [code, message] = SAFE_SERVER_ERRORS[parsed.data.detail.code];
-  throw new SharedAssetApiError(response.status, code, message);
+  throw new SharedAssetApiError(
+    response.status,
+    code,
+    message,
+    parsed.data.detail.diagnostics,
+  );
 }
 
 async function parseResponse<T>(
@@ -712,6 +771,72 @@ export async function importProjectSkillArchive(
     );
   }
   return parseResponse(response, projectSkillImportResponseSchema);
+}
+
+export async function parseProjectSkillFrontmatter(
+  projectId: string,
+  input: SkillFrontmatterParseInput,
+  signal?: AbortSignal,
+): Promise<SkillFrontmatterParseResponse> {
+  const body = parseInput(skillFrontmatterParseInputSchema, input);
+  return parseResponse(
+    await request(`${projectAssetUrl(projectId, "skills")}/frontmatter/parse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+    skillFrontmatterParseResponseSchema,
+  );
+}
+
+export async function patchProjectSkillFrontmatter(
+  projectId: string,
+  input: SkillFrontmatterPatchInput,
+  signal?: AbortSignal,
+): Promise<SkillFrontmatterPatchResponse> {
+  const body = parseInput(skillFrontmatterPatchInputSchema, input);
+  return parseResponse(
+    await request(`${projectAssetUrl(projectId, "skills")}/frontmatter/patch`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    }),
+    skillFrontmatterPatchResponseSchema,
+  );
+}
+
+export async function getProjectSkillPublishPlan(
+  projectId: string,
+  skillId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<SkillPublishPlanResponse> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
+  return parseResponse(
+    await request(
+      `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/publish-plan`,
+      { signal },
+    ),
+    skillPublishPlanResponseSchema.superRefine((value, context) => {
+      if (value.skill_id !== skill) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill publish plan belongs to another Skill",
+          path: ["skill_id"],
+        });
+      }
+      if (value.skill_version_id !== version) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill publish plan belongs to another version",
+          path: ["skill_version_id"],
+        });
+      }
+    }),
+  );
 }
 
 export async function createAdminProjectAgent(
@@ -1254,17 +1379,35 @@ export function forkProjectSkillVersion(
 
 export function publishProjectAssetVersion(
   projectId: string,
-  kind: VersionedAssetListKind,
+  kind: "skills",
+  assetId: string,
+  versionId: string,
+  input: SkillPublishAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function publishProjectAssetVersion(
+  projectId: string,
+  kind: Exclude<VersionedAssetListKind, "skills">,
   assetId: string,
   versionId: string,
   input: PublishAssetVersionInput,
+  signal?: AbortSignal,
+): Promise<VersionResponse>;
+export function publishProjectAssetVersion(
+  projectId: string,
+  kind: VersionedAssetListKind,
+  assetId: string,
+  versionId: string,
+  input: PublishAssetVersionInput | SkillPublishAssetVersionInput,
   signal?: AbortSignal,
 ): Promise<VersionResponse> {
   const asset = parseInput(assetIdSchema, assetId);
   const version = parseInput(assetIdSchema, versionId);
   return postVersionMutation(
     `${projectAssetUrl(projectId, kind)}/${asset}/versions/${version}/publish`,
-    publishAssetVersionInputSchema,
+    kind === "skills"
+      ? skillPublishAssetVersionInputSchema
+      : publishAssetVersionInputSchema,
     publishVersionSchema(kind),
     input,
     signal,

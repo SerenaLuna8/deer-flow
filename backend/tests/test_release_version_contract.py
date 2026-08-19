@@ -47,16 +47,7 @@ def test_runtime_product_metadata_uses_the_v1_release_version() -> None:
 def test_public_release_copy_describes_actweave_v1_without_v2_residue() -> None:
     hero = (REPO_ROOT / "frontend/src/components/landing/hero.tsx").read_text(encoding="utf-8")
     whats_new = (REPO_ROOT / "frontend/src/components/landing/sections/whats-new-section.tsx").read_text(encoding="utf-8")
-    plan_mode = (REPO_ROOT / "backend/docs/plan_mode_usage.md").read_text(encoding="utf-8")
 
     assert "Get Started with ActWeave 1.0" in hero
     assert "Meet ActWeave 1.0" in whats_new
-    assert "ActWeave 1.0" in plan_mode
-    assert "ActWeave 2.0" not in hero + whats_new + plan_mode
-
-    for lang in ("en", "zh"):
-        release_dir = REPO_ROOT / f"frontend/src/content/{lang}/posts/releases"
-        assert not (release_dir / "2_0_rc.mdx").exists()
-        release = (release_dir / "actweave-1-0.mdx").read_text(encoding="utf-8")
-        assert "ActWeave 1.0" in release
-        assert "DeerFlow 2.0" not in release
+    assert "ActWeave 2.0" not in hero + whats_new

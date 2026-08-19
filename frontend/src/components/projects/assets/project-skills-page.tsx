@@ -34,8 +34,12 @@ function ProjectSkillBuilderLead({ project }: { project: Project }) {
 
 export function ProjectSkillsPage({
   selectedAssetId = null,
+  selectedVersionId = null,
+  focusSelectedSkillCredentials = false,
 }: {
   selectedAssetId?: string | null;
+  selectedVersionId?: string | null;
+  focusSelectedSkillCredentials?: boolean;
 }) {
   const project = useCurrentProject();
 
@@ -44,7 +48,13 @@ export function ProjectSkillsPage({
       kind="skills"
       title="Skill"
       initialSelectedAssetId={selectedAssetId}
+      initialSelectedVersionId={selectedVersionId}
+      initialFocusSkillCredentials={focusSelectedSkillCredentials}
       selectionQueryParam="skill_id"
+      selectionDependentQueryParams={[
+        "skill_version_id",
+        "configure_credentials",
+      ]}
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />
       )}
@@ -63,11 +73,16 @@ export function ProjectSkillsPage({
               editing: context.editing,
               onEditingChange: context.onEditingChange,
               onDirtyChange: context.onDirtyChange,
+              onCredentialBindingsDirtyChange:
+                context.onCredentialBindingsDirtyChange,
+              onPublishValidityChange: context.onPublishValidityChange,
               onVersionCreated: context.onVersionCreated,
               canManageCredentials: project.capabilities.includes(
                 "mcp.credentials.approve",
               ),
               credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
+              focusCredentials: context.focusSkillCredentials,
+              onCredentialsFocused: context.onSkillCredentialsFocused,
             }}
           />
         ) : (

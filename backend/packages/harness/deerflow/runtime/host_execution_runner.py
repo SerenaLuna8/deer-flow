@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import threading
 import time
 from collections.abc import Callable, Mapping
 from types import SimpleNamespace
@@ -25,7 +26,15 @@ from deerflow.runtime.host_execution_approval import (
     HostExecutionFrozenClaim,
     HostExecutionOutcome,
     HostExecutionOutputDeliveryPort,
+    HostExecutionPlan,
     HostExecutionRetrySafetyFencePort,
+)
+from deerflow.runtime.secret_context import (
+    ACTIVE_SECRET_SOURCES_CONTEXT_KEY,
+    ACTIVE_SECRETS_CONTEXT_KEY,
+    SECRETS_CONTEXT_KEY,
+    SKILL_SECRET_PROVIDER_CONTEXT_KEY,
+    resolve_provider_active_secrets,
 )
 from deerflow.sandbox.local.local_sandbox import (
     LocalProcessSpawnAuthorizationFailed,
@@ -45,11 +54,16 @@ from deerflow.sandbox.tools import (
     _prepare_local_host_execution,
     _truncate_bash_output,
     mask_local_paths_in_output,
+    mask_secret_values,
 )
 
 
 class HostExecutionContinuationError(RuntimeError):
     """The frozen continuation could not be safely settled."""
+
+
+class _HostExecutionEnvironmentBindingUnavailable(RuntimeError):
+    """The exact per-command Skill Credential closure could not be refreshed."""
 
 
 @runtime_checkable
@@ -334,39 +348,155 @@ def _structured_execute(
     timeout_seconds: int,
     thread_data: Mapping[str, object],
     prepared_base_env: Mapping[str, str],
+    injected_env_provider: Callable[[], dict[str, str]],
+    cancellation_requested: threading.Event,
     max_chars: int,
     spawn_authorization_guard: Callable[[], float],
 ) -> tuple[str, int, str, str]:
     execute = getattr(sandbox, "execute_prepared_command_result", None)
     if not callable(execute):
         raise RuntimeError("Local sandbox cannot execute a frozen command")
-    result = execute(
-        effective_command,
-        shell=shell,
-        # Secret-bearing plans currently fail closed before this point. The
-        # verified Worker-local base environment is passed through unchanged;
-        # LocalSandbox must not re-read process environment before spawning.
-        env=None,
-        prepared_base_env=prepared_base_env,
-        timeout=timeout_seconds,
-        spawn_authorization_guard=spawn_authorization_guard,
-    )
-    exit_code = getattr(result, "exit_code", None)
-    output = getattr(result, "output", None)
-    stdout = getattr(result, "stdout", None)
-    stderr = getattr(result, "stderr", None)
-    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        raise RuntimeError("Local command returned no authoritative exit code")
-    if not all(isinstance(value, str) for value in (output, stdout, stderr)):
-        raise RuntimeError("Local command returned invalid structured output")
+    injected_env: dict[str, str] = {}
+    try:
+        if cancellation_requested.is_set():
+            raise LocalProcessSpawnAuthorizationFailed
+        injected_env = injected_env_provider()
+        if cancellation_requested.is_set():
+            raise LocalProcessSpawnAuthorizationFailed
 
-    def bounded(value: str) -> str:
-        return _truncate_bash_output(
-            mask_local_paths_in_output(value, thread_data),
-            max_chars,
+        def guarded_spawn_authorization() -> float:
+            if cancellation_requested.is_set():
+                raise LocalProcessSpawnAuthorizationFailed
+            deadline = spawn_authorization_guard()
+            if cancellation_requested.is_set():
+                raise LocalProcessSpawnAuthorizationFailed
+            return deadline
+
+        result = execute(
+            effective_command,
+            shell=shell,
+            # Exact Skill values are a one-command overlay materialized only
+            # after this executor slot is running. The verified Worker-local
+            # base environment is passed through unchanged; LocalSandbox must
+            # not re-read process environment before spawning.
+            env=injected_env or None,
+            prepared_base_env=prepared_base_env,
+            timeout=timeout_seconds,
+            spawn_authorization_guard=guarded_spawn_authorization,
         )
+        exit_code = getattr(result, "exit_code", None)
+        output = getattr(result, "output", None)
+        stdout = getattr(result, "stdout", None)
+        stderr = getattr(result, "stderr", None)
+        if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+            raise RuntimeError("Local command returned no authoritative exit code")
+        if not all(isinstance(value, str) for value in (output, stdout, stderr)):
+            raise RuntimeError("Local command returned invalid structured output")
 
-    return bounded(output), exit_code, bounded(stdout), bounded(stderr)
+        def bounded(value: str) -> str:
+            return _truncate_bash_output(
+                mask_secret_values(
+                    mask_local_paths_in_output(value, thread_data),
+                    injected_env,
+                ),
+                max_chars,
+            )
+
+        return bounded(output), exit_code, bounded(stdout), bounded(stderr)
+    finally:
+        injected_env.clear()
+
+
+def _frozen_skill_secret_request(
+    frozen: HostExecutionPlan,
+) -> (
+    tuple[
+        dict[str, frozenset[str]],
+        tuple[tuple[str, str, tuple[str, ...], bool], ...],
+    ]
+    | None
+):
+    """Validate and rebuild the secret-free activation plan for one command."""
+
+    if frozen.legacy_environment_keys:
+        return None
+    expected_names: set[str] = set()
+    names_by_path: dict[str, tuple[str, ...]] = {}
+    requested: dict[str, set[str]] = {}
+    activation_sources: list[tuple[str, str, tuple[str, ...], bool]] = []
+    for source in frozen.skill_secret_sources:
+        prior = names_by_path.setdefault(
+            source.skill_path,
+            source.secret_names,
+        )
+        if prior != source.secret_names:
+            return None
+        expected_names.update(source.secret_names)
+        requested.setdefault(source.skill_path, set()).update(
+            source.secret_names,
+        )
+        activation_sources.append(
+            (
+                "frozen-skill",
+                source.skill_path,
+                source.secret_names,
+                source.explicit,
+            ),
+        )
+    if frozen.environment_keys != tuple(sorted(expected_names)):
+        # v2 approvals, request-scoped secrets, and GitHub token carriers have
+        # names but no exact Skill source closure. They remain fail closed.
+        return None
+    return (
+        {path: frozenset(names) for path, names in requested.items()},
+        tuple(activation_sources),
+    )
+
+
+def _clear_scoped_secret_carrier(carrier: object) -> None:
+    if not isinstance(carrier, dict):
+        return
+    for values in carrier.values():
+        if isinstance(values, dict):
+            values.clear()
+    carrier.clear()
+
+
+async def _materialize_frozen_skill_secrets(
+    runtime_context: Mapping[str, Any],
+    frozen: HostExecutionPlan,
+) -> dict[str, str] | None:
+    prepared = _frozen_skill_secret_request(frozen)
+    if prepared is None:
+        return None
+    requested, activation_sources = prepared
+    if not requested:
+        return {}
+    if "private_scope" not in runtime_context:
+        return None
+    provider = runtime_context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY)
+    if not callable(provider):
+        return None
+    fresh_scoped: object = None
+    try:
+        fresh_scoped = await provider(requested)
+        if not isinstance(fresh_scoped, dict) or set(fresh_scoped) != set(
+            requested,
+        ):
+            return None
+        if any(not isinstance(values, dict) for values in fresh_scoped.values()):
+            return None
+        selection_context = {
+            ACTIVE_SECRET_SOURCES_CONTEXT_KEY: activation_sources,
+        }
+        return resolve_provider_active_secrets(
+            selection_context,
+            fresh_scoped,
+        )
+    except Exception:
+        return None
+    finally:
+        _clear_scoped_secret_carrier(fresh_scoped)
 
 
 async def execute_frozen_host_execution_continuation(
@@ -440,10 +570,7 @@ async def execute_frozen_host_execution_continuation(
             agent_path=frozen.agent_path,
             reason_code="policy_drift",
         )
-    if frozen.environment_keys:
-        # Names alone cannot identify an exact Skill credential binding.  A
-        # future contract may persist a secret-free binding closure; until then
-        # silently rematerializing by name risks selecting different authority.
+    if _frozen_skill_secret_request(frozen) is None:
         return await _settle_before_spawn_failure(
             approval_port,
             approval_id,
@@ -498,6 +625,24 @@ async def execute_frozen_host_execution_continuation(
     # invocation in this continuation.
     continuation_context = dict(runtime_context)
     continuation_context[HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY] = frozen.agent_path
+    # Rebuild the exact secret-free source plan captured before approval.
+    # Continuation input cannot contribute request/GitHub values or a different
+    # activation selection to the execution digest.
+    continuation_context.pop(SECRETS_CONTEXT_KEY, None)
+    continuation_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
+    continuation_context.pop("github_token", None)
+    if frozen.skill_secret_sources:
+        continuation_context[ACTIVE_SECRET_SOURCES_CONTEXT_KEY] = tuple(
+            (
+                "frozen-skill",
+                source.skill_path,
+                source.secret_names,
+                source.explicit,
+            )
+            for source in frozen.skill_secret_sources
+        )
+    else:
+        continuation_context.pop(ACTIVE_SECRET_SOURCES_CONTEXT_KEY, None)
     # The continuation has no authority to select a channel identity. Rebuild
     # the exact source state frozen before approval, ignoring any missing or
     # conflicting value in continuation input/context.
@@ -533,7 +678,7 @@ async def execute_frozen_host_execution_continuation(
             agent_path=frozen.agent_path,
             reason_code="plan_rebase_failed",
         )
-    if rebound.execution_digest != frozen.execution_digest:
+    if rebound.execution_digest_for_schema(frozen.schema_version) != frozen.execution_digest:
         return await _settle_before_spawn_failure(
             approval_port,
             approval_id,
@@ -595,7 +740,28 @@ async def execute_frozen_host_execution_continuation(
             runtime_context=runtime_context,
             retry_safety_fence=retry_safety_fence,
         )
+
     owner_loop = asyncio.get_running_loop()
+
+    def materialize_environment_in_owner_loop() -> dict[str, str]:
+        try:
+            materialization = asyncio.run_coroutine_threadsafe(
+                _materialize_frozen_skill_secrets(
+                    runtime_context,
+                    frozen,
+                ),
+                owner_loop,
+            )
+        except Exception:
+            raise _HostExecutionEnvironmentBindingUnavailable from None
+        try:
+            injected = materialization.result()
+        except Exception:
+            materialization.cancel()
+            raise _HostExecutionEnvironmentBindingUnavailable from None
+        if injected is None:
+            raise _HostExecutionEnvironmentBindingUnavailable
+        return injected
 
     def authorize_spawn_in_owner_loop() -> float:
         # This synchronous callback is consumed inside LocalSandbox directly
@@ -627,6 +793,7 @@ async def execute_frozen_host_execution_continuation(
             raise LocalProcessSpawnDeadlineExpired
         return spawn_deadline_monotonic
 
+    cancellation_requested = threading.Event()
     try:
         output, exit_code, stdout, stderr = await asyncio.to_thread(
             _structured_execute,
@@ -636,8 +803,20 @@ async def execute_frozen_host_execution_continuation(
             timeout_seconds=rebound.timeout_seconds,
             thread_data=thread_data,
             prepared_base_env=prepared_base_env,
+            injected_env_provider=materialize_environment_in_owner_loop,
+            cancellation_requested=cancellation_requested,
             max_chars=max_chars,
             spawn_authorization_guard=authorize_spawn_in_owner_loop,
+        )
+    except _HostExecutionEnvironmentBindingUnavailable:
+        return await _settle_before_spawn_failure(
+            approval_port,
+            approval_id,
+            source_tool_call_id=frozen.source_tool_call_id,
+            agent_path=frozen.agent_path,
+            reason_code="environment_binding_unavailable",
+            runtime_context=runtime_context,
+            retry_safety_fence=retry_safety_fence,
         )
     except (
         LocalProcessSpawnAuthorizationFailed,
@@ -652,7 +831,7 @@ async def execute_frozen_host_execution_continuation(
             runtime_context=runtime_context,
             retry_safety_fence=retry_safety_fence,
         )
-    except Exception as error:
+    except Exception:
         await _complete_or_raise(
             approval_port,
             approval_id,
@@ -665,7 +844,9 @@ async def execute_frozen_host_execution_continuation(
         )
         raise HostExecutionContinuationError(
             "Approved host execution outcome is unknown",
-        ) from error
+        ) from None
+    finally:
+        cancellation_requested.set()
 
     await _complete_or_raise(
         approval_port,

@@ -2074,6 +2074,120 @@ export const enUS: Translations = {
   },
 
   skills: {
+    secrets: {
+      workbenchAria: "Skill editing area",
+      filesTab: "Files",
+      secretsTab: "Credential environment variables",
+      aria: "Credential environment variable declarations",
+      title: "Credential environment variables",
+      description:
+        "The server parses this form and patches the current SKILL.md editing buffer. Only names and requirement flags are stored; Credential plaintext is never written to the Skill.",
+      viewSource: "View SKILL.md",
+      checking: "Checking SKILL.md…",
+      syncing: "Syncing to the current editing buffer…",
+      retry: "Check again",
+      sourceStale:
+        "SKILL.md changed while it was being processed. Your current edits were preserved; try again.",
+      invalidDeclaration:
+        "The environment variable declaration is invalid. Open the source and follow the validation details.",
+      forbidden: "You cannot edit this Skill declaration.",
+      notFound: "This project no longer exists.",
+      invalidResponse:
+        "The Skill declaration service returned an invalid response, so no change was applied.",
+      unavailable:
+        "The Skill environment variable declaration cannot be processed right now. Try again later.",
+      invalidSource:
+        "The SKILL.md frontmatter is invalid. The source was preserved; fix it in source view and try again.",
+      openSource: "Open source to fix",
+      managedComments:
+        "The managed fields contain comments that cannot be preserved safely. The form is read-only; edit the source instead.",
+      shorthand: (count) =>
+        `${count} legacy shorthand declaration${count === 1 ? " was" : "s were"} found. They are normalized only after an actual edit.`,
+      empty: "The current editing buffer declares no Credential variables.",
+      optional: "Optional",
+      required: "Required",
+      setOptional: (name) => `Make ${name} optional`,
+      remove: (name) => `Remove the ${name} declaration`,
+      addTitle: "Add an environment variable declaration",
+      nameLabel: "Variable name",
+      namePlaceholder: "API_KEY",
+      newOptional: "Make the new variable optional",
+      add: "Add",
+      invalidName:
+        "The name must start with a letter or underscore and contain only letters, numbers, and underscores.",
+      duplicateName:
+        "That environment variable is already declared. Names are case-sensitive.",
+      autonomousTitle: "Allow autonomous Credential use",
+      autonomousDescription:
+        "This maps to SKILL.md secrets-autonomous and does not bypass runtime authorization or Credential binding.",
+      autonomousAria: "Allow autonomous Credential use",
+      location: (line, column) =>
+        `Line ${line}${column === null ? "" : `, column ${column}`}: `,
+      loadSourceFailed:
+        "The root SKILL.md could not be loaded, so environment variable editing is unavailable.",
+      loadSource: "Loading SKILL.md…",
+      saveBlocked:
+        "Wait for the SKILL.md check to finish or fix the environment variable declaration",
+      publishBlocked:
+        "Wait for the SKILL.md check to finish and fix the environment variable declaration before publishing.",
+      credentialLabel: "Project Credential",
+      noCompatibleCredential: "No compatible Credential",
+      optionalUnbound: "Leave unbound (optional)",
+      selectCredential: "Select a Credential",
+      credentialVersion: (name, version) => `${name} · version ${version}`,
+      requiredMissing: "Select a Credential for this required variable.",
+      createCredential: "Create Credential",
+      manageCredential: "Manage Credentials",
+    },
+    publishDialog: {
+      title: "Publish Skill version",
+      description: (version) =>
+        `Publish version ${version} and select exact project Credential versions for this immutable version. The request contains only Credential version IDs, never secret values.`,
+      loading: "Running publish checks…",
+      targetVersion: "Target version: ",
+      bindingRevision: "Binding revision: ",
+      noRequirements:
+        "The target version declares no Credential variables and can be published directly.",
+      bindingsTitle: "Version Credential bindings",
+      noApprove:
+        "You cannot select Credentials. This request will not submit bindings; a suspended Skill may be published first, but an administrator must configure it before activation.",
+      approvalRequiredForActive:
+        "A new version of an active Skill must atomically submit every required binding. Ask a member with Credential approval permission to publish it, or suspend the Skill first.",
+      optionalUnbound: (count) =>
+        `${count} optional variable${count === 1 ? " is" : "s are"} unbound and will not be injected at runtime.`,
+      staleBase:
+        "This draft is based on an older published version. Confirm again to move the live pointer using the latest publish plan; compatible selections were preserved.",
+      credentialChanged:
+        "Credentials changed. Compatible selections were preserved; review them and publish again.",
+      assetChanged: "The Skill changed. Review the latest publish plan.",
+      cancel: "Cancel",
+      retry: "Check again",
+      publishing: "Publishing…",
+      publish: "Publish version",
+      confirmOverwrite: "Confirm overwrite and publish",
+      discardTitle: "Discard unpublished Credential selections?",
+      discardDescription:
+        "Closing clears selections made in this dialog. The Skill version and existing bindings are unchanged.",
+      continue: "Continue configuring",
+      discard: "Discard and close",
+      createdInvalid:
+        "The Credential was created, but its returned version metadata is invalid.",
+      createdIneligible:
+        "The Credential was created, but the latest publish check does not consider its version compatible. Check its fields and try again.",
+      incomplete:
+        "Required environment variables for the active Skill are not fully bound. Complete the selections and try again.",
+      invalidBinding:
+        "The selected Credential is incompatible with the Skill declaration. Refresh the publish check and try again.",
+      staleSelection:
+        "A Credential was rotated, suspended, or revoked. Available options were reloaded.",
+      stalePublishBase:
+        "This draft is based on an older published version. Confirm to overwrite and publish.",
+      invalidDeclaration:
+        "The target version has an invalid environment variable declaration. Create a new draft and fix SKILL.md before publishing.",
+      forbidden: "You cannot publish this Skill.",
+      credentialRequestOmitted:
+        "You cannot select Credentials, so this publish request will not submit bindings.",
+    },
     builder: {
       errors: {
         unavailable:
@@ -2211,6 +2325,10 @@ export const enUS: Translations = {
         packageAria: "Candidate files",
         title: "Candidate files",
         titleRevise: "Candidate files (revision)",
+        filesSurface: "Files",
+        secretsSurface: "Credential environment variables",
+        secretsUnavailable:
+          "The candidate package has no root SKILL.md, so Credential environment variable declarations cannot be edited.",
         fileCount: (count) => `${count} UTF-8 text files`,
         diffSummary: (version, added, modified, deleted) =>
           ` · vs baseline${version}: ${added} added · ${modified} modified · ${deleted} deleted`,
@@ -2328,6 +2446,9 @@ export const enUS: Translations = {
           `Created draft version v${version}. Go publish it`,
         withoutVersion: "Created a draft version. Go publish it",
         goPublish: "Go publish",
+        createdWithSecrets: (count) =>
+          `Skill created and suspended with ${count} Credential environment variable declaration${count === 1 ? "" : "s"}. Configure credentials before enabling it.`,
+        configureCredentials: "Configure credentials",
       },
       publish: {
         staleTitle: "A newer version is already published",

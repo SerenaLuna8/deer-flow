@@ -4,6 +4,7 @@ import os
 import posixpath
 import re
 import shlex
+import threading
 from collections.abc import Callable, Mapping
 from functools import lru_cache
 from pathlib import Path
@@ -28,8 +29,10 @@ from deerflow.runtime.host_execution_approval import (
     HostExecutionApprovalPort,
     HostExecutionChannelIdentityMode,
     HostExecutionPlan,
+    HostExecutionSkillSecretSource,
 )
 from deerflow.runtime.secret_context import (
+    ACTIVE_SECRET_SOURCES_CONTEXT_KEY,
     ACTIVE_SECRETS_CONTEXT_KEY,
     SKILL_SECRET_EXEC_READY_CONTEXT_KEY,
     SKILL_SECRET_PROVIDER_CONTEXT_KEY,
@@ -1404,39 +1407,63 @@ async def _run_sync_tool_after_async_sandbox_init(
 
     context = getattr(runtime, "context", None)
     private_skill_provider = context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if (authorization_operation == "before_sandbox_exec" and isinstance(context, dict) and "private_scope" in context) else None
-    call_runtime = runtime
-    call_context: dict | None = None
     if callable(private_skill_provider):
         # Each command gets an isolated context overlay. Parallel bash calls
         # must never clear or replace one another's ready marker or carrier.
         call_context = dict(context)
         call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
         requested = active_provider_secret_request(call_context)
-        fresh_scoped = await private_skill_provider(requested) if requested else {}
-        try:
-            active = resolve_provider_active_secrets(
-                call_context,
-                fresh_scoped,
-            )
-        finally:
-            if isinstance(fresh_scoped, dict):
-                for values in fresh_scoped.values():
-                    if isinstance(values, dict):
-                        values.clear()
-                fresh_scoped.clear()
-        if active:
-            call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
-        call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
         call_runtime = _RuntimeContextOverlay(runtime, call_context)
+        owner_loop = asyncio.get_running_loop()
+        cancellation_requested = threading.Event()
 
-    try:
-        return await asyncio.to_thread(func, call_runtime, *args)
-    finally:
-        if call_context is not None:
-            call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
-            active = call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
-            if isinstance(active, dict):
+        def invoke_with_fresh_skill_credentials() -> str:
+            fresh_scoped: object = None
+            active: dict[str, str] = {}
+            try:
+                if cancellation_requested.is_set():
+                    return "Error: Skill credential material is unavailable"
+                if requested:
+                    try:
+                        materialization = asyncio.run_coroutine_threadsafe(
+                            private_skill_provider(requested),
+                            owner_loop,
+                        )
+                    except Exception:
+                        return "Error: Skill credential material is unavailable"
+                    try:
+                        fresh_scoped = materialization.result()
+                    except Exception:
+                        materialization.cancel()
+                        return "Error: Skill credential material is unavailable"
+                    if not isinstance(fresh_scoped, dict) or set(fresh_scoped) != set(requested) or any(not isinstance(values, dict) for values in fresh_scoped.values()):
+                        return "Error: Skill credential material is unavailable"
+                    active = resolve_provider_active_secrets(
+                        call_context,
+                        fresh_scoped,
+                    )
+                if cancellation_requested.is_set():
+                    return "Error: Skill credential material is unavailable"
+                if active:
+                    call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
+                call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
+                return func(call_runtime, *args)
+            finally:
+                call_context.pop(SKILL_SECRET_EXEC_READY_CONTEXT_KEY, None)
+                call_context.pop(ACTIVE_SECRETS_CONTEXT_KEY, None)
                 active.clear()
+                if isinstance(fresh_scoped, dict):
+                    for values in fresh_scoped.values():
+                        if isinstance(values, dict):
+                            values.clear()
+                    fresh_scoped.clear()
+
+        try:
+            return await asyncio.to_thread(invoke_with_fresh_skill_credentials)
+        finally:
+            cancellation_requested.set()
+
+    return await asyncio.to_thread(func, runtime, *args)
 
 
 class _RuntimeContextOverlay:
@@ -1753,6 +1780,47 @@ def _host_execution_environment_keys(context: object) -> tuple[str, ...]:
     return tuple(sorted(names))
 
 
+def _host_execution_skill_secret_sources(
+    context: object,
+) -> tuple[HostExecutionSkillSecretSource, ...]:
+    """Freeze only middleware-owned path/name/activation semantics."""
+
+    if not isinstance(context, Mapping):
+        return ()
+    raw_sources = context.get(ACTIVE_SECRET_SOURCES_CONTEXT_KEY)
+    if not isinstance(raw_sources, tuple):
+        return ()
+    sources: set[HostExecutionSkillSecretSource] = set()
+    for source in raw_sources:
+        if not isinstance(source, tuple) or len(source) != 4 or not isinstance(source[0], str) or not source[0] or not isinstance(source[1], str) or not source[1] or not isinstance(source[2], tuple) or type(source[3]) is not bool:
+            continue
+        try:
+            sources.add(
+                HostExecutionSkillSecretSource(
+                    skill_path=source[1],
+                    # Frontmatter preserves author order, while the frozen
+                    # execution plan treats declarations as a set. Canonicalize
+                    # that valid order here; the typed source still rejects
+                    # duplicates and malformed names.
+                    secret_names=tuple(sorted(source[2])),
+                    explicit=source[3],
+                ),
+            )
+        except ValueError:
+            continue
+    return tuple(sorted(sources, key=lambda source: source.sort_key))
+
+
+def _host_execution_legacy_environment_keys(context: object) -> tuple[str, ...]:
+    """Identify name-only carriers that cannot be replayed as exact authority."""
+
+    names = set(extract_request_secrets(context))
+    names.update(read_active_secrets(context))
+    if isinstance(context, Mapping) and context.get("github_token") is not None:
+        names.update({"GH_TOKEN", "GITHUB_TOKEN"})
+    return tuple(sorted(names))
+
+
 async def _approval_scan_secrets(runtime: Runtime) -> dict[str, str]:
     """Materialize only enough secret plaintext to reject command embedding."""
 
@@ -1869,6 +1937,12 @@ def _prepare_local_host_execution(
             cwd=cwd if isinstance(cwd, str) and cwd else None,
             timeout_seconds=timeout_seconds,
             environment_keys=_host_execution_environment_keys(context),
+            skill_secret_sources=_host_execution_skill_secret_sources(
+                context,
+            ),
+            legacy_environment_keys=_host_execution_legacy_environment_keys(
+                context,
+            ),
             agent_path=_host_execution_agent_path(context),
             channel_identity_mode=channel_identity_mode,
             channel_user_id=channel_user_id,

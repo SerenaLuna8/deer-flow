@@ -65,6 +65,7 @@ import {
   projectAgentVersionCanPublish,
   projectMcpDeleteErrorMessage,
   projectSkillDeleteErrorMessage,
+  projectSkillCredentialSetupRequired,
   projectSkillVersionCanPublish,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
@@ -73,6 +74,7 @@ import {
   ProjectMcpDeleteDialog,
   ProjectSkillDeleteDialog,
 } from "./project-skill-delete-dialog";
+import { SkillPublishDialog } from "./skill-publish-dialog";
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 
 export function projectAssetDetailShowsVersionHistory(
@@ -120,6 +122,27 @@ export function projectAssetDetailPreferredVersionId(
     versions[0]?.id ??
     ""
   );
+}
+
+export function projectAssetRequestedVersionResolution(
+  versions: readonly Pick<AssetVersion, "id">[],
+  requestedVersionId: string | null,
+  historyReady: boolean,
+): "none" | "pending" | "available" | "missing" {
+  if (!requestedVersionId) return "none";
+  if (!historyReady) return "pending";
+  return versions.some((version) => version.id === requestedVersionId)
+    ? "available"
+    : "missing";
+}
+
+export function projectSkillCredentialRepairVersionId(
+  error: unknown,
+  currentPublishedVersionId: string | null,
+): string | null {
+  return projectSkillCredentialSetupRequired(error)
+    ? currentPublishedVersionId
+    : null;
 }
 
 export function projectAgentPreviousVersion(
@@ -376,7 +399,11 @@ export type ProjectAssetVersionRenderContext = {
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
+  onCredentialBindingsDirtyChange: (dirty: boolean) => void;
+  onPublishValidityChange: (valid: boolean) => void;
   onVersionCreated: (versionId: string) => void;
+  focusSkillCredentials: boolean;
+  onSkillCredentialsFocused: () => void;
 };
 
 const VERSION_STATUS_LABEL: Record<VersionStatus, string> = {
@@ -455,11 +482,20 @@ export function versionPublishDisabled(
   actionPending: boolean,
   versionDirty: boolean,
   versionSelectionPending = false,
+  versionInvalid = false,
 ): boolean {
   return (
     versionActionDisabled(actionPending, versionSelectionPending) ||
-    versionDirty
+    versionDirty ||
+    versionInvalid
   );
+}
+
+export function projectAssetDetailDirty(
+  versionDirty: boolean,
+  credentialBindingsDirty: boolean,
+): boolean {
+  return versionDirty || credentialBindingsDirty;
 }
 
 export function versionActionDisabled(
@@ -673,6 +709,10 @@ export function ProjectAssetDetailSheet({
   renderDetailActions,
   renderAssetEditor,
   renderVersion,
+  credentialsHref,
+  focusSkillCredentials = false,
+  onSkillCredentialsFocused,
+  onSkillCredentialSetupRequired,
 }: {
   accountId: string;
   projectId: string;
@@ -690,7 +730,11 @@ export function ProjectAssetDetailSheet({
   onDeleted: (assetId: string) => void;
   onDirtyChange?: (dirty: boolean) => void;
   onVersionCreated: (assetId: string, versionId: string) => void;
-  onRequestedVersionHandled: (assetId: string, versionId: string) => void;
+  onRequestedVersionHandled: (
+    assetId: string,
+    versionId: string,
+    available: boolean,
+  ) => void;
   renderDetailActions?: (context: {
     item: ProjectAssetItem;
     editing: boolean;
@@ -703,6 +747,10 @@ export function ProjectAssetDetailSheet({
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
+  credentialsHref?: string;
+  focusSkillCredentials?: boolean;
+  onSkillCredentialsFocused?: () => void;
+  onSkillCredentialSetupRequired?: (versionId: string | null) => void;
 }) {
   const { t } = useI18n();
   const { models } = useModels({ enabled: open && kind === "agents" });
@@ -731,6 +779,7 @@ export function ProjectAssetDetailSheet({
   );
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [versionDirty, setVersionDirty] = useState(false);
+  const [credentialBindingsDirty, setCredentialBindingsDirty] = useState(false);
   const [versionEditing, setVersionEditing] = useState(false);
   const [skillDeleteSnapshot, setSkillDeleteSnapshot] =
     useState<ProjectSkillDeleteSnapshot | null>(null);
@@ -744,16 +793,38 @@ export function ProjectAssetDetailSheet({
   > | null>(null);
   const [publishStaleVersion, setPublishStaleVersion] =
     useState<AssetVersion | null>(null);
+  const [skillPublishVersion, setSkillPublishVersion] = useState<Extract<
+    AssetVersion,
+    { skill_id: string }
+  > | null>(null);
+  const [skillPublishValidity, setSkillPublishValidity] = useState<{
+    versionId: string;
+    valid: boolean;
+  } | null>(null);
   const [discardAction, setDiscardAction] = useState<
-    { type: "close" } | { type: "version"; versionId: string } | null
+    | { type: "close" }
+    | {
+        type: "version";
+        versionId: string;
+        focusSkillCredentials?: boolean;
+      }
+    | null
   >(null);
-  const updateVersionDirty = useCallback(
-    (dirty: boolean) => {
-      setVersionDirty(dirty);
-      onDirtyChange?.(dirty);
-    },
-    [onDirtyChange],
+  const updateVersionDirty = useCallback((dirty: boolean) => {
+    setVersionDirty(dirty);
+  }, []);
+  const updateCredentialBindingsDirty = useCallback(
+    (dirty: boolean) => setCredentialBindingsDirty(dirty),
+    [],
   );
+  const detailDirty = projectAssetDetailDirty(
+    versionDirty,
+    credentialBindingsDirty,
+  );
+
+  useEffect(() => {
+    onDirtyChange?.(detailDirty);
+  }, [detailDirty, onDirtyChange]);
 
   const versions = useMemo(() => history.data?.data ?? [], [history.data]);
   const mcpConfiguration =
@@ -768,6 +839,23 @@ export function ProjectAssetDetailSheet({
     kind === "mcp-servers"
       ? (mcpConfiguration?.version ?? null)
       : (versions.find((version) => version.id === selectedVersionId) ?? null);
+  const selectedVersionIdentity = selectedVersion?.id ?? null;
+  const selectedSkillPublishValid =
+    kind !== "skills" ||
+    (skillPublishValidity?.versionId === selectedVersionIdentity &&
+      skillPublishValidity?.valid === true);
+  const handleSkillPublishValidityChange = useCallback(
+    (valid: boolean) => {
+      if (!selectedVersionIdentity) return;
+      setSkillPublishValidity((current) =>
+        current?.versionId === selectedVersionIdentity &&
+        current.valid === valid
+          ? current
+          : { versionId: selectedVersionIdentity, valid },
+      );
+    },
+    [selectedVersionIdentity],
+  );
   const selectedAgentVersion =
     selectedVersion && "agent_id" in selectedVersion ? selectedVersion : null;
   const previousAgentVersion = projectAgentPreviousVersion(
@@ -815,7 +903,17 @@ export function ProjectAssetDetailSheet({
       : effectiveVersion;
 
   useEffect(() => {
-    if (!open || versions.length === 0) return;
+    if (!open) return;
+    const requestedVersionResolution = projectAssetRequestedVersionResolution(
+      versions,
+      requestedVersionId,
+      history.isSuccess,
+    );
+    if (requestedVersionResolution === "pending") return;
+    if (requestedVersionResolution === "missing" && requestedVersionId) {
+      onRequestedVersionHandled(item.id, requestedVersionId, false);
+    }
+    if (versions.length === 0) return;
     if (kind === "mcp-servers") {
       const preferredId = projectAssetDetailPreferredVersionId(
         kind,
@@ -824,20 +922,14 @@ export function ProjectAssetDetailSheet({
         item.current_published_version_id,
       );
       setSelectedVersionId(preferredId);
-      if (
-        requestedVersionId &&
-        versions.some((version) => version.id === requestedVersionId)
-      ) {
-        onRequestedVersionHandled(item.id, requestedVersionId);
+      if (requestedVersionResolution === "available" && requestedVersionId) {
+        onRequestedVersionHandled(item.id, requestedVersionId, true);
       }
       return;
     }
-    if (
-      requestedVersionId &&
-      versions.some((version) => version.id === requestedVersionId)
-    ) {
+    if (requestedVersionResolution === "available" && requestedVersionId) {
       setSelectedVersionId(requestedVersionId);
-      onRequestedVersionHandled(item.id, requestedVersionId);
+      onRequestedVersionHandled(item.id, requestedVersionId, true);
       return;
     }
     const preferredId = projectAssetDetailPreferredVersionId(
@@ -855,6 +947,7 @@ export function ProjectAssetDetailSheet({
     item.current_published_version_id,
     item.id,
     item.scope,
+    history.isSuccess,
     kind,
     onRequestedVersionHandled,
     open,
@@ -866,13 +959,16 @@ export function ProjectAssetDetailSheet({
     if (open) return;
     setSelectedVersionId("");
     updateVersionDirty(false);
+    updateCredentialBindingsDirty(false);
     setVersionEditing(false);
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
     setMcpDeleteSnapshot(null);
     setAgentRestoreTarget(null);
+    setSkillPublishVersion(null);
+    setSkillPublishValidity(null);
     setDiscardAction(null);
-  }, [open, updateVersionDirty]);
+  }, [open, updateCredentialBindingsDirty, updateVersionDirty]);
 
   useEffect(
     () => () => {
@@ -960,6 +1056,10 @@ export function ProjectAssetDetailSheet({
   );
 
   function publishSelectedVersion(version: AssetVersion) {
+    if ("skill_id" in version) {
+      setSkillPublishVersion(version);
+      return;
+    }
     if (
       isMcpVersion(version) &&
       mcpVersionRuntimeBlockReason(version, item.scope)
@@ -1013,7 +1113,7 @@ export function ProjectAssetDetailSheet({
   }
 
   function requestOpenChange(next: boolean) {
-    if (!next && versionDirty) {
+    if (!next && detailDirty) {
       setDiscardAction({ type: "close" });
       return;
     }
@@ -1021,25 +1121,44 @@ export function ProjectAssetDetailSheet({
     onOpenChange(next);
   }
 
-  function requestVersionChange(versionId: string) {
-    if (versionId === selectedVersionId) return;
-    if (versionDirty) {
-      setDiscardAction({ type: "version", versionId });
+  function requestVersionChange(
+    versionId: string,
+    options: { focusSkillCredentials?: boolean } = {},
+  ) {
+    if (versionId === selectedVersionId) {
+      if (options.focusSkillCredentials) {
+        onSkillCredentialSetupRequired?.(versionId);
+      }
+      return;
+    }
+    if (detailDirty) {
+      setDiscardAction({
+        type: "version",
+        versionId,
+        focusSkillCredentials: options.focusSkillCredentials,
+      });
       return;
     }
     setVersionEditing(false);
     setSelectedVersionId(versionId);
+    if (options.focusSkillCredentials) {
+      onSkillCredentialSetupRequired?.(versionId);
+    }
   }
 
   function confirmDiscardNavigation() {
     const action = discardAction;
     setDiscardAction(null);
     updateVersionDirty(false);
+    updateCredentialBindingsDirty(false);
     setVersionEditing(false);
     if (action?.type === "close") {
       onOpenChange(false);
     } else if (action?.type === "version") {
       setSelectedVersionId(action.versionId);
+      if (action.focusSkillCredentials) {
+        onSkillCredentialSetupRequired?.(action.versionId);
+      }
     }
   }
 
@@ -1115,11 +1234,29 @@ export function ProjectAssetDetailSheet({
     if (kind !== "skills") return;
     const toggleState = projectSkillStatusToggleState(item);
     if (toggleState.disabled || toggleState.checked === checked) return;
-    changeStatus.mutate({
-      assetId: item.id,
-      action: checked ? "activate" : "suspend",
-      input: { expected_asset_version: item.version },
-    });
+    changeStatus.mutate(
+      {
+        assetId: item.id,
+        action: checked ? "activate" : "suspend",
+        input: { expected_asset_version: item.version },
+      },
+      {
+        onError: (error) => {
+          const repairVersionId = projectSkillCredentialRepairVersionId(
+            error,
+            item.current_published_version_id,
+          );
+          if (!projectSkillCredentialSetupRequired(error)) return;
+          if (repairVersionId) {
+            requestVersionChange(repairVersionId, {
+              focusSkillCredentials: true,
+            });
+          } else {
+            onSkillCredentialSetupRequired?.(null);
+          }
+        },
+      },
+    );
   }
 
   return (
@@ -1327,7 +1464,13 @@ export function ProjectAssetDetailSheet({
                       editing: versionEditing,
                       onEditingChange: setVersionEditing,
                       onDirtyChange: updateVersionDirty,
+                      onCredentialBindingsDirtyChange:
+                        updateCredentialBindingsDirty,
+                      onPublishValidityChange: handleSkillPublishValidityChange,
                       onVersionCreated: handleWorkbenchVersionCreated,
+                      focusSkillCredentials,
+                      onSkillCredentialsFocused:
+                        onSkillCredentialsFocused ?? (() => undefined),
                     })}
                   </div>
                 )
@@ -1449,14 +1592,19 @@ export function ProjectAssetDetailSheet({
                                       Boolean(selectedRuntimeBlockReason),
                                     versionDirty,
                                     versionSelectionPending,
+                                    kind === "skills" &&
+                                      !selectedSkillPublishValid,
                                   )}
                                   title={
                                     selectedRuntimeBlockReason ??
                                     (versionDirty
                                       ? "请先保存或放弃当前未保存修改"
-                                      : versionSelectionPending
-                                        ? revisionCopy.loading
-                                        : undefined)
+                                      : kind === "skills" &&
+                                          !selectedSkillPublishValid
+                                        ? t.skills.secrets.publishBlocked
+                                        : versionSelectionPending
+                                          ? revisionCopy.loading
+                                          : undefined)
                                   }
                                   onClick={() =>
                                     publishSelectedVersion(selectedVersion)
@@ -1493,7 +1641,14 @@ export function ProjectAssetDetailSheet({
                             editing: versionEditing,
                             onEditingChange: setVersionEditing,
                             onDirtyChange: updateVersionDirty,
+                            onCredentialBindingsDirtyChange:
+                              updateCredentialBindingsDirty,
+                            onPublishValidityChange:
+                              handleSkillPublishValidityChange,
                             onVersionCreated: handleWorkbenchVersionCreated,
+                            focusSkillCredentials,
+                            onSkillCredentialsFocused:
+                              onSkillCredentialsFocused ?? (() => undefined),
                           },
                         )}
                       </div>
@@ -1620,6 +1775,28 @@ export function ProjectAssetDetailSheet({
           onConfirm={() => void confirmMcpDelete()}
         />
       )}
+
+      {skillPublishVersion !== null ? (
+        <SkillPublishDialog
+          accountId={accountId}
+          projectId={projectId}
+          item={item}
+          version={skillPublishVersion}
+          open
+          canApproveCredentials={projectCapabilities.includes(
+            "mcp.credentials.approve",
+          )}
+          credentialsHref={credentialsHref ?? ""}
+          onOpenChange={(next) => {
+            if (!next) setSkillPublishVersion(null);
+          }}
+          onPublished={(versionId) => {
+            setSkillPublishVersion(null);
+            setSelectedVersionId(versionId);
+            handleWorkbenchVersionCreated(versionId);
+          }}
+        />
+      ) : null}
 
       <Dialog
         open={agentRestoreTarget !== null}

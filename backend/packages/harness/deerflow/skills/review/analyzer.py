@@ -7,12 +7,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import yaml
-
-from deerflow.skills.parser import (
-    parse_allowed_tools,
-    parse_required_secrets,
-)
+from deerflow.skills.frontmatter import parse_skill_frontmatter_document
+from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.review.digest import compute_package_digest
 from deerflow.skills.review.eval_schema import analyze_eval_manifests
 from deerflow.skills.review.models import (
@@ -30,11 +26,6 @@ from deerflow.skills.review.package_paths import (
 from deerflow.skills.review.resource_graph import build_resource_graph
 from deerflow.skills.skillscan.orchestrator import scan_skill_dir
 from deerflow.skills.validation import ALLOWED_FRONTMATTER_PROPERTIES
-
-_FRONTMATTER_RE = re.compile(
-    r"^---\s*\n(.*?)\n---\s*\n?",
-    re.DOTALL,
-)
 
 
 def analyze_skill_package(
@@ -281,33 +272,6 @@ def _analyze_skill_md(
             )
         )
 
-    try:
-        parse_required_secrets(
-            metadata.get("required-secrets"),
-            Path("SKILL.md"),
-        )
-    except ValueError as exc:
-        findings.append(
-            make_finding(
-                "structure.invalid-required-secrets",
-                severity="error",
-                path="SKILL.md",
-                message=str(exc),
-                remediation="Declare required-secrets as a YAML list.",
-            )
-        )
-
-    if "secrets-autonomous" in metadata and not isinstance(metadata.get("secrets-autonomous"), bool):
-        findings.append(
-            make_finding(
-                "structure.invalid-secrets-autonomous",
-                severity="error",
-                path="SKILL.md",
-                message="secrets-autonomous must be a boolean.",
-                remediation="Use true or false for secrets-autonomous.",
-            )
-        )
-
     if profile == "agentskills":
         _add_agentskills_findings(
             metadata,
@@ -320,18 +284,19 @@ def _analyze_skill_md(
 def _split_skill_markdown(
     content: str,
 ) -> tuple[dict[str, Any] | None, str | None, str | None]:
-    match = _FRONTMATTER_RE.match(content)
-    if not match:
-        return None, None, "No YAML frontmatter found"
-    try:
-        metadata = yaml.safe_load(match.group(1))
-    except yaml.YAMLError as exc:
-        return None, None, f"Invalid YAML in frontmatter: {exc}"
-    if not isinstance(metadata, dict):
-        return None, None, "Frontmatter must be a YAML dictionary"
+    document = parse_skill_frontmatter_document(content)
+    if not document.valid:
+        diagnostic = next(
+            (item for item in document.diagnostics if item.severity == "error"),
+            document.diagnostics[0],
+        )
+        return None, None, diagnostic.public_message
+    metadata = document.frontmatter
+    body = document.body
+    assert metadata is not None and body is not None
     return (
-        {str(key): value for key, value in metadata.items()},
-        content[match.end() :],
+        dict(metadata),
+        body,
         None,
     )
 

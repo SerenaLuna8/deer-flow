@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   SkillBuilderCandidateWorkbench,
+  skillBuilderWorkbenchTabForKey,
   skillBuilderRevisionDiff,
 } from "@/components/projects/skills/skill-builder-candidate-workbench";
 import { SkillBuilderFilesTrigger } from "@/components/projects/skills/skill-builder-files-trigger";
@@ -16,6 +17,7 @@ function renderUi(node: React.ReactNode) {
 }
 
 const SHA256 = "a".repeat(64);
+const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
 
 function file(path = "SKILL.md"): SkillBuilderFile {
   const content = "# Skill\n";
@@ -34,9 +36,11 @@ function workbench(
 ) {
   return (
     <SkillBuilderCandidateWorkbench
+      projectId={PROJECT_ID}
       files={overrides.files ?? [file()]}
       selectedPath="SKILL.md"
       draftContent="# Skill\n"
+      skillMdContent="# Skill\n"
       displayMode="source"
       canAuthor
       readOnly={false}
@@ -50,6 +54,8 @@ function workbench(
       errorMessage={null}
       onSelectPath={() => undefined}
       onDraftContentChange={() => undefined}
+      onSkillMdContentChange={() => true}
+      onSecretValidityChange={() => undefined}
       onDisplayModeChange={() => undefined}
       onSave={() => undefined}
       onDiscard={() => undefined}
@@ -85,6 +91,23 @@ describe("SkillBuilderCandidateWorkbench", () => {
     const html = renderUi(workbench({ onClose: () => undefined }));
     expect(html).toContain("候选文件包");
     expect(html).toContain('aria-label="关闭候选文件包"');
+    expect(html).toContain('role="tablist"');
+    expect(html).toContain("凭证环境变量");
+    expect(html).toContain("aria-controls=");
+    expect(html).toContain("aria-labelledby=");
+    expect(html).toContain('tabindex="-1"');
+  });
+
+  test("maps the complete horizontal tab keyboard contract", () => {
+    expect(skillBuilderWorkbenchTabForKey("files", "ArrowRight")).toBe(
+      "secrets",
+    );
+    expect(skillBuilderWorkbenchTabForKey("secrets", "ArrowLeft")).toBe(
+      "files",
+    );
+    expect(skillBuilderWorkbenchTabForKey("secrets", "Home")).toBe("files");
+    expect(skillBuilderWorkbenchTabForKey("files", "End")).toBe("secrets");
+    expect(skillBuilderWorkbenchTabForKey("files", "Enter")).toBeNull();
   });
 
   test("does not render a close control when the panel cannot be dismissed", () => {
@@ -95,6 +118,7 @@ describe("SkillBuilderCandidateWorkbench", () => {
   test("shows revision diff badges against the pinned base files", () => {
     const html = renderUi(
       <SkillBuilderCandidateWorkbench
+        projectId={PROJECT_ID}
         files={[
           file("SKILL.md"),
           {
@@ -104,6 +128,7 @@ describe("SkillBuilderCandidateWorkbench", () => {
         ]}
         selectedPath="SKILL.md"
         draftContent="# Skill\n"
+        skillMdContent="# Skill\n"
         displayMode="source"
         canAuthor
         readOnly={false}
@@ -133,6 +158,8 @@ describe("SkillBuilderCandidateWorkbench", () => {
         ]}
         onSelectPath={() => undefined}
         onDraftContentChange={() => undefined}
+        onSkillMdContentChange={() => true}
+        onSecretValidityChange={() => undefined}
         onDisplayModeChange={() => undefined}
         onSave={() => undefined}
         onDiscard={() => undefined}

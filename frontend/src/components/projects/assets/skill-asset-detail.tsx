@@ -29,6 +29,9 @@ type SkillWorkspaceProps = Omit<
 > & {
   canManageCredentials: boolean;
   credentialsHref: string;
+  focusCredentials: boolean;
+  onCredentialsFocused: () => void;
+  onCredentialBindingsDirtyChange: (dirty: boolean) => void;
 };
 
 export function skillCredentialBindingsVisible(
@@ -160,7 +163,14 @@ export function SkillAssetDetail({
 }) {
   if (!workspace) return <SkillMetadata version={version} />;
 
-  const { canManageCredentials, credentialsHref, ...workbench } = workspace;
+  const {
+    canManageCredentials,
+    credentialsHref,
+    focusCredentials,
+    onCredentialsFocused,
+    onCredentialBindingsDirtyChange,
+    ...workbench
+  } = workspace;
   return (
     <div className="space-y-8">
       <SkillVersionWorkbench {...workbench} version={version} />
@@ -175,8 +185,12 @@ export function SkillAssetDetail({
           currentPublishedVersionId={
             workspace.item.current_published_version_id
           }
+          skillStatus={workspace.item.status}
           canManage={canManageCredentials}
           credentialsHref={credentialsHref}
+          focus={focusCredentials}
+          onFocused={onCredentialsFocused}
+          onDirtyChange={onCredentialBindingsDirtyChange}
         />
       ) : null}
       <details className="border-border/70 rounded-xl border px-4 py-3">

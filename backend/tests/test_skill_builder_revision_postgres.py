@@ -50,6 +50,10 @@ from app.shared_assets.skill_service import (
 )
 from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
+from app.system_settings.bootstrap import (
+    GPT_5_6_LUNA_MODEL_ID,
+    GPT_5_6_LUNA_MODEL_VERSION_ID,
+)
 from deerflow.persistence.jobs.model import WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.run.model import RunRow
@@ -211,6 +215,49 @@ async def _seed_default_model(seed: PrivateThreadSeed) -> None:
                  WHERE id=:model"""
             ),
             {"version": version_id, "model": model_id},
+        )
+        await connection.execute(
+            sa.text(
+                """INSERT INTO system_model_configs
+                (id,display_name,status,current_version_id,
+                 revision,created_by_user_id,updated_by_user_id)
+                VALUES (:id,'Builder revision vision model','active',NULL,1,
+                        :owner,:owner)"""
+            ),
+            {
+                "id": GPT_5_6_LUNA_MODEL_ID,
+                "owner": str(seed.owner_a.user_id),
+            },
+        )
+        await connection.execute(
+            sa.text(
+                """INSERT INTO system_model_config_versions
+                (id,model_config_id,version_number,provider_adapter,provider_model,
+                 settings,supports_thinking,supports_reasoning_effort,
+                 supports_vision,credential_id,credential_version_id,
+                 credential_env_key,payload_checksum,supersedes_version_id,
+                 created_by_user_id)
+                VALUES (:id,:model,1,'vision_bridge_fake','builder-revision-vision',
+                        '{}'::jsonb,false,false,true,NULL,NULL,NULL,
+                        :checksum,NULL,:owner)"""
+            ),
+            {
+                "id": GPT_5_6_LUNA_MODEL_VERSION_ID,
+                "model": GPT_5_6_LUNA_MODEL_ID,
+                "checksum": "c" * 64,
+                "owner": str(seed.owner_a.user_id),
+            },
+        )
+        await connection.execute(
+            sa.text(
+                """UPDATE system_model_configs
+                   SET current_version_id=:version
+                 WHERE id=:model"""
+            ),
+            {
+                "version": GPT_5_6_LUNA_MODEL_VERSION_ID,
+                "model": GPT_5_6_LUNA_MODEL_ID,
+            },
         )
         await connection.execute(
             sa.text(
@@ -503,7 +550,12 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert committed.skill.slug == slug
         assert committed.skill.status == "suspended"
         assert committed.skill.current_published_version_id is not None
-        assert committed.version is None
+        assert committed.version is not None
+        assert committed.session.created_skill_version_id == committed.version.id
+        assert committed.version.id == committed.skill.current_published_version_id
+        assert committed.version.workflow_status.value == "published"
+        refreshed = await design.get(context, opened.id)
+        assert refreshed.created_skill_version_id == committed.version.id
 
         async with seed.factory() as session:
             design_row = await session.get(SkillDesignSessionRow, opened.id)
@@ -530,6 +582,33 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert version_files[0].content == files[0].content
         assert draft_file_count == 0
         assert quota.reserved == [version.id]
+
+        next_asset = await skills.get(context, committed.skill.id)
+        next_draft = await skills.create_version_from_archive(
+            context,
+            committed.skill.id,
+            (_skill_md(slug, "A later published revision.\n"),),
+            expected_asset_version=next_asset.version,
+        )
+        next_asset = await skills.get(context, committed.skill.id)
+        next_published = await skills.publish(
+            context,
+            committed.skill.id,
+            next_draft.id,
+            expected_asset_version=next_asset.version,
+        )
+        assert next_published.id != committed.version.id
+
+        replayed = await _commit_session(
+            design,
+            context,
+            validated,
+            "builder-create-commit",
+        )
+        assert replayed.version is not None
+        assert replayed.version.id == committed.version.id
+        assert replayed.session.created_skill_version_id == committed.version.id
+        assert replayed.skill.current_published_version_id == next_published.id
     finally:
         await seed.engine.dispose()
 
@@ -778,16 +857,20 @@ async def test_revision_commit_creates_draft_without_moving_pointer(
         assert committed.session.status is SkillDesignStatus.COMPLETED
         assert committed.session.created_skill_id == asset.id
         assert committed.version is not None
+        assert committed.session.created_skill_version_id == committed.version.id
         assert committed.version.version_number == 2
         assert committed.version.workflow_status.value == "draft"
         assert committed.version.supersedes_version_id == published.id
         assert committed.version.id in quota.reserved
         assert committed.version.id not in reserved_before
+        refreshed = await design.get(context, opened.id)
+        assert refreshed.created_skill_version_id == committed.version.id
         current = await skills.get(context, asset.id)
         assert current.current_published_version_id == published.id
         replayed = await _commit_session(design, context, validated, "commit-save")
         assert replayed.version is not None
         assert replayed.version.id == committed.version.id
+        assert replayed.session.created_skill_version_id == committed.version.id
     finally:
         await seed.engine.dispose()
 

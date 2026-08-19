@@ -357,6 +357,7 @@ class SkillDesignSessionView:
     error_code: str | None
     error_message: str | None
     created_skill_id: uuid.UUID | None
+    created_skill_version_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
     active_run: SkillBuilderRunAdmission | None = None
@@ -1997,6 +1998,7 @@ class SkillDesignService:
                 return SkillDesignCommitResult(
                     session=repeated_session,
                     skill=created_result.asset,
+                    version=created_result.version,
                 )
             if created_version is not None:
                 skill = await self._skill_service.get(
@@ -2015,7 +2017,7 @@ class SkillDesignService:
                 repeated_session.created_skill_id,
             )
             replayed_version: SkillVersionView | None = None
-            if repeated_session.session_kind == "revise" and row.created_skill_version_id is not None:
+            if row.created_skill_version_id is not None:
                 replayed_version = await self._skill_service.get_project_version_view(
                     context,
                     repeated_session.created_skill_id,
@@ -3588,6 +3590,7 @@ class SkillDesignService:
                 error_code=row.error_code,
                 error_message=row.error_message,
                 created_skill_id=row.created_skill_id,
+                created_skill_version_id=row.created_skill_version_id,
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 active_run=active_run,

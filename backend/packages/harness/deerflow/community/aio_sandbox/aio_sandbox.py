@@ -297,11 +297,21 @@ class AioSandbox(Sandbox):
                     self._bash_exec_unsupported = True
                     logger.error("Sandbox %s does not support bash.exec (/v1/bash/exec returned 404); env-bearing commands are unavailable until the sandbox image is upgraded to all-in-one-sandbox >= 1.9.3", self.id)
                     return _BASH_EXEC_UNSUPPORTED_ERROR
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
+                # ApiError includes the response body verbatim. Validation and
+                # proxy responses may reflect the structured env request, so
+                # neither logs nor tool output may include its raw text.
+                logger.error(
+                    "Failed to execute command with injected env in sandbox; provider_error_type=%s status_code=%s",
+                    type(e).__name__,
+                    e.status_code,
+                )
+                return "Error: Sandbox command execution failed"
             except Exception as e:
-                logger.error(f"Failed to execute command with injected env in sandbox: {e}")
-                return f"Error: {e}"
+                logger.error(
+                    "Failed to execute command with injected env in sandbox; provider_error_type=%s",
+                    type(e).__name__,
+                )
+                return "Error: Sandbox command execution failed"
 
     def read_file(self, path: str) -> str:
         """Read the content of a file in the sandbox.

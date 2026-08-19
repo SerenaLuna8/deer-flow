@@ -211,6 +211,9 @@ async def prepare_replay_runtime_catalog(
                 "memory": value.memory.model_copy(
                     update={"enabled": False},
                 ),
+                "vision_bridge": value.vision_bridge.model_copy(
+                    update={"model_name": None},
+                ),
             },
         )
         if desired != value:

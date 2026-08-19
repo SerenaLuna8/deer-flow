@@ -59,6 +59,33 @@ class SkillRuntimeNameConflict(AssetConflict):
     public_message = "A runtime-visible Skill already uses this name"
 
 
+class SkillSecretDeclarationInvalid(AssetValidationFailed):
+    """A Skill secret declaration cannot be parsed or safely patched.
+
+    ``diagnostics`` contains only the bounded, public-safe structured
+    diagnostics produced by the canonical frontmatter parser.  The exception
+    deliberately never stores the submitted SKILL.md source.
+    """
+
+    code = "SKILL_SECRET_DECLARATION_INVALID"
+    public_message = "Skill secret declaration is invalid"
+
+    def __init__(
+        self,
+        request_id: str,
+        diagnostics: tuple[object, ...] = (),
+    ) -> None:
+        self.diagnostics = tuple(diagnostics)
+        super().__init__(request_id)
+
+
+class SkillFrontmatterSourceStale(AssetConflict):
+    """The submitted form patch no longer targets the caller's exact buffer."""
+
+    code = "SKILL_FRONTMATTER_SOURCE_STALE"
+    public_message = "Skill frontmatter source changed"
+
+
 class AgentDesignSecretDetected(AssetValidationFailed):
     """Agent Builder input contained secret-like material."""
 
@@ -166,3 +193,24 @@ class SkillPublishBaseStale(SharedAssetError):
     code = "SKILL_PUBLISH_BASE_STALE"
     status_code = 409
     public_message = "The version being published was not based on the live published version"
+
+
+class SkillCredentialBindingsIncomplete(AssetValidationFailed):
+    """An active Skill version would be published without every required secret."""
+
+    code = "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE"
+    public_message = "Required Skill credential bindings are incomplete"
+
+
+class SkillCredentialBindingInvalid(AssetValidationFailed):
+    """A Skill binding name or Credential schema is incompatible."""
+
+    code = "SKILL_CREDENTIAL_BINDING_INVALID"
+    public_message = "Skill credential binding is invalid"
+
+
+class SkillCredentialSelectionStale(AssetConflict):
+    """A selected Credential or publish-plan revision is no longer current."""
+
+    code = "SKILL_CREDENTIAL_SELECTION_STALE"
+    public_message = "Skill credential selection is stale"

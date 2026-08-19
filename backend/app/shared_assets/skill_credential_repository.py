@@ -9,6 +9,7 @@ from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
+from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetForbidden, AssetNotFound
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -46,6 +47,16 @@ class SkillCredentialRepository:
             raise AssetForbidden(getattr(context, "request_id", "unknown"))
 
     @staticmethod
+    def _require_binding_actor(
+        context: ProjectContext | SystemAssetGovernanceContext,
+    ) -> None:
+        if isinstance(context, ProjectContext):
+            return
+        if isinstance(context, SystemAssetGovernanceContext) and context.project_id is not None:
+            return
+        raise AssetForbidden(getattr(context, "request_id", "unknown"))
+
+    @staticmethod
     def _project_context_exists(context: ProjectContext):
         return exists(
             select(1)
@@ -57,6 +68,24 @@ class SkillCredentialRepository:
                 ProjectMembershipRow.user_id == str(context.user_id),
                 ProjectMembershipRow.status == "active",
                 ProjectMembershipRow.version == context.membership_version,
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+            )
+        )
+
+    @classmethod
+    def _binding_project_exists(
+        cls,
+        context: ProjectContext | SystemAssetGovernanceContext,
+    ):
+        cls._require_binding_actor(context)
+        if isinstance(context, ProjectContext):
+            return cls._project_context_exists(context)
+        return exists(
+            select(1)
+            .select_from(ProjectRow)
+            .where(
                 ProjectRow.id == context.project_id,
                 ProjectRow.status == "active",
                 ProjectRow.is_suspended.is_(False),
@@ -139,20 +168,64 @@ class SkillCredentialRepository:
             raise AssetNotFound(context.request_id)
         return SkillCredentialTarget(asset, version)
 
-    async def get_config(
+    async def lock_configurable_project_skill_version(
         self,
         context: ProjectContext,
         skill_id: uuid.UUID,
         skill_version_id: uuid.UUID,
         *,
+        read: bool = False,
+    ) -> SkillCredentialTarget:
+        """Lock one exact project Skill version after the project gate.
+
+        Callers acquire ``lock_project`` first. Keeping that gate separate lets
+        a composite publish transaction reuse the Project lock already held by
+        ``SkillRepository`` instead of attempting an unsafe lock upgrade.
+        """
+
+        self._require_actor(context)
+        asset_statement = (
+            select(SkillRow)
+            .where(
+                SkillRow.id == skill_id,
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
+                SkillRow.status.in_(("active", "suspended")),
+                self._project_context_exists(context),
+            )
+            .with_for_update(read=read, of=SkillRow)
+        )
+        asset = (await self.session.execute(asset_statement)).scalar_one_or_none()
+        if asset is None:
+            raise AssetNotFound(context.request_id)
+        version_statement = (
+            select(SkillVersionRow)
+            .where(
+                SkillVersionRow.id == skill_version_id,
+                SkillVersionRow.skill_id == asset.id,
+                SkillVersionRow.revoked_at.is_(None),
+            )
+            .with_for_update(read=read, of=SkillVersionRow)
+        )
+        version = (await self.session.execute(version_statement)).scalar_one_or_none()
+        if version is None:
+            raise AssetNotFound(context.request_id)
+        return SkillCredentialTarget(asset, version)
+
+    async def get_config(
+        self,
+        context: ProjectContext | SystemAssetGovernanceContext,
+        skill_id: uuid.UUID,
+        skill_version_id: uuid.UUID,
+        *,
         for_update: bool = False,
     ) -> ProjectSkillCredentialConfigRow | None:
-        self._require_actor(context)
+        self._require_binding_actor(context)
         statement = select(ProjectSkillCredentialConfigRow).where(
             ProjectSkillCredentialConfigRow.project_id == context.project_id,
             ProjectSkillCredentialConfigRow.skill_id == skill_id,
             ProjectSkillCredentialConfigRow.skill_version_id == skill_version_id,
-            self._project_context_exists(context),
+            self._binding_project_exists(context),
         )
         if for_update:
             statement = statement.with_for_update(
@@ -162,13 +235,13 @@ class SkillCredentialRepository:
 
     async def active_bindings(
         self,
-        context: ProjectContext,
+        context: ProjectContext | SystemAssetGovernanceContext,
         skill_id: uuid.UUID,
         skill_version_id: uuid.UUID,
         *,
         for_update: bool = False,
     ) -> tuple[ProjectSkillCredentialBindingRow, ...]:
-        self._require_actor(context)
+        self._require_binding_actor(context)
         statement = (
             select(ProjectSkillCredentialBindingRow)
             .where(
@@ -176,7 +249,7 @@ class SkillCredentialRepository:
                 ProjectSkillCredentialBindingRow.skill_id == skill_id,
                 ProjectSkillCredentialBindingRow.skill_version_id == skill_version_id,
                 ProjectSkillCredentialBindingRow.status == "active",
-                self._project_context_exists(context),
+                self._binding_project_exists(context),
             )
             .order_by(
                 ProjectSkillCredentialBindingRow.secret_name,
@@ -224,10 +297,10 @@ class SkillCredentialRepository:
 
     async def lock_selected_credentials(
         self,
-        context: ProjectContext,
+        context: ProjectContext | SystemAssetGovernanceContext,
         version_ids: Sequence[uuid.UUID],
     ) -> Mapping[uuid.UUID, EligibleSkillCredentialRecord]:
-        self._require_actor(context)
+        self._require_binding_actor(context)
         ordered_ids = tuple(
             sorted(
                 {uuid.UUID(str(version_id)) for version_id in version_ids},
@@ -253,7 +326,7 @@ class SkillCredentialRepository:
                         CredentialRow.scope == "project",
                         CredentialRow.project_id == context.project_id,
                         CredentialRow.is_delete.is_(False),
-                        self._project_context_exists(context),
+                        self._binding_project_exists(context),
                     )
                 )
             ).all()
@@ -274,7 +347,7 @@ class SkillCredentialRepository:
                         CredentialRow.scope == "project",
                         CredentialRow.project_id == context.project_id,
                         CredentialRow.is_delete.is_(False),
-                        self._project_context_exists(context),
+                        self._binding_project_exists(context),
                     )
                     .with_for_update(of=CredentialRow)
                 )
@@ -333,6 +406,41 @@ class SkillCredentialRepository:
                 )
             )
         )
+
+    async def lock_active_envelopes(
+        self,
+        credential_version_ids: Sequence[uuid.UUID],
+    ) -> frozenset[uuid.UUID]:
+        ordered_ids = tuple(
+            sorted(
+                {uuid.UUID(str(version_id)) for version_id in credential_version_ids},
+                key=lambda value: value.int,
+            )
+        )
+        if not ordered_ids:
+            return frozenset()
+        rows = tuple(
+            (
+                await self.session.execute(
+                    select(CredentialEnvelopeRow)
+                    .where(
+                        CredentialEnvelopeRow.credential_version_id.in_(
+                            ordered_ids,
+                        ),
+                        CredentialEnvelopeRow.is_active.is_(True),
+                    )
+                    .order_by(
+                        CredentialEnvelopeRow.credential_version_id,
+                        CredentialEnvelopeRow.envelope_generation,
+                        CredentialEnvelopeRow.id,
+                    )
+                    .with_for_update(of=CredentialEnvelopeRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        return frozenset(uuid.UUID(str(row.credential_version_id)) for row in rows)
 
     async def create_config(
         self,
