@@ -44,6 +44,15 @@ def _files(name: str, *, body: str = "Use reviewed inputs.\n") -> tuple[SkillArc
     return (SkillArchiveFile("SKILL.md", content, "text/markdown"),)
 
 
+def _files_with_required_secret(
+    name: str,
+    *,
+    body: str = "Use the mapped credential.\n",
+) -> tuple[SkillArchiveFile, ...]:
+    content = (f"---\nname: {name}\ndescription: Credential demo skill\nrequired-secrets:\n  - name: TARGET_API_KEY\n    optional: false\n---\n\n{body}").encode()
+    return (SkillArchiveFile("SKILL.md", content, "text/markdown"),)
+
+
 def _seed_asset(store: _Store, actor: ProjectContext, *, slug: str) -> SkillRow:
     now = datetime.now(UTC)
     asset = SkillRow(
@@ -193,6 +202,12 @@ class _Repository:
         await self.session.flush()
         return row
 
+    async def list_project_visible(
+        self,
+        context: ProjectContext,
+    ) -> tuple[SkillRow, ...]:
+        return tuple(row for row in self.store.assets.values() if row.project_id == context.project_id)
+
     async def get_project_asset(
         self,
         context: ProjectContext,
@@ -292,6 +307,23 @@ class _Quota:
         session.store.reservations.append(reservation)
 
 
+class _SkillCredentialRepository:
+    def __init__(self, _session: _Session) -> None:
+        pass
+
+    async def get_config(self, *_args: object, **_kwargs: object):
+        return None
+
+    async def active_bindings(self, *_args: object, **_kwargs: object):
+        return ()
+
+    async def lock_selected_credentials(self, *_args: object, **_kwargs: object):
+        return {}
+
+    async def lock_active_envelopes(self, *_args: object, **_kwargs: object):
+        return frozenset()
+
+
 class _GovernanceSink:
     async def append_project(self, session: _Session, **kwargs: object) -> None:
         session.store.governance.append(dict(kwargs))
@@ -313,6 +345,11 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     session = _Session(store)
     quota = _Quota()
     monkeypatch.setattr(skill_service_module, "SkillRepository", _Repository)
+    monkeypatch.setattr(
+        skill_service_module,
+        "SkillCredentialRepository",
+        _SkillCredentialRepository,
+    )
     service = skill_service_module.SkillService(
         lambda: session,
         governance_sink=_GovernanceSink(),
@@ -365,6 +402,99 @@ async def _create_draft(
 
 
 @pytest.mark.asyncio
+async def test_initial_archive_create_allows_required_secret_without_binding(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+
+    result = await harness.service.import_project_archives_atomic(
+        actor,
+        (
+            skill_service_module.ProjectSkillArchiveImport(
+                files=_files_with_required_secret("archive-required-skill"),
+            ),
+        ),
+        execute=True,
+    )
+
+    assert result.created_count == 1
+    created = next(iter(harness.store.assets.values()))
+    version = harness.store.versions[created.current_published_version_id]
+    assert created.status == "suspended"
+    assert created.version == 3
+    assert version.row.workflow_status == WorkflowStatus.PUBLISHED.value
+    assert version.row.secret_requirements == [
+        {"name": "TARGET_API_KEY", "optional": False},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_builder_preview_create_allows_required_secret_without_binding(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    preview = await harness.service.preview_archive(
+        actor,
+        _files_with_required_secret("builder-required-skill"),
+    )
+
+    result = await harness.service.create_project_from_preview_in_session(
+        harness.session,
+        actor,
+        skill_service_module.CreateSkill(
+            slug="builder-required-skill",
+            display_name="Builder Required Skill",
+        ),
+        preview,
+    )
+
+    created = harness.store.assets[result.asset.id]
+    assert created.status == "suspended"
+    assert created.current_published_version_id == result.version.id
+    assert result.version.workflow_status is WorkflowStatus.PUBLISHED
+    assert result.version.secret_requirements == (
+        skill_service_module.SkillSecretRequirementView(
+            name="TARGET_API_KEY",
+            optional=False,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_archive_replace_does_not_reuse_incomplete_create_exception(
+    harness: _Harness,
+) -> None:
+    actor = _admin_context()
+    original = _files_with_required_secret("archive-replace-required")
+    await harness.service.import_project_archives_atomic(
+        actor,
+        (skill_service_module.ProjectSkillArchiveImport(files=original),),
+        execute=True,
+    )
+    created = next(iter(harness.store.assets.values()))
+    original_version_id = created.current_published_version_id
+
+    with pytest.raises(SkillCredentialBindingsIncomplete):
+        await harness.service.import_project_archives_atomic(
+            actor,
+            (
+                skill_service_module.ProjectSkillArchiveImport(
+                    files=_files_with_required_secret(
+                        "archive-replace-required",
+                        body="Use the mapped credential in revision two.\n",
+                    ),
+                ),
+            ),
+            execute=True,
+            replace=True,
+        )
+
+    assert created.current_published_version_id == original_version_id
+    assert created.version == 3
+    assert tuple(harness.store.versions) == (original_version_id,)
+
+
+@pytest.mark.asyncio
 async def test_publish_preserves_version_payload_history_and_moves_current_pointer(
     harness: _Harness,
 ) -> None:
@@ -379,6 +509,8 @@ async def test_publish_preserves_version_payload_history_and_moves_current_point
         asset.id,
         first_draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     assert first.workflow_status is WorkflowStatus.PUBLISHED
 
@@ -398,6 +530,8 @@ async def test_publish_preserves_version_payload_history_and_moves_current_point
         asset.id,
         second.id,
         expected_asset_version=4,
+        expected_payload_checksum=second_record.row.payload_checksum,
+        expected_binding_revision=0,
     )
 
     persisted_asset = harness.store.assets[asset.id]
@@ -426,6 +560,8 @@ async def test_suspended_skill_can_publish_activate_and_suspend(
         created.id,
         draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     activated = await harness.service.activate(
         actor,
@@ -467,6 +603,8 @@ async def test_activation_reports_incomplete_required_credential_bindings(
         created.id,
         draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     draft.row.secret_requirements = [{"name": "API_KEY", "optional": False}]
 
@@ -505,6 +643,8 @@ async def test_project_skill_activation_rejects_enabled_system_name_conflict(
         created.id,
         draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     harness.store.system_skill_name_conflict = True
 
@@ -542,6 +682,8 @@ async def test_stale_publish_expected_version_has_no_side_effects(
             created.id,
             draft.row.id,
             expected_asset_version=1,
+            expected_payload_checksum=draft.row.payload_checksum,
+            expected_binding_revision=0,
         )
 
     assert exc_info.value.request_id == actor.request_id
@@ -626,6 +768,8 @@ async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
         asset.id,
         first_draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     stale = await harness.service.create_version_from_archive(
         actor,
@@ -644,6 +788,8 @@ async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
         asset.id,
         live.id,
         expected_asset_version=5,
+        expected_payload_checksum=harness.store.versions[live.id].row.payload_checksum,
+        expected_binding_revision=0,
     )
 
     with pytest.raises(SkillPublishBaseStale) as exc_info:
@@ -652,6 +798,8 @@ async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
             asset.id,
             stale.id,
             expected_asset_version=6,
+            expected_payload_checksum=harness.store.versions[stale.id].row.payload_checksum,
+            expected_binding_revision=0,
         )
 
     persisted = harness.store.assets[asset.id]
@@ -665,6 +813,8 @@ async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
         stale.id,
         expected_asset_version=6,
         acknowledge_stale_base=True,
+        expected_payload_checksum=harness.store.versions[stale.id].row.payload_checksum,
+        expected_binding_revision=0,
     )
     assert published_stale.id == stale.id
     assert published_stale.workflow_status is WorkflowStatus.PUBLISHED
@@ -687,6 +837,8 @@ async def test_create_project_version_from_preview_pins_supersedes_without_publi
         asset.id,
         first_draft.row.id,
         expected_asset_version=2,
+        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_binding_revision=0,
     )
     preview = await harness.service.preview_archive(
         actor,

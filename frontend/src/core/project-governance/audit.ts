@@ -34,6 +34,7 @@ export const auditActionSchema = z.enum([
   "asset.published",
   "asset.deprecated",
   "asset.deleted",
+  "asset.exported",
   "asset.bound",
   "asset.unbound",
   "asset.credential_created",
@@ -97,6 +98,7 @@ const assetOperationSchema = z.enum([
   "skill.version.create",
   "skill.publish",
   "skill.version.revoke",
+  "skill.export",
   "skill.delete",
   "skill.activate",
   "skill.credential_bindings.configure",
@@ -130,7 +132,10 @@ const versionedAgentOperations = new Set([
   "agent.publish",
   "agent.activate",
 ]);
-const versionedSkillOperations = new Set(["skill.version.revoke"]);
+const versionedSkillOperations = new Set([
+  "skill.version.revoke",
+  "skill.export",
+]);
 const currentAssetMetadataSchema = z
   .object({
     asset_kind: z.enum(["agent", "skill", "mcp"]),
@@ -419,6 +424,7 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "asset.published": assetMetadataSchema,
   "asset.deprecated": assetMetadataSchema,
   "asset.deleted": assetMetadataSchema,
+  "asset.exported": assetMetadataSchema,
   "asset.bound": assetMetadataSchema,
   "asset.unbound": assetMetadataSchema,
   "asset.credential_created": assetMetadataSchema,

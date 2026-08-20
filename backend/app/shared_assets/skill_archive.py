@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import gzip as gzip_lib
 import io
 import mimetypes
@@ -40,6 +41,11 @@ _ZIP64_EOCD_FIXED_BYTES = 56
 _ZIP64_EOCD_LOCATOR_BYTES = 20
 _ZIP_CENTRAL_DIRECTORY_HEADER_BYTES = 46
 _MAX_ZIP_CENTRAL_DIRECTORY_BYTES = 32 * 1024 * 1024
+_DISTRIBUTION_EXCLUDED_DIRS = frozenset({"__pycache__", "node_modules"})
+_DISTRIBUTION_ROOT_EXCLUDED_DIRS = frozenset({"evals"})
+_DISTRIBUTION_EXCLUDED_FILES = frozenset({".DS_Store"})
+_DISTRIBUTION_EXCLUDED_GLOBS = ("*.pyc",)
+_DISTRIBUTION_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 
 
 class _ArchiveStreamLimitExceeded(Exception):
@@ -487,6 +493,84 @@ def _media_type(path: str) -> str:
     return guessed or "application/octet-stream"
 
 
+def _distribution_file_is_excluded(path: str) -> bool:
+    parts = PurePosixPath(path).parts
+    if not parts:
+        return True
+    if any(part in _DISTRIBUTION_EXCLUDED_DIRS for part in parts):
+        return True
+    if parts[0] in _DISTRIBUTION_ROOT_EXCLUDED_DIRS:
+        return True
+    name = parts[-1]
+    if name in _DISTRIBUTION_EXCLUDED_FILES:
+        return True
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in _DISTRIBUTION_EXCLUDED_GLOBS)
+
+
+def dump_skill_distribution_zip(
+    files: tuple[SkillArchiveFile, ...],
+    *,
+    request_id: str,
+) -> bytes:
+    """Encode one deterministic, root-layout Skill distribution ZIP."""
+
+    try:
+        snapshot = tuple(files)
+    except TypeError:
+        raise _invalid(request_id) from None
+    if not snapshot or len(snapshot) > MAX_SKILL_ARCHIVE_FILES:
+        raise _invalid(request_id)
+
+    total_bytes = 0
+    selected: list[SkillArchiveFile] = []
+    identities: set[str] = set()
+    for item in snapshot:
+        if not isinstance(item, SkillArchiveFile) or not isinstance(item.content, bytes):
+            raise _invalid(request_id)
+        path = _canonical_member_path(item.path, request_id)
+        if path != item.path:
+            raise _invalid(request_id)
+        identity = unicodedata.normalize("NFC", path.casefold())
+        if identity in identities:
+            raise _invalid(request_id)
+        identities.add(identity)
+        total_bytes += len(item.content)
+        if len(item.content) > MAX_SKILL_ARCHIVE_FILE_BYTES or total_bytes > MAX_SKILL_ARCHIVE_BYTES:
+            raise _limit_exceeded(request_id)
+        if not _distribution_file_is_excluded(path):
+            selected.append(item)
+
+    selected.sort(key=lambda item: item.path)
+    if [item.path for item in selected].count("SKILL.md") != 1:
+        raise _invalid(request_id)
+
+    buffer = io.BytesIO()
+    try:
+        with zipfile.ZipFile(
+            buffer,
+            mode="w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as archive:
+            for item in selected:
+                info = zipfile.ZipInfo(
+                    item.path,
+                    date_time=_DISTRIBUTION_ZIP_TIMESTAMP,
+                )
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                archive.writestr(
+                    info,
+                    item.content,
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+    except (OSError, RuntimeError, ValueError, zipfile.LargeZipFile):
+        raise _invalid(request_id) from None
+    return buffer.getvalue()
+
+
 def load_skill_archive_package(
     payload: bytes,
     *,
@@ -525,5 +609,6 @@ __all__ = [
     "MAX_SKILL_ARCHIVE_FILES",
     "MAX_SKILL_ARCHIVE_MEMBERS",
     "MAX_SKILL_ARCHIVE_UPLOAD_BYTES",
+    "dump_skill_distribution_zip",
     "load_skill_archive_package",
 ]

@@ -30,6 +30,10 @@ import {
 import { AdminPage, AdminSection } from "@/components/admin/ui/admin-page";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import {
+  skillExportBlockReason,
+  SkillExportButton,
+} from "@/components/assets/skill-export-button";
+import {
   CredentialDeleteDialog,
   createCredentialDeleteSnapshot,
   type CredentialDeleteSnapshot,
@@ -64,11 +68,13 @@ import {
   adminAssetVersionsKey,
   createAdminCredential,
   deleteAdminCredential,
+  exportAdminSkillVersion,
   migrateAdminCredentialGrants,
   replaceAdminCredential,
   revokeAdminCredential,
   useAdminAssets,
   useAdminAssetVersions,
+  useAdminCredentialMigrationStatus,
   useConfigureAdminMcpCredentialGrants,
   type AdminAssetList,
   type AdminCredentialList,
@@ -78,7 +84,6 @@ import {
   type ConfigureSystemMcpCredentialGrantsInput,
   type CreateCredentialInput,
   type CredentialMetadata,
-  type CredentialPendingMigration,
   type ReplaceCredentialInput,
 } from "@/core/shared-assets";
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
@@ -86,6 +91,7 @@ import { cn } from "@/lib/utils";
 
 import {
   CredentialGrantMigrationDialog,
+  CredentialMigrationReferenceList,
   CredentialRevokeDialog,
   CredentialSecretDialog,
 } from "./admin-asset-dialogs";
@@ -96,6 +102,8 @@ import {
   adminCredentialTypeLabel,
   adminMcpTransportLabel,
   adminAssetErrorMessage,
+  credentialMigrationActionVisible,
+  credentialMigrationCompleteMessage,
   credentialPendingMigrationMessage,
   filterAndSortAdminAssets,
   filterSystemAdminCatalogItems,
@@ -269,7 +277,13 @@ function ErrorNotice({ error }: { error: unknown }) {
   );
 }
 
-function versionStatus(version: AssetVersion) {
+export function adminAssetVersionStatus(version: AssetVersion) {
+  if (
+    "governance_status" in version &&
+    version.governance_status === "revoked"
+  ) {
+    return "revoked";
+  }
   return "workflow_status" in version
     ? version.workflow_status
     : version.status;
@@ -497,23 +511,33 @@ export function VersionTimeline({
   currentVersionId,
   configureCredentialGrantsVersionId,
   onConfigureCredentialGrants,
+  selectedVersionId: controlledSelectedVersionId,
+  onSelectedVersionChange,
 }: {
   versions: AssetVersion[];
   kind?: AssetListKind;
   currentVersionId?: string | null;
   configureCredentialGrantsVersionId?: string | null;
   onConfigureCredentialGrants?: (version: McpVersion) => void;
+  selectedVersionId?: string | null;
+  onSelectedVersionChange?: (versionId: string) => void;
 }) {
   const { locale, t } = useI18n();
   const { models } = useModels({
     enabled: versions.some((version) => "agent_id" in version),
   });
-  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
+  const [internalSelectedVersionId, setInternalSelectedVersionId] = useState<
+    string | null
+  >(
     () =>
       versions.find((version) => version.id === currentVersionId)?.id ??
       versions[0]?.id ??
       null,
   );
+  const selectedVersionId =
+    controlledSelectedVersionId === undefined
+      ? internalSelectedVersionId
+      : controlledSelectedVersionId;
   const selectedVersion =
     versions.find((version) => version.id === selectedVersionId) ??
     versions[0] ??
@@ -551,7 +575,7 @@ export function VersionTimeline({
     return (
       <div className="min-w-0 space-y-3">
         <div className="flex items-center gap-3">
-          <AssetStatusBadge status={versionStatus(version)} />
+          <AssetStatusBadge status={adminAssetVersionStatus(version)} />
           <time className="text-muted-foreground ml-auto text-xs">
             {new Date(version.created_at).toLocaleString(locale)}
           </time>
@@ -587,7 +611,7 @@ export function VersionTimeline({
                   {new Date(version.created_at).toLocaleString(locale)}
                 </time>
               </div>
-              <AssetStatusBadge status={versionStatus(version)} />
+              <AssetStatusBadge status={adminAssetVersionStatus(version)} />
               {canSwitchVersions ? (
                 <ChevronRightIcon
                   aria-hidden
@@ -607,7 +631,10 @@ export function VersionTimeline({
               data-testid={`admin-version-row-${version.id}`}
               aria-pressed={selected}
               className={`${rowClassName} hover:bg-muted/40 focus-visible:ring-ring transition-colors focus-visible:ring-2 focus-visible:outline-none`}
-              onClick={() => setSelectedVersionId(version.id)}
+              onClick={() => {
+                setInternalSelectedVersionId(version.id);
+                onSelectedVersionChange?.(version.id);
+              }}
             >
               {content}
             </button>
@@ -827,6 +854,7 @@ function AdminMcpCredentialGrantDialog({
 
 export function CredentialMetadataCard({
   credential,
+  migrationActionVisible,
   pending = false,
   onReplace,
   onMigrate,
@@ -834,6 +862,7 @@ export function CredentialMetadataCard({
   onDelete,
 }: {
   credential: CredentialMetadata;
+  migrationActionVisible: boolean;
   pending?: boolean;
   onReplace: () => void;
   onMigrate: () => void;
@@ -889,7 +918,7 @@ export function CredentialMetadataCard({
               >
                 {t.adminAssets.common.replaceCredential}
               </Button>
-              {credential.version > 1 ? (
+              {migrationActionVisible ? (
                 <Button
                   type="button"
                   size="sm"
@@ -1001,6 +1030,9 @@ function SelectedAssetDetail({
   const history = useAdminAssetVersions(accountId, kind, item.id);
   const configureGrants = useConfigureAdminMcpCredentialGrants(accountId);
   const [grantVersion, setGrantVersion] = useState<McpVersion | null>(null);
+  const [selectedVersionId, setSelectedVersionId] = useState<string | null>(
+    null,
+  );
   const credentialCatalog = useAdminAssets(
     accountId,
     "credentials",
@@ -1009,32 +1041,110 @@ function SelectedAssetDetail({
   const [replaceOpen, setReplaceOpen] = useState(false);
   const [revokeOpen, setRevokeOpen] = useState(false);
   const [migrationOpen, setMigrationOpen] = useState(false);
-  const [pendingMigration, setPendingMigration] =
-    useState<CredentialPendingMigration | null>(null);
   const [deleteSnapshot, setDeleteSnapshot] =
     useState<CredentialDeleteSnapshot | null>(null);
 
   const credential = isCredentialMetadata(item) ? item : null;
   const asset = isCredentialMetadata(item) ? null : item;
+  const migrationStatus = useAdminCredentialMigrationStatus(
+    accountId,
+    credential?.id ?? "",
+    credential?.current_version_id ?? "",
+    Boolean(
+      credential &&
+      secureWrite &&
+      credential.status === "active" &&
+      credential.version > 1,
+    ),
+  );
+  const pendingMigration = migrationStatus.data?.data ?? null;
+  const versions = history.data?.data ?? [];
+  const selectedVersion =
+    versions.find((version) => version.id === selectedVersionId) ??
+    versions.find(
+      (version) =>
+        version.id ===
+        (asset?.current_published_version_id ?? credential?.current_version_id),
+    ) ??
+    versions[0] ??
+    null;
 
   return (
     <div className="min-w-0 flex-1 overflow-y-auto px-5 pb-8">
       <section className="min-w-0 space-y-4 py-5">
-        {credential && secureWrite ? (
-          <CredentialWriteNotice
-            message={credentialPendingMigrationMessage(
-              pendingMigration,
-              t.adminAssets.common,
-            )}
-            action={{
-              label: t.adminAssets.common.migrateReferences,
-              disabled: secureWrite.pending,
-              onClick: () => {
-                secureWrite.clearError();
-                setMigrationOpen(true);
-              },
-            }}
-          />
+        {asset && kind === "skills" ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <SkillExportButton
+              versionNumber={selectedVersion?.version_number ?? null}
+              blockReason={skillExportBlockReason({
+                hasVersion: selectedVersion !== null,
+                loading: history.isLoading,
+                revoked:
+                  selectedVersion !== null &&
+                  "governance_status" in selectedVersion &&
+                  selectedVersion.governance_status === "revoked",
+                unpublished:
+                  selectedVersion !== null &&
+                  "workflow_status" in selectedVersion &&
+                  selectedVersion.workflow_status !== "published",
+              })}
+              download={() => {
+                if (!selectedVersion) {
+                  return Promise.reject(
+                    new Error("No persisted Skill version"),
+                  );
+                }
+                return exportAdminSkillVersion(item.id, selectedVersion.id);
+              }}
+            />
+          </div>
+        ) : null}
+        {credential && secureWrite && credential.version > 1 ? (
+          <div className="mb-6 space-y-3">
+            {migrationStatus.isLoading ? (
+              <CredentialWriteNotice
+                message={t.adminAssets.common.credentialMigrationChecking}
+              />
+            ) : migrationStatus.error || !migrationStatus.data ? (
+              <CredentialWriteNotice
+                message={t.adminAssets.common.credentialMigrationUnavailable}
+                action={{
+                  label: t.adminAssets.common.retry,
+                  onClick: () => void migrationStatus.refetch(),
+                }}
+              />
+            ) : pendingMigration ? (
+              <>
+                <CredentialWriteNotice
+                  message={
+                    credentialPendingMigrationMessage(
+                      pendingMigration,
+                      t.adminAssets.common,
+                    ) ??
+                    credentialMigrationCompleteMessage(
+                      pendingMigration,
+                      t.adminAssets.common,
+                    )
+                  }
+                  action={
+                    credentialMigrationActionVisible(pendingMigration)
+                      ? {
+                          label: t.adminAssets.common.migrateReferences,
+                          disabled: secureWrite.pending,
+                          onClick: () => {
+                            secureWrite.clearError();
+                            setMigrationOpen(true);
+                          },
+                        }
+                      : undefined
+                  }
+                />
+                <CredentialMigrationReferenceList
+                  pendingMigration={pendingMigration}
+                />
+              </>
+            ) : null}
+          </div>
         ) : null}
         {asset ? (
           <dl className="grid min-w-0 gap-4 rounded-xl border p-4 sm:grid-cols-2">
@@ -1068,6 +1178,9 @@ function SelectedAssetDetail({
         ) : credential && secureWrite ? (
           <CredentialMetadataCard
             credential={credential}
+            migrationActionVisible={credentialMigrationActionVisible(
+              pendingMigration,
+            )}
             pending={secureWrite.pending}
             onReplace={() => {
               secureWrite.clearError();
@@ -1141,6 +1254,8 @@ function SelectedAssetDetail({
             onConfigureCredentialGrants={
               kind === "mcp-servers" ? setGrantVersion : undefined
             }
+            selectedVersionId={selectedVersion?.id ?? null}
+            onSelectedVersionChange={setSelectedVersionId}
           />
         )}
       </section>
@@ -1187,14 +1302,9 @@ function SelectedAssetDetail({
             errorMessage={secureWrite.errorMessage}
             onOpenChange={setReplaceOpen}
             onReplace={(input: ReplaceCredentialInput) => {
-              setPendingMigration(null);
               void secureWrite
                 .run(async () => {
-                  const replaced = await replaceAdminCredential(
-                    credential.id,
-                    input,
-                  );
-                  setPendingMigration(replaced.pending_migration);
+                  await replaceAdminCredential(credential.id, input);
                 })
                 .then((success) => {
                   if (!success) return;
@@ -1206,6 +1316,17 @@ function SelectedAssetDetail({
           <CredentialGrantMigrationDialog
             open={migrationOpen}
             credentialName={credential.display_name}
+            pendingMigration={
+              pendingMigration ?? {
+                total: 0,
+                mcp_grant_count: 0,
+                skill_binding_count: 0,
+                system_model_count: 0,
+                references: [],
+                current_reference_count: 0,
+                current_references: [],
+              }
+            }
             pending={secureWrite.pending}
             onOpenChange={setMigrationOpen}
             onConfirm={() => {
@@ -1217,9 +1338,9 @@ function SelectedAssetDetail({
                     }),
                   t.adminAssets.common.migrationSuccess,
                 )
-                .then((success) => {
+                .then(async (success) => {
                   if (!success) return;
-                  setPendingMigration(null);
+                  await migrationStatus.refetch();
                   setMigrationOpen(false);
                 });
             }}

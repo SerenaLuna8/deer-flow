@@ -1,14 +1,14 @@
 # AGENTS.md
 
-This file is the repository-level guide for coding agents. Keep it short and
-navigational. Module-specific architecture and invariants belong to:
+This file owns repository orientation and cross-cutting gates. Read the owning
+guide before changing a module:
 
 - [backend/AGENTS.md](backend/AGENTS.md) — runtime, authorization, persistence,
   configuration, assets, and backend tests.
 - [frontend/AGENTS.md](frontend/AGENTS.md) — routes, client scope, data flow,
   UI ownership, and frontend tests.
 
-For setup and operator-facing usage, read [README.md](README.md) and
+For setup, local operation, and deployment, read [README.md](README.md) and
 [Install.md](Install.md).
 
 > The three repository `AGENTS.md` files are development-time guidance only.
@@ -17,7 +17,24 @@ For setup and operator-facing usage, read [README.md](README.md) and
 > fields, not these filesystem guides. Likewise, `skills/public/*/SKILL.md`
 > contains runtime Skill assets; local coding-agent skills do not.
 
-## System overview
+## Agent skills
+
+### Issue tracker
+
+Track issues and specs in this repository's GitHub Issues using `gh`. See
+`docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the five canonical triage labels without remapping. See
+`docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Use the single-context domain-doc layout: root `CONTEXT.md` and `docs/adr/`.
+See `docs/agents/domain.md`.
+
+## Architecture boundaries
 
 ActWeave is a project-first full-stack agent system. Nginx is the single browser
 entry, Gateway owns HTTP admission and authorization, Worker alone executes
@@ -36,7 +53,7 @@ Gateway never executes an Agent graph. Worker exposes no browser business API.
 Provisioner is a Sandbox provider, not a Kubernetes deployment target for the
 complete application.
 
-## Repository map
+## Ownership map
 
 | Path                        | Owner                                                             |
 | --------------------------- | ----------------------------------------------------------------- |
@@ -46,7 +63,6 @@ complete application.
 | `docker/`                   | Compose, Nginx, and optional Sandbox Provisioner                  |
 | `skills/public/`            | Sole source of packaged System Skill definitions                  |
 | `scripts/`                  | Setup, diagnostics, local runtime, and Compose deployment helpers |
-| `backend/docs/`             | Current backend architecture, API, and operations references      |
 | `config.example.yaml`       | Root runtime configuration template                               |
 
 Runtime configuration is resolved from the repository-root `config.yaml` (or an
@@ -59,30 +75,19 @@ Fresh schema installation and explicit upgrades are separate operator actions.
 The runtime never creates, upgrades, stamps, or repairs the application schema;
 see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 
-## Command boundary
+## Command boundaries
 
-Run whole-application commands from the repository root:
-
-| Command                   | Purpose                                                           |
-| ------------------------- | ----------------------------------------------------------------- |
-| `make setup`              | Interactive local setup                                           |
-| `make doctor`             | Check tools, configuration, and database readiness                |
-| `make install`            | Install backend and frontend dependencies                         |
-| `make setup-db`           | Initialize a new empty PostgreSQL target                          |
-| `make upgrade-db`         | Explicitly upgrade a known older schema                            |
-| `make check-db`           | Read-only schema/readiness check                                  |
-| `make upgrade-system-assets` | Apply packaged System Asset releases during maintenance        |
-| `make dev` / `make start` | Start the local full stack                                        |
-| `make stop`               | Stop local services                                               |
-| `make up` / `make down`   | Build/start or stop the Compose stack                             |
-| `make support-bundle`     | Generate a redacted diagnostic bundle and internal incident draft |
-| `make test`               | Run the backend core suite with isolated test databases           |
-
-Use `make help` for operator and maintenance commands. Run module commands from
-their module directories, for example `cd backend && make lint` or
-`cd frontend && pnpm check`.
+- Run whole-application commands from the repository root; use `make help` as
+  the current command index.
+- Run backend targets from `backend/` and frontend targets from `frontend/`, for
+  example `make lint` and `pnpm check`.
+- Treat `make setup-db`, `make upgrade-db`, and
+  `make upgrade-system-assets` as explicit operator actions, not runtime startup
+  steps. Use `make check-db` for read-only database readiness evidence.
 
 ## Repository-wide rules
+
+### Scope and documentation
 
 - Preserve unrelated user changes in a dirty worktree. Never reset, restore,
   stage, commit, or push them without explicit authorization.
@@ -90,6 +95,9 @@ their module directories, for example `cd backend && make lint` or
   architecture changes. Do not turn the root guide into a feature changelog.
 - Features and bug fixes require focused tests. Backend tests live under
   `backend/tests/`; frontend tests live under `frontend/tests/`.
+
+### Authority, secrets, and persistence
+
 - Authorization comes from authenticated identity, server-issued project
   context, capabilities, and owner scope. Never trust IDs or authority copied
   from request metadata, browser state, or model output.
@@ -97,6 +105,9 @@ their module directories, for example `cd backend && make lint` or
   responses, snapshots, or diagnostic bundles. Use governed Credential paths.
 - Schema changes require ORM, full-schema SQL, migration-chain, and parity-test
   updates. Never patch or stamp a database manually.
+
+### Verification and handoff
+
 - Format and validate the changed module before handoff. Use
   `cd backend && make format` and `cd frontend && pnpm check` as applicable.
 - This private repository has no hosted CI. Run the relevant local backend,

@@ -1200,6 +1200,7 @@ export function ProjectAgentsPage({
       )}
       renderAssetEditor={(version, context) => (
         <AgentDetailWorkbench
+          key={version?.id ?? "empty"}
           accountId={context.accountId}
           projectId={context.projectId}
           item={context.item}

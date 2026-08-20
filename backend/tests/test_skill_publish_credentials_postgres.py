@@ -29,6 +29,7 @@ from app.shared_assets.audit import DurableSharedAssetGovernanceEventSink
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.credential_service import CredentialReplacementView, CredentialService
 from app.shared_assets.errors import (
+    AssetValidationFailed,
     SkillCredentialBindingInvalid,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
@@ -36,7 +37,10 @@ from app.shared_assets.errors import (
 from app.shared_assets.keyring import CredentialKeyring
 from app.shared_assets.models import AssetKind, AssetScope, SkillArchiveFile, WorkflowStatus
 from app.shared_assets.skill_credential_policy import SkillCredentialBindingInput
-from app.shared_assets.skill_credential_service import SkillCredentialBindingService
+from app.shared_assets.skill_credential_service import (
+    SkillCredentialBindingService,
+    SkillCredentialBindingSetView,
+)
 from app.shared_assets.skill_service import SkillVersionView
 from deerflow.persistence.audit.model import AuditLogRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
@@ -305,6 +309,7 @@ async def _seed(
                 skill_id=skill_id,
                 skill_version_id=old_version_id,
                 secret_name="API_KEY",
+                source_env_field_name="API_KEY",
                 credential_id=old_credential.credential_id,
                 credential_version_id=old_credential.version_id,
                 config_revision=1,
@@ -391,12 +396,39 @@ def _durable_audit_sink() -> DurableSharedAssetGovernanceEventSink:
     )
 
 
+async def _configure_draft(
+    seed: _Seed,
+    *,
+    source_env_field_name: str = "API_KEY",
+    durable_audit: bool = False,
+) -> SkillCredentialBindingSetView:
+    return await SkillCredentialBindingService(
+        seed.factory,
+        governance_sink=(_durable_audit_sink() if durable_audit else None),
+    ).replace_for_version(
+        seed.actor,
+        seed.skill_id,
+        seed.draft_version_id,
+        (
+            SkillCredentialBindingInput(
+                "API_KEY",
+                seed.new_credential.version_id,
+                source_env_field_name,
+            ),
+        ),
+        expected_revision=0,
+    )
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_postgres_publish_atomically_switches_exact_binding_closure(
+async def test_postgres_publish_uses_preconfigured_alias_mapping_and_exact_cas(
     migrated_postgres_database_url: str,
 ) -> None:
-    seed = await _seed(migrated_postgres_database_url)
+    seed = await _seed(
+        migrated_postgres_database_url,
+        new_credential_env=("PROJECT_API_TOKEN",),
+    )
     try:
         old_before = await _run_skill_credentials(
             seed,
@@ -404,6 +436,15 @@ async def test_postgres_publish_atomically_switches_exact_binding_closure(
             payload_checksum=seed.old_checksum,
         )
         assert old_before[0].credential_version_id == seed.old_credential.version_id
+        assert old_before[0].source_env_field_name == "API_KEY"
+
+        configured = await _configure_draft(
+            seed,
+            source_env_field_name="PROJECT_API_TOKEN",
+            durable_audit=True,
+        )
+        assert configured.revision == 1
+        assert configured.requirements[0].source_env_field_name == ("PROJECT_API_TOKEN")
 
         published = await skill_service_module.SkillService(
             seed.factory,
@@ -414,13 +455,7 @@ async def test_postgres_publish_atomically_switches_exact_binding_closure(
             seed.draft_version_id,
             expected_asset_version=8,
             expected_payload_checksum=seed.draft_checksum,
-            expected_binding_revision=0,
-            credential_bindings=(
-                SkillCredentialBindingInput(
-                    "API_KEY",
-                    seed.new_credential.version_id,
-                ),
-            ),
+            expected_binding_revision=1,
         )
 
         assert published.workflow_status is WorkflowStatus.PUBLISHED
@@ -432,6 +467,7 @@ async def test_postgres_publish_atomically_switches_exact_binding_closure(
         assert config is not None and config.revision == 1
         assert len(bindings) == 1
         assert bindings[0].credential_version_id == seed.new_credential.version_id
+        assert bindings[0].source_env_field_name == "PROJECT_API_TOKEN"
 
         old_after = await _run_skill_credentials(
             seed,
@@ -445,6 +481,7 @@ async def test_postgres_publish_atomically_switches_exact_binding_closure(
         )
         assert old_after[0].credential_version_id == seed.old_credential.version_id
         assert new_after[0].credential_version_id == seed.new_credential.version_id
+        assert new_after[0].source_env_field_name == "PROJECT_API_TOKEN"
 
         async with seed.factory() as session:
             audit_rows = tuple((await session.execute(select(AuditLogRow).order_by(AuditLogRow.occurred_at, AuditLogRow.id))).scalars().all())
@@ -463,6 +500,7 @@ async def test_postgres_publish_atomically_switches_exact_binding_closure(
                 seed.actor,
                 seed.skill_id,
                 (),
+                expected_skill_version_id=seed.draft_version_id,
                 expected_revision=1,
             )
         _skill, _version, config_after, bindings_after = await _published_state(seed)
@@ -527,6 +565,7 @@ async def test_postgres_admin_project_override_validates_existing_bindings_witho
                     skill_id=seed.skill_id,
                     skill_version_id=seed.draft_version_id,
                     secret_name="API_KEY",
+                    source_env_field_name="API_KEY",
                     credential_id=seed.new_credential.credential_id,
                     credential_version_id=seed.new_credential.version_id,
                     config_revision=1,
@@ -581,36 +620,29 @@ async def test_postgres_publish_failure_rolls_back_pointer_version_and_binding(
         new_credential_envelope_active=failure != "envelope_missing",
     )
     try:
-        service = skill_service_module.SkillService(
-            seed.factory,
-            governance_sink=(_FailingPublishAudit() if failure == "audit" else None),
-        )
-        expected_error = {
-            "audit": RuntimeError,
-            "envelope_missing": SkillCredentialSelectionStale,
-            "missing_required": SkillCredentialBindingsIncomplete,
-            "schema_mismatch": SkillCredentialBindingInvalid,
-        }[failure]
-        selected = (
-            (
-                SkillCredentialBindingInput(
-                    "API_KEY",
-                    seed.new_credential.version_id,
-                ),
+        if failure in {"schema_mismatch", "envelope_missing"}:
+            expected_error = SkillCredentialBindingInvalid if failure == "schema_mismatch" else SkillCredentialSelectionStale
+            with pytest.raises(expected_error):
+                await _configure_draft(seed)
+        else:
+            binding_revision = 0
+            if failure == "audit":
+                await _configure_draft(seed, durable_audit=True)
+                binding_revision = 1
+            service = skill_service_module.SkillService(
+                seed.factory,
+                governance_sink=(_FailingPublishAudit() if failure == "audit" else None),
             )
-            if failure != "missing_required"
-            else ()
-        )
-        with pytest.raises(expected_error):
-            await service.publish(
-                seed.actor,
-                seed.skill_id,
-                seed.draft_version_id,
-                expected_asset_version=8,
-                expected_payload_checksum=seed.draft_checksum,
-                expected_binding_revision=0,
-                credential_bindings=selected,
-            )
+            expected_error = RuntimeError if failure == "audit" else SkillCredentialBindingsIncomplete
+            with pytest.raises(expected_error):
+                await service.publish(
+                    seed.actor,
+                    seed.skill_id,
+                    seed.draft_version_id,
+                    expected_asset_version=8,
+                    expected_payload_checksum=seed.draft_checksum,
+                    expected_binding_revision=binding_revision,
+                )
 
         skill, version, config, bindings = await _published_state(seed)
         assert skill is not None
@@ -618,11 +650,211 @@ async def test_postgres_publish_failure_rolls_back_pointer_version_and_binding(
         assert skill.current_published_version_id == seed.old_version_id
         assert skill.version == 8
         assert version.workflow_status == "draft"
-        assert config is None
-        assert bindings == ()
+        if failure == "audit":
+            assert config is not None and config.revision == 1
+            assert len(bindings) == 1
+        else:
+            assert config is None
+            assert bindings == ()
         if failure == "audit":
             async with seed.factory() as session:
-                assert await session.scalar(select(AuditLogRow.id).limit(1)) is None
+                rows = tuple((await session.execute(select(AuditLogRow).order_by(AuditLogRow.occurred_at))).scalars().all())
+                assert [row.metadata_json["operation"] for row in rows] == ["skill.credential_bindings.configure"]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_publish_rejects_stale_preflight_revision(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await _seed(migrated_postgres_database_url)
+    try:
+        await _configure_draft(seed)
+        with pytest.raises(SkillCredentialSelectionStale):
+            await skill_service_module.SkillService(seed.factory).publish(
+                seed.actor,
+                seed.skill_id,
+                seed.draft_version_id,
+                expected_asset_version=8,
+                expected_payload_checksum=seed.draft_checksum,
+                expected_binding_revision=0,
+            )
+        skill, version, config, bindings = await _published_state(seed)
+        assert skill is not None
+        assert version is not None
+        assert skill.current_published_version_id == seed.old_version_id
+        assert skill.version == 8
+        assert version.workflow_status == "draft"
+        assert config is not None and config.revision == 1
+        assert len(bindings) == 1
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_credential_rotation_preserves_alias_source_field(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await _seed(
+        migrated_postgres_database_url,
+        new_credential_env=("PROJECT_API_TOKEN", "UNRELATED_TOKEN"),
+    )
+    try:
+        await _configure_draft(
+            seed,
+            source_env_field_name="PROJECT_API_TOKEN",
+        )
+        await skill_service_module.SkillService(seed.factory).publish(
+            seed.actor,
+            seed.skill_id,
+            seed.draft_version_id,
+            expected_asset_version=8,
+            expected_payload_checksum=seed.draft_checksum,
+            expected_binding_revision=1,
+        )
+        credentials = CredentialService(
+            seed.factory,
+            keyring=CredentialKeyring("test-key", {"test-key": b"k" * 32}),
+        )
+        replacement = await credentials.replace(
+            seed.actor,
+            seed.new_credential.credential_id,
+            {
+                "env": {
+                    "PROJECT_API_TOKEN": "rotated-provider-token",
+                    "UNRELATED_TOKEN": "must-not-be-mapped",
+                },
+            },
+            expected_credential_version=1,
+        )
+        assert replacement.pending_migration is not None
+        assert replacement.pending_migration.total == 1
+        assert replacement.pending_migration.mcp_grant_count == 0
+        assert replacement.pending_migration.skill_binding_count == 1
+        assert replacement.pending_migration.system_model_count == 0
+        assert len(replacement.pending_migration.references) == 1
+        reference = replacement.pending_migration.references[0]
+        assert reference.kind == "skill_binding"
+        assert reference.reference_name == "API_KEY"
+        assert reference.source_name == "PROJECT_API_TOKEN"
+        assert replacement.pending_migration.current_reference_count == 0
+        assert replacement.pending_migration.current_references == ()
+
+        migrated = await credentials.migrate_grants(
+            seed.actor,
+            seed.new_credential.credential_id,
+            expected_credential_version=2,
+        )
+
+        assert migrated.migrated_count == 1
+        status = await credentials.migration_status(
+            seed.actor,
+            seed.new_credential.credential_id,
+        )
+        assert status.total == 0
+        assert status.current_reference_count == 1
+        assert status.current_references[0].reference_name == "API_KEY"
+        assert status.current_references[0].source_name == "PROJECT_API_TOKEN"
+        async with seed.factory() as session:
+            config = await session.get(
+                ProjectSkillCredentialConfigRow,
+                (
+                    seed.actor.project_id,
+                    seed.skill_id,
+                    seed.draft_version_id,
+                ),
+            )
+            rows = tuple(
+                (
+                    await session.execute(
+                        select(ProjectSkillCredentialBindingRow)
+                        .where(
+                            ProjectSkillCredentialBindingRow.project_id == seed.actor.project_id,
+                            ProjectSkillCredentialBindingRow.skill_id == seed.skill_id,
+                            ProjectSkillCredentialBindingRow.skill_version_id == seed.draft_version_id,
+                        )
+                        .order_by(
+                            ProjectSkillCredentialBindingRow.config_revision,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert config is not None and config.revision == 2
+        assert [row.status for row in rows] == ["revoked", "active"]
+        assert [row.source_env_field_name for row in rows] == [
+            "PROJECT_API_TOKEN",
+            "PROJECT_API_TOKEN",
+        ]
+        assert rows[0].credential_version_id == seed.new_credential.version_id
+        assert rows[1].credential_version_id == replacement.version.id
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_credential_rotation_rejects_missing_alias_source_field(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await _seed(
+        migrated_postgres_database_url,
+        new_credential_env=("PROJECT_API_TOKEN", "UNRELATED_TOKEN"),
+    )
+    try:
+        await _configure_draft(
+            seed,
+            source_env_field_name="PROJECT_API_TOKEN",
+        )
+        credentials = CredentialService(
+            seed.factory,
+            keyring=CredentialKeyring("test-key", {"test-key": b"k" * 32}),
+        )
+        await credentials.replace(
+            seed.actor,
+            seed.new_credential.credential_id,
+            {"env": {"RENAMED_TOKEN": "incompatible-rotation"}},
+            expected_credential_version=1,
+        )
+
+        with pytest.raises(AssetValidationFailed):
+            await credentials.migrate_grants(
+                seed.actor,
+                seed.new_credential.credential_id,
+                expected_credential_version=2,
+            )
+
+        async with seed.factory() as session:
+            config = await session.get(
+                ProjectSkillCredentialConfigRow,
+                (
+                    seed.actor.project_id,
+                    seed.skill_id,
+                    seed.draft_version_id,
+                ),
+            )
+            rows = tuple(
+                (
+                    await session.execute(
+                        select(ProjectSkillCredentialBindingRow).where(
+                            ProjectSkillCredentialBindingRow.project_id == seed.actor.project_id,
+                            ProjectSkillCredentialBindingRow.skill_id == seed.skill_id,
+                            ProjectSkillCredentialBindingRow.skill_version_id == seed.draft_version_id,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        assert config is not None and config.revision == 1
+        assert len(rows) == 1
+        assert rows[0].status == "active"
+        assert rows[0].source_env_field_name == "PROJECT_API_TOKEN"
+        assert rows[0].credential_version_id == seed.new_credential.version_id
     finally:
         await seed.engine.dispose()
 
@@ -634,19 +866,14 @@ async def test_postgres_publish_and_credential_rotation_never_deadlock_or_partia
 ) -> None:
     seed = await _seed(migrated_postgres_database_url)
     try:
+        await _configure_draft(seed)
         publish = skill_service_module.SkillService(seed.factory).publish(
             seed.actor,
             seed.skill_id,
             seed.draft_version_id,
             expected_asset_version=8,
             expected_payload_checksum=seed.draft_checksum,
-            expected_binding_revision=0,
-            credential_bindings=(
-                SkillCredentialBindingInput(
-                    "API_KEY",
-                    seed.new_credential.version_id,
-                ),
-            ),
+            expected_binding_revision=1,
         )
         rotate = CredentialService(
             seed.factory,
@@ -680,7 +907,63 @@ async def test_postgres_publish_and_credential_rotation_never_deadlock_or_partia
             assert publish_result.code == "SKILL_CREDENTIAL_SELECTION_STALE"
             assert skill.current_published_version_id == seed.old_version_id
             assert version.workflow_status == "draft"
-            assert config is None
-            assert bindings == ()
+            assert config is not None and config.revision == 1
+            assert len(bindings) == 1
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_postgres_publish_and_binding_replace_never_retarget_stale_version(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await _seed(migrated_postgres_database_url)
+    try:
+        await _configure_draft(seed)
+        publish = skill_service_module.SkillService(seed.factory).publish(
+            seed.actor,
+            seed.skill_id,
+            seed.draft_version_id,
+            expected_asset_version=8,
+            expected_payload_checksum=seed.draft_checksum,
+            expected_binding_revision=1,
+        )
+        replace = SkillCredentialBindingService(seed.factory).replace(
+            seed.actor,
+            seed.skill_id,
+            (
+                SkillCredentialBindingInput(
+                    "API_KEY",
+                    seed.old_credential.version_id,
+                ),
+            ),
+            expected_skill_version_id=seed.old_version_id,
+            expected_revision=1,
+        )
+
+        publish_result, replace_result = await asyncio.wait_for(
+            asyncio.gather(publish, replace, return_exceptions=True),
+            timeout=15,
+        )
+
+        assert isinstance(publish_result, SkillVersionView)
+        assert isinstance(
+            replace_result,
+            (SkillCredentialBindingSetView, SkillCredentialSelectionStale),
+        )
+        if isinstance(replace_result, SkillCredentialBindingSetView):
+            assert replace_result.skill_version_id == seed.old_version_id
+        else:
+            assert replace_result.code == "SKILL_CREDENTIAL_SELECTION_STALE"
+
+        skill, version, config, bindings = await _published_state(seed)
+        assert skill is not None
+        assert version is not None
+        assert skill.current_published_version_id == seed.draft_version_id
+        assert version.workflow_status == "published"
+        assert config is not None and config.skill_version_id == seed.draft_version_id
+        assert len(bindings) == 1
+        assert bindings[0].credential_version_id == seed.new_credential.version_id
     finally:
         await seed.engine.dispose()

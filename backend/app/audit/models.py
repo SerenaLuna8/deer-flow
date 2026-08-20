@@ -62,6 +62,7 @@ class AuditAction(StrEnum):
     ASSET_CREATED = "asset.created"
     ASSET_UPDATED = "asset.updated"
     ASSET_PUBLISHED = "asset.published"
+    ASSET_EXPORTED = "asset.exported"
     ASSET_DEPRECATED = "asset.deprecated"
     ASSET_DELETED = "asset.deleted"
     ASSET_BOUND = "asset.bound"
@@ -241,6 +242,7 @@ for _action in (
     AuditAction.ASSET_CREATED,
     AuditAction.ASSET_UPDATED,
     AuditAction.ASSET_PUBLISHED,
+    AuditAction.ASSET_EXPORTED,
     AuditAction.ASSET_DEPRECATED,
     AuditAction.ASSET_DELETED,
     AuditAction.ASSET_CREDENTIAL_CREATED,
@@ -846,6 +848,7 @@ class AssetAuditMetadata(_AuditMetadata):
         "skill.create",
         "skill.version.create",
         "skill.publish",
+        "skill.export",
         "skill.version.revoke",
         "skill.delete",
         "skill.activate",
@@ -890,7 +893,7 @@ class AssetAuditMetadata(_AuditMetadata):
             "agent.publish",
             "agent.activate",
         }
-        versioned_skill_operations = {"skill.version.revoke"}
+        versioned_skill_operations = {"skill.export", "skill.version.revoke"}
         if operation_domain == "agent":
             expects_version = self.operation in versioned_agent_operations
             if expects_version != (self.version_number is not None):
@@ -1136,6 +1139,7 @@ for _action in (
     AuditAction.ASSET_CREATED,
     AuditAction.ASSET_UPDATED,
     AuditAction.ASSET_PUBLISHED,
+    AuditAction.ASSET_EXPORTED,
     AuditAction.ASSET_DEPRECATED,
     AuditAction.ASSET_DELETED,
     AuditAction.ASSET_BOUND,

@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   CURRENT_UPLOAD_UNAVAILABLE,
+  LLM_PROVIDER_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   type ProjectRunFailureCode,
@@ -64,6 +65,7 @@ export function RunFailureAlert({
   const isModelOutputLimit = failureCode === MODEL_OUTPUT_LIMIT;
   const isOutputDeliveryIncomplete = failureCode === OUTPUT_DELIVERY_INCOMPLETE;
   const isCurrentUploadUnavailable = failureCode === CURRENT_UPLOAD_UNAVAILABLE;
+  const isProviderUnavailable = failureCode === LLM_PROVIDER_UNAVAILABLE;
 
   return (
     <Alert
@@ -79,7 +81,9 @@ export function RunFailureAlert({
             ? t.conversation.outputDeliveryIncompleteTitle
             : isCurrentUploadUnavailable
               ? t.conversation.currentUploadUnavailableTitle
-              : t.conversation.runFailedTitle}
+              : isProviderUnavailable
+                ? t.conversation.providerUnavailableTitle
+                : t.conversation.runFailedTitle}
       </AlertTitle>
       <AlertDescription className="flex flex-col items-start justify-between gap-3 sm:flex-row sm:items-center">
         <span>
@@ -89,7 +93,9 @@ export function RunFailureAlert({
               ? t.conversation.outputDeliveryIncompleteDescription
               : isCurrentUploadUnavailable
                 ? t.conversation.currentUploadUnavailableDescription
-                : t.conversation.runFailedDescription}
+                : isProviderUnavailable
+                  ? t.conversation.providerUnavailableDescription
+                  : t.conversation.runFailedDescription}
         </span>
         {isModelOutputLimit && (
           <Button

@@ -7,6 +7,7 @@ import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   CreateVersionDialog,
   CredentialGrantMigrationDialog,
+  CredentialMigrationReferenceList,
   CredentialRevokeDialog,
   CredentialSecretDialog,
   type VersionAuthoringInput,
@@ -14,6 +15,9 @@ import {
 import {
   adminAssetErrorMessage,
   adminCredentialTypeLabel,
+  credentialMigrationActionVisible,
+  credentialMigrationCompleteMessage,
+  credentialPendingMigrationMessage,
   filterAdminProjectCatalogItems,
 } from "@/components/admin/assets/admin-asset-view-model";
 import {
@@ -56,6 +60,7 @@ import {
   revokeAdminProjectCredential,
   useAdminProjectAssets,
   useAdminProjectAssetVersions,
+  useAdminProjectCredentialMigrationStatus,
   useApproveAdminProjectMcpVersion,
   useChangeAdminProjectAssetStatus,
   useCreateAdminProjectAssetVersion,
@@ -993,6 +998,31 @@ function AdminProjectCredentials({
   const selectedCredentialDetailRef =
     useAdminProjectDetailFocus(selectedCredentialId);
 
+  const credentialData = query.data as ProjectCredentialList | undefined;
+  const projectCredentials = credentialData
+    ? filterAdminProjectCatalogItems(credentialData.project_items, projectId)
+    : [];
+  const selectedCredential =
+    projectCredentials.find(
+      (credential) => credential.id === selectedCredentialId,
+    ) ?? null;
+  const selectedCredentialCanWrite = selectedCredential
+    ? projectCredentialCanDelete(selectedCredential)
+    : false;
+  const migrationStatus = useAdminProjectCredentialMigrationStatus(
+    accountId,
+    projectId,
+    selectedCredential?.id ?? "",
+    selectedCredential?.current_version_id ?? "",
+    Boolean(
+      selectedCredential &&
+      selectedCredentialCanWrite &&
+      selectedCredential.status === "active" &&
+      selectedCredential.version > 1,
+    ),
+  );
+  const pendingMigration = migrationStatus.data?.data ?? null;
+
   if (query.isLoading) return <AdminProjectDirectorySkeleton />;
   if (query.error || !query.data) {
     return (
@@ -1013,17 +1043,6 @@ function AdminProjectCredentials({
     );
   }
   const data = query.data as ProjectCredentialList;
-  const projectCredentials = filterAdminProjectCatalogItems(
-    data.project_items,
-    projectId,
-  );
-  const selectedCredential =
-    projectCredentials.find(
-      (credential) => credential.id === selectedCredentialId,
-    ) ?? null;
-  const selectedCredentialCanWrite = selectedCredential
-    ? projectCredentialCanDelete(selectedCredential)
-    : false;
 
   return (
     <>
@@ -1134,6 +1153,49 @@ function AdminProjectCredentials({
               </dd>
             </div>
           </dl>
+          {selectedCredentialCanWrite && selectedCredential.version > 1 ? (
+            <section className="space-y-3 rounded-xl border p-4">
+              {migrationStatus.isLoading ? (
+                <p className="text-muted-foreground text-sm">
+                  {t.adminAssets.common.credentialMigrationChecking}
+                </p>
+              ) : migrationStatus.error || !migrationStatus.data ? (
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p role="alert" className="text-destructive text-sm">
+                    {t.adminAssets.common.credentialMigrationUnavailable}
+                  </p>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void migrationStatus.refetch()}
+                  >
+                    {t.adminAssets.common.retry}
+                  </Button>
+                </div>
+              ) : pendingMigration ? (
+                <>
+                  <p className="text-muted-foreground text-sm">
+                    {credentialPendingMigrationMessage(
+                      pendingMigration,
+                      t.adminAssets.common,
+                    ) ??
+                      credentialMigrationCompleteMessage(
+                        pendingMigration,
+                        t.adminAssets.common,
+                      )}
+                  </p>
+                  <CredentialMigrationReferenceList
+                    pendingMigration={pendingMigration}
+                  />
+                </>
+              ) : (
+                <p className="text-muted-foreground text-sm">
+                  {t.adminAssets.common.credentialMigrationUnavailable}
+                </p>
+              )}
+            </section>
+          ) : null}
           {selectedCredentialCanWrite ? (
             <div className="border-border/70 flex flex-col gap-3 border-t pt-4 lg:flex-row lg:items-start lg:justify-between">
               <div className="flex flex-wrap gap-2">
@@ -1151,7 +1213,7 @@ function AdminProjectCredentials({
                     >
                       {t.adminAssets.common.replaceCredential}
                     </Button>
-                    {selectedCredential.version > 1 ? (
+                    {credentialMigrationActionVisible(pendingMigration) ? (
                       <Button
                         type="button"
                         size="sm"
@@ -1238,10 +1300,11 @@ function AdminProjectCredentials({
           onClose={() => setReplaceCredential(null)}
         />
       ) : null}
-      {migrateCredential ? (
+      {migrateCredential && pendingMigration ? (
         <CredentialGrantMigrationDialog
           open
           credentialName={migrateCredential.display_name}
+          pendingMigration={pendingMigration}
           pending={secureWrite.pending}
           onOpenChange={(open) => !open && setMigrateCredential(null)}
           onConfirm={() => {
@@ -1257,7 +1320,11 @@ function AdminProjectCredentials({
                   ),
                 t.adminAssets.common.migrationSuccess,
               )
-              .then((success) => success && setMigrateCredential(null));
+              .then(async (success) => {
+                if (!success) return;
+                await migrationStatus.refetch();
+                setMigrateCredential(null);
+              });
           }}
         />
       ) : null}

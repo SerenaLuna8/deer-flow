@@ -73,6 +73,13 @@ class SkillVersionMetadataRecord:
 
 
 @dataclass(frozen=True)
+class SkillVersionContentRecord:
+    asset: SkillRow
+    version: SkillVersionRow
+    files: tuple[SkillVersionFileRow, ...]
+
+
+@dataclass(frozen=True)
 class SkillVersionStorageRecord:
     version_id: uuid.UUID
     size_bytes: int
@@ -642,6 +649,112 @@ class SkillRepository:
                     ),
                 ),
                 self._project_context_exists(context),
+            )
+        )
+        selected = (await self.session.execute(statement)).one_or_none()
+        if selected is None:
+            raise AssetNotFound(context.request_id)
+        asset, version = selected
+        return SkillVersionMetadataRecord(
+            asset=asset,
+            version=version,
+            files=await self._load_file_metadata(version.id),
+        )
+
+    async def get_project_visible_version(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionContentRecord:
+        """Load one exact authoring-visible Project or System Skill version."""
+
+        self._require_project_actor(context)
+        await self._lock_project_context(context)
+        statement = (
+            select(SkillRow, SkillVersionRow)
+            .join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
+            .where(
+                SkillRow.id == asset_id,
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                or_(
+                    and_(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == context.project_id,
+                    ),
+                    and_(
+                        SkillRow.scope == "system",
+                        SkillRow.project_id.is_(None),
+                        SkillVersionRow.workflow_status == "published",
+                        SkillVersionRow.revoked_at.is_(None),
+                    ),
+                ),
+                self._project_context_exists(context),
+            )
+        )
+        selected = (await self.session.execute(statement)).one_or_none()
+        if selected is None:
+            raise AssetNotFound(context.request_id)
+        asset, version = selected
+        return SkillVersionContentRecord(
+            asset=asset,
+            version=version,
+            files=await self._load_files(version.id),
+        )
+
+    async def get_system_export_version(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionContentRecord:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
+        statement = (
+            select(SkillRow, SkillVersionRow)
+            .join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
+            .where(
+                SkillRow.id == asset_id,
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                SkillRow.scope == "system",
+                SkillRow.project_id.is_(None),
+                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
+            )
+        )
+        selected = (await self.session.execute(statement)).one_or_none()
+        if selected is None:
+            raise AssetNotFound(context.request_id)
+        asset, version = selected
+        return SkillVersionContentRecord(
+            asset=asset,
+            version=version,
+            files=await self._load_files(version.id),
+        )
+
+    async def get_system_export_version_metadata(
+        self,
+        context: SystemAssetGovernanceContext,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillVersionMetadataRecord:
+        self._require_system_actor(context)
+        if context.project_id is not None:
+            raise AssetNotFound(context.request_id)
+        statement = (
+            select(SkillRow, SkillVersionRow)
+            .join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
+            .where(
+                SkillRow.id == asset_id,
+                SkillVersionRow.id == version_id,
+                SkillVersionRow.skill_id == asset_id,
+                SkillRow.scope == "system",
+                SkillRow.project_id.is_(None),
+                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.revoked_at.is_(None),
             )
         )
         selected = (await self.session.execute(statement)).one_or_none()

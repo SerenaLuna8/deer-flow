@@ -54,15 +54,46 @@ export type ProjectStreamFrameDecision = {
 };
 
 export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
+export const PROJECT_RUN_TERMINAL_EVENT_TYPE = "project_run_terminal_failure";
 export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
 export const MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT";
 export const OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE";
 export const CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE";
+export const LLM_QUOTA_EXCEEDED = "LLM_QUOTA_EXCEEDED";
+export const LLM_AUTHENTICATION_FAILED = "LLM_AUTHENTICATION_FAILED";
+export const LLM_PROVIDER_BUSY = "LLM_PROVIDER_BUSY";
+export const LLM_PROVIDER_UNAVAILABLE = "LLM_PROVIDER_UNAVAILABLE";
+export const LLM_REQUEST_FAILED = "LLM_REQUEST_FAILED";
+export const LLM_CIRCUIT_OPEN = "LLM_CIRCUIT_OPEN";
 
 export type ProjectRunFailureCode =
   | typeof MODEL_OUTPUT_LIMIT
   | typeof OUTPUT_DELIVERY_INCOMPLETE
-  | typeof CURRENT_UPLOAD_UNAVAILABLE;
+  | typeof CURRENT_UPLOAD_UNAVAILABLE
+  | typeof LLM_QUOTA_EXCEEDED
+  | typeof LLM_AUTHENTICATION_FAILED
+  | typeof LLM_PROVIDER_BUSY
+  | typeof LLM_PROVIDER_UNAVAILABLE
+  | typeof LLM_REQUEST_FAILED
+  | typeof LLM_CIRCUIT_OPEN;
+
+const PROJECT_RUN_FAILURE_CODES = [
+  MODEL_OUTPUT_LIMIT,
+  OUTPUT_DELIVERY_INCOMPLETE,
+  CURRENT_UPLOAD_UNAVAILABLE,
+  LLM_QUOTA_EXCEEDED,
+  LLM_AUTHENTICATION_FAILED,
+  LLM_PROVIDER_BUSY,
+  LLM_PROVIDER_UNAVAILABLE,
+  LLM_REQUEST_FAILED,
+  LLM_CIRCUIT_OPEN,
+] as const;
+
+export type ProjectRunTerminalFailureEvent = {
+  type: typeof PROJECT_RUN_TERMINAL_EVENT_TYPE;
+  error: ProjectRunFailureCode | typeof PROJECT_RUN_TERMINAL_FAILURE;
+  message: ProjectRunFailureCode | typeof PROJECT_RUN_TERMINAL_FAILURE;
+};
 
 const FAILED_PROJECT_RUN_TERMINAL_STATUSES = new Set([
   "error",
@@ -83,11 +114,7 @@ export function projectStreamFailureName(
   const name = Reflect.get(frame.data, "name");
   const legacyError = Reflect.get(frame.data, "error");
   const errorCode = Reflect.get(frame.data, "error_code");
-  for (const failureCode of [
-    MODEL_OUTPUT_LIMIT,
-    OUTPUT_DELIVERY_INCOMPLETE,
-    CURRENT_UPLOAD_UNAVAILABLE,
-  ] as const) {
+  for (const failureCode of PROJECT_RUN_FAILURE_CODES) {
     if (
       name === failureCode ||
       legacyError === failureCode ||
@@ -136,6 +163,21 @@ export function isCurrentUploadUnavailableError(error: unknown): boolean {
   return isProjectRunFailureCode(error, CURRENT_UPLOAD_UNAVAILABLE);
 }
 
+export function isLlmProviderUnavailableError(error: unknown): boolean {
+  return isProjectRunFailureCode(error, LLM_PROVIDER_UNAVAILABLE);
+}
+
+export function projectRunFailureCode(
+  error: unknown,
+): ProjectRunFailureCode | null {
+  for (const failureCode of PROJECT_RUN_FAILURE_CODES) {
+    if (isProjectRunFailureCode(error, failureCode)) {
+      return failureCode;
+    }
+  }
+  return null;
+}
+
 export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
   frame: T,
   precedingFailureName: ProjectRunFailureCode | null = null,
@@ -154,18 +196,39 @@ export function projectStreamFrameForUI<T extends ProjectStreamFrame>(
   ) {
     return frame;
   }
-  // LangGraph's stream consumer only enters its error state for `event:error`.
-  // ActWeave's durable protocol closes every Run with `event:end` and carries
-  // the authoritative outcome in `data.status`, so translate only failed
-  // terminal outcomes while preserving the durable event ID/cursor.
+  // The LangGraph SDK unconditionally logs every `event:error` with
+  // console.error. A durable Run failure is an expected business outcome, so
+  // deliver it through the custom-event lifecycle and let the owning hook
+  // render the failure without triggering the Next.js console overlay.
   return {
     ...frame,
-    event: "error",
+    event: "custom",
     data: {
+      type: PROJECT_RUN_TERMINAL_EVENT_TYPE,
       error: failureName,
       message: failureName,
     },
   } as T;
+}
+
+export function projectRunTerminalFailureEventToError(
+  event: unknown,
+): Error | null {
+  if (
+    typeof event !== "object" ||
+    event === null ||
+    Reflect.get(event, "type") !== PROJECT_RUN_TERMINAL_EVENT_TYPE
+  ) {
+    return null;
+  }
+  const errorName = Reflect.get(event, "error");
+  const message = Reflect.get(event, "message");
+  if (typeof errorName !== "string" || typeof message !== "string") {
+    return null;
+  }
+  const error = new Error(message);
+  error.name = errorName;
+  return error;
 }
 
 export function isProjectRunTerminalFailure(error: unknown): boolean {

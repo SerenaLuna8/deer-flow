@@ -211,7 +211,14 @@ async def test_replace_reports_every_system_model_left_on_the_previous_version(
         assert replaced.version.version_number == 2
         assert replaced.pending_migration is not None
         assert replaced.pending_migration.total == 2
+        assert replaced.pending_migration.mcp_grant_count == 0
+        assert replaced.pending_migration.skill_binding_count == 0
         assert replaced.pending_migration.system_model_count == 2
+        assert {reference.kind for reference in replaced.pending_migration.references} == {"system_model"}
+        assert {reference.display_name for reference in replaced.pending_migration.references} == {
+            "DeepSeek V4 Flash",
+            "DeepSeek V4 Pro",
+        }
 
 
 @pytest.mark.postgres
@@ -244,7 +251,13 @@ async def test_replace_counts_a_stale_mcp_grant_alongside_the_pinned_model(
 
         assert replaced.pending_migration is not None
         assert replaced.pending_migration.total == 2
+        assert replaced.pending_migration.mcp_grant_count == 1
+        assert replaced.pending_migration.skill_binding_count == 0
         assert replaced.pending_migration.system_model_count == 1
+        assert {reference.kind for reference in replaced.pending_migration.references} == {
+            "mcp_grant",
+            "system_model",
+        }
 
 
 @pytest.mark.postgres
@@ -274,6 +287,8 @@ async def test_reported_total_equals_what_migration_actually_moves(
             expected_credential_version=1,
         )
         assert replaced.pending_migration is not None
+        preview = await service.migration_status(env.actor, env.deepseek_id)
+        assert preview == replaced.pending_migration
 
         migrated = await service.migrate_grants(
             env.actor,
@@ -283,6 +298,14 @@ async def test_reported_total_equals_what_migration_actually_moves(
 
         assert migrated.migrated_count + migrated.migrated_model_count == replaced.pending_migration.total
         assert migrated.migrated_model_count == replaced.pending_migration.system_model_count
+        migrated_preview = await service.migration_status(env.actor, env.deepseek_id)
+        assert migrated_preview.total == 0
+        assert migrated_preview.mcp_grant_count == 0
+        assert migrated_preview.skill_binding_count == 0
+        assert migrated_preview.system_model_count == 0
+        assert migrated_preview.references == ()
+        assert migrated_preview.current_reference_count == replaced.pending_migration.total
+        assert {reference.kind for reference in migrated_preview.current_references} == {"mcp_grant", "system_model"}
 
         repeated = await service.migrate_grants(
             env.actor,
@@ -321,6 +344,8 @@ async def test_replace_reports_nothing_pending_for_an_unreferenced_credential(
 
         assert replaced.pending_migration is not None
         assert replaced.pending_migration.total == 0
+        assert replaced.pending_migration.mcp_grant_count == 0
+        assert replaced.pending_migration.skill_binding_count == 0
         assert replaced.pending_migration.system_model_count == 0
 
 
@@ -377,6 +402,8 @@ async def test_project_scope_replace_counts_grants_without_the_model_catalog(
 
         assert replaced.pending_migration is not None
         assert replaced.pending_migration.total == 1
+        assert replaced.pending_migration.mcp_grant_count == 1
+        assert replaced.pending_migration.skill_binding_count == 0
         assert replaced.pending_migration.system_model_count == 0
 
 

@@ -818,15 +818,15 @@ async def test_real_local_sandbox_subprocess_reads_frozen_skill_credential(
 ) -> None:
     source = HostExecutionSkillSecretSource(
         skill_path="/mnt/skills/demo/SKILL.md",
-        secret_names=("TOKEN",),
+        secret_names=("TARGET_API_KEY",),
         explicit=True,
     )
-    command = 'python3 -c \'import os; print(os.environ.get("TOKEN", "missing"))\''
+    command = 'python3 -c \'import os; print("target-only" if os.environ.get("TARGET_API_KEY") == "provider-secret-value" and "PROVIDER_TOKEN" not in os.environ and "UNRELATED_TOKEN" not in os.environ else "unexpected-environment")\''
     plan = _plan(
         requested_command=command,
         effective_command=command,
         cwd=str(tmp_path),
-        environment_keys=("TOKEN",),
+        environment_keys=("TARGET_API_KEY",),
         skill_secret_sources=(source,),
     )
     port = _Port(HostExecutionFrozenClaim.claimed("approval-1", plan))
@@ -860,7 +860,7 @@ async def test_real_local_sandbox_subprocess_reads_frozen_skill_credential(
     ) -> dict[str, dict[str, str]]:
         return {
             "/mnt/skills/demo/SKILL.md": {
-                "TOKEN": "credential-exact-v7",
+                "TARGET_API_KEY": "provider-secret-value",
             },
         }
 
@@ -878,9 +878,9 @@ async def test_real_local_sandbox_subprocess_reads_frozen_skill_credential(
 
     assert port.completions[0][1].status == "finished"
     assert port.completions[0][1].exit_code == 0
-    assert port.completions[0][1].result_text == "[redacted]\n"
-    assert "credential-exact-v7" not in result["messages"][0]["content"]
-    assert "[redacted]" in result["messages"][0]["content"]
+    assert port.completions[0][1].result_text == "target-only\n"
+    assert "provider-secret-value" not in result["messages"][0]["content"]
+    assert "target-only" in result["messages"][0]["content"]
 
 
 @pytest.mark.asyncio

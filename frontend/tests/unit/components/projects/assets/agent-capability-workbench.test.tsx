@@ -1,7 +1,11 @@
 import { describe, expect, test } from "@rstest/core";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { agentDependencyOptions } from "@/components/projects/assets/agent-capability-workbench";
-import { projectAgentVersionCanRestore } from "@/components/projects/assets/project-asset-detail-sheet";
+import {
+  ProjectAgentDetailActions,
+  projectAgentVersionCanRestore,
+} from "@/components/projects/assets/project-asset-detail-sheet";
 import { projectAgentDeleteErrorMessage } from "@/components/projects/assets/project-asset-view-model";
 import {
   projectAssetDeleteDescription,
@@ -104,6 +108,21 @@ function catalog(): ProjectAssetList {
 }
 
 describe("Agent capability bindings", () => {
+  test("places publish in the upper detail actions before lifecycle and delete", () => {
+    const html = renderToStaticMarkup(
+      <ProjectAgentDetailActions
+        actionPending={false}
+        canDelete
+        onDelete={() => undefined}
+        publishAction={<button type="button">发布版本</button>}
+        lifecycleActions={<button type="button">停用</button>}
+      />,
+    );
+
+    expect(html.indexOf("发布版本")).toBeLessThan(html.indexOf("停用"));
+    expect(html.indexOf("停用")).toBeLessThan(html.indexOf("删除"));
+  });
+
   test("shows every dependency and marks unavailable choices as disabled", () => {
     const options = agentDependencyOptions(
       "skill",
@@ -141,10 +160,11 @@ describe("Agent capability bindings", () => {
     );
   });
 
-  test("restores only a historical published Project Agent version", () => {
+  test("restores a historical published Project Agent version", () => {
     const version = {
       id: PROJECT_VERSION_ID,
       workflow_status: "published" as const,
+      supersedes_version_id: null,
     };
 
     expect(

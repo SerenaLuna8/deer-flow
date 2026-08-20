@@ -4,8 +4,11 @@ import { AlertCircleIcon, KeyRoundIcon } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import {
   SharedAssetApiError,
   skillCredentialBindingsInputSchema,
@@ -13,8 +16,8 @@ import {
   useUpdateProjectSkillCredentialBindings,
   type SkillCredentialBindingsInput,
   type SkillCredentialBindingsResponse,
+  type SkillCredentialMappingStatus,
   type SkillCredentialRequirement,
-  type ProjectAssetItem,
 } from "@/core/shared-assets";
 
 import {
@@ -22,7 +25,67 @@ import {
   skillCredentialRequirementOptions,
 } from "./skill-credential-option-select";
 
-export type BindingSelections = Record<string, string>;
+export type BindingSelection = {
+  credentialVersionId: string;
+  sourceEnvFieldName: string;
+};
+
+export type BindingSelections = Record<string, BindingSelection>;
+
+type SkillSecretsCopy = Translations["skills"]["secrets"];
+
+export type SkillCredentialVersionGuard = {
+  retained: SkillCredentialBindingsResponse | null;
+  conflicted: boolean;
+};
+
+export function guardedSkillCredentialBindingResponse(
+  guard: SkillCredentialVersionGuard,
+  expectedSkillVersionId: string,
+  response: SkillCredentialBindingsResponse | undefined,
+): {
+  data: SkillCredentialBindingsResponse | null;
+  versionChanged: boolean;
+} {
+  const responseMatches = response?.skill_version_id === expectedSkillVersionId;
+  const retainedVersionChanged = Boolean(
+    guard.retained &&
+    guard.retained.skill_version_id !== expectedSkillVersionId,
+  );
+  const versionChanged =
+    guard.conflicted ||
+    retainedVersionChanged ||
+    Boolean(response && !responseMatches);
+
+  if (guard.conflicted || retainedVersionChanged) {
+    return { data: guard.retained, versionChanged };
+  }
+  if (responseMatches) return { data: response ?? null, versionChanged };
+  if (guard.retained?.skill_version_id === expectedSkillVersionId) {
+    return { data: guard.retained, versionChanged };
+  }
+  return { data: null, versionChanged };
+}
+
+export function skillCredentialVersionGuardAfterResponse(
+  current: SkillCredentialVersionGuard,
+  expectedSkillVersionId: string,
+  response: SkillCredentialBindingsResponse | undefined,
+): SkillCredentialVersionGuard {
+  if (!response) return current;
+  if (
+    current.retained &&
+    current.retained.skill_version_id !== expectedSkillVersionId
+  ) {
+    return current.conflicted ? current : { ...current, conflicted: true };
+  }
+  if (response.skill_version_id === expectedSkillVersionId) {
+    if (current.conflicted || current.retained === response) return current;
+    return { retained: response, conflicted: false };
+  }
+  if (!current.retained || current.conflicted) return current;
+  return { ...current, conflicted: true };
+}
 
 export function skillCredentialBindingCanUnbind(
   skillActive: boolean,
@@ -36,8 +99,18 @@ function configuredSelections(
 ): BindingSelections {
   return Object.fromEntries(
     data.requirements.flatMap((requirement) =>
-      requirement.configured
-        ? [[requirement.name, requirement.credential_version_id]]
+      requirement.configured &&
+      requirement.credential_version_id !== null &&
+      requirement.source_env_field_name !== null
+        ? [
+            [
+              requirement.name,
+              {
+                credentialVersionId: requirement.credential_version_id,
+                sourceEnvFieldName: requirement.source_env_field_name,
+              },
+            ] as const,
+          ]
         : [],
     ),
   );
@@ -45,9 +118,18 @@ function configuredSelections(
 
 function sortedBindingEntries(
   selections: BindingSelections,
-): Array<[string, string]> {
+): Array<[string, string, string]> {
   return Object.entries(selections)
-    .filter(([, credentialVersionId]) => credentialVersionId !== "")
+    .filter(
+      ([, selection]) =>
+        selection.credentialVersionId !== "" &&
+        selection.sourceEnvFieldName !== "",
+    )
+    .map<[string, string, string]>(([name, selection]) => [
+      name,
+      selection.credentialVersionId,
+      selection.sourceEnvFieldName,
+    ])
     .sort(([left], [right]) => left.localeCompare(right));
 }
 
@@ -57,7 +139,12 @@ function selectionsEqual(
 ): boolean {
   return (
     JSON.stringify(sortedBindingEntries(left)) ===
-    JSON.stringify(sortedBindingEntries(right))
+      JSON.stringify(sortedBindingEntries(right)) &&
+    Object.values(left).every(
+      (selection) =>
+        selection.credentialVersionId !== "" &&
+        selection.sourceEnvFieldName !== "",
+    )
   );
 }
 
@@ -73,12 +160,17 @@ export function skillCredentialSelectionsAfterServerRefresh(
   const selections: BindingSelections = {};
   let preservedLocalChanges = false;
   for (const name of nextRequirementNames) {
-    const currentValue = current[name] ?? "";
-    const previousValue = previousOriginal[name] ?? "";
-    const nextValue = nextOriginal[name] ?? "";
-    const locallyChanged = currentValue !== previousValue;
+    const currentValue = current[name];
+    const previousValue = previousOriginal[name];
+    const nextValue = nextOriginal[name];
+    const locallyChanged =
+      JSON.stringify(currentValue ?? null) !==
+      JSON.stringify(previousValue ?? null);
     const selectedValue = locallyChanged ? currentValue : nextValue;
-    if (locallyChanged && currentValue !== nextValue) {
+    if (
+      locallyChanged &&
+      JSON.stringify(currentValue ?? null) !== JSON.stringify(nextValue ?? null)
+    ) {
       preservedLocalChanges = true;
     }
     if (selectedValue) selections[name] = selectedValue;
@@ -93,9 +185,10 @@ export function skillCredentialBindingsPayload(
   return skillCredentialBindingsInputSchema.parse({
     expected_revision: expectedRevision,
     bindings: sortedBindingEntries(selections).map(
-      ([name, credentialVersionId]) => ({
+      ([name, credentialVersionId, sourceEnvFieldName]) => ({
         name,
         credential_version_id: credentialVersionId,
+        source_env_field_name: sourceEnvFieldName,
       }),
     ),
   });
@@ -104,27 +197,117 @@ export function skillCredentialBindingsPayload(
 function bindingErrorMessage(
   error: unknown,
   action: "load" | "save",
+  copy: SkillSecretsCopy,
 ): string | null {
   if (!error) return null;
   if (error instanceof SharedAssetApiError) {
     if (error.status === 409) {
-      return "环境变量配置已被其他人修改。请重新加载最新配置后再保存。";
+      return copy.mappingConflict;
     }
-    if (error.status === 403) return "你没有修改环境变量配置的权限。";
-    if (error.status === 404) return "当前 Skill 或发布版本已不存在。";
+    if (error.status === 403) return copy.mappingForbidden;
+    if (error.status === 404) return copy.mappingNotFound;
     if (error.code === "ASSET_RESPONSE_INVALID") {
-      return "环境变量配置响应无效，已停止显示以保护敏感信息。";
+      return copy.mappingInvalidResponse;
     }
   }
-  return action === "load"
-    ? "环境变量配置暂时无法加载。"
-    : "环境变量配置保存失败，请稍后重试。";
+  return action === "load" ? copy.mappingLoadFailed : copy.mappingSaveFailed;
+}
+
+function localMappingStatus(
+  requirement: SkillCredentialRequirement,
+  selection: BindingSelection | undefined,
+): SkillCredentialMappingStatus {
+  if (!selection) return "missing";
+  const credential = requirement.eligible_credentials.find(
+    (candidate) =>
+      candidate.credential_version_id === selection.credentialVersionId,
+  );
+  return credential?.env_fields.includes(selection.sourceEnvFieldName)
+    ? "configured"
+    : "invalid";
+}
+
+export function skillCredentialBindingValidation(
+  requirements: readonly SkillCredentialRequirement[],
+  selections: BindingSelections,
+  skillActive: boolean,
+): {
+  statuses: Record<string, SkillCredentialMappingStatus>;
+  hasInvalidSelection: boolean;
+  hasBlockingMissingRequired: boolean;
+} {
+  const statuses: Record<string, SkillCredentialMappingStatus> =
+    Object.fromEntries(
+      requirements.map((requirement) => [
+        requirement.name,
+        localMappingStatus(requirement, selections[requirement.name]),
+      ]),
+    );
+  return {
+    statuses,
+    hasInvalidSelection: requirements.some(
+      (requirement) => statuses[requirement.name] === "invalid",
+    ),
+    hasBlockingMissingRequired:
+      skillActive &&
+      requirements.some(
+        (requirement) =>
+          !requirement.optional && statuses[requirement.name] === "missing",
+      ),
+  };
+}
+
+function ReadOnlyRequirement({
+  requirement,
+}: {
+  requirement: SkillCredentialRequirement;
+}) {
+  const { t } = useI18n();
+  const copy = t.skills.secrets;
+  const statusLabel =
+    requirement.mapping_status === "configured"
+      ? copy.mappingStatusConfigured
+      : requirement.mapping_status === "invalid"
+        ? copy.mappingStatusInvalid
+        : copy.mappingStatusMissing;
+  return (
+    <div className="space-y-2 rounded-lg border p-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <code className="min-w-0 flex-1 text-sm font-medium break-all">
+          {requirement.name}
+        </code>
+        <Badge variant="secondary">
+          {requirement.optional ? copy.optional : copy.required}
+        </Badge>
+        <Badge
+          variant={
+            requirement.mapping_status === "configured"
+              ? "default"
+              : "secondary"
+          }
+        >
+          {statusLabel}
+        </Badge>
+      </div>
+      {requirement.credential_display_name &&
+      requirement.credential_version_number &&
+      requirement.source_env_field_name ? (
+        <p className="text-muted-foreground text-xs">
+          <code>{requirement.name}</code> ←{" "}
+          {requirement.credential_display_name}
+          {` · ${copy.versionLabel(requirement.credential_version_number)}`} /{" "}
+          <code>env.{requirement.source_env_field_name}</code>
+        </p>
+      ) : null}
+    </div>
+  );
 }
 
 export function SkillCredentialBindingEditor({
   data,
   skillActive,
   canManage,
+  readOnlyReason,
   credentialsHref,
   pending,
   errorMessage,
@@ -135,6 +318,7 @@ export function SkillCredentialBindingEditor({
   data: SkillCredentialBindingsResponse;
   skillActive: boolean;
   canManage: boolean;
+  readOnlyReason?: "approval" | "historical";
   credentialsHref: string;
   pending: boolean;
   errorMessage: string | null;
@@ -142,6 +326,8 @@ export function SkillCredentialBindingEditor({
   onSave: (input: SkillCredentialBindingsInput) => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
+  const { t } = useI18n();
+  const copy = t.skills.secrets;
   const originalSelections = useMemo(() => configuredSelections(data), [data]);
   const [selections, setSelections] =
     useState<BindingSelections>(originalSelections);
@@ -166,6 +352,23 @@ export function SkillCredentialBindingEditor({
     setServerRefreshPreserved(reconciled.preservedLocalChanges);
   }, [data.requirements, originalSelections, sourceIdentity]);
   const dirty = !selectionsEqual(selections, originalSelections);
+  const hasPartialSelection = Object.values(selections).some(
+    (selection) =>
+      (selection.credentialVersionId === "") !==
+      (selection.sourceEnvFieldName === ""),
+  );
+  const validation = skillCredentialBindingValidation(
+    data.requirements,
+    selections,
+    skillActive,
+  );
+  const saveBlockedTitle = validation.hasInvalidSelection
+    ? copy.mappingRepairInvalid
+    : validation.hasBlockingMissingRequired
+      ? copy.mappingCompleteRequired
+      : hasPartialSelection
+        ? copy.sourceFieldRequired
+        : undefined;
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -184,81 +387,116 @@ export function SkillCredentialBindingEditor({
         <div>
           <div className="flex items-center gap-2">
             <KeyRoundIcon aria-hidden className="size-4" />
-            <h3 className="text-sm font-semibold">环境变量</h3>
+            <h3 className="text-sm font-semibold">{copy.mappingTitle}</h3>
           </div>
           <p className="text-muted-foreground mt-1 text-xs leading-5">
-            仅绑定当前发布版本声明的变量。密钥保存在 Credential
-            中，此页面不会输入或回显密钥值。
+            {copy.mappingDescription}
           </p>
         </div>
         {canManage && !dirty ? (
           <Button asChild type="button" variant="outline" size="sm">
-            <Link href={credentialsHref}>管理 Credential</Link>
+            <Link href={credentialsHref}>{copy.manageCredential}</Link>
           </Button>
         ) : null}
       </div>
 
       {data.requirements.length === 0 ? (
         <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-          当前发布版本没有声明环境变量。
+          {copy.mappingEmpty}
         </p>
-      ) : (
+      ) : canManage ? (
         <div className="space-y-3">
-          {skillActive &&
-          data.requirements.some(
-            (requirement) =>
-              !requirement.optional && !selections[requirement.name],
-          ) ? (
-            <div className="border-destructive/30 rounded-lg border p-3 text-sm">
-              <p role="alert" className="text-destructive">
-                当前活跃 Skill
-                存在未绑定的必需环境变量。请先修复；必需绑定不能在活跃状态下解除。
-              </p>
-            </div>
-          ) : null}
           {data.requirements.map((requirement) => {
-            const selectedVersionId = selections[requirement.name] ?? "";
+            const selection = selections[requirement.name];
+            const selectedVersionId = selection?.credentialVersionId ?? "";
+            const sourceEnvFieldName = selection?.sourceEnvFieldName ?? "";
+            const options = skillCredentialRequirementOptions(
+              requirement,
+              selectedVersionId,
+            );
+            const rowStatus = dirty
+              ? (validation.statuses[requirement.name] ?? "missing")
+              : requirement.mapping_status;
+            const rowError =
+              rowStatus === "invalid" ||
+              (skillActive && !requirement.optional && rowStatus === "missing");
             return (
               <SkillCredentialOptionSelect
                 key={requirement.name}
                 name={requirement.name}
                 optional={requirement.optional}
-                options={skillCredentialRequirementOptions(
+                mappingStatus={rowStatus}
+                options={options}
+                credentialVersionId={selectedVersionId}
+                sourceEnvFieldName={sourceEnvFieldName}
+                disabled={pending}
+                error={rowError}
+                allowEmpty={skillCredentialBindingCanUnbind(
+                  skillActive,
                   requirement,
-                  selectedVersionId,
                 )}
-                value={selectedVersionId}
-                disabled={!canManage || pending}
-                error={
-                  skillActive &&
-                  !requirement.optional &&
-                  selectedVersionId === ""
-                }
-                allowEmpty={
-                  skillCredentialBindingCanUnbind(skillActive, requirement) ||
-                  selectedVersionId === ""
-                }
-                manageHref={canManage && !dirty ? credentialsHref : undefined}
-                onChange={(credentialVersionId) =>
+                manageHref={!dirty ? credentialsHref : undefined}
+                onCredentialChange={(credentialVersionId) =>
                   setSelections((current) => {
                     const next = { ...current };
-                    if (credentialVersionId) {
-                      next[requirement.name] = credentialVersionId;
-                    } else {
+                    if (!credentialVersionId) {
                       delete next[requirement.name];
+                      return next;
                     }
+                    const candidate = requirement.eligible_credentials.find(
+                      (credential) =>
+                        credential.credential_version_id ===
+                        credentialVersionId,
+                    );
+                    const previousSource =
+                      current[requirement.name]?.sourceEnvFieldName;
+                    const sourceEnvFieldName =
+                      previousSource &&
+                      candidate?.env_fields.includes(previousSource)
+                        ? previousSource
+                        : candidate?.env_fields.includes(requirement.name)
+                          ? requirement.name
+                          : "";
+                    next[requirement.name] = {
+                      credentialVersionId,
+                      sourceEnvFieldName,
+                    };
                     return next;
                   })
+                }
+                onSourceEnvFieldChange={(sourceEnvFieldName) =>
+                  setSelections((current) => ({
+                    ...current,
+                    [requirement.name]: {
+                      credentialVersionId:
+                        current[requirement.name]?.credentialVersionId ?? "",
+                      sourceEnvFieldName,
+                    },
+                  }))
                 }
               />
             );
           })}
         </div>
+      ) : (
+        <div className="space-y-3">
+          {data.requirements.map((requirement) => (
+            <ReadOnlyRequirement
+              key={requirement.name}
+              requirement={requirement}
+            />
+          ))}
+          <p role="status" className="text-muted-foreground text-xs leading-5">
+            {readOnlyReason === "historical"
+              ? copy.mappingHistoricalReadOnly
+              : copy.mappingReadOnly}
+          </p>
+        </div>
       )}
 
       {serverRefreshPreserved ? (
         <p role="status" className="text-muted-foreground text-sm">
-          服务器上的环境变量配置已更新；你的未保存选择已保留，并已合并未修改项。请核对后保存或撤销。
+          {copy.mappingRefreshPreserved}
         </p>
       ) : null}
 
@@ -275,13 +513,11 @@ export function SkillCredentialBindingEditor({
             size="sm"
             className="h-auto p-0"
             onClick={() => {
-              setSelections(originalSelections);
-              baselineSelectionsRef.current = originalSelections;
               setServerRefreshPreserved(false);
               onReload();
             }}
           >
-            重新加载
+            {copy.mappingReload}
           </Button>
         </div>
       ) : null}
@@ -298,16 +534,23 @@ export function SkillCredentialBindingEditor({
               setServerRefreshPreserved(false);
             }}
           >
-            撤销修改
+            {copy.mappingDiscard}
           </Button>
           <Button
             type="button"
-            disabled={!dirty || pending}
+            disabled={
+              !dirty ||
+              pending ||
+              hasPartialSelection ||
+              validation.hasInvalidSelection ||
+              validation.hasBlockingMissingRequired
+            }
+            title={saveBlockedTitle}
             onClick={() =>
               onSave(skillCredentialBindingsPayload(data.revision, selections))
             }
           >
-            {pending ? "保存中…" : "保存配置"}
+            {pending ? copy.mappingSaving : copy.mappingSave}
           </Button>
         </div>
       ) : null}
@@ -319,94 +562,84 @@ export function SkillCredentialBindings({
   accountId,
   projectId,
   skillId,
-  currentPublishedVersionId,
-  skillStatus,
+  versionId,
+  skillActive,
   canManage,
+  readOnlyReason,
   credentialsHref,
-  focus = false,
-  onFocused,
   onDirtyChange,
 }: {
   accountId: string;
   projectId: string;
   skillId: string;
-  currentPublishedVersionId: string | null;
-  skillStatus: ProjectAssetItem["status"];
+  versionId: string;
+  skillActive: boolean;
   canManage: boolean;
+  readOnlyReason?: "approval" | "historical";
   credentialsHref: string;
-  focus?: boolean;
-  onFocused?: () => void;
   onDirtyChange?: (dirty: boolean) => void;
 }) {
-  const sectionRef = useRef<HTMLElement | null>(null);
+  const { t } = useI18n();
+  const copy = t.skills.secrets;
+  const [versionGuard, setVersionGuard] = useState<SkillCredentialVersionGuard>(
+    { retained: null, conflicted: false },
+  );
   const bindings = useProjectSkillCredentialBindings(
     accountId,
     projectId,
     skillId,
-    currentPublishedVersionId !== null,
+    versionId,
   );
   const update = useUpdateProjectSkillCredentialBindings(
     accountId,
     projectId,
     skillId,
+    versionId,
   );
+  const bindingData = bindings.data;
 
   useEffect(() => {
-    if (!focus) return;
-    const frame = requestAnimationFrame(() => {
-      sectionRef.current?.scrollIntoView({
-        behavior: "smooth",
-        block: "start",
-      });
-      onFocused?.();
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [focus, onFocused]);
-
-  if (currentPublishedVersionId === null) {
-    return (
-      <section
-        ref={sectionRef}
-        className="border-border/70 space-y-2 rounded-xl border p-4"
-      >
-        <div className="flex items-center gap-2">
-          <KeyRoundIcon aria-hidden className="size-4" />
-          <h3 className="text-sm font-semibold">环境变量</h3>
-        </div>
-        <p className="text-muted-foreground text-sm">
-          发布 Skill 版本后才能配置环境变量。
-        </p>
-      </section>
+    setVersionGuard((current) =>
+      skillCredentialVersionGuardAfterResponse(current, versionId, bindingData),
     );
-  }
+  }, [bindingData, versionId]);
 
-  if (bindings.isLoading) {
+  const guardedResponse = guardedSkillCredentialBindingResponse(
+    versionGuard,
+    versionId,
+    bindingData,
+  );
+  const guardedBindingData = guardedResponse.data;
+  const staleUpdate =
+    update.error instanceof SharedAssetApiError && update.error.status === 409;
+  const saveBlockedByVersionChange =
+    guardedResponse.versionChanged || Boolean(bindings.error) || staleUpdate;
+
+  if (!guardedBindingData && bindings.isLoading) {
     return (
       <section
-        ref={sectionRef}
         aria-busy="true"
-        aria-label="正在加载环境变量配置"
+        aria-label={copy.mappingLoadingAria}
         className="border-border/70 space-y-3 rounded-xl border p-4"
       >
         <Skeleton className="h-5 w-28" />
-        <Skeleton className="h-16 w-full" />
+        <Skeleton className="h-20 w-full" />
       </section>
     );
   }
 
-  if (bindings.error || !bindings.data) {
+  if (!guardedBindingData) {
     return (
-      <section
-        ref={sectionRef}
-        className="border-border/70 space-y-3 rounded-xl border p-4"
-      >
+      <section className="border-border/70 space-y-3 rounded-xl border p-4">
         <div className="flex items-center gap-2">
           <KeyRoundIcon aria-hidden className="size-4" />
-          <h3 className="text-sm font-semibold">环境变量</h3>
+          <h3 className="text-sm font-semibold">{copy.mappingTitle}</h3>
         </div>
         <p role="alert" className="text-destructive text-sm">
-          {bindingErrorMessage(bindings.error, "load") ??
-            "环境变量配置暂时无法加载。"}
+          {bindingData && bindingData.skill_version_id !== versionId
+            ? copy.mappingVersionMismatch
+            : (bindingErrorMessage(bindings.error, "load", copy) ??
+              copy.mappingLoadFailed)}
         </p>
         <Button
           type="button"
@@ -414,32 +647,37 @@ export function SkillCredentialBindings({
           size="sm"
           onClick={() => void bindings.refetch()}
         >
-          重试
+          {copy.mappingRetry}
         </Button>
       </section>
     );
   }
 
   return (
-    <div
-      ref={(element) => {
-        sectionRef.current = element;
+    <SkillCredentialBindingEditor
+      data={guardedBindingData}
+      skillActive={skillActive}
+      canManage={canManage && !saveBlockedByVersionChange}
+      readOnlyReason={readOnlyReason}
+      credentialsHref={credentialsHref}
+      pending={update.isPending}
+      errorMessage={
+        guardedResponse.versionChanged
+          ? copy.mappingVersionChanged
+          : (bindingErrorMessage(bindings.error, "load", copy) ??
+            bindingErrorMessage(update.error, "save", copy))
+      }
+      onDirtyChange={onDirtyChange}
+      onReload={() => {
+        update.reset();
+        setVersionGuard({
+          retained:
+            bindingData?.skill_version_id === versionId ? bindingData : null,
+          conflicted: false,
+        });
+        void bindings.refetch();
       }}
-    >
-      <SkillCredentialBindingEditor
-        data={bindings.data}
-        skillActive={skillStatus === "active"}
-        canManage={canManage}
-        credentialsHref={credentialsHref}
-        pending={update.isPending}
-        errorMessage={bindingErrorMessage(update.error, "save")}
-        onDirtyChange={onDirtyChange}
-        onReload={() => {
-          update.reset();
-          void bindings.refetch();
-        }}
-        onSave={(input) => update.mutate(input)}
-      />
-    </div>
+      onSave={(input) => update.mutate(input)}
+    />
   );
 }

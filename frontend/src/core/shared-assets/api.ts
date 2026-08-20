@@ -38,6 +38,7 @@ import {
   createCredentialInputSchema,
   configureSystemMcpCredentialGrantsInputSchema,
   credentialGrantMigrationResponseSchema,
+  credentialMigrationStatusResponseSchema,
   credentialMutationResponseSchema,
   credentialReplacementResponseSchema,
   credentialVersionHistoryResponseSchema,
@@ -89,6 +90,7 @@ import {
   type CreateAgentInput,
   type CreateConfiguredMcpInput,
   type CreateCredentialInput,
+  type CredentialMigrationStatusResponse,
   type ConfigureSystemMcpCredentialGrantsInput,
   type CredentialGrantMigrationResponse,
   type CredentialMutationResponse,
@@ -127,6 +129,14 @@ import {
 
 type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
 type VersionedAssetListKind = MutableAssetListKind;
+
+export type SkillDistributionDownload = {
+  filename: string;
+  content: Blob;
+};
+
+const SKILL_DISTRIBUTION_FILENAME_PATTERN =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?-v[1-9][0-9]*\.zip$/u;
 
 const serverErrorCodeSchema = z.enum([
   "asset_not_found",
@@ -341,6 +351,42 @@ async function parseResponse<T>(
     );
   }
   return parsed.data;
+}
+
+function skillDistributionFilename(response: Response): string | null {
+  const disposition = response.headers.get("Content-Disposition");
+  const match = disposition?.match(/^attachment;\s*filename="([^"]+)"$/iu);
+  const filename = match?.[1] ?? null;
+  return filename && SKILL_DISTRIBUTION_FILENAME_PATTERN.test(filename)
+    ? filename
+    : null;
+}
+
+async function parseSkillDistributionDownload(
+  response: Response,
+): Promise<SkillDistributionDownload> {
+  if (!response.ok) await throwResponseError(response);
+  const contentType = response.headers.get("Content-Type")?.split(";", 1)[0];
+  const filename = skillDistributionFilename(response);
+  if (contentType !== "application/zip" || !filename) {
+    throw new SharedAssetApiError(
+      response.status,
+      "ASSET_RESPONSE_INVALID",
+      "Shared asset response was invalid",
+    );
+  }
+  try {
+    const content = await response.blob();
+    if (content.size === 0) throw new Error("Empty Skill distribution package");
+    return { filename, content };
+  } catch (error) {
+    if (error instanceof SharedAssetApiError) throw error;
+    throw new SharedAssetApiError(
+      response.status,
+      "ASSET_RESPONSE_INVALID",
+      "Shared asset response was invalid",
+    );
+  }
 }
 
 function projectAssetUrl(projectId: string, kind: AssetListKind): string {
@@ -771,6 +817,37 @@ export async function importProjectSkillArchive(
     );
   }
   return parseResponse(response, projectSkillImportResponseSchema);
+}
+
+export async function exportProjectSkillVersion(
+  projectId: string,
+  skillId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<SkillDistributionDownload> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
+  return parseSkillDistributionDownload(
+    await request(
+      `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/export`,
+      { signal },
+    ),
+  );
+}
+
+export async function exportAdminSkillVersion(
+  skillId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<SkillDistributionDownload> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
+  return parseSkillDistributionDownload(
+    await request(
+      `${adminAssetUrl("skills")}/${skill}/versions/${version}/export`,
+      { signal },
+    ),
+  );
 }
 
 export async function parseProjectSkillFrontmatter(
@@ -1312,26 +1389,48 @@ export async function getProjectSkillVersionFile(
 export async function getProjectSkillCredentialBindings(
   projectId: string,
   skillId: string,
+  versionId: string,
   signal?: AbortSignal,
 ): Promise<SkillCredentialBindingsResponse> {
   const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
   const response = await request(
-    `${projectAssetUrl(projectId, "skills")}/${skill}/credential-bindings`,
+    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/credential-bindings`,
     { signal },
   );
-  return parseResponse(response, skillCredentialBindingsResponseSchema);
+  return parseResponse(
+    response,
+    skillCredentialBindingsResponseSchema.superRefine((value, context) => {
+      if (value.skill_id !== skill) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential bindings belong to another Skill",
+          path: ["skill_id"],
+        });
+      }
+      if (value.skill_version_id !== version) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential bindings belong to another version",
+          path: ["skill_version_id"],
+        });
+      }
+    }),
+  );
 }
 
 export async function updateProjectSkillCredentialBindings(
   projectId: string,
   skillId: string,
+  versionId: string,
   input: SkillCredentialBindingsInput,
   signal?: AbortSignal,
 ): Promise<SkillCredentialBindingsResponse> {
   const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
   const body = parseInput(skillCredentialBindingsInputSchema, input);
   const response = await request(
-    `${projectAssetUrl(projectId, "skills")}/${skill}/credential-bindings`,
+    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/credential-bindings`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1339,7 +1438,25 @@ export async function updateProjectSkillCredentialBindings(
       signal,
     },
   );
-  return parseResponse(response, skillCredentialBindingsResponseSchema);
+  return parseResponse(
+    response,
+    skillCredentialBindingsResponseSchema.superRefine((value, context) => {
+      if (value.skill_id !== skill) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential bindings belong to another Skill",
+          path: ["skill_id"],
+        });
+      }
+      if (value.skill_version_id !== version) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential bindings belong to another version",
+          path: ["skill_version_id"],
+        });
+      }
+    }),
+  );
 }
 
 async function postVersionMutation<TInput, TResponse = VersionResponse>(
@@ -1549,6 +1666,49 @@ async function migrateCredentialGrants(
     signal,
   });
   return parseResponse(response, credentialGrantMigrationResponseSchema);
+}
+
+async function getCredentialMigrationStatus(
+  url: string,
+  signal?: AbortSignal,
+): Promise<CredentialMigrationStatusResponse> {
+  const response = await request(url, { signal });
+  return parseResponse(response, credentialMigrationStatusResponseSchema);
+}
+
+export function getAdminCredentialMigrationStatus(
+  credentialId: string,
+  signal?: AbortSignal,
+): Promise<CredentialMigrationStatusResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return getCredentialMigrationStatus(
+    `${adminAssetUrl("credentials")}/${id}/migration-status`,
+    signal,
+  );
+}
+
+export function getAdminProjectCredentialMigrationStatus(
+  projectId: string,
+  credentialId: string,
+  signal?: AbortSignal,
+): Promise<CredentialMigrationStatusResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return getCredentialMigrationStatus(
+    `${adminProjectAssetUrl(projectId, "credentials")}/${id}/migration-status`,
+    signal,
+  );
+}
+
+export function getProjectCredentialMigrationStatus(
+  projectId: string,
+  credentialId: string,
+  signal?: AbortSignal,
+): Promise<CredentialMigrationStatusResponse> {
+  const id = parseInput(assetIdSchema, credentialId);
+  return getCredentialMigrationStatus(
+    `${projectAssetUrl(projectId, "credentials")}/${id}/migration-status`,
+    signal,
+  );
 }
 
 export function migrateProjectCredentialGrants(

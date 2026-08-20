@@ -2,8 +2,6 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   buildSkillPublishInput,
-  initialSkillPublishSelections,
-  mergeSkillPublishSelections,
   missingRequiredSkillPublishRequirements,
   skillFrontmatterPatchInputSchema,
   skillFrontmatterParseResponseSchema,
@@ -11,13 +9,46 @@ import {
   skillPublishRequiredBindingsBlocked,
   skillPublishPlanResponseSchema,
 } from "@/core/shared-assets/skill-secret-declarations";
-import { skillPublishAssetVersionInputSchema } from "@/core/shared-assets/types";
+import {
+  skillCredentialBindingsInputSchema,
+  skillPublishAssetVersionInputSchema,
+} from "@/core/shared-assets/types";
 
 const SKILL_ID = "33333333-3333-4333-8333-333333333333";
 const VERSION_ID = "44444444-4444-4444-8444-444444444444";
-const CREDENTIAL_ID = "55555555-5555-4555-8555-555555555555";
 const CREDENTIAL_VERSION_ID = "66666666-6666-4666-8666-666666666666";
 const SHA = "a".repeat(64);
+
+function publishPlan(
+  requirements: Array<{
+    name: string;
+    optional: boolean;
+    mapping_status: "missing" | "configured" | "invalid";
+  }>,
+) {
+  const required = requirements.filter((requirement) => !requirement.optional);
+  const configuredRequired = required.filter(
+    (requirement) => requirement.mapping_status === "configured",
+  );
+  const invalid = requirements.filter(
+    (requirement) => requirement.mapping_status === "invalid",
+  );
+  return {
+    skill_id: SKILL_ID,
+    skill_version_id: VERSION_ID,
+    asset_version: 8,
+    payload_checksum: SHA,
+    binding_revision: 2,
+    secrets_autonomous: false,
+    ready:
+      required.length === configuredRequired.length && invalid.length === 0,
+    required_count: required.length,
+    configured_required_count: configuredRequired.length,
+    invalid_count: invalid.length,
+    requirements,
+    request_id: "publish-plan",
+  };
+}
 
 describe("Skill secret declaration contracts", () => {
   test("accepts a safe invalid parse projection without returning source text", () => {
@@ -81,45 +112,29 @@ describe("Skill secret declaration contracts", () => {
     ).toThrow();
   });
 
-  test("accepts only server-supplied eligible Credential metadata", () => {
-    const plan = skillPublishPlanResponseSchema.parse({
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      asset_version: 8,
-      payload_checksum: SHA,
-      binding_revision: 0,
-      secrets_autonomous: true,
-      requirements: [
+  test("publish plan exposes readiness only, never selectable Credential metadata", () => {
+    const plan = skillPublishPlanResponseSchema.parse(
+      publishPlan([
         {
           name: "OPENAI_API_KEY",
           optional: false,
-          suggested_credential_version_id: CREDENTIAL_VERSION_ID,
-          eligible_credentials: [
-            {
-              credential_id: CREDENTIAL_ID,
-              credential_version_id: CREDENTIAL_VERSION_ID,
-              display_name: "OpenAI production",
-              version_number: 3,
-            },
-          ],
+          mapping_status: "configured",
         },
-      ],
-      request_id: "req-2",
+      ]),
+    );
+    expect(plan.ready).toBe(true);
+    expect(plan.requirements[0]).toEqual({
+      name: "OPENAI_API_KEY",
+      optional: false,
+      mapping_status: "configured",
     });
-
-    expect(plan.requirements[0]?.eligible_credentials).toHaveLength(1);
     expect(() =>
       skillPublishPlanResponseSchema.parse({
         ...plan,
         requirements: [
           {
             ...plan.requirements[0],
-            eligible_credentials: [
-              {
-                ...plan.requirements[0]?.eligible_credentials[0],
-                plaintext: "leak",
-              },
-            ],
+            credential_version_id: CREDENTIAL_VERSION_ID,
           },
         ],
       }),
@@ -137,241 +152,86 @@ describe("Skill secret declaration contracts", () => {
       }).required_secrets[0]?.name,
     ).toBe(historicalName);
     expect(
-      skillPublishPlanResponseSchema.parse({
-        skill_id: SKILL_ID,
-        skill_version_id: VERSION_ID,
-        asset_version: 8,
-        payload_checksum: SHA,
-        binding_revision: 0,
-        secrets_autonomous: false,
-        requirements: [
-          {
-            name: historicalName,
-            optional: false,
-            suggested_credential_version_id: null,
-            eligible_credentials: [],
-          },
-        ],
-        request_id: "req-long-binding-name",
-      }).requirements[0]?.name,
+      skillPublishPlanResponseSchema.parse(
+        publishPlan([
+          { name: historicalName, optional: false, mapping_status: "missing" },
+        ]),
+      ).requirements[0]?.name,
     ).toBe(historicalName);
+  });
+
+  test("publish body always pins payload and binding revision but rejects selections", () => {
+    const plan = skillPublishPlanResponseSchema.parse(publishPlan([]));
+    const input = skillPublishAssetVersionInputSchema.parse(
+      buildSkillPublishInput({ plan }),
+    );
+    expect(input).toEqual({
+      expected_asset_version: 8,
+      expected_payload_checksum: SHA,
+      expected_binding_revision: 2,
+      acknowledge_stale_base: false,
+    });
+    expect(input).not.toHaveProperty("credential_bindings");
     expect(() =>
       skillPublishAssetVersionInputSchema.parse({
-        expected_asset_version: 8,
-        expected_payload_checksum: SHA,
-        expected_binding_revision: 0,
-        acknowledge_stale_base: false,
-        credential_bindings: [
-          {
-            name: historicalName,
-            credential_version_id: CREDENTIAL_VERSION_ID,
-          },
-        ],
+        ...input,
+        credential_bindings: [],
       }),
     ).toThrow();
   });
 
-  test("builds the atomic publish body without any secret value field", () => {
-    const input = skillPublishAssetVersionInputSchema.parse({
-      expected_asset_version: 8,
-      expected_payload_checksum: SHA,
-      expected_binding_revision: 0,
-      acknowledge_stale_base: false,
-      credential_bindings: [
+  test("binding body maps a target name to a specific Credential env field", () => {
+    expect(
+      skillCredentialBindingsInputSchema.parse({
+        expected_revision: 2,
+        bindings: [
+          {
+            name: "OPENAI_API_KEY",
+            credential_version_id: CREDENTIAL_VERSION_ID,
+            source_env_field_name: "PROVIDER_TOKEN",
+          },
+        ],
+      }),
+    ).toEqual({
+      expected_revision: 2,
+      bindings: [
         {
           name: "OPENAI_API_KEY",
           credential_version_id: CREDENTIAL_VERSION_ID,
+          source_env_field_name: "PROVIDER_TOKEN",
         },
       ],
     });
+  });
 
-    expect(input.credential_bindings).toEqual([
-      {
-        name: "OPENAI_API_KEY",
-        credential_version_id: CREDENTIAL_VERSION_ID,
-      },
-    ]);
-    expect(JSON.stringify(input)).not.toMatch(
-      /plaintext|secret_value|credential_payload/u,
+  test("rejects a publish summary that disagrees with requirement status", () => {
+    expect(() =>
+      skillPublishPlanResponseSchema.parse({
+        ...publishPlan([
+          { name: "API_KEY", optional: false, mapping_status: "missing" },
+        ]),
+        ready: true,
+      }),
+    ).toThrow();
+  });
+
+  test("blocks every public Draft until the read-only preflight is ready", () => {
+    const blocked = skillPublishPlanResponseSchema.parse(
+      publishPlan([
+        { name: "API_KEY", optional: false, mapping_status: "missing" },
+        { name: "OPTIONAL", optional: true, mapping_status: "invalid" },
+      ]),
     );
-  });
+    expect(missingRequiredSkillPublishRequirements(blocked)).toMatchObject([
+      { name: "API_KEY" },
+    ]);
+    expect(skillPublishRequiredBindingsBlocked({ plan: blocked })).toBe(true);
 
-  test("preserves only still-eligible selections across a stale-plan refresh", () => {
-    const plan = skillPublishPlanResponseSchema.parse({
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      asset_version: 8,
-      payload_checksum: SHA,
-      binding_revision: 0,
-      secrets_autonomous: false,
-      requirements: [
-        {
-          name: "API_KEY",
-          optional: false,
-          suggested_credential_version_id: CREDENTIAL_VERSION_ID,
-          eligible_credentials: [
-            {
-              credential_id: CREDENTIAL_ID,
-              credential_version_id: CREDENTIAL_VERSION_ID,
-              display_name: "Primary",
-              version_number: 1,
-            },
-          ],
-        },
-        {
-          name: "OPTIONAL_TOKEN",
-          optional: true,
-          suggested_credential_version_id: null,
-          eligible_credentials: [],
-        },
-      ],
-      request_id: "req-before",
-    });
-    expect(initialSkillPublishSelections(plan)).toEqual({
-      API_KEY: CREDENTIAL_VERSION_ID,
-    });
-
-    const refreshed = {
-      ...plan,
-      asset_version: 9,
-      request_id: "req-after",
-      requirements: plan.requirements.map((requirement) =>
-        requirement.name === "API_KEY"
-          ? { ...requirement, suggested_credential_version_id: null }
-          : requirement,
-      ),
-    };
-    expect(
-      mergeSkillPublishSelections(
-        {
-          API_KEY: CREDENTIAL_VERSION_ID,
-          OPTIONAL_TOKEN: "77777777-7777-4777-8777-777777777777",
-        },
-        refreshed,
-      ),
-    ).toEqual({ API_KEY: CREDENTIAL_VERSION_ID });
-    expect(
-      missingRequiredSkillPublishRequirements(refreshed, {}),
-    ).toMatchObject([{ name: "API_KEY" }]);
-  });
-
-  test("preserves an intentional unbound selection across publish-plan refetch", () => {
-    const optionalVersionId = "77777777-7777-4777-8777-777777777777";
-    const plan = skillPublishPlanResponseSchema.parse({
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      asset_version: 8,
-      payload_checksum: SHA,
-      binding_revision: 2,
-      secrets_autonomous: false,
-      requirements: [
-        {
-          name: "OPTIONAL_TOKEN",
-          optional: true,
-          suggested_credential_version_id: optionalVersionId,
-          eligible_credentials: [
-            {
-              credential_id: CREDENTIAL_ID,
-              credential_version_id: optionalVersionId,
-              display_name: "Optional",
-              version_number: 1,
-            },
-          ],
-        },
-      ],
-      request_id: "req-refetched",
-    });
-
-    expect(
-      mergeSkillPublishSelections({}, plan, new Set(["OPTIONAL_TOKEN"])),
-    ).toEqual({});
-  });
-
-  test("omits Credential replacement intent without approve capability", () => {
-    const plan = skillPublishPlanResponseSchema.parse({
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      asset_version: 8,
-      payload_checksum: SHA,
-      binding_revision: 2,
-      secrets_autonomous: false,
-      requirements: [],
-      request_id: "req-no-secrets",
-    });
-    expect(
-      buildSkillPublishInput({
-        plan,
-        selections: {},
-        includeCredentialBindings: false,
-      }),
-    ).not.toHaveProperty("credential_bindings");
-  });
-
-  test("blocks only active required bindings according to approval authority", () => {
-    const plan = skillPublishPlanResponseSchema.parse({
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      asset_version: 8,
-      payload_checksum: SHA,
-      binding_revision: 0,
-      secrets_autonomous: false,
-      requirements: [
-        {
-          name: "API_KEY",
-          optional: false,
-          suggested_credential_version_id: CREDENTIAL_VERSION_ID,
-          eligible_credentials: [
-            {
-              credential_id: CREDENTIAL_ID,
-              credential_version_id: CREDENTIAL_VERSION_ID,
-              display_name: "Prior published binding",
-              version_number: 1,
-            },
-          ],
-        },
-      ],
-      request_id: "req-permission",
-    });
-
-    expect(
-      skillPublishRequiredBindingsBlocked({
-        plan,
-        selections: { API_KEY: CREDENTIAL_VERSION_ID },
-        skillActive: true,
-        canApproveCredentials: false,
-      }),
-    ).toBe(true);
-    expect(
-      skillPublishRequiredBindingsBlocked({
-        plan,
-        selections: { API_KEY: CREDENTIAL_VERSION_ID },
-        skillActive: true,
-        canApproveCredentials: true,
-      }),
-    ).toBe(false);
-    expect(
-      skillPublishRequiredBindingsBlocked({
-        plan,
-        selections: {},
-        skillActive: true,
-        canApproveCredentials: true,
-      }),
-    ).toBe(true);
-    expect(
-      skillPublishRequiredBindingsBlocked({
-        plan,
-        selections: {},
-        skillActive: false,
-        canApproveCredentials: true,
-      }),
-    ).toBe(false);
-    expect(
-      skillPublishRequiredBindingsBlocked({
-        plan,
-        selections: {},
-        skillActive: false,
-        canApproveCredentials: false,
-      }),
-    ).toBe(false);
+    const ready = skillPublishPlanResponseSchema.parse(
+      publishPlan([
+        { name: "API_KEY", optional: false, mapping_status: "configured" },
+      ]),
+    );
+    expect(skillPublishRequiredBindingsBlocked({ plan: ready })).toBe(false);
   });
 });

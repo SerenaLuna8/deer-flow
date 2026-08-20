@@ -282,7 +282,10 @@ async def lock_skill_credential_closures(
                 or credential.current_version_id != credential_version_id
                 or credential_version.credential_id != credential_id
                 or credential_version.status != "active"
-                or not _env_schema_contains(credential_version, name)
+                or not _env_schema_contains(
+                    credential_version,
+                    binding.source_env_field_name,
+                )
             ):
                 raise SkillCredentialClosureInvalid
             envelope_id, envelope_row = envelope
@@ -296,7 +299,7 @@ async def lock_skill_credential_closures(
                     credential_id=credential_id,
                     credential_version_id=credential_version_id,
                     credential_field_group="env",
-                    credential_field_name=name,
+                    credential_field_name=binding.source_env_field_name,
                     envelope_id=envelope_id,
                     envelope=envelope_row,
                 )

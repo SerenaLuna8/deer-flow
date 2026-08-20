@@ -142,6 +142,53 @@ export function adminProjectAssetVersionsKey(
   ] as const;
 }
 
+export function adminCredentialMigrationStatusKey(
+  accountId: string,
+  credentialId: string,
+  credentialVersionId: string,
+) {
+  return [
+    ...adminAssetKey(accountId, "credentials"),
+    "asset",
+    assetIdSchema.parse(credentialId),
+    "version",
+    assetIdSchema.parse(credentialVersionId),
+    "migration-status",
+  ] as const;
+}
+
+export function adminProjectCredentialMigrationStatusKey(
+  accountId: string,
+  projectId: string,
+  credentialId: string,
+  credentialVersionId: string,
+) {
+  return [
+    ...adminProjectAssetKey(accountId, projectId, "credentials"),
+    "asset",
+    assetIdSchema.parse(credentialId),
+    "version",
+    assetIdSchema.parse(credentialVersionId),
+    "migration-status",
+  ] as const;
+}
+
+export function projectCredentialMigrationStatusKey(
+  accountId: string,
+  projectId: string,
+  credentialId: string,
+  credentialVersionId: string,
+) {
+  return [
+    ...projectAssetKey(accountId, projectId, "credentials"),
+    "asset",
+    assetIdSchema.parse(credentialId),
+    "version",
+    assetIdSchema.parse(credentialVersionId),
+    "migration-status",
+  ] as const;
+}
+
 export function projectAssetVersionsKey(
   accountId: string,
   projectId: string,
@@ -208,6 +255,7 @@ export function projectSkillCredentialBindingsKey(
   accountId: string,
   projectId: string,
   skillId: string,
+  versionId: string,
 ) {
   return [
     ...projectAssetVersionsKey(
@@ -216,6 +264,8 @@ export function projectSkillCredentialBindingsKey(
       "skills",
       assetIdSchema.parse(skillId),
     ),
+    "version",
+    assetIdSchema.parse(versionId),
     "credential-bindings",
   ] as const;
 }
@@ -224,9 +274,15 @@ export function projectSkillCredentialBindingsMutationKey(
   accountId: string,
   projectId: string,
   skillId: string,
+  versionId: string,
 ) {
   return [
-    ...projectSkillCredentialBindingsKey(accountId, projectId, skillId),
+    ...projectSkillCredentialBindingsKey(
+      accountId,
+      projectId,
+      skillId,
+      versionId,
+    ),
     "mutation",
     "replace",
   ] as const;

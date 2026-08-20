@@ -25,12 +25,69 @@ function response(pendingMigration: unknown) {
 describe("credential replacement contract", () => {
   test("keeps the server-computed pending report, including its model share", () => {
     const parsed = credentialReplacementResponseSchema.parse(
-      response({ total: 3, system_model_count: 1 }),
+      response({
+        total: 3,
+        mcp_grant_count: 1,
+        skill_binding_count: 1,
+        system_model_count: 1,
+        references: [
+          {
+            kind: "skill_binding",
+            display_name: "Database Skill",
+            version_number: 2,
+            reference_name: "DB_PASSWORD",
+            source_name: "PROVIDER_PASSWORD",
+          },
+          {
+            kind: "mcp_grant",
+            display_name: "Database MCP",
+            version_number: 1,
+            reference_name: "database-auth",
+            source_name: null,
+          },
+          {
+            kind: "system_model",
+            display_name: "Database Model",
+            version_number: 3,
+            reference_name: "MODEL_API_KEY",
+            source_name: null,
+          },
+        ],
+        current_reference_count: 0,
+        current_references: [],
+      }),
     );
 
     expect(parsed.pending_migration).toEqual({
       total: 3,
+      mcp_grant_count: 1,
+      skill_binding_count: 1,
       system_model_count: 1,
+      references: [
+        {
+          kind: "skill_binding",
+          display_name: "Database Skill",
+          version_number: 2,
+          reference_name: "DB_PASSWORD",
+          source_name: "PROVIDER_PASSWORD",
+        },
+        {
+          kind: "mcp_grant",
+          display_name: "Database MCP",
+          version_number: 1,
+          reference_name: "database-auth",
+          source_name: null,
+        },
+        {
+          kind: "system_model",
+          display_name: "Database Model",
+          version_number: 3,
+          reference_name: "MODEL_API_KEY",
+          source_name: null,
+        },
+      ],
+      current_reference_count: 0,
+      current_references: [],
     });
   });
 
@@ -55,12 +112,29 @@ describe("credential replacement contract", () => {
     ).toThrow();
     expect(() =>
       credentialReplacementResponseSchema.parse(
-        response({ total: -1, system_model_count: 0 }),
+        response({
+          total: -1,
+          mcp_grant_count: 0,
+          skill_binding_count: 0,
+          system_model_count: 0,
+          references: [],
+          current_reference_count: 0,
+          current_references: [],
+        }),
       ),
     ).toThrow();
     expect(() =>
       credentialReplacementResponseSchema.parse(
-        response({ total: 2, system_model_count: 1, migrated_count: 2 }),
+        response({
+          total: 2,
+          mcp_grant_count: 1,
+          skill_binding_count: 0,
+          system_model_count: 1,
+          references: [],
+          current_reference_count: 0,
+          current_references: [],
+          migrated_count: 2,
+        }),
       ),
     ).toThrow();
   });

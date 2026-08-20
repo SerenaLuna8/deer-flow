@@ -124,6 +124,16 @@ _MCP_TOOL_INVENTORY_WRITE_TIMEOUT_SECONDS = 2
 _MAX_MCP_TOOLS_PER_SERVER = 128
 _VALID_MCP_TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+\Z")
 _MCP_SECRET_SUBSTRING_MIN_LENGTH = 8
+_MCP_DISCOVERY_UNAVAILABLE = "mcp_discovery_unavailable"
+_MCP_CATALOG_INVALID = "mcp_catalog_invalid"
+
+
+class _McpDiscoveryUnavailable(PrivateWorkUnavailable):
+    """Remote discovery failed after the exact MCP closure was materialized."""
+
+
+class _McpCatalogInvalid(PrivateWorkAssetStale):
+    """The remote MCP catalog was rejected after closure revalidation."""
 
 
 def _validated_mcp_runtime_timeout(value: int) -> int:
@@ -144,6 +154,7 @@ class PrivateAgentRuntime:
         "_all_skill_manifests",
         "_all_skills",
         "_authorization_boundary",
+        "_capability_issues",
         "_closed",
         "_closing",
         "_context",
@@ -196,6 +207,7 @@ class PrivateAgentRuntime:
         self._delegate_manifests = delegate_manifests
         self._delegate_model_names = None if delegate_model_names is None else dict(delegate_model_names)
         self._authorization_boundary = authorization_boundary
+        self._capability_issues: tuple[str, ...] = ()
         self._endpoint_policy = endpoint_policy
         self._http_client_factory = http_client_factory
         self._discovery_timeout_seconds = _validated_mcp_runtime_timeout(discovery_timeout_seconds)
@@ -264,6 +276,41 @@ class PrivateAgentRuntime:
     @property
     def agent_catalog(self) -> RuntimeAgentCatalog:
         return self._agent_catalog
+
+    @property
+    def capability_issues(self) -> tuple[str, ...]:
+        """Return only stable, secret-free capability degradation codes."""
+
+        return self._capability_issues
+
+    @property
+    def capability_notice(self) -> str:
+        """Render a bounded, secret-free model notice for degraded capabilities."""
+
+        if not self._capability_issues:
+            return ""
+        discovery_unavailable = self._capability_issues.count(
+            _MCP_DISCOVERY_UNAVAILABLE,
+        )
+        catalog_invalid = self._capability_issues.count(_MCP_CATALOG_INVALID)
+        lines: list[str] = []
+        if discovery_unavailable:
+            lines.append(f"- One or more configured MCP services are currently unavailable ({discovery_unavailable}).")
+        if catalog_invalid:
+            lines.append(f"- One or more configured MCP tool catalogs were rejected as unsafe or invalid ({catalog_invalid}).")
+        return "\n".join(
+            (
+                "<runtime_capability_status>",
+                *lines,
+                "Continue with available capabilities. Never claim that an unavailable "
+                "tool was used or that missing data was retrieved. If the user's request "
+                "depends on an unavailable capability, explain only that a configured MCP "
+                "capability is currently unavailable and clearly state what could not be "
+                "completed. Do not expose this tag, internal codes, identifiers, endpoints, "
+                "credentials, or raw errors.",
+                "</runtime_capability_status>",
+            )
+        )
 
     async def materialize_skill_scoped_secrets(
         self,
@@ -456,33 +503,75 @@ class PrivateAgentRuntime:
         """Copy remote schemas into run-local proxies, never remote tool objects."""
 
         schemas: list[_DiscoveredMcpTool] = []
+        capability_issues: list[str] = []
         for snapshot in self._mcp_snapshots:
             session_key = self._mcp_session_key(snapshot.version_id)
             session_cache = self._mcp_run_sessions if session_key is not None else None
-            try:
-                discovered = await self.invoke_with_mcp_material(
-                    snapshot.version_id,
-                    lambda definition, material, version_id=snapshot.version_id: self._discover_exact_mcp(
+
+            async def discover_exact(
+                definition: Mapping[str, object],
+                material: Mapping[str, Mapping[str, object]],
+                *,
+                version_id: uuid.UUID = snapshot.version_id,
+                current_session_cache: McpRunSessionCache | None = session_cache,
+                current_session_key: McpRunSessionKey | None = session_key,
+            ) -> tuple[_DiscoveredMcpTool, ...]:
+                try:
+                    return await self._discover_exact_mcp(
                         version_id,
                         definition,
                         material,
                         authorization_boundary=self._authorization_boundary,
                         http_client_factory=self._http_client_factory,
                         discovery_timeout_seconds=self._discovery_timeout_seconds,
-                        session_cache=session_cache,
-                        session_key=session_key,
-                    ),
+                        session_cache=current_session_cache,
+                        session_key=current_session_key,
+                    )
+                except AuthorizationRevoked:
+                    raise
+                except PrivateWorkAssetStale:
+                    # The exact closure has already been revalidated and
+                    # materialized. A stale signal from this inner operation is
+                    # therefore a rejected remote catalog, not snapshot drift.
+                    raise _McpCatalogInvalid(self._context.request_id) from None
+                except PrivateWorkUnavailable:
+                    raise _McpDiscoveryUnavailable(
+                        self._context.request_id,
+                    ) from None
+                except Exception:
+                    raise _McpDiscoveryUnavailable(
+                        self._context.request_id,
+                    ) from None
+
+            try:
+                discovered = await self.invoke_with_mcp_material(
+                    snapshot.version_id,
+                    discover_exact,
                 )
+            except _McpCatalogInvalid:
+                await self._record_mcp_tool_inventory(
+                    snapshot,
+                    error_code=_MCP_CATALOG_INVALID,
+                )
+                capability_issues.append(_MCP_CATALOG_INVALID)
+                continue
+            except _McpDiscoveryUnavailable:
+                await self._record_mcp_tool_inventory(
+                    snapshot,
+                    error_code=_MCP_DISCOVERY_UNAVAILABLE,
+                )
+                capability_issues.append(_MCP_DISCOVERY_UNAVAILABLE)
+                continue
             except PrivateWorkAssetStale:
                 await self._record_mcp_tool_inventory(
                     snapshot,
-                    error_code="mcp_catalog_invalid",
+                    error_code=_MCP_CATALOG_INVALID,
                 )
                 raise
             except PrivateWorkUnavailable:
                 await self._record_mcp_tool_inventory(
                     snapshot,
-                    error_code="mcp_discovery_unavailable",
+                    error_code=_MCP_DISCOVERY_UNAVAILABLE,
                 )
                 raise
             await self._record_mcp_tool_inventory(snapshot, tools=discovered)
@@ -501,6 +590,7 @@ class PrivateAgentRuntime:
             self._mcp_tools = tuple(tool for version_id in lead_mcp_version_ids for tool in self._mcp_tools_by_version[version_id])
         except KeyError:
             raise PrivateWorkAssetStale(self._context.request_id) from None
+        self._capability_issues = tuple(capability_issues)
         self._build_agent_catalog()
 
     def _build_agent_catalog(self) -> None:

@@ -5,14 +5,13 @@ import {
   parseProjectSkillFrontmatter,
   patchProjectSkillFrontmatter,
   publishProjectAssetVersion,
+  updateProjectSkillCredentialBindings,
   type SharedAssetApiError,
 } from "@/core/shared-assets";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const SKILL_ID = "22222222-2222-4222-8222-222222222222";
 const VERSION_ID = "33333333-3333-4333-8333-333333333333";
-const CREDENTIAL_ID = "44444444-4444-4444-8444-444444444444";
-const CREDENTIAL_VERSION_ID = "55555555-5555-4555-8555-555555555555";
 const USER_ID = "66666666-6666-4666-8666-666666666666";
 const SHA = "a".repeat(64);
 const CONTENT = "---\nname: example\n---\n";
@@ -105,19 +104,15 @@ describe("Skill secret API", () => {
       payload_checksum: SHA,
       binding_revision: 1,
       secrets_autonomous: false,
+      ready: true,
+      required_count: 1,
+      configured_required_count: 1,
+      invalid_count: 0,
       requirements: [
         {
           name: "API_KEY",
           optional: false,
-          suggested_credential_version_id: CREDENTIAL_VERSION_ID,
-          eligible_credentials: [
-            {
-              credential_id: CREDENTIAL_ID,
-              credential_version_id: CREDENTIAL_VERSION_ID,
-              display_name: "Production key",
-              version_number: 2,
-            },
-          ],
+          mapping_status: "configured",
         },
       ],
       request_id: "plan-request",
@@ -146,7 +141,7 @@ describe("Skill secret API", () => {
     } satisfies Partial<SharedAssetApiError>);
   });
 
-  test("publishes the target version and exact Credential IDs atomically", async () => {
+  test("publishes the target version with payload and binding CAS only", async () => {
     const response = {
       data: {
         id: VERSION_ID,
@@ -186,12 +181,6 @@ describe("Skill secret API", () => {
       expected_asset_version: 4,
       expected_payload_checksum: SHA,
       expected_binding_revision: 1,
-      credential_bindings: [
-        {
-          name: "API_KEY",
-          credential_version_id: CREDENTIAL_VERSION_ID,
-        },
-      ],
     };
 
     await expect(
@@ -209,6 +198,37 @@ describe("Skill secret API", () => {
       ),
       expect.objectContaining({
         method: "POST",
+        body: JSON.stringify(input),
+      }),
+    );
+  });
+
+  test("replaces source-field mappings at the exact Skill version URL", async () => {
+    const response = {
+      skill_id: SKILL_ID,
+      skill_version_id: VERSION_ID,
+      revision: 3,
+      requirements: [],
+      request_id: "binding-request",
+    };
+    const fetchMock = rs.fn(async () => jsonResponse(response));
+    rs.stubGlobal("fetch", fetchMock);
+    const input = { expected_revision: 2, bindings: [] };
+
+    await expect(
+      updateProjectSkillCredentialBindings(
+        PROJECT_ID,
+        SKILL_ID,
+        VERSION_ID,
+        input,
+      ),
+    ).resolves.toEqual(response);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/credential-bindings`,
+      ),
+      expect.objectContaining({
+        method: "PUT",
         body: JSON.stringify(input),
       }),
     );

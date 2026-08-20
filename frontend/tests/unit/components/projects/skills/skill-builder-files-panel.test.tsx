@@ -92,10 +92,16 @@ describe("SkillBuilderCandidateWorkbench", () => {
     expect(html).toContain("候选文件包");
     expect(html).toContain('aria-label="关闭候选文件包"');
     expect(html).toContain('role="tablist"');
-    expect(html).toContain("凭证环境变量");
+    expect(html).toContain("运行凭证");
     expect(html).toContain("aria-controls=");
     expect(html).toContain("aria-labelledby=");
     expect(html).toContain('tabindex="-1"');
+    expect(html).toMatch(
+      /data-variant="default"[^>]*role="tab"[^>]*aria-selected="true"/u,
+    );
+    expect(html).toMatch(
+      /data-variant="ghost"[^>]*role="tab"[^>]*aria-selected="false"/u,
+    );
   });
 
   test("maps the complete horizontal tab keyboard contract", () => {

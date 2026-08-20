@@ -1,12 +1,25 @@
 # Backend AGENTS.md
 
-This is the source of truth for backend changes. The repository-level
-[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide keeps only
-backend architecture, security boundaries, common change paths, and tests.
-Detailed operator and feature behavior belongs in [docs/](docs/README.md),
-code, and focused tests rather than in this file.
+This guide owns backend process boundaries, authorization, persistence,
+governed assets, change paths, operational limits, and verification. Read the
+repository-level [AGENTS.md](../AGENTS.md) for cross-cutting rules and
+[README.md](../README.md) plus [Install.md](../Install.md) for setup and
+operator workflows. Feature behavior remains authoritative in code and focused
+tests.
 
-## Runtime topology
+## Guide map
+
+| Change area                      | Read first                                  |
+| -------------------------------- | ------------------------------------------- |
+| HTTP, domains, authorization     | Authorization and transactions              |
+| Schema or durable state          | PostgreSQL schema and persistence           |
+| Jobs, Runs, streams, files       | Jobs, Runs, streams, checkpoints, and files |
+| Agents, Skills, MCP, Credentials | Governed assets                             |
+| Memory, audit, quota, retention  | Memory, audit, quota, and retention         |
+| Configuration, models, vision    | Configuration, models, and `inspect_image`  |
+| Implementation or verification   | Common change paths; Tests and code quality |
+
+## Process and dependency boundaries
 
 - **Gateway** (`app.gateway`, port `8001`) owns authentication, project/admin
   APIs, Run admission, scoped reads, durable SSE replay, and inbound adapters.
@@ -24,52 +37,17 @@ Gateway, Worker, and Scheduler share the same PostgreSQL schema and governed
 configuration. Public readiness must expose component state only—never PIDs,
 lock keys, credentials, URLs with secrets, private identifiers, or content.
 
-## Commands and layout
+## Where changes live
 
-Run full-stack commands from the repository root. Run backend-only commands
-from `backend/`:
+Run full-stack commands from the repository root and backend targets from
+`backend/`; use the applicable `Makefile` as the current command index.
 
-```bash
-make install
-make gateway
-make worker
-make scheduler
-make test
-make lint
-make format
-make setup-db
-make upgrade-db
-make check-db
-make upgrade-system-assets
-make prepare-run-event-partitions
-make detect-blocking-io
-```
-
-```text
-backend/
-├── app/
-│   ├── gateway/              # HTTP composition and server-issued contexts
-│   ├── worker/               # graph and durable Job execution
-│   ├── scheduler/            # Automation polling and admission
-│   ├── projects/             # project governance and ProjectContext
-│   ├── private_work/         # owner-private Thread/Run/file/Memory services
-│   ├── shared_assets/        # Agent/Skill/MCP/Credential governance
-│   ├── automations/          # Automation definitions and occurrences
-│   ├── channels/             # inbound/outbound channel adapters
-│   ├── quotas/               # transactional quota enforcement
-│   └── audit/                # typed append-only audit events
-├── packages/harness/deerflow/
-│   ├── agents/               # LangGraph graph and middleware
-│   ├── persistence/          # ORM, repositories, schema, bootstrap
-│   ├── runtime/              # execution, streams, checkpoints, Jobs
-│   ├── sandbox/              # Sandbox providers and file/shell tools
-│   ├── skills/               # Skill parsing, scan, review, materialization
-│   ├── mcp/                  # admitted MCP discovery and calls
-│   └── subagents/            # delegated Agent execution
-├── migrations/               # explicit Alembic chain for existing databases
-├── scripts/                  # database and operator CLIs
-└── tests/                    # unit, PostgreSQL, process, and contract gates
-```
+- `app/<domain>/` owns application composition, HTTP admission, server-issued
+  contexts, and domain transactions.
+- `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
+  persistence, sandbox, Skill, MCP, and subagent primitives.
+- `migrations/` and `scripts/` own explicit schema and operator workflows.
+- `tests/` owns unit, PostgreSQL, process, and contract gates.
 
 The dependency direction is `app.* -> deerflow.*`; harness code must never
 import `app.*`.
@@ -104,7 +82,7 @@ import `app.*`.
 - Public request/response models reject unknown authority fields. Copy the error
   and strictness convention of the neighboring route family.
 
-### Authentication and secrets
+### Authentication, secrets, and public contracts
 
 - Account email is normalized with `strip + lowercase` on every path and is
   protected by the database's case-insensitive unique index. Login also accepts
@@ -124,7 +102,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `agent_archived_slug_reuse`. Fresh setup runs that schema directly
+the current marker is `skill_credential_source_field`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -153,7 +131,7 @@ or downgrade an application database.
   may live in configured storage, but access, identity, version, and scope remain
   database-authoritative.
 
-### Jobs, Runs, streams, and checkpoints
+### Jobs, Runs, streams, checkpoints, and files
 
 - Gateway admits executable work; Worker executes it. Business state, Job,
   quota reservation, snapshot, and audit rows must be committed atomically at
@@ -179,11 +157,16 @@ or downgrade an application database.
 - Current-message files and images are admitted from server file authority.
   Worker retry revalidates the frozen metadata; missing or changed attachments
   fail closed rather than degrading silently.
+- Runtime-only dependency environments belong under `/tmp`. The secure
+  finalization scan prunes only the exact top-level workspace `.venv` tree;
+  other workspace/output symlinks and special files still fail closed.
 - Conditional composer cleanup takes the same Thread lock as Run admission. It
   retains uploads present in any frozen current-upload snapshot, while admission
   rejects the whole request if any selected upload is no longer ready.
 
-### Assets, Skills, MCP, and Agents
+### Governed assets
+
+#### Packaged System assets
 
 - `skills/public/*` is the sole source for packaged System Skills. Regenerate the
   manifest/archives with
@@ -207,22 +190,39 @@ or downgrade an application database.
   new bindings, Run admission, retry/resume materialization, and Worker file writes
   reject the revoked release. Existing pins must be explicitly moved to an eligible
   release or disabled; an already materialized running graph is not force-aborted.
+
+#### Project assets and Credentials
+
 - Project Agent/Skill/MCP versions are immutable. Agent creation is one atomic
-  complete package (`suspended` plus draft v1); author edits and restores create
-  a new draft without moving the live pointer, while a binding manager explicitly
-  publishes the selected draft and controls activation. No flow mutates history
+  complete package (`suspended` plus draft v1); author edits and copies of any
+  persisted Agent version create a new draft based on the current live pointer
+  without moving that pointer, while a binding manager explicitly publishes the
+  selected current-base draft and controls activation. No flow mutates history
   or moves a pointer backward to an old row.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
+- Skill export is a read-only, audit-required distribution operation over one
+  exact persisted version. Project exports require `shared_assets.edit` and may
+  select any persisted Project version; System exports require a published,
+  non-revoked version. The deterministic root-layout ZIP excludes root `evals/`,
+  any `node_modules/` or `__pycache__/`, `.DS_Store`, and `*.pyc`, and never
+  includes Credential mappings, secrets, lifecycle state, or version history.
 - A Skill's `SKILL.md` is the sole authority for `required-secrets` and
   `secrets-autonomous`. Archive, Builder, validation, review, publish, and
   runtime consumers use the canonical parser; form edits patch only those
   managed frontmatter fields and preserve the rest of the document.
-- Publishing a Skill version and replacing its exact Credential bindings is one
-  transaction. An active Skill must cover every non-optional declaration;
-  suspended Skills may remain incomplete but activation fails with the stable
-  incomplete-binding error. Secret values never enter Skill bytes, publish
-  plans, snapshots, audit metadata, or API responses.
+- Skill Credential mappings belong to one exact Skill version and map each
+  declared target environment name to one exact Project Credential version and
+  one source `env` field. Draft and current-published mappings use revision
+  CAS; historical published versions are read-only. A normal Draft publish must
+  have every required mapping valid and no invalid optional mapping. The narrow
+  initial archive/AI create path may publish one suspended incomplete v1 so a
+  credential approver can configure it afterward; activation still fails with
+  the stable incomplete-binding error. Secret values never enter Skill bytes,
+  publish plans, snapshots, audit metadata, or API responses.
+
+#### Runtime admission and MCP
+
 - Runtime-visible Skill names are unique case-insensitively within a project,
   across active Project Skills and enabled System Skill bindings. Activation and
   binding enable enforce the inverse checks under the project lock; Run
@@ -238,8 +238,18 @@ or downgrade an application database.
   slots. Worker disables redirects and ambient proxy trust, revalidates the
   target and closure for discovery/calls, and treats inventory as diagnostic—not
   execution authority.
+- After exact closure and Credential materialization succeed, Worker isolates a
+  remote MCP discovery transport/catalog failure to that MCP for the current Run,
+  exposes no tools from it, and supplies only a stable secret-free capability
+  notice to the Agent. Authorization, snapshot, database, and Credential
+  materialization uncertainty still fail closed. Ordinary Skill/tool execution
+  failures return safe error results; malformed or stale Skill evidence remains
+  fail closed.
 - System MCP may retain packaged stdio, header, and OAuth capabilities; do not
   copy that broader trust model into project-authored MCP.
+
+#### Project Agents and Builder
+
 - Project Agent logical `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are
   immutable version fields, not files in this repository.
 - Agent payload checksums are recomputed at resolution and Worker materialization.
@@ -290,36 +300,41 @@ or downgrade an application database.
   to the exact tombstone generation; it must never make a committed logical
   deletion appear to fail or touch a recreated same-ID Thread.
 
-### Configuration
+### Configuration, models, and `inspect_image`
+
+#### Configuration authority
 
 Configuration is read only from explicit `DEER_FLOW_CONFIG_PATH` or the
 repository-root `config.yaml`. Infrastructure settings are restart-required.
-Model definitions, runtime/auth/Memory/quota/Automation policy, and provider Credentials are
-PostgreSQL authority and must not be reintroduced as YAML or ambient-key
-fallbacks.
+Model definitions, runtime/auth/Memory/quota/Automation policy, and provider
+Credentials are PostgreSQL authority and must not be reintroduced as YAML or
+ambient-key fallbacks.
+
+#### Model adapters and `inspect_image`
 
 The authorable System Model adapter allowlist is intentionally narrow. Retired
 adapter rows may remain admin-readable for remediation, but they must not be
 reactivated, made default, exposed in the public model catalog, or admitted to a
 new Run snapshot.
 
-Text-model image inspection follows
-[`docs/VISION_BRIDGE_REFACTOR_PLAN.md`](docs/VISION_BRIDGE_REFACTOR_PLAN.md).
-`inspect_image` is a reserved, conditional Worker tool selected through
+Text-model image inspection uses `inspect_image`, a reserved, conditional Worker
+tool selected through
 `agent_runtime.vision_bridge.model_name`, never `config.yaml`. The selected
 active System Model must declare `supports_vision=true`; its existing Provider
 adapter owns SDK construction, credentials, wire serialization, and response
 parsing through the single `ModelRuntime`. The tool owns only Run/file
 authorization, bounded image normalization, fixed mode instructions plus one
 required bounded analysis goal, durable dispatch settlement, and a bounded
-untrusted ToolMessage. Use standard
-LangChain multimodal content blocks. Never add a Bridge-specific adapter,
+untrusted ToolMessage. Use standard LangChain multimodal content blocks. Never
+add a Bridge-specific adapter,
 Provider HTTP client, protocol resolver, raw headers/body passthrough, or a
 second model factory. `vision_openai_compatible_v1` has no production
 descriptor/class path and `vision_bridge_fake` is test-only; neither may enter
-new authoring, defaults, bindings, or Run snapshots. Preserve exact frozen `purpose="vision"` snapshots,
-Worker abort/deadline behavior, tracing suppression, and durable dispatch
-authority.
+new authoring, defaults, bindings, or Run snapshots. Preserve exact frozen
+`purpose="vision"` snapshots, Worker abort/deadline behavior, tracing
+suppression, and durable dispatch authority.
+
+#### Configuration schema and bootstrap Credentials
 
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required
@@ -384,6 +399,8 @@ model configuration.
 The focused constants test keeps these values synchronized with code. If a
 source constant changes, update this section and the owning detailed document.
 
+### Execution and asset limits
+
 - Subagent concurrency is canonically clamped to `1..4`; the per-Run total remains independently bounded to `1..50`.
 - SkillScan rejects unsafe archives while retaining the final 100 MiB and the
   16384-file, bounded-log contract.
@@ -394,6 +411,9 @@ source constant changes, update this section and the owning detailed document.
 - Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
 - Verified Skill reads remain active for `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12).
 - SNIP free-prose task continuity bounded to 2,000 characters and tagged fact lines bounded to 1,000 characters; the packaged prompt raises a declared output cap below 4,096 tokens.
+
+### Runtime, Memory, and quota limits
+
 - `worker.stream.text_delta_flush_ms`, default 75ms, controls text coalescing.
   `worker.stream.run_event_notify_enabled` is true (the default).
 - `mcp_security.run_session_reuse` (default `true`) reuses an exact-closure MCP

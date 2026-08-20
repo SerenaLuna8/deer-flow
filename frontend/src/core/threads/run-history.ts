@@ -1,12 +1,7 @@
 import type { Message, Run } from "@langchain/langgraph-sdk";
 
 import {
-  CURRENT_UPLOAD_UNAVAILABLE,
-  isCurrentUploadUnavailableError,
-  isOutputDeliveryIncompleteError,
-  isModelOutputLimitError,
-  MODEL_OUTPUT_LIMIT,
-  OUTPUT_DELIVERY_INCOMPLETE,
+  projectRunFailureCode,
   type ProjectRunFailureCode,
 } from "../private-work/api-client";
 import {
@@ -159,30 +154,14 @@ export function latestRunFailureCode(
     return null;
   }
   const error = Reflect.get(latestRun, "error");
-  if (isModelOutputLimitError(error)) {
-    return MODEL_OUTPUT_LIMIT;
-  }
-  if (isOutputDeliveryIncompleteError(error)) {
-    return OUTPUT_DELIVERY_INCOMPLETE;
-  }
-  return isCurrentUploadUnavailableError(error)
-    ? CURRENT_UPLOAD_UNAVAILABLE
-    : null;
+  return projectRunFailureCode(error);
 }
 
 export function resolveRunFailureCode(
   streamError: unknown,
   runs: Run[] | undefined,
 ): ProjectRunFailureCode | null {
-  if (isModelOutputLimitError(streamError)) {
-    return MODEL_OUTPUT_LIMIT;
-  }
-  if (isOutputDeliveryIncompleteError(streamError)) {
-    return OUTPUT_DELIVERY_INCOMPLETE;
-  }
-  return isCurrentUploadUnavailableError(streamError)
-    ? CURRENT_UPLOAD_UNAVAILABLE
-    : latestRunFailureCode(runs);
+  return projectRunFailureCode(streamError) ?? latestRunFailureCode(runs);
 }
 
 export function resolveRunFailureRunId(
@@ -190,12 +169,7 @@ export function resolveRunFailureRunId(
   activeRunId: string | null,
   runs: Run[] | undefined,
 ): string | null {
-  if (
-    (isModelOutputLimitError(streamError) ||
-      isOutputDeliveryIncompleteError(streamError) ||
-      isCurrentUploadUnavailableError(streamError)) &&
-    activeRunId
-  ) {
+  if (projectRunFailureCode(streamError) && activeRunId) {
     return activeRunId;
   }
   return latestRunHasTerminalFailure(runs) ? (runs?.[0]?.run_id ?? null) : null;

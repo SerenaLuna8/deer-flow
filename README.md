@@ -25,16 +25,32 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   操作无法由平台召回。会话输入框选择、粘贴或拖入附件后会立即在后台预上传；发送
   消息时复用同一上传结果，不会重复上传。已经持久化的完整回复不会因运行时或沙箱
   回收失败被改写为 Agent 执行失败；此类回收问题作为 Worker 运维错误重试和记录。
+  Run 内的依赖虚拟环境属于临时运行状态，不作为会话文件保存；其他工作区符号链接
+  仍安全失败。
+  单个 MCP 服务在远端工具发现阶段不可用或返回非法目录时，只会禁用该 MCP 的本次
+  Run 工具并向 Agent 提供安全的能力降级提示；其他能力和主回复继续执行。授权撤销、
+  冻结快照漂移、Credential 材料化不确定等安全边界仍会终止 Run。Skill 脚本及普通
+  工具失败以错误结果返回 Agent，由其使用现有上下文继续或明确说明未完成部分。
 - System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill
   仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz` 或 `.tgz`
   包；常见 macOS 归档元数据会被忽略。新建 Skill 保持 suspended，修订草稿需由具备
   资产发布权限的成员显式发布后才生效；超出上传、解压、单文件或成员数限制的包会以
-  明确的大小限制错误拒绝。项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
+  明确的大小限制错误拒绝。Skill 详情可把当前选中的已持久化版本导出为
+  `<slug>-v<version_number>.zip` 标准分发包；`SKILL.md` 位于包根目录，包内不含
+  Credential 映射、密钥、版本历史或发布状态，被治理撤销的 System Skill 版本不可导出。
+  项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
   Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
-  名称，同一名称可用于创建具有新 ID 的 Agent。Skill 可在 `SKILL.md` 中通过
+  名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情按所选不可变版本展示
+  指令和能力；基于旧发布版的草稿不能直接发布，但可复制为基于当前发布版的新草稿，
+  不会覆盖历史或回退当前指针。Skill 可在 `SKILL.md` 中通过
   `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
-  同一源码副本同步，发布时原子选择项目 Credential。明文只在授权命令执行边界解密
-  注入，Local Provider 与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
+  同一源码副本同步。版本工作台的“运行凭证”把每个目标变量映射到精确的项目
+  Credential 版本及其中一个 `env` 来源字段：声明仍只写入 `SKILL.md`，项目映射只存
+  PostgreSQL。普通 Draft 在发布前必须完成全部必需映射，发布窗口只做只读预检；AI
+  或压缩包首次创建的 Skill 保持 published + suspended，允许随后为精确 v1 补齐映射，
+  但映射完整前不能启用。已发布版本仍可独立轮换运行映射，不需要重发 Skill。明文只在
+  授权命令执行边界从选定来源字段解密，并以 Skill 声明的目标变量名注入；Local Provider
+  与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选 Skill 仍只能经受管草稿工具、
@@ -122,7 +138,7 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `agent_archived_slug_reuse`。
+  `skill_credential_source_field`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本可直接通过 `make upgrade-db` 显式升级。

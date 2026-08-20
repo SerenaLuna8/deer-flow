@@ -41,6 +41,8 @@ import type {
   CreateCredentialInput,
   CredentialPayload,
   CredentialPayloadGroup,
+  CredentialPendingMigration,
+  CredentialMigrationReference,
   ReplaceCredentialInput,
   SkillVersionInput,
   UpdateConfiguredMcpInput,
@@ -1944,12 +1946,14 @@ export function CredentialRevokeDialog({
 export function CredentialGrantMigrationDialog({
   open,
   credentialName,
+  pendingMigration,
   pending,
   onOpenChange,
   onConfirm,
 }: {
   open: boolean;
   credentialName: string;
+  pendingMigration: CredentialPendingMigration;
   pending: boolean;
   onOpenChange: (open: boolean) => void;
   onConfirm: () => void;
@@ -1964,6 +1968,10 @@ export function CredentialGrantMigrationDialog({
             {t.adminAssets.dialogs.migrateDescription(credentialName)}
           </DialogDescription>
         </DialogHeader>
+        <CredentialMigrationReferenceList
+          pendingMigration={pendingMigration}
+          showCurrent={false}
+        />
         <DialogFooter>
           <Button
             type="button"
@@ -1981,5 +1989,93 @@ export function CredentialGrantMigrationDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function credentialMigrationReferenceKindLabel(
+  reference: CredentialMigrationReference,
+  copy: Translations["adminAssets"]["dialogs"],
+): string {
+  switch (reference.kind) {
+    case "skill_binding":
+      return copy.migrationSkillBinding;
+    case "mcp_grant":
+      return copy.migrationMcpGrant;
+    case "system_model":
+      return copy.migrationSystemModel;
+  }
+}
+
+export function CredentialMigrationReferenceList({
+  pendingMigration,
+  showCurrent = true,
+}: {
+  pendingMigration: CredentialPendingMigration;
+  showCurrent?: boolean;
+}) {
+  const { t } = useI18n();
+  const groups = [
+    {
+      title: t.adminAssets.dialogs.migrationDetailsTitle,
+      references: pendingMigration.references,
+    },
+    ...(showCurrent
+      ? [
+          {
+            title: t.adminAssets.dialogs.migrationCurrentDetailsTitle,
+            references: pendingMigration.current_references,
+          },
+        ]
+      : []),
+  ].filter((group) => group.references.length > 0);
+  if (groups.length === 0) return null;
+  return (
+    <div className="space-y-4">
+      {groups.map((group) => (
+        <section
+          key={group.title}
+          className="space-y-2"
+          aria-label={group.title}
+        >
+          <h3 className="text-sm font-semibold">{group.title}</h3>
+          <ul className="max-h-72 space-y-2 overflow-y-auto pr-1">
+            {group.references.map((reference, index) => (
+              <li
+                key={`${reference.kind}:${reference.display_name}:${reference.version_number}:${reference.reference_name}:${index}`}
+                className="border-border bg-muted/20 rounded-lg border px-3 py-2"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="font-medium">{reference.display_name}</span>
+                  <span className="text-muted-foreground text-xs">
+                    {credentialMigrationReferenceKindLabel(
+                      reference,
+                      t.adminAssets.dialogs,
+                    )}
+                    {" · "}
+                    {t.adminAssets.dialogs.migrationVersion(
+                      reference.version_number,
+                    )}
+                  </span>
+                </div>
+                <dl className="text-muted-foreground mt-1 grid gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_1fr]">
+                  <dt>{t.adminAssets.dialogs.migrationTarget}</dt>
+                  <dd className="font-mono break-all">
+                    {reference.reference_name}
+                  </dd>
+                  {reference.source_name ? (
+                    <>
+                      <dt>{t.adminAssets.dialogs.migrationSource}</dt>
+                      <dd className="font-mono break-all">
+                        {reference.source_name}
+                      </dd>
+                    </>
+                  ) : null}
+                </dl>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ))}
+    </div>
   );
 }

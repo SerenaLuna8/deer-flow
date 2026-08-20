@@ -273,8 +273,10 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
 
 
 @pytest.mark.asyncio
-async def test_restore_version_creates_a_draft_copy_without_rewriting_history(
+@pytest.mark.parametrize("source_workflow_status", ["published", "draft"])
+async def test_restore_version_creates_a_current_base_draft_copy_without_rewriting_source(
     monkeypatch: pytest.MonkeyPatch,
+    source_workflow_status: str,
 ) -> None:
     context = _context()
     current_version_id = uuid.uuid4()
@@ -283,6 +285,9 @@ async def test_restore_version_creates_a_draft_copy_without_rewriting_history(
     asset.version = 7
     target = _version(asset.id, target_version_id)
     target.row.version_number = 2
+    target.row.workflow_status = source_workflow_status
+    source_supersedes_version_id = uuid.uuid4() if source_workflow_status == "draft" else None
+    target.row.supersedes_version_id = source_supersedes_version_id
     target.row.description = "历史版本"
     target.row.payload_checksum = AgentService._payload_checksum(  # noqa: SLF001 - focused immutable-version contract
         AgentPayload(
@@ -374,10 +379,19 @@ async def test_restore_version_creates_a_draft_copy_without_rewriting_history(
     assert restored.version_number == 5
     assert restored.workflow_status.value == "draft"
     assert restored.description == "历史版本"
+    assert restored.agents_instructions == target.row.agents_instructions
+    assert restored.soul == target.row.soul
+    assert restored.identity == target.row.identity
+    assert restored.user_context == target.row.user_context
+    assert restored.model_ref == target.row.model_ref
+    assert restored.model_settings == AgentModelSettings()
+    assert restored.tool_groups == tuple(target.row.tool_groups)
     assert restored.skill_version_ids == target.skill_version_ids
     assert restored.mcp_version_ids == target.mcp_version_ids
     assert created[0].row.supersedes_version_id == current_version_id
+    assert restored.payload_checksum == target.row.payload_checksum
     assert target.row.version_number == 2
-    assert target.row.workflow_status == "published"
+    assert target.row.workflow_status == source_workflow_status
+    assert target.row.supersedes_version_id == source_supersedes_version_id
     assert asset.current_published_version_id == current_version_id
     assert asset.version == 8

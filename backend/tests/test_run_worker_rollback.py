@@ -1014,7 +1014,7 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     fetched = await run_manager.get(record.run_id)
     assert fetched is not None
     assert fetched.status == RunStatus.error
-    assert fetched.error == "Connection error."
+    assert fetched.error == "LLM_PROVIDER_UNAVAILABLE"
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 

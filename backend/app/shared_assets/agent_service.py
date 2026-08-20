@@ -653,7 +653,10 @@ class AgentService:
                 version_id,
                 for_update=True,
             )
-            if target.row.workflow_status != WorkflowStatus.PUBLISHED.value:
+            if target.row.workflow_status not in {
+                WorkflowStatus.PUBLISHED.value,
+                WorkflowStatus.DRAFT.value,
+            }:
                 raise AssetConflict(actor.request_id)
             await self._validate_dependency_closure(
                 repository,

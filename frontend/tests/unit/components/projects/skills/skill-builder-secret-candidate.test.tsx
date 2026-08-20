@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { skillFrontmatterResponseIsCurrent } from "@/components/projects/assets/skill-secret-declarations-editor";
 import {
   SkillBuilderCreateSecretSuccess,
+  SkillBuilderRevisionCommitSuccess,
   skillBuilderCreateCommitHref,
   skillBuilderCompletedVersionHref,
   skillBuilderCreatedSecretSetup,
@@ -276,7 +277,14 @@ describe("Skill Builder create Credential setup", () => {
       skillBuilderCompletedVersionHref("/projects/demo/skills", completed, {
         configureCredentials: true,
       }),
-    ).toBeNull();
+    ).toBe(
+      `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`,
+    );
+    expect(skillBuilderCreatedSecretSetupFromSession(completed)).toEqual({
+      skillId: SKILL_ID,
+      skillVersionId: VERSION_ID,
+      requirementNames: ["API_KEY"],
+    });
   });
 
   test("derives the exact published create version and requirements from the checked commit response", () => {
@@ -415,6 +423,22 @@ describe("Skill Builder create Credential setup", () => {
     expect(html).toContain("配置凭证");
     expect(html).toContain(`skill_id=${SKILL_ID}`);
     expect(html).toContain(`skill_version_id=${VERSION_ID}`);
+    expect(html).toContain("configure_credentials=1");
+  });
+
+  test("routes a revised Draft with declarations to exact-version mappings", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="zh-CN">
+        <SkillBuilderRevisionCommitSuccess
+          versionNumber={2}
+          credentialRequirementCount={1}
+          href={`/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`}
+        />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("草稿版本 v2");
+    expect(html).toContain("配置凭证");
     expect(html).toContain("configure_credentials=1");
   });
 });

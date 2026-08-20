@@ -27,9 +27,12 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 - 私有业务操作必须使用认证账户、服务端签发的项目上下文和 owner scope。
 - Gateway 只准入和读取；Worker 是唯一 Agent graph 执行者。
 - Run 固定精确的 Agent、模型、Skill、MCP 和 Credential 引用快照。
+- MCP 冻结闭包验证和 Credential 材料化成功后，单个远端 discovery 不可用或目录非法
+  只禁用该 MCP 的本次 Run 工具；Agent 使用其余能力继续。权限、闭包、数据库或材料化
+  不确定仍 fail closed。普通 Skill/工具执行异常以安全错误结果返回 Agent。
 - System 资产定义由 packaged catalog 初始化；项目资产使用不可变版本。
 - Credential 明文只在 Worker 的精确执行边界解密，不进入 API、日志或快照。
-- `full_schema.sql` 用于新空库并直接记录当前链头 revision `agent_archived_slug_reuse`；运行时
+- `full_schema.sql` 用于新空库并直接记录当前链头 revision `skill_credential_source_field`；运行时
   从不自动创建、迁移或修复 schema。
 
 ## 开发命令

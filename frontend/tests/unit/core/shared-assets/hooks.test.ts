@@ -1,12 +1,22 @@
 import { describe, expect, rs, test } from "@rstest/core";
-import { useQuery, type QueryClient } from "@tanstack/react-query";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 
 rs.mock("@tanstack/react-query", () => ({
   useMutation: rs.fn(),
   useQuery: rs.fn((options: unknown) => options),
   useQueryClient: rs.fn(),
 }));
+rs.mock("@/core/private-work/provider", () => ({
+  usePrivateWorkAccess: rs.fn(),
+}));
 
+import { usePrivateWorkAccess } from "@/core/private-work/provider";
+import type { PrivateWorkAccess } from "@/core/private-work/types";
 import { projectKeys } from "@/core/projects/query-keys";
 import { SharedAssetApiError } from "@/core/shared-assets/api";
 import {
@@ -14,6 +24,7 @@ import {
   invalidateProjectAgentConflictQueries,
   isProjectAgentCasConflict,
   useProjectAssetVersions,
+  useRestoreProjectAgentVersion,
 } from "@/core/shared-assets/hooks";
 import {
   projectAgentRuntimeAssessmentsRoot,
@@ -119,5 +130,57 @@ describe("shared asset hooks", () => {
         new SharedAssetApiError(422, "ASSET_VALIDATION_FAILED", "invalid"),
       ),
     ).toBe(false);
+  });
+
+  test("refreshes the Agent catalog and exact history after a restore conflict", async () => {
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const projectId = "22222222-2222-4222-8222-222222222222";
+    const assetId = "33333333-3333-4333-8333-333333333333";
+    const invalidateQueries = rs.fn(async () => undefined);
+    const queryClient = { invalidateQueries } as unknown as QueryClient;
+    rs.mocked(useQueryClient).mockReturnValue(queryClient);
+    rs.mocked(usePrivateWorkAccess).mockReturnValue({
+      scope: { accountId, projectId },
+      client: {} as PrivateWorkAccess["client"],
+      apiBaseURL: "/api",
+      queryKeyPrefix: [],
+      reconnectOnMount: false,
+    });
+    rs.mocked(useMutation).mockClear();
+
+    useRestoreProjectAgentVersion(accountId, projectId);
+    const mutationOptions = rs.mocked(useMutation).mock
+      .calls[0]?.[0] as unknown as {
+      onError: (
+        error: unknown,
+        variables: {
+          assetId: string;
+          versionId: string;
+          input: { expected_asset_version: number };
+        },
+      ) => Promise<void>;
+    };
+    await mutationOptions.onError(
+      new SharedAssetApiError(409, "ASSET_CONFLICT", "changed"),
+      {
+        assetId,
+        versionId: "44444444-4444-4444-8444-444444444444",
+        input: { expected_asset_version: 5 },
+      },
+    );
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAssetKey(accountId, projectId, "agents"),
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAssetVersionsKey(
+        accountId,
+        projectId,
+        "agents",
+        assetId,
+      ),
+      exact: true,
+    });
   });
 });

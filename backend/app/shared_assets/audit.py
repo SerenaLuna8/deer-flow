@@ -36,6 +36,7 @@ _ACTIONS: dict[str, AuditAction] = {
     "skill.create": AuditAction.ASSET_CREATED,
     "skill.version.create": AuditAction.ASSET_UPDATED,
     "skill.publish": AuditAction.ASSET_PUBLISHED,
+    "skill.export": AuditAction.ASSET_EXPORTED,
     "skill.version.revoke": AuditAction.ASSET_DEPRECATED,
     "skill.delete": AuditAction.ASSET_DELETED,
     "skill.activate": AuditAction.ASSET_UPDATED,
@@ -73,7 +74,7 @@ _VERSIONED_AGENT_OPERATIONS = frozenset(
         "agent.activate",
     }
 )
-_VERSIONED_SKILL_OPERATIONS = frozenset({"skill.version.revoke"})
+_VERSIONED_SKILL_OPERATIONS = frozenset({"skill.export", "skill.version.revoke"})
 
 
 class DurableSharedAssetGovernanceEventSink:

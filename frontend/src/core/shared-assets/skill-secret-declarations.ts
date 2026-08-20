@@ -2,8 +2,7 @@ import { z } from "zod";
 
 import {
   assetIdSchema,
-  eligibleSkillCredentialSchema,
-  skillCredentialBindingInputSchema,
+  skillCredentialMappingStatusSchema,
   skillSecretDeclarationNameSchema,
   type SkillPublishAssetVersionInput,
 } from "./types";
@@ -123,32 +122,9 @@ export const skillPublishPlanRequirementSchema = z
   .object({
     name: skillSecretDeclarationNameSchema,
     optional: z.boolean(),
-    suggested_credential_version_id: assetIdSchema.nullable(),
-    eligible_credentials: z.array(eligibleSkillCredentialSchema),
+    mapping_status: skillCredentialMappingStatusSchema,
   })
-  .strict()
-  .superRefine((value, context) => {
-    const eligibleVersionIds = value.eligible_credentials.map(
-      (credential) => credential.credential_version_id,
-    );
-    if (new Set(eligibleVersionIds).size !== eligibleVersionIds.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Eligible Credential versions must be unique",
-        path: ["eligible_credentials"],
-      });
-    }
-    if (
-      value.suggested_credential_version_id !== null &&
-      !eligibleVersionIds.includes(value.suggested_credential_version_id)
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Suggested Credential version must be eligible",
-        path: ["suggested_credential_version_id"],
-      });
-    }
-  });
+  .strict();
 
 export const skillPublishPlanResponseSchema = z
   .object({
@@ -158,19 +134,66 @@ export const skillPublishPlanResponseSchema = z
     payload_checksum: sha256Schema,
     binding_revision: z.number().int().nonnegative(),
     secrets_autonomous: z.boolean(),
+    ready: z.boolean(),
+    required_count: z.number().int().nonnegative().max(256),
+    configured_required_count: z.number().int().nonnegative().max(256),
+    invalid_count: z.number().int().nonnegative().max(256),
     requirements: z.array(skillPublishPlanRequirementSchema).max(256),
     request_id: z.string().min(1),
   })
   .strict()
-  .refine(
-    (value) =>
+  .superRefine((value, context) => {
+    if (
       new Set(value.requirements.map((requirement) => requirement.name))
-        .size === value.requirements.length,
-    {
-      message: "Skill publish requirement names must be unique",
-      path: ["requirements"],
-    },
-  );
+        .size !== value.requirements.length
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill publish requirement names must be unique",
+        path: ["requirements"],
+      });
+    }
+    const required = value.requirements.filter(
+      (requirement) => !requirement.optional,
+    );
+    const configuredRequired = required.filter(
+      (requirement) => requirement.mapping_status === "configured",
+    );
+    const invalid = value.requirements.filter(
+      (requirement) => requirement.mapping_status === "invalid",
+    );
+    if (value.required_count !== required.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill publish required count does not match requirements",
+        path: ["required_count"],
+      });
+    }
+    if (value.configured_required_count !== configuredRequired.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Skill publish configured required count does not match requirements",
+        path: ["configured_required_count"],
+      });
+    }
+    if (value.invalid_count !== invalid.length) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill publish invalid count does not match requirements",
+        path: ["invalid_count"],
+      });
+    }
+    const ready =
+      configuredRequired.length === required.length && invalid.length === 0;
+    if (value.ready !== ready) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill publish readiness does not match requirements",
+        path: ["ready"],
+      });
+    }
+  });
 
 export type SkillFrontmatterDiagnostic = z.infer<
   typeof skillFrontmatterDiagnosticSchema
@@ -194,7 +217,6 @@ export type SkillPublishPlanRequirement = z.infer<
 export type SkillPublishPlanResponse = z.infer<
   typeof skillPublishPlanResponseSchema
 >;
-export type SkillPublishSelections = Record<string, string>;
 
 export async function sha256SkillContent(content: string): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest(
@@ -206,94 +228,34 @@ export async function sha256SkillContent(content: string): Promise<string> {
   ).join("");
 }
 
-export function initialSkillPublishSelections(
-  plan: SkillPublishPlanResponse,
-): SkillPublishSelections {
-  return Object.fromEntries(
-    plan.requirements.flatMap((requirement) =>
-      requirement.suggested_credential_version_id === null
-        ? []
-        : [[requirement.name, requirement.suggested_credential_version_id]],
-    ),
-  );
-}
-
-export function mergeSkillPublishSelections(
-  current: SkillPublishSelections,
-  plan: SkillPublishPlanResponse,
-  editedRequirementNames: ReadonlySet<string> = new Set(),
-): SkillPublishSelections {
-  return Object.fromEntries(
-    plan.requirements.flatMap((requirement) => {
-      const currentSelection = current[requirement.name];
-      const stillEligible = requirement.eligible_credentials.some(
-        (credential) => credential.credential_version_id === currentSelection,
-      );
-      const intentionallyUnbound =
-        editedRequirementNames.has(requirement.name) && !currentSelection;
-      const selected = intentionallyUnbound
-        ? null
-        : stillEligible
-          ? currentSelection
-          : requirement.suggested_credential_version_id;
-      return selected ? [[requirement.name, selected]] : [];
-    }),
-  );
-}
-
 export function missingRequiredSkillPublishRequirements(
   plan: SkillPublishPlanResponse,
-  selections: SkillPublishSelections,
 ): SkillPublishPlanRequirement[] {
   return plan.requirements.filter(
-    (requirement) => !requirement.optional && !selections[requirement.name],
+    (requirement) =>
+      !requirement.optional && requirement.mapping_status !== "configured",
   );
 }
 
 export function skillPublishRequiredBindingsBlocked({
   plan,
-  selections,
-  skillActive,
-  canApproveCredentials,
 }: {
   plan: SkillPublishPlanResponse;
-  selections: SkillPublishSelections;
-  skillActive: boolean;
-  canApproveCredentials: boolean;
 }): boolean {
-  if (!skillActive) return false;
-  if (!canApproveCredentials) {
-    return plan.requirements.some((requirement) => !requirement.optional);
-  }
-  return missingRequiredSkillPublishRequirements(plan, selections).length > 0;
+  return !plan.ready;
 }
 
 export function buildSkillPublishInput({
   plan,
-  selections,
-  includeCredentialBindings,
   acknowledgeStaleBase = false,
 }: {
   plan: SkillPublishPlanResponse;
-  selections: SkillPublishSelections;
-  includeCredentialBindings: boolean;
   acknowledgeStaleBase?: boolean;
 }): SkillPublishAssetVersionInput {
-  const bindings = plan.requirements.flatMap((requirement) => {
-    const credentialVersionId = selections[requirement.name];
-    if (!credentialVersionId) return [];
-    return [
-      skillCredentialBindingInputSchema.parse({
-        name: requirement.name,
-        credential_version_id: credentialVersionId,
-      }),
-    ];
-  });
   return {
     expected_asset_version: plan.asset_version,
     expected_payload_checksum: plan.payload_checksum,
     expected_binding_revision: plan.binding_revision,
     acknowledge_stale_base: acknowledgeStaleBase,
-    ...(includeCredentialBindings ? { credential_bindings: bindings } : {}),
   };
 }

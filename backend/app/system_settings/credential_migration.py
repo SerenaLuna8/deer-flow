@@ -22,7 +22,10 @@ from dataclasses import dataclass, field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.shared_assets.credential_service import SystemModelMigrationIncompatible
+from app.shared_assets.credential_service import (
+    CredentialMigrationReferenceView,
+    SystemModelMigrationIncompatible,
+)
 from app.system_settings.models import UpdateSystemModel
 from app.system_settings.validation import (
     ModelSettingsInvalid,
@@ -86,31 +89,57 @@ class _BoundMigration:
         self.pins = tuple(pins)
         return len(self.pins)
 
-    async def count_stale_pins(
+    async def list_stale_pins(
         self,
         credential_id: uuid.UUID,
         target_version_id: uuid.UUID,
-    ) -> int:
-        """Count current model pointers a migration would have to re-point.
+    ) -> tuple[CredentialMigrationReferenceView, ...]:
+        return await self._list_pins(
+            credential_id,
+            target_version_id,
+            current=False,
+        )
 
-        Deliberately lock-free: this answers "how much is still on the old
-        envelope" for a Credential replacement, which must not acquire the
-        catalog locks that ``lock_pinned_models`` orders for the migration.
-        """
+    async def list_current_pins(
+        self,
+        credential_id: uuid.UUID,
+        target_version_id: uuid.UUID,
+    ) -> tuple[CredentialMigrationReferenceView, ...]:
+        return await self._list_pins(
+            credential_id,
+            target_version_id,
+            current=True,
+        )
 
+    async def _list_pins(
+        self,
+        credential_id: uuid.UUID,
+        target_version_id: uuid.UUID,
+        *,
+        current: bool,
+    ) -> tuple[CredentialMigrationReferenceView, ...]:
+        version_filter = SystemModelConfigVersionRow.credential_version_id == target_version_id if current else SystemModelConfigVersionRow.credential_version_id != target_version_id
         statement = (
-            select(func.count())
-            .select_from(SystemModelConfigRow)
+            select(SystemModelConfigRow, SystemModelConfigVersionRow)
             .join(
                 SystemModelConfigVersionRow,
                 (SystemModelConfigVersionRow.id == SystemModelConfigRow.current_version_id) & (SystemModelConfigVersionRow.model_config_id == SystemModelConfigRow.id),
             )
             .where(
                 SystemModelConfigVersionRow.credential_id == credential_id,
-                SystemModelConfigVersionRow.credential_version_id != target_version_id,
+                version_filter,
             )
+            .order_by(SystemModelConfigRow.display_name, SystemModelConfigRow.id)
         )
-        return int((await self.session.execute(statement)).scalar_one())
+        return tuple(
+            CredentialMigrationReferenceView(
+                kind="system_model",
+                display_name=model.display_name,
+                version_number=version.version_number,
+                reference_name=version.credential_env_key,
+            )
+            for model, version in (await self.session.execute(statement)).all()
+        )
 
     async def repoint(
         self,

@@ -1043,7 +1043,7 @@ export const enUS: Translations = {
       },
       metadataVersion: "Metadata revision",
       replaceCredential: "Replace Credential",
-      migrateReferences: "Migrate compatible references",
+      migrateReferences: "Use new Credential version",
       revokeCredential: "Revoke Credential",
       delete: "Delete",
       createCredential: "Create Credential",
@@ -1059,11 +1059,20 @@ export const enUS: Translations = {
       revoked: "Revoked",
       loading: "Loading",
       migrationSuccess:
-        "Compatible reference migration completed. No authorization changes were made when no eligible MCP Grant, Skill environment binding, or system model required migration.",
-      pendingMigrationNotice: (total, systemModelCount) =>
-        systemModelCount > 0
-          ? `New version created, but ${total} ${total === 1 ? "reference" : "references"} still use the previous key (${systemModelCount} system ${systemModelCount === 1 ? "model" : "models"}).`
-          : `New version created, but ${total} ${total === 1 ? "reference" : "references"} still use the previous key.`,
+        "Existing consumers now use the current Credential version.",
+      credentialMigrationChecking:
+        "Checking which consumers still use an older Credential version…",
+      credentialMigrationUnavailable:
+        "Credential version usage details are temporarily unavailable.",
+      credentialMigrationComplete:
+        "All consumers already use the current Credential version.",
+      pendingMigrationNotice: (
+        total,
+        mcpGrantCount,
+        skillBindingCount,
+        systemModelCount,
+      ) =>
+        `${total} ${total === 1 ? "consumer still uses" : "consumers still use"} an older Credential version: ${skillBindingCount} Skill environment ${skillBindingCount === 1 ? "binding" : "bindings"}, ${mcpGrantCount} MCP ${mcpGrantCount === 1 ? "grant" : "grants"}, and ${systemModelCount} system ${systemModelCount === 1 ? "model" : "models"}.`,
       credentialRotationNote:
         "Replacement creates a new version only. Existing MCP Grants, Skill environment bindings, and system models stay pinned to the previous key until they are migrated explicitly.",
       historySchemaUnavailable:
@@ -1449,11 +1458,19 @@ export const enUS: Translations = {
       cancel: "Cancel",
       revoking: "Revoking…",
       confirmRevoke: "Permanently revoke",
-      migrateTitle: "Migrate compatible Credential references",
+      migrateTitle: "Move existing consumers to the current Credential version",
       migrateDescription: (name) =>
-        `Replacing a Credential creates a new version without rotating existing MCP Grants, Skill environment bindings, or system models. References to an older “${name}” version migrate atomically only when every field schema is compatible, and each affected system model gains a new model version. Any incompatible reference rejects the entire operation.`,
-      migrating: "Migrating…",
-      confirmMigrate: "Migrate references",
+        `These consumers still use an older version of “${name}”. Confirm to switch all of them to the current version. If any consumer is incompatible, the entire operation is cancelled.`,
+      migrationDetailsTitle: "Consumers to update",
+      migrationCurrentDetailsTitle: "Current-version consumers",
+      migrationSkillBinding: "Skill environment variable",
+      migrationMcpGrant: "MCP grant",
+      migrationSystemModel: "System model",
+      migrationVersion: (version) => `Version ${version}`,
+      migrationTarget: "Usage",
+      migrationSource: "Source field",
+      migrating: "Switching…",
+      confirmMigrate: "Confirm switch",
       deleteTitle: "Delete Credential?",
       deleteDescription: (name) =>
         `Deleting “${name}” removes all versions from ordinary lists and runtime queries. Related MCP Grants and Skill environment bindings become invalid. Only audit records remain. This cannot be undone.`,
@@ -2074,17 +2091,29 @@ export const enUS: Translations = {
   },
 
   skills: {
+    export: {
+      label: "Export ZIP",
+      preparing: "Preparing…",
+      started: "Download started",
+      tooltip: (version) => `Export the selected v${version}`,
+      unsaved: "Save or discard the current changes first",
+      loading: "The selected version is still loading",
+      revoked: "Revoked System Skill versions cannot be exported",
+      unpublished: "Only published System Skill versions can be exported",
+      noVersion: "Select a persisted version first",
+    },
     secrets: {
       workbenchAria: "Skill editing area",
       filesTab: "Files",
-      secretsTab: "Credential environment variables",
-      aria: "Credential environment variable declarations",
-      title: "Credential environment variables",
-      description:
-        "The server parses this form and patches the current SKILL.md editing buffer. Only names and requirement flags are stored; Credential plaintext is never written to the Skill.",
+      secretsTab: "Runtime credentials",
+      aria: "Environment variable declarations",
+      title: "1. Environment variable declarations",
       viewSource: "View SKILL.md",
       checking: "Checking SKILL.md…",
-      syncing: "Syncing to the current editing buffer…",
+      syncing: "Writing to the SKILL.md draft…",
+      recognized: (count) =>
+        `${count} environment variable${count === 1 ? "" : "s"} recognized from SKILL.md`,
+      draftUpdated: "Written to the SKILL.md draft; not saved yet",
       retry: "Check again",
       sourceStale:
         "SKILL.md changed while it was being processed. Your current edits were preserved; try again.",
@@ -2103,7 +2132,9 @@ export const enUS: Translations = {
         "The managed fields contain comments that cannot be preserved safely. The form is read-only; edit the source instead.",
       shorthand: (count) =>
         `${count} legacy shorthand declaration${count === 1 ? " was" : "s were"} found. They are normalized only after an actual edit.`,
-      empty: "The current editing buffer declares no Credential variables.",
+      empty:
+        "No environment variables are declared yet. Add one to update the current SKILL.md draft.",
+      beginEdit: "Create a new version and add a variable",
       optional: "Optional",
       required: "Required",
       setOptional: (name) => `Make ${name} optional`,
@@ -2117,10 +2148,17 @@ export const enUS: Translations = {
         "The name must start with a letter or underscore and contain only letters, numbers, and underscores.",
       duplicateName:
         "That environment variable is already declared. Names are case-sensitive.",
-      autonomousTitle: "Allow autonomous Credential use",
+      autonomousTitle: "Credential injection mode",
       autonomousDescription:
-        "This maps to SKILL.md secrets-autonomous and does not bypass runtime authorization or Credential binding.",
-      autonomousAria: "Allow autonomous Credential use",
+        "Choose which Skill activation modes may inject already bound and authorized Credentials.",
+      autonomousAria: "Choose the Credential injection mode",
+      advancedSettings: "Advanced settings",
+      injectionAutomatic: "Inject after the Skill is read",
+      injectionAutomaticDescription:
+        "The Agent may inject bound Credentials after reading this Skill. Explicit /Skill activation also injects them.",
+      injectionExplicit: "Inject only after explicit /Skill activation",
+      injectionExplicitDescription:
+        "Natural-language automatic loading does not inject Credentials. Injection requires explicit /Skill activation.",
       location: (line, column) =>
         `Line ${line}${column === null ? "" : `, column ${column}`}: `,
       loadSourceFailed:
@@ -2135,24 +2173,82 @@ export const enUS: Translations = {
       optionalUnbound: "Leave unbound (optional)",
       selectCredential: "Select a Credential",
       credentialVersion: (name, version) => `${name} · version ${version}`,
+      credentialUnavailable: "Unavailable Credential · select a replacement",
+      versionLabel: (version) => `version ${version}`,
+      sourceFieldLabel: "Source environment variable",
+      selectCredentialFirst: "Select a project Credential first",
+      selectSourceField: "Select an env field from the Credential",
+      sourceFieldUnavailable: "field no longer available",
+      sourceFieldRequired: "Select a specific source env field.",
       requiredMissing: "Select a Credential for this required variable.",
+      invalidMapping:
+        "This mapping is no longer compatible. Select an available Credential and source env field.",
       createCredential: "Create Credential",
-      manageCredential: "Manage Credentials",
+      manageCredential: "Manage project Credentials",
+      mappingTitle: "2. Project Credential mappings",
+      mappingDescription:
+        "Map each Skill environment variable to a specific env field in a project Credential. Mappings are stored in the project database, never in SKILL.md, and secret values are never displayed.",
+      mappingEmpty:
+        "This version declares no environment variables, so no project Credential mapping is needed.",
+      mappingStatusConfigured: "Configured",
+      mappingStatusMissing: "Not configured",
+      mappingStatusInvalid: "Needs repair",
+      mappingReadOnly:
+        "You can edit the declarations in SKILL.md, but a member with Credential approval permission must configure their project Credential sources.",
+      mappingHistoricalReadOnly:
+        "Historical published versions are read-only. Project Skill Drafts and the current published version support project Credential mappings.",
+      mappingRefreshPreserved:
+        "Server mappings changed. Your unsaved choices were preserved and merged with unchanged rows. Review them before saving or discarding.",
+      mappingReload: "Reload",
+      mappingDiscard: "Discard changes",
+      mappingSave: "Save mappings",
+      mappingSaving: "Saving…",
+      mappingCompleteRequired:
+        "Configure every required variable before saving mappings for an active Skill.",
+      mappingRepairInvalid:
+        "Repair invalid mappings or remove optional mappings before saving.",
+      mappingLoadingAria: "Loading this version's project Credential mappings",
+      mappingVersionMismatch:
+        "The returned Credential mappings do not belong to this version, so they were not displayed. Reload and try again.",
+      mappingRetry: "Try again",
+      mappingConflict:
+        "Credential mappings were changed by someone else, or this version is no longer editable. Your local choices were preserved; reload and review them.",
+      mappingForbidden: "You cannot modify these Credential mappings.",
+      mappingNotFound: "This Skill or version no longer exists.",
+      mappingInvalidResponse:
+        "The Credential mapping response was invalid, so it was not displayed to protect sensitive information.",
+      mappingLoadFailed: "Credential mappings could not be loaded.",
+      mappingSaveFailed:
+        "Credential mappings could not be saved. Try again later.",
+      mappingVersionChanged:
+        "The current version changed. Your unsaved choices are still preserved, but saving is paused; reload and confirm them again.",
     },
     publishDialog: {
       title: "Publish Skill version",
       description: (version) =>
-        `Publish version ${version} and select exact project Credential versions for this immutable version. The request contains only Credential version IDs, never secret values.`,
+        `Publish version ${version}. This dialog only checks the exact version's environment variables and project Credential mappings; it does not collect Credential choices.`,
       loading: "Running publish checks…",
       targetVersion: "Target version: ",
       bindingRevision: "Binding revision: ",
       noRequirements:
-        "The target version declares no Credential variables and can be published directly.",
+        "The target version declares no environment variables and can be published directly.",
       bindingsTitle: "Version Credential bindings",
+      required: "Required",
+      optional: "Optional",
+      statusConfigured: "Configured",
+      statusMissing: "Not configured",
+      statusInvalid: "Needs repair",
+      preflightReady: "Publish checks passed",
+      preflightBlocked: "Publish checks did not pass",
+      preflightSummary: (configuredRequired, required, invalid) =>
+        `${configuredRequired}/${required} required mappings configured; ${invalid} invalid mapping${invalid === 1 ? "" : "s"}.`,
+      configureBeforePublish:
+        "Return to Runtime credentials, complete required mappings, and repair invalid mappings before publishing.",
+      configureCredentials: "Go to Runtime credentials",
       noApprove:
-        "You cannot select Credentials. This request will not submit bindings; a suspended Skill may be published first, but an administrator must configure it before activation.",
+        "You cannot choose Credential sources. Ask a member with Credential approval permission to complete the mappings in Runtime credentials first.",
       approvalRequiredForActive:
-        "A new version of an active Skill must atomically submit every required binding. Ask a member with Credential approval permission to publish it, or suspend the Skill first.",
+        "Every public Draft must have all required mappings configured and invalid mappings repaired before publish. Ask a Credential approver to configure them first.",
       optionalUnbound: (count) =>
         `${count} optional variable${count === 1 ? " is" : "s are"} unbound and will not be injected at runtime.`,
       staleBase:
@@ -2326,9 +2422,9 @@ export const enUS: Translations = {
         title: "Candidate files",
         titleRevise: "Candidate files (revision)",
         filesSurface: "Files",
-        secretsSurface: "Credential environment variables",
+        secretsSurface: "Runtime credentials",
         secretsUnavailable:
-          "The candidate package has no root SKILL.md, so Credential environment variable declarations cannot be edited.",
+          "The candidate package has no root SKILL.md, so environment variable declarations cannot be edited.",
         fileCount: (count) => `${count} UTF-8 text files`,
         diffSummary: (version, added, modified, deleted) =>
           ` · vs baseline${version}: ${added} added · ${modified} modified · ${deleted} deleted`,
@@ -2446,8 +2542,10 @@ export const enUS: Translations = {
           `Created draft version v${version}. Go publish it`,
         withoutVersion: "Created a draft version. Go publish it",
         goPublish: "Go publish",
+        revisionWithSecrets: (version, count) =>
+          `Created ${version === null ? "a draft version" : `draft version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before publishing.`,
         createdWithSecrets: (count) =>
-          `Skill created and suspended with ${count} Credential environment variable declaration${count === 1 ? "" : "s"}. Configure credentials before enabling it.`,
+          `Skill created and suspended with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before enabling it.`,
         configureCredentials: "Configure credentials",
       },
       publish: {
@@ -2626,6 +2724,9 @@ export const enUS: Translations = {
     runFailedTitle: "Run did not finish",
     runFailedDescription:
       "The agent could not produce a response. Check the selected model, asset dependencies, and credentials, then edit or send the message again.",
+    providerUnavailableTitle: "Model provider temporarily unavailable",
+    providerUnavailableDescription:
+      "The Worker could not reach the configured model provider after retrying. Check the Worker network or proxy configuration, then retry this message.",
     runAdmissionNotConfirmedDescription:
       "The Run did not start because the conversation may already be running or its state changed. Your draft was preserved; try again shortly.",
     restoreFailedInput: "Restore to composer",

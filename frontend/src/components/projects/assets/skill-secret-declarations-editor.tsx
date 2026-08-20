@@ -2,6 +2,7 @@
 
 import {
   AlertCircleIcon,
+  CheckCircle2Icon,
   Code2Icon,
   KeyRoundIcon,
   Loader2Icon,
@@ -9,7 +10,7 @@ import {
   RefreshCwIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -37,6 +38,7 @@ type EditorStatus =
       projection: SkillSecretProjection;
       patchable: boolean;
       diagnostics: SkillFrontmatterDiagnostic[];
+      feedback: SkillSecretFeedbackKind;
     }
   | {
       kind: "invalid";
@@ -44,6 +46,69 @@ type EditorStatus =
       diagnostics: SkillFrontmatterDiagnostic[];
     }
   | { kind: "error"; message: string };
+
+type SkillSecretFeedbackKind = "source" | "draft";
+export type SkillSecretInjectionMode = "automatic" | "explicit";
+
+export function resolveSkillSecretEditorAccess({
+  editable,
+  canEdit,
+  canBeginEdit,
+}: {
+  editable?: boolean;
+  canEdit?: boolean;
+  canBeginEdit?: boolean;
+}): { editable: boolean; canBeginEdit: boolean } {
+  const resolvedEditable = editable ?? canEdit ?? false;
+  return {
+    editable: resolvedEditable,
+    canBeginEdit: !resolvedEditable && Boolean(canBeginEdit),
+  };
+}
+
+export function skillSecretFeedbackMessage(
+  copy: Translations["skills"]["secrets"],
+  feedback: SkillSecretFeedbackKind,
+  count: number,
+): string {
+  return feedback === "draft" ? copy.draftUpdated : copy.recognized(count);
+}
+
+export function skillSecretInjectionModeFromAutonomous(
+  autonomous: boolean,
+): SkillSecretInjectionMode {
+  return autonomous ? "automatic" : "explicit";
+}
+
+export function skillSecretAutonomousFromInjectionMode(
+  mode: SkillSecretInjectionMode,
+): boolean {
+  return mode === "automatic";
+}
+
+export function shouldShowSkillSecretInjectionSettings(
+  requiredSecretCount: number,
+): boolean {
+  return requiredSecretCount > 0;
+}
+
+export function skillSecretNameFocusDecision({
+  editable,
+  focusRequested,
+  inputReady,
+}: {
+  editable: boolean;
+  focusRequested: boolean;
+  inputReady: boolean;
+}): { shouldFocus: boolean; keepRequest: boolean } {
+  if (!focusRequested) {
+    return { shouldFocus: false, keepRequest: false };
+  }
+  if (!editable || !inputReady) {
+    return { shouldFocus: false, keepRequest: true };
+  }
+  return { shouldFocus: true, keepRequest: false };
+}
 
 export function skillFrontmatterResponseIsCurrent({
   generation,
@@ -128,16 +193,27 @@ export function SkillSecretDeclarationsEditor({
   projectId,
   content,
   canEdit,
+  editable,
+  canBeginEdit = false,
+  readOnlyReason,
   disabled = false,
+  beforeAdvancedSettings,
   onContentChange,
+  onBeginEdit,
   onOpenSource,
   onValidityChange,
 }: {
   projectId: string;
   content: string;
-  canEdit: boolean;
+  /** @deprecated Prefer `editable`; retained while callers migrate. */
+  canEdit?: boolean;
+  editable?: boolean;
+  canBeginEdit?: boolean;
+  readOnlyReason?: string;
   disabled?: boolean;
+  beforeAdvancedSettings?: ReactNode;
   onContentChange: (content: string) => void;
+  onBeginEdit?: () => void;
   onOpenSource: () => void;
   onValidityChange?: (valid: boolean) => void;
 }) {
@@ -148,10 +224,41 @@ export function SkillSecretDeclarationsEditor({
   const [newOptional, setNewOptional] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const [parseNonce, setParseNonce] = useState(0);
+  const injectionModeName = useId();
   const contentRef = useRef(content);
+  const lastPatchedContentRef = useRef<string | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const focusNameAfterBeginEditRef = useRef(false);
   const generationRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
   contentRef.current = content;
+  const access = resolveSkillSecretEditorAccess({
+    editable,
+    canEdit,
+    canBeginEdit,
+  });
+
+  useEffect(() => {
+    const decision = skillSecretNameFocusDecision({
+      editable: access.editable,
+      focusRequested: focusNameAfterBeginEditRef.current,
+      inputReady: status.kind === "ready",
+    });
+    if (!decision.shouldFocus) {
+      focusNameAfterBeginEditRef.current = decision.keepRequest;
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const input = nameInputRef.current;
+      if (!input) {
+        focusNameAfterBeginEditRef.current = true;
+        return;
+      }
+      focusNameAfterBeginEditRef.current = false;
+      input.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [access.editable, status.kind]);
 
   useEffect(() => {
     const generation = ++generationRef.current;
@@ -203,6 +310,10 @@ export function SkillSecretDeclarationsEditor({
                   projection: response.projection,
                   patchable: response.patchable,
                   diagnostics: response.diagnostics,
+                  feedback:
+                    sourceContent === lastPatchedContentRef.current
+                      ? "draft"
+                      : "source",
                 }
               : {
                   kind: "invalid",
@@ -210,6 +321,9 @@ export function SkillSecretDeclarationsEditor({
                   diagnostics: response.diagnostics,
                 },
           );
+          if (sourceContent !== lastPatchedContentRef.current) {
+            lastPatchedContentRef.current = null;
+          }
         } catch (error) {
           if (
             controller.signal.aborted ||
@@ -253,7 +367,12 @@ export function SkillSecretDeclarationsEditor({
     requiredSecrets: SkillSecretProjection["required_secrets"],
     secretsAutonomous: boolean,
   ): Promise<boolean> {
-    if (status.kind !== "ready" || !status.patchable || disabled || !canEdit) {
+    if (
+      status.kind !== "ready" ||
+      !status.patchable ||
+      disabled ||
+      !access.editable
+    ) {
       return false;
     }
     const sourceContent = contentRef.current;
@@ -289,12 +408,14 @@ export function SkillSecretDeclarationsEditor({
         return false;
       }
       contentRef.current = response.content;
+      lastPatchedContentRef.current = response.content;
       setStatus({
         kind: "ready",
         sourceSha256: response.result_sha256,
         projection: response.projection,
         patchable: true,
         diagnostics: response.diagnostics,
+        feedback: "draft",
       });
       if (response.changed) onContentChange(response.content);
       return true;
@@ -361,7 +482,7 @@ export function SkillSecretDeclarationsEditor({
     status.kind === "idle" ||
     status.kind === "parsing" ||
     status.kind === "patching";
-  const controlsDisabled = busy || disabled || !canEdit;
+  const controlsDisabled = busy || disabled || !access.editable;
   const diagnostics =
     status.kind === "ready" || status.kind === "invalid"
       ? status.diagnostics
@@ -375,9 +496,6 @@ export function SkillSecretDeclarationsEditor({
             <KeyRoundIcon aria-hidden className="size-4" />
             <h3 className="text-sm font-semibold">{copy.title}</h3>
           </div>
-          <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            {copy.description}
-          </p>
         </div>
         <Button
           type="button"
@@ -444,11 +562,45 @@ export function SkillSecretDeclarationsEditor({
             </p>
           ) : null}
 
+          <p
+            role="status"
+            aria-live="polite"
+            className="text-muted-foreground flex items-center gap-2 text-xs"
+          >
+            <CheckCircle2Icon aria-hidden className="size-3.5" />
+            {skillSecretFeedbackMessage(
+              copy,
+              status.feedback,
+              status.projection.required_secrets.length,
+            )}
+          </p>
+
           <div className="space-y-3">
             {status.projection.required_secrets.length === 0 ? (
-              <p className="text-muted-foreground rounded-lg border border-dashed p-4 text-sm">
-                {copy.empty}
-              </p>
+              <div className="space-y-3 rounded-lg border border-dashed p-4">
+                {access.editable ? (
+                  <p className="text-muted-foreground text-sm">{copy.empty}</p>
+                ) : null}
+                {access.canBeginEdit && onBeginEdit ? (
+                  <Button
+                    type="button"
+                    size="sm"
+                    disabled={disabled}
+                    onClick={() => {
+                      focusNameAfterBeginEditRef.current = true;
+                      onBeginEdit();
+                    }}
+                  >
+                    <PlusIcon aria-hidden className="size-4" />
+                    {copy.beginEdit}
+                  </Button>
+                ) : null}
+                {!access.editable && readOnlyReason ? (
+                  <p className="text-muted-foreground text-xs leading-5">
+                    {readOnlyReason}
+                  </p>
+                ) : null}
+              </div>
             ) : (
               status.projection.required_secrets.map((requirement) => (
                 <div
@@ -479,7 +631,7 @@ export function SkillSecretDeclarationsEditor({
                     />
                     {copy.optional}
                   </label>
-                  {canEdit ? (
+                  {access.editable ? (
                     <Button
                       type="button"
                       size="icon-sm"
@@ -503,7 +655,7 @@ export function SkillSecretDeclarationsEditor({
             )}
           </div>
 
-          {canEdit ? (
+          {access.editable ? (
             <div className="space-y-3 rounded-lg border border-dashed p-3">
               <p className="text-sm font-medium">{copy.addTitle}</p>
               <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto_auto] sm:items-end">
@@ -512,6 +664,7 @@ export function SkillSecretDeclarationsEditor({
                     {copy.nameLabel}
                   </span>
                   <Input
+                    ref={nameInputRef}
                     value={newName}
                     placeholder={copy.namePlaceholder}
                     disabled={controlsDisabled || !status.patchable}
@@ -566,26 +719,95 @@ export function SkillSecretDeclarationsEditor({
             </div>
           ) : null}
 
-          <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
-            <div>
-              <p className="text-sm font-medium">{copy.autonomousTitle}</p>
-              <p className="text-muted-foreground mt-1 text-xs leading-5">
-                {copy.autonomousDescription}
-              </p>
-            </div>
-            <Switch
-              aria-label={copy.autonomousAria}
-              checked={status.projection.secrets_autonomous}
-              disabled={controlsDisabled || !status.patchable}
-              onCheckedChange={(checked) =>
-                void patchProjection(
-                  status.projection.required_secrets,
-                  checked,
-                )
-              }
-            />
-          </div>
+          {!access.editable &&
+          status.projection.required_secrets.length > 0 &&
+          readOnlyReason ? (
+            <p className="text-muted-foreground text-xs leading-5">
+              {readOnlyReason}
+            </p>
+          ) : null}
         </>
+      ) : null}
+
+      {beforeAdvancedSettings}
+
+      {status.kind === "ready" &&
+      shouldShowSkillSecretInjectionSettings(
+        status.projection.required_secrets.length,
+      ) ? (
+        <details className="group rounded-lg border px-3 py-2">
+          <summary className="cursor-pointer text-sm font-medium">
+            {copy.advancedSettings}
+          </summary>
+          <fieldset className="mt-3 space-y-3 border-t pt-3">
+            <legend className="text-sm font-medium">
+              {copy.autonomousTitle}
+            </legend>
+            <p className="text-muted-foreground text-xs leading-5">
+              {copy.autonomousDescription}
+            </p>
+            <div
+              role="radiogroup"
+              aria-label={copy.autonomousAria}
+              className="grid gap-2 sm:grid-cols-2"
+            >
+              {(
+                [
+                  {
+                    mode: "automatic" as const,
+                    title: copy.injectionAutomatic,
+                    description: copy.injectionAutomaticDescription,
+                  },
+                  {
+                    mode: "explicit" as const,
+                    title: copy.injectionExplicit,
+                    description: copy.injectionExplicitDescription,
+                  },
+                ] satisfies Array<{
+                  mode: SkillSecretInjectionMode;
+                  title: string;
+                  description: string;
+                }>
+              ).map((option) => {
+                const checked =
+                  skillSecretInjectionModeFromAutonomous(
+                    status.projection.secrets_autonomous,
+                  ) === option.mode;
+                return (
+                  <label
+                    key={option.mode}
+                    className={`flex items-start gap-3 rounded-lg border p-3 ${
+                      checked ? "border-primary bg-primary/5" : "border-border"
+                    } ${controlsDisabled ? "cursor-not-allowed" : "cursor-pointer"}`}
+                  >
+                    <input
+                      type="radio"
+                      name={injectionModeName}
+                      value={option.mode}
+                      checked={checked}
+                      disabled={controlsDisabled || !status.patchable}
+                      className="accent-primary mt-1"
+                      onChange={() =>
+                        void patchProjection(
+                          status.projection.required_secrets,
+                          skillSecretAutonomousFromInjectionMode(option.mode),
+                        )
+                      }
+                    />
+                    <span>
+                      <span className="block text-sm font-medium">
+                        {option.title}
+                      </span>
+                      <span className="text-muted-foreground mt-1 block text-xs leading-5">
+                        {option.description}
+                      </span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
+        </details>
       ) : null}
 
       {diagnostics.length > 0 ? (

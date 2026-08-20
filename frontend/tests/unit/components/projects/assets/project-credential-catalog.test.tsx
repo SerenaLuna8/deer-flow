@@ -51,6 +51,11 @@ describe("ProjectCredentialCatalogView", () => {
     expect(html).toContain("传输MCP凭证");
     expect(html).toContain("SKILL 认证");
     expect(html).toContain("元数据版本");
+    expect(html).toContain("更新时间");
+    expect(html).toContain(
+      'class="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_minmax(0,1.35fr)] gap-x-4 gap-y-2 text-sm"',
+    );
+    expect(html).not.toContain("sm:col-span-2");
     expect(html).not.toContain("版本历史");
     expect(html).not.toContain("上一版本");
   });

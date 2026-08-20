@@ -9,6 +9,7 @@ import {
 import { I18nProvider } from "@/core/i18n/context";
 import {
   CURRENT_UPLOAD_UNAVAILABLE,
+  LLM_PROVIDER_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   type ProjectRunFailureCode,
@@ -121,6 +122,21 @@ describe("RunFailureAlert", () => {
     expect(english).toContain("Image attachment could not be read");
     expect(english).toContain("Restore the original input and retry");
     expect(english).toContain("Restore to composer");
+  });
+
+  test("renders a provider-specific terminal failure without a console-error surface", () => {
+    const chinese = render(LLM_PROVIDER_UNAVAILABLE, "zh-CN", false, true);
+    const english = render(LLM_PROVIDER_UNAVAILABLE, "en-US", false, true);
+
+    expect(chinese).toContain(
+      `data-run-failure-code="${LLM_PROVIDER_UNAVAILABLE}"`,
+    );
+    expect(chinese).toContain("模型服务暂时不可用");
+    expect(chinese).toContain("检查 Worker 网络或代理配置");
+    expect(english).toContain("Model provider temporarily unavailable");
+    expect(english).toContain(
+      "Check the Worker network or proxy configuration",
+    );
   });
 
   test("disables retry without Run authority or while a Run is active", () => {

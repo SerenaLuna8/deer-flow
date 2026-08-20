@@ -46,6 +46,7 @@ _SCAN_ROOTS = (
     ("/mnt/user-data/outputs", "outputs", "output"),
 )
 _PRESENTED_OUTPUT_PREFIX = "/mnt/user-data/outputs/"
+_WORKSPACE_RUNTIME_ROOT_NAMES = (".venv",)
 _DEFAULT_PRIVATE_FINALIZATION_MAX_SCANNED_FILES = 2_000
 _DEFAULT_PRIVATE_FINALIZATION_MAX_SCAN_ENTRIES = 10_000
 
@@ -230,6 +231,7 @@ class PrivateFileFinalizer:
                 entries = sandbox.list_secure_files(
                     virtual_root,
                     max_entries=self._limits.max_scan_entries,
+                    excluded_root_names=(_WORKSPACE_RUNTIME_ROOT_NAMES if logical_root == "workspace" else ()),
                 )
                 for entry in entries:
                     scanned_entries += 1

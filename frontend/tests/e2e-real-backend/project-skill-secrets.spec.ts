@@ -77,7 +77,7 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
     project = await registerReplayProject(context, APP);
   });
 
-  test("uploads, binds, patches SKILL.md, and atomically publishes Credential IDs", async ({
+  test("uploads, maps exact Credential fields, patches SKILL.md, and publishes with CAS", async ({
     page,
     context,
   }) => {
@@ -143,11 +143,20 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
     const detail = page.getByRole("dialog", { name: "real-secret-browser" });
     await expect(detail).toBeVisible();
     await expect(
-      detail.getByRole("heading", { name: "环境变量" }),
+      detail.getByRole("tab", { name: "Runtime credentials" }),
+    ).toHaveAttribute("aria-selected", "true");
+    await expect(
+      detail.getByRole("heading", { name: "2. Project Credential mappings" }),
     ).toBeVisible();
-    const bindingSelect = detail.getByLabel("Project Credential");
+    const bindingSelect = detail.getByLabel(
+      `Project Credential · ${REQUIRED_SECRET}`,
+    );
     await expect(bindingSelect).toHaveValue("");
     await bindingSelect.selectOption(credentialVersionId);
+    const sourceFieldSelect = detail.getByLabel(
+      `Source environment variable · ${REQUIRED_SECRET}`,
+    );
+    await sourceFieldSelect.selectOption(REQUIRED_SECRET);
     const [bindingResponse] = await Promise.all([
       page.waitForResponse(
         (response) =>
@@ -155,18 +164,28 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
           response
             .url()
             .endsWith(
-              `/api/projects/${project.id}/skills/${skillId}/credential-bindings`,
+              `/api/projects/${project.id}/skills/${skillId}/versions/${initialVersionId}/credential-bindings`,
             ),
       ),
-      detail.getByRole("button", { name: "保存配置" }).click(),
+      detail.getByRole("button", { name: "Save mappings" }).click(),
     ]);
     expect(bindingResponse.status(), await bindingResponse.text()).toBe(200);
     await expect(bindingSelect).toHaveValue(credentialVersionId);
+    await expect(sourceFieldSelect).toHaveValue(REQUIRED_SECRET);
 
     await detail.getByRole("button", { name: "创建新版本" }).click();
-    await detail
-      .getByRole("tab", { name: "Credential environment variables" })
-      .click();
+    await detail.getByRole("tab", { name: "Runtime credentials" }).click();
+    await expect(
+      detail.getByRole("heading", {
+        name: "1. Environment variable declarations",
+      }),
+    ).toBeVisible();
+    await expect(
+      detail.getByText("当前正在编辑新版本。", { exact: false }),
+    ).toBeVisible();
+    await expect(
+      detail.getByLabel(new RegExp("Project Credential", "u")),
+    ).toHaveCount(0);
     await detail.getByLabel("Variable name").fill(OPTIONAL_SECRET);
     await detail.getByLabel("Make the new variable optional").click();
     await detail.getByRole("button", { name: "Add" }).click();
@@ -196,6 +215,34 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
       throw new Error("Skill fork response is missing the draft version ID");
     }
 
+    await expect(
+      detail.getByRole("tab", { name: "Runtime credentials" }),
+    ).toHaveAttribute("aria-selected", "true");
+    const draftCredentialSelect = detail.getByLabel(
+      `Project Credential · ${REQUIRED_SECRET}`,
+    );
+    await draftCredentialSelect.selectOption(credentialVersionId);
+    const draftSourceFieldSelect = detail.getByLabel(
+      `Source environment variable · ${REQUIRED_SECRET}`,
+    );
+    await draftSourceFieldSelect.selectOption(REQUIRED_SECRET);
+    const [draftBindingResponse] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.request().method() === "PUT" &&
+          response
+            .url()
+            .endsWith(
+              `/api/projects/${project.id}/skills/${skillId}/versions/${draftVersionId}/credential-bindings`,
+            ),
+      ),
+      detail.getByRole("button", { name: "Save mappings" }).click(),
+    ]);
+    expect(
+      draftBindingResponse.status(),
+      await draftBindingResponse.text(),
+    ).toBe(200);
+
     const publishButton = detail.getByRole("button", { name: "发布版本" });
     await expect(publishButton).toBeEnabled();
     await publishButton.click();
@@ -204,8 +251,8 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
     });
     await expect(publishDialog).toBeVisible();
     await expect(
-      publishDialog.getByLabel("Project Credential").first(),
-    ).toHaveValue(credentialVersionId);
+      publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+    ).toHaveCount(0);
 
     const [publishRequest, publishResponse] = await Promise.all([
       page.waitForRequest(
@@ -229,23 +276,14 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
       publishDialog.getByRole("button", { name: "Publish version" }).click(),
     ]);
     expect(publishResponse.status(), await publishResponse.text()).toBe(200);
-    const publishBody = publishRequest.postDataJSON() as {
-      credential_bindings?: Array<{
-        name?: unknown;
-        credential_version_id?: unknown;
-      }>;
-      [key: string]: unknown;
-    };
-    expect(publishBody.credential_bindings).toEqual([
-      {
-        name: REQUIRED_SECRET,
-        credential_version_id: credentialVersionId,
-      },
-    ]);
+    const publishBody = publishRequest.postDataJSON() as Record<
+      string,
+      unknown
+    >;
+    expect(publishBody).not.toHaveProperty("credential_bindings");
     expect(JSON.stringify(publishBody)).not.toContain(SECRET_VALUE);
     expect(Object.keys(publishBody).sort()).toEqual([
       "acknowledge_stale_base",
-      "credential_bindings",
       "expected_asset_version",
       "expected_binding_revision",
       "expected_payload_checksum",

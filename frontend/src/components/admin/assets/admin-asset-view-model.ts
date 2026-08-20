@@ -37,7 +37,25 @@ export function credentialPendingMigrationMessage(
   // Nothing pending is a silent success; the count itself is server authority
   // and is never recomputed from a version list here.
   if (!pending || pending.total <= 0) return null;
-  return copy.pendingMigrationNotice(pending.total, pending.system_model_count);
+  return copy.pendingMigrationNotice(
+    pending.total,
+    pending.mcp_grant_count,
+    pending.skill_binding_count,
+    pending.system_model_count,
+  );
+}
+
+export function credentialMigrationActionVisible(
+  pending: CredentialPendingMigration | null,
+): boolean {
+  return Boolean(pending && pending.total > 0);
+}
+
+export function credentialMigrationCompleteMessage(
+  pending: CredentialPendingMigration | null,
+  copy: Translations["adminAssets"]["common"],
+): string | null {
+  return pending?.total === 0 ? copy.credentialMigrationComplete : null;
 }
 
 type CredentialTypeCopy =

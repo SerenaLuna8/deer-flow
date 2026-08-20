@@ -2,11 +2,13 @@ import { describe, expect, rs, test } from "@rstest/core";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
+  notifySkillDraftVersionCreated,
   skillVersionConflictHasLatestServerState,
   skillVersionDraftMatchesSubmittedChanges,
   skillVersionSaveIsPending,
   skillVersionWorkbenchTabForKey,
 } from "@/components/projects/assets/skill-version-workbench";
+import { skillWorkbenchTabVariant } from "@/components/projects/assets/skill-workbench-tabs";
 import type { SkillFileChange } from "@/core/shared-assets";
 import { invalidateProjectSkillConflictQueries } from "@/core/shared-assets/hooks";
 
@@ -16,6 +18,29 @@ const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("Skill version conflict recovery", () => {
+  test("focuses Runtime credentials after saving a Draft with declarations", () => {
+    const events: unknown[][] = [];
+    notifySkillDraftVersionCreated((...args) => events.push(args), {
+      id: SOURCE_VERSION_ID,
+      secret_requirements: [{ name: "API_KEY", optional: false }],
+    });
+    expect(events).toEqual([[SOURCE_VERSION_ID, { focusCredentials: true }]]);
+  });
+
+  test("does not force Runtime credentials after saving a Draft without declarations", () => {
+    const events: unknown[][] = [];
+    notifySkillDraftVersionCreated((...args) => events.push(args), {
+      id: SOURCE_VERSION_ID,
+      secret_requirements: [],
+    });
+    expect(events).toEqual([[SOURCE_VERSION_ID, { focusCredentials: false }]]);
+  });
+
+  test("uses a high-contrast selected tab variant", () => {
+    expect(skillWorkbenchTabVariant(true)).toBe("default");
+    expect(skillWorkbenchTabVariant(false)).toBe("ghost");
+  });
+
   test("maps the complete horizontal tab keyboard contract", () => {
     expect(skillVersionWorkbenchTabForKey("files", "ArrowRight")).toBe(
       "secrets",

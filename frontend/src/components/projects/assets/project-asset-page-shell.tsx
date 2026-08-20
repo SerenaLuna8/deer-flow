@@ -1842,11 +1842,6 @@ function ProjectAssetCatalog({
           renderDetailActions={renderDetailActions}
           renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
-          credentialsHref={
-            kind === "skills"
-              ? `/projects/${encodeURIComponent(project.slug)}/credentials`
-              : undefined
-          }
           focusSkillCredentials={credentialSetupAssetId === selectedItem.id}
           onSkillCredentialsFocused={() =>
             setCredentialSetupAssetId((current) =>

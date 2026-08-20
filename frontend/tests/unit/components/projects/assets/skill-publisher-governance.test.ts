@@ -17,12 +17,47 @@ import { projectAssetDeleteDescription } from "@/components/projects/assets/proj
 import { projectSkillImportErrorMessage } from "@/components/projects/assets/project-skill-import-dialog";
 import {
   skillCredentialBindingCanUnbind,
+  skillCredentialBindingValidation,
   skillCredentialSelectionsAfterServerRefresh,
 } from "@/components/projects/assets/skill-credential-bindings";
-import { SharedAssetApiError } from "@/core/shared-assets";
+import {
+  SharedAssetApiError,
+  type SkillCredentialRequirement,
+} from "@/core/shared-assets";
 
 const EDIT = "shared_assets.edit" as const;
 const MANAGE_BINDINGS = "shared_assets.manage_bindings" as const;
+const CREDENTIAL_ID = "88888888-8888-4888-8888-888888888888";
+const CREDENTIAL_VERSION_ID = "99999999-9999-4999-8999-999999999999";
+
+function mappingRequirement(
+  name: string,
+  {
+    optional = false,
+    envFields = [name],
+  }: { optional?: boolean; envFields?: string[] } = {},
+): SkillCredentialRequirement {
+  return {
+    name,
+    optional,
+    configured: false,
+    mapping_status: "missing",
+    credential_id: null,
+    credential_version_id: null,
+    credential_display_name: null,
+    credential_version_number: null,
+    source_env_field_name: null,
+    eligible_credentials: [
+      {
+        credential_id: CREDENTIAL_ID,
+        credential_version_id: CREDENTIAL_VERSION_ID,
+        display_name: "Shared Credential",
+        version_number: 1,
+        env_fields: envFields,
+      },
+    ],
+  };
+}
 
 describe("Skill publisher governance", () => {
   test("requires binding-manager authority to publish a Skill draft", () => {
@@ -145,6 +180,61 @@ describe("Skill publisher governance", () => {
     );
   });
 
+  test("blocks a partially completed active mapping set but lets a Draft save complete rows", () => {
+    const requirements = [
+      mappingRequirement("API_KEY"),
+      mappingRequirement("DATABASE_URL"),
+    ];
+    const selections = {
+      API_KEY: {
+        credentialVersionId: CREDENTIAL_VERSION_ID,
+        sourceEnvFieldName: "API_KEY",
+      },
+    };
+
+    expect(
+      skillCredentialBindingValidation(requirements, selections, true),
+    ).toMatchObject({
+      hasInvalidSelection: false,
+      hasBlockingMissingRequired: true,
+    });
+    expect(
+      skillCredentialBindingValidation(requirements, selections, false),
+    ).toMatchObject({
+      hasInvalidSelection: false,
+      hasBlockingMissingRequired: false,
+    });
+  });
+
+  test("blocks a stale source env field until it is replaced or optionally unbound", () => {
+    const requirement = mappingRequirement("DATABASE_URL", {
+      optional: true,
+      envFields: ["NEW_DATABASE_URL"],
+    });
+
+    expect(
+      skillCredentialBindingValidation(
+        [requirement],
+        {
+          DATABASE_URL: {
+            credentialVersionId: CREDENTIAL_VERSION_ID,
+            sourceEnvFieldName: "OLD_DATABASE_URL",
+          },
+        },
+        false,
+      ),
+    ).toMatchObject({
+      statuses: { DATABASE_URL: "invalid" },
+      hasInvalidSelection: true,
+    });
+    expect(
+      skillCredentialBindingValidation([requirement], {}, false),
+    ).toMatchObject({
+      statuses: { DATABASE_URL: "missing" },
+      hasInvalidSelection: false,
+    });
+  });
+
   test("turns incomplete activation into an actionable Credential repair", () => {
     const error = new SharedAssetApiError(
       422,
@@ -185,27 +275,63 @@ describe("Skill publisher governance", () => {
     expect(
       skillCredentialSelectionsAfterServerRefresh(
         {
-          API_KEY: "22222222-2222-4222-8222-222222222222",
-          REGION: "33333333-3333-4333-8333-333333333333",
-          REMOVED: "44444444-4444-4444-8444-444444444444",
+          API_KEY: {
+            credentialVersionId: "22222222-2222-4222-8222-222222222222",
+            sourceEnvFieldName: "API_TOKEN",
+          },
+          REGION: {
+            credentialVersionId: "33333333-3333-4333-8333-333333333333",
+            sourceEnvFieldName: "REGION",
+          },
+          REMOVED: {
+            credentialVersionId: "44444444-4444-4444-8444-444444444444",
+            sourceEnvFieldName: "REMOVED",
+          },
         },
         {
-          API_KEY: "11111111-1111-4111-8111-111111111111",
-          REGION: "33333333-3333-4333-8333-333333333333",
-          REMOVED: "44444444-4444-4444-8444-444444444444",
+          API_KEY: {
+            credentialVersionId: "11111111-1111-4111-8111-111111111111",
+            sourceEnvFieldName: "API_KEY",
+          },
+          REGION: {
+            credentialVersionId: "33333333-3333-4333-8333-333333333333",
+            sourceEnvFieldName: "REGION",
+          },
+          REMOVED: {
+            credentialVersionId: "44444444-4444-4444-8444-444444444444",
+            sourceEnvFieldName: "REMOVED",
+          },
         },
         {
-          API_KEY: "55555555-5555-4555-8555-555555555555",
-          REGION: "66666666-6666-4666-8666-666666666666",
-          ADDED: "77777777-7777-4777-8777-777777777777",
+          API_KEY: {
+            credentialVersionId: "55555555-5555-4555-8555-555555555555",
+            sourceEnvFieldName: "API_KEY",
+          },
+          REGION: {
+            credentialVersionId: "66666666-6666-4666-8666-666666666666",
+            sourceEnvFieldName: "REGION",
+          },
+          ADDED: {
+            credentialVersionId: "77777777-7777-4777-8777-777777777777",
+            sourceEnvFieldName: "ADDED_SOURCE",
+          },
         },
         ["API_KEY", "REGION", "ADDED"],
       ),
     ).toEqual({
       selections: {
-        API_KEY: "22222222-2222-4222-8222-222222222222",
-        REGION: "66666666-6666-4666-8666-666666666666",
-        ADDED: "77777777-7777-4777-8777-777777777777",
+        API_KEY: {
+          credentialVersionId: "22222222-2222-4222-8222-222222222222",
+          sourceEnvFieldName: "API_TOKEN",
+        },
+        REGION: {
+          credentialVersionId: "66666666-6666-4666-8666-666666666666",
+          sourceEnvFieldName: "REGION",
+        },
+        ADDED: {
+          credentialVersionId: "77777777-7777-4777-8777-777777777777",
+          sourceEnvFieldName: "ADDED_SOURCE",
+        },
       },
       preservedLocalChanges: true,
     });

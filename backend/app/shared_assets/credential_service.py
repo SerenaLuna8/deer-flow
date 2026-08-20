@@ -116,11 +116,25 @@ class CredentialGrantMigrationView:
 
 
 @dataclass(frozen=True)
+class CredentialMigrationReferenceView:
+    kind: str
+    display_name: str
+    version_number: int
+    reference_name: str
+    source_name: str | None = None
+
+
+@dataclass(frozen=True)
 class CredentialPendingMigrationView:
     """How many references ``migrate_grants`` would still have to move."""
 
     total: int
+    mcp_grant_count: int
+    skill_binding_count: int
     system_model_count: int
+    references: tuple[CredentialMigrationReferenceView, ...]
+    current_reference_count: int
+    current_references: tuple[CredentialMigrationReferenceView, ...]
 
 
 @dataclass(frozen=True)
@@ -145,11 +159,17 @@ class BoundSystemModelMigration(Protocol):
 
     async def lock_pinned_models(self, credential_id: uuid.UUID) -> int: ...
 
-    async def count_stale_pins(
+    async def list_stale_pins(
         self,
         credential_id: uuid.UUID,
         target_version_id: uuid.UUID,
-    ) -> int: ...
+    ) -> tuple[CredentialMigrationReferenceView, ...]: ...
+
+    async def list_current_pins(
+        self,
+        credential_id: uuid.UUID,
+        target_version_id: uuid.UUID,
+    ) -> tuple[CredentialMigrationReferenceView, ...]: ...
 
     async def repoint(
         self,
@@ -426,7 +446,7 @@ class CredentialService:
                     raise AssetValidationFailed(actor.request_id)
             target_env = target_schema.get("env", ())
             for item in stale_skill_bindings:
-                if credential.scope != "project" or credential.project_id != item.binding.project_id or item.binding.secret_name not in target_env:
+                if credential.scope != "project" or credential.project_id != item.binding.project_id or item.binding.source_env_field_name not in target_env:
                     raise AssetValidationFailed(actor.request_id)
             migrated_at = datetime.now(UTC)
             await repository.migrate_grants(
@@ -466,6 +486,39 @@ class CredentialService:
                 "credential.grants.migrate",
             ),
         )
+
+    async def migration_status(
+        self,
+        actor: _Actor,
+        credential_id: uuid.UUID,
+    ) -> CredentialPendingMigrationView | None:
+        """Return the current server-authoritative migration preview.
+
+        The preview is intentionally read-only and may become stale before a
+        later migration. ``migrate_grants`` still performs the locked,
+        all-or-nothing compatibility check.
+        """
+
+        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
+
+        async def operation(
+            repository: CredentialRepository,
+        ) -> CredentialPendingMigrationView | None:
+            credential = await self._get_credential(
+                repository,
+                actor,
+                credential_id,
+            )
+            if credential.status != "active" or credential.current_version_id is None:
+                raise AssetConflict(actor.request_id)
+            return await self._pending_migration(
+                repository,
+                actor,
+                credential,
+                uuid.UUID(str(credential.current_version_id)),
+            )
+
+        return await self._execute(actor, operation)
 
     async def get(self, actor: _Actor, credential_id: uuid.UUID) -> CredentialView:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
@@ -600,19 +653,69 @@ class CredentialService:
         """
 
         scope, project_id = self._scope(actor)
-        system_model_count = 0
+        system_references: tuple[CredentialMigrationReferenceView, ...] = ()
+        current_system_references: tuple[CredentialMigrationReferenceView, ...] = ()
         if scope is AssetScope.SYSTEM and project_id is None:
             if self._system_models is None:
                 return None
-            system_model_count = await self._system_models.bind(repository.session).count_stale_pins(
-                uuid.UUID(str(credential.id)),
-                target_version_id,
+            bound_models = self._system_models.bind(repository.session)
+            system_references = await bound_models.list_stale_pins(uuid.UUID(str(credential.id)), target_version_id)
+            current_system_references = await bound_models.list_current_pins(uuid.UUID(str(credential.id)), target_version_id)
+        stale_grants = await repository.list_stale_grant_references(credential, target_version_id)
+        stale_skill_bindings = await repository.list_stale_skill_references(credential, target_version_id)
+        current_grants = await repository.list_current_grant_references(credential, target_version_id)
+        current_skill_bindings = await repository.list_current_skill_references(credential, target_version_id)
+        mcp_references = tuple(
+            CredentialMigrationReferenceView(
+                kind="mcp_grant",
+                display_name=item.display_name,
+                version_number=item.version_number,
+                reference_name=item.slot_name,
             )
-        stale_grants = await repository.count_stale_grants(credential, target_version_id)
-        stale_skill_bindings = await repository.count_stale_skill_bindings(credential, target_version_id)
+            for item in stale_grants
+        )
+        skill_references = tuple(
+            CredentialMigrationReferenceView(
+                kind="skill_binding",
+                display_name=item.display_name,
+                version_number=item.version_number,
+                reference_name=item.target_env_name,
+                source_name=item.source_env_field_name,
+            )
+            for item in stale_skill_bindings
+        )
+        current_mcp_references = tuple(
+            CredentialMigrationReferenceView(
+                kind="mcp_grant",
+                display_name=item.display_name,
+                version_number=item.version_number,
+                reference_name=item.slot_name,
+            )
+            for item in current_grants
+        )
+        current_skill_references = tuple(
+            CredentialMigrationReferenceView(
+                kind="skill_binding",
+                display_name=item.display_name,
+                version_number=item.version_number,
+                reference_name=item.target_env_name,
+                source_name=item.source_env_field_name,
+            )
+            for item in current_skill_bindings
+        )
+        current_references = (
+            *current_skill_references,
+            *current_mcp_references,
+            *current_system_references,
+        )
         return CredentialPendingMigrationView(
-            total=stale_grants + stale_skill_bindings + system_model_count,
-            system_model_count=system_model_count,
+            total=len(mcp_references) + len(skill_references) + len(system_references),
+            mcp_grant_count=len(mcp_references),
+            skill_binding_count=len(skill_references),
+            system_model_count=len(system_references),
+            references=(*skill_references, *mcp_references, *system_references),
+            current_reference_count=len(current_references),
+            current_references=current_references,
         )
 
     @staticmethod

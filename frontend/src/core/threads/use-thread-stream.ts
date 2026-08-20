@@ -22,10 +22,12 @@ import { useI18n } from "../i18n/hooks";
 import type { FileInMessage } from "../messages/utils";
 import {
   isCurrentUploadUnavailableError,
+  isLlmProviderUnavailableError,
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
   isProjectAgentArchivedError,
   isProjectRunTerminalFailure,
+  projectRunTerminalFailureEventToError,
 } from "../private-work/api-client";
 import { usePrivateWorkAccess } from "../private-work/provider";
 import {
@@ -130,6 +132,11 @@ import { useThreadHistory } from "./use-thread-history";
 export type ToolEndEvent = {
   name: string;
   data: unknown;
+};
+
+type ThreadStreamCallbackMetadata = {
+  thread_id?: string;
+  run_id?: string;
 };
 
 export type ThreadStreamOptions = {
@@ -397,6 +404,7 @@ export function useThreadStream({
   const messagesRef = useRef<Message[]>([]);
   const currentRunIdRef = useRef<string | null>(null);
   const currentRunThreadIdRef = useRef<string | null>(null);
+  const expectedTerminalFailureKeysRef = useRef<Set<string>>(new Set());
   const currentRunBaselineMessageIdsRef = useRef<Set<string>>(new Set());
   const runBaselinePreparedRef = useRef(false);
   const startedRef = useRef(false);
@@ -595,6 +603,127 @@ export function useThreadStream({
     },
     [attachmentUploadCoordinator],
   );
+
+  const handleStreamFailure = (
+    error: unknown,
+    callbackOptions?: ThreadStreamCallbackMetadata,
+  ) => {
+    if (!streamOwnerMountedRef.current) return;
+    const replayAttempt = preparedReplayAttemptRef.current;
+    // SDK history refresh failures are metadata-less, including late errors
+    // from an old A view after the hook has switched to B. Without an
+    // explicit prepared-replay attribution window they cannot safely mutate
+    // or toast any projection. Message admission failures are authoritative
+    // through the submit lifecycle monitor below.
+    if (
+      shouldIgnoreMetadataLessStreamError(
+        callbackOptions?.thread_id,
+        replayAttempt?.status === "submitting",
+      )
+    ) {
+      return;
+    }
+    if (
+      shouldIgnoreAttributedThreadCallback(
+        callbackOptions?.thread_id,
+        currentViewThreadIdRef.current,
+      )
+    ) {
+      return;
+    }
+    const decision =
+      replayAttempt?.status === "submitting"
+        ? classifyPreparedReplaySdkError({
+            createdRunId: replayAttempt.createdRunId,
+            callbackRunId: callbackOptions?.run_id ?? null,
+            error,
+            historyRefetchError: replayAttempt.historyRefetchError,
+          })
+        : null;
+    const leavesReplayProjectionIntact =
+      decision?.kind === "history-refetch-failure" ||
+      decision?.kind === "ignore-history-refetch-duplicate" ||
+      decision?.kind === "ignore-unrelated-run";
+
+    if (decision?.kind === "rollback" && replayAttempt) {
+      replayAttempt.status = "failed";
+      rollbackPreparedReplayFailure(replayAttempt.replay, decision.failedRunId);
+    } else if (decision?.kind === "history-refetch-failure" && replayAttempt) {
+      replayAttempt.historyRefetchError = error;
+      setIgnoredReplayHistoryError({ error });
+    }
+
+    if (!leavesReplayProjectionIntact) {
+      const failedRunId =
+        callbackOptions?.run_id ?? currentRunIdRef.current ?? null;
+      const failedThreadId =
+        callbackOptions?.thread_id ?? threadIdRef.current ?? null;
+      const terminalMessages = captureTerminalRunMessages(
+        messagesRef.current,
+        failedRunId,
+        currentRunBaselineMessageIdsRef.current,
+      );
+      if (failedThreadId && terminalMessages.length > 0) {
+        // The SDK may release its live messages before the durable Run
+        // journal refetch completes. Reuse the same transient history bridge
+        // as summarization so the terminal frame cannot disappear in between.
+        pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
+          ...pendingArchivedMessagesRef.current,
+          ...terminalMessages,
+        ]);
+        pendingArchiveThreadIdRef.current = failedThreadId;
+      }
+      const retainsAdmittedHuman =
+        failedRunId !== null && optimisticRunIdRef.current === failedRunId;
+      if (retainsAdmittedHuman) {
+        setFailedOptimisticThreadId(
+          callbackOptions?.thread_id ?? threadIdRef.current,
+        );
+        setFailedOptimisticMessages((current) =>
+          dedupeMessagesByIdentity([
+            ...current,
+            ...retainOptimisticHumanMessagesAfterFailure(
+              optimisticMessagesRef.current,
+              failedRunId,
+            ),
+          ]),
+        );
+      }
+      optimisticRunIdRef.current = null;
+      optimisticMessagesRef.current = [];
+      setOptimisticMessages([]);
+      setOptimisticThreadId(null);
+      setLiveMessagesThreadId(null);
+    }
+    if (decision?.kind !== "ignore-history-refetch-duplicate") {
+      toast.error(
+        isProjectAgentArchivedError(error)
+          ? t.conversation.agentArchivedDescription
+          : isModelOutputLimitError(error)
+            ? t.conversation.modelOutputLimitDescription
+            : isOutputDeliveryIncompleteError(error)
+              ? t.conversation.outputDeliveryIncompleteDescription
+              : isCurrentUploadUnavailableError(error)
+                ? t.conversation.currentUploadUnavailableDescription
+                : isLlmProviderUnavailableError(error)
+                  ? t.conversation.providerUnavailableDescription
+                  : isProjectRunTerminalFailure(error)
+                    ? t.conversation.runFailedDescription
+                    : getStreamErrorMessage(error),
+      );
+    }
+    pendingUsageBaselineMessageIdsRef.current = new Set(
+      messagesRef.current
+        .map(messageIdentity)
+        .filter((id): id is string => Boolean(id)),
+    );
+    invalidateStoppedThreadCaches(
+      queryClient,
+      threadIdRef.current,
+      isMock,
+      privateWork.scope,
+    );
+  };
 
   const thread = useStream<AgentThreadState>({
     client: privateWork.client,
@@ -838,6 +967,23 @@ export function useThreadStream({
       if (!streamOwnerMountedRef.current) return;
       if (!isRootStreamCallback(callbackOptions)) return;
 
+      const terminalFailure = projectRunTerminalFailureEventToError(event);
+      if (terminalFailure) {
+        const failedThreadId =
+          currentRunThreadIdRef.current ?? threadIdRef.current;
+        const failedRunId = currentRunIdRef.current;
+        if (failedThreadId && failedRunId) {
+          expectedTerminalFailureKeysRef.current.add(
+            `${failedThreadId}:${failedRunId}`,
+          );
+        }
+        handleStreamFailure(terminalFailure, {
+          thread_id: failedThreadId ?? undefined,
+          run_id: failedRunId ?? undefined,
+        });
+        return;
+      }
+
       const terminalUpdate = parseSubtaskTerminalEvent(event);
       if (terminalUpdate) {
         updateSubtask({
@@ -895,134 +1041,29 @@ export function useThreadStream({
       }
     },
     onError(error, callbackOptions) {
-      if (!streamOwnerMountedRef.current) return;
-      const replayAttempt = preparedReplayAttemptRef.current;
-      // SDK history refresh failures are metadata-less, including late errors
-      // from an old A view after the hook has switched to B. Without an
-      // explicit prepared-replay attribution window they cannot safely mutate
-      // or toast any projection. Message admission failures are authoritative
-      // through the submit lifecycle monitor below.
-      if (
-        shouldIgnoreMetadataLessStreamError(
-          callbackOptions?.thread_id,
-          replayAttempt?.status === "submitting",
-        )
-      ) {
-        return;
-      }
-      if (
-        shouldIgnoreAttributedThreadCallback(
-          callbackOptions?.thread_id,
-          currentViewThreadIdRef.current,
-        )
-      ) {
-        return;
-      }
-      const decision =
-        replayAttempt?.status === "submitting"
-          ? classifyPreparedReplaySdkError({
-              createdRunId: replayAttempt.createdRunId,
-              callbackRunId: callbackOptions?.run_id ?? null,
-              error,
-              historyRefetchError: replayAttempt.historyRefetchError,
-            })
-          : null;
-      const leavesReplayProjectionIntact =
-        decision?.kind === "history-refetch-failure" ||
-        decision?.kind === "ignore-history-refetch-duplicate" ||
-        decision?.kind === "ignore-unrelated-run";
-
-      if (decision?.kind === "rollback" && replayAttempt) {
-        replayAttempt.status = "failed";
-        rollbackPreparedReplayFailure(
-          replayAttempt.replay,
-          decision.failedRunId,
-        );
-      } else if (
-        decision?.kind === "history-refetch-failure" &&
-        replayAttempt
-      ) {
-        replayAttempt.historyRefetchError = error;
-        setIgnoredReplayHistoryError({ error });
-      }
-
-      if (!leavesReplayProjectionIntact) {
-        const failedRunId =
-          callbackOptions?.run_id ?? currentRunIdRef.current ?? null;
-        const failedThreadId =
-          callbackOptions?.thread_id ?? threadIdRef.current ?? null;
-        const terminalMessages = captureTerminalRunMessages(
-          messagesRef.current,
-          failedRunId,
-          currentRunBaselineMessageIdsRef.current,
-        );
-        if (failedThreadId && terminalMessages.length > 0) {
-          // The SDK may release its live messages before the durable Run
-          // journal refetch completes. Reuse the same transient history bridge
-          // as summarization so the terminal frame cannot disappear in between.
-          pendingArchivedMessagesRef.current = dedupeMessagesByIdentity([
-            ...pendingArchivedMessagesRef.current,
-            ...terminalMessages,
-          ]);
-          pendingArchiveThreadIdRef.current = failedThreadId;
-        }
-        const retainsAdmittedHuman =
-          failedRunId !== null && optimisticRunIdRef.current === failedRunId;
-        if (retainsAdmittedHuman) {
-          setFailedOptimisticThreadId(
-            callbackOptions?.thread_id ?? threadIdRef.current,
-          );
-          setFailedOptimisticMessages((current) =>
-            dedupeMessagesByIdentity([
-              ...current,
-              ...retainOptimisticHumanMessagesAfterFailure(
-                optimisticMessagesRef.current,
-                failedRunId,
-              ),
-            ]),
-          );
-        }
-        optimisticRunIdRef.current = null;
-        optimisticMessagesRef.current = [];
-        setOptimisticMessages([]);
-        setOptimisticThreadId(null);
-        setLiveMessagesThreadId(null);
-      }
-      if (decision?.kind !== "ignore-history-refetch-duplicate") {
-        toast.error(
-          isProjectAgentArchivedError(error)
-            ? t.conversation.agentArchivedDescription
-            : isModelOutputLimitError(error)
-              ? t.conversation.modelOutputLimitDescription
-              : isOutputDeliveryIncompleteError(error)
-                ? t.conversation.outputDeliveryIncompleteDescription
-                : isCurrentUploadUnavailableError(error)
-                  ? t.conversation.currentUploadUnavailableDescription
-                  : isProjectRunTerminalFailure(error)
-                    ? t.conversation.runFailedDescription
-                    : getStreamErrorMessage(error),
-        );
-      }
-      pendingUsageBaselineMessageIdsRef.current = new Set(
-        messagesRef.current
-          .map(messageIdentity)
-          .filter((id): id is string => Boolean(id)),
-      );
-      invalidateStoppedThreadCaches(
-        queryClient,
-        threadIdRef.current,
-        isMock,
-        privateWork.scope,
-      );
+      handleStreamFailure(error, callbackOptions);
     },
     onFinish(state, callbackOptions) {
       if (!streamOwnerMountedRef.current) return;
+      const terminalFailureKey =
+        callbackOptions?.thread_id && callbackOptions.run_id
+          ? `${callbackOptions.thread_id}:${callbackOptions.run_id}`
+          : null;
+      const expectedTerminalFailure = terminalFailureKey
+        ? expectedTerminalFailureKeysRef.current.delete(terminalFailureKey)
+        : false;
       if (
         shouldIgnoreAttributedThreadCallback(
           callbackOptions?.thread_id,
           currentViewThreadIdRef.current,
         )
       ) {
+        return;
+      }
+      if (expectedTerminalFailure) {
+        // The custom terminal event already ran the failure lifecycle. The SDK
+        // sees a clean transport end, but this must not notify consumers that
+        // the business Run completed successfully.
         return;
       }
       const replayAttempt = preparedReplayAttemptRef.current;
@@ -1839,9 +1880,11 @@ export function useThreadStream({
                           ? t.conversation.outputDeliveryIncompleteDescription
                           : isCurrentUploadUnavailableError(error)
                             ? t.conversation.currentUploadUnavailableDescription
-                            : isProjectRunTerminalFailure(error)
-                              ? t.conversation.runFailedDescription
-                              : getStreamErrorMessage(error),
+                            : isLlmProviderUnavailableError(error)
+                              ? t.conversation.providerUnavailableDescription
+                              : isProjectRunTerminalFailure(error)
+                                ? t.conversation.runFailedDescription
+                                : getStreamErrorMessage(error),
                 );
               }
             }
@@ -1912,6 +1955,7 @@ export function useThreadStream({
       t.conversation.modelOutputLimitDescription,
       t.conversation.outputDeliveryIncompleteDescription,
       t.conversation.currentUploadUnavailableDescription,
+      t.conversation.providerUnavailableDescription,
       t.conversation.runFailedDescription,
       context,
       attachmentUploadCoordinator,

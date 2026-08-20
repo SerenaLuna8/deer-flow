@@ -244,41 +244,104 @@ export const eligibleSkillCredentialSchema = z
     credential_version_id: assetIdSchema,
     display_name: z.string().min(1),
     version_number: z.number().int().positive(),
+    env_fields: z.array(credentialFieldNameSchema),
   })
-  .strict();
+  .strict()
+  .refine(
+    (value) => new Set(value.env_fields).size === value.env_fields.length,
+    {
+      message: "Credential env field names must be unique",
+      path: ["env_fields"],
+    },
+  );
+export const skillCredentialMappingStatusSchema = z.enum([
+  "missing",
+  "configured",
+  "invalid",
+]);
 const skillCredentialRequirementBaseSchema = z.object({
   name: skillSecretDeclarationNameSchema,
   optional: z.boolean(),
+  mapping_status: skillCredentialMappingStatusSchema,
   eligible_credentials: z.array(eligibleSkillCredentialSchema),
 });
-const configuredSkillCredentialRequirementSchema =
+export const skillCredentialRequirementSchema =
   skillCredentialRequirementBaseSchema
     .extend({
-      configured: z.literal(true),
-      credential_id: assetIdSchema,
-      credential_version_id: assetIdSchema,
-      credential_display_name: z.string().min(1),
-      credential_version_number: z.number().int().positive(),
+      configured: z.boolean(),
+      credential_id: assetIdSchema.nullable(),
+      credential_version_id: assetIdSchema.nullable(),
+      credential_display_name: z.string().min(1).nullable(),
+      credential_version_number: z.number().int().positive().nullable(),
+      source_env_field_name: credentialFieldNameSchema.nullable(),
     })
-    .strict();
-const unconfiguredSkillCredentialRequirementSchema =
-  skillCredentialRequirementBaseSchema
-    .extend({
-      configured: z.literal(false),
-      credential_id: z.null(),
-      credential_version_id: z.null(),
-      credential_display_name: z.null(),
-      credential_version_number: z.null(),
-    })
-    .strict();
-
-export const skillCredentialRequirementSchema = z.discriminatedUnion(
-  "configured",
-  [
-    configuredSkillCredentialRequirementSchema,
-    unconfiguredSkillCredentialRequirementSchema,
-  ],
-);
+    .strict()
+    .superRefine((value, context) => {
+      const shouldBeConfigured = value.mapping_status !== "missing";
+      if (value.configured !== shouldBeConfigured) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Skill Credential configured state must match mapping status",
+          path: ["configured"],
+        });
+      }
+      const sourceIdentity = [
+        value.credential_id,
+        value.credential_version_id,
+        value.source_env_field_name,
+      ];
+      const sourceIdentityCount = sourceIdentity.filter(
+        (item) => item !== null,
+      ).length;
+      if (
+        sourceIdentityCount !== 0 &&
+        sourceIdentityCount !== sourceIdentity.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Skill Credential source identity must be all visible or all redacted",
+          path: ["credential_id"],
+        });
+      }
+      const displayMetadata = [
+        value.credential_display_name,
+        value.credential_version_number,
+      ];
+      const displayMetadataCount = displayMetadata.filter(
+        (item) => item !== null,
+      ).length;
+      if (
+        displayMetadataCount !== 0 &&
+        displayMetadataCount !== displayMetadata.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "Skill Credential display metadata must be all visible or all unavailable",
+          path: ["credential_display_name"],
+        });
+      }
+      if (displayMetadataCount > 0 && sourceIdentityCount === 0) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Skill Credential display metadata requires source identity",
+          path: ["credential_display_name"],
+        });
+      }
+      if (
+        value.mapping_status === "configured" &&
+        sourceIdentityCount > 0 &&
+        displayMetadataCount !== displayMetadata.length
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "A valid Skill Credential mapping requires display metadata",
+          path: ["credential_display_name"],
+        });
+      }
+    });
 export const skillCredentialBindingsResponseSchema = z
   .object({
     skill_id: assetIdSchema,
@@ -314,6 +377,7 @@ export const skillCredentialBindingInputSchema = z
   .object({
     name: skillSecretNameSchema,
     credential_version_id: assetIdSchema,
+    source_env_field_name: credentialFieldNameSchema,
   })
   .strict();
 export const skillCredentialBindingsInputSchema = z
@@ -836,10 +900,30 @@ export const projectMcpEditableConfigurationResponseSchema = z
       });
     }
   });
+export const credentialMigrationReferenceSchema = z
+  .object({
+    kind: z.enum(["skill_binding", "mcp_grant", "system_model"]),
+    display_name: z.string().min(1),
+    version_number: z.number().int().positive(),
+    reference_name: z.string().min(1),
+    source_name: z.string().min(1).nullable(),
+  })
+  .strict();
 export const credentialPendingMigrationSchema = z
   .object({
     total: z.number().int().nonnegative(),
+    mcp_grant_count: z.number().int().nonnegative(),
+    skill_binding_count: z.number().int().nonnegative(),
     system_model_count: z.number().int().nonnegative(),
+    references: z.array(credentialMigrationReferenceSchema),
+    current_reference_count: z.number().int().nonnegative(),
+    current_references: z.array(credentialMigrationReferenceSchema),
+  })
+  .strict();
+export const credentialMigrationStatusResponseSchema = z
+  .object({
+    data: credentialPendingMigrationSchema.nullable(),
+    request_id: z.string().min(1),
   })
   .strict();
 // Replacement only mints a version, so the server reports how many references
@@ -1126,43 +1210,10 @@ export const skillPublishAssetVersionInputSchema =
   expectedAssetVersionInputSchema
     .extend({
       acknowledge_stale_base: z.boolean().optional(),
-      expected_payload_checksum: z
-        .string()
-        .regex(/^[a-f0-9]{64}$/u)
-        .optional(),
-      expected_binding_revision: z.number().int().nonnegative().optional(),
-      credential_bindings: z
-        .array(skillCredentialBindingInputSchema)
-        .max(256)
-        .optional(),
+      expected_payload_checksum: z.string().regex(/^[a-f0-9]{64}$/u),
+      expected_binding_revision: z.number().int().nonnegative(),
     })
-    .strict()
-    .superRefine((value, context) => {
-      const bindings = value.credential_bindings;
-      if (
-        bindings &&
-        new Set(bindings.map((binding) => binding.name)).size !==
-          bindings.length
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Skill Credential binding names must be unique",
-          path: ["credential_bindings"],
-        });
-      }
-      if (
-        bindings !== undefined &&
-        (value.expected_payload_checksum === undefined ||
-          value.expected_binding_revision === undefined)
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "Atomic Skill Credential publish requires payload checksum and binding revision",
-          path: ["credential_bindings"],
-        });
-      }
-    });
+    .strict();
 export const projectDefaultAgentSchema = z
   .object({
     agent_asset_id: assetIdSchema.nullable(),
@@ -1547,6 +1598,12 @@ export type CredentialGrantMigrationResponse = z.infer<
 export type CredentialPendingMigration = z.infer<
   typeof credentialPendingMigrationSchema
 >;
+export type CredentialMigrationReference = z.infer<
+  typeof credentialMigrationReferenceSchema
+>;
+export type CredentialMigrationStatusResponse = z.infer<
+  typeof credentialMigrationStatusResponseSchema
+>;
 export type CredentialReplacementResponse = z.infer<
   typeof credentialReplacementResponseSchema
 >;
@@ -1567,6 +1624,9 @@ export type SkillVersionFileContentResponse = z.infer<
 >;
 export type SkillFileChange = z.input<typeof skillFileChangeSchema>;
 export type SkillFileForkInput = z.input<typeof skillFileForkInputSchema>;
+export type SkillCredentialMappingStatus = z.infer<
+  typeof skillCredentialMappingStatusSchema
+>;
 export type SkillCredentialRequirement = z.infer<
   typeof skillCredentialRequirementSchema
 >;

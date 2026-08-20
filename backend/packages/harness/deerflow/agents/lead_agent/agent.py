@@ -834,6 +834,8 @@ def _make_lead_agent(
     final_tools = [tool for tool in final_tools if tool.name not in extension.excluded_tool_names]
     private_prompt_bundle = getattr(private_runtime, "prompt_bundle", None) if private_runtime is not None else None
     runtime_agent_catalog = trusted_runtime_agent_catalog(getattr(private_runtime, "agent_catalog", None)) if private_runtime is not None else None
+    raw_capability_notice = getattr(private_runtime, "capability_notice", "") if private_runtime is not None else ""
+    runtime_capability_notice = raw_capability_notice if isinstance(raw_capability_notice, str) else ""
     agent_model_overrides: dict[str, object] = {}
     if agent_version_model_settings is not None:
         sampling_overrides = getattr(
@@ -917,6 +919,7 @@ def _make_lead_agent(
                 exact_skills_container_path=container_base_path if runtime_skills is not None else None,
                 runtime_agent_catalog=runtime_agent_catalog,
                 inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
+                runtime_capability_notice=runtime_capability_notice,
             )
         ),
         state_schema=get_thread_state_schema(

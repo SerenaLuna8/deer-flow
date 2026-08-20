@@ -151,6 +151,7 @@ class RunSkillCredentialSnapshot:
     skill_id: uuid.UUID
     skill_version_id: uuid.UUID
     secret_name: str
+    source_env_field_name: str
     skill_credential_binding_id: uuid.UUID
     binding_revision: int
     credential_id: uuid.UUID
@@ -1050,6 +1051,7 @@ class RunSnapshotRepository:
                 skill_id=material.skill_id,
                 skill_version_id=material.skill_version_id,
                 secret_name=material.env_name,
+                source_env_field_name=material.credential_field_name,
                 skill_credential_binding_id=material.binding_id,
                 binding_revision=material.binding_revision,
                 credential_id=material.credential_id,
@@ -1481,6 +1483,7 @@ class RunSnapshotRepository:
                 skill_id=row.skill_id,
                 skill_version_id=row.skill_version_id,
                 secret_name=row.secret_name,
+                source_env_field_name=row.source_env_field_name,
                 skill_credential_binding_id=(row.skill_credential_binding_id),
                 binding_revision=row.binding_revision,
                 credential_id=row.credential_id,
@@ -1534,6 +1537,7 @@ class RunSnapshotRepository:
                 skill_id=material.skill_id,
                 skill_version_id=material.skill_version_id,
                 secret_name=material.env_name,
+                source_env_field_name=material.credential_field_name,
                 skill_credential_binding_id=material.binding_id,
                 binding_revision=material.binding_revision,
                 credential_id=material.credential_id,

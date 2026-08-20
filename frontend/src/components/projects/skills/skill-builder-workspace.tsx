@@ -150,19 +150,27 @@ export function skillBuilderRevisionCommitSuccessCopy(
 export function SkillBuilderRevisionCommitSuccess({
   versionNumber,
   href,
+  credentialRequirementCount = 0,
 }: {
   versionNumber: number | null;
   href: string;
+  credentialRequirementCount?: number;
 }) {
   const { t } = useI18n();
   const copy = t.skills.builder.success;
   return (
     <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center px-4 py-16 text-center">
       <p className="text-sm font-medium">
-        {skillBuilderRevisionCommitSuccessCopy(versionNumber, copy)}
+        {credentialRequirementCount > 0
+          ? copy.revisionWithSecrets(versionNumber, credentialRequirementCount)
+          : skillBuilderRevisionCommitSuccessCopy(versionNumber, copy)}
       </p>
       <Button asChild type="button" className="mt-6 min-h-11">
-        <Link href={href}>{copy.goPublish}</Link>
+        <Link href={href}>
+          {credentialRequirementCount > 0
+            ? copy.configureCredentials
+            : copy.goPublish}
+        </Link>
       </Button>
     </div>
   );
@@ -179,7 +187,6 @@ export function skillBuilderCreatedSecretSetupFromSession(
 ): SkillBuilderCreatedSecretSetup | null {
   const validation = session.validation;
   if (
-    session.session_kind !== "create" ||
     session.status !== "completed" ||
     !session.created_skill_id ||
     !session.created_skill_version_id ||
@@ -247,8 +254,7 @@ export function skillBuilderCompletedVersionHref(
   if (
     session.status !== "completed" ||
     !session.created_skill_id ||
-    !session.created_skill_version_id ||
-    (options.configureCredentials && session.session_kind !== "create")
+    !session.created_skill_version_id
   ) {
     return null;
   }
@@ -1555,7 +1561,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const revisionHref =
     (session
       ? skillBuilderCompletedVersionHref(listHref, session, {
-          configureCredentials: false,
+          configureCredentials: Boolean(
+            revising &&
+            effectiveSecretSetup?.skillId === session.created_skill_id &&
+            effectiveSecretSetup.skillVersionId === exactCreatedVersionId,
+          ),
         })
       : null) ??
     (session?.status === "completed" &&
@@ -1674,6 +1684,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           </div>
         ) : effectiveSecretSetup &&
           createSecretHref &&
+          session.session_kind === "create" &&
           session.status === "completed" &&
           session.created_skill_id === effectiveSecretSetup.skillId ? (
           <SkillBuilderCreateSecretSuccess
@@ -1688,6 +1699,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           <SkillBuilderRevisionCommitSuccess
             versionNumber={createdDraftVersion?.versionNumber ?? null}
             href={revisionHref}
+            credentialRequirementCount={
+              effectiveSecretSetup?.skillId === session.created_skill_id &&
+              effectiveSecretSetup.skillVersionId === exactCreatedVersionId
+                ? effectiveSecretSetup.requirementNames.length
+                : 0
+            }
           />
         ) : (
           <div

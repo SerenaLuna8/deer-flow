@@ -1,34 +1,27 @@
 # Frontend AGENTS.md
 
-This is the source of truth for frontend changes. The repository-level
-[AGENTS.md](../AGENTS.md) owns monorepo orientation; this guide keeps only route,
-authorization, cache-isolation, data-contract, UI-ownership, and test rules.
-Exact page copy and layout belong in components and focused tests, not here.
+This guide owns frontend route authority, client scope, data contracts, UI
+ownership, concurrency, and verification. Read the repository-level
+[AGENTS.md](../AGENTS.md) for cross-cutting rules and [README.md](README.md) plus
+`package.json` for setup, the current stack, and command lookup. Exact feature
+behavior remains authoritative in components and focused tests.
 
-## Stack and commands
+## Guide map
 
-The frontend uses Next.js 16 App Router, React 19, TypeScript 5.8, Tailwind CSS
-4, TanStack Query 5, strict Zod contracts, Rstest, and Playwright. Use Node.js
-22+ and the pnpm version declared in `package.json`.
+| Change area                    | Read first                                |
+| ------------------------------ | ----------------------------------------- |
+| Routes, identity, capabilities | Authority and identity                    |
+| Queries, mutations, project UI | Project scope and TanStack ownership      |
+| SSE, history, concurrency      | Streams, history, and concurrency         |
+| Agents, Skills, MCP, files     | Governed assets and runtime state         |
+| Admin or Automation            | Admin and Automation                      |
+| Implementation or verification | Change checklist; Tests and release gates |
 
-Run from `frontend/`:
-
-| Command                             | Purpose                                  |
-| ----------------------------------- | ---------------------------------------- |
-| `pnpm dev`                          | Turbopack development server             |
-| `pnpm check`                        | ESLint plus TypeScript                   |
-| `pnpm test`                         | Rstest unit suite                        |
-| `pnpm test:e2e`                     | Deterministic dynamic-mode Chromium gate |
-| `pnpm test:e2e:static`              | Static-build boundary gate               |
-| `pnpm build:production`             | Production build                         |
-| `pnpm build:static`                 | No-network static demo build             |
-| `pnpm format` / `pnpm format:write` | Check or write Prettier formatting       |
+## Application boundaries
 
 The normal full stack starts from the repository root with `make dev` and uses
 same-origin `/api/*` through Nginx. Override the backend base URL only for
 deliberate split-origin development.
-
-## Route and build model
 
 - `/workspace` is the authenticated account-wide project landing page.
 - `/projects/[project_slug]/*` is the only live project shell. It contains
@@ -46,34 +39,9 @@ pages the member-scoped project list, exact-matches the slug, enters by UUID, an
 owns the resulting context. Nested pages consume `useCurrentProject()` and never
 repeat slug resolution or send a slug to UUID-only APIs.
 
-## Source ownership
-
-```text
-frontend/src/
-├── app/                         # App Router pages and layouts
-├── build/                       # static/production build boundaries
-├── components/
-│   ├── projects/                # project shell and project-private features
-│   ├── workspace/               # chat, message, file, and artifact UI
-│   ├── assets/                  # shared asset presentation
-│   ├── admin/                   # platform administration
-│   └── ui/                      # shared primitives
-├── content/                     # product documentation content
-├── core/
-│   ├── auth/                    # account identity and account query client
-│   ├── projects/                # project contracts and context
-│   ├── private-work/            # scoped API client, keys, and teardown
-│   ├── threads/                 # chat/run state and streaming integration
-│   ├── shared-assets/           # Agent/Skill/MCP/Credential contracts
-│   ├── project-automations/     # Automation API and schedule logic
-│   ├── admin-operations/        # safe system operation contracts
-│   └── admin-settings/          # system model/policy contracts
-├── hooks/                       # reusable React hooks
-├── lib/                         # cross-cutting helpers
-└── styles/                      # Tailwind entry and theme tokens
-```
-
-Prefer updating generated/shared primitives through their owning registry or
+Keep routes and layouts thin. `core/<domain>/` owns contracts and data flow;
+feature components own presentation of already-scoped, validated state. Prefer
+updating generated or shared primitives through their owning registry or
 generator. A necessary local patch needs focused coverage and an explanation.
 
 ## Non-negotiable client boundaries
@@ -159,7 +127,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
   use their dedicated task/progress surfaces and must not be attached to an
   arbitrary assistant message.
 
-### Assets, models, files, and secrets
+### Governed assets and runtime state
+
+#### Agents and Builder
 
 - Project Agent/Skill/MCP versions are immutable server objects. The UI authors
   through aggregate mutations and optimistic revisions; it never fabricates a
@@ -169,6 +139,10 @@ generator. A necessary local patch needs focused coverage and an explanation.
   Agent `409` recovery must reload both the Agent catalog and complete version
   history, preserve the local draft, and adopt the backend's live-pointer
   authoring base only after the returned CAS revision is newer.
+- An Agent version selection owns the visible Instructions and Capabilities for
+  that exact immutable version. Only the current live-pointer authoring base is
+  editable. A stale Draft is never published directly: the UI explains why and
+  lets an author copy it into a new current-base Draft before publication.
 - Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are four logical
   version fields, not a filesystem editor.
 - Builder sessions are account/project/owner scoped. Candidate edits remain
@@ -178,24 +152,48 @@ generator. A necessary local patch needs focused coverage and an explanation.
   regenerates the candidate; editing a document alone does not resolve it. Commit
   includes `slug` only when the normalized review name differs from
   `session.slug`, and its idempotency signature must match that request body.
+
+#### Skills and Credentials
+
 - Project Skill creation exposes exactly two user flows: AI Builder and validated
   archive upload. Do not reintroduce a manual metadata or starter-template form.
 - Skill secret declaration forms are a server-parsed projection of the current
   `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
   Parse/patch races must preserve newer local edits; invalid or pending source
   blocks save, validation, and publish without discarding the draft.
-- Skill publishing uses the server publish plan and submits only exact
-  Credential-version IDs. It never sends secret values or simulates atomic
-  publish with a later binding mutation. Archive and Builder create results with
-  declarations must lead to the exact created version's Credential controls.
+- The Skill version workbench presents one `Runtime credentials` surface while
+  preserving two distinct authorities: declarations edit the current
+  `SKILL.md` buffer, and project Credential mappings target one exact immutable
+  Skill version. After a new Draft is saved, the workbench focuses that Draft's
+  mapping editor before publish. Project Drafts and the current published
+  version are writable; historical versions are read-only, and a current System
+  Skill may still receive project Credential mappings. Each mapping selects both
+  an exact Credential version and one safe `env` field name, while values remain
+  server-only. Hiding the surface must not discard an unsaved mapping, and a
+  revision conflict preserves local selections until explicit reload.
+- Skill publishing uses a read-only server publish plan. The publish request
+  always pins the exact payload checksum and mapping revision and never submits
+  Credential choices or secret values. A public Draft cannot publish until the
+  plan is ready. Archive plus Builder create/revise results with declarations
+  must lead to the exact created version's Runtime credentials controls; AI
+  never chooses a Credential or source field.
 - System asset definitions are read-only in global admin views. Project binding
   and Credential-grant operations are separate, narrow mutations.
 - System Skill version history keeps revoked releases visible and labels them as
   ineligible. A project pin is never silently moved or resurrected: the binding
   UI may explicitly upgrade/rollback to an eligible release or disable the pin,
   while optimistic `409` responses refresh authority and require a fresh choice.
+- Project and global System Skill details export the currently selected,
+  persisted version through the same `Export ZIP` interaction. Unsaved Skill or
+  Credential-mapping edits disable export until saved or discarded; revoked
+  System versions remain visible but cannot export. Client success means the
+  complete ZIP response arrived and the browser download was started, not that
+  the user saved the file.
 - Credential forms never display or cache plaintext after submission. Responses
   may expose safe status/revision metadata only.
+
+#### MCP, models, Agent state, and files
+
 - Project MCP authoring exposes only backend-supported remote transports and
   secret-free URLs. Credential fields are encrypted bindings; the browser never
   probes the MCP endpoint, performs discovery, or infers CIDR authorization.
@@ -231,53 +229,36 @@ generator. A necessary local patch needs focused coverage and an explanation.
   pure; manual triggers use idempotency and the same durable server admission as
   Scheduler.
 
-## Common change paths
+## Change checklist
 
-### Add a project page
-
-1. Add the route below `src/app/projects/[project_slug]/`.
-2. Keep the route thin. Use `requireServerProjectCapability` for an SSR UX gate
-   or `useCurrentProject()` in the delegated client component.
-3. Put feature UI under `components/projects/` and register navigation with the
-   matching capability check.
-4. Do not resolve the slug or construct a project client again.
-
-### Add an API call or hook
-
-1. Define a strict response schema under the owning `core/<domain>/` module.
-2. Use the authenticated fetcher, validate before return, and forward the abort
-   signal.
-3. Add an account/project UUID query-key factory.
-4. Register a new scope root in `scope-registry.ts`.
-5. Invalidate the smallest authoritative root after mutation success.
-
-### Add a component
-
-- Place it under the owning feature directory and compose shared primitives.
-- Import cross-module code through `@/*`; merge conditional classes with `cn()`.
-- Tailwind classes assembled dynamically need an explicit source/safelist entry.
-- Keep data fetching and authorization in owning hooks/providers; presentation
-  components receive already-safe data and capabilities.
-
-### Change streaming or message projection
-
-- Start at `core/private-work/api-client.ts`, `core/threads/hooks.ts`, and the
-  scoped chat projection rather than adding a second stream client.
-- Cover reconnect, duplicate/late frames, scope change, terminal dedup, bigint
-  cursor handling, compaction/history merge, and cancellation behavior.
+1. Keep project routes below `src/app/projects/[project_slug]/` thin. Use
+   `requireServerProjectCapability` for an SSR UX gate or `useCurrentProject()`
+   in the delegated client component; register navigation with the same
+   capability and never resolve the slug or construct the project client again.
+2. Put response contracts and data flow in the owning `core/<domain>/`. Use the
+   authenticated fetcher, validate strictly, forward the abort signal, key
+   project state by account/project UUID, register every new root in
+   `scope-registry.ts`, and invalidate the smallest authoritative root.
+3. Put presentation in the owning feature directory and compose shared
+   primitives. Import cross-module code through `@/*`, merge conditional classes
+   with `cn()`, and add an explicit source/safelist entry for dynamically
+   assembled Tailwind classes.
+4. Extend streaming from `core/private-work/api-client.ts`,
+   `core/threads/hooks.ts`, and the scoped chat projection rather than adding a
+   second client. Cover reconnect, duplicate/late frames, scope change, terminal
+   dedup, bigint cursors, compaction/history merge, and cancellation.
+5. Add focused coverage for unauthorized access, stale scope or late responses,
+   optimistic conflicts, and the changed feature's failure boundary.
 
 ## Tests and release gates
 
 Unit tests mirror source paths under `tests/unit/` and import through `@/*`.
 Restore globals and dispose scoped clients after each test.
 
-Playwright modes are intentionally isolated:
-
-| Mode            | Specs                     | Config                              | Command                                                                |
-| --------------- | ------------------------- | ----------------------------------- | ---------------------------------------------------------------------- |
-| Dynamic mocked  | `tests/e2e/`              | `playwright.config.ts`              | `pnpm test:e2e`                                                        |
-| Static boundary | `tests/e2e-static/`       | `playwright.static.config.ts`       | `pnpm test:e2e:static`                                                 |
-| Real backend    | `tests/e2e-real-backend/` | `playwright.real-backend.config.ts` | `pnpm exec playwright test --config playwright.real-backend.config.ts` |
+Playwright modes are intentionally isolated: deterministic mocked tests live in
+`tests/e2e/`, static-boundary tests in `tests/e2e-static/`, and live integration
+tests in `tests/e2e-real-backend/`. Use the matching package script or Playwright
+config; never mix their assumptions.
 
 Keep mocked E2E deterministic: mock every relevant `/api/` request and use fixed
 IDs/timestamps. An unmocked request should fail rather than reach a developer's

@@ -252,10 +252,26 @@ class _DeterministicLocalSandbox:
         root: str,
         *,
         max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
     ) -> list[SimpleNamespace]:
         del max_entries
         if root == "/mnt/user-data/workspace":
-            return []
+            # Reproduce the partial symlink tree left by a failed
+            # ``python -m venv /mnt/user-data/workspace/.venv`` command.
+            if ".venv" in excluded_root_names:
+                return []
+            return [
+                SimpleNamespace(
+                    file_type="directory",
+                    path="/mnt/user-data/workspace/.venv",
+                    size=96,
+                ),
+                SimpleNamespace(
+                    file_type="symlink",
+                    path="/mnt/user-data/workspace/.venv/bin/python3",
+                    size=16,
+                ),
+            ]
         assert root == "/mnt/user-data/outputs"
         return [
             SimpleNamespace(

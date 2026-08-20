@@ -8,6 +8,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from deerflow.error_codes import LLM_PUBLIC_ERROR_CODES
+
 _STREAM_EVENT = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
 _STREAM_NAMESPACE_MAX_DEPTH = 32
 _STREAM_NAMESPACE_SEGMENT_MAX_LENGTH = 256
@@ -24,12 +26,15 @@ _TERMINAL_STATUSES = frozenset(
         "timeout",
     }
 )
-STREAM_TERMINAL_ERROR_CODES = frozenset(
-    {
-        "MODEL_OUTPUT_LIMIT",
-        "OUTPUT_DELIVERY_INCOMPLETE",
-        "CURRENT_UPLOAD_UNAVAILABLE",
-    }
+STREAM_TERMINAL_ERROR_CODES = (
+    frozenset(
+        {
+            "MODEL_OUTPUT_LIMIT",
+            "OUTPUT_DELIVERY_INCOMPLETE",
+            "CURRENT_UPLOAD_UNAVAILABLE",
+        }
+    )
+    | LLM_PUBLIC_ERROR_CODES
 )
 
 

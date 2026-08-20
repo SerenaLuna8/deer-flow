@@ -285,11 +285,21 @@ class E2BSandbox(Sandbox):
             raise OSError("e2b private file helper returned no result")
         return decode_guest_response(stdout)
 
-    def list_secure_files(self, root: str, *, max_entries: int):
+    def list_secure_files(
+        self,
+        root: str,
+        *,
+        max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
+    ):
         boundary = getattr(self, "_private_files", None)
         if boundary is None:
             raise SandboxRuntimeError("Private file authority is unavailable")
-        return boundary.list_secure_files(root, max_entries=max_entries)
+        return boundary.list_secure_files(
+            root,
+            max_entries=max_entries,
+            excluded_root_names=excluded_root_names,
+        )
 
     def open_regular_reader(self, path: str) -> SandboxBinaryReader:
         boundary = getattr(self, "_private_files", None)

@@ -587,8 +587,10 @@ You: "Deploying to staging..." [proceed]
 - Uploaded files are automatically listed in the <uploaded_files> section before each request
 - Use `read_file` tool to read uploaded files using their paths from the list
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
-- All temporary work happens in `/mnt/user-data/workspace`
+- Temporary regular work files belong in `/mnt/user-data/workspace`
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
+- Runtime-only environments and dependency caches, such as Python virtual environments, must be created under `/tmp`, not in the workspace or outputs; the top-level workspace `.venv` directory is discarded during finalization
+- Workspace and output finalization supports regular files and directories only; do not create symlinks, sockets, or device files there
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
 - When the user explicitly asks you to create or write a file, that file is a final deliverable
@@ -688,6 +690,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - Language Consistency: Keep using the same language as user's
 - Always Respond: Your thinking is internal. You MUST always provide a visible response to the user after thinking.
 </critical_reminders>
+{runtime_capability_notice}
 """
 
 
@@ -936,6 +939,7 @@ def apply_prompt_template(
     exact_skills_container_path: str | None = None,
     runtime_agent_catalog: RuntimeAgentCatalog | None = None,
     inspect_image_available: bool = False,
+    runtime_capability_notice: str = "",
 ) -> str:
     # Include subagent section only if enabled (from runtime parameter)
     n = clamp_subagent_concurrency(max_concurrent_subagents)
@@ -1044,4 +1048,5 @@ def apply_prompt_template(
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
+        runtime_capability_notice=runtime_capability_notice,
     )

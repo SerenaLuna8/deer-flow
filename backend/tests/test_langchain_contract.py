@@ -34,6 +34,10 @@ from packaging.requirements import Requirement
 from packaging.version import Version
 
 import deerflow.checkpoint_patches as checkpoint_patches
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ToolErrorHandlingMiddleware,
+)
+from deerflow.error_codes import TOOL_EXECUTION_FAILED_ERROR_CODE
 
 # The patch module captures these methods before its process-wide assignment.
 # Reading that canonical capture keeps the before/after probe independent of
@@ -59,6 +63,13 @@ def echo(text: str) -> str:
     """Echo the given text back."""
 
     return text
+
+
+@tool
+def failing_skill_script() -> str:
+    """Represent a script invoked from an activated Skill."""
+
+    raise RuntimeError("sensitive-skill-script-failure")
 
 
 def _recorder(label: str, journal: list[str]) -> AgentMiddleware:
@@ -197,6 +208,37 @@ def test_wrap_tool_call_composes_first_registered_outermost() -> None:
         "outer:tool_exit",
     ]
     assert result["messages"][-1].content == "done"
+
+
+@pytest.mark.asyncio
+async def test_skill_script_tool_failure_returns_to_agent_for_final_reply() -> None:
+    agent = create_agent(
+        model=_fake_model(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "failing_skill_script",
+                            "args": {},
+                            "id": "call-skill-script",
+                        }
+                    ],
+                ),
+                AIMessage(content="done with the available context"),
+            ]
+        ),
+        tools=[failing_skill_script],
+        middleware=[ToolErrorHandlingMiddleware()],
+    )
+
+    result = await agent.ainvoke({"messages": [HumanMessage(content="run the skill")]})
+
+    tool_message = next(message for message in result["messages"] if isinstance(message, ToolMessage) and message.tool_call_id == "call-skill-script")
+    assert tool_message.status == "error"
+    assert tool_message.additional_kwargs["error_code"] == (TOOL_EXECUTION_FAILED_ERROR_CODE)
+    assert "sensitive-skill-script-failure" not in str(tool_message.content)
+    assert result["messages"][-1].content == "done with the available context"
 
 
 def test_wrap_model_call_can_short_circuit_every_inner_layer() -> None:

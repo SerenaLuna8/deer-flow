@@ -179,6 +179,76 @@ def test_remote_authority_uses_exact_fixed_request_to_initialize_private_roots()
     assert requests == [_INIT_REQUEST]
 
 
+def test_remote_authority_passes_exact_scan_exclusions_to_guest() -> None:
+    requests: list[dict[str, object]] = []
+    authority = RemotePrivateFileAuthority(
+        execute=lambda request: requests.append(request) or {"ok": True, "data": {"entries": []}},
+        resolve_path=lambda path: path,
+    )
+
+    assert (
+        tuple(
+            authority.list_secure_files(
+                "/mnt/user-data/workspace",
+                max_entries=10,
+                excluded_root_names=(".venv",),
+            )
+        )
+        == ()
+    )
+    assert requests == [
+        {
+            "version": 1,
+            "action": "scan",
+            "root": "/mnt/user-data",
+            "path": "/mnt/user-data/workspace",
+            "display_path": "/mnt/user-data/workspace",
+            "max_entries": 10,
+            "excluded_root_names": [".venv"],
+        }
+    ]
+
+
+def test_private_guest_prunes_excluded_workspace_runtime_tree_before_entry_limit(
+    tmp_path: Path,
+) -> None:
+    mount_root = tmp_path / "mnt"
+    mount_root.mkdir(mode=0o700)
+    bootstrap = _run_root_bootstrap(mount_root)
+    assert bootstrap.returncode == 0, bootstrap.stderr
+    workspace = mount_root / "user-data" / "workspace"
+    runtime_bin = workspace / ".venv" / "bin"
+    runtime_bin.mkdir(parents=True)
+    (runtime_bin / "python3").symlink_to("/usr/bin/python3")
+    (workspace / "result.txt").write_text("kept", encoding="utf-8")
+
+    response = _run_guest_init(
+        mount_root,
+        request={
+            "version": 1,
+            "action": "scan",
+            "root": str(workspace),
+            "path": str(workspace),
+            "display_path": "/mnt/user-data/workspace",
+            "max_entries": 1,
+            "excluded_root_names": [".venv"],
+        },
+    )
+
+    assert response == {
+        "ok": True,
+        "data": {
+            "entries": [
+                {
+                    "path": "/mnt/user-data/workspace/result.txt",
+                    "size": 4,
+                    "file_type": "regular",
+                }
+            ]
+        },
+    }
+
+
 def test_private_guest_verifies_all_fixed_roots_idempotently(
     tmp_path: Path,
 ) -> None:

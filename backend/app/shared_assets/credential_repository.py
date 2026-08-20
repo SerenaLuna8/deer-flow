@@ -23,6 +23,8 @@ from deerflow.persistence.shared_assets import (
     McpServerVersionRow,
     ProjectSkillCredentialBindingRow,
     ProjectSkillCredentialConfigRow,
+    SkillRow,
+    SkillVersionRow,
 )
 
 
@@ -43,6 +45,21 @@ class ActiveCredentialGrant:
 class ActiveSkillCredentialBinding:
     binding: ProjectSkillCredentialBindingRow
     config: ProjectSkillCredentialConfigRow
+
+
+@dataclass(frozen=True)
+class StaleMcpCredentialReference:
+    display_name: str
+    version_number: int
+    slot_name: str
+
+
+@dataclass(frozen=True)
+class StaleSkillCredentialReference:
+    display_name: str
+    version_number: int
+    target_env_name: str
+    source_env_field_name: str
 
 
 def _request_id(context: object) -> str:
@@ -787,49 +804,131 @@ class CredentialRepository:
             result.extend(ActiveSkillCredentialBinding(binding, config) for binding in bindings)
         return tuple(result)
 
-    async def count_stale_grants(
+    async def list_stale_grant_references(
         self,
         credential: CredentialRow,
         target_version_id: uuid.UUID,
-    ) -> int:
-        """Count active grants that ``migrate_grants`` would still move.
+    ) -> tuple[StaleMcpCredentialReference, ...]:
+        return await self._list_grant_references(
+            credential,
+            target_version_id,
+            current=False,
+        )
 
-        Read-only on purpose: a preview must not take the row locks the
-        migration itself needs.
-        """
+    async def list_current_grant_references(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+    ) -> tuple[StaleMcpCredentialReference, ...]:
+        return await self._list_grant_references(
+            credential,
+            target_version_id,
+            current=True,
+        )
 
+    async def _list_grant_references(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+        *,
+        current: bool,
+    ) -> tuple[StaleMcpCredentialReference, ...]:
+        version_filter = CredentialGrantRow.credential_version_id == target_version_id if current else CredentialGrantRow.credential_version_id != target_version_id
         statement = (
-            select(func.count())
-            .select_from(CredentialGrantRow)
+            select(McpServerRow, McpServerVersionRow, McpCredentialSlotRow)
+            .join(
+                CredentialGrantRow,
+                CredentialGrantRow.mcp_server_version_id == McpServerVersionRow.id,
+            )
             .join(
                 CredentialVersionRow,
                 CredentialVersionRow.id == CredentialGrantRow.credential_version_id,
             )
+            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
+            .join(
+                McpCredentialSlotRow,
+                (McpCredentialSlotRow.id == CredentialGrantRow.credential_slot_id) & (McpCredentialSlotRow.mcp_server_version_id == McpServerVersionRow.id),
+            )
             .where(
                 CredentialVersionRow.credential_id == credential.id,
                 CredentialGrantRow.status == "active",
-                CredentialGrantRow.credential_version_id != target_version_id,
+                version_filter,
+            )
+            .order_by(
+                McpServerRow.display_name,
+                McpServerVersionRow.version_number,
+                McpCredentialSlotRow.name,
             )
         )
-        return int((await self.session.execute(statement)).scalar_one())
+        return tuple(
+            StaleMcpCredentialReference(
+                display_name=server.display_name,
+                version_number=version.version_number,
+                slot_name=slot.name,
+            )
+            for server, version, slot in (await self.session.execute(statement)).all()
+        )
 
-    async def count_stale_skill_bindings(
+    async def list_stale_skill_references(
         self,
         credential: CredentialRow,
         target_version_id: uuid.UUID,
-    ) -> int:
-        """Count active Skill environment bindings still on an older version."""
+    ) -> tuple[StaleSkillCredentialReference, ...]:
+        return await self._list_skill_references(
+            credential,
+            target_version_id,
+            current=False,
+        )
 
+    async def list_current_skill_references(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+    ) -> tuple[StaleSkillCredentialReference, ...]:
+        return await self._list_skill_references(
+            credential,
+            target_version_id,
+            current=True,
+        )
+
+    async def _list_skill_references(
+        self,
+        credential: CredentialRow,
+        target_version_id: uuid.UUID,
+        *,
+        current: bool,
+    ) -> tuple[StaleSkillCredentialReference, ...]:
+        version_filter = ProjectSkillCredentialBindingRow.credential_version_id == target_version_id if current else ProjectSkillCredentialBindingRow.credential_version_id != target_version_id
         statement = (
-            select(func.count())
-            .select_from(ProjectSkillCredentialBindingRow)
+            select(ProjectSkillCredentialBindingRow, SkillRow, SkillVersionRow)
+            .join(
+                SkillRow,
+                SkillRow.id == ProjectSkillCredentialBindingRow.skill_id,
+            )
+            .join(
+                SkillVersionRow,
+                (SkillVersionRow.id == ProjectSkillCredentialBindingRow.skill_version_id) & (SkillVersionRow.skill_id == SkillRow.id),
+            )
             .where(
                 ProjectSkillCredentialBindingRow.credential_id == credential.id,
                 ProjectSkillCredentialBindingRow.status == "active",
-                ProjectSkillCredentialBindingRow.credential_version_id != target_version_id,
+                version_filter,
+            )
+            .order_by(
+                SkillRow.display_name,
+                SkillVersionRow.version_number,
+                ProjectSkillCredentialBindingRow.secret_name,
             )
         )
-        return int((await self.session.execute(statement)).scalar_one())
+        return tuple(
+            StaleSkillCredentialReference(
+                display_name=skill.display_name,
+                version_number=version.version_number,
+                target_env_name=binding.secret_name,
+                source_env_field_name=binding.source_env_field_name,
+            )
+            for binding, skill, version in (await self.session.execute(statement)).all()
+        )
 
     async def revoke_grants(
         self,
@@ -892,6 +991,7 @@ class CredentialRepository:
                             skill_id=binding.skill_id,
                             skill_version_id=binding.skill_version_id,
                             secret_name=binding.secret_name,
+                            source_env_field_name=binding.source_env_field_name,
                             credential_id=binding.credential_id,
                             credential_version_id=binding.credential_version_id,
                             config_revision=config.revision,
@@ -945,6 +1045,7 @@ class CredentialRepository:
                         skill_id=binding.skill_id,
                         skill_version_id=binding.skill_version_id,
                         secret_name=binding.secret_name,
+                        source_env_field_name=binding.source_env_field_name,
                         credential_id=binding.credential_id,
                         credential_version_id=(target_version.id if binding.credential_id == credential_id else binding.credential_version_id),
                         config_revision=config.revision,

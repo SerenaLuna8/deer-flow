@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Literal, TypeVar
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.audit.models import AuditError
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.quotas.models import QuotaError, QuotaExceeded
@@ -30,6 +31,7 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
+    SkillArchiveLimitExceeded,
     SkillCredentialBindingInvalid,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
@@ -40,15 +42,12 @@ from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatu
 from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
+    dump_skill_distribution_zip,
     load_skill_archive_package,
 )
 from app.shared_assets.skill_credential_closure import (
     SkillCredentialClosureInvalid,
     lock_skill_credential_closure,
-)
-from app.shared_assets.skill_credential_policy import (
-    SkillCredentialBindingInput,
-    normalize_binding_inputs,
 )
 from app.shared_assets.skill_credential_repository import (
     SkillCredentialRepository,
@@ -187,6 +186,23 @@ class SkillFileContentView:
     content: str | None
     source_payload_checksum: str
     asset_version: int
+
+
+@dataclass(frozen=True)
+class SkillDistributionPackage:
+    filename: str
+    content: bytes
+    version_number: int
+
+
+@dataclass(frozen=True)
+class _SkillDistributionSource:
+    asset_id: uuid.UUID
+    version_id: uuid.UUID
+    slug: str
+    version_number: int
+    payload_checksum: str
+    files: tuple[SkillArchiveFile, ...]
 
 
 @dataclass(frozen=True)
@@ -923,6 +939,92 @@ class SkillService:
 
         return await self._execute(actor, operation)
 
+    async def export_distribution_package(
+        self,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+        version_id: uuid.UUID,
+    ) -> SkillDistributionPackage:
+        if isinstance(actor, ProjectContext):
+            self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
+        else:
+            self._require_global_governance_actor(actor)
+        request_id = getattr(actor, "request_id", "unknown")
+
+        async def load_source(repository: SkillRepository) -> _SkillDistributionSource:
+            if isinstance(actor, ProjectContext):
+                record = await repository.get_project_visible_version(
+                    actor,
+                    asset_id,
+                    version_id,
+                )
+            elif isinstance(actor, SystemAssetGovernanceContext):
+                record = await repository.get_system_export_version(
+                    actor,
+                    asset_id,
+                    version_id,
+                )
+            else:
+                raise AssetForbidden(request_id)
+            return await asyncio.to_thread(
+                self._distribution_source,
+                record,
+                request_id,
+            )
+
+        try:
+            source = await self._execute(actor, load_source)
+            content = await asyncio.to_thread(
+                dump_skill_distribution_zip,
+                source.files,
+                request_id=request_id,
+            )
+        except (AssetValidationFailed, SkillArchiveLimitExceeded):
+            raise AssetStorageUnavailable(request_id) from None
+
+        async def verify_source(repository: SkillRepository) -> None:
+            if isinstance(actor, ProjectContext):
+                current = await repository.get_project_visible_version_metadata(
+                    actor,
+                    asset_id,
+                    version_id,
+                )
+            elif isinstance(actor, SystemAssetGovernanceContext):
+                current = await repository.get_system_export_version_metadata(
+                    actor,
+                    asset_id,
+                    version_id,
+                )
+            else:
+                raise AssetForbidden(request_id)
+            await asyncio.to_thread(
+                self._verify_distribution_source,
+                current,
+                source,
+                request_id,
+            )
+
+        try:
+            await self._execute(
+                actor,
+                verify_source,
+                governance=lambda session, _result: self._record_governance(
+                    session,
+                    actor,
+                    asset_id,
+                    version_id,
+                    "skill.export",
+                ),
+            )
+        except (AssetValidationFailed, AuditError):
+            raise AssetStorageUnavailable(request_id) from None
+
+        return SkillDistributionPackage(
+            filename=f"{source.slug}-v{source.version_number}.zip",
+            content=content,
+            version_number=source.version_number,
+        )
+
     async def create_version_from_archive(
         self,
         actor: _Actor,
@@ -1018,7 +1120,6 @@ class SkillService:
         acknowledge_stale_base: bool = False,
         expected_payload_checksum: str | None = None,
         expected_binding_revision: int | None = None,
-        credential_bindings: Sequence[SkillCredentialBindingInput] | None = None,
     ) -> SkillVersionView:
         self._require_capability(
             actor,
@@ -1027,25 +1128,15 @@ class SkillService:
         if type(acknowledge_stale_base) is not bool:
             raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
         request_id = getattr(actor, "request_id", "unknown")
+        if isinstance(actor, ProjectContext) and (not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None):
+            raise SkillCredentialBindingInvalid(request_id)
+        if isinstance(actor, ProjectContext) and (not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0):
+            raise SkillCredentialBindingInvalid(request_id)
         if expected_payload_checksum is not None and (not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None):
             raise SkillCredentialBindingInvalid(request_id)
         if expected_binding_revision is not None and (not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0):
             raise SkillCredentialBindingInvalid(request_id)
-        normalized_bindings: tuple[SkillCredentialBindingInput, ...] | None = None
-        if credential_bindings is not None:
-            if not isinstance(actor, ProjectContext):
-                raise AssetForbidden(request_id)
-            self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
-            normalized_bindings = normalize_binding_inputs(
-                credential_bindings,
-                request_id=request_id,
-            )
-            if expected_payload_checksum is None or expected_binding_revision is None:
-                raise SkillCredentialBindingInvalid(request_id)
-        elif expected_binding_revision is not None and not isinstance(
-            actor,
-            ProjectContext,
-        ):
+        if expected_binding_revision is not None and not isinstance(actor, ProjectContext):
             raise AssetForbidden(request_id)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
@@ -1058,8 +1149,6 @@ class SkillService:
                 acknowledge_stale_base=acknowledge_stale_base,
                 expected_payload_checksum=expected_payload_checksum,
                 expected_binding_revision=expected_binding_revision,
-                credential_bindings=normalized_bindings,
-                record_credential_governance=True,
             )
 
         return await self._execute(
@@ -1531,6 +1620,7 @@ class SkillService:
             asset.id,
             draft.id,
             expected_asset_version=asset.version + 1,
+            allow_incomplete_suspended=True,
         )
         await self._record_governance(
             repository.session,
@@ -1640,8 +1730,7 @@ class SkillService:
         acknowledge_stale_base: bool = False,
         expected_payload_checksum: str | None = None,
         expected_binding_revision: int | None = None,
-        credential_bindings: Sequence[SkillCredentialBindingInput] | None = None,
-        record_credential_governance: bool = False,
+        allow_incomplete_suspended: bool = False,
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
@@ -1678,34 +1767,24 @@ class SkillService:
             if isinstance(actor, ProjectContext):
                 raise SkillCredentialSelectionStale(actor.request_id)
             raise AssetConflict(actor.request_id)
-        credential_bindings_changed = False
         project_binding_actor: ProjectContext | SystemAssetGovernanceContext | None
         if isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None):
             project_binding_actor = actor
         else:
             project_binding_actor = None
-        if project_binding_actor is not None and (bool(record.row.secret_requirements) or credential_bindings is not None or expected_binding_revision is not None):
-            prepared = await prepare_skill_credential_bindings_in_transaction(
+        if project_binding_actor is not None and (bool(record.row.secret_requirements) or expected_binding_revision is not None):
+            await prepare_skill_credential_bindings_in_transaction(
                 SkillCredentialRepository(repository.session),
                 project_binding_actor,
                 SkillCredentialTarget(asset, record.row),
-                credential_bindings,
+                None,
                 expected_revision=expected_binding_revision,
-                require_complete=asset.status == "active",
+                require_complete=not (allow_incomplete_suspended and asset.status == "suspended"),
             )
-            credential_bindings_changed = prepared.changed
         record.row.workflow_status = WorkflowStatus.PUBLISHED.value
         asset.current_published_version_id = record.row.id
         asset.version += 1
         await repository.session.flush()
-        if credential_bindings_changed and record_credential_governance:
-            await self._record_governance(
-                repository.session,
-                actor,
-                asset.id,
-                record.row.id,
-                "skill.credential_bindings.configure",
-            )
         return self._version_view(record)
 
     async def _create_version(
@@ -1921,6 +2000,57 @@ class SkillService:
         if _snapshot_checksum(_file_views(files)) != record.row.payload_checksum:
             raise AssetValidationFailed(request_id)
         return files
+
+    @staticmethod
+    def _distribution_source(
+        record,
+        request_id: str,
+    ) -> _SkillDistributionSource:
+        asset = record.asset
+        version = record.version
+        if (
+            not isinstance(asset.id, uuid.UUID)
+            or not isinstance(version.id, uuid.UUID)
+            or version.skill_id != asset.id
+            or _SLUG_PATTERN.fullmatch(asset.slug) is None
+            or type(version.version_number) is not int
+            or version.version_number < 1
+            or not isinstance(version.payload_checksum, str)
+            or re.fullmatch(r"[0-9a-f]{64}", version.payload_checksum) is None
+        ):
+            raise AssetValidationFailed(request_id)
+        files = SkillService._verified_archive_files(
+            SkillVersionRecord(version, tuple(record.files)),
+            request_id,
+        )
+        return _SkillDistributionSource(
+            asset_id=asset.id,
+            version_id=version.id,
+            slug=asset.slug,
+            version_number=version.version_number,
+            payload_checksum=version.payload_checksum,
+            files=files,
+        )
+
+    @staticmethod
+    def _verify_distribution_source(
+        record,
+        source: _SkillDistributionSource,
+        request_id: str,
+    ) -> None:
+        asset = record.asset
+        version = record.version
+        file_views = SkillService._metadata_file_views(record.files, request_id)
+        if (
+            asset.id != source.asset_id
+            or asset.slug != source.slug
+            or version.id != source.version_id
+            or version.skill_id != source.asset_id
+            or version.version_number != source.version_number
+            or version.payload_checksum != source.payload_checksum
+            or _snapshot_checksum(file_views) != source.payload_checksum
+        ):
+            raise AssetValidationFailed(request_id)
 
     @staticmethod
     def _metadata_file_views(

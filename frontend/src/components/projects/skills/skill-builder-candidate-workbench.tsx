@@ -22,6 +22,7 @@ import {
   type WorkingSkillFile,
 } from "@/components/projects/assets/skill-file-workbench-state";
 import { SkillSecretDeclarationsEditor } from "@/components/projects/assets/skill-secret-declarations-editor";
+import { skillWorkbenchTabVariant } from "@/components/projects/assets/skill-workbench-tabs";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { useI18n } from "@/core/i18n/hooks";
@@ -298,7 +299,7 @@ export function SkillBuilderCandidateWorkbench({
           id={filesTabId}
           type="button"
           size="sm"
-          variant={surface === "files" ? "secondary" : "ghost"}
+          variant={skillWorkbenchTabVariant(surface === "files")}
           role="tab"
           aria-selected={surface === "files"}
           aria-controls={filesPanelId}
@@ -313,7 +314,7 @@ export function SkillBuilderCandidateWorkbench({
           id={secretsTabId}
           type="button"
           size="sm"
-          variant={surface === "secrets" ? "secondary" : "ghost"}
+          variant={skillWorkbenchTabVariant(surface === "secrets")}
           role="tab"
           aria-selected={surface === "secrets"}
           aria-controls={secretsPanelId}
@@ -451,8 +452,8 @@ export function SkillBuilderCandidateWorkbench({
             key={secretEditorRevision}
             projectId={projectId}
             content={skillMdContent}
-            canEdit={canAuthor}
-            disabled={readOnly || pending}
+            editable={canAuthor && !readOnly}
+            disabled={pending}
             onContentChange={(content) => {
               if (!onSkillMdContentChange(content)) {
                 setSecretEditorRevision((current) => current + 1);

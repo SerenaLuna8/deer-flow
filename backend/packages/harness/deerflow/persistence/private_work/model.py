@@ -154,6 +154,9 @@ class RunSkillCredentialSnapshotRow(Base):
         default=_now,
         server_default=text("now()"),
     )
+    # New migration columns stay physically last so upgraded and fresh
+    # PostgreSQL catalogs have identical attribute order.
+    source_env_field_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -174,6 +177,10 @@ class RunSkillCredentialSnapshotRow(Base):
         CheckConstraint(
             "secret_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
             name="ck_run_skill_credential_snapshots_secret_name",
+        ),
+        CheckConstraint(
+            "length(source_env_field_name) BETWEEN 1 AND 255",
+            name="ck_run_skill_credential_snapshots_source_env_field_name",
         ),
         CheckConstraint(
             "binding_revision >= 1",

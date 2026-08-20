@@ -20,6 +20,8 @@ _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 AUTHORIZATION_REVOKED_REASON = "authorization_revoked"
 PRIVATE_FILE_IO_CHUNK_SIZE = 1024 * 1024
+_MAX_SECURE_SCAN_EXCLUDED_ROOT_NAMES = 32
+_MAX_POSIX_PATH_COMPONENT_BYTES = 255
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,27 @@ class SandboxFileInfo:
     path: str
     size: int
     file_type: str
+
+
+def validate_secure_scan_excluded_root_names(
+    excluded_root_names: tuple[str, ...],
+) -> frozenset[str]:
+    """Validate exact root-child names that a secure scan may prune."""
+
+    if type(excluded_root_names) is not tuple or len(excluded_root_names) > _MAX_SECURE_SCAN_EXCLUDED_ROOT_NAMES:
+        raise ValueError("Invalid secure scan exclusions")
+    validated: set[str] = set()
+    for name in excluded_root_names:
+        if type(name) is not str:
+            raise ValueError("Invalid secure scan exclusion")
+        try:
+            encoded_name = name.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("Invalid secure scan exclusion") from None
+        if not name or name in {".", ".."} or "/" in name or "\\" in name or b"\x00" in encoded_name or len(encoded_name) > _MAX_POSIX_PATH_COMPONENT_BYTES or name in validated:
+            raise ValueError("Invalid secure scan exclusion")
+        validated.add(name)
+    return frozenset(validated)
 
 
 class SandboxBinaryReader(Protocol):
@@ -181,9 +204,12 @@ class Sandbox(ABC):
         root: str,
         *,
         max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
     ) -> Iterator[SandboxFileInfo]:
         """List regular and rejected objects without following links.
 
+        Exact excluded direct child directories are pruned before counting or
+        traversal.
         Providers that do not implement this private-work boundary fail closed.
         """
 

@@ -36,11 +36,13 @@ from deerflow.config.app_config import AppConfig, is_trace_correlation_enabled
 from deerflow.config.database_config import CheckpointChannelMode
 from deerflow.config.worker_config import DEFAULT_TEXT_DELTA_FLUSH_MS
 from deerflow.error_codes import (
+    LLM_PUBLIC_ERROR_CODES,
     ROLLBACK_FAILED_ERROR_CODE,
     RUN_EXECUTION_FAILED_ERROR_CODE,
     MemoryAuthorityUnavailable,
     PublicRunError,
     PublicRunErrorCode,
+    llm_error_code_for_reason,
 )
 from deerflow.file_authority import RunFileAuthority
 from deerflow.runtime.checkpoint_mode import (
@@ -796,6 +798,7 @@ async def run_agent(
     run_mount_user_id: str | None = None
     snapshot_capture_failed = False
     llm_error_fallback_message: str | None = None
+    llm_error_fallback_code: str | None = None
     # Message ids checkpointed *before* this run started. The stream loop uses
     # this set to mask out ``deerflow_error_fallback`` markers that belong to
     # earlier runs on the same thread — without it, one stale fallback in
@@ -1307,7 +1310,7 @@ async def run_agent(
             return goal_evaluator_model
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal suspended_approval_id, llm_error_fallback_message
+            nonlocal suspended_approval_id, llm_error_fallback_message, llm_error_fallback_code
             if suspended_approval_id is not None:
                 return
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "values" in requested_modes else None
@@ -1346,10 +1349,13 @@ async def run_agent(
                                 run_id,
                             )
                             break
-                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(
+                        fallback = _extract_llm_error_fallback(
                             chunk,
                             pre_existing_message_ids,
                         )
+                        if fallback is not None and llm_error_fallback_message is None:
+                            llm_error_fallback_message = fallback.message
+                            llm_error_fallback_code = fallback.error_code
                         current_run_approval_id = _current_run_host_execution_approval_id(
                             chunk,
                             run_id,
@@ -1413,10 +1419,13 @@ async def run_agent(
                         continue
 
                     if not namespace:
-                        llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(
+                        fallback = _extract_llm_error_fallback(
                             chunk,
                             pre_existing_message_ids,
                         )
+                        if fallback is not None and llm_error_fallback_message is None:
+                            llm_error_fallback_message = fallback.message
+                            llm_error_fallback_code = fallback.error_code
                     current_run_approval_id = _current_run_host_execution_approval_id(
                         chunk,
                         run_id,
@@ -1529,12 +1538,12 @@ async def run_agent(
                     error=(AUTHORIZATION_REVOKED_REASON if action == "authorization_revoked" else None),
                 )
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
-            error_msg = llm_error_fallback_message
-            if error_msg is None and journal is not None:
-                error_msg = journal.llm_error_fallback_message
-            error_msg = error_msg or "LLM provider failed after retries"
+            error_code = llm_error_fallback_code
+            if error_code is None and journal is not None:
+                error_code = journal.llm_error_fallback_code
+            error_code = error_code or llm_error_code_for_reason("generic")
             await private_files.mark_failed()
-            await run_manager.set_status(run_id, RunStatus.error, error=error_msg)
+            await run_manager.set_status(run_id, RunStatus.error, error=error_code)
         else:
             await private_files.finalize()
             obligation_status = await private_files.output_delivery_status()
@@ -2896,16 +2905,36 @@ async def _publish_stream_item(
         await subagent_events.add(chunk)
 
 
-def _error_fallback_message_from_metadata(metadata: dict[str, Any], content: Any) -> str:
+@dataclass(frozen=True, slots=True)
+class _LLMErrorFallback:
+    message: str
+    error_code: str
+
+
+def _error_fallback_from_metadata(
+    metadata: dict[str, Any],
+    content: Any,
+) -> _LLMErrorFallback:
     detail = metadata.get("error_detail")
     if isinstance(detail, str) and detail.strip():
-        return detail.strip()
-    reason = metadata.get("error_reason")
-    if isinstance(reason, str) and reason.strip():
-        return reason.strip()
-    if isinstance(content, str) and content.strip():
-        return content.strip()[:2000]
-    return "LLM provider failed after retries"
+        message = detail.strip()
+    else:
+        reason = metadata.get("error_reason")
+        if isinstance(reason, str) and reason.strip():
+            message = reason.strip()
+        elif isinstance(content, str) and content.strip():
+            message = content.strip()[:2000]
+        else:
+            message = "LLM provider failed after retries"
+
+    raw_error_code = metadata.get("error_code")
+    legacy_error_code = metadata.get("error_detail")
+    error_code = (
+        raw_error_code
+        if isinstance(raw_error_code, str) and raw_error_code in LLM_PUBLIC_ERROR_CODES
+        else (legacy_error_code if isinstance(legacy_error_code, str) and legacy_error_code in LLM_PUBLIC_ERROR_CODES else llm_error_code_for_reason(metadata.get("error_reason")))
+    )
+    return _LLMErrorFallback(message=message, error_code=error_code)
 
 
 def _message_id(obj: Any) -> str | None:
@@ -2981,7 +3010,10 @@ def _contains_current_run_host_execution_approval(
     return _current_run_host_execution_approval_id(value, run_id) is not None
 
 
-def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None) -> str | None:
+def _try_extract_llm_error_fallback(
+    obj: Any,
+    pre_existing_ids: set[str] | None = None,
+) -> _LLMErrorFallback | None:
     """Try to extract fallback marker from a single message object or dict.
 
     Messages whose id appears in ``pre_existing_ids`` are skipped — those are
@@ -2998,16 +3030,24 @@ def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None
 
     additional_kwargs = getattr(obj, "additional_kwargs", None)
     if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
-        return _error_fallback_message_from_metadata(additional_kwargs, getattr(obj, "content", None))
+        return _error_fallback_from_metadata(additional_kwargs, getattr(obj, "content", None))
 
     if isinstance(obj, dict):
         nested_kwargs = obj.get("additional_kwargs")
         if isinstance(nested_kwargs, dict) and nested_kwargs.get("deerflow_error_fallback"):
-            return _error_fallback_message_from_metadata(nested_kwargs, obj.get("content"))
+            return _error_fallback_from_metadata(nested_kwargs, obj.get("content"))
     return None
 
 
-def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] | None = None) -> str | None:
+def _try_extract_from_message(obj: Any, pre_existing_ids: set[str] | None = None) -> str | None:
+    fallback = _try_extract_llm_error_fallback(obj, pre_existing_ids)
+    return fallback.message if fallback is not None else None
+
+
+def _extract_llm_error_fallback(
+    value: Any,
+    pre_existing_ids: set[str] | None = None,
+) -> _LLMErrorFallback | None:
     """Find LLM fallback markers in streamed LangGraph chunks.
 
     Error fallback messages returned by model-call middleware are not guaranteed
@@ -3025,7 +3065,7 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
         messages = value.get("messages")
         if isinstance(messages, (list, tuple)):
             for msg in messages:
-                result = _try_extract_from_message(msg, pre_existing_ids)
+                result = _try_extract_llm_error_fallback(msg, pre_existing_ids)
                 if result is not None:
                     return result
             # Fallback marker is attached to an AI message in the messages
@@ -3039,13 +3079,13 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
     # small, so full recursion is acceptable here.
     seen: set[int] = set()
 
-    def walk(obj: Any) -> str | None:
+    def walk(obj: Any) -> _LLMErrorFallback | None:
         oid = id(obj)
         if oid in seen:
             return None
         seen.add(oid)
 
-        result = _try_extract_from_message(obj, pre_existing_ids)
+        result = _try_extract_llm_error_fallback(obj, pre_existing_ids)
         if result is not None:
             return result
 
@@ -3064,6 +3104,14 @@ def _extract_llm_error_fallback_message(value: Any, pre_existing_ids: set[str] |
         return None
 
     return walk(value)
+
+
+def _extract_llm_error_fallback_message(
+    value: Any,
+    pre_existing_ids: set[str] | None = None,
+) -> str | None:
+    fallback = _extract_llm_error_fallback(value, pre_existing_ids)
+    return fallback.message if fallback is not None else None
 
 
 def _checkpoint_messages_from_values_or_snapshot(

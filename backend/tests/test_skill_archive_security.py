@@ -9,7 +9,11 @@ import zipfile
 import pytest
 
 from app.shared_assets.errors import AssetValidationFailed, SkillArchiveLimitExceeded
-from app.shared_assets.skill_archive import load_skill_archive_package
+from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_archive import (
+    dump_skill_distribution_zip,
+    load_skill_archive_package,
+)
 
 
 def _manifest(name: str = "meeting-brief") -> bytes:
@@ -173,6 +177,46 @@ def test_load_skill_archive_filters_macos_metadata_before_wrapper_detection(
     )
 
     assert [item.path for item in files] == ["SKILL.md", "scripts/run"]
+
+
+def test_dump_skill_distribution_zip_is_deterministic_root_layout_and_filtered() -> None:
+    files = (
+        SkillArchiveFile("SKILL.md", _manifest(), "text/markdown"),
+        SkillArchiveFile("scripts/run.py", b"print('ok')\n", "text/x-python"),
+        SkillArchiveFile("evals/case.json", b"{}\n", "application/json"),
+        SkillArchiveFile("examples/evals/kept.json", b"{}\n", "application/json"),
+        SkillArchiveFile("vendor/node_modules/pkg/index.js", b"ignored\n", "text/javascript"),
+        SkillArchiveFile("scripts/__pycache__/run.pyc", b"ignored", "application/octet-stream"),
+        SkillArchiveFile("references/.DS_Store", b"ignored", "application/octet-stream"),
+        SkillArchiveFile("scripts/helper.pyc", b"ignored", "application/octet-stream"),
+    )
+
+    first = dump_skill_distribution_zip(files, request_id="req-export")
+    second = dump_skill_distribution_zip(files, request_id="req-export")
+
+    assert first == second
+    with zipfile.ZipFile(io.BytesIO(first), mode="r") as archive:
+        assert archive.namelist() == [
+            "SKILL.md",
+            "examples/evals/kept.json",
+            "scripts/run.py",
+        ]
+        assert archive.read("SKILL.md") == _manifest()
+        for info in archive.infolist():
+            assert info.date_time == (1980, 1, 1, 0, 0, 0)
+            assert stat.S_IFMT(info.external_attr >> 16) == stat.S_IFREG
+            assert stat.S_IMODE(info.external_attr >> 16) == 0o644
+
+    imported = load_skill_archive_package(
+        first,
+        filename="meeting-brief-v7.zip",
+        request_id="req-export-roundtrip",
+    )
+    assert [(item.path, item.content) for item in imported] == [
+        ("SKILL.md", _manifest()),
+        ("examples/evals/kept.json", b"{}\n"),
+        ("scripts/run.py", b"print('ok')\n"),
+    ]
 
 
 @pytest.mark.parametrize(

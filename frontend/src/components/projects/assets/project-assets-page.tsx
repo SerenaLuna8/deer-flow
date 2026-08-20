@@ -6,12 +6,16 @@ import { useState } from "react";
 
 import {
   CredentialGrantMigrationDialog,
+  CredentialMigrationReferenceList,
   CredentialRevokeDialog,
   CredentialSecretDialog,
 } from "@/components/admin/assets/admin-asset-dialogs";
 import {
   adminAssetErrorMessage,
   adminCredentialTypeLabel,
+  credentialMigrationActionVisible,
+  credentialMigrationCompleteMessage,
+  credentialPendingMigrationMessage,
 } from "@/components/admin/assets/admin-asset-view-model";
 import { AssetStatusBadge } from "@/components/assets/asset-status-badge";
 import { AssetVersionHistory } from "@/components/assets/asset-version-history";
@@ -30,6 +34,7 @@ import {
   revokeProjectCredential,
   useProjectAssets,
   useProjectAssetVersions,
+  useProjectCredentialMigrationStatus,
   type AdminProjectAssetStatusAction,
   type AssetListKind,
   type AssetVersion,
@@ -138,6 +143,8 @@ export function ProjectAssetCatalogView({
 
 export function ProjectCredentialCatalogView({
   data,
+  accountId,
+  projectId,
   pending = false,
   actions,
   onReplace,
@@ -146,6 +153,8 @@ export function ProjectCredentialCatalogView({
   onDelete,
 }: {
   data: ProjectCredentialList;
+  accountId?: string;
+  projectId?: string;
   pending?: boolean;
   actions?: React.ReactNode;
   onReplace?: (credential: ProjectCredentialItem) => void;
@@ -230,8 +239,8 @@ export function ProjectCredentialCatalogView({
                     </div>
                   </CardHeader>
                   <CardContent className="space-y-4 px-4">
-                    <dl className="grid gap-2 text-sm sm:grid-cols-2">
-                      <div>
+                    <dl className="grid grid-cols-[minmax(0,1fr)_minmax(0,0.75fr)_minmax(0,1.35fr)] gap-x-4 gap-y-2 text-sm">
+                      <div className="min-w-0">
                         <dt className="text-muted-foreground text-xs">
                           {t.adminAssets.common.type}
                         </dt>
@@ -242,17 +251,17 @@ export function ProjectCredentialCatalogView({
                           )}
                         </dd>
                       </div>
-                      <div>
+                      <div className="min-w-0">
                         <dt className="text-muted-foreground text-xs">
                           {t.adminAssets.common.metadataVersion}
                         </dt>
                         <dd>{credential.version}</dd>
                       </div>
-                      <div className="sm:col-span-2">
+                      <div className="min-w-0">
                         <dt className="text-muted-foreground text-xs">
                           {t.adminAssets.common.updatedAt}
                         </dt>
-                        <dd>
+                        <dd className="tabular-nums">
                           {new Date(credential.updated_at).toLocaleString(
                             locale,
                           )}
@@ -261,15 +270,18 @@ export function ProjectCredentialCatalogView({
                     </dl>
                     {projectCredentialCanDelete(credential) && (
                       <div className="space-y-3">
-                        {credential.status === "active" &&
-                          credential.version > 1 && (
-                            <div
-                              role="note"
-                              className="border-border bg-muted/30 text-muted-foreground rounded-lg border px-3 py-2 text-xs"
-                            >
-                              {t.adminAssets.common.credentialRotationNote}
-                            </div>
-                          )}
+                        {accountId &&
+                        projectId &&
+                        credential.status === "active" &&
+                        credential.version > 1 ? (
+                          <ProjectCredentialMigrationPanel
+                            accountId={accountId}
+                            projectId={projectId}
+                            credential={credential}
+                            pending={pending}
+                            onMigrate={() => onMigrate?.(credential)}
+                          />
+                        ) : null}
                         <div className="flex flex-wrap gap-2">
                           {credential.status === "active" ? (
                             <>
@@ -282,17 +294,6 @@ export function ProjectCredentialCatalogView({
                               >
                                 {t.adminAssets.common.replaceCredential}
                               </Button>
-                              {credential.version > 1 && (
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  variant="outline"
-                                  disabled={pending}
-                                  onClick={() => onMigrate?.(credential)}
-                                >
-                                  {t.adminAssets.common.migrateReferences}
-                                </Button>
-                              )}
                               <Button
                                 type="button"
                                 size="sm"
@@ -326,6 +327,73 @@ export function ProjectCredentialCatalogView({
         </TabsContent>
       ))}
     </Tabs>
+  );
+}
+
+function ProjectCredentialMigrationPanel({
+  accountId,
+  projectId,
+  credential,
+  pending,
+  onMigrate,
+}: {
+  accountId: string;
+  projectId: string;
+  credential: ProjectCredentialItem;
+  pending: boolean;
+  onMigrate: () => void;
+}) {
+  const { t } = useI18n();
+  const status = useProjectCredentialMigrationStatus(
+    accountId,
+    projectId,
+    credential.id,
+    credential.current_version_id ?? "",
+  );
+  const report = status.data?.data ?? null;
+  if (status.isLoading) {
+    return (
+      <p className="text-muted-foreground text-xs">
+        {t.adminAssets.common.credentialMigrationChecking}
+      </p>
+    );
+  }
+  if (status.error || !status.data || !report) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p role="alert" className="text-destructive text-xs">
+          {t.adminAssets.common.credentialMigrationUnavailable}
+        </p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={() => void status.refetch()}
+        >
+          {t.adminAssets.common.retry}
+        </Button>
+      </div>
+    );
+  }
+  return (
+    <div className="border-border bg-muted/20 space-y-3 rounded-lg border p-3">
+      <p className="text-muted-foreground text-xs">
+        {credentialPendingMigrationMessage(report, t.adminAssets.common) ??
+          credentialMigrationCompleteMessage(report, t.adminAssets.common)}
+      </p>
+      <CredentialMigrationReferenceList pendingMigration={report} />
+      {credentialMigrationActionVisible(report) ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={pending}
+          onClick={onMigrate}
+        >
+          {t.adminAssets.common.migrateReferences}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -533,6 +601,14 @@ export function ProjectCredentialsWorkspace({
     useState<ProjectCredentialItem | null>(null);
   const [credentialDeleteSnapshot, setCredentialDeleteSnapshot] =
     useState<CredentialDeleteSnapshot | null>(null);
+  const migrationStatus = useProjectCredentialMigrationStatus(
+    accountId,
+    projectId,
+    credentialToMigrate?.id ?? "",
+    credentialToMigrate?.current_version_id ?? "",
+    credentialToMigrate !== null,
+  );
+  const pendingMigration = migrationStatus.data?.data ?? null;
 
   if (query.isLoading) return <Skeleton className="h-72 w-full" />;
   if (query.error) return <ErrorNotice error={query.error} />;
@@ -555,6 +631,8 @@ export function ProjectCredentialsWorkspace({
       )}
       <ProjectCredentialCatalogView
         data={data}
+        accountId={accountId}
+        projectId={projectId}
         pending={secureWrite.pending}
         actions={
           canCreate ? (
@@ -611,10 +689,11 @@ export function ProjectCredentialsWorkspace({
           onClose={() => setReplaceCredential(null)}
         />
       )}
-      {credentialToMigrate && (
+      {credentialToMigrate && pendingMigration && (
         <CredentialGrantMigrationDialog
           open
           credentialName={credentialToMigrate.display_name}
+          pendingMigration={pendingMigration}
           pending={secureWrite.pending}
           onOpenChange={(open) => !open && setCredentialToMigrate(null)}
           onConfirm={() => {
@@ -630,7 +709,11 @@ export function ProjectCredentialsWorkspace({
                   ),
                 t.adminAssets.common.migrationSuccess,
               )
-              .then((success) => success && setCredentialToMigrate(null));
+              .then(async (success) => {
+                if (!success) return;
+                await migrationStatus.refetch();
+                setCredentialToMigrate(null);
+              });
           }}
         />
       )}

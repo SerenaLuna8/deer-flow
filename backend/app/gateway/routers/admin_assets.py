@@ -349,7 +349,12 @@ register_asset_routes(
     _admin_actor,
     include_shared_asset_mutations=False,
 )
-register_asset_routes(admin_project_router, _admin_project_actor)
+register_asset_routes(
+    admin_project_router,
+    _admin_project_actor,
+    include_skill_export=False,
+    require_skill_publish_credential_cas=False,
+)
 
 
 def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:

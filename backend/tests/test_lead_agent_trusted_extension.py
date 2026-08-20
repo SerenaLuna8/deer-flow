@@ -73,6 +73,7 @@ def _private_runtime(tmp_path: Path) -> object:
         prompt_bundle=None,
         soul="builder prompt",
         agent_catalog=None,
+        capability_notice="",
     )
 
 
@@ -190,3 +191,22 @@ def test_runtime_config_cannot_construct_a_trusted_extension(
     ]
     assert captured["agent_kwargs"]["system_prompt"] == "canonical-prompt"  # type: ignore[index]
     assert len(captured["prompt_calls"]) == 1  # type: ignore[arg-type]
+
+
+def test_private_runtime_capability_notice_reaches_canonical_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+    private_runtime = _private_runtime(tmp_path)
+    private_runtime.capability_notice = "<runtime_capability_status>safe</runtime_capability_status>"
+
+    graph = lead_agent_module._make_lead_agent(
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=private_runtime,
+    )
+
+    assert graph == "canonical-graph"
+    assert captured["prompt_calls"][0]["runtime_capability_notice"] == private_runtime.capability_notice  # type: ignore[index]

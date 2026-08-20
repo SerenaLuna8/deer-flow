@@ -173,6 +173,9 @@ class ProjectSkillCredentialBindingRow(Base):
         ),
         nullable=True,
     )
+    # New migration columns stay physically last so upgraded and fresh
+    # PostgreSQL catalogs have identical attribute order.
+    source_env_field_name: Mapped[str] = mapped_column(String(255), nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint(
@@ -210,6 +213,10 @@ class ProjectSkillCredentialBindingRow(Base):
         CheckConstraint(
             "secret_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
             name="ck_project_skill_credential_bindings_secret_name",
+        ),
+        CheckConstraint(
+            "length(source_env_field_name) BETWEEN 1 AND 255",
+            name="ck_project_skill_credential_bindings_source_env_field_name",
         ),
         CheckConstraint(
             "config_revision >= 1",

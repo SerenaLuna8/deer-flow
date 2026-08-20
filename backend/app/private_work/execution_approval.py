@@ -581,6 +581,7 @@ async def _asset_closure(
             str(row.skill_id),
             str(row.skill_version_id),
             row.secret_name,
+            row.source_env_field_name,
             str(row.skill_credential_binding_id),
             row.binding_revision,
             str(row.credential_id),

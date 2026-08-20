@@ -78,6 +78,7 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
             "model_catalog_simplify",
             "agent_design_resume_index",
             "agent_archived_slug_reuse",
+            "skill_credential_source_field",
         )
     )
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
@@ -93,7 +94,7 @@ def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
-    assert CURRENT_SCHEMA_REVISION == "agent_archived_slug_reuse"
+    assert CURRENT_SCHEMA_REVISION == "skill_credential_source_field"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -107,6 +108,7 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
         "approval_output_delivery.py",
         "initial_schema.py",
         "model_catalog_simplify.py",
+        "skill_credential_source_field.py",
     ]
 
 
@@ -185,6 +187,21 @@ async def _restore_pre_model_catalog_schema(connection) -> None:
         text(
             """COMMENT ON TABLE system_model_configs IS
                '保存系统模型配置的逻辑身份和当前版本指针。'""",
+        ),
+    )
+
+
+async def _restore_pre_skill_credential_source_schema(connection) -> None:
+    """Remove the two columns absent from every prior released revision."""
+
+    await connection.execute(
+        text(
+            "ALTER TABLE project_skill_credential_bindings DROP COLUMN source_env_field_name",
+        ),
+    )
+    await connection.execute(
+        text(
+            "ALTER TABLE run_skill_credential_snapshots DROP COLUMN source_env_field_name",
         ),
     )
 
@@ -740,6 +757,7 @@ async def test_output_delivery_migration_upgrades_initial_schema_catalog(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             await connection.execute(text("DROP TABLE execution_approval_output_delivery_candidates"))
             await connection.execute(text("DROP TABLE execution_approval_output_delivery_obligations"))
@@ -769,6 +787,7 @@ async def test_agent_design_resume_index_migration_supports_incomplete_keyset(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await connection.execute(
                 text("DROP INDEX ix_agent_design_sessions_resume"),
             )
@@ -835,6 +854,7 @@ async def test_agent_archived_slug_reuse_migration_rebuilds_project_index(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await connection.execute(text("DROP INDEX uq_agents_project_slug"))
             await connection.execute(
                 text(
@@ -882,6 +902,312 @@ async def test_agent_archived_slug_reuse_migration_rebuilds_project_index(
 
 
 @pytest.mark.asyncio
+async def test_skill_credential_source_field_migration_backfills_existing_rows(
+    postgres_database_url: str,
+) -> None:
+    user_id = "20000000-0000-0000-0000-000000000001"
+    project_id = uuid.UUID("20000000-0000-0000-0000-000000000002")
+    membership_id = uuid.UUID("20000000-0000-0000-0000-000000000003")
+    agent_id = uuid.UUID("20000000-0000-0000-0000-000000000004")
+    skill_id = uuid.UUID("20000000-0000-0000-0000-000000000005")
+    skill_version_id = uuid.UUID("20000000-0000-0000-0000-000000000006")
+    credential_id = uuid.UUID("20000000-0000-0000-0000-000000000007")
+    credential_version_id = uuid.UUID(
+        "20000000-0000-0000-0000-000000000008",
+    )
+    binding_id = uuid.UUID("20000000-0000-0000-0000-000000000009")
+    thread_id = "skill-source-migration-thread"
+    run_id = "skill-source-migration-run"
+
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """ALTER TABLE project_skill_credential_bindings
+                       DROP COLUMN source_env_field_name""",
+                ),
+            )
+            await connection.execute(
+                text(
+                    """ALTER TABLE run_skill_credential_snapshots
+                       DROP COLUMN source_env_field_name""",
+                ),
+            )
+            await connection.execute(
+                text(
+                    "UPDATE alembic_version SET version_num = 'agent_archived_slug_reuse'",
+                ),
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO users
+                       (id,email,username,password_hash,system_role,created_at,
+                        oauth_provider,oauth_id,needs_setup,token_version)
+                       VALUES
+                       (:id,'skill-source@example.invalid','skill_source_user',
+                        NULL,'user',now(),NULL,NULL,false,0)""",
+                ),
+                {"id": user_id},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO projects
+                       (id,slug,display_name,created_by_user_id)
+                       VALUES
+                       (:id,'skill-source-migration','Skill Source Migration',
+                        :user_id)""",
+                ),
+                {"id": project_id, "user_id": user_id},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_memberships
+                       (id,project_id,user_id,role,status)
+                       VALUES (:id,:project_id,:user_id,'admin','active')""",
+                ),
+                {
+                    "id": membership_id,
+                    "project_id": project_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO agents
+                       (id,scope,project_id,slug,display_name,status,version,
+                        created_by_user_id)
+                       VALUES
+                       (:id,'project',:project_id,'skill-source-agent',
+                        'Skill Source Agent','active',1,:user_id)""",
+                ),
+                {
+                    "id": agent_id,
+                    "project_id": project_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO threads_meta
+                       (thread_id,owner_user_id,status,metadata_json,created_at,
+                        updated_at,project_id,agent_asset_id,agent_scope)
+                       VALUES
+                       (:thread_id,:user_id,'idle','{}',now(),now(),
+                        :project_id,:agent_id,'project')""",
+                ),
+                {
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "project_id": project_id,
+                    "agent_id": agent_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO runs
+                       (run_id,thread_id,owner_user_id,status,model_name,
+                        multitask_strategy,metadata_json,kwargs_json,
+                        origin_trace_id,message_count,total_input_tokens,
+                        total_output_tokens,total_tokens,llm_call_count,
+                        lead_agent_tokens,subagent_tokens,middleware_tokens,
+                        created_at,updated_at,project_id)
+                       VALUES
+                       (:run_id,:thread_id,:user_id,'pending',NULL,'reject',
+                        '{}','{}','skill-source-migration-trace',0,0,0,0,0,0,0,0,
+                        now(),now(),:project_id)""",
+                ),
+                {
+                    "run_id": run_id,
+                    "thread_id": thread_id,
+                    "user_id": user_id,
+                    "project_id": project_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO skills
+                       (id,scope,project_id,slug,display_name,status,version,
+                        created_by_user_id)
+                       VALUES
+                       (:id,'project',:project_id,'skill-source-migration',
+                        'Skill Source Migration','active',1,:user_id)""",
+                ),
+                {
+                    "id": skill_id,
+                    "project_id": project_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO skill_versions
+                       (id,skill_id,version_number,workflow_status,description,
+                        frontmatter,compatibility,secret_requirements,
+                        scan_decision,scan_summary,payload_checksum,
+                        created_by_user_id)
+                       VALUES
+                       (:id,:skill_id,1,'published','migration','{}',NULL,
+                        CAST(:requirements AS jsonb),
+                        'allow','{}',:checksum,:user_id)""",
+                ),
+                {
+                    "id": skill_version_id,
+                    "skill_id": skill_id,
+                    "requirements": json.dumps(
+                        [{"name": "TARGET_API_KEY", "optional": False}],
+                    ),
+                    "checksum": "d" * 64,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    "UPDATE skills SET current_published_version_id=:version_id WHERE id=:skill_id",
+                ),
+                {"version_id": skill_version_id, "skill_id": skill_id},
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO credentials
+                       (id,scope,project_id,name,display_name,credential_type,
+                        status,is_delete,version,created_by_user_id)
+                       VALUES
+                       (:id,'project',:project_id,'migration-credential',
+                        'Migration Credential','opaque','active',false,1,
+                        :user_id)""",
+                ),
+                {
+                    "id": credential_id,
+                    "project_id": project_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO credential_versions
+                       (id,credential_id,version_number,status,
+                        payload_schema_version,payload_schema,
+                        created_by_user_id)
+                       VALUES
+                       (:id,:credential_id,1,'active',1,
+                        CAST(:payload_schema AS jsonb),:user_id)""",
+                ),
+                {
+                    "id": credential_version_id,
+                    "credential_id": credential_id,
+                    "payload_schema": json.dumps(
+                        {"env": ["TARGET_API_KEY"]},
+                    ),
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    "UPDATE credentials SET current_version_id=:version_id WHERE id=:credential_id",
+                ),
+                {
+                    "version_id": credential_version_id,
+                    "credential_id": credential_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_skill_credential_configs
+                       (project_id,skill_id,skill_version_id,revision,
+                        created_by_user_id,updated_by_user_id)
+                       VALUES
+                       (:project_id,:skill_id,:skill_version_id,1,
+                        :user_id,:user_id)""",
+                ),
+                {
+                    "project_id": project_id,
+                    "skill_id": skill_id,
+                    "skill_version_id": skill_version_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO project_skill_credential_bindings
+                       (id,project_id,skill_id,skill_version_id,secret_name,
+                        credential_id,credential_version_id,config_revision,
+                        status,created_by_user_id)
+                       VALUES
+                       (:id,:project_id,:skill_id,:skill_version_id,
+                        'TARGET_API_KEY',:credential_id,:credential_version_id,
+                        1,'active',:user_id)""",
+                ),
+                {
+                    "id": binding_id,
+                    "project_id": project_id,
+                    "skill_id": skill_id,
+                    "skill_version_id": skill_version_id,
+                    "credential_id": credential_id,
+                    "credential_version_id": credential_version_id,
+                    "user_id": user_id,
+                },
+            )
+            await connection.execute(
+                text(
+                    """INSERT INTO run_skill_credential_snapshots
+                       (project_id,owner_user_id,thread_id,run_id,skill_id,
+                        skill_version_id,secret_name,
+                        skill_credential_binding_id,binding_revision,
+                        credential_id,credential_version_id)
+                       VALUES
+                       (:project_id,:user_id,:thread_id,:run_id,:skill_id,
+                        :skill_version_id,'TARGET_API_KEY',:binding_id,1,
+                        :credential_id,:credential_version_id)""",
+                ),
+                {
+                    "project_id": project_id,
+                    "user_id": user_id,
+                    "thread_id": thread_id,
+                    "run_id": run_id,
+                    "skill_id": skill_id,
+                    "skill_version_id": skill_version_id,
+                    "binding_id": binding_id,
+                    "credential_id": credential_id,
+                    "credential_version_id": credential_version_id,
+                },
+            )
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url)
+
+    assert result.applied is True
+    assert result.from_revision == "agent_archived_slug_reuse"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION
+    state, signature = await _catalog_signature(postgres_database_url)
+    assert state == "current"
+    assert signature == FINAL_M7_CATALOG_SIGNATURE
+
+    engine = create_async_engine(postgres_database_url, poolclass=NullPool)
+    try:
+        async with engine.connect() as connection:
+            binding_source = await connection.scalar(
+                text(
+                    "SELECT source_env_field_name FROM project_skill_credential_bindings WHERE id=:id",
+                ),
+                {"id": binding_id},
+            )
+            snapshot_source = await connection.scalar(
+                text(
+                    "SELECT source_env_field_name FROM run_skill_credential_snapshots WHERE run_id=:run_id",
+                ),
+                {"run_id": run_id},
+            )
+    finally:
+        await engine.dispose()
+
+    assert binding_source == "TARGET_API_KEY"
+    assert snapshot_source == "TARGET_API_KEY"
+
+
+@pytest.mark.asyncio
 async def test_model_catalog_migration_removes_obsolete_fields(
     postgres_database_url: str,
 ) -> None:
@@ -889,6 +1215,7 @@ async def test_model_catalog_migration_removes_obsolete_fields(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             await connection.execute(
                 text(
@@ -948,6 +1275,7 @@ async def test_model_catalog_migration_rewrites_durable_model_references(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(connection)
             await connection.execute(
@@ -1123,6 +1451,7 @@ async def test_model_catalog_migration_rejects_unknown_durable_reference(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(connection)
             invalid_blueprint = json.loads(json.dumps(seeded["blueprint"]))
@@ -1206,6 +1535,7 @@ async def test_model_catalog_migration_rejects_invalid_runtime_policy_reference(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(
                 connection,

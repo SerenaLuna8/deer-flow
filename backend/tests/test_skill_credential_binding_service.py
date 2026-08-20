@@ -10,6 +10,7 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.errors import (
+    AssetConflict,
     AssetForbidden,
     AssetNotFound,
     SkillCredentialBindingsIncomplete,
@@ -110,7 +111,7 @@ def _eligible(
 
 
 @pytest.mark.asyncio
-async def test_get_for_version_builds_exact_draft_publish_plan_with_explicit_suggestion(
+async def test_get_for_version_builds_read_only_exact_draft_preflight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
@@ -172,9 +173,12 @@ async def test_get_for_version_builds_exact_draft_publish_plan_with_explicit_sug
     assert plan.payload_checksum == "a" * 64
     assert plan.binding_revision == 0
     assert plan.secrets_autonomous is True
-    assert plan.requirements[0].suggested_credential_version_id == eligible.version.id
-    assert plan.requirements[0].eligible_credentials[0].credential_version_id == eligible.version.id
-    assert plan.requirements[1].suggested_credential_version_id is None
+    assert plan.ready is False
+    assert plan.required_count == 1
+    assert plan.configured_required_count == 0
+    assert plan.invalid_count == 0
+    assert plan.requirements[0].mapping_status == "missing"
+    assert plan.requirements[1].mapping_status == "missing"
 
 
 @pytest.mark.asyncio
@@ -255,10 +259,74 @@ async def test_replace_rejects_removing_required_binding_from_active_skill(
             actor,
             target.asset.id,
             (),
+            expected_skill_version_id=published_version_id,
             expected_revision=2,
         )
 
     _Repository.replace_bindings.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_replace_rejects_stale_published_version_before_binding_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _context()
+    current_version_id = uuid.uuid4()
+    stale_version_id = uuid.uuid4()
+    target = _target(
+        actor,
+        status="active",
+        current_published_version_id=current_version_id,
+        version_id=current_version_id,
+    )
+    target.version.workflow_status = "published"
+
+    class _Repository:
+        lock_project = AsyncMock()
+        lock_configurable_current_published_skill = AsyncMock(
+            return_value=target,
+        )
+        get_config = AsyncMock()
+        active_bindings = AsyncMock()
+        create_config = AsyncMock()
+        replace_bindings = AsyncMock()
+        eligible_credentials = AsyncMock()
+
+        def __init__(self, _session):
+            pass
+
+    monkeypatch.setattr(
+        "app.shared_assets.skill_credential_service.SkillCredentialRepository",
+        _Repository,
+    )
+    governance_sink = SimpleNamespace(append_project=AsyncMock())
+    service = SkillCredentialBindingService(
+        lambda: _Session(),
+        governance_sink=governance_sink,
+    )
+
+    with pytest.raises(SkillCredentialSelectionStale) as exc_info:
+        await service.replace(
+            actor,
+            target.asset.id,
+            (),
+            expected_skill_version_id=stale_version_id,
+            expected_revision=0,
+        )
+
+    assert exc_info.value.code == "SKILL_CREDENTIAL_SELECTION_STALE"
+    repository = _Repository
+    repository.lock_project.assert_awaited_once_with(actor)
+    repository.lock_configurable_current_published_skill.assert_awaited_once_with(
+        actor,
+        target.asset.id,
+    )
+    repository.get_config.assert_not_awaited()
+    repository.active_bindings.assert_not_awaited()
+    repository.create_config.assert_not_awaited()
+    repository.replace_bindings.assert_not_awaited()
+    repository.eligible_credentials.assert_not_awaited()
+    governance_sink.append_project.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -291,3 +359,265 @@ async def test_selected_credential_disappearance_collapses_to_stable_stale_error
 
     assert exc_info.value.code == "SKILL_CREDENTIAL_SELECTION_STALE"
     repository.lock_active_envelopes.assert_not_awaited()
+
+
+def test_exact_version_view_supports_alias_mapping_and_redacts_for_non_approver() -> None:
+    actor = _context()
+    target = _target(
+        actor,
+        status="suspended",
+        current_published_version_id=None,
+    )
+    eligible = _eligible(actor, env=["DB_DATABASE", "DB_PASSWORD"])
+    config = SimpleNamespace(
+        revision=2,
+        skill_version_id=target.version.id,
+    )
+    binding = SimpleNamespace(
+        skill_version_id=target.version.id,
+        config_revision=2,
+        secret_name="API_KEY",
+        source_env_field_name="DB_DATABASE",
+        credential_id=eligible.credential.id,
+        credential_version_id=eligible.version.id,
+    )
+
+    privileged = SkillCredentialBindingService._view(  # noqa: SLF001
+        actor,
+        target,
+        config,
+        (binding,),
+        (eligible,),
+        expose_credentials=True,
+    )
+    requirement = privileged.requirements[0]
+    assert requirement.configured is True
+    assert requirement.mapping_status == "configured"
+    assert requirement.source_env_field_name == "DB_DATABASE"
+    assert requirement.eligible_credentials[0].env_fields == (
+        "DB_DATABASE",
+        "DB_PASSWORD",
+    )
+
+    redacted = SkillCredentialBindingService._view(  # noqa: SLF001
+        actor,
+        target,
+        config,
+        (binding,),
+        (eligible,),
+        expose_credentials=False,
+    )
+    redacted_requirement = redacted.requirements[0]
+    assert redacted_requirement.configured is True
+    assert redacted_requirement.mapping_status == "configured"
+    assert redacted_requirement.credential_id is None
+    assert redacted_requirement.credential_version_id is None
+    assert redacted_requirement.source_env_field_name is None
+    assert redacted_requirement.eligible_credentials == ()
+
+
+@pytest.mark.asyncio
+async def test_exact_get_keeps_current_published_system_skill_configurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _context()
+    target = _target(
+        actor,
+        status="active",
+        current_published_version_id=None,
+    )
+    target.asset.scope = "system"
+    target.asset.project_id = None
+    target.asset.current_published_version_id = target.version.id
+    target.version.workflow_status = "published"
+    eligible = _eligible(actor, env=["API_KEY"])
+
+    class _Repository:
+        def __init__(self, _session):
+            self.lock_project = AsyncMock()
+
+        async def lock_configurable_exact_skill_version(
+            self,
+            _actor,
+            skill_id,
+            version_id,
+            *,
+            read=False,
+        ):
+            assert read is True
+            assert (skill_id, version_id) == (target.asset.id, target.version.id)
+            return target
+
+        async def get_config(self, *_args, **_kwargs):
+            return None
+
+        async def active_bindings(self, *_args, **_kwargs):
+            return ()
+
+        async def eligible_credentials(self, *_args, **_kwargs):
+            return (eligible,)
+
+    monkeypatch.setattr(
+        "app.shared_assets.skill_credential_service.SkillCredentialRepository",
+        _Repository,
+    )
+
+    view = await SkillCredentialBindingService(lambda: _Session()).get_exact(
+        actor,
+        target.asset.id,
+        target.version.id,
+    )
+
+    assert view.skill_version_id == target.version.id
+    assert view.requirements[0].mapping_status == "missing"
+    assert view.requirements[0].eligible_credentials[0].env_fields == ("API_KEY",)
+
+
+@pytest.mark.asyncio
+async def test_exact_replace_writes_current_published_system_skill_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _context()
+    target = _target(
+        actor,
+        status="active",
+        current_published_version_id=None,
+    )
+    target.asset.scope = "system"
+    target.asset.project_id = None
+    target.asset.current_published_version_id = target.version.id
+    target.version.workflow_status = "published"
+    eligible = _eligible(actor, env=["PROVIDER_TOKEN"])
+    config = SimpleNamespace(
+        revision=1,
+        skill_version_id=target.version.id,
+    )
+    created = SimpleNamespace(
+        skill_version_id=target.version.id,
+        config_revision=1,
+        secret_name="API_KEY",
+        source_env_field_name="PROVIDER_TOKEN",
+        credential_id=eligible.credential.id,
+        credential_version_id=eligible.version.id,
+    )
+
+    class _Repository:
+        lock_project = AsyncMock()
+        lock_configurable_exact_skill_version = AsyncMock(
+            return_value=target,
+        )
+        get_config = AsyncMock(return_value=None)
+        active_bindings = AsyncMock(side_effect=[(), (created,)])
+        lock_selected_credentials = AsyncMock(
+            return_value={eligible.version.id: eligible},
+        )
+        lock_active_envelopes = AsyncMock(
+            return_value=frozenset({eligible.version.id}),
+        )
+        create_config = AsyncMock(return_value=config)
+        replace_bindings = AsyncMock(return_value=(created,))
+        eligible_credentials = AsyncMock(return_value=(eligible,))
+
+        def __init__(self, _session):
+            pass
+
+    monkeypatch.setattr(
+        "app.shared_assets.skill_credential_service.SkillCredentialRepository",
+        _Repository,
+    )
+    governance_sink = SimpleNamespace(append_project=AsyncMock())
+    service = SkillCredentialBindingService(
+        lambda: _Session(),
+        governance_sink=governance_sink,
+    )
+
+    view = await service.replace_for_version(
+        actor,
+        target.asset.id,
+        target.version.id,
+        (
+            SkillCredentialBindingInput(
+                "API_KEY",
+                eligible.version.id,
+                "PROVIDER_TOKEN",
+            ),
+        ),
+        expected_revision=0,
+    )
+
+    assert view.skill_version_id == target.version.id
+    assert view.revision == 1
+    assert view.requirements[0].configured is True
+    assert view.requirements[0].mapping_status == "configured"
+    assert view.requirements[0].source_env_field_name == "PROVIDER_TOKEN"
+    _Repository.lock_project.assert_awaited_once_with(actor)
+    _Repository.lock_configurable_exact_skill_version.assert_awaited_once_with(
+        actor,
+        target.asset.id,
+        target.version.id,
+    )
+    _Repository.create_config.assert_awaited_once_with(actor, target)
+    records = _Repository.replace_bindings.await_args.args[3]
+    assert records == (("API_KEY", "PROVIDER_TOKEN", eligible),)
+    governance_sink.append_project.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_exact_replace_rejects_historical_system_skill_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actor = _context()
+    target = _target(
+        actor,
+        status="active",
+        current_published_version_id=uuid.uuid4(),
+    )
+    target.asset.scope = "system"
+    target.asset.project_id = None
+    target.version.workflow_status = "published"
+
+    class _Repository:
+        lock_project = AsyncMock()
+        lock_configurable_exact_skill_version = AsyncMock(
+            return_value=target,
+        )
+        get_config = AsyncMock()
+        active_bindings = AsyncMock()
+        create_config = AsyncMock()
+        replace_bindings = AsyncMock()
+        eligible_credentials = AsyncMock()
+
+        def __init__(self, _session):
+            pass
+
+    monkeypatch.setattr(
+        "app.shared_assets.skill_credential_service.SkillCredentialRepository",
+        _Repository,
+    )
+    governance_sink = SimpleNamespace(append_project=AsyncMock())
+    service = SkillCredentialBindingService(
+        lambda: _Session(),
+        governance_sink=governance_sink,
+    )
+
+    with pytest.raises(AssetConflict):
+        await service.replace_for_version(
+            actor,
+            target.asset.id,
+            target.version.id,
+            (),
+            expected_revision=0,
+        )
+
+    _Repository.lock_project.assert_awaited_once_with(actor)
+    _Repository.lock_configurable_exact_skill_version.assert_awaited_once_with(
+        actor,
+        target.asset.id,
+        target.version.id,
+    )
+    _Repository.get_config.assert_not_awaited()
+    _Repository.active_bindings.assert_not_awaited()
+    _Repository.create_config.assert_not_awaited()
+    _Repository.replace_bindings.assert_not_awaited()
+    _Repository.eligible_credentials.assert_not_awaited()
+    governance_sink.append_project.assert_not_awaited()

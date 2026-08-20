@@ -80,10 +80,22 @@ def test_every_durable_error_terminal_is_nonretryable() -> None:
         },
         terminal=True,
     )
+    provider_unavailable = StoredStreamFrame(
+        id="4",
+        thread_id="thread-1",
+        run_id="run-4",
+        event="end",
+        data={
+            "status": "error",
+            "error_code": "LLM_PROVIDER_UNAVAILABLE",
+        },
+        terminal=True,
+    )
 
     typed_result = PrivateRunJobHandler._terminal_result(typed)
     legacy_result = PrivateRunJobHandler._terminal_result(legacy)
     current_upload_result = PrivateRunJobHandler._terminal_result(current_upload)
+    provider_unavailable_result = PrivateRunJobHandler._terminal_result(provider_unavailable)
 
     assert typed_result.public_error_code == "MODEL_OUTPUT_LIMIT"
     assert typed_result.retryable is False
@@ -91,6 +103,8 @@ def test_every_durable_error_terminal_is_nonretryable() -> None:
     assert legacy_result.retryable is False
     assert current_upload_result.public_error_code == "CURRENT_UPLOAD_UNAVAILABLE"
     assert current_upload_result.retryable is False
+    assert provider_unavailable_result.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
+    assert provider_unavailable_result.retryable is False
 
 
 def test_stream_terminal_error_code_is_a_closed_contract() -> None:
@@ -98,6 +112,12 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         "MODEL_OUTPUT_LIMIT",
         "OUTPUT_DELIVERY_INCOMPLETE",
         "CURRENT_UPLOAD_UNAVAILABLE",
+        "LLM_QUOTA_EXCEEDED",
+        "LLM_AUTHENTICATION_FAILED",
+        "LLM_PROVIDER_BUSY",
+        "LLM_PROVIDER_UNAVAILABLE",
+        "LLM_REQUEST_FAILED",
+        "LLM_CIRCUIT_OPEN",
     }
     assert StreamFrame.end(
         status="error",
@@ -119,6 +139,13 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
     ).data == {
         "status": "error",
         "error_code": "CURRENT_UPLOAD_UNAVAILABLE",
+    }
+    assert StreamFrame.end(
+        status="error",
+        error_code="LLM_PROVIDER_UNAVAILABLE",
+    ).data == {
+        "status": "error",
+        "error_code": "LLM_PROVIDER_UNAVAILABLE",
     }
 
     import pytest
@@ -160,6 +187,17 @@ def test_executor_current_upload_terminal_preserves_public_error_code() -> None:
     assert result.attempt_usage == _usage()
 
 
+def test_executor_provider_terminal_is_typed_and_nonretryable() -> None:
+    result = RunAgentPrivateExecutor._terminal_failure_result(
+        SimpleNamespace(error="LLM_PROVIDER_UNAVAILABLE"),
+        attempt_usage=_usage(),
+    )
+
+    assert result.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
+    assert result.retryable is False
+    assert result.attempt_usage == _usage()
+
+
 def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -> None:
     assert (
         _dead_error_code_for_failure(
@@ -192,6 +230,14 @@ def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -
             retryable=False,
         )
         == "CURRENT_UPLOAD_UNAVAILABLE"
+    )
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="LLM_PROVIDER_UNAVAILABLE",
+            retryable=False,
+        )
+        == "LLM_PROVIDER_UNAVAILABLE"
     )
     assert (
         _dead_error_code_for_failure(

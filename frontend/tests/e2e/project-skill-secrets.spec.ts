@@ -19,6 +19,7 @@ const SESSION_ID = "60000000-0000-4000-8000-000000000001";
 const THREAD_ID = "70000000-0000-4000-8000-000000000001";
 const TIMESTAMP = "2026-08-19T08:00:00+08:00";
 const API_TOKEN = "API_TOKEN";
+const SOURCE_API_TOKEN = "TOKEN_VALUE";
 const ANALYTICS_KEY = "ANALYTICS_KEY";
 const BUILDER_TOKEN = "BUILDER_TOKEN";
 
@@ -254,7 +255,46 @@ async function mockProjectSkillSecrets(
   const patchBodies: unknown[] = [];
   const forkBodies: unknown[] = [];
   const publishBodies: unknown[] = [];
+  const bindingBodies: unknown[] = [];
+  const bindingsByVersion = new Map<
+    string,
+    Record<string, { credentialVersionId: string; sourceEnvFieldName: string }>
+  >();
+  const bindingRevisionByVersion = new Map<string, number>();
   const unexpectedRequests: string[] = [];
+
+  function bindingResponse(versionId: string) {
+    const version = versions.find((item) => item.id === versionId);
+    const configured = bindingsByVersion.get(versionId) ?? {};
+    return {
+      skill_id: SKILL_ID,
+      skill_version_id: versionId,
+      revision: bindingRevisionByVersion.get(versionId) ?? 0,
+      requirements: (version?.secret_requirements ?? []).map((requirement) => {
+        const binding = configured[requirement.name];
+        return {
+          ...requirement,
+          configured: Boolean(binding),
+          mapping_status: binding ? "configured" : "missing",
+          credential_id: binding ? CREDENTIAL_ID : null,
+          credential_version_id: binding?.credentialVersionId ?? null,
+          credential_display_name: binding ? "Browser API token" : null,
+          credential_version_number: binding ? 1 : null,
+          source_env_field_name: binding?.sourceEnvFieldName ?? null,
+          eligible_credentials: [
+            {
+              credential_id: CREDENTIAL_ID,
+              credential_version_id: CREDENTIAL_VERSION_ID,
+              display_name: "Browser API token",
+              version_number: 1,
+              env_fields: [SOURCE_API_TOKEN],
+            },
+          ],
+        };
+      }),
+      request_id: `request-bindings-${versionId}`,
+    };
+  }
 
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -407,53 +447,38 @@ async function mockProjectSkillSecrets(
         request_id: "request-patch",
       });
     }
-    if (
-      path === `${skillsBase}/${SKILL_ID}/credential-bindings` &&
-      method === "GET"
-    ) {
-      const current = versions.find(
-        (version) => version.id === asset.current_published_version_id,
-      );
-      return json(route, {
-        skill_id: SKILL_ID,
-        skill_version_id: asset.current_published_version_id,
-        revision: publishBodies.length,
-        requirements: (current?.secret_requirements ?? []).map(
-          (requirement) => ({
-            ...requirement,
-            configured:
-              requirement.name === API_TOKEN && publishBodies.length > 0,
-            credential_id:
-              requirement.name === API_TOKEN && publishBodies.length > 0
-                ? CREDENTIAL_ID
-                : null,
-            credential_version_id:
-              requirement.name === API_TOKEN && publishBodies.length > 0
-                ? CREDENTIAL_VERSION_ID
-                : null,
-            credential_display_name:
-              requirement.name === API_TOKEN && publishBodies.length > 0
-                ? "Browser API token"
-                : null,
-            credential_version_number:
-              requirement.name === API_TOKEN && publishBodies.length > 0
-                ? 1
-                : null,
-            eligible_credentials:
-              requirement.name === API_TOKEN
-                ? [
-                    {
-                      credential_id: CREDENTIAL_ID,
-                      credential_version_id: CREDENTIAL_VERSION_ID,
-                      display_name: "Browser API token",
-                      version_number: 1,
-                    },
-                  ]
-                : [],
-          }),
+    const bindingMatch = new RegExp(
+      `^${skillsBase}/${SKILL_ID}/versions/([^/]+)/credential-bindings$`,
+      "u",
+    ).exec(path);
+    if (bindingMatch && method === "GET") {
+      return json(route, bindingResponse(bindingMatch[1] ?? ""));
+    }
+    if (bindingMatch && method === "PUT") {
+      const versionId = bindingMatch[1] ?? "";
+      const body = request.postDataJSON() as {
+        expected_revision: number;
+        bindings: Array<{
+          name: string;
+          credential_version_id: string;
+          source_env_field_name: string;
+        }>;
+      };
+      bindingBodies.push(body);
+      bindingsByVersion.set(
+        versionId,
+        Object.fromEntries(
+          body.bindings.map((binding) => [
+            binding.name,
+            {
+              credentialVersionId: binding.credential_version_id,
+              sourceEnvFieldName: binding.source_env_field_name,
+            },
+          ]),
         ),
-        request_id: "request-bindings",
-      });
+      );
+      bindingRevisionByVersion.set(versionId, body.expected_revision + 1);
+      return json(route, bindingResponse(versionId));
     }
     if (
       path === `${skillsBase}/${SKILL_ID}/versions/${VERSION_1_ID}/fork` &&
@@ -488,32 +513,31 @@ async function mockProjectSkillSecrets(
       method === "GET"
     ) {
       const draft = versions.find((version) => version.id === VERSION_2_ID);
+      const configured = bindingsByVersion.get(VERSION_2_ID) ?? {};
+      const apiTokenConfigured = Boolean(configured[API_TOKEN]);
       return json(route, {
         skill_id: SKILL_ID,
         skill_version_id: VERSION_2_ID,
         asset_version: asset.version,
         payload_checksum: draft?.payload_checksum ?? sha256(patchedContent),
-        binding_revision: 0,
+        binding_revision: bindingRevisionByVersion.get(VERSION_2_ID) ?? 0,
         secrets_autonomous: true,
+        ready: apiTokenConfigured,
+        required_count: 1,
+        configured_required_count: apiTokenConfigured ? 1 : 0,
+        invalid_count: 0,
         requirements: [
           {
             name: API_TOKEN,
             optional: false,
-            suggested_credential_version_id: null,
-            eligible_credentials: [
-              {
-                credential_id: CREDENTIAL_ID,
-                credential_version_id: CREDENTIAL_VERSION_ID,
-                display_name: "Browser API token",
-                version_number: 1,
-              },
-            ],
+            mapping_status: apiTokenConfigured ? "configured" : "missing",
           },
           {
             name: ANALYTICS_KEY,
             optional: true,
-            suggested_credential_version_id: null,
-            eligible_credentials: [],
+            mapping_status: configured[ANALYTICS_KEY]
+              ? "configured"
+              : "missing",
           },
         ],
         request_id: "request-publish-plan",
@@ -542,7 +566,13 @@ async function mockProjectSkillSecrets(
     return json(route, { detail: "unexpected browser-test request" }, 599);
   });
 
-  return { patchBodies, forkBodies, publishBodies, unexpectedRequests };
+  return {
+    patchBodies,
+    forkBodies,
+    bindingBodies,
+    publishBodies,
+    unexpectedRequests,
+  };
 }
 
 function builderFile(content: string) {
@@ -856,18 +886,50 @@ test("archive required-secrets guides the user to Credential configuration", asy
   );
   const detail = page.getByRole("dialog", { name: "Browser Secret" });
   await expect(detail).toBeVisible();
-  await expect(detail.getByRole("heading", { name: "环境变量" })).toBeVisible();
+  const runtimeCredentialsTab = detail.getByRole("tab", {
+    name: "Runtime credentials",
+  });
+  await expect(runtimeCredentialsTab).toHaveAttribute("aria-selected", "true");
+  const bindingHeading = detail.getByRole("heading", {
+    name: "2. Project Credential mappings",
+  });
+  await expect(bindingHeading).toBeVisible();
   await expect(
-    detail.getByText("仅绑定当前发布版本声明的变量。", { exact: false }),
+    detail.getByText("Map each Skill environment variable", {
+      exact: false,
+    }),
   ).toBeVisible();
-  await expect(detail.getByText(API_TOKEN, { exact: true })).toBeVisible();
   await expect(
     detail.getByRole("option", { name: "Select a Credential" }),
   ).toBeAttached();
+  const bindingSelect = detail.getByLabel(`Project Credential · ${API_TOKEN}`);
+  await bindingSelect.selectOption(CREDENTIAL_VERSION_ID);
+  const sourceSelect = detail.getByLabel(
+    `Source environment variable · ${API_TOKEN}`,
+  );
+  await sourceSelect.selectOption(SOURCE_API_TOKEN);
+  await detail.getByRole("button", { name: "Save mappings" }).click();
+  await detail.getByRole("tab", { name: "Files" }).click();
+  await expect(bindingHeading).toBeHidden();
+  await runtimeCredentialsTab.click();
+  await expect(bindingSelect).toHaveValue(CREDENTIAL_VERSION_ID);
+  await expect(sourceSelect).toHaveValue(SOURCE_API_TOKEN);
+  expect(api.bindingBodies).toEqual([
+    {
+      expected_revision: 0,
+      bindings: [
+        {
+          name: API_TOKEN,
+          credential_version_id: CREDENTIAL_VERSION_ID,
+          source_env_field_name: SOURCE_API_TOKEN,
+        },
+      ],
+    },
+  ]);
   expect(api.unexpectedRequests).toEqual([]);
 });
 
-test("version form patches SKILL.md and publish submits only Credential version IDs", async ({
+test("version form saves exact source-field mappings before read-only publish", async ({
   page,
 }) => {
   const api = await mockProjectSkillSecrets(page);
@@ -876,12 +938,27 @@ test("version form patches SKILL.md and publish submits only Credential version 
   const detail = page.getByRole("dialog", { name: "Browser Secret" });
   await expect(detail).toBeVisible();
   await detail.getByRole("button", { name: "创建新版本" }).click();
-  await detail
-    .getByRole("tab", { name: "Credential environment variables" })
-    .click();
+  const editingStatus = detail.getByRole("region", {
+    name: "版本编辑状态",
+  });
   await expect(
-    detail.getByRole("heading", { name: "Credential environment variables" }),
+    editingStatus.getByRole("button", { name: "放弃修改" }),
   ).toBeVisible();
+  await expect(
+    editingStatus.getByRole("button", { name: "保存为新版本" }),
+  ).toBeVisible();
+  await detail.getByRole("tab", { name: "Runtime credentials" }).click();
+  await expect(
+    detail.getByRole("heading", {
+      name: "1. Environment variable declarations",
+    }),
+  ).toBeVisible();
+  await expect(
+    detail.getByText("当前正在编辑 SKILL.md。", { exact: false }),
+  ).toBeVisible();
+  await expect(
+    detail.getByLabel(new RegExp("Project Credential", "u")),
+  ).toHaveCount(0);
 
   await detail.getByLabel("Variable name").fill(ANALYTICS_KEY);
   await detail.getByLabel("Make the new variable optional").click();
@@ -894,6 +971,32 @@ test("version form patches SKILL.md and publish submits only Credential version 
   await expect(source).toHaveValue(new RegExp(`name: ${ANALYTICS_KEY}`, "u"));
 
   await detail.getByRole("button", { name: "保存为新版本" }).click();
+  await expect(
+    detail.getByRole("tab", { name: "Runtime credentials" }),
+  ).toHaveAttribute("aria-selected", "true");
+  await detail
+    .getByLabel(`Project Credential · ${API_TOKEN}`)
+    .selectOption(CREDENTIAL_VERSION_ID);
+  await detail
+    .getByLabel(`Source environment variable · ${API_TOKEN}`)
+    .selectOption(SOURCE_API_TOKEN);
+  const saveMappings = detail.getByRole("button", { name: "Save mappings" });
+  await saveMappings.click();
+  const advancedSettings = detail.getByText("Advanced settings", {
+    exact: true,
+  });
+  await expect(saveMappings).toBeVisible();
+  await expect(advancedSettings).toBeVisible();
+  const [saveMappingsBox, advancedSettingsBox] = await Promise.all([
+    saveMappings.boundingBox(),
+    advancedSettings.boundingBox(),
+  ]);
+  if (!saveMappingsBox || !advancedSettingsBox) {
+    throw new Error("Credential mapping and advanced settings must be visible");
+  }
+  expect(advancedSettingsBox.y).toBeGreaterThan(
+    saveMappingsBox.y + saveMappingsBox.height,
+  );
   await expect(detail.getByRole("button", { name: "发布版本" })).toBeEnabled();
   await detail.getByRole("button", { name: "发布版本" }).click();
 
@@ -901,15 +1004,27 @@ test("version form patches SKILL.md and publish submits only Credential version 
     name: "Publish Skill version",
   });
   await expect(publishDialog).toBeVisible();
-  await publishDialog
-    .getByLabel("Project Credential")
-    .first()
-    .selectOption(CREDENTIAL_VERSION_ID);
+  await expect(
+    publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+  ).toHaveCount(0);
+  await expect(publishDialog.getByText("Publish checks passed")).toBeVisible();
   await publishDialog.getByRole("button", { name: "Publish version" }).click();
 
   await expect(publishDialog).toHaveCount(0);
   expect(api.patchBodies).toHaveLength(1);
   expect(api.forkBodies).toHaveLength(1);
+  expect(api.bindingBodies).toEqual([
+    {
+      expected_revision: 0,
+      bindings: [
+        {
+          name: API_TOKEN,
+          credential_version_id: CREDENTIAL_VERSION_ID,
+          source_env_field_name: SOURCE_API_TOKEN,
+        },
+      ],
+    },
+  ]);
   expect(api.forkBodies[0]).toMatchObject({
     changes: [
       {
@@ -924,14 +1039,8 @@ test("version form patches SKILL.md and publish submits only Credential version 
     {
       expected_asset_version: 2,
       expected_payload_checksum: sha256(patchedContent),
-      expected_binding_revision: 0,
+      expected_binding_revision: 1,
       acknowledge_stale_base: false,
-      credential_bindings: [
-        {
-          name: API_TOKEN,
-          credential_version_id: CREDENTIAL_VERSION_ID,
-        },
-      ],
     },
   ]);
   expect(JSON.stringify(api.publishBodies)).not.toMatch(
@@ -955,7 +1064,44 @@ test("failed activation leaves a Draft for the exact published Credential sectio
   await expect(page).toHaveURL(
     `/projects/alpha/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_1_ID}&configure_credentials=1`,
   );
-  await expect(detail.getByRole("heading", { name: "环境变量" })).toBeVisible();
+  await expect(
+    detail.getByRole("heading", { name: "2. Project Credential mappings" }),
+  ).toBeVisible();
+  expect(api.unexpectedRequests).toEqual([]);
+});
+
+test("publish preflight is read-only and routes a missing Draft back to mappings", async ({
+  page,
+}) => {
+  const api = await mockProjectSkillSecrets(page, { initialDraft: true });
+
+  await page.goto(
+    `/projects/alpha/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_2_ID}`,
+  );
+  const detail = page.getByRole("dialog", { name: "Browser Secret" });
+  await detail.getByRole("button", { name: "发布版本" }).click();
+  const publishDialog = page.getByRole("dialog", {
+    name: "Publish Skill version",
+  });
+  await expect(
+    publishDialog.getByText("Publish checks did not pass"),
+  ).toBeVisible();
+  await expect(
+    publishDialog.getByRole("button", { name: "Publish version" }),
+  ).toBeDisabled();
+  await expect(
+    publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+  ).toHaveCount(0);
+  await publishDialog
+    .getByRole("button", { name: "Go to Runtime credentials" })
+    .click();
+  await expect(
+    detail.getByRole("tab", { name: "Runtime credentials" }),
+  ).toHaveAttribute("aria-selected", "true");
+  await expect(
+    detail.getByRole("heading", { name: "2. Project Credential mappings" }),
+  ).toBeVisible();
+  expect(api.publishBodies).toHaveLength(0);
   expect(api.unexpectedRequests).toEqual([]);
 });
 
@@ -969,9 +1115,7 @@ test("Builder declaration edits invalidate checks, then revalidate and expose Cr
   const createSkill = page.getByRole("button", { name: "Create Skill" });
   await expect(createSkill).toBeEnabled();
 
-  await page
-    .getByRole("tab", { name: "Credential environment variables" })
-    .click();
+  await page.getByRole("tab", { name: "Runtime credentials" }).click();
   await page.getByLabel("Variable name").fill(BUILDER_TOKEN);
   await page.getByRole("button", { name: "Add", exact: true }).click();
   await expect(page.getByText(BUILDER_TOKEN, { exact: true })).toBeVisible();
@@ -991,7 +1135,7 @@ test("Builder declaration edits invalidate checks, then revalidate and expose Cr
 
   await expect(
     page.getByText(
-      "Skill created and suspended with 1 Credential environment variable declaration. Configure credentials before enabling it.",
+      "Skill created and suspended with 1 environment variable declaration. Configure runtime credentials before enabling it.",
       { exact: true },
     ),
   ).toBeVisible();

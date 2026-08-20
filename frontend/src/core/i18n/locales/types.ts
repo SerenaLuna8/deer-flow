@@ -694,8 +694,13 @@ export interface Translations {
       revoked: string;
       loading: string;
       migrationSuccess: string;
+      credentialMigrationChecking: string;
+      credentialMigrationUnavailable: string;
+      credentialMigrationComplete: string;
       pendingMigrationNotice: (
         total: number,
+        mcpGrantCount: number,
+        skillBindingCount: number,
         systemModelCount: number,
       ) => string;
       credentialRotationNote: string;
@@ -1018,6 +1023,14 @@ export interface Translations {
       confirmRevoke: string;
       migrateTitle: string;
       migrateDescription: (name: string) => string;
+      migrationDetailsTitle: string;
+      migrationCurrentDetailsTitle: string;
+      migrationSkillBinding: string;
+      migrationMcpGrant: string;
+      migrationSystemModel: string;
+      migrationVersion: (version: number) => string;
+      migrationTarget: string;
+      migrationSource: string;
       migrating: string;
       confirmMigrate: string;
       deleteTitle: string;
@@ -1762,16 +1775,28 @@ export interface Translations {
   };
 
   skills: {
+    export: {
+      label: string;
+      preparing: string;
+      started: string;
+      tooltip: (version: number) => string;
+      unsaved: string;
+      loading: string;
+      revoked: string;
+      unpublished: string;
+      noVersion: string;
+    };
     secrets: {
       workbenchAria: string;
       filesTab: string;
       secretsTab: string;
       aria: string;
       title: string;
-      description: string;
       viewSource: string;
       checking: string;
       syncing: string;
+      recognized: (count: number) => string;
+      draftUpdated: string;
       retry: string;
       sourceStale: string;
       invalidDeclaration: string;
@@ -1784,6 +1809,7 @@ export interface Translations {
       managedComments: string;
       shorthand: (count: number) => string;
       empty: string;
+      beginEdit: string;
       optional: string;
       required: string;
       setOptional: (name: string) => string;
@@ -1798,6 +1824,11 @@ export interface Translations {
       autonomousTitle: string;
       autonomousDescription: string;
       autonomousAria: string;
+      advancedSettings: string;
+      injectionAutomatic: string;
+      injectionAutomaticDescription: string;
+      injectionExplicit: string;
+      injectionExplicitDescription: string;
       location: (line: number, column: number | null) => string;
       loadSourceFailed: string;
       loadSource: string;
@@ -1808,9 +1839,42 @@ export interface Translations {
       optionalUnbound: string;
       selectCredential: string;
       credentialVersion: (name: string, version: number) => string;
+      credentialUnavailable: string;
+      versionLabel: (version: number) => string;
+      sourceFieldLabel: string;
+      selectCredentialFirst: string;
+      selectSourceField: string;
+      sourceFieldUnavailable: string;
+      sourceFieldRequired: string;
       requiredMissing: string;
+      invalidMapping: string;
       createCredential: string;
       manageCredential: string;
+      mappingTitle: string;
+      mappingDescription: string;
+      mappingEmpty: string;
+      mappingStatusConfigured: string;
+      mappingStatusMissing: string;
+      mappingStatusInvalid: string;
+      mappingReadOnly: string;
+      mappingHistoricalReadOnly: string;
+      mappingRefreshPreserved: string;
+      mappingReload: string;
+      mappingDiscard: string;
+      mappingSave: string;
+      mappingSaving: string;
+      mappingCompleteRequired: string;
+      mappingRepairInvalid: string;
+      mappingLoadingAria: string;
+      mappingVersionMismatch: string;
+      mappingRetry: string;
+      mappingConflict: string;
+      mappingForbidden: string;
+      mappingNotFound: string;
+      mappingInvalidResponse: string;
+      mappingLoadFailed: string;
+      mappingSaveFailed: string;
+      mappingVersionChanged: string;
     };
     publishDialog: {
       title: string;
@@ -1820,6 +1884,20 @@ export interface Translations {
       bindingRevision: string;
       noRequirements: string;
       bindingsTitle: string;
+      required: string;
+      optional: string;
+      statusConfigured: string;
+      statusMissing: string;
+      statusInvalid: string;
+      preflightReady: string;
+      preflightBlocked: string;
+      preflightSummary: (
+        configuredRequired: number,
+        required: number,
+        invalid: number,
+      ) => string;
+      configureBeforePublish: string;
+      configureCredentials: string;
       noApprove: string;
       approvalRequiredForActive: string;
       optionalUnbound: (count: number) => string;
@@ -2065,6 +2143,7 @@ export interface Translations {
         withVersion: (version: number) => string;
         withoutVersion: string;
         goPublish: string;
+        revisionWithSecrets: (version: number | null, count: number) => string;
         createdWithSecrets: (count: number) => string;
         configureCredentials: string;
       };
@@ -2225,6 +2304,8 @@ export interface Translations {
     branchFailed: string;
     runFailedTitle: string;
     runFailedDescription: string;
+    providerUnavailableTitle: string;
+    providerUnavailableDescription: string;
     runAdmissionNotConfirmedDescription: string;
     restoreFailedInput: string;
     restoreFailedInputBlocked: string;

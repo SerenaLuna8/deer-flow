@@ -36,6 +36,7 @@ from deerflow.agents.middlewares.token_budget_middleware import (
     TOKEN_BUDGET_STATUS_KEY,
     read_token_budget_status,
 )
+from deerflow.error_codes import LLM_PUBLIC_ERROR_CODES, llm_error_code_for_reason
 from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
@@ -130,6 +131,7 @@ class RunJournal(BaseCallbackHandler):
         self._msg_count = 0
         self._had_llm_error_fallback = False
         self._llm_error_fallback_message: str | None = None
+        self._llm_error_fallback_code: str | None = None
 
         # Latency tracking
         self._llm_start_times: dict[str, float] = {}  # langchain run_id -> start time
@@ -709,6 +711,13 @@ class RunJournal(BaseCallbackHandler):
         self._had_llm_error_fallback = True
         detail = additional_kwargs.get("error_detail")
         reason = additional_kwargs.get("error_reason")
+        raw_error_code = additional_kwargs.get("error_code")
+        legacy_error_code = additional_kwargs.get("error_detail")
+        self._llm_error_fallback_code = (
+            raw_error_code
+            if isinstance(raw_error_code, str) and raw_error_code in LLM_PUBLIC_ERROR_CODES
+            else (legacy_error_code if isinstance(legacy_error_code, str) and legacy_error_code in LLM_PUBLIC_ERROR_CODES else llm_error_code_for_reason(reason))
+        )
         if isinstance(detail, str) and detail.strip():
             self._llm_error_fallback_message = detail.strip()
         elif isinstance(reason, str) and reason.strip():
@@ -1119,3 +1128,7 @@ class RunJournal(BaseCallbackHandler):
     @property
     def llm_error_fallback_message(self) -> str | None:
         return self._llm_error_fallback_message
+
+    @property
+    def llm_error_fallback_code(self) -> str | None:
+        return self._llm_error_fallback_code

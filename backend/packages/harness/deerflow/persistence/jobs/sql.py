@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deerflow.error_codes import LLM_PUBLIC_ERROR_CODES
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.trace_context import normalize_trace_id
@@ -33,12 +34,15 @@ JobType = Literal[
 RetrySafety = Literal["safe", "unknown", "unsafe"]
 
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
-_DETERMINISTIC_NONRETRYABLE_ERROR_CODES = frozenset(
-    {
-        "MODEL_OUTPUT_LIMIT",
-        "OUTPUT_DELIVERY_INCOMPLETE",
-        "CURRENT_UPLOAD_UNAVAILABLE",
-    }
+_DETERMINISTIC_NONRETRYABLE_ERROR_CODES = (
+    frozenset(
+        {
+            "MODEL_OUTPUT_LIMIT",
+            "OUTPUT_DELIVERY_INCOMPLETE",
+            "CURRENT_UPLOAD_UNAVAILABLE",
+        }
+    )
+    | LLM_PUBLIC_ERROR_CODES
 )
 
 

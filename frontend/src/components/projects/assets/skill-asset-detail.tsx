@@ -1,4 +1,4 @@
-import type { ComponentProps } from "react";
+import type { ComponentProps, ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import type { AssetVersion } from "@/core/shared-assets";
@@ -34,14 +34,26 @@ type SkillWorkspaceProps = Omit<
   onCredentialBindingsDirtyChange: (dirty: boolean) => void;
 };
 
+export function skillCredentialBindingsMounted({
+  selectedVersionId,
+  editing,
+}: {
+  selectedVersionId: string;
+  currentPublishedVersionId: string | null;
+  editing: boolean;
+}): boolean {
+  return !editing && selectedVersionId !== "";
+}
+
 export function skillCredentialBindingsVisible(
   selectedVersionId: string,
   currentPublishedVersionId: string | null,
 ): boolean {
-  return (
-    currentPublishedVersionId !== null &&
-    selectedVersionId === currentPublishedVersionId
-  );
+  return skillCredentialBindingsMounted({
+    selectedVersionId,
+    currentPublishedVersionId,
+    editing: false,
+  });
 }
 
 function SkillMetadata({ version }: { version: SkillAssetVersion }) {
@@ -122,7 +134,7 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
       </section>
 
       <section className="space-y-3">
-        <h3 className="text-sm font-semibold">凭据要求</h3>
+        <h3 className="text-sm font-semibold">环境变量声明</h3>
         {version.secret_requirements.length === 0 ? (
           <p className="text-muted-foreground text-sm">无需凭据。</p>
         ) : (
@@ -171,28 +183,44 @@ export function SkillAssetDetail({
     onCredentialBindingsDirtyChange,
     ...workbench
   } = workspace;
+  let credentialBindings: ReactNode = null;
+  if (!workspace.editing) {
+    const currentPublished =
+      version.id === workspace.item.current_published_version_id;
+    const writable =
+      currentPublished ||
+      (workspace.item.scope === "project" &&
+        version.workflow_status === "draft");
+    credentialBindings = (
+      <SkillCredentialBindings
+        key={`${workspace.item.id}:${version.id}`}
+        accountId={workspace.accountId}
+        projectId={workspace.projectId}
+        skillId={workspace.item.id}
+        versionId={version.id}
+        skillActive={workspace.item.status === "active" && currentPublished}
+        canManage={canManageCredentials && writable}
+        readOnlyReason={
+          !canManageCredentials
+            ? "approval"
+            : !writable
+              ? "historical"
+              : undefined
+        }
+        credentialsHref={credentialsHref}
+        onDirtyChange={onCredentialBindingsDirtyChange}
+      />
+    );
+  }
   return (
     <div className="space-y-8">
-      <SkillVersionWorkbench {...workbench} version={version} />
-      {skillCredentialBindingsVisible(
-        version.id,
-        workspace.item.current_published_version_id,
-      ) ? (
-        <SkillCredentialBindings
-          accountId={workspace.accountId}
-          projectId={workspace.projectId}
-          skillId={workspace.item.id}
-          currentPublishedVersionId={
-            workspace.item.current_published_version_id
-          }
-          skillStatus={workspace.item.status}
-          canManage={canManageCredentials}
-          credentialsHref={credentialsHref}
-          focus={focusCredentials}
-          onFocused={onCredentialsFocused}
-          onDirtyChange={onCredentialBindingsDirtyChange}
-        />
-      ) : null}
+      <SkillVersionWorkbench
+        {...workbench}
+        version={version}
+        focusCredentials={focusCredentials}
+        onCredentialsFocused={onCredentialsFocused}
+        credentialBindings={credentialBindings}
+      />
       <details className="border-border/70 rounded-xl border px-4 py-3">
         <summary className="cursor-pointer text-sm font-medium">
           版本说明与检查结果

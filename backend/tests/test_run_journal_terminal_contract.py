@@ -47,6 +47,7 @@ async def test_fatal_llm_fallback_cannot_journal_a_successful_run_end() -> None:
     assert terminal_events[0]["metadata"] == {"status": "error"}
     assert journal.had_llm_error_fallback is True
     assert journal.llm_error_fallback_message == "CURRENT_UPLOAD_UNAVAILABLE"
+    assert journal.llm_error_fallback_code == "CURRENT_UPLOAD_UNAVAILABLE"
 
 
 @pytest.mark.anyio
@@ -82,3 +83,4 @@ async def test_stale_fallback_cannot_poison_a_later_successful_run_end() -> None
     assert terminal_events[0]["metadata"] == {"status": "success"}
     assert journal.had_llm_error_fallback is False
     assert journal.llm_error_fallback_message is None
+    assert journal.llm_error_fallback_code is None

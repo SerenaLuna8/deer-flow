@@ -26,6 +26,7 @@ from deerflow.sandbox.sandbox import (
     Sandbox,
     SandboxFileInfo,
     _validate_extra_env,
+    validate_secure_scan_excluded_root_names,
 )
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
@@ -860,9 +861,13 @@ class LocalSandbox(Sandbox):
         root: str,
         *,
         max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
     ) -> Iterator[SandboxFileInfo]:
         if type(max_entries) is not int or max_entries < 1:
             raise ValueError("Secure scan entry limit must be positive")
+        excluded_names = validate_secure_scan_excluded_root_names(
+            excluded_root_names,
+        )
         mapping, parts = self._private_path_parts(
             root,
             write=False,
@@ -907,6 +912,8 @@ class LocalSandbox(Sandbox):
                         kind = "regular"
                     else:
                         kind = "other"
+                    if directory_fd == base_fd and kind == "directory" and name in excluded_names:
+                        continue
                     seen += 1
                     if seen > max_entries:
                         raise OSError(

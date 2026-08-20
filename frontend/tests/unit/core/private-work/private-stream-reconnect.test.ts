@@ -10,10 +10,12 @@ import {
   getProjectAPIClient,
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
+  LLM_PROVIDER_UNAVAILABLE,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   PROJECT_STREAM_INCOMPLETE,
   projectReconnectStorage,
+  projectRunTerminalFailureEventToError,
   projectStreamFrameForUI,
   projectStreamFailureName,
   projectStreamCursorStorageKey,
@@ -599,8 +601,9 @@ describe("private stream reconnect", () => {
     expect(frames).toEqual([
       {
         id: "61",
-        event: "error",
+        event: "custom",
         data: {
+          type: "project_run_terminal_failure",
           error: "PROJECT_RUN_TERMINAL_FAILURE",
           message: "PROJECT_RUN_TERMINAL_FAILURE",
         },
@@ -778,7 +781,7 @@ describe("private stream reconnect", () => {
     );
   });
 
-  test("turns a durable failed terminal into the SDK error event", () => {
+  test("turns a durable failed terminal into a lifecycle custom event", () => {
     for (const status of ["error", "failed", "timeout"]) {
       expect(
         projectStreamFrameForUI({
@@ -788,8 +791,9 @@ describe("private stream reconnect", () => {
         }),
       ).toEqual({
         id: "9",
-        event: "error",
+        event: "custom",
         data: {
+          type: "project_run_terminal_failure",
           error: "PROJECT_RUN_TERMINAL_FAILURE",
           message: "PROJECT_RUN_TERMINAL_FAILURE",
         },
@@ -816,6 +820,31 @@ describe("private stream reconnect", () => {
     );
   });
 
+  test("keeps an expected durable Run failure out of the SDK error channel", () => {
+    const frame = projectStreamFrameForUI({
+      id: "1",
+      event: "end",
+      data: { status: "error" },
+    });
+
+    // The LangGraph SDK unconditionally calls console.error for event:error.
+    // Durable Run failures are expected business outcomes and must reach the
+    // conversation lifecycle without triggering Next.js' console overlay.
+    expect(frame).toEqual({
+      id: "1",
+      event: "custom",
+      data: {
+        type: "project_run_terminal_failure",
+        error: "PROJECT_RUN_TERMINAL_FAILURE",
+        message: "PROJECT_RUN_TERMINAL_FAILURE",
+      },
+    });
+    expect(projectRunTerminalFailureEventToError(frame.data)).toMatchObject({
+      name: "PROJECT_RUN_TERMINAL_FAILURE",
+      message: "PROJECT_RUN_TERMINAL_FAILURE",
+    });
+  });
+
   test("preserves only the stable model output-limit name until the durable terminal", () => {
     const diagnostic = {
       id: "8",
@@ -835,8 +864,9 @@ describe("private stream reconnect", () => {
       }),
     ).toEqual({
       id: "9",
-      event: "error",
+      event: "custom",
       data: {
+        type: "project_run_terminal_failure",
         error: MODEL_OUTPUT_LIMIT,
         message: MODEL_OUTPUT_LIMIT,
       },
@@ -848,8 +878,9 @@ describe("private stream reconnect", () => {
       ),
     ).toEqual({
       id: "10",
-      event: "error",
+      event: "custom",
       data: {
+        type: "project_run_terminal_failure",
         error: MODEL_OUTPUT_LIMIT,
         message: MODEL_OUTPUT_LIMIT,
       },
@@ -885,8 +916,9 @@ describe("private stream reconnect", () => {
       ),
     ).toEqual({
       id: "9",
-      event: "error",
+      event: "custom",
       data: {
+        type: "project_run_terminal_failure",
         error: OUTPUT_DELIVERY_INCOMPLETE,
         message: OUTPUT_DELIVERY_INCOMPLETE,
       },
@@ -902,8 +934,9 @@ describe("private stream reconnect", () => {
       }),
     ).toEqual({
       id: "10",
-      event: "error",
+      event: "custom",
       data: {
+        type: "project_run_terminal_failure",
         error: OUTPUT_DELIVERY_INCOMPLETE,
         message: OUTPUT_DELIVERY_INCOMPLETE,
       },
@@ -914,6 +947,37 @@ describe("private stream reconnect", () => {
       }),
     ).toBe(true);
     expect(isOutputDeliveryIncompleteError({ name: "other" })).toBe(false);
+  });
+
+  test("preserves the stable provider-unavailable failure until the durable terminal", () => {
+    const diagnostic = {
+      id: "8",
+      event: "error",
+      data: {
+        name: LLM_PROVIDER_UNAVAILABLE,
+        message: "safe public detail",
+      },
+    };
+
+    expect(projectStreamFailureName(diagnostic)).toBe(LLM_PROVIDER_UNAVAILABLE);
+    expect(
+      projectStreamFrameForUI(
+        {
+          id: "9",
+          event: "end",
+          data: { status: "error" },
+        },
+        projectStreamFailureName(diagnostic),
+      ),
+    ).toEqual({
+      id: "9",
+      event: "custom",
+      data: {
+        type: "project_run_terminal_failure",
+        error: LLM_PROVIDER_UNAVAILABLE,
+        message: LLM_PROVIDER_UNAVAILABLE,
+      },
+    });
   });
 
   test("carries a live output-limit diagnostic through its durable terminal", async () => {
@@ -961,8 +1025,9 @@ describe("private stream reconnect", () => {
 
     expect(frames.at(-1)).toEqual({
       id: "3",
-      event: "error",
+      event: "custom",
       data: {
+        type: "project_run_terminal_failure",
         error: MODEL_OUTPUT_LIMIT,
         message: MODEL_OUTPUT_LIMIT,
       },
@@ -1082,8 +1147,9 @@ describe("private stream reconnect", () => {
       },
       {
         id: "3",
-        event: "error",
+        event: "custom",
         data: {
+          type: "project_run_terminal_failure",
           error: "PROJECT_RUN_TERMINAL_FAILURE",
           message: "PROJECT_RUN_TERMINAL_FAILURE",
         },

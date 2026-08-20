@@ -22,6 +22,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from "react";
 
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
@@ -65,9 +66,30 @@ import {
   type SkillFileTreeSelection,
 } from "./skill-file-workbench-state";
 import { SkillSecretDeclarationsEditor } from "./skill-secret-declarations-editor";
+import { skillWorkbenchTabVariant } from "./skill-workbench-tabs";
 
 type PathDialogMode = "add" | "rename";
 type WorkbenchSurface = "files" | "secrets";
+
+export function beginSkillCredentialEditing(
+  setSurface: (surface: WorkbenchSurface) => void,
+  onEditingChange: (editing: boolean) => void,
+): void {
+  setSurface("secrets");
+  onEditingChange(true);
+}
+
+export function notifySkillDraftVersionCreated(
+  onVersionCreated: (
+    versionId: string,
+    options?: { focusCredentials?: boolean },
+  ) => void,
+  version: Pick<SkillAssetVersion, "id" | "secret_requirements">,
+): void {
+  onVersionCreated(version.id, {
+    focusCredentials: version.secret_requirements.length > 0,
+  });
+}
 
 export function skillVersionWorkbenchTabForKey(
   current: WorkbenchSurface,
@@ -217,6 +239,10 @@ export function SkillVersionWorkbench({
   onDirtyChange,
   onPublishValidityChange,
   onVersionCreated,
+  credentialBindingsDirty = false,
+  focusCredentials = false,
+  onCredentialsFocused,
+  credentialBindings,
 }: {
   accountId: string;
   projectId: string;
@@ -227,7 +253,14 @@ export function SkillVersionWorkbench({
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
   onPublishValidityChange: (valid: boolean) => void;
-  onVersionCreated: (versionId: string) => void;
+  onVersionCreated: (
+    versionId: string,
+    options?: { focusCredentials?: boolean },
+  ) => void;
+  credentialBindingsDirty?: boolean;
+  focusCredentials?: boolean;
+  onCredentialsFocused?: () => void;
+  credentialBindings?: ReactNode;
 }) {
   const { t } = useI18n();
   const secretCopy = t.skills.secrets;
@@ -252,6 +285,7 @@ export function SkillVersionWorkbench({
   const secretsTabId = `${tabIdPrefix}-secrets-tab`;
   const filesPanelId = `${tabIdPrefix}-files-panel`;
   const secretsPanelId = `${tabIdPrefix}-secrets-panel`;
+  const secretsPanelRef = useRef<HTMLDivElement | null>(null);
   const [secretDeclarationValid, setSecretDeclarationValid] = useState(false);
   const [pathDialog, setPathDialog] = useState<PathDialogMode | null>(null);
   const [pathInput, setPathInput] = useState("");
@@ -387,6 +421,24 @@ export function SkillVersionWorkbench({
   useEffect(() => {
     onDirtyChange(dirty);
   }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!focusCredentials) return;
+    if (surface !== "secrets") setSurface("secrets");
+  }, [focusCredentials, surface]);
+
+  useEffect(() => {
+    if (!focusCredentials || surface !== "secrets") return;
+    const frame = requestAnimationFrame(() => {
+      secretsPanelRef.current?.focus({ preventScroll: true });
+      secretsPanelRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+      onCredentialsFocused?.();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [focusCredentials, onCredentialsFocused, surface]);
 
   useEffect(() => {
     const conflictRecovery = conflictRecoveryRef.current;
@@ -722,7 +774,7 @@ export function SkillVersionWorkbench({
         setLoadedSources({});
         onEditingChange(false);
         onDirtyChange(false);
-        onVersionCreated(result.data.id);
+        notifySkillDraftVersionCreated(onVersionCreated, result.data);
       } else {
         setLocalError(
           "提交时的修改已保存为新版本；保存期间产生的后续修改仍保留在当前编辑副本中，请再次保存或手动放弃。",
@@ -754,10 +806,26 @@ export function SkillVersionWorkbench({
     }
   }
 
+  const credentialMappingContent = isEditing ? (
+    <section className="border-border/70 space-y-2 rounded-xl border p-4">
+      <div className="flex items-center gap-2">
+        <KeyRoundIcon aria-hidden className="size-4" />
+        <h3 className="text-sm font-semibold">2. 项目凭证映射</h3>
+      </div>
+      <p className="text-muted-foreground text-sm leading-6">
+        当前正在编辑 SKILL.md。先保存为精确
+        Draft；保存后仍在此页面为每个声明选择项目 Credential 和具体来源 env
+        字段。发布窗口只做检查，不再填写凭证。
+      </p>
+    </section>
+  ) : (
+    credentialBindings
+  );
+
   return (
-    <section className="space-y-4" aria-label="Skill 版本文件">
+    <section className="space-y-4" aria-label="Skill 版本内容">
       <div>
-        <h3 className="text-sm font-semibold">版本文件</h3>
+        <h3 className="text-sm font-semibold">版本内容</h3>
         <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
           文件来自版本 {version.version_number}{" "}
           的不可变快照。修改会另存为新的草稿版本，当前版本不会被覆盖。
@@ -773,7 +841,7 @@ export function SkillVersionWorkbench({
           id={filesTabId}
           type="button"
           size="sm"
-          variant={surface === "files" ? "secondary" : "ghost"}
+          variant={skillWorkbenchTabVariant(surface === "files")}
           role="tab"
           aria-selected={surface === "files"}
           aria-controls={filesPanelId}
@@ -788,7 +856,7 @@ export function SkillVersionWorkbench({
           id={secretsTabId}
           type="button"
           size="sm"
-          variant={surface === "secrets" ? "secondary" : "ghost"}
+          variant={skillWorkbenchTabVariant(surface === "secrets")}
           role="tab"
           aria-selected={surface === "secrets"}
           aria-controls={secretsPanelId}
@@ -802,8 +870,11 @@ export function SkillVersionWorkbench({
       </div>
 
       {isEditing && (
-        <div className="border-primary/20 bg-primary/5 rounded-xl border px-4 py-3">
-          <div>
+        <section
+          aria-label="版本编辑状态"
+          className="border-primary/20 bg-primary/5 flex flex-col gap-3 rounded-xl border px-4 py-3 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="min-w-0">
             <p className="text-sm font-medium">
               正在基于版本 {version.version_number} 编辑副本
             </p>
@@ -817,7 +888,41 @@ export function SkillVersionWorkbench({
               </p>
             )}
           </div>
-        </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={fork.isPending}
+              onClick={() => (dirty ? setDiscardOpen(true) : discardChanges())}
+            >
+              放弃修改
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              disabled={
+                !dirty ||
+                fork.isPending ||
+                skillMdContent === null ||
+                !secretDeclarationValid
+              }
+              title={
+                dirty && !secretDeclarationValid
+                  ? secretCopy.saveBlocked
+                  : undefined
+              }
+              onClick={() => void saveAsDraft()}
+            >
+              {fork.isPending ? (
+                <Loader2Icon aria-hidden className="size-4 animate-spin" />
+              ) : (
+                <SaveIcon aria-hidden className="size-4" />
+              )}
+              {fork.isPending ? "保存中…" : "保存为新版本"}
+            </Button>
+          </div>
+        </section>
       )}
 
       <div
@@ -1077,18 +1182,33 @@ export function SkillVersionWorkbench({
       </div>
 
       <div
+        ref={secretsPanelRef}
         id={secretsPanelId}
         hidden={surface !== "secrets"}
         role="tabpanel"
         aria-labelledby={secretsTabId}
+        tabIndex={-1}
+        className="scroll-mt-5 space-y-5 focus:outline-none"
       >
         {skillMdContent !== null ? (
           <SkillSecretDeclarationsEditor
             projectId={projectId}
             content={skillMdContent}
-            canEdit={isEditing}
+            editable={isEditing}
+            canBeginEdit={canAuthor && !isEditing && !credentialBindingsDirty}
+            readOnlyReason={
+              !canAuthor
+                ? "当前版本只读，你没有创建新版本的权限。"
+                : credentialBindingsDirty
+                  ? "请先保存或撤销当前凭证绑定修改，再创建新版本。"
+                  : undefined
+            }
             disabled={fork.isPending}
+            beforeAdvancedSettings={credentialMappingContent}
             onContentChange={applySkillMdContent}
+            onBeginEdit={() =>
+              beginSkillCredentialEditing(setSurface, onEditingChange)
+            }
             onOpenSource={openSkillMdSource}
             onValidityChange={handleSecretValidityChange}
           />
@@ -1126,48 +1246,6 @@ export function SkillVersionWorkbench({
         <p role="alert" className="text-destructive text-sm">
           {localError ?? adminAssetErrorMessage(fork.error)}
         </p>
-      )}
-
-      {isEditing && (
-        <div className="bg-background/95 sticky bottom-0 z-10 -mx-1 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-muted-foreground text-xs">
-            保存后创建新的 Draft；发布仍需单独确认。
-          </p>
-          <div className="flex gap-2">
-            <Button
-              type="button"
-              variant="outline"
-              className="min-h-11 flex-1 sm:flex-none"
-              disabled={fork.isPending}
-              onClick={() => (dirty ? setDiscardOpen(true) : discardChanges())}
-            >
-              放弃修改
-            </Button>
-            <Button
-              type="button"
-              className="min-h-11 flex-1 sm:flex-none"
-              disabled={
-                !dirty ||
-                fork.isPending ||
-                skillMdContent === null ||
-                !secretDeclarationValid
-              }
-              title={
-                dirty && !secretDeclarationValid
-                  ? secretCopy.saveBlocked
-                  : undefined
-              }
-              onClick={() => void saveAsDraft()}
-            >
-              {fork.isPending ? (
-                <Loader2Icon aria-hidden className="size-4 animate-spin" />
-              ) : (
-                <SaveIcon aria-hidden className="size-4" />
-              )}
-              {fork.isPending ? "保存中…" : "保存为新版本"}
-            </Button>
-          </div>
-        </div>
       )}
 
       <Dialog

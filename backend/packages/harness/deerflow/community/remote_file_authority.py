@@ -24,6 +24,7 @@ from deerflow.sandbox.sandbox import (
     SandboxAtomicWriter,
     SandboxBinaryReader,
     SandboxFileInfo,
+    validate_secure_scan_excluded_root_names,
 )
 
 PRIVATE_GUEST_REQUEST_ENV = "DEERFLOW_PRIVATE_FILE_REQUEST_B64"
@@ -275,12 +276,36 @@ try:
     root, parts = relative(request.get("root"), request.get("path"))
 
     if action == "scan":
+        if set(request) != {"version", "action", "root", "path", "display_path", "max_entries", "excluded_root_names"}:
+            fail("protocol", "invalid private scan request")
         limit = request.get("max_entries")
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100000:
             fail("limit", "invalid entry limit")
+        raw_excluded_root_names = request.get("excluded_root_names")
+        if not isinstance(raw_excluded_root_names, list) or len(raw_excluded_root_names) > 32:
+            fail("protocol", "invalid private scan exclusions")
+        excluded_root_names = set()
+        for name in raw_excluded_root_names:
+            try:
+                encoded_name = name.encode("utf-8")
+            except (AttributeError, UnicodeEncodeError):
+                fail("protocol", "invalid private scan exclusions")
+            if (
+                not isinstance(name, str)
+                or not name
+                or name in {".", ".."}
+                or "/" in name
+                or "\\" in name
+                or "\x00" in name
+                or len(encoded_name) > 255
+            ):
+                fail("protocol", "invalid private scan exclusions")
+            if name in excluded_root_names:
+                fail("protocol", "invalid private scan exclusions")
+            excluded_root_names.add(name)
         root_fd = open_absolute_dir(request["path"])
         entries = []
-        def walk(fd, virtual):
+        def walk(fd, virtual, top_level=False):
             try:
                 names = sorted(os.listdir(fd), key=os.fsencode)
                 for name in names:
@@ -291,6 +316,8 @@ try:
                     elif stat.S_ISDIR(st.st_mode): kind = "directory"
                     elif stat.S_ISREG(st.st_mode) and st.st_nlink == 1: kind = "regular"
                     else: kind = "other"
+                    if top_level and kind == "directory" and name in excluded_root_names:
+                        continue
                     child = virtual.rstrip("/") + "/" + name
                     entries.append({"path": child, "size": st.st_size, "file_type": kind})
                     if len(entries) > limit:
@@ -309,7 +336,7 @@ try:
         if not isinstance(display_path, str) or not display_path.startswith("/mnt/user-data"):
             fail("protocol", "invalid private display path")
         try:
-            walk(root_fd, display_path)
+            walk(root_fd, display_path, top_level=True)
         finally:
             os.close(root_fd)
         emit({"entries": entries})
@@ -543,10 +570,19 @@ class RemotePrivateFileAuthority:
         root: str,
         *,
         max_entries: int,
+        excluded_root_names: tuple[str, ...] = (),
     ) -> Iterator[SandboxFileInfo]:
         if not isinstance(max_entries, int) or isinstance(max_entries, bool) or not 1 <= max_entries <= 100_000:
             raise ValueError("Invalid private scan entry limit")
-        data = self._request("scan", root, max_entries=max_entries)
+        exclusions = validate_secure_scan_excluded_root_names(
+            excluded_root_names,
+        )
+        data = self._request(
+            "scan",
+            root,
+            max_entries=max_entries,
+            excluded_root_names=sorted(exclusions),
+        )
         entries = data.get("entries")
         if not isinstance(entries, list) or len(entries) > max_entries:
             raise OSError("Invalid private scan response")

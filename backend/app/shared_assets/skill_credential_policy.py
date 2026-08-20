@@ -41,6 +41,14 @@ class SkillCredentialRecord(Protocol):
 class SkillCredentialBindingInput:
     name: str
     credential_version_id: uuid.UUID
+    source_env_field_name: str | None = None
+
+    def __post_init__(self) -> None:
+        # Programmatic callers from the previous exact-name contract remain a
+        # safe compatibility path. Public HTTP authoring requires the source
+        # field explicitly and therefore never relies on this default.
+        if self.source_env_field_name is None:
+            object.__setattr__(self, "source_env_field_name", self.name)
 
 
 def parse_secret_requirements(
@@ -83,6 +91,9 @@ def normalize_binding_inputs(
             or len(item.name) > MAX_SKILL_CREDENTIAL_BINDING_NAME_LENGTH
             or _ENV_NAME_PATTERN.fullmatch(item.name) is None
             or not isinstance(item.credential_version_id, uuid.UUID)
+            or not isinstance(item.source_env_field_name, str)
+            or not item.source_env_field_name
+            or len(item.source_env_field_name) > MAX_SKILL_CREDENTIAL_BINDING_NAME_LENGTH
             or item.name in seen
         ):
             raise SkillCredentialBindingInvalid(request_id)
@@ -90,11 +101,14 @@ def normalize_binding_inputs(
     return normalized
 
 
-def credential_is_eligible(record: SkillCredentialRecord, name: str) -> bool:
+def credential_is_eligible(
+    record: SkillCredentialRecord,
+    source_env_field_name: str,
+) -> bool:
     env = record.version.payload_schema.get("env")
     return (
-        len(name) <= MAX_SKILL_CREDENTIAL_BINDING_NAME_LENGTH
-        and _ENV_NAME_PATTERN.fullmatch(name) is not None
+        bool(source_env_field_name)
+        and len(source_env_field_name) <= MAX_SKILL_CREDENTIAL_BINDING_NAME_LENGTH
         and record.credential.scope == "project"
         and record.credential.status == "active"
         and not record.credential.is_delete
@@ -102,13 +116,13 @@ def credential_is_eligible(record: SkillCredentialRecord, name: str) -> bool:
         and record.version.status == "active"
         and isinstance(env, list)
         and all(isinstance(item, str) for item in env)
-        and name in env
+        and source_env_field_name in env
     )
 
 
 def validate_selected_credential(
     record: SkillCredentialRecord,
-    name: str,
+    source_env_field_name: str,
     *,
     active_envelope: bool,
     request_id: str,
@@ -116,7 +130,7 @@ def validate_selected_credential(
     if record.credential.scope != "project" or record.credential.status != "active" or record.credential.is_delete or record.credential.current_version_id != record.version.id or record.version.status != "active" or not active_envelope:
         raise SkillCredentialSelectionStale(request_id)
     env = record.version.payload_schema.get("env")
-    if not isinstance(env, list) or not all(isinstance(item, str) for item in env) or name not in env:
+    if not isinstance(env, list) or not all(isinstance(item, str) for item in env) or source_env_field_name not in env:
         raise SkillCredentialBindingInvalid(request_id)
 
 

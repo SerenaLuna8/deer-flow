@@ -71,6 +71,7 @@ export function ProjectSkillsPage({
               item: context.item,
               canAuthor: context.canAuthor,
               editing: context.editing,
+              credentialBindingsDirty: context.credentialBindingsDirty,
               onEditingChange: context.onEditingChange,
               onDirtyChange: context.onDirtyChange,
               onCredentialBindingsDirtyChange:

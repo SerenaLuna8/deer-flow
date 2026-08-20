@@ -212,6 +212,60 @@ class SkillCredentialRepository:
             raise AssetNotFound(context.request_id)
         return SkillCredentialTarget(asset, version)
 
+    async def lock_configurable_exact_skill_version(
+        self,
+        context: ProjectContext,
+        skill_id: uuid.UUID,
+        skill_version_id: uuid.UUID,
+        *,
+        read: bool = False,
+    ) -> SkillCredentialTarget:
+        """Lock an exact Project Skill or a System Skill version.
+
+        Services keep Project draft/history and System current-published policy
+        explicit after this scoped lookup. The project membership predicate is
+        retained even for a packaged System Skill because mappings are owned by
+        the requesting project.
+        """
+
+        self._require_actor(context)
+        asset_statement = (
+            select(SkillRow)
+            .where(
+                SkillRow.id == skill_id,
+                or_(
+                    and_(
+                        SkillRow.scope == "project",
+                        SkillRow.project_id == context.project_id,
+                        SkillRow.status.in_(("active", "suspended")),
+                    ),
+                    and_(
+                        SkillRow.scope == "system",
+                        SkillRow.project_id.is_(None),
+                        SkillRow.status == "active",
+                    ),
+                ),
+                self._project_context_exists(context),
+            )
+            .with_for_update(read=read, of=SkillRow)
+        )
+        asset = (await self.session.execute(asset_statement)).scalar_one_or_none()
+        if asset is None:
+            raise AssetNotFound(context.request_id)
+        version_statement = (
+            select(SkillVersionRow)
+            .where(
+                SkillVersionRow.id == skill_version_id,
+                SkillVersionRow.skill_id == asset.id,
+                SkillVersionRow.revoked_at.is_(None),
+            )
+            .with_for_update(read=read, of=SkillVersionRow)
+        )
+        version = (await self.session.execute(version_statement)).scalar_one_or_none()
+        if version is None:
+            raise AssetNotFound(context.request_id)
+        return SkillCredentialTarget(asset, version)
+
     async def get_config(
         self,
         context: ProjectContext | SystemAssetGovernanceContext,
@@ -464,7 +518,7 @@ class SkillCredentialRepository:
         context: ProjectContext,
         config: ProjectSkillCredentialConfigRow,
         target: SkillCredentialTarget,
-        bindings: Sequence[tuple[str, EligibleSkillCredentialRecord]],
+        bindings: Sequence[tuple[str, str, EligibleSkillCredentialRecord]],
         *,
         now: datetime,
         existing: Sequence[ProjectSkillCredentialBindingRow],
@@ -484,12 +538,13 @@ class SkillCredentialRepository:
                 skill_id=target.asset.id,
                 skill_version_id=target.version.id,
                 secret_name=name,
+                source_env_field_name=source_env_field_name,
                 credential_id=record.credential.id,
                 credential_version_id=record.version.id,
                 config_revision=new_revision,
                 created_by_user_id=str(context.user_id),
             )
-            for name, record in bindings
+            for name, source_env_field_name, record in bindings
         )
         self.session.add_all(created)
         await self.session.flush()

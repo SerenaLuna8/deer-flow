@@ -33,6 +33,9 @@ import {
   getProjectMcpEditableConfiguration,
   getProjectMcpToolInventory,
   getProjectDefaultAgent,
+  getAdminCredentialMigrationStatus,
+  getAdminProjectCredentialMigrationStatus,
+  getProjectCredentialMigrationStatus,
   getProjectSkillCredentialBindings,
   getProjectSkillPublishPlan,
   getProjectSkillVersionFile,
@@ -66,8 +69,11 @@ import {
 import {
   adminAssetKey,
   adminAssetVersionsKey,
+  adminCredentialMigrationStatusKey,
   adminProjectAssetKey,
   adminProjectAssetVersionsKey,
+  adminProjectCredentialMigrationStatusKey,
+  projectCredentialMigrationStatusKey,
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
@@ -88,6 +94,7 @@ import type {
   AssetSummary,
   AgentCapabilityBindingsInput,
   AdminProjectAssetStatusAction,
+  CredentialMigrationStatusResponse,
   AdminCredentialList,
   AgentInstructionsInput,
   ApproveMcpInput,
@@ -601,13 +608,19 @@ export function useProjectSkillCredentialBindings(
   accountId: string,
   projectId: string,
   skillId: string,
+  versionId: string,
   enabled = true,
 ) {
   return useQuery<SkillCredentialBindingsResponse>({
-    queryKey: projectSkillCredentialBindingsKey(accountId, projectId, skillId),
+    queryKey: projectSkillCredentialBindingsKey(
+      accountId,
+      projectId,
+      skillId,
+      versionId,
+    ),
     queryFn: ({ signal }) =>
-      getProjectSkillCredentialBindings(projectId, skillId, signal),
-    enabled,
+      getProjectSkillCredentialBindings(projectId, skillId, versionId, signal),
+    enabled: enabled && versionId !== "",
   });
 }
 
@@ -636,9 +649,15 @@ export function useUpdateProjectSkillCredentialBindings(
   accountId: string,
   projectId: string,
   skillId: string,
+  versionId: string,
 ) {
   const queryClient = useQueryClient();
-  const key = projectSkillCredentialBindingsKey(accountId, projectId, skillId);
+  const key = projectSkillCredentialBindingsKey(
+    accountId,
+    projectId,
+    skillId,
+    versionId,
+  );
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -648,10 +667,17 @@ export function useUpdateProjectSkillCredentialBindings(
       accountId,
       projectId,
       skillId,
+      versionId,
     ),
     mutationFn: (input: SkillCredentialBindingsInput) =>
       runMutation((signal) =>
-        updateProjectSkillCredentialBindings(projectId, skillId, input, signal),
+        updateProjectSkillCredentialBindings(
+          projectId,
+          skillId,
+          versionId,
+          input,
+          signal,
+        ),
       ),
     onSuccess: whenActive((response: SkillCredentialBindingsResponse) => {
       queryClient.setQueryData(key, response);
@@ -685,6 +711,76 @@ export function useAdminProjectAssetVersions(
     queryKey: adminProjectAssetVersionsKey(accountId, projectId, kind, assetId),
     queryFn: ({ signal }) =>
       listAdminProjectAssetVersions(projectId, kind, assetId, signal),
+  });
+}
+
+export function useAdminCredentialMigrationStatus(
+  accountId: string,
+  credentialId: string,
+  credentialVersionId: string,
+  enabled = true,
+) {
+  const active = enabled && credentialId !== "" && credentialVersionId !== "";
+  return useQuery<CredentialMigrationStatusResponse>({
+    queryKey: active
+      ? adminCredentialMigrationStatusKey(
+          accountId,
+          credentialId,
+          credentialVersionId,
+        )
+      : ["credential-migration-status", "disabled", accountId],
+    queryFn: ({ signal }) =>
+      getAdminCredentialMigrationStatus(credentialId, signal),
+    enabled: active,
+    staleTime: 0,
+  });
+}
+
+export function useAdminProjectCredentialMigrationStatus(
+  accountId: string,
+  projectId: string,
+  credentialId: string,
+  credentialVersionId: string,
+  enabled = true,
+) {
+  const active = enabled && credentialId !== "" && credentialVersionId !== "";
+  return useQuery<CredentialMigrationStatusResponse>({
+    queryKey: active
+      ? adminProjectCredentialMigrationStatusKey(
+          accountId,
+          projectId,
+          credentialId,
+          credentialVersionId,
+        )
+      : ["credential-migration-status", "disabled", accountId, projectId],
+    queryFn: ({ signal }) =>
+      getAdminProjectCredentialMigrationStatus(projectId, credentialId, signal),
+    enabled: active,
+    staleTime: 0,
+  });
+}
+
+export function useProjectCredentialMigrationStatus(
+  accountId: string,
+  projectId: string,
+  credentialId: string,
+  credentialVersionId: string,
+  enabled = true,
+) {
+  const active = enabled && credentialId !== "" && credentialVersionId !== "";
+  return useQuery<CredentialMigrationStatusResponse>({
+    queryKey: active
+      ? projectCredentialMigrationStatusKey(
+          accountId,
+          projectId,
+          credentialId,
+          credentialVersionId,
+        )
+      : ["credential-migration-status", "disabled", accountId, projectId],
+    queryFn: ({ signal }) =>
+      getProjectCredentialMigrationStatus(projectId, credentialId, signal),
+    enabled: active,
+    staleTime: 0,
   });
 }
 
@@ -983,6 +1079,24 @@ export function useRestoreProjectAgentVersion(
           projectId,
           variables.assetId,
         ),
+    ),
+    onError: whenActive(
+      async (
+        error: unknown,
+        variables: {
+          assetId: string;
+          versionId: string;
+          input: ExpectedAssetVersionInput;
+        },
+      ) => {
+        if (!isProjectAgentCasConflict(error)) return;
+        await invalidateProjectAgentConflictQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        );
+      },
     ),
   });
 }

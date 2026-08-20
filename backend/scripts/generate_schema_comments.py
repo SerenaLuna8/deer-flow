@@ -29,7 +29,7 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
 _EXPECTED_TABLE_COUNT = 89
-_EXPECTED_COLUMN_COUNT = 1104
+_EXPECTED_COLUMN_COUNT = 1106
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -248,6 +248,7 @@ _COLUMN_PHRASES: dict[str, str] = {
     "payload_checksum": "载荷内容校验和",
     "content_digest": "内容摘要",
     "source_digest": "来源内容摘要",
+    "source_env_field_name": "来源环境变量字段名称",
     "state_hash": "状态内容哈希",
     "sha256": "内容的 SHA-256 摘要",
     "idempotency_key": "幂等操作键",

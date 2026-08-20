@@ -176,6 +176,7 @@ def test_every_governance_operation_has_a_valid_closed_audit_encoding(
         "agent.version.restore",
         "agent.publish",
         "agent.activate",
+        "skill.export",
         "skill.version.revoke",
     }:
         metadata["version_number"] = 7
@@ -244,6 +245,49 @@ async def test_system_skill_revocation_audit_keeps_exact_safe_version_number() -
     assert len(version_queries) == 1
     assert "skill_versions.skill_id" in version_queries[0]
     assert "skill_versions.id" in version_queries[0]
+    assert str(version_id) not in repr(append.await_args.args[5])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["project", "system"])
+async def test_skill_export_audit_uses_a_distinct_read_action_and_safe_version_number(
+    scope: str,
+) -> None:
+    sink, append = _sink()
+    session = _Session(version_number=9)
+    actor_id = uuid.uuid4()
+    asset_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+
+    if scope == "project":
+        await sink.append_project(
+            session,  # type: ignore[arg-type]
+            actor=actor_id,
+            project_id=uuid.uuid4(),
+            asset_id=asset_id,
+            version_id=version_id,
+            action="skill.export",
+            request_id="req-skill-export-audit",
+            asset_kind="skill",
+        )
+    else:
+        await sink.append_override(
+            session,  # type: ignore[arg-type]
+            actor=actor_id,
+            project_id=None,
+            asset_id=asset_id,
+            version_id=version_id,
+            action="skill.export",
+            request_id="req-skill-export-audit",
+            asset_kind="skill",
+        )
+
+    assert append.await_args.args[2] is AuditAction.ASSET_EXPORTED
+    assert append.await_args.args[5] == {
+        "asset_kind": "skill",
+        "operation": "skill.export",
+        "version_number": 9,
+    }
     assert str(version_id) not in repr(append.await_args.args[5])
 
 

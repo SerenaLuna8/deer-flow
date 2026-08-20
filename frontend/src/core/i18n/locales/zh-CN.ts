@@ -992,7 +992,7 @@ export const zhCN: Translations = {
       },
       metadataVersion: "元数据版本",
       replaceCredential: "替换凭据",
-      migrateReferences: "迁移兼容引用",
+      migrateReferences: "使用新凭证版本",
       revokeCredential: "撤销凭据",
       delete: "删除",
       createCredential: "创建凭据",
@@ -1007,12 +1007,17 @@ export const zhCN: Translations = {
       active: "有效",
       revoked: "已撤销",
       loading: "正在加载",
-      migrationSuccess:
-        "已完成兼容引用迁移；没有待迁移的 MCP 授权、Skill 环境变量绑定或系统模型时不会更改授权。",
-      pendingMigrationNotice: (total, systemModelCount) =>
-        systemModelCount > 0
-          ? `新版本已创建，但 ${total} 个引用仍在使用旧密钥（含 ${systemModelCount} 个系统模型）。`
-          : `新版本已创建，但 ${total} 个引用仍在使用旧密钥。`,
+      migrationSuccess: "现有使用方已切换到当前凭证版本。",
+      credentialMigrationChecking: "正在检查哪些使用方仍在使用旧凭证版本…",
+      credentialMigrationUnavailable: "暂时无法读取凭证版本使用详情。",
+      credentialMigrationComplete: "所有使用方均已使用当前凭证版本。",
+      pendingMigrationNotice: (
+        total,
+        mcpGrantCount,
+        skillBindingCount,
+        systemModelCount,
+      ) =>
+        `${total} 个使用方仍在使用旧凭证版本：${skillBindingCount} 个 Skill 环境变量绑定、${mcpGrantCount} 个 MCP 授权、${systemModelCount} 个系统模型。`,
       credentialRotationNote:
         "替换只创建新版本；既有 MCP 授权、Skill 环境变量绑定与系统模型仍固定到旧版本并继续使用旧密钥，轮换需要显式迁移。",
       historySchemaUnavailable:
@@ -1373,11 +1378,19 @@ export const zhCN: Translations = {
       cancel: "取消",
       revoking: "撤销中…",
       confirmRevoke: "确认永久撤销",
-      migrateTitle: "迁移凭据兼容引用",
+      migrateTitle: "让现有使用方改用当前凭证版本",
       migrateDescription: (name) =>
-        `替换凭据只会创建新版本，不会自动轮换既有 MCP 授权、Skill 环境变量绑定或系统模型。系统将仅在字段结构完全兼容时，把“${name}”仍固定到旧版本的有效引用原子迁移到当前版本；系统模型会因此产生一个新的模型版本。任一引用不兼容都会整体拒绝。`,
-      migrating: "迁移中…",
-      confirmMigrate: "确认迁移引用",
+        `以下使用方仍在使用“${name}”的旧版本。确认后会统一切换到当前版本；任一使用方不兼容时，操作会整体取消。`,
+      migrationDetailsTitle: "将要切换的使用方",
+      migrationCurrentDetailsTitle: "当前版本使用方",
+      migrationSkillBinding: "Skill 环境变量",
+      migrationMcpGrant: "MCP 授权",
+      migrationSystemModel: "系统模型",
+      migrationVersion: (version) => `版本 ${version}`,
+      migrationTarget: "使用位置",
+      migrationSource: "来源字段",
+      migrating: "切换中…",
+      confirmMigrate: "确认切换",
       deleteTitle: "删除凭据？",
       deleteDescription: (name) =>
         `删除“${name}”后，其所有版本会从普通列表与运行时查询中移除，相关 MCP 授权与 Skill 环境变量绑定将失效。仅审计记录保留，此操作不可恢复。`,
@@ -1959,17 +1972,28 @@ export const zhCN: Translations = {
   },
 
   skills: {
+    export: {
+      label: "导出 ZIP",
+      preparing: "正在准备…",
+      started: "下载已开始",
+      tooltip: (version) => `导出当前选中的 v${version}`,
+      unsaved: "请先保存或放弃当前修改",
+      loading: "正在加载当前版本，请稍候",
+      revoked: "已撤销的 System Skill 版本不可导出",
+      unpublished: "System Skill 只有已发布版本可以导出",
+      noVersion: "请选择一个已持久化的版本",
+    },
     secrets: {
       workbenchAria: "Skill 编辑区域",
       filesTab: "文件",
-      secretsTab: "凭证环境变量",
-      aria: "凭证环境变量声明",
-      title: "凭证环境变量",
-      description:
-        "此表单由服务端解析并回写当前 SKILL.md 编辑副本，只保存变量名和是否必需；Credential 明文不会写入 Skill。",
+      secretsTab: "运行凭证",
+      aria: "环境变量声明",
+      title: "1. 环境变量声明",
       viewSource: "查看 SKILL.md",
       checking: "正在检查 SKILL.md…",
-      syncing: "正在同步到当前编辑副本…",
+      syncing: "正在写入 SKILL.md 草稿…",
+      recognized: (count) => `已从 SKILL.md 识别 ${count} 个环境变量`,
+      draftUpdated: "已写入 SKILL.md 草稿，尚未保存",
       retry: "重新检查",
       sourceStale:
         "SKILL.md 在处理期间发生了变化，当前编辑内容已保留，请重试。",
@@ -1985,7 +2009,8 @@ export const zhCN: Translations = {
         "托管字段包含无法安全保留的注释。表单已切换为只读，请通过源码修改。",
       shorthand: (count) =>
         `检测到 ${count} 条历史简写声明；只有实际修改后才会规范化。`,
-      empty: "当前编辑副本没有声明凭证环境变量。",
+      empty: "还没有声明环境变量。添加后会同步到当前 SKILL.md 草稿。",
+      beginEdit: "创建新版本并添加变量",
       optional: "可选",
       required: "必需",
       setOptional: (name) => `${name} 设为可选`,
@@ -1998,10 +2023,17 @@ export const zhCN: Translations = {
       invalidName:
         "环境变量名必须以字母或下划线开头，并且只能包含字母、数字和下划线。",
       duplicateName: "这个环境变量已经声明。名称区分大小写。",
-      autonomousTitle: "允许自主使用凭证",
+      autonomousTitle: "凭证注入方式",
       autonomousDescription:
-        "对应 SKILL.md 的 secrets-autonomous；这不会绕过运行时授权和 Credential 绑定。",
-      autonomousAria: "允许自主使用凭证",
+        "选择已绑定且授权的凭证可以在哪种 Skill 调用方式下注入。",
+      autonomousAria: "选择凭证注入方式",
+      advancedSettings: "高级设置",
+      injectionAutomatic: "读取 Skill 后自动注入",
+      injectionAutomaticDescription:
+        "Agent 读取此 Skill 后可以注入已绑定凭证；通过 /Skill 明确调用时也会注入。",
+      injectionExplicit: "仅在 /Skill 明确调用时注入",
+      injectionExplicitDescription:
+        "自然语言自动加载不会注入；只有用户通过 /Skill 明确调用后才会注入已绑定凭证。",
       location: (line, column) =>
         `第 ${line} 行${column === null ? "" : `，第 ${column} 列`}：`,
       loadSourceFailed: "无法加载根目录 SKILL.md，环境变量表单已停止编辑。",
@@ -2014,23 +2046,77 @@ export const zhCN: Translations = {
       optionalUnbound: "不绑定（可选）",
       selectCredential: "请选择 Credential",
       credentialVersion: (name, version) => `${name} · 版本 ${version}`,
+      credentialUnavailable: "已失效的 Credential · 请重新选择",
+      versionLabel: (version) => `版本 ${version}`,
+      sourceFieldLabel: "来源环境变量",
+      selectCredentialFirst: "请先选择项目 Credential",
+      selectSourceField: "请选择 Credential 中的 env 字段",
+      sourceFieldUnavailable: "字段已不可用",
+      sourceFieldRequired: "请选择具体的来源 env 字段。",
       requiredMissing: "必需环境变量尚未选择 Credential。",
+      invalidMapping:
+        "当前映射已不再兼容，请重新选择可用的 Credential 和来源 env 字段。",
       createCredential: "创建 Credential",
-      manageCredential: "管理 Credential",
+      manageCredential: "管理项目凭证库",
+      mappingTitle: "2. 项目凭证映射",
+      mappingDescription:
+        "将 Skill 的目标环境变量映射到项目 Credential 中具体的 env 字段。映射保存在项目数据库，不会写入 SKILL.md，也不会显示密钥值。",
+      mappingEmpty: "当前版本没有环境变量声明，无需配置项目凭证映射。",
+      mappingStatusConfigured: "已配置",
+      mappingStatusMissing: "未配置",
+      mappingStatusInvalid: "需要修复",
+      mappingReadOnly:
+        "你可以编辑 SKILL.md 中的声明，但项目凭证来源需要由具备 Credential 审批权限的成员配置。",
+      mappingHistoricalReadOnly:
+        "历史发布版本只读；项目 Skill Draft 和当前发布版本可以配置项目凭证映射。",
+      mappingRefreshPreserved:
+        "服务器映射已更新；你的未保存选择已保留，并已合并未修改项。请核对后保存或撤销。",
+      mappingReload: "重新加载",
+      mappingDiscard: "撤销修改",
+      mappingSave: "保存映射",
+      mappingSaving: "保存中…",
+      mappingCompleteRequired:
+        "活跃 Skill 必须配置全部必需环境变量后才能保存映射。",
+      mappingRepairInvalid: "请先修复失效映射，或移除失效的可选映射。",
+      mappingLoadingAria: "正在加载当前版本的项目凭证映射",
+      mappingVersionMismatch:
+        "返回的凭证映射不属于当前版本，已停止显示。请重新加载。",
+      mappingRetry: "重试",
+      mappingConflict:
+        "凭证映射已被其他人修改，或这个版本已不再允许修改。你的本地选择已保留；请重新加载后核对。",
+      mappingForbidden: "你没有修改凭证映射的权限。",
+      mappingNotFound: "当前 Skill 或版本已不存在。",
+      mappingInvalidResponse: "凭证映射响应无效，已停止显示以保护敏感信息。",
+      mappingLoadFailed: "凭证映射暂时无法加载。",
+      mappingSaveFailed: "凭证映射保存失败，请稍后重试。",
+      mappingVersionChanged:
+        "当前版本已变化。你的未保存选择仍保留，但已停止保存；请重新加载并重新确认。",
     },
     publishDialog: {
       title: "发布 Skill 版本",
       description: (version) =>
-        `发布版本 ${version}，并为该不可变版本选择精确的项目 Credential。发布请求只包含 Credential version ID，不包含密钥值。`,
+        `发布版本 ${version}。此窗口只检查该精确版本的环境变量和项目凭证映射，不再填写 Credential。`,
       loading: "正在执行发布检查…",
       targetVersion: "目标版本：",
       bindingRevision: "绑定修订：",
-      noRequirements: "目标版本没有声明凭证环境变量，可以直接发布。",
+      noRequirements: "目标版本没有声明环境变量，可以直接发布。",
       bindingsTitle: "版本凭证绑定",
+      required: "必需",
+      optional: "可选",
+      statusConfigured: "已配置",
+      statusMissing: "未配置",
+      statusInvalid: "需要修复",
+      preflightReady: "发布检查已通过",
+      preflightBlocked: "发布检查未通过",
+      preflightSummary: (configuredRequired, required, invalid) =>
+        `必需映射 ${configuredRequired}/${required}，失效映射 ${invalid}。`,
+      configureBeforePublish:
+        "请先回到运行凭证页面完成必需映射并修复失效映射，再重新发布。",
+      configureCredentials: "前往运行凭证",
       noApprove:
-        "你没有选择 Credential 的权限。本次请求不会提交绑定；停用状态的 Skill 可以先发布，启用前仍需管理员完成配置。",
+        "你没有选择 Credential 来源的权限。请由具备 Credential 审批权限的成员先在运行凭证页面完成映射。",
       approvalRequiredForActive:
-        "活跃 Skill 的新版本必须原子提交全部必需绑定。请由具有 Credential 审批权限的成员完成发布，或先停用 Skill。",
+        "公开 Draft 发布前必须完成全部必需映射并修复失效映射。请由具备 Credential 审批权限的成员先配置。",
       optionalUnbound: (count) =>
         `${count} 个可选环境变量未绑定；发布后这些变量不会注入运行环境。`,
       staleBase:
@@ -2186,8 +2272,8 @@ export const zhCN: Translations = {
         title: "候选文件包",
         titleRevise: "候选文件包（修订）",
         filesSurface: "文件",
-        secretsSurface: "凭证环境变量",
-        secretsUnavailable: "候选包缺少根 SKILL.md，无法编辑凭证环境变量声明。",
+        secretsSurface: "运行凭证",
+        secretsUnavailable: "候选包缺少根 SKILL.md，无法编辑环境变量声明。",
         fileCount: (count) => `${count} 个 UTF-8 文本文件`,
         diffSummary: (version, added, modified, deleted) =>
           ` · 较基线${version}：新增 ${added} · 修改 ${modified} · 删除 ${deleted}`,
@@ -2302,8 +2388,10 @@ export const zhCN: Translations = {
         withVersion: (version) => `已创建草稿版本 v${version}，前往发布`,
         withoutVersion: "已创建草稿版本，前往发布",
         goPublish: "前往发布",
+        revisionWithSecrets: (version, count) =>
+          `已创建${version === null ? "草稿版本" : `草稿版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再发布。`,
         createdWithSecrets: (count) =>
-          `Skill 已创建并默认停用，检测到 ${count} 项凭证环境变量声明。请先配置凭证。`,
+          `Skill 已创建并默认停用，检测到 ${count} 项环境变量声明。请先配置运行凭证。`,
         configureCredentials: "配置凭证",
       },
       publish: {
@@ -2470,6 +2558,9 @@ export const zhCN: Translations = {
     runFailedTitle: "运行未完成",
     runFailedDescription:
       "Agent 未能生成回复。请检查所选模型、依赖资产和凭据后，修改或重新发送消息。",
+    providerUnavailableTitle: "模型服务暂时不可用",
+    providerUnavailableDescription:
+      "Worker 重试后仍无法连接所选模型服务。请检查 Worker 网络或代理配置，然后重试此消息。",
     runAdmissionNotConfirmedDescription:
       "运行未开始：会话可能正在运行或状态已变化。草稿已保留，请稍后重试。",
     restoreFailedInput: "恢复到输入框",

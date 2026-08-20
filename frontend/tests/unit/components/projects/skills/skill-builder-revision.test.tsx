@@ -99,7 +99,7 @@ describe("skillRevisionEntryVisible", () => {
 });
 
 describe("ProjectSkillDetailActions", () => {
-  test("places the AI revision action after the existing top actions", () => {
+  test("places publish beside create before AI revision and delete", () => {
     const html = renderUi(
       <ProjectSkillDetailActions
         actionPending={false}
@@ -111,13 +111,15 @@ describe("ProjectSkillDetailActions", () => {
         versionSelectionPending={false}
         onCreateVersion={() => undefined}
         onDelete={() => undefined}
+        publishAction={<button type="button">发布版本</button>}
         additionalActions={<button type="button">AI修改</button>}
       />,
     );
 
     expect(zhCN.skills.builder.revision.button).toBe("AI修改");
-    expect(html.indexOf("创建新版本")).toBeLessThan(html.indexOf("删除 Skill"));
-    expect(html.indexOf("删除 Skill")).toBeLessThan(html.indexOf("AI修改"));
+    expect(html.indexOf("创建新版本")).toBeLessThan(html.indexOf("发布版本"));
+    expect(html.indexOf("发布版本")).toBeLessThan(html.indexOf("AI修改"));
+    expect(html.indexOf("AI修改")).toBeLessThan(html.indexOf("删除 Skill"));
     expect(html).not.toContain("以当前发布版本为基线");
   });
 });

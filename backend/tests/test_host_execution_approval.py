@@ -1207,7 +1207,9 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
         ) -> str:
             self.last_env_reference = env
             self.envs.append(dict(env) if env is not None else None)
-            return env["TOKEN"] if env is not None else "missing"
+            if env is None:
+                return "missing"
+            return "target-only" if set(env) == {"TARGET_API_KEY"} and env["TARGET_API_KEY"] == "provider-secret-value" else "unexpected-environment"
 
     sandbox = IsolatedSandbox()
     config = _sandbox_config(
@@ -1216,7 +1218,7 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
     )
     carrier = {
         "/mnt/skills/demo/SKILL.md": {
-            "TOKEN": "credential-exact-v7",
+            "TARGET_API_KEY": "provider-secret-value",
         },
     }
     calls: list[dict[str, frozenset[str]]] = []
@@ -1237,7 +1239,7 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
             (
                 "demo",
                 "/mnt/skills/demo/SKILL.md",
-                ("TOKEN",),
+                ("TARGET_API_KEY",),
                 True,
             ),
         ),
@@ -1268,18 +1270,21 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
     result = await bash_tool.coroutine(
         runtime=runtime,
         description="read exact credential",
-        command='printf %s "$TOKEN"',
+        command='test -n "$TARGET_API_KEY"',
     )
 
     assert calls == [
         {
-            "/mnt/skills/demo/SKILL.md": frozenset({"TOKEN"}),
+            "/mnt/skills/demo/SKILL.md": frozenset({"TARGET_API_KEY"}),
         },
     ]
-    assert sandbox.envs == [{"TOKEN": "credential-exact-v7"}]
+    assert sandbox.envs == [{"TARGET_API_KEY": "provider-secret-value"}]
+    assert "PROVIDER_TOKEN" not in sandbox.envs[0]
+    assert "UNRELATED_TOKEN" not in sandbox.envs[0]
     assert sandbox.last_env_reference == {}
     assert carrier == {}
-    assert result == "[redacted]"
+    assert result == "target-only"
+    assert "provider-secret-value" not in result
     assert "__active_skill_secrets" not in context
     assert "__skill_secret_exec_ready" not in context
 
