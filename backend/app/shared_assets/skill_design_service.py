@@ -42,7 +42,6 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
     SharedAssetError,
-    SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
@@ -182,7 +181,7 @@ class CreateSkillDesignSession:
 
 @dataclass(frozen=True, slots=True)
 class CreateSkillDesignRevisionSession:
-    """Open a Builder session seeded from an existing Skill's published base."""
+    """Open a Builder session seeded from an existing Skill's latest head."""
 
     skill_id: uuid.UUID
     idempotency_key: str
@@ -290,7 +289,6 @@ class CommitSkillDesignSession:
     expected_draft_checksum: str
     acknowledge_warnings: bool
     idempotency_key: str
-    acknowledge_base_stale: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -693,17 +691,29 @@ class SkillDesignService:
                         command.skill_id,
                         for_update=True,
                     )
-                    if target.status not in {"active", "suspended"} or target.current_published_version_id is None:
+                    if target.status not in {"active", "suspended"}:
                         raise AssetConflict(context.request_id)
                     if await repository.live_revision_session_exists(
                         context,
                         target.id,
                     ):
                         raise SkillDesignTargetSessionExists(context.request_id)
+                    history = await skill_repository.get_project_version_history(
+                        context,
+                        target.id,
+                    )
+                    head = max(
+                        history,
+                        key=lambda item: item.row.version_number,
+                        default=None,
+                    )
+                    if head is None:
+                        raise AssetConflict(context.request_id)
                     record = await skill_repository.get_project_version(
                         context,
                         target.id,
-                        target.current_published_version_id,
+                        head.row.id,
+                        for_update=True,
                     )
                     seeded = self._seed_revision_files(context, record)
                     snapshot = self._draft_snapshot(context, seeded)
@@ -1830,7 +1840,6 @@ class SkillDesignService:
                 "expected_revision": command.expected_revision,
                 "expected_draft_checksum": command.expected_draft_checksum,
                 "acknowledge_warnings": command.acknowledge_warnings,
-                "acknowledge_base_stale": command.acknowledge_base_stale,
             }
         )
         repeated_session: SkillDesignSessionView | None = None
@@ -1943,8 +1952,6 @@ class SkillDesignService:
                             draft_identity = {(item.path, item.sha256, item.size_bytes, item.media_type) for item in preview.file_views}
                             if base_identity == draft_identity:
                                 raise SkillDesignNoChanges(context.request_id)
-                            if target_asset.current_published_version_id != row.base_version_id and not command.acknowledge_base_stale:
-                                raise SkillDesignBaseStale(context.request_id)
                         operation = self._new_operation(
                             context,
                             session_id,
@@ -2952,7 +2959,6 @@ class SkillDesignService:
             or not isinstance(command.expected_draft_checksum, str)
             or _CHECKSUM_PATTERN.fullmatch(command.expected_draft_checksum) is None
             or type(command.acknowledge_warnings) is not bool
-            or type(command.acknowledge_base_stale) is not bool
         ):
             raise AssetValidationFailed(context.request_id)
         return CommitSkillDesignSession(
@@ -2963,7 +2969,6 @@ class SkillDesignService:
                 context,
                 command.idempotency_key,
             ),
-            acknowledge_base_stale=command.acknowledge_base_stale,
         )
 
     @staticmethod

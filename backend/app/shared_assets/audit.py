@@ -26,20 +26,19 @@ _ACTIONS: dict[str, AuditAction] = {
     "agent.version.create": AuditAction.ASSET_UPDATED,
     "agent.instructions.update": AuditAction.ASSET_UPDATED,
     "agent.capability_bindings.update": AuditAction.ASSET_UPDATED,
-    "agent.version.restore": AuditAction.ASSET_UPDATED,
-    "agent.publish": AuditAction.ASSET_PUBLISHED,
+    "agent.version.activate": AuditAction.ASSET_UPDATED,
     "agent.delete": AuditAction.ASSET_DELETED,
-    "agent.activate": AuditAction.ASSET_UPDATED,
+    "agent.enable": AuditAction.ASSET_UPDATED,
     "agent.suspend": AuditAction.ASSET_DEPRECATED,
     "agent.default.set": AuditAction.ASSET_BOUND,
     "agent.default.clear": AuditAction.ASSET_UNBOUND,
     "skill.create": AuditAction.ASSET_CREATED,
     "skill.version.create": AuditAction.ASSET_UPDATED,
-    "skill.publish": AuditAction.ASSET_PUBLISHED,
+    "skill.version.activate": AuditAction.ASSET_UPDATED,
     "skill.export": AuditAction.ASSET_EXPORTED,
     "skill.version.revoke": AuditAction.ASSET_DEPRECATED,
     "skill.delete": AuditAction.ASSET_DELETED,
-    "skill.activate": AuditAction.ASSET_UPDATED,
+    "skill.enable": AuditAction.ASSET_UPDATED,
     "skill.credential_bindings.configure": AuditAction.ASSET_UPDATED,
     "skill.suspend": AuditAction.ASSET_DEPRECATED,
     "mcp.create": AuditAction.ASSET_CREATED,
@@ -69,12 +68,17 @@ _VERSIONED_AGENT_OPERATIONS = frozenset(
         "agent.version.create",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.restore",
-        "agent.publish",
-        "agent.activate",
+        "agent.version.activate",
     }
 )
-_VERSIONED_SKILL_OPERATIONS = frozenset({"skill.export", "skill.version.revoke"})
+_VERSIONED_SKILL_OPERATIONS = frozenset(
+    {
+        "skill.version.create",
+        "skill.version.activate",
+        "skill.export",
+        "skill.version.revoke",
+    }
+)
 
 
 class DurableSharedAssetGovernanceEventSink:

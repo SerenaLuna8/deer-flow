@@ -22,8 +22,8 @@ const VERSION_ID = "00000000-0000-4000-8000-000000000004";
 
 const item = {
   id: AGENT_ID,
-  version: 2,
-  current_published_version_id: VERSION_ID,
+  revision: 2,
+  current_version_id: VERSION_ID,
 } as ProjectAssetItem;
 const catalog = {
   system_items: [],
@@ -36,7 +36,7 @@ const history = {
       id: VERSION_ID,
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published",
+      relation: "current",
       supersedes_version_id: null,
     },
   ],
@@ -60,7 +60,7 @@ describe("Agent authoring recovery requests", () => {
     await reloadProjectAgentAuthoringState({
       projectId: PROJECT_ID,
       assetId: AGENT_ID,
-      attemptedAssetVersion: 1,
+      attemptedRevision: 1,
       includeDependencyCatalogs: true,
       signal: controller.signal,
     });

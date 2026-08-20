@@ -4,7 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentBuilderBlueprintReview } from "@/components/projects/agents/agent-builder-blueprint-review";
 import { AgentInstructionWorkspace } from "@/components/projects/assets/agent-instructions-workbench";
 import {
-  projectAgentVersionCanPublish,
+  projectAgentVersionCanActivate,
   projectAssetCanDelete,
 } from "@/components/projects/assets/project-asset-view-model";
 import { I18nProvider } from "@/core/i18n/context";
@@ -18,86 +18,85 @@ function renderAgentUi(node: React.ReactNode) {
   );
 }
 
-describe("Agent author and publisher governance", () => {
-  test("only a project binding manager can publish a selected draft", () => {
-    const draft = {
-      workflow_status: "draft" as const,
-      supersedes_version_id: null,
-    };
+describe("Agent author and activation governance", () => {
+  test("lets an Editor or Admin activate a project candidate", () => {
+    const candidate = { relation: "candidate" as const };
     const editorItem = {
       scope: "project" as const,
       capabilities: [EDIT],
-      current_published_version_id: null,
+      current_version_id: null,
     };
-    const publisherItem = {
+    const adminItem = {
       scope: "project" as const,
-      capabilities: [MANAGE_BINDINGS],
-      current_published_version_id: null,
+      capabilities: [EDIT, MANAGE_BINDINGS],
+      current_version_id: null,
     };
 
-    expect(projectAgentVersionCanPublish(editorItem, [EDIT], draft)).toBe(
-      false,
+    expect(projectAgentVersionCanActivate(editorItem, [EDIT], candidate)).toBe(
+      true,
     );
     expect(
-      projectAgentVersionCanPublish(publisherItem, [MANAGE_BINDINGS], draft),
+      projectAgentVersionCanActivate(
+        adminItem,
+        [EDIT, MANAGE_BINDINGS],
+        candidate,
+      ),
     ).toBe(true);
     expect(
-      projectAgentVersionCanPublish(publisherItem, [MANAGE_BINDINGS], {
-        workflow_status: "published",
-        supersedes_version_id: null,
+      projectAgentVersionCanActivate(adminItem, [EDIT, MANAGE_BINDINGS], {
+        relation: "current",
       }),
     ).toBe(false);
     expect(
-      projectAgentVersionCanPublish(
-        { ...publisherItem, scope: "system" },
-        [MANAGE_BINDINGS],
-        draft,
+      projectAgentVersionCanActivate(
+        { ...adminItem, scope: "system" },
+        [EDIT, MANAGE_BINDINGS],
+        candidate,
       ),
     ).toBe(false);
     expect(
-      projectAgentVersionCanPublish(
+      projectAgentVersionCanActivate(
         {
-          ...publisherItem,
-          current_published_version_id: "22222222-2222-4222-8222-222222222222",
+          ...adminItem,
         },
-        [MANAGE_BINDINGS],
-        draft,
+        [EDIT, MANAGE_BINDINGS],
+        candidate,
       ),
-    ).toBe(false);
+    ).toBe(true);
   });
 
-  test("requires publisher authority before deleting a published Agent", () => {
+  test("lets an Editor delete an Agent asset regardless of Current Version", () => {
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT],
-        current_published_version_id: null,
+        current_version_id: null,
       }),
     ).toBe(true);
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT],
-        current_published_version_id: "11111111-1111-4111-8111-111111111111",
+        current_version_id: "11111111-1111-4111-8111-111111111111",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       projectAssetCanDelete("agents", {
         scope: "project",
         capabilities: [EDIT, MANAGE_BINDINGS],
-        current_published_version_id: "11111111-1111-4111-8111-111111111111",
+        current_version_id: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
   });
 
-  test("explains that Builder creates a suspended draft", () => {
+  test("explains that Builder saves an inactive v1 Candidate Version", () => {
     const html = renderAgentUi(
       <AgentBuilderBlueprintReview
         blueprint={{
           description: "Review changes",
           model_ref: "default",
           tool_groups: ["file:read"],
-          skill_version_ids: [],
+          skill_refs: [],
           mcp_version_ids: [],
           agents_instructions: "# AGENTS",
           soul: "# SOUL",
@@ -129,12 +128,12 @@ describe("Agent author and publisher governance", () => {
       />,
     );
 
-    expect(html).toContain("创建停用的 Agent 草稿");
-    expect(html).toContain("管理员发布草稿后才能启用");
+    expect(html).toContain("不可变的 v1 候选版本");
+    expect(html).toContain("激活后才会用于运行");
     expect(html).not.toContain("创建后默认停用，需手动启用");
   });
 
-  test("describes an instruction save as a draft, not an immediate publish", () => {
+  test("describes an instruction save as a Candidate Version without activation", () => {
     const html = renderAgentUi(
       <AgentInstructionWorkspace
         draft={{
@@ -160,8 +159,8 @@ describe("Agent author and publisher governance", () => {
       />,
     );
 
-    expect(html).toContain("保存后创建草稿");
-    expect(html).toContain("不会直接发布");
+    expect(html).toContain("保存后创建不可变的候选版本");
+    expect(html).toContain("激活后才会用于后续运行");
     expect(html).not.toContain("保存后将用于后续运行");
   });
 

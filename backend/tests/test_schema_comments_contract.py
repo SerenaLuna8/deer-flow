@@ -53,8 +53,8 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         comments,
         re.MULTILINE,
     )
-    assert len(table_comments) == 89
-    assert len(column_comments) == 1106
+    assert len(table_comments) == 90
+    assert len(column_comments) == 1107
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -106,6 +106,11 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("project_channel_group_bindings", "agent_scope"),
         ("project_channel_group_bindings", "agent_asset_id"),
         ("project_channel_group_bindings", "deleted_at"),
+        ("run_asset_versions", "snapshot_json"),
+        ("system_asset_upgrade_audit", "before_checksum"),
+        ("system_asset_upgrade_audit", "after_checksum"),
+        ("system_asset_upgrade_audit", "package_digest"),
+        ("system_asset_upgrade_audit", "operator_identity"),
     }
 
     assert set(generate_schema_comments._TABLE_COLUMN_PHRASES) == expected

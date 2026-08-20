@@ -5,7 +5,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { useI18n } from "@/core/i18n/hooks";
-import type { ProjectAssetList } from "@/core/shared-assets";
+import type { AssetListKind, ProjectAssetList } from "@/core/shared-assets";
 
 type SystemAssetItem = ProjectAssetList["system_items"][number];
 
@@ -17,10 +17,12 @@ export function canManageSystemBinding(item: SystemAssetItem): boolean {
 }
 
 export function SystemAssetSection({
+  kind,
   items,
   onManageBinding,
   renderDetails,
 }: {
+  kind: Exclude<AssetListKind, "credentials">;
   items: SystemAssetItem[];
   onManageBinding?: (item: SystemAssetItem) => void;
   renderDetails?: (item: SystemAssetItem) => React.ReactNode;
@@ -33,7 +35,9 @@ export function SystemAssetSection({
           {t.adminAssets.catalog.systemAssets}
         </h2>
         <p className="text-muted-foreground mt-1 text-sm">
-          {t.adminAssets.catalog.systemAssetsDescription}
+          {kind === "mcp-servers"
+            ? t.adminAssets.catalog.systemMcpDescription
+            : t.adminAssets.catalog.systemCurrentAssetsDescription}
         </p>
       </div>
       {items.length === 0 ? (
@@ -68,46 +72,61 @@ export function SystemAssetSection({
                   <dl className="grid gap-3 sm:grid-cols-2">
                     <div>
                       <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.catalog.systemPublishStatus}
+                        {kind === "mcp-servers"
+                          ? t.adminAssets.catalog.systemPublishStatus
+                          : t.adminAssets.catalog.currentVersionStatus}
                       </dt>
                       <dd>
-                        {item.current_published_version_id
-                          ? t.adminAssets.catalog.publishedAvailable
-                          : t.adminAssets.catalog.unpublished}
+                        {item.current_version_id
+                          ? kind === "mcp-servers"
+                            ? t.adminAssets.catalog.publishedAvailable
+                            : t.adminAssets.catalog.currentVersionAvailable
+                          : kind === "mcp-servers"
+                            ? t.adminAssets.catalog.unpublished
+                            : t.adminAssets.catalog.currentVersionMissing}
                       </dd>
                     </div>
                     <div>
                       <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.catalog.pinnedVersion}
+                        {kind === "mcp-servers"
+                          ? t.adminAssets.catalog.pinnedVersion
+                          : t.adminAssets.catalog.bindingStatus}
                       </dt>
                       <dd>
                         {item.binding?.enabled
-                          ? t.adminAssets.catalog.enabledAndPinned
+                          ? kind === "mcp-servers"
+                            ? t.adminAssets.catalog.enabledAndPinned
+                            : t.adminAssets.catalog.enabled
                           : item.binding
                             ? t.adminAssets.catalog.closed
                             : t.adminAssets.catalog.notBound}
                       </dd>
                     </div>
-                    <div>
-                      <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.catalog.bindingStatus}
-                      </dt>
-                      <dd>
-                        {item.binding
-                          ? item.binding.enabled
-                            ? t.adminAssets.catalog.enabled
-                            : t.adminAssets.catalog.closed
-                          : t.adminAssets.catalog.notBound}
-                      </dd>
-                    </div>
-                    <div>
-                      <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.catalog.bindingRevision}
-                      </dt>
-                      <dd>
-                        {item.binding?.version ?? t.adminAssets.catalog.none}
-                      </dd>
-                    </div>
+                    {kind === "mcp-servers" ? (
+                      <>
+                        <div>
+                          <dt className="text-muted-foreground text-xs">
+                            {t.adminAssets.catalog.bindingStatus}
+                          </dt>
+                          <dd>
+                            {item.binding
+                              ? item.binding.enabled
+                                ? t.adminAssets.catalog.enabled
+                                : t.adminAssets.catalog.closed
+                              : t.adminAssets.catalog.notBound}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt className="text-muted-foreground text-xs">
+                            {t.adminAssets.catalog.bindingRevision}
+                          </dt>
+                          <dd>
+                            {item.binding?.version ??
+                              t.adminAssets.catalog.none}
+                          </dd>
+                        </div>
+                      </>
+                    ) : null}
                   </dl>
                   {canManage && (
                     <Button

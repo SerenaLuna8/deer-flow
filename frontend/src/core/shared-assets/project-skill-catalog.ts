@@ -1,12 +1,10 @@
-import { useQueries } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 
 import { useProjectPrivateWorkScope } from "@/core/private-work/provider";
 
-import { listProjectAssetVersions } from "./api";
 import { useProjectAssets, useProjectAssetVersions } from "./hooks";
-import { projectAssetVersionsKey } from "./query-keys";
 import type {
+  AgentVersion,
   ProjectAssetItem,
   ProjectAssetList,
   VersionHistoryResponse,
@@ -18,16 +16,11 @@ export type ProjectSlashSkill = {
   enabled: boolean;
 };
 
+type SkillRef = AgentVersion["skill_refs"][number];
+
 export type ProjectSkillRuntime =
   | { kind: "main" }
-  | {
-      kind: "explicit";
-      skillVersionIds: readonly string[];
-      publishedProjectVersionIdsByAssetId?: ReadonlyMap<
-        string,
-        ReadonlySet<string>
-      >;
-    };
+  | { kind: "explicit"; skillRefs: readonly SkillRef[] };
 
 type ThreadAgentMetadata = {
   [key: string]: unknown;
@@ -40,64 +33,44 @@ const MAIN_PROJECT_AGENT_SLUG = "project-assistant";
 function isExecutable(item: ProjectAssetItem): boolean {
   return (
     item.status === "active" &&
+    item.current_version_id !== null &&
     item.capabilities.includes("shared_assets.execute")
   );
-}
-
-function effectiveSkillVersionId(item: ProjectAssetItem): string | null {
-  if (item.scope === "project") return item.current_published_version_id;
-  return item.binding?.enabled === true ? item.binding.version_id : null;
 }
 
 function slashSkill(item: ProjectAssetItem): ProjectSlashSkill {
   return {
     name: item.slug,
     description: item.display_name,
-    enabled: isExecutable(item),
+    enabled:
+      isExecutable(item) &&
+      (item.scope === "project" || item.binding?.enabled === true),
   };
 }
 
 export function projectSlashSkills(
   catalog: ProjectAssetList,
 ): ProjectSlashSkill[] {
-  const published = (item: ProjectAssetList["project_items"][number]) =>
-    item.current_published_version_id !== null;
-
-  return [
-    ...catalog.project_items.filter(published).map(slashSkill),
-    ...catalog.system_items.filter(published).map((item) => ({
-      ...slashSkill(item),
-      enabled: isExecutable(item) && item.binding?.enabled === true,
-    })),
-  ];
+  return [...catalog.project_items, ...catalog.system_items]
+    .filter((item) => item.current_version_id !== null)
+    .map(slashSkill);
 }
 
 export function projectRuntimeSlashSkills(
   catalog: ProjectAssetList,
   runtime: ProjectSkillRuntime,
 ): ProjectSlashSkill[] {
+  const available = [...catalog.project_items, ...catalog.system_items];
   if (runtime.kind === "main") {
-    return projectSlashSkills(catalog).filter((skill) => skill.enabled);
+    return available.map(slashSkill).filter((skill) => skill.enabled);
   }
-  const requiredVersionIds = new Set(runtime.skillVersionIds);
-  return [...catalog.project_items, ...catalog.system_items]
-    .filter((item) => {
-      if (!isExecutable(item) || item.current_published_version_id === null) {
-        return false;
-      }
-      if (item.scope === "system") {
-        return requiredVersionIds.has(effectiveSkillVersionId(item) ?? "");
-      }
-      const publishedVersionIds =
-        runtime.publishedProjectVersionIdsByAssetId?.get(item.id);
-      if (publishedVersionIds) {
-        return runtime.skillVersionIds.some((versionId) =>
-          publishedVersionIds.has(versionId),
-        );
-      }
-      return requiredVersionIds.has(item.current_published_version_id);
-    })
-    .map(slashSkill);
+  const required = new Set(
+    runtime.skillRefs.map((ref) => `${ref.scope}:${ref.asset_id}`),
+  );
+  return available
+    .filter((item) => required.has(`${item.scope}:${item.id}`))
+    .map(slashSkill)
+    .filter((skill) => skill.enabled);
 }
 
 function threadAgent(
@@ -136,15 +109,29 @@ export function isThreadProjectAgentArchived(
 }
 
 function selectedAgentVersionId(agent: ProjectAssetItem | null): string {
-  if (!agent) return "";
-  if (agent.scope === "project") {
-    return agent.current_published_version_id ?? "";
-  }
-  return agent.binding?.enabled === true ? agent.binding.version_id : "";
+  if (agent?.status !== "active") return "";
+  if (agent.scope === "system" && agent.binding?.enabled !== true) return "";
+  return agent.current_version_id ?? "";
 }
 
 function isSuspendedProjectAgent(agent: ProjectAssetItem | null): boolean {
-  return agent?.scope === "project" && agent.status === "suspended";
+  return agent?.scope === "project" && agent?.status === "suspended";
+}
+
+function currentAgentVersion(
+  history: VersionHistoryResponse | undefined,
+  agent: ProjectAssetItem | null,
+): AgentVersion | null {
+  if (!agent) return null;
+  const versionId = selectedAgentVersionId(agent);
+  const version = history?.data.find(
+    (candidate) =>
+      "agent_id" in candidate &&
+      candidate.agent_id === agent.id &&
+      candidate.id === versionId &&
+      candidate.relation === "current",
+  );
+  return version && "agent_id" in version ? version : null;
 }
 
 export function resolveThreadAgentModelRef(
@@ -157,18 +144,8 @@ export function resolveThreadAgentModelRef(
   if (agent.scope === "system" && agent.slug === MAIN_PROJECT_AGENT_SLUG) {
     return "default";
   }
-  const versionId = selectedAgentVersionId(agent);
-  if (!versionId) return null;
-  const version = history?.data.find(
-    (candidate) =>
-      "agent_id" in candidate &&
-      candidate.id === versionId &&
-      candidate.agent_id === agent.id &&
-      candidate.workflow_status === "published",
-  );
-  return version && "agent_id" in version && version.model_ref.trim()
-    ? version.model_ref
-    : null;
+  const version = currentAgentVersion(history, agent);
+  return version?.model_ref.trim() ? version.model_ref : null;
 }
 
 export function useThreadAgentModelRef(
@@ -238,26 +215,12 @@ export function useThreadAgentModelRef(
   };
 }
 
-function referencedSkillVersionIds(
-  history: VersionHistoryResponse | undefined,
-  versionId: string,
-): readonly string[] | null {
-  const version = history?.data.find(
-    (candidate) =>
-      "agent_id" in candidate &&
-      candidate.id === versionId &&
-      candidate.workflow_status === "published",
-  );
-  return version && "agent_id" in version ? version.skill_version_ids : null;
-}
-
 export function useProjectSlashSkills() {
   const { scope } = useProjectPrivateWorkScope();
   const query = useProjectAssets(scope.accountId, scope.projectId, "skills");
   const skills = useMemo(() => {
     const catalog = query.data as ProjectAssetList | undefined;
-    if (!catalog) return [];
-    return projectSlashSkills(catalog);
+    return catalog ? projectSlashSkills(catalog) : [];
   }, [query.data]);
   return { skills, isLoading: query.isLoading, error: query.error };
 }
@@ -291,83 +254,25 @@ export function useProjectRuntimeSlashSkills(
     agent?.id ?? "",
     Boolean(agent && !main && versionId),
   );
-  const explicitSkillVersionIds = referencedSkillVersionIds(
-    versionQuery.data,
-    versionId,
-  );
-  const projectSkillItems = useMemo(() => {
-    const catalog = skillQuery.data as ProjectAssetList | undefined;
-    return catalog?.project_items ?? [];
-  }, [skillQuery.data]);
-  const shouldResolveProjectSkillVersions = Boolean(
-    agent &&
-    !main &&
-    explicitSkillVersionIds &&
-    explicitSkillVersionIds.length > 0,
-  );
-  const projectSkillHistories = useQueries({
-    queries: projectSkillItems.map((item) => ({
-      queryKey: projectAssetVersionsKey(
-        scope.accountId,
-        scope.projectId,
-        "skills",
-        item.id,
-      ),
-      queryFn: ({ signal }: { signal: AbortSignal }) =>
-        listProjectAssetVersions(scope.projectId, "skills", item.id, signal),
-      enabled: shouldResolveProjectSkillVersions,
-    })),
-  });
-  const publishedProjectVersionIdsByAssetId = useMemo(
-    () =>
-      new Map(
-        projectSkillItems.map((item, index) => [
-          item.id,
-          new Set(
-            (projectSkillHistories[index]?.data?.data ?? []).flatMap(
-              (version) =>
-                "skill_id" in version && version.workflow_status === "published"
-                  ? [version.id]
-                  : [],
-            ),
-          ),
-        ]),
-      ),
-    [projectSkillHistories, projectSkillItems],
-  );
-  const error =
-    skillQuery.error ??
-    agentQuery.error ??
-    versionQuery.error ??
-    projectSkillHistories.find((history) => history.error)?.error;
+  const version = currentAgentVersion(versionQuery.data, agent);
+  const error = skillQuery.error ?? agentQuery.error ?? versionQuery.error;
   const skills = useMemo(() => {
     const catalog = skillQuery.data as ProjectAssetList | undefined;
     if (error || !catalog || !agent) return [];
     if (main) return projectRuntimeSlashSkills(catalog, { kind: "main" });
-    return explicitSkillVersionIds
+    return version
       ? projectRuntimeSlashSkills(catalog, {
           kind: "explicit",
-          skillVersionIds: explicitSkillVersionIds,
-          publishedProjectVersionIdsByAssetId,
+          skillRefs: version.skill_refs,
         })
       : [];
-  }, [
-    agent,
-    error,
-    explicitSkillVersionIds,
-    main,
-    publishedProjectVersionIdsByAssetId,
-    skillQuery.data,
-  ]);
-  const isLoading =
-    skillQuery.isLoading ||
-    agentQuery.isLoading ||
-    Boolean(agent && !main && versionId && versionQuery.isLoading) ||
-    (shouldResolveProjectSkillVersions &&
-      projectSkillHistories.some((history) => history.isLoading));
+  }, [agent, error, main, skillQuery.data, version]);
   return {
     skills,
-    isLoading,
+    isLoading:
+      skillQuery.isLoading ||
+      agentQuery.isLoading ||
+      Boolean(agent && !main && versionId && versionQuery.isLoading),
     error,
   };
 }

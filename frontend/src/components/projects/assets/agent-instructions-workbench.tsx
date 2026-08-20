@@ -95,25 +95,25 @@ export function agentInstructionDraftIsDirty(
 type PendingSavedAgentVersion = {
   assetId: string;
   versionId: string;
-  assetVersion: number;
+  assetRevision: number;
 };
 
 type AgentInstructionConflictRecovery = {
   assetId: string;
-  assetVersion: number;
+  assetRevision: number;
   generation: number;
   status: "refreshing" | "error";
 };
 
 export function agentInstructionSaveIsPending(
   pending: PendingSavedAgentVersion | null,
-  item: Pick<ProjectAssetItem, "id" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "revision">,
   version: Pick<AgentAssetVersion, "id"> | null,
 ): boolean {
   if (pending?.assetId !== item.id) return false;
-  if (item.version < pending.assetVersion) return true;
+  if (item.revision < pending.assetRevision) return true;
   return (
-    item.version === pending.assetVersion && version?.id !== pending.versionId
+    item.revision === pending.assetRevision && version?.id !== pending.versionId
   );
 }
 
@@ -374,9 +374,9 @@ export function AgentInstructionsWorkbench({
   );
   const [discardOpen, setDiscardOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
-  const expectedAssetVersionRef = useRef(item.version);
+  const expectedRevisionRef = useRef(item.revision);
   const appliedServerStateRef = useRef(
-    `${item.id}:${item.version}:${version?.id ?? "empty"}`,
+    `${item.id}:${item.revision}:${version?.id ?? "empty"}`,
   );
   const pendingSavedVersionRef = useRef<PendingSavedAgentVersion | null>(null);
   const [conflictRecovery, setConflictRecovery] =
@@ -392,7 +392,7 @@ export function AgentInstructionsWorkbench({
   const update = useUpdateProjectAgentInstructions(accountId, projectId);
   const dirty = agentInstructionDraftIsDirty(baseline, draft);
   const isEditing = canAuthor && editing;
-  const serverState = `${item.id}:${item.version}:${version?.id ?? "empty"}`;
+  const serverState = `${item.id}:${item.revision}:${version?.id ?? "empty"}`;
 
   useEffect(() => {
     onDirtyChange(dirty);
@@ -419,7 +419,7 @@ export function AgentInstructionsWorkbench({
       if (
         agentInstructionSaveIsPending(
           pendingSavedVersion,
-          { id: item.id, version: item.version },
+          { id: item.id, revision: item.revision },
           version,
         )
       ) {
@@ -443,7 +443,7 @@ export function AgentInstructionsWorkbench({
     setBaseline(nextDraft);
     setDraft(nextDraft);
     setLocalError(null);
-    expectedAssetVersionRef.current = item.version;
+    expectedRevisionRef.current = item.revision;
     appliedServerStateRef.current = serverState;
   }, [
     conflictRecovery,
@@ -451,7 +451,7 @@ export function AgentInstructionsWorkbench({
     draft,
     editing,
     item.id,
-    item.version,
+    item.revision,
     serverState,
     version,
   ]);
@@ -525,7 +525,7 @@ export function AgentInstructionsWorkbench({
         reloadProjectAgentAuthoringState({
           projectId,
           assetId: recovery.assetId,
-          attemptedAssetVersion: recovery.assetVersion,
+          attemptedRevision: recovery.assetRevision,
           signal: scopeSignal
             ? AbortSignal.any([controller.signal, scopeSignal])
             : controller.signal,
@@ -544,8 +544,8 @@ export function AgentInstructionsWorkbench({
       if (!recoveryIsCurrent(recovery, controller)) return;
       const nextBaseline = agentInstructionDraft(reload.version);
       setBaseline(nextBaseline);
-      expectedAssetVersionRef.current = reload.item.version;
-      appliedServerStateRef.current = `${reload.item.id}:${reload.item.version}:${reload.version.id}`;
+      expectedRevisionRef.current = reload.item.revision;
+      appliedServerStateRef.current = `${reload.item.id}:${reload.item.revision}:${reload.version.id}`;
       pendingSavedVersionRef.current = null;
       authoringBaseVersionIdRef.current = reload.version.id;
       setConflictRecovery(null);
@@ -590,7 +590,7 @@ export function AgentInstructionsWorkbench({
         assetId: item.id,
         input: {
           ...draft,
-          expected_asset_version: expectedAssetVersionRef.current,
+          expected_revision: expectedRevisionRef.current,
         },
       });
       if (
@@ -607,15 +607,15 @@ export function AgentInstructionsWorkbench({
         return;
       }
       const nextDraft = agentInstructionDraft(nextVersion);
-      const savedAssetVersion = expectedAssetVersionRef.current + 1;
+      const savedRevision = expectedRevisionRef.current + 1;
       pendingSavedVersionRef.current = {
         assetId: item.id,
         versionId: nextVersion.id,
-        assetVersion: savedAssetVersion,
+        assetRevision: savedRevision,
       };
       setConflictRecovery(null);
       authoringBaseVersionIdRef.current = null;
-      expectedAssetVersionRef.current = savedAssetVersion;
+      expectedRevisionRef.current = savedRevision;
       setBaseline(nextDraft);
       setDraft(nextDraft);
       onDirtyChange(false);
@@ -638,7 +638,7 @@ export function AgentInstructionsWorkbench({
         const controller = new AbortController();
         const recovery: AgentInstructionConflictRecovery = {
           assetId: item.id,
-          assetVersion: expectedAssetVersionRef.current,
+          assetRevision: expectedRevisionRef.current,
           generation: recoveryGenerationRef.current + 1,
           status: "refreshing",
         };

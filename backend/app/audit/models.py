@@ -838,20 +838,19 @@ class AssetAuditMetadata(_AuditMetadata):
         "agent.version.create",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.restore",
-        "agent.publish",
+        "agent.version.activate",
         "agent.delete",
-        "agent.activate",
+        "agent.enable",
         "agent.suspend",
         "agent.default.set",
         "agent.default.clear",
         "skill.create",
         "skill.version.create",
-        "skill.publish",
+        "skill.version.activate",
         "skill.export",
         "skill.version.revoke",
         "skill.delete",
-        "skill.activate",
+        "skill.enable",
         "skill.credential_bindings.configure",
         "skill.suspend",
         "mcp.create",
@@ -889,11 +888,14 @@ class AssetAuditMetadata(_AuditMetadata):
             "agent.version.create",
             "agent.instructions.update",
             "agent.capability_bindings.update",
-            "agent.version.restore",
-            "agent.publish",
-            "agent.activate",
+            "agent.version.activate",
         }
-        versioned_skill_operations = {"skill.export", "skill.version.revoke"}
+        versioned_skill_operations = {
+            "skill.version.create",
+            "skill.version.activate",
+            "skill.export",
+            "skill.version.revoke",
+        }
         if operation_domain == "agent":
             expects_version = self.operation in versioned_agent_operations
             if expects_version != (self.version_number is not None):

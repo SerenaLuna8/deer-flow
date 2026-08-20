@@ -5,7 +5,7 @@
 .PHONY: \
 	help \
 	setup config config-upgrade check doctor install setup-sandbox support-bundle \
-	setup-db upgrade-db check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage rotate-credentials import-project-skills \
+	setup-db upgrade-db preflight-upgrade check-db upgrade-system-assets prepare-run-event-partitions prune-run-events reconcile-usage rotate-credentials import-project-skills \
 	test \
 	detect-thread-boundaries detect-blocking-io \
 	dev dev-daemon start start-daemon gateway worker scheduler nginx stop clean \
@@ -58,6 +58,7 @@ help:
 	@echo "PostgreSQL 与运维："
 	@echo "  make setup-db                         空库安装首版 initial_schema 并初始化"
 	@echo "  make upgrade-db                       显式升级存量库到迁移链头"
+	@echo "  make preflight-upgrade                只读检查并输出 Agent/Skill 生命周期升级清单"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
 	@echo "  make upgrade-system-assets            在维护窗口应用新增 System Asset release"
 	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"
@@ -98,6 +99,9 @@ setup-db:
 
 upgrade-db:
 	@$(MAKE) -C backend upgrade-db ARGS="$(ARGS)"
+
+preflight-upgrade:
+	@$(MAKE) -C backend preflight-upgrade
 
 reconcile-usage:
 	@$(MAKE) -C backend reconcile-usage ARGS="$(ARGS)"

@@ -695,12 +695,13 @@ async def test_run_admission_locks_models_before_optional_user_memory_snapshot(
         checksum="b" * 64,
         catalog_generation=1,
         dependency_version_ids=(),
+        skill_version_ids=(),
         payload=AgentPayload(
             description="",
             soul="",
             model_ref=LEAD_MODEL_REF,
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
         ),
     )
@@ -845,12 +846,13 @@ async def test_run_admission_freezes_catalog_default_title_model(
         checksum="b" * 64,
         catalog_generation=1,
         dependency_version_ids=(),
+        skill_version_ids=(),
         payload=AgentPayload(
             description="",
             soul="",
             model_ref=LEAD_MODEL_REF,
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
         ),
     )

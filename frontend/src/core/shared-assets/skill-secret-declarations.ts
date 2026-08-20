@@ -4,7 +4,7 @@ import {
   assetIdSchema,
   skillCredentialMappingStatusSchema,
   skillSecretDeclarationNameSchema,
-  type SkillPublishAssetVersionInput,
+  type SkillActivationInput,
 } from "./types";
 
 export const sha256Schema = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -118,7 +118,7 @@ export const skillFrontmatterPatchResponseSchema = z
     },
   );
 
-export const skillPublishPlanRequirementSchema = z
+export const skillActivationRequirementSchema = z
   .object({
     name: skillSecretDeclarationNameSchema,
     optional: z.boolean(),
@@ -126,11 +126,11 @@ export const skillPublishPlanRequirementSchema = z
   })
   .strict();
 
-export const skillPublishPlanResponseSchema = z
+export const skillActivationReadinessResponseSchema = z
   .object({
     skill_id: assetIdSchema,
     skill_version_id: assetIdSchema,
-    asset_version: z.number().int().positive(),
+    revision: z.number().int().positive(),
     payload_checksum: sha256Schema,
     binding_revision: z.number().int().nonnegative(),
     secrets_autonomous: z.boolean(),
@@ -138,7 +138,7 @@ export const skillPublishPlanResponseSchema = z
     required_count: z.number().int().nonnegative().max(256),
     configured_required_count: z.number().int().nonnegative().max(256),
     invalid_count: z.number().int().nonnegative().max(256),
-    requirements: z.array(skillPublishPlanRequirementSchema).max(256),
+    requirements: z.array(skillActivationRequirementSchema).max(256),
     request_id: z.string().min(1),
   })
   .strict()
@@ -149,7 +149,7 @@ export const skillPublishPlanResponseSchema = z
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Skill publish requirement names must be unique",
+        message: "Skill activation requirement names must be unique",
         path: ["requirements"],
       });
     }
@@ -165,7 +165,7 @@ export const skillPublishPlanResponseSchema = z
     if (value.required_count !== required.length) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Skill publish required count does not match requirements",
+        message: "Skill activation required count does not match requirements",
         path: ["required_count"],
       });
     }
@@ -173,14 +173,14 @@ export const skillPublishPlanResponseSchema = z
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Skill publish configured required count does not match requirements",
+          "Skill activation configured required count does not match requirements",
         path: ["configured_required_count"],
       });
     }
     if (value.invalid_count !== invalid.length) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Skill publish invalid count does not match requirements",
+        message: "Skill activation invalid count does not match requirements",
         path: ["invalid_count"],
       });
     }
@@ -189,7 +189,7 @@ export const skillPublishPlanResponseSchema = z
     if (value.ready !== ready) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Skill publish readiness does not match requirements",
+        message: "Skill activation readiness does not match requirements",
         path: ["ready"],
       });
     }
@@ -211,11 +211,11 @@ export type SkillFrontmatterPatchInput = z.input<
 export type SkillFrontmatterPatchResponse = z.infer<
   typeof skillFrontmatterPatchResponseSchema
 >;
-export type SkillPublishPlanRequirement = z.infer<
-  typeof skillPublishPlanRequirementSchema
+export type SkillActivationRequirement = z.infer<
+  typeof skillActivationRequirementSchema
 >;
-export type SkillPublishPlanResponse = z.infer<
-  typeof skillPublishPlanResponseSchema
+export type SkillActivationReadinessResponse = z.infer<
+  typeof skillActivationReadinessResponseSchema
 >;
 
 export async function sha256SkillContent(content: string): Promise<string> {
@@ -228,34 +228,31 @@ export async function sha256SkillContent(content: string): Promise<string> {
   ).join("");
 }
 
-export function missingRequiredSkillPublishRequirements(
-  plan: SkillPublishPlanResponse,
-): SkillPublishPlanRequirement[] {
-  return plan.requirements.filter(
+export function missingRequiredSkillActivationRequirements(
+  readiness: SkillActivationReadinessResponse,
+): SkillActivationRequirement[] {
+  return readiness.requirements.filter(
     (requirement) =>
       !requirement.optional && requirement.mapping_status !== "configured",
   );
 }
 
-export function skillPublishRequiredBindingsBlocked({
-  plan,
+export function skillActivationBlocked({
+  readiness,
 }: {
-  plan: SkillPublishPlanResponse;
+  readiness: SkillActivationReadinessResponse;
 }): boolean {
-  return !plan.ready;
+  return !readiness.ready;
 }
 
-export function buildSkillPublishInput({
-  plan,
-  acknowledgeStaleBase = false,
+export function buildSkillActivationInput({
+  readiness,
 }: {
-  plan: SkillPublishPlanResponse;
-  acknowledgeStaleBase?: boolean;
-}): SkillPublishAssetVersionInput {
+  readiness: SkillActivationReadinessResponse;
+}): SkillActivationInput {
   return {
-    expected_asset_version: plan.asset_version,
-    expected_payload_checksum: plan.payload_checksum,
-    expected_binding_revision: plan.binding_revision,
-    acknowledge_stale_base: acknowledgeStaleBase,
+    expected_revision: readiness.revision,
+    expected_payload_checksum: readiness.payload_checksum,
+    expected_binding_revision: readiness.binding_revision,
   };
 }

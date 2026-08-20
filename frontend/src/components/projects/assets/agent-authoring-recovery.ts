@@ -16,13 +16,9 @@ export type AgentAssetVersion = Extract<AssetVersion, { agent_id: string }>;
 export function agentAuthoringBaseVersion<
   T extends Pick<
     AgentAssetVersion,
-    | "id"
-    | "agent_id"
-    | "version_number"
-    | "workflow_status"
-    | "supersedes_version_id"
+    "id" | "agent_id" | "version_number" | "relation" | "supersedes_version_id"
   >,
->(versions: readonly T[], currentPublishedVersionId: string | null): T | null {
+>(versions: readonly T[], currentVersionId: string | null): T | null {
   const latest = versions.reduce<T | null>(
     (current, candidate) =>
       !current || candidate.version_number > current.version_number
@@ -32,15 +28,12 @@ export function agentAuthoringBaseVersion<
   );
   if (
     latest &&
-    (latest.id === currentPublishedVersionId ||
-      (latest.workflow_status === "draft" &&
-        latest.supersedes_version_id === currentPublishedVersionId))
+    (latest.id === currentVersionId || latest.relation === "candidate")
   ) {
     return latest;
   }
   return (
-    versions.find((candidate) => candidate.id === currentPublishedVersionId) ??
-    null
+    versions.find((candidate) => candidate.id === currentVersionId) ?? null
   );
 }
 
@@ -126,20 +119,17 @@ export function resolveProjectAgentAuthoringState({
   history,
   afterCatalog,
   assetId,
-  attemptedAssetVersion,
-  minimumAssetVersion,
+  attemptedRevision,
+  minimumRevision,
 }: {
   beforeCatalog: ProjectAssetList;
   history: VersionHistoryResponse;
   afterCatalog: ProjectAssetList;
   assetId: string;
-  attemptedAssetVersion?: number;
-  minimumAssetVersion?: number;
+  attemptedRevision?: number;
+  minimumRevision?: number;
 }): ProjectAgentAuthoringState {
-  if (
-    (attemptedAssetVersion === undefined) ===
-    (minimumAssetVersion === undefined)
-  ) {
+  if ((attemptedRevision === undefined) === (minimumRevision === undefined)) {
     throw new Error("Agent authoring revision guard is invalid");
   }
   const beforeItem = catalogAgent(beforeCatalog, assetId);
@@ -148,12 +138,10 @@ export function resolveProjectAgentAuthoringState({
     throw new Error("Agent authoring state is unavailable");
   }
   if (
-    beforeItem.version !== item.version ||
-    beforeItem.current_published_version_id !==
-      item.current_published_version_id ||
-    (attemptedAssetVersion !== undefined &&
-      item.version <= attemptedAssetVersion) ||
-    (minimumAssetVersion !== undefined && item.version < minimumAssetVersion)
+    beforeItem.revision !== item.revision ||
+    beforeItem.current_version_id !== item.current_version_id ||
+    (attemptedRevision !== undefined && item.revision <= attemptedRevision) ||
+    (minimumRevision !== undefined && item.revision < minimumRevision)
   ) {
     throw new Error(
       "Agent changed while its latest authoring state was loading",
@@ -163,10 +151,7 @@ export function resolveProjectAgentAuthoringState({
   const versions = history.data.filter(
     (candidate): candidate is AgentAssetVersion => "agent_id" in candidate,
   );
-  const version = agentAuthoringBaseVersion(
-    versions,
-    item.current_published_version_id,
-  );
+  const version = agentAuthoringBaseVersion(versions, item.current_version_id);
   if (version?.agent_id !== assetId) {
     throw new Error("Agent authoring base is unavailable");
   }
@@ -176,15 +161,15 @@ export function resolveProjectAgentAuthoringState({
 export async function reloadProjectAgentAuthoringState({
   projectId,
   assetId,
-  attemptedAssetVersion,
-  minimumAssetVersion,
+  attemptedRevision,
+  minimumRevision,
   includeDependencyCatalogs = false,
   signal,
 }: {
   projectId: string;
   assetId: string;
-  attemptedAssetVersion?: number;
-  minimumAssetVersion?: number;
+  attemptedRevision?: number;
+  minimumRevision?: number;
   includeDependencyCatalogs?: boolean;
   signal?: AbortSignal;
 }): Promise<ProjectAgentAuthoringReload> {
@@ -217,8 +202,8 @@ export async function reloadProjectAgentAuthoringState({
       history,
       afterCatalog,
       assetId,
-      attemptedAssetVersion,
-      minimumAssetVersion,
+      attemptedRevision,
+      minimumRevision,
     });
 
     return {

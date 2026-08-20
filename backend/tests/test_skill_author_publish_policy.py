@@ -10,7 +10,8 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets import skill_service as skill_service_module
-from app.shared_assets.errors import AssetForbidden, AssetInUse
+from app.shared_assets.errors import AssetInUse
+from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.skill_repository import SkillRepository
 
 
@@ -38,32 +39,44 @@ class _Session:
 
 
 @pytest.mark.asyncio
-async def test_editor_cannot_publish_skill_version() -> None:
+async def test_editor_is_authorized_to_activate_skill_version() -> None:
     class _ExplodingFactory:
         def __call__(self):
             raise AssertionError("authorization must fail before storage is opened")
 
-    with pytest.raises(AssetForbidden):
-        await skill_service_module.SkillService(_ExplodingFactory()).publish(
+    with pytest.raises(AssertionError, match="authorization"):
+        await skill_service_module.SkillService(_ExplodingFactory()).activate_version(
             _context(ProjectRole.EDITOR),
             uuid.uuid4(),
             uuid.uuid4(),
             expected_asset_version=1,
+            expected_payload_checksum="a" * 64,
+            expected_binding_revision=0,
         )
 
 
 @pytest.mark.asyncio
-async def test_editor_cannot_execute_batch_replace_that_moves_live_pointer() -> None:
+async def test_editor_is_authorized_to_save_batch_replacement_candidates() -> None:
     class _ExplodingFactory:
         def __call__(self):
             raise AssertionError("authorization must fail before storage is opened")
 
-    with pytest.raises(AssetForbidden):
+    with pytest.raises(AssertionError, match="authorization"):
         await skill_service_module.SkillService(
             _ExplodingFactory(),
         ).import_project_archives_atomic(
             _context(ProjectRole.EDITOR),
-            (),
+            (
+                skill_service_module.ProjectSkillArchiveImport(
+                    files=(
+                        SkillArchiveFile(
+                            "SKILL.md",
+                            b"---\nname: editor-skill\ndescription: Editor Skill\n---\n",
+                            "text/markdown",
+                        ),
+                    ),
+                ),
+            ),
             execute=True,
             replace=True,
         )
@@ -71,7 +84,7 @@ async def test_editor_cannot_execute_batch_replace_that_moves_live_pointer() -> 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("status", ["active", "suspended"])
-async def test_editor_cannot_delete_published_skill(
+async def test_editor_can_delete_skill_with_or_without_current(
     monkeypatch: pytest.MonkeyPatch,
     status: str,
 ) -> None:
@@ -81,8 +94,8 @@ async def test_editor_cannot_delete_published_skill(
         scope="project",
         project_id=actor.project_id,
         status=status,
-        current_published_version_id=uuid.uuid4(),
-        version=4,
+        current_version_id=uuid.uuid4(),
+        revision=4,
     )
     session = _Session()
     repository = SimpleNamespace(
@@ -98,18 +111,17 @@ async def test_editor_cannot_delete_published_skill(
         lambda _session: repository,
     )
 
-    with pytest.raises(AssetForbidden):
-        await skill_service_module.SkillService(
-            lambda: session,
-            governance_sink=SimpleNamespace(append_project=AsyncMock()),
-        ).delete(actor, asset.id, expected_asset_version=4)
+    await skill_service_module.SkillService(
+        lambda: session,
+        governance_sink=SimpleNamespace(append_project=AsyncMock()),
+    ).delete(actor, asset.id, expected_asset_version=4)
 
-    repository.plan_project_asset_deletion.assert_not_awaited()
-    repository.delete_project_asset.assert_not_awaited()
+    repository.plan_project_asset_deletion.assert_awaited_once_with(actor, asset)
+    repository.delete_project_asset.assert_awaited_once_with(actor, asset, ())
 
 
 @pytest.mark.asyncio
-async def test_editor_can_delete_unpublished_skill_draft(
+async def test_editor_can_delete_skill_without_current(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context(ProjectRole.EDITOR)
@@ -118,8 +130,8 @@ async def test_editor_can_delete_unpublished_skill_draft(
         scope="project",
         project_id=actor.project_id,
         status="suspended",
-        current_published_version_id=None,
-        version=2,
+        current_version_id=None,
+        revision=2,
     )
     session = _Session()
     repository = SimpleNamespace(

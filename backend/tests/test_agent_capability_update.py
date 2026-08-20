@@ -15,7 +15,12 @@ from app.shared_assets.agent_service import (
     AgentService,
 )
 from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.models import AgentModelSettings, AgentPayload
+from app.shared_assets.models import (
+    AgentModelSettings,
+    AssetScope,
+    SkillAssetRef,
+    VersionRelation,
+)
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
 
@@ -46,8 +51,8 @@ def _asset(context: ProjectContext, version_id: uuid.UUID) -> AgentRow:
         slug="reviewer",
         display_name="Reviewer",
         status="active",
-        current_published_version_id=version_id,
-        version=3,
+        current_version_id=version_id,
+        revision=3,
         created_by_user_id=str(context.user_id),
         created_at=now,
         updated_at=now,
@@ -60,7 +65,6 @@ def _version(asset_id: uuid.UUID, version_id: uuid.UUID) -> AgentVersionRecord:
         id=version_id,
         agent_id=asset_id,
         version_number=1,
-        workflow_status="published",
         description="审查代码并输出建议",
         agents_instructions="# AGENTS.md\n\nReview code.",
         soul="# SOUL.md\n\nBe precise.",
@@ -75,26 +79,32 @@ def _version(asset_id: uuid.UUID, version_id: uuid.UUID) -> AgentVersionRecord:
         created_by_user_id="creator",
         created_at=now,
     )
-    return AgentVersionRecord(row, (uuid.uuid4(),), ())
+    return AgentVersionRecord(
+        row,
+        (SkillAssetRef(AssetScope.PROJECT, uuid.uuid4()),),
+        (),
+    )
 
 
 @pytest.mark.asyncio
-async def test_update_capability_bindings_creates_a_draft_replacement_version(
+async def test_update_capability_bindings_creates_a_forward_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
     current_version_id = uuid.uuid4()
     asset = _asset(context, current_version_id)
     current = _version(asset.id, current_version_id)
-    latest_draft = _version(asset.id, uuid.uuid4())
-    latest_draft.row.workflow_status = "draft"
-    latest_draft.row.version_number = 2
-    latest_draft.row.supersedes_version_id = current_version_id
-    latest_draft.row.agents_instructions = "# AGENTS.md\n\nKeep this unpublished edit."
-    latest_draft.row.soul = "# SOUL.md\n\nDraft soul."
-    latest_draft.row.identity = "# IDENTITY.md\n\nDraft identity."
-    latest_draft.row.user_context = "# USER.md\n\nDraft context."
-    selected_skills = (uuid.uuid4(), uuid.uuid4())
+    latest_candidate = _version(asset.id, uuid.uuid4())
+    latest_candidate.row.version_number = 2
+    latest_candidate.row.supersedes_version_id = current_version_id
+    latest_candidate.row.agents_instructions = "# AGENTS.md\n\nKeep this Candidate edit."
+    latest_candidate.row.soul = "# SOUL.md\n\nCandidate soul."
+    latest_candidate.row.identity = "# IDENTITY.md\n\nCandidate identity."
+    latest_candidate.row.user_context = "# USER.md\n\nCandidate context."
+    selected_skills = (
+        SkillAssetRef(AssetScope.PROJECT, uuid.uuid4()),
+        SkillAssetRef(AssetScope.SYSTEM, uuid.uuid4()),
+    )
     selected_mcps = (uuid.uuid4(),)
     created: list[AgentVersionRecord] = []
     audit_actions: list[str] = []
@@ -110,31 +120,16 @@ async def test_update_capability_bindings_creates_a_draft_replacement_version(
         async def get_project_asset(self, *_args, **_kwargs) -> AgentRow:
             return asset
 
-        async def get_project_version(
-            self,
-            _actor: object,
-            _asset_id: uuid.UUID,
-            version_id: uuid.UUID,
-            **_kwargs,
-        ) -> AgentVersionRecord:
-            assert version_id == current_version_id
-            return current
+        async def get_project_version_history(self, *_args) -> tuple[AgentVersionRecord, ...]:
+            return (latest_candidate, current)
 
-        async def get_latest_project_version(
-            self,
-            _actor: object,
-            _asset_id: uuid.UUID,
-            **_kwargs,
-        ) -> AgentVersionRecord:
-            return latest_draft
-
-        async def resolve_project_skill_versions(self, *_args) -> tuple[uuid.UUID, ...]:
+        async def resolve_project_skill_refs(self, *_args, **_kwargs) -> tuple[SkillAssetRef, ...]:
             return selected_skills
 
         async def resolve_project_mcp_versions(self, *_args) -> tuple[uuid.UUID, ...]:
             return selected_mcps
 
-        async def lock_skill_version_slugs(self, values) -> tuple[str, ...]:
+        async def lock_skill_asset_slugs(self, values) -> tuple[str, ...]:
             assert tuple(values) == selected_skills
             return ("first-skill", "second-skill")
 
@@ -146,14 +141,14 @@ async def test_update_capability_bindings_creates_a_draft_replacement_version(
             _actor: object,
             asset_id: uuid.UUID,
             row: AgentVersionRow,
-            skill_version_ids,
+            skill_refs,
             mcp_version_ids,
         ) -> AgentVersionRecord:
             assert asset_id == asset.id
             row.id = uuid.uuid4()
             record = AgentVersionRecord(
                 row,
-                tuple(skill_version_ids),
+                tuple(skill_refs),
                 tuple(mcp_version_ids),
             )
             created.append(record)
@@ -199,18 +194,18 @@ async def test_update_capability_bindings_creates_a_draft_replacement_version(
     )
 
     assert result.version_number == 3
-    assert result.workflow_status.value == "draft"
-    assert result.skill_version_ids == selected_skills
+    assert result.relation is VersionRelation.CANDIDATE
+    assert result.skill_refs == selected_skills
     assert result.mcp_version_ids == selected_mcps
-    assert result.agents_instructions == latest_draft.row.agents_instructions
-    assert result.soul == latest_draft.row.soul
-    assert result.identity == latest_draft.row.identity
-    assert result.user_context == latest_draft.row.user_context
+    assert result.agents_instructions == latest_candidate.row.agents_instructions
+    assert result.soul == latest_candidate.row.soul
+    assert result.identity == latest_candidate.row.identity
+    assert result.user_context == latest_candidate.row.user_context
     assert result.tool_groups == tuple(current.row.tool_groups)
     assert len(created) == 1
-    assert created[0].row.supersedes_version_id == current_version_id
-    assert asset.current_published_version_id == current_version_id
-    assert asset.version == 4
+    assert created[0].row.supersedes_version_id == latest_candidate.row.id
+    assert asset.current_version_id == current_version_id
+    assert asset.revision == 4
     assert audit_actions == ["agent.capability_bindings.update"]
 
 
@@ -222,7 +217,7 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
     current_version_id = uuid.uuid4()
     asset = _asset(context, current_version_id)
     current = _version(asset.id, current_version_id)
-    selected_skill = uuid.uuid4()
+    selected_skill = SkillAssetRef(AssetScope.PROJECT, uuid.uuid4())
 
     class _Session:
         async def flush(self) -> None:
@@ -244,17 +239,10 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
         async def get_project_asset(self, *_args, **_kwargs) -> AgentRow:
             return asset
 
-        async def get_project_version(self, *_args, **_kwargs) -> AgentVersionRecord:
-            return current
+        async def get_project_version_history(self, *_args) -> tuple[AgentVersionRecord, ...]:
+            return (current,)
 
-        async def get_latest_project_version(
-            self,
-            *_args,
-            **_kwargs,
-        ) -> AgentVersionRecord:
-            return current
-
-        async def resolve_project_skill_versions(self, *_args) -> tuple[uuid.UUID, ...]:
+        async def resolve_project_skill_refs(self, *_args, **_kwargs) -> tuple[SkillAssetRef, ...]:
             return ()
 
         async def resolve_project_mcp_versions(self, *_args) -> tuple[uuid.UUID, ...]:
@@ -270,128 +258,3 @@ async def test_update_capability_bindings_rejects_out_of_scope_dependencies(
             AgentCapabilityBindings((selected_skill,), ()),
             expected_asset_version=3,
         )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("source_workflow_status", ["published", "draft"])
-async def test_restore_version_creates_a_current_base_draft_copy_without_rewriting_source(
-    monkeypatch: pytest.MonkeyPatch,
-    source_workflow_status: str,
-) -> None:
-    context = _context()
-    current_version_id = uuid.uuid4()
-    target_version_id = uuid.uuid4()
-    asset = _asset(context, current_version_id)
-    asset.version = 7
-    target = _version(asset.id, target_version_id)
-    target.row.version_number = 2
-    target.row.workflow_status = source_workflow_status
-    source_supersedes_version_id = uuid.uuid4() if source_workflow_status == "draft" else None
-    target.row.supersedes_version_id = source_supersedes_version_id
-    target.row.description = "历史版本"
-    target.row.payload_checksum = AgentService._payload_checksum(  # noqa: SLF001 - focused immutable-version contract
-        AgentPayload(
-            description=target.row.description,
-            soul=target.row.soul,
-            model_ref=target.row.model_ref,
-            tool_groups=tuple(target.row.tool_groups),
-            skill_version_ids=target.skill_version_ids,
-            mcp_version_ids=target.mcp_version_ids,
-            agents_instructions=target.row.agents_instructions,
-            identity=target.row.identity,
-            user_context=target.row.user_context,
-            payload_schema_version=target.row.payload_schema_version,
-            model_settings=AgentModelSettings(),
-        ),
-        payload_schema_version=target.row.payload_schema_version,
-    )
-    created: list[AgentVersionRecord] = []
-
-    class _Session:
-        async def flush(self) -> None:
-            return None
-
-        def begin(self):
-            return self
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args) -> None:
-            return None
-
-    class _Repository:
-        def __init__(self, session: object) -> None:
-            self.session = session
-
-        async def get_project_asset(self, *_args, **_kwargs) -> AgentRow:
-            return asset
-
-        async def get_project_version(
-            self,
-            _actor: object,
-            _asset_id: uuid.UUID,
-            version_id: uuid.UUID,
-            **_kwargs,
-        ) -> AgentVersionRecord:
-            assert version_id == target_version_id
-            return target
-
-        async def resolve_project_skill_versions(self, *_args) -> tuple[uuid.UUID, ...]:
-            return target.skill_version_ids
-
-        async def resolve_project_mcp_versions(self, *_args) -> tuple[uuid.UUID, ...]:
-            return target.mcp_version_ids
-
-        async def lock_skill_version_slugs(self, _values) -> tuple[str, ...]:
-            return ("restored-skill",)
-
-        async def next_project_version_number(self, *_args) -> int:
-            return 5
-
-        async def create_project_version(
-            self,
-            _actor: object,
-            _asset_id: uuid.UUID,
-            row: AgentVersionRow,
-            skill_version_ids,
-            mcp_version_ids,
-        ) -> AgentVersionRecord:
-            row.id = uuid.uuid4()
-            record = AgentVersionRecord(
-                row,
-                tuple(skill_version_ids),
-                tuple(mcp_version_ids),
-            )
-            created.append(record)
-            return record
-
-    monkeypatch.setattr(agent_service_module, "AgentRepository", _Repository)
-    service = AgentService(lambda: _Session())  # type: ignore[arg-type]
-
-    restored = await service.restore_version(
-        context,
-        asset.id,
-        target_version_id,
-        expected_asset_version=7,
-    )
-
-    assert restored.version_number == 5
-    assert restored.workflow_status.value == "draft"
-    assert restored.description == "历史版本"
-    assert restored.agents_instructions == target.row.agents_instructions
-    assert restored.soul == target.row.soul
-    assert restored.identity == target.row.identity
-    assert restored.user_context == target.row.user_context
-    assert restored.model_ref == target.row.model_ref
-    assert restored.model_settings == AgentModelSettings()
-    assert restored.tool_groups == tuple(target.row.tool_groups)
-    assert restored.skill_version_ids == target.skill_version_ids
-    assert restored.mcp_version_ids == target.mcp_version_ids
-    assert created[0].row.supersedes_version_id == current_version_id
-    assert restored.payload_checksum == target.row.payload_checksum
-    assert target.row.version_number == 2
-    assert target.row.workflow_status == source_workflow_status
-    assert target.row.supersedes_version_id == source_supersedes_version_id
-    assert asset.current_published_version_id == current_version_id
-    assert asset.version == 8

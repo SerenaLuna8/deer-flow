@@ -47,7 +47,7 @@ REMOVED_MEMORY_TABLES = {
 
 
 def test_final_memory_schema_uses_only_the_document_model() -> None:
-    assert CURRENT_SCHEMA_REVISION == "skill_credential_source_field"
+    assert CURRENT_SCHEMA_REVISION == "current_asset_version_lifecycle"
     assert MEMORY_DOCUMENT_TABLES <= set(Base.metadata.tables)
     assert REMOVED_MEMORY_TABLES.isdisjoint(Base.metadata.tables)
     assert MEMORY_DOCUMENT_TABLES <= set(FINAL_REQUIRED_RELATIONS)

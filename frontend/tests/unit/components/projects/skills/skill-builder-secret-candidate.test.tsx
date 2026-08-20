@@ -104,8 +104,8 @@ function commitResponse(
         slug: "secret-reader",
         display_name: "Secret reader",
         status: "suspended",
-        current_published_version_id: VERSION_ID,
-        version: 1,
+        current_version_id: VERSION_ID,
+        revision: 1,
         created_by_user_id: "owner-1",
         created_at: NOW,
         updated_at: NOW,
@@ -287,7 +287,7 @@ describe("Skill Builder create Credential setup", () => {
     });
   });
 
-  test("derives the exact published create version and requirements from the checked commit response", () => {
+  test("derives the exact saved create version and requirements from the checked commit response", () => {
     expect(skillBuilderCreatedSecretSetup(commitResponse())).toEqual({
       skillId: SKILL_ID,
       skillVersionId: VERSION_ID,
@@ -339,13 +339,13 @@ describe("Skill Builder create Credential setup", () => {
         ...original.data,
         skill: {
           ...original.data.skill,
-          current_published_version_id: NEWER_VERSION_ID,
+          current_version_id: NEWER_VERSION_ID,
         },
         version: {
           id: VERSION_ID,
           skill_id: SKILL_ID,
           version_number: 1,
-          workflow_status: "published",
+          relation: "candidate",
           description: "Secret reader",
           frontmatter: {},
           compatibility: null,
@@ -360,7 +360,7 @@ describe("Skill Builder create Credential setup", () => {
           revoked_by_user_id: null,
           revocation_reason_code: null,
           governance_status: "active",
-          binding_eligible: true,
+          binding_eligible: false,
           created_by_user_id: "owner-1",
           created_at: NOW,
         },
@@ -426,7 +426,7 @@ describe("Skill Builder create Credential setup", () => {
     expect(html).toContain("configure_credentials=1");
   });
 
-  test("routes a revised Draft with declarations to exact-version mappings", () => {
+  test("routes a revised Candidate Version with declarations to exact-version mappings", () => {
     const html = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
         <SkillBuilderRevisionCommitSuccess
@@ -437,7 +437,7 @@ describe("Skill Builder create Credential setup", () => {
       </I18nProvider>,
     );
 
-    expect(html).toContain("草稿版本 v2");
+    expect(html).toContain("候选版本 v2");
     expect(html).toContain("配置凭证");
     expect(html).toContain("configure_credentials=1");
   });

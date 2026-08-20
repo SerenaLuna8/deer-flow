@@ -20,7 +20,7 @@ async def require_executable_agent(
     context: PrivateWorkContext,
     agent: ThreadAgentRef,
 ) -> None:
-    """Require the active published Agent target used by private execution."""
+    """Require an enabled Agent with a Current Version for private execution."""
 
     if agent.scope == "project":
         asset = (
@@ -35,9 +35,9 @@ async def require_executable_agent(
                 .with_for_update(read=True, of=AgentRow)
             )
         ).scalar_one_or_none()
-        if asset is None or asset.current_published_version_id is None:
+        if asset is None or asset.current_version_id is None:
             raise PrivateWorkNotFound(context.request_id)
-        version_id = asset.current_published_version_id
+        version_id = asset.current_version_id
     elif agent.scope == "system":
         asset = (
             await session.execute(
@@ -54,9 +54,9 @@ async def require_executable_agent(
         if asset is None:
             raise PrivateWorkNotFound(context.request_id)
         if asset.source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY:
-            if asset.current_published_version_id is None:
+            if asset.current_version_id is None:
                 raise PrivateWorkNotFound(context.request_id)
-            version_id = asset.current_published_version_id
+            version_id = asset.current_version_id
         else:
             binding = (
                 await session.execute(
@@ -71,7 +71,9 @@ async def require_executable_agent(
             ).scalar_one_or_none()
             if binding is None:
                 raise PrivateWorkNotFound(context.request_id)
-            version_id = binding.agent_version_id
+            if asset.current_version_id is None:
+                raise PrivateWorkNotFound(context.request_id)
+            version_id = asset.current_version_id
     else:
         raise PrivateWorkNotFound(context.request_id)
 
@@ -81,7 +83,8 @@ async def require_executable_agent(
             .where(
                 AgentVersionRow.id == version_id,
                 AgentVersionRow.agent_id == agent.asset_id,
-                AgentVersionRow.workflow_status == "published",
+                AgentVersionRow.id == asset.current_version_id,
+                *((AgentVersionRow.version_number == 1,) if asset.scope == "system" else ()),
             )
             .with_for_update(read=True, of=AgentVersionRow)
         )

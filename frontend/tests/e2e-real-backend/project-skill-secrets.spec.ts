@@ -12,7 +12,7 @@ const APP =
   `http://localhost:${process.env.E2E_FRONTEND_PORT ?? "3000"}`;
 const REQUIRED_SECRET = "REAL_API_TOKEN";
 const OPTIONAL_SECRET = "REAL_ANALYTICS_KEY";
-const SECRET_VALUE = "playwright-secret-value-never-publish";
+const SECRET_VALUE = "playwright-secret-value-never-expose";
 
 function writeTarOctal(
   header: Buffer,
@@ -77,7 +77,7 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
     project = await registerReplayProject(context, APP);
   });
 
-  test("uploads, maps exact Credential fields, patches SKILL.md, and publishes with CAS", async ({
+  test("uploads, maps exact Credential fields, patches SKILL.md, and activates with CAS", async ({
     page,
     context,
   }) => {
@@ -181,7 +181,7 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
       }),
     ).toBeVisible();
     await expect(
-      detail.getByText("当前正在编辑新版本。", { exact: false }),
+      detail.getByText("当前正在编辑 SKILL.md。", { exact: false }),
     ).toBeVisible();
     await expect(
       detail.getByLabel(new RegExp("Project Credential", "u")),
@@ -209,59 +209,48 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
     ]);
     expect(forkResponse.status(), await forkResponse.text()).toBe(201);
     const forked = (await forkResponse.json()) as { data?: { id?: unknown } };
-    const draftVersionId = forked.data?.id;
-    expect(typeof draftVersionId).toBe("string");
-    if (typeof draftVersionId !== "string") {
-      throw new Error("Skill fork response is missing the draft version ID");
+    const candidateVersionId = forked.data?.id;
+    expect(typeof candidateVersionId).toBe("string");
+    if (typeof candidateVersionId !== "string") {
+      throw new Error(
+        "Skill fork response is missing the Candidate Version ID",
+      );
     }
 
     await expect(
       detail.getByRole("tab", { name: "Runtime credentials" }),
     ).toHaveAttribute("aria-selected", "true");
-    const draftCredentialSelect = detail.getByLabel(
+    const candidateCredentialSelect = detail.getByLabel(
       `Project Credential · ${REQUIRED_SECRET}`,
     );
-    await draftCredentialSelect.selectOption(credentialVersionId);
-    const draftSourceFieldSelect = detail.getByLabel(
+    const candidateSourceFieldSelect = detail.getByLabel(
       `Source environment variable · ${REQUIRED_SECRET}`,
     );
-    await draftSourceFieldSelect.selectOption(REQUIRED_SECRET);
-    const [draftBindingResponse] = await Promise.all([
-      page.waitForResponse(
-        (response) =>
-          response.request().method() === "PUT" &&
-          response
-            .url()
-            .endsWith(
-              `/api/projects/${project.id}/skills/${skillId}/versions/${draftVersionId}/credential-bindings`,
-            ),
-      ),
-      detail.getByRole("button", { name: "Save mappings" }).click(),
-    ]);
-    expect(
-      draftBindingResponse.status(),
-      await draftBindingResponse.text(),
-    ).toBe(200);
-
-    const publishButton = detail.getByRole("button", { name: "发布版本" });
-    await expect(publishButton).toBeEnabled();
-    await publishButton.click();
-    const publishDialog = page.getByRole("dialog", {
-      name: "Publish Skill version",
-    });
-    await expect(publishDialog).toBeVisible();
+    await expect(candidateCredentialSelect).toHaveValue(credentialVersionId);
+    await expect(candidateSourceFieldSelect).toHaveValue(REQUIRED_SECRET);
     await expect(
-      publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+      detail.getByRole("button", { name: "Save mappings" }),
+    ).toBeDisabled();
+
+    const activationButton = detail.getByRole("button", { name: "激活版本" });
+    await expect(activationButton).toBeEnabled();
+    await activationButton.click();
+    const activationDialog = page.getByRole("dialog", {
+      name: "Activate Skill Candidate Version",
+    });
+    await expect(activationDialog).toBeVisible();
+    await expect(
+      activationDialog.getByLabel(new RegExp("Project Credential", "u")),
     ).toHaveCount(0);
 
-    const [publishRequest, publishResponse] = await Promise.all([
+    const [activationRequest, activationResponse] = await Promise.all([
       page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
           request
             .url()
             .endsWith(
-              `/api/projects/${project.id}/skills/${skillId}/versions/${draftVersionId}/publish`,
+              `/api/projects/${project.id}/skills/${skillId}/versions/${candidateVersionId}/activate`,
             ),
       ),
       page.waitForResponse(
@@ -270,24 +259,27 @@ test.describe("project Skill secrets (real Gateway, no external model)", () => {
           response
             .url()
             .endsWith(
-              `/api/projects/${project.id}/skills/${skillId}/versions/${draftVersionId}/publish`,
+              `/api/projects/${project.id}/skills/${skillId}/versions/${candidateVersionId}/activate`,
             ),
       ),
-      publishDialog.getByRole("button", { name: "Publish version" }).click(),
+      activationDialog
+        .getByRole("button", { name: "Activate version" })
+        .click(),
     ]);
-    expect(publishResponse.status(), await publishResponse.text()).toBe(200);
-    const publishBody = publishRequest.postDataJSON() as Record<
+    expect(activationResponse.status(), await activationResponse.text()).toBe(
+      200,
+    );
+    const activationBody = activationRequest.postDataJSON() as Record<
       string,
       unknown
     >;
-    expect(publishBody).not.toHaveProperty("credential_bindings");
-    expect(JSON.stringify(publishBody)).not.toContain(SECRET_VALUE);
-    expect(Object.keys(publishBody).sort()).toEqual([
-      "acknowledge_stale_base",
-      "expected_asset_version",
+    expect(activationBody).not.toHaveProperty("credential_bindings");
+    expect(JSON.stringify(activationBody)).not.toContain(SECRET_VALUE);
+    expect(Object.keys(activationBody).sort()).toEqual([
       "expected_binding_revision",
       "expected_payload_checksum",
+      "expected_revision",
     ]);
-    await expect(publishDialog).toHaveCount(0, { timeout: 30_000 });
+    await expect(activationDialog).toHaveCount(0, { timeout: 30_000 });
   });
 });

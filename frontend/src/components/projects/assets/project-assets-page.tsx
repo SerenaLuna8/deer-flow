@@ -127,6 +127,7 @@ export function ProjectAssetCatalogView({
   return (
     <div className="space-y-10">
       <SystemAssetSection
+        kind={kind}
         items={data.system_items}
         onManageBinding={onManageBinding}
         renderDetails={renderSystemDetails}
@@ -439,6 +440,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   actionError,
   pending = false,
   onChangeStatus,
+  onActivate,
   onPublish,
   onSubmit,
   onApprove,
@@ -456,6 +458,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
   actionError?: unknown;
   pending?: boolean;
   onChangeStatus?: (action: AdminProjectAssetStatusAction<Kind>) => void;
+  onActivate?: (version: AssetVersion) => void;
   onPublish?: (version: AssetVersion) => void;
   onSubmit?: (version: McpVersion) => void;
   onApprove?: (
@@ -493,7 +496,7 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
             >
               {action === "archive"
                 ? t.adminAssets.catalog.archive
-                : action === "activate"
+                : action === "enable"
                   ? t.adminAssets.catalog.activate
                   : kind === "agents"
                     ? t.adminAssets.catalog.disable
@@ -511,14 +514,17 @@ export function ProjectAssetHistoryView<Kind extends MutableKind>({
           kind={kind}
           scope={item.scope}
           versions={versions}
-          currentVersionId={item.current_published_version_id}
+          currentVersionId={item.current_version_id}
           pending={pending}
           approvalCredentials={approvalCredentials}
           approvalCredentialsLoading={approvalCredentialsLoading}
           approvalCredentialsError={approvalCredentialsError}
           approvalError={approvalError}
           onRetryApprovalCredentials={onRetryApprovalCredentials}
-          onPublish={canAuthor ? onPublish : undefined}
+          onActivate={onActivate}
+          onPublish={
+            canAuthor && kind === "mcp-servers" ? onPublish : undefined
+          }
           onSubmit={canAuthor && kind === "mcp-servers" ? onSubmit : undefined}
           onApprove={
             canApprove && item.status === "active" && kind === "mcp-servers"

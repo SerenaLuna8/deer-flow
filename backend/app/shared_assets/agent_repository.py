@@ -14,6 +14,7 @@ from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFoun
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
+from app.shared_assets.models import AssetScope, SkillAssetRef
 from deerflow.persistence.projects.model import (
     ProjectDefaultAgentRow,
     ProjectMembershipRow,
@@ -41,7 +42,7 @@ class AgentCreateCommand(Protocol):
 @dataclass(frozen=True)
 class AgentVersionRecord:
     row: AgentVersionRow
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRef, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
 
 
@@ -146,7 +147,7 @@ class AgentRepository:
         await self.session.flush()
         return row
 
-    async def current_published_descriptions(
+    async def current_descriptions(
         self,
         asset_ids: Sequence[uuid.UUID],
     ) -> Mapping[uuid.UUID, str]:
@@ -159,7 +160,7 @@ class AgentRepository:
             select(AgentRow.id, AgentVersionRow.description)
             .join(
                 AgentVersionRow,
-                AgentVersionRow.id == AgentRow.current_published_version_id,
+                AgentVersionRow.id == AgentRow.current_version_id,
             )
             .where(AgentRow.id.in_(ids))
         )
@@ -219,6 +220,35 @@ class AgentRepository:
         )
         if for_update:
             statement = statement.with_for_update(of=AgentRow)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return row
+
+    async def get_project_visible_asset(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+    ) -> AgentRow:
+        self._require_project_actor(context)
+        statement = select(AgentRow).where(
+            AgentRow.id == asset_id,
+            or_(
+                and_(
+                    AgentRow.scope == "project",
+                    AgentRow.project_id == context.project_id,
+                ),
+                and_(
+                    AgentRow.scope == "system",
+                    AgentRow.project_id.is_(None),
+                    or_(
+                        AgentRow.source_key.is_(None),
+                        AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
+                    ),
+                ),
+            ),
+            self._project_context_exists(context),
+        )
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
@@ -291,7 +321,7 @@ class AgentRepository:
         if asset.status == "archived":
             raise AssetConflict(context.request_id)
         asset.status = "archived"
-        asset.version += 1
+        asset.revision += 1
         await self.session.flush()
 
     async def get_system_asset(
@@ -401,7 +431,7 @@ class AgentRepository:
         context: ProjectContext,
         asset_id: uuid.UUID,
         version: AgentVersionRow,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
     ) -> AgentVersionRecord:
         self._require_project_actor(context)
@@ -410,15 +440,16 @@ class AgentRepository:
             raise AssetNotFound(context.request_id)
         self.session.add(version)
         await self.session.flush()
-        await self._add_refs(version.id, skill_version_ids, mcp_version_ids)
-        return AgentVersionRecord(version, tuple(skill_version_ids), tuple(mcp_version_ids))
+        await self._allow_version_assembly(version.id)
+        await self._add_refs(version.id, skill_refs, mcp_version_ids)
+        return AgentVersionRecord(version, tuple(skill_refs), tuple(mcp_version_ids))
 
     async def create_system_version(
         self,
         context: SystemAssetGovernanceContext,
         asset_id: uuid.UUID,
         version: AgentVersionRow,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
     ) -> AgentVersionRecord:
         self._require_system_actor(context)
@@ -427,15 +458,16 @@ class AgentRepository:
             raise AssetNotFound(context.request_id)
         self.session.add(version)
         await self.session.flush()
-        await self._add_refs(version.id, skill_version_ids, mcp_version_ids)
-        return AgentVersionRecord(version, tuple(skill_version_ids), tuple(mcp_version_ids))
+        await self._allow_version_assembly(version.id)
+        await self._add_refs(version.id, skill_refs, mcp_version_ids)
+        return AgentVersionRecord(version, tuple(skill_refs), tuple(mcp_version_ids))
 
     async def create_override_version(
         self,
         context: SystemAssetGovernanceContext,
         asset_id: uuid.UUID,
         version: AgentVersionRow,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
     ) -> AgentVersionRecord:
         self._require_system_actor(context)
@@ -444,22 +476,24 @@ class AgentRepository:
             raise AssetNotFound(context.request_id)
         self.session.add(version)
         await self.session.flush()
-        await self._add_refs(version.id, skill_version_ids, mcp_version_ids)
-        return AgentVersionRecord(version, tuple(skill_version_ids), tuple(mcp_version_ids))
+        await self._allow_version_assembly(version.id)
+        await self._add_refs(version.id, skill_refs, mcp_version_ids)
+        return AgentVersionRecord(version, tuple(skill_refs), tuple(mcp_version_ids))
 
     async def _add_refs(
         self,
         version_id: uuid.UUID,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
     ) -> None:
         self.session.add_all(
             AgentVersionSkillRefRow(
                 agent_version_id=version_id,
-                skill_version_id=dependency_id,
+                skill_asset_scope=dependency.scope.value,
+                skill_asset_id=dependency.asset_id,
                 sort_order=index,
             )
-            for index, dependency_id in enumerate(skill_version_ids)
+            for index, dependency in enumerate(skill_refs)
         )
         self.session.add_all(
             AgentVersionMcpRefRow(
@@ -470,6 +504,17 @@ class AgentRepository:
             for index, dependency_id in enumerate(mcp_version_ids)
         )
         await self.session.flush()
+
+    async def _allow_version_assembly(self, version_id: uuid.UUID) -> None:
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.asset_version_assembly",
+                    str(version_id),
+                    True,
+                )
+            )
+        )
 
     async def get_project_version(
         self,
@@ -726,16 +771,7 @@ class AgentRepository:
             select(AgentRow.id, AgentVersionRow)
             .outerjoin(
                 AgentVersionRow,
-                and_(
-                    AgentVersionRow.agent_id == AgentRow.id,
-                    or_(
-                        AgentRow.scope == "project",
-                        and_(
-                            AgentRow.scope == "system",
-                            AgentVersionRow.workflow_status == "published",
-                        ),
-                    ),
-                ),
+                AgentVersionRow.agent_id == AgentRow.id,
             )
             .where(
                 AgentRow.id == asset_id,
@@ -819,11 +855,15 @@ class AgentRepository:
         version_ids: Sequence[uuid.UUID],
         *,
         for_update: bool = False,
-    ) -> tuple[dict[uuid.UUID, tuple[uuid.UUID, ...]], dict[uuid.UUID, tuple[uuid.UUID, ...]]]:
+    ) -> tuple[
+        dict[uuid.UUID, tuple[SkillAssetRef, ...]],
+        dict[uuid.UUID, tuple[uuid.UUID, ...]],
+    ]:
         skill_statement = (
             select(
                 AgentVersionSkillRefRow.agent_version_id,
-                AgentVersionSkillRefRow.skill_version_id,
+                AgentVersionSkillRefRow.skill_asset_scope,
+                AgentVersionSkillRefRow.skill_asset_id,
             )
             .where(AgentVersionSkillRefRow.agent_version_id.in_(version_ids))
             .order_by(AgentVersionSkillRefRow.agent_version_id, AgentVersionSkillRefRow.sort_order)
@@ -839,9 +879,11 @@ class AgentRepository:
         if for_update:
             skill_statement = skill_statement.with_for_update(of=AgentVersionSkillRefRow)
             mcp_statement = mcp_statement.with_for_update(of=AgentVersionMcpRefRow)
-        skill_map: dict[uuid.UUID, list[uuid.UUID]] = {}
-        for version_id, dependency_id in (await self.session.execute(skill_statement)).all():
-            skill_map.setdefault(version_id, []).append(dependency_id)
+        skill_map: dict[uuid.UUID, list[SkillAssetRef]] = {}
+        for version_id, scope, dependency_id in (await self.session.execute(skill_statement)).all():
+            skill_map.setdefault(version_id, []).append(
+                SkillAssetRef(AssetScope(scope), dependency_id),
+            )
         mcp_map: dict[uuid.UUID, list[uuid.UUID]] = {}
         for version_id, dependency_id in (await self.session.execute(mcp_statement)).all():
             mcp_map.setdefault(version_id, []).append(dependency_id)
@@ -850,72 +892,88 @@ class AgentRepository:
             {key: tuple(value) for key, value in mcp_map.items()},
         )
 
-    async def resolve_project_skill_versions(
+    async def resolve_project_skill_refs(
         self,
         context: ProjectContext,
-        version_ids: Sequence[uuid.UUID],
-    ) -> tuple[uuid.UUID, ...]:
+        refs: Sequence[SkillAssetRef],
+        *,
+        require_runnable: bool,
+    ) -> tuple[SkillAssetRef, ...]:
         self._require_project_actor(context)
-        if not version_ids:
+        if not refs:
             return ()
+        project_ids = tuple(ref.asset_id for ref in refs if ref.scope is AssetScope.PROJECT)
+        system_ids = tuple(ref.asset_id for ref in refs if ref.scope is AssetScope.SYSTEM)
         project_statement = (
-            select(SkillVersionRow.id)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            select(SkillRow.id)
             .where(
-                SkillVersionRow.id.in_(version_ids),
-                SkillVersionRow.workflow_status == "published",
+                SkillRow.id.in_(project_ids),
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
-                SkillRow.status == "active",
                 self._project_context_exists(context),
+                *(
+                    (
+                        SkillRow.status == "active",
+                        SkillRow.current_version_id.is_not(None),
+                    )
+                    if require_runnable
+                    else (SkillRow.status != "archived",)
+                ),
             )
-            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+            .with_for_update(read=True, of=SkillRow)
         )
         system_statement = (
-            select(SkillVersionRow.id)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            select(SkillRow.id)
             .join(
                 ProjectSystemSkillBindingRow,
+                ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
+            )
+            .join(
+                SkillVersionRow,
                 and_(
-                    ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
-                    ProjectSystemSkillBindingRow.skill_version_id == SkillVersionRow.id,
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
                 ),
             )
             .where(
-                SkillVersionRow.id.in_(version_ids),
-                SkillVersionRow.workflow_status == "published",
-                SkillVersionRow.revoked_at.is_(None),
+                SkillRow.id.in_(system_ids),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
-                SkillRow.status == "active",
                 ProjectSystemSkillBindingRow.project_id == context.project_id,
                 ProjectSystemSkillBindingRow.enabled.is_(True),
                 self._project_context_exists(context),
+                *(
+                    (
+                        SkillRow.status == "active",
+                        SkillVersionRow.revoked_at.is_(None),
+                    )
+                    if require_runnable
+                    else ()
+                ),
             )
             .with_for_update(
                 read=True,
                 of=[SkillRow, SkillVersionRow, ProjectSystemSkillBindingRow],
             )
         )
-        project_ids = (await self.session.execute(project_statement)).scalars().all()
-        system_ids = (await self.session.execute(system_statement)).scalars().all()
-        return tuple((*project_ids, *system_ids))
+        resolved_project_ids = set(
+            (await self.session.execute(project_statement)).scalars().all(),
+        )
+        resolved_system_ids = set(
+            (await self.session.execute(system_statement)).scalars().all(),
+        )
+        return tuple(ref for ref in refs if (ref.scope is AssetScope.PROJECT and ref.asset_id in resolved_project_ids) or (ref.scope is AssetScope.SYSTEM and ref.asset_id in resolved_system_ids))
 
-    async def list_enabled_system_dependency_versions(
+    async def list_enabled_system_dependencies(
         self,
         context: ProjectContext,
-    ) -> tuple[tuple[uuid.UUID, ...], tuple[uuid.UUID, ...]]:
-        """Freeze every enabled, active, published System Skill/MCP binding.
-
-        Agent revisions store exact dependency version IDs.  Defaults therefore
-        come from the project's enabled bindings rather than from the global
-        catalog, preserving the project authorization boundary.
-        """
+    ) -> tuple[tuple[SkillAssetRef, ...], tuple[uuid.UUID, ...]]:
+        """Return stable System Skill assets and exact MCP releases."""
 
         self._require_project_actor(context)
         await self._lock_project_context(context)
         skill_statement = (
-            select(SkillVersionRow.id)
+            select(SkillRow.id)
             .select_from(ProjectSystemSkillBindingRow)
             .join(
                 SkillRow,
@@ -929,9 +987,8 @@ class AgentRepository:
             .join(
                 SkillVersionRow,
                 and_(
-                    SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
                     SkillVersionRow.skill_id == SkillRow.id,
-                    SkillVersionRow.workflow_status == "published",
                     SkillVersionRow.revoked_at.is_(None),
                 ),
             )
@@ -985,17 +1042,21 @@ class AgentRepository:
         )
         skill_ids = (await self.session.execute(skill_statement)).scalars().all()
         mcp_ids = (await self.session.execute(mcp_statement)).scalars().all()
-        return tuple(skill_ids), tuple(mcp_ids)
+        return (
+            tuple(SkillAssetRef(AssetScope.SYSTEM, skill_id) for skill_id in skill_ids),
+            tuple(mcp_ids),
+        )
 
-    async def lock_skill_version_slugs(
+    async def lock_skill_asset_slugs(
         self,
-        version_ids: Sequence[uuid.UUID],
+        refs: Sequence[SkillAssetRef],
     ) -> tuple[str, ...]:
-        """Read slugs for dependency rows already scope-validated and locked."""
+        """Read runtime names for dependency assets already scope-validated."""
 
-        if not version_ids:
+        if not refs:
             return ()
-        statement = select(SkillRow.slug).join(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id).where(SkillVersionRow.id.in_(version_ids)).with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+        ids = tuple(ref.asset_id for ref in refs)
+        statement = select(SkillRow.slug).where(SkillRow.id.in_(ids)).order_by(SkillRow.id).with_for_update(read=True, of=SkillRow)
         return tuple((await self.session.execute(statement)).scalars().all())
 
     async def resolve_project_mcp_versions(
@@ -1048,79 +1109,116 @@ class AgentRepository:
         system_ids = (await self.session.execute(system_statement)).scalars().all()
         return tuple((*project_ids, *system_ids))
 
-    async def resolve_system_skill_versions(
+    async def resolve_system_skill_refs(
         self,
         context: SystemAssetGovernanceContext,
-        version_ids: Sequence[uuid.UUID],
-    ) -> tuple[uuid.UUID, ...]:
+        refs: Sequence[SkillAssetRef],
+        *,
+        require_runnable: bool,
+    ) -> tuple[SkillAssetRef, ...]:
         self._require_system_actor(context)
         if context.project_id is not None:
             raise AssetNotFound(context.request_id)
-        if not version_ids:
+        if not refs:
+            return ()
+        if any(ref.scope is not AssetScope.SYSTEM for ref in refs):
             return ()
         statement = (
-            select(SkillVersionRow.id)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
-            .where(
-                SkillVersionRow.id.in_(version_ids),
-                SkillVersionRow.workflow_status == "published",
-                SkillVersionRow.revoked_at.is_(None),
-                SkillRow.scope == "system",
-                SkillRow.project_id.is_(None),
-                SkillRow.status == "active",
-            )
-            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
-        )
-        return tuple((await self.session.execute(statement)).scalars().all())
-
-    async def resolve_override_skill_versions(
-        self,
-        context: SystemAssetGovernanceContext,
-        version_ids: Sequence[uuid.UUID],
-    ) -> tuple[uuid.UUID, ...]:
-        await self._lock_override_project(context)
-        if not version_ids:
-            return ()
-        project_statement = (
-            select(SkillVersionRow.id)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
-            .where(
-                SkillVersionRow.id.in_(version_ids),
-                SkillVersionRow.workflow_status == "published",
-                SkillRow.scope == "project",
-                SkillRow.project_id == context.project_id,
-                SkillRow.status == "active",
-            )
-            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
-        )
-        system_statement = (
-            select(SkillVersionRow.id)
-            .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+            select(SkillRow.id)
             .join(
-                ProjectSystemSkillBindingRow,
+                SkillVersionRow,
                 and_(
-                    ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
-                    ProjectSystemSkillBindingRow.skill_version_id == SkillVersionRow.id,
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
                 ),
             )
             .where(
-                SkillVersionRow.id.in_(version_ids),
-                SkillVersionRow.workflow_status == "published",
-                SkillVersionRow.revoked_at.is_(None),
+                SkillRow.id.in_(tuple(ref.asset_id for ref in refs)),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
-                SkillRow.status == "active",
+                *(
+                    (
+                        SkillRow.status == "active",
+                        SkillVersionRow.revoked_at.is_(None),
+                    )
+                    if require_runnable
+                    else ()
+                ),
+            )
+            .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
+        )
+        resolved = set((await self.session.execute(statement)).scalars().all())
+        return tuple(ref for ref in refs if ref.asset_id in resolved)
+
+    async def resolve_override_skill_refs(
+        self,
+        context: SystemAssetGovernanceContext,
+        refs: Sequence[SkillAssetRef],
+        *,
+        require_runnable: bool,
+    ) -> tuple[SkillAssetRef, ...]:
+        await self._lock_override_project(context)
+        if not refs:
+            return ()
+        project_ids = tuple(ref.asset_id for ref in refs if ref.scope is AssetScope.PROJECT)
+        system_ids = tuple(ref.asset_id for ref in refs if ref.scope is AssetScope.SYSTEM)
+        project_statement = (
+            select(SkillRow.id)
+            .where(
+                SkillRow.id.in_(project_ids),
+                SkillRow.scope == "project",
+                SkillRow.project_id == context.project_id,
+                *(
+                    (
+                        SkillRow.status == "active",
+                        SkillRow.current_version_id.is_not(None),
+                    )
+                    if require_runnable
+                    else (SkillRow.status != "archived",)
+                ),
+            )
+            .with_for_update(read=True, of=SkillRow)
+        )
+        system_statement = (
+            select(SkillRow.id)
+            .join(
+                ProjectSystemSkillBindingRow,
+                ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
+            )
+            .join(
+                SkillVersionRow,
+                and_(
+                    SkillVersionRow.skill_id == SkillRow.id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
+                ),
+            )
+            .where(
+                SkillRow.id.in_(system_ids),
+                SkillRow.scope == "system",
+                SkillRow.project_id.is_(None),
                 ProjectSystemSkillBindingRow.project_id == context.project_id,
                 ProjectSystemSkillBindingRow.enabled.is_(True),
+                *(
+                    (
+                        SkillRow.status == "active",
+                        SkillVersionRow.revoked_at.is_(None),
+                    )
+                    if require_runnable
+                    else ()
+                ),
             )
             .with_for_update(
                 read=True,
                 of=[SkillRow, SkillVersionRow, ProjectSystemSkillBindingRow],
             )
         )
-        project_ids = (await self.session.execute(project_statement)).scalars().all()
-        system_ids = (await self.session.execute(system_statement)).scalars().all()
-        return tuple((*project_ids, *system_ids))
+        resolved_project_ids = set(
+            (await self.session.execute(project_statement)).scalars().all(),
+        )
+        resolved_system_ids = set(
+            (await self.session.execute(system_statement)).scalars().all(),
+        )
+        return tuple(ref for ref in refs if (ref.scope is AssetScope.PROJECT and ref.asset_id in resolved_project_ids) or (ref.scope is AssetScope.SYSTEM and ref.asset_id in resolved_system_ids))
 
     async def resolve_system_mcp_versions(
         self,

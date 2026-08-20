@@ -16,9 +16,7 @@ class _RevocationSeed:
     admin_user_id: str
     project_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID]
     system_skill_id: uuid.UUID
-    published_version_ids: tuple[uuid.UUID, uuid.UUID, uuid.UUID]
-    concurrent_version_id: uuid.UUID
-    draft_version_id: uuid.UUID
+    system_version_id: uuid.UUID
     project_version_id: uuid.UUID
 
 
@@ -27,9 +25,7 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
     project_ids = (uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
     system_skill_id = uuid.uuid4()
     project_skill_id = uuid.uuid4()
-    published_version_ids = (uuid.uuid4(), uuid.uuid4(), uuid.uuid4())
-    concurrent_version_id = uuid.uuid4()
-    draft_version_id = uuid.uuid4()
+    system_version_id = uuid.uuid4()
     project_version_id = uuid.uuid4()
 
     async with engine.begin() as connection:
@@ -63,7 +59,7 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
         await connection.execute(
             text(
                 """INSERT INTO skills
-                (id,scope,project_id,slug,display_name,status,version,
+                (id,scope,project_id,slug,display_name,status,revision,
                  created_by_user_id)
                 VALUES (:id,:scope,:project_id,:slug,:display_name,'active',
                         :version,:owner)"""
@@ -92,47 +88,29 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
         await connection.execute(
             text(
                 """INSERT INTO skill_versions
-                (id,skill_id,version_number,workflow_status,description,
+                (id,skill_id,version_number,description,
                  frontmatter,compatibility,secret_requirements,scan_decision,
                 scan_summary,payload_checksum,created_by_user_id)
-                VALUES (:id,:skill_id,:version_number,:workflow_status,
+                VALUES (:id,:skill_id,:version_number,
                         :description,jsonb_build_object('name',CAST(:name AS text)),
                         '>=1.0','[]'::jsonb,'allow',
                         jsonb_build_object('decision','allow'),:checksum,:owner)"""
             ),
             [
                 {
-                    "id": version_id,
+                    "id": system_version_id,
                     "skill_id": system_skill_id,
-                    "version_number": index,
-                    "workflow_status": "published",
-                    "description": f"Published System Skill v{index}",
-                    "name": f"system-v{index}",
-                    "checksum": str(index) * 64,
-                    "owner": admin_user_id,
-                }
-                for index, version_id in enumerate(
-                    (*published_version_ids, concurrent_version_id),
-                    start=1,
-                )
-            ]
-            + [
-                {
-                    "id": draft_version_id,
-                    "skill_id": system_skill_id,
-                    "version_number": 5,
-                    "workflow_status": "draft",
-                    "description": "Draft System Skill v5",
-                    "name": "system-v5",
-                    "checksum": "5" * 64,
+                    "version_number": 1,
+                    "description": "System Skill Current v1",
+                    "name": "system-v1",
+                    "checksum": "1" * 64,
                     "owner": admin_user_id,
                 },
                 {
                     "id": project_version_id,
                     "skill_id": project_skill_id,
                     "version_number": 1,
-                    "workflow_status": "published",
-                    "description": "Published Project Skill v1",
+                    "description": "Project Skill Current v1",
                     "name": "project-v1",
                     "checksum": "6" * 64,
                     "owner": admin_user_id,
@@ -142,32 +120,39 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
         await connection.execute(
             text(
                 """UPDATE skills
-                SET current_published_version_id=:version_id
+                SET current_version_id=:version_id
                 WHERE id=:skill_id"""
             ),
             {
                 "skill_id": system_skill_id,
-                "version_id": published_version_ids[0],
+                "version_id": system_version_id,
+            },
+        )
+        await connection.execute(
+            text(
+                "UPDATE skills SET current_version_id=:version_id WHERE id=:skill_id",
+            ),
+            {
+                "version_id": project_version_id,
+                "skill_id": project_skill_id,
             },
         )
         await connection.execute(
             text(
                 """INSERT INTO project_system_skill_bindings
-                (project_id,system_skill_id,skill_version_id,enabled,version,
+                (project_id,system_skill_id,enabled,version,
                  created_by_user_id,updated_by_user_id)
-                VALUES (:project_id,:skill_id,:version_id,true,1,:owner,:owner)"""
+                VALUES (:project_id,:skill_id,true,1,:owner,:owner)"""
             ),
             [
                 {
                     "project_id": project_ids[0],
                     "skill_id": system_skill_id,
-                    "version_id": published_version_ids[0],
                     "owner": admin_user_id,
                 },
                 {
                     "project_id": project_ids[1],
                     "skill_id": system_skill_id,
-                    "version_id": published_version_ids[1],
                     "owner": admin_user_id,
                 },
             ],
@@ -183,9 +168,7 @@ async def _seed_revocation_graph(engine: AsyncEngine) -> _RevocationSeed:
         admin_user_id=admin_user_id,
         project_ids=project_ids,
         system_skill_id=system_skill_id,
-        published_version_ids=published_version_ids,
-        concurrent_version_id=concurrent_version_id,
-        draft_version_id=draft_version_id,
+        system_version_id=system_version_id,
         project_version_id=project_version_id,
     )
 
@@ -226,7 +209,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
     engine = create_async_engine(migrated_postgres_database_url)
     try:
         seed = await _seed_revocation_graph(engine)
-        revoked_version, active_version, later_revoked_version = seed.published_version_ids
+        revoked_version = seed.system_version_id
 
         before_payload = await _version_payload(engine, revoked_version)
         async with engine.connect() as connection:
@@ -234,7 +217,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
             before_asset = (
                 await connection.execute(
                     text(
-                        """SELECT current_published_version_id,version
+                        """SELECT current_version_id,revision
                         FROM skills WHERE id=:skill_id"""
                     ),
                     {"skill_id": seed.system_skill_id},
@@ -261,7 +244,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
             after_asset = (
                 await connection.execute(
                     text(
-                        """SELECT current_published_version_id,version
+                        """SELECT current_version_id,revision
                         FROM skills WHERE id=:skill_id"""
                     ),
                     {"skill_id": seed.system_skill_id},
@@ -320,26 +303,16 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
                 revoked_by_user_id=:actor,
                 revocation_reason_code='security'
             WHERE id=:version_id""",
-            {"actor": seed.admin_user_id, "version_id": seed.draft_version_id},
-            irreversible_message,
-        )
-        await _expect_database_error(
-            engine,
-            """UPDATE skill_versions
-            SET revoked_at=clock_timestamp(),
-                revoked_by_user_id=:actor,
-                revocation_reason_code='policy'
-            WHERE id=:version_id""",
             {"actor": seed.admin_user_id, "version_id": seed.project_version_id},
-            "only published system skill versions can be revoked",
+            "only a System Skill Current v1 can be revoked",
         )
         await _expect_database_error(
             engine,
             """INSERT INTO skill_versions
-            (id,skill_id,version_number,workflow_status,scan_decision,
+            (id,skill_id,version_number,scan_decision,
              payload_checksum,created_by_user_id,revoked_at,
              revoked_by_user_id,revocation_reason_code)
-            VALUES (:id,:skill_id,6,'published','allow',:checksum,:actor,
+            VALUES (:id,:skill_id,2,'allow',:checksum,:actor,
                     clock_timestamp(),:actor,'integrity')""",
             {
                 "id": uuid.uuid4(),
@@ -350,9 +323,8 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
             "skill version must be created unrevoked",
         )
 
-        # A binding that was valid before revocation remains removable. It
-        # cannot be resurrected on the revoked pin, but it can move to a live
-        # published release in the same atomic update.
+        # An asset-only binding that was valid before revocation remains
+        # removable, but it cannot be re-enabled while Current v1 is revoked.
         async with engine.begin() as connection:
             await connection.execute(
                 text(
@@ -369,7 +341,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
                 },
             )
 
-        binding_error = "system binding requires non-revoked published version"
+        binding_error = "system binding requires an eligible Current Version"
         await _expect_database_error(
             engine,
             """UPDATE project_system_skill_bindings
@@ -385,71 +357,22 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
         await _expect_database_error(
             engine,
             """INSERT INTO project_system_skill_bindings
-            (project_id,system_skill_id,skill_version_id,enabled,version,
+            (project_id,system_skill_id,enabled,version,
              created_by_user_id,updated_by_user_id)
-            VALUES (:project_id,:skill_id,:version_id,true,1,:actor,:actor)""",
+            VALUES (:project_id,:skill_id,true,1,:actor,:actor)""",
             {
                 "project_id": seed.project_ids[2],
                 "skill_id": seed.system_skill_id,
-                "version_id": revoked_version,
                 "actor": seed.admin_user_id,
             },
             binding_error,
         )
 
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """UPDATE skill_versions
-                    SET revoked_at=clock_timestamp(),
-                        revoked_by_user_id=:actor,
-                        revocation_reason_code='integrity'
-                    WHERE id=:version_id"""
-                ),
-                {
-                    "actor": seed.admin_user_id,
-                    "version_id": later_revoked_version,
-                },
-            )
-
-        for target in (later_revoked_version, revoked_version):
-            await _expect_database_error(
-                engine,
-                """UPDATE project_system_skill_bindings
-                SET skill_version_id=:target,version=version+1,
-                    updated_by_user_id=:actor
-                WHERE project_id=:project_id AND system_skill_id=:skill_id""",
-                {
-                    "target": target,
-                    "actor": seed.admin_user_id,
-                    "project_id": seed.project_ids[1],
-                    "skill_id": seed.system_skill_id,
-                },
-                binding_error,
-            )
-
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """UPDATE project_system_skill_bindings
-                    SET skill_version_id=:target,enabled=true,
-                        version=version+1,updated_by_user_id=:actor
-                    WHERE project_id=:project_id
-                      AND system_skill_id=:skill_id"""
-                ),
-                {
-                    "target": active_version,
-                    "actor": seed.admin_user_id,
-                    "project_id": seed.project_ids[0],
-                    "skill_id": seed.system_skill_id,
-                },
-            )
-
         async with engine.connect() as connection:
             first_binding = (
                 await connection.execute(
                     text(
-                        """SELECT skill_version_id,enabled,version
+                        """SELECT enabled,version
                         FROM project_system_skill_bindings
                         WHERE project_id=:project_id
                           AND system_skill_id=:skill_id"""
@@ -463,7 +386,7 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
             second_binding = (
                 await connection.execute(
                     text(
-                        """SELECT skill_version_id,enabled
+                        """SELECT enabled,version
                         FROM project_system_skill_bindings
                         WHERE project_id=:project_id
                           AND system_skill_id=:skill_id"""
@@ -486,8 +409,8 @@ async def test_system_skill_revocation_and_binding_targets_are_fail_closed(
                 },
             )
 
-        assert first_binding == (active_version, True, 3)
-        assert second_binding == (active_version, True)
+        assert first_binding == (False, 2)
+        assert second_binding == (True, 1)
         assert third_binding_count == 0
     finally:
         await engine.dispose()
@@ -518,7 +441,7 @@ async def test_concurrent_system_skill_revocations_serialize_to_one_winner(
                         ),
                         {
                             "actor": seed.admin_user_id,
-                            "version_id": seed.concurrent_version_id,
+                            "version_id": seed.system_version_id,
                         },
                     )
                 except DBAPIError as error:
@@ -539,7 +462,7 @@ async def test_concurrent_system_skill_revocations_serialize_to_one_winner(
                 ),
                 {
                     "actor": seed.admin_user_id,
-                    "version_id": seed.concurrent_version_id,
+                    "version_id": seed.system_version_id,
                 },
             )
             competing_task = asyncio.create_task(competing_revocation())
@@ -558,7 +481,7 @@ async def test_concurrent_system_skill_revocations_serialize_to_one_winner(
                                   revocation_reason_code
                         FROM skill_versions WHERE id=:version_id"""
                     ),
-                    {"version_id": seed.concurrent_version_id},
+                    {"version_id": seed.system_version_id},
                 )
             ).one()
         assert row.revoked_at is not None

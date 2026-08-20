@@ -56,24 +56,10 @@ export async function registerReplayProject(
   const agent = (await prepared.json()) as {
     id?: unknown;
     scope?: unknown;
-    version?: unknown;
   };
-  if (
-    typeof agent.id !== "string" ||
-    agent.scope !== "project" ||
-    typeof agent.version !== "number"
-  ) {
+  if (typeof agent.id !== "string" || agent.scope !== "project") {
     throw new Error("prepared replay Agent response is invalid");
   }
-
-  const activation = await context.request.post(
-    `${app}/api/projects/${project.id}/agents/${agent.id}/activate`,
-    {
-      headers: { "X-CSRF-Token": csrf! },
-      data: { expected_asset_version: agent.version },
-    },
-  );
-  expect(activation.status(), await activation.text()).toBe(200);
 
   return {
     id: project.id,

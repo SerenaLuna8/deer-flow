@@ -138,8 +138,45 @@ def _install_reference_migration_helpers() -> None:
 
 
 def _migrate_agent_references() -> None:
-    op.execute(
+    reference_columns = {
+        column["name"]
+        for column in sa.inspect(op.get_bind()).get_columns(
+            "agent_version_skill_refs",
+        )
+    }
+    if "skill_version_id" in reference_columns:
+        skill_reference_query = """
+            SELECT COALESCE(
+                       jsonb_agg(
+                           to_jsonb(reference.skill_version_id::text)
+                           ORDER BY reference.sort_order
+                       ),
+                       '[]'::jsonb
+                   )
+              INTO skill_version_ids
+              FROM agent_version_skill_refs AS reference
+             WHERE reference.agent_version_id =
+                   actweave_agent_payload_document.agent_version_id;
         """
+    else:
+        skill_reference_query = """
+            SELECT COALESCE(
+                       jsonb_agg(
+                           to_jsonb(skill.current_version_id::text)
+                           ORDER BY reference.sort_order
+                       ),
+                       '[]'::jsonb
+                   )
+              INTO skill_version_ids
+              FROM agent_version_skill_refs AS reference
+              JOIN skills AS skill
+                ON skill.id = reference.skill_asset_id
+               AND skill.scope = reference.skill_asset_scope
+             WHERE reference.agent_version_id =
+                   actweave_agent_payload_document.agent_version_id;
+        """
+    op.execute(
+        f"""
         CREATE FUNCTION pg_temp.actweave_agent_payload_document(
             agent_version_id uuid,
             schema_version integer,
@@ -162,17 +199,7 @@ def _migrate_agent_references() -> None:
             mcp_version_ids jsonb;
             document jsonb;
         BEGIN
-            SELECT COALESCE(
-                       jsonb_agg(
-                           to_jsonb(reference.skill_version_id::text)
-                           ORDER BY reference.sort_order
-                       ),
-                       '[]'::jsonb
-                   )
-              INTO skill_version_ids
-              FROM agent_version_skill_refs AS reference
-             WHERE reference.agent_version_id =
-                   actweave_agent_payload_document.agent_version_id;
+            {skill_reference_query}
 
             SELECT COALESCE(
                        jsonb_agg(

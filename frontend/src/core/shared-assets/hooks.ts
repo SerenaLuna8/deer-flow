@@ -16,6 +16,8 @@ import {
   SharedAssetApiError,
   approveAdminProjectMcpVersion,
   approveProjectMcpVersion,
+  activateAdminProjectAssetVersion,
+  activateProjectAssetVersion,
   changeAdminProjectAssetStatus,
   changeProjectAssetStatus,
   configureAdminMcpCredentialGrants,
@@ -37,7 +39,7 @@ import {
   getAdminProjectCredentialMigrationStatus,
   getProjectCredentialMigrationStatus,
   getProjectSkillCredentialBindings,
-  getProjectSkillPublishPlan,
+  getProjectSkillActivationReadiness,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
   listAdminAssetVersions,
@@ -47,10 +49,9 @@ import {
   listProjectAssetVersions,
   listProjectAssets,
   listSystemAssetCatalog,
-  publishProjectAssetVersion,
-  publishAdminProjectAssetVersion,
+  publishProjectMcpVersion,
+  publishAdminProjectMcpVersion,
   requestProjectMcpToolDiscovery,
-  restoreProjectAgentVersion,
   revokeAdminCredential,
   revokeProjectCredential,
   rollbackProjectSystemBinding,
@@ -83,11 +84,11 @@ import {
   projectMcpToolInventoryKey,
   projectSkillCredentialBindingsKey,
   projectSkillCredentialBindingsMutationKey,
-  projectSkillPublishPlanKey,
+  projectSkillActivationReadinessKey,
   projectSkillVersionFileKey,
   systemCatalogKey,
 } from "./query-keys";
-import type { SkillPublishPlanResponse } from "./skill-secret-declarations";
+import type { SkillActivationReadinessResponse } from "./skill-secret-declarations";
 import type {
   AdminAssetList,
   AssetMutationResponse,
@@ -104,10 +105,11 @@ import type {
   ConfigureSystemMcpCredentialGrantsInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
+  EnableCurrentSystemBindingInput,
   ExpectedAssetVersionInput,
+  ExpectedRevisionInput,
   MoveSystemBindingInput,
   McpVersionInput,
-  PublishAssetVersionInput,
   McpToolInventoryResponse,
   ProjectAssetList,
   ProjectAssetStatusAction,
@@ -120,7 +122,7 @@ import type {
   SkillFileForkInput,
   SkillCredentialBindingsInput,
   SkillCredentialBindingsResponse,
-  SkillPublishAssetVersionInput,
+  SkillActivationInput,
   SkillVersionFileContentResponse,
   SyncCurrentSystemMcpBindingInput,
   UpdateConfiguredMcpInput,
@@ -128,8 +130,8 @@ import type {
 } from "./types";
 
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-type PublishableVersionKind = MutableAssetKind;
-type AuthorableVersionKind = Exclude<PublishableVersionKind, "agents">;
+type ActivatableVersionKind = "agents" | "skills";
+type AuthorableVersionKind = Exclude<MutableAssetKind, "agents">;
 type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
 
 export const MCP_TOOL_INVENTORY_POLL_INTERVAL_MS = 2_000;
@@ -624,22 +626,22 @@ export function useProjectSkillCredentialBindings(
   });
 }
 
-export function useProjectSkillPublishPlan(
+export function useProjectSkillActivationReadiness(
   accountId: string,
   projectId: string,
   skillId: string,
   versionId: string,
   enabled = true,
 ) {
-  return useQuery<SkillPublishPlanResponse>({
-    queryKey: projectSkillPublishPlanKey(
+  return useQuery<SkillActivationReadinessResponse>({
+    queryKey: projectSkillActivationReadinessKey(
       accountId,
       projectId,
       skillId,
       versionId,
     ),
     queryFn: ({ signal }) =>
-      getProjectSkillPublishPlan(projectId, skillId, versionId, signal),
+      getProjectSkillActivationReadiness(projectId, skillId, versionId, signal),
     enabled: enabled && skillId !== "" && versionId !== "",
     staleTime: 0,
   });
@@ -1030,77 +1032,6 @@ export function useUpdateProjectAgentCapabilityBindings(
   });
 }
 
-export function useRestoreProjectAgentVersion(
-  accountId: string,
-  projectId: string,
-) {
-  const queryClient = useQueryClient();
-  const { runMutation, whenActive } = useProjectMutationRunner(
-    accountId,
-    projectId,
-  );
-  return useMutation({
-    mutationKey: projectAssetMutationKey(
-      accountId,
-      projectId,
-      "agents",
-      "restore-version",
-    ),
-    mutationFn: ({
-      assetId,
-      versionId,
-      input,
-    }: {
-      assetId: string;
-      versionId: string;
-      input: ExpectedAssetVersionInput;
-    }) =>
-      runMutation((signal) =>
-        restoreProjectAgentVersion(
-          projectId,
-          assetId,
-          versionId,
-          input,
-          signal,
-        ),
-      ),
-    onSuccess: whenActive(
-      (
-        _data,
-        variables: {
-          assetId: string;
-          versionId: string;
-          input: ExpectedAssetVersionInput;
-        },
-      ) =>
-        invalidateProjectAgentMutationQueries(
-          queryClient,
-          accountId,
-          projectId,
-          variables.assetId,
-        ),
-    ),
-    onError: whenActive(
-      async (
-        error: unknown,
-        variables: {
-          assetId: string;
-          versionId: string;
-          input: ExpectedAssetVersionInput;
-        },
-      ) => {
-        if (!isProjectAgentCasConflict(error)) return;
-        await invalidateProjectAgentConflictQueries(
-          queryClient,
-          accountId,
-          projectId,
-          variables.assetId,
-        );
-      },
-    ),
-  });
-}
-
 export function useCreateAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
@@ -1198,7 +1129,7 @@ export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
     }: {
       assetId: string;
       action: ProjectAssetStatusAction<Kind>;
-      input: ExpectedAssetVersionInput;
+      input: ExpectedAssetVersionInput | ExpectedRevisionInput;
     }) =>
       runMutation((signal) =>
         changeProjectAssetStatus(
@@ -1226,7 +1157,7 @@ export function useChangeProjectAssetStatus<Kind extends MutableAssetKind>(
         variables: {
           assetId: string;
           action: ProjectAssetStatusAction<Kind>;
-          input: ExpectedAssetVersionInput;
+          input: ExpectedAssetVersionInput | ExpectedRevisionInput;
         },
       ) => {
         if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;
@@ -1260,7 +1191,7 @@ export function useDeleteProjectSkill(accountId: string, projectId: string) {
       input,
     }: {
       assetId: string;
-      input: ExpectedAssetVersionInput;
+      input: ExpectedRevisionInput;
     }) =>
       runMutation((signal) =>
         deleteProjectSkill(projectId, assetId, input, signal),
@@ -1270,7 +1201,7 @@ export function useDeleteProjectSkill(accountId: string, projectId: string) {
         _data: void,
         variables: {
           assetId: string;
-          input: ExpectedAssetVersionInput;
+          input: ExpectedRevisionInput;
         },
       ) => {
         queryClient.setQueryData<ProjectAssetList>(
@@ -1317,7 +1248,7 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
       input,
     }: {
       assetId: string;
-      input: ExpectedAssetVersionInput;
+      input: ExpectedRevisionInput;
     }) =>
       runMutation((signal) =>
         deleteProjectAgent(projectId, assetId, input, signal),
@@ -1327,7 +1258,7 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
         _data: void,
         variables: {
           assetId: string;
-          input: ExpectedAssetVersionInput;
+          input: ExpectedRevisionInput;
         },
       ) => {
         queryClient.setQueryData<ProjectAssetList>(
@@ -1362,7 +1293,7 @@ export function useDeleteProjectAgent(accountId: string, projectId: string) {
         error: unknown,
         variables: {
           assetId: string;
-          input: ExpectedAssetVersionInput;
+          input: ExpectedRevisionInput;
         },
       ) => {
         if (!isProjectAgentCasConflict(error)) return;
@@ -1453,17 +1384,17 @@ export function useChangeAdminProjectAssetStatus<Kind extends MutableAssetKind>(
     }: {
       assetId: string;
       action: AdminProjectAssetStatusAction<Kind>;
-      input: ExpectedAssetVersionInput;
+      input: ExpectedAssetVersionInput | ExpectedRevisionInput;
     }) =>
       changeAdminProjectAssetStatus(projectId, kind, assetId, action, input),
     onSuccess: invalidate,
   });
 }
 
-export function usePublishProjectAssetVersion(
+export function useActivateProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: PublishableVersionKind,
+  kind: ActivatableVersionKind,
 ) {
   const queryClient = useQueryClient();
   const queryKind = kind;
@@ -1477,7 +1408,7 @@ export function usePublishProjectAssetVersion(
       accountId,
       projectId,
       queryKind,
-      "publish-version",
+      "activate-version",
     ),
     mutationFn: ({
       assetId,
@@ -1486,24 +1417,24 @@ export function usePublishProjectAssetVersion(
     }: {
       assetId: string;
       versionId: string;
-      input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
+      input: ExpectedRevisionInput | SkillActivationInput;
     }) => {
       return runMutation((signal) =>
         kind === "skills"
-          ? publishProjectAssetVersion(
+          ? activateProjectAssetVersion(
               projectId,
               kind,
               assetId,
               versionId,
-              input as SkillPublishAssetVersionInput,
+              input as SkillActivationInput,
               signal,
             )
-          : publishProjectAssetVersion(
+          : activateProjectAssetVersion(
               projectId,
               kind,
               assetId,
               versionId,
-              input as PublishAssetVersionInput,
+              input as ExpectedRevisionInput,
               signal,
             ),
       );
@@ -1514,7 +1445,7 @@ export function usePublishProjectAssetVersion(
         variables: {
           assetId: string;
           versionId: string;
-          input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
+          input: ExpectedRevisionInput | SkillActivationInput;
         },
       ) =>
         kind === "agents"
@@ -1532,7 +1463,7 @@ export function usePublishProjectAssetVersion(
         variables: {
           assetId: string;
           versionId: string;
-          input: PublishAssetVersionInput | SkillPublishAssetVersionInput;
+          input: ExpectedRevisionInput | SkillActivationInput;
         },
       ) => {
         if (kind !== "agents" || !isProjectAgentCasConflict(error)) return;
@@ -1547,10 +1478,10 @@ export function usePublishProjectAssetVersion(
   });
 }
 
-export function usePublishAdminProjectAssetVersion(
+export function useActivateAdminProjectAssetVersion(
   accountId: string,
   projectId: string,
-  kind: PublishableVersionKind,
+  kind: ActivatableVersionKind,
 ) {
   const queryKind = kind;
   const invalidate = useAdminProjectInvalidation(
@@ -1566,9 +1497,9 @@ export function usePublishAdminProjectAssetVersion(
     }: {
       assetId: string;
       versionId: string;
-      input: PublishAssetVersionInput;
+      input: ExpectedRevisionInput | SkillActivationInput;
     }) => {
-      return publishAdminProjectAssetVersion(
+      return activateAdminProjectAssetVersion(
         projectId,
         kind,
         assetId,
@@ -1576,6 +1507,65 @@ export function usePublishAdminProjectAssetVersion(
         input,
       );
     },
+    onSuccess: invalidate,
+  });
+}
+
+export function usePublishProjectMcpVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "publish-version",
+    ),
+    mutationFn: ({
+      assetId,
+      versionId,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      input: ExpectedAssetVersionInput;
+    }) =>
+      runMutation((signal) =>
+        publishProjectMcpVersion(projectId, assetId, versionId, input, signal),
+      ),
+    onSuccess: whenActive(invalidate),
+  });
+}
+
+export function usePublishAdminProjectMcpVersion(
+  accountId: string,
+  projectId: string,
+) {
+  const invalidate = useAdminProjectInvalidation(
+    accountId,
+    projectId,
+    "mcp-servers",
+  );
+  return useMutation({
+    mutationFn: ({
+      assetId,
+      versionId,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      input: ExpectedAssetVersionInput;
+    }) => publishAdminProjectMcpVersion(projectId, assetId, versionId, input),
     onSuccess: invalidate,
   });
 }
@@ -1783,7 +1773,9 @@ export function useEnableProjectSystemBinding(
       BINDING_LIST_KIND[kind],
       "enable-binding",
     ),
-    mutationFn: (input: EnableSystemBindingInput) =>
+    mutationFn: (
+      input: EnableSystemBindingInput | EnableCurrentSystemBindingInput,
+    ) =>
       runMutation((signal) =>
         enableProjectSystemBinding(projectId, kind, input, signal),
       ),
@@ -1828,7 +1820,7 @@ export function useSyncCurrentProjectSystemMcpBinding(
 function useMoveProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
   action: "upgrade" | "rollback",
 ) {
   const invalidate = useProjectAssetListInvalidation(
@@ -1872,7 +1864,7 @@ function useMoveProjectSystemBinding(
 export function useUpgradeProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
 ) {
   return useMoveProjectSystemBinding(accountId, projectId, kind, "upgrade");
 }
@@ -1880,7 +1872,7 @@ export function useUpgradeProjectSystemBinding(
 export function useRollbackProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
 ) {
   return useMoveProjectSystemBinding(accountId, projectId, kind, "rollback");
 }
@@ -1931,8 +1923,9 @@ export function useEnableAdminProjectSystemBinding(
     BINDING_LIST_KIND[kind],
   );
   return useMutation({
-    mutationFn: (input: EnableSystemBindingInput) =>
-      enableAdminProjectSystemBinding(projectId, kind, input),
+    mutationFn: (
+      input: EnableSystemBindingInput | EnableCurrentSystemBindingInput,
+    ) => enableAdminProjectSystemBinding(projectId, kind, input),
     onSuccess: invalidate,
   });
 }
@@ -1940,7 +1933,7 @@ export function useEnableAdminProjectSystemBinding(
 function useMoveAdminProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
   action: "upgrade" | "rollback",
 ) {
   const invalidate = useAdminProjectInvalidation(
@@ -1966,7 +1959,7 @@ function useMoveAdminProjectSystemBinding(
 export function useUpgradeAdminProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
 ) {
   return useMoveAdminProjectSystemBinding(
     accountId,
@@ -1979,7 +1972,7 @@ export function useUpgradeAdminProjectSystemBinding(
 export function useRollbackAdminProjectSystemBinding(
   accountId: string,
   projectId: string,
-  kind: AssetKind,
+  kind: "mcp",
 ) {
   return useMoveAdminProjectSystemBinding(
     accountId,

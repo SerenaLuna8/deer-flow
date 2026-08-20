@@ -167,7 +167,7 @@ function AgentDetailWorkbench({
             reloadProjectAgentAuthoringState({
               projectId,
               assetId: item.id,
-              minimumAssetVersion: item.version,
+              minimumRevision: item.revision,
               includeDependencyCatalogs,
               signal: scopeSignal
                 ? AbortSignal.any([controller.signal, scopeSignal])
@@ -238,7 +238,7 @@ function AgentDetailWorkbench({
     [
       accountId,
       item.id,
-      item.version,
+      item.revision,
       privateWork,
       projectId,
       queryClient,
@@ -421,7 +421,7 @@ export function projectAgentChatAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.executeForbidden };
   }
-  if (!item.current_published_version_id) {
+  if (!item.current_version_id) {
     return { enabled: false, reason: copy.publishRequired };
   }
   if (mcpDependencyReason) {
@@ -438,7 +438,7 @@ export function projectAgentCanActivate(
     item.status === "suspended" &&
     projectCapabilities.includes("shared_assets.manage_bindings") &&
     item.capabilities.includes("shared_assets.manage_bindings") &&
-    item.current_published_version_id !== null
+    item.current_version_id !== null
   );
 }
 
@@ -460,7 +460,7 @@ export function projectAgentDefaultAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.executeForbidden };
   }
-  if (!item.current_published_version_id) {
+  if (!item.current_version_id) {
     return { enabled: false, reason: copy.publishRequired };
   }
   if (mcpDependencyReason) {
@@ -486,7 +486,7 @@ function projectMainDefaultAvailability(
   if (!item.capabilities.includes("shared_assets.execute")) {
     return { enabled: false, reason: copy.mainExecuteForbidden };
   }
-  if (!item.current_published_version_id) {
+  if (!item.current_version_id) {
     return { enabled: false, reason: copy.mainVersionUnavailable };
   }
   return { enabled: true, reason: null };
@@ -1022,8 +1022,8 @@ function ProjectAgentCatalog({
     changeStatus.mutate(
       {
         assetId: agent.id,
-        action: "activate",
-        input: { expected_asset_version: agent.version },
+        action: "enable",
+        input: { expected_revision: agent.revision },
       },
       {
         onSuccess: () => toast.success(copy.activated(agent.display_name)),

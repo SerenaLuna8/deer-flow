@@ -2,10 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { agentDependencyOptions } from "@/components/projects/assets/agent-capability-workbench";
-import {
-  ProjectAgentDetailActions,
-  projectAgentVersionCanRestore,
-} from "@/components/projects/assets/project-asset-detail-sheet";
+import { ProjectAgentDetailActions } from "@/components/projects/assets/project-asset-detail-sheet";
 import { projectAgentDeleteErrorMessage } from "@/components/projects/assets/project-asset-view-model";
 import {
   projectAssetDeleteDescription,
@@ -36,14 +33,14 @@ function catalog(): ProjectAssetList {
         display_name: "System Skill",
         description: "System description",
         status: "active",
-        current_published_version_id: SYSTEM_VERSION_ID,
-        version: 1,
+        current_version_id: SYSTEM_VERSION_ID,
+        revision: 1,
         capabilities: ["shared_assets.read"],
         binding: {
           project_id: PROJECT_ID,
           kind: "skill",
           asset_id: SYSTEM_ASSET_ID,
-          version_id: SYSTEM_VERSION_ID,
+          current_version_id: SYSTEM_VERSION_ID,
           enabled: true,
           version: 1,
           created_by_user_id: "user-1",
@@ -62,8 +59,8 @@ function catalog(): ProjectAssetList {
         slug: "disabled-system-skill",
         display_name: "Disabled System Skill",
         status: "active",
-        current_published_version_id: "00000000-0000-4000-8000-000000000013",
-        version: 1,
+        current_version_id: "00000000-0000-4000-8000-000000000013",
+        revision: 1,
         capabilities: ["shared_assets.read"],
         binding: null,
         created_by_user_id: "system",
@@ -80,8 +77,8 @@ function catalog(): ProjectAssetList {
         display_name: "Project Skill",
         description: "Project description",
         status: "active",
-        current_published_version_id: PROJECT_VERSION_ID,
-        version: 1,
+        current_version_id: PROJECT_VERSION_ID,
+        revision: 1,
         capabilities: ["shared_assets.read", "shared_assets.edit"],
         binding: null,
         created_by_user_id: "user-1",
@@ -95,8 +92,8 @@ function catalog(): ProjectAssetList {
         slug: "draft-project-skill",
         display_name: "Draft Project Skill",
         status: "active",
-        current_published_version_id: null,
-        version: 1,
+        current_version_id: null,
+        revision: 1,
         capabilities: ["shared_assets.read", "shared_assets.edit"],
         binding: null,
         created_by_user_id: "user-1",
@@ -108,18 +105,18 @@ function catalog(): ProjectAssetList {
 }
 
 describe("Agent capability bindings", () => {
-  test("places publish in the upper detail actions before lifecycle and delete", () => {
+  test("places activation in the upper detail actions before lifecycle and delete", () => {
     const html = renderToStaticMarkup(
       <ProjectAgentDetailActions
         actionPending={false}
         canDelete
         onDelete={() => undefined}
-        publishAction={<button type="button">发布版本</button>}
+        primaryVersionAction={<button type="button">激活版本</button>}
         lifecycleActions={<button type="button">停用</button>}
       />,
     );
 
-    expect(html.indexOf("发布版本")).toBeLessThan(html.indexOf("停用"));
+    expect(html.indexOf("激活版本")).toBeLessThan(html.indexOf("停用"));
     expect(html.indexOf("停用")).toBeLessThan(html.indexOf("删除"));
   });
 
@@ -135,13 +132,13 @@ describe("Agent capability bindings", () => {
       expect.arrayContaining([
         expect.objectContaining({
           assetId: SYSTEM_ASSET_ID,
-          versionId: SYSTEM_VERSION_ID,
+          versionId: `system:${SYSTEM_ASSET_ID}`,
           scope: "system",
           disabled: false,
         }),
         expect.objectContaining({
           assetId: PROJECT_ASSET_ID,
-          versionId: PROJECT_VERSION_ID,
+          versionId: "project:00000000-0000-4000-8000-000000000020",
           scope: "project",
           disabled: false,
         }),
@@ -154,46 +151,10 @@ describe("Agent capability bindings", () => {
           slug: "draft-project-skill",
           versionId: null,
           disabled: true,
-          reason: expect.stringContaining("尚未发布"),
+          reason: expect.stringContaining("尚无当前版本"),
         }),
       ]),
     );
-  });
-
-  test("restores a historical published Project Agent version", () => {
-    const version = {
-      id: PROJECT_VERSION_ID,
-      workflow_status: "published" as const,
-      supersedes_version_id: null,
-    };
-
-    expect(
-      projectAgentVersionCanRestore(
-        "agents",
-        "project",
-        true,
-        version,
-        SYSTEM_VERSION_ID,
-      ),
-    ).toBe(true);
-    expect(
-      projectAgentVersionCanRestore(
-        "agents",
-        "project",
-        true,
-        version,
-        PROJECT_VERSION_ID,
-      ),
-    ).toBe(false);
-    expect(
-      projectAgentVersionCanRestore(
-        "agents",
-        "system",
-        true,
-        version,
-        SYSTEM_VERSION_ID,
-      ),
-    ).toBe(false);
   });
 
   test("describes Agent deletion as a soft archive without a delay", () => {

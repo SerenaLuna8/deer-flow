@@ -18,7 +18,10 @@ from app.shared_assets.agent_catalog import (
     RejectingAgentCatalogValidator,
     require_agent_catalog_validation,
 )
-from app.shared_assets.agent_payload_checksum import agent_payload_checksum
+from app.shared_assets.agent_payload_checksum import (
+    agent_payload_checksum,
+    persisted_agent_payload_checksum_matches,
+)
 from app.shared_assets.agent_repository import AgentRepository, AgentVersionRecord
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import (
@@ -34,7 +37,12 @@ from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
     AssetScope,
-    WorkflowStatus,
+    SkillAssetRef,
+    VersionRelation,
+)
+from app.shared_assets.version_relation import (
+    VersionLineageNode,
+    classify_version_relations,
 )
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
@@ -90,7 +98,7 @@ class AgentInstructions:
 
 @dataclass(frozen=True)
 class AgentCapabilityBindings:
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRef, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
 
 
@@ -102,8 +110,8 @@ class AgentAssetView:
     slug: str
     display_name: str
     status: str
-    current_published_version_id: uuid.UUID | None
-    version: int
+    current_version_id: uuid.UUID | None
+    revision: int
     created_by_user_id: str
     created_at: datetime
     updated_at: datetime
@@ -115,12 +123,12 @@ class AgentVersionView:
     id: uuid.UUID
     agent_id: uuid.UUID
     version_number: int
-    workflow_status: WorkflowStatus
+    relation: VersionRelation
     description: str
     soul: str
     model_ref: str
     tool_groups: tuple[str, ...]
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRef, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
@@ -157,16 +165,8 @@ class AgentService:
         actor: ProjectContext,
         command: CreateAgent,
         payload: AgentPayload,
-        *,
-        publish: bool = False,
     ) -> ProjectAgentCreateResult:
-        """Atomically create a suspended project Agent with immutable v1.
-
-        The caller owns the transaction so a design-session commit can move its
-        own state and create the complete immutable Agent package together.
-        Normal authoring leaves v1 as a draft; publisher-authorized bootstrap
-        callers may publish within their already-authorized transaction.
-        """
+        """Atomically create a suspended Project Agent with Candidate v1."""
 
         if not isinstance(actor, ProjectContext):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
@@ -175,7 +175,6 @@ class AgentService:
             actor,
             command,
             payload,
-            publish=publish,
         )
 
     async def _create_project_package(
@@ -184,8 +183,6 @@ class AgentService:
         actor: ProjectContext | SystemAssetGovernanceContext,
         command: CreateAgent,
         payload: AgentPayload,
-        *,
-        publish: bool,
     ) -> ProjectAgentCreateResult:
         command = self._validate_create(actor, command)
         payload = self._validate_payload(
@@ -194,11 +191,6 @@ class AgentService:
             payload_schema_version=self._payload_schema_version(payload),
         )
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
-        if publish:
-            self._require_capability(
-                actor,
-                Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-            )
         if not isinstance(actor, ProjectContext) and actor.project_id is None:
             raise AssetForbidden(actor.request_id)
         await require_agent_catalog_validation(
@@ -211,7 +203,7 @@ class AgentService:
         await self._validate_dependency_closure(
             repository,
             actor,
-            payload.skill_version_ids,
+            payload.skill_refs,
             payload.mcp_version_ids,
         )
         if isinstance(actor, ProjectContext):
@@ -231,7 +223,6 @@ class AgentService:
         row = AgentVersionRow(
             agent_id=asset.id,
             version_number=1,
-            workflow_status=WorkflowStatus.DRAFT.value,
             description=payload.description,
             agents_instructions=payload.agents_instructions,
             soul=payload.soul,
@@ -253,14 +244,10 @@ class AgentService:
             actor,
             asset.id,
             row,
-            payload.skill_version_ids,
+            payload.skill_refs,
             payload.mcp_version_ids,
         )
-        if publish:
-            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
-            await repository.session.flush()
-            asset.current_published_version_id = record.row.id
-        asset.version += 1
+        asset.revision += 1
         await repository.session.flush()
         await self._record_governance(
             repository.session,
@@ -269,17 +256,12 @@ class AgentService:
             record.row.id,
             "agent.version.create",
         )
-        if publish:
-            await self._record_governance(
-                repository.session,
-                actor,
-                asset.id,
-                record.row.id,
-                "agent.publish",
-            )
         return ProjectAgentCreateResult(
             asset=self._asset_view(asset),
-            version=self._version_view(record),
+            version=self._version_view(
+                record,
+                relation=VersionRelation.CANDIDATE,
+            ),
         )
 
     async def create_project(
@@ -288,7 +270,7 @@ class AgentService:
         command: CreateAgent,
         payload: AgentPayload,
     ) -> ProjectAgentCreateResult:
-        """Create one complete project-scoped Agent draft atomically."""
+        """Create one complete project-scoped Agent Candidate atomically."""
 
         if not isinstance(actor, (ProjectContext, SystemAssetGovernanceContext)) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is None):
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
@@ -299,7 +281,6 @@ class AgentService:
                 actor,
                 command,
                 payload,
-                publish=False,
             )
 
         return await self._execute(actor, operation)
@@ -328,17 +309,21 @@ class AgentService:
         async def operation(repository: AgentRepository) -> AgentVersionView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status not in {"active", "suspended"}:
+            if asset.scope != AssetScope.PROJECT.value or asset.status not in {
+                "active",
+                "suspended",
+            }:
+                raise AssetConflict(actor.request_id)
+            head = await self._authoring_base(repository, actor, asset)
+            if head is None:
                 raise AssetConflict(actor.request_id)
             effective_payload = payload
             if provided_instruction_fields != AGENT_INSTRUCTION_FIELDS:
-                base = await self._authoring_base(repository, actor, asset)
-                if base is not None:
-                    effective_payload = self._merge_instructions(
-                        effective_payload,
-                        self._instructions_from_record(base),
-                        provided_instruction_fields,
-                    )
+                effective_payload = self._merge_instructions(
+                    effective_payload,
+                    self._instructions_from_record(head),
+                    provided_instruction_fields,
+                )
             effective_payload = self._validate_payload(
                 actor,
                 effective_payload,
@@ -347,7 +332,7 @@ class AgentService:
             await self._validate_dependency_closure(
                 repository,
                 actor,
-                effective_payload.skill_version_ids,
+                effective_payload.skill_refs,
                 effective_payload.mcp_version_ids,
             )
             if isinstance(actor, ProjectContext):
@@ -355,12 +340,13 @@ class AgentService:
             elif actor.project_id is not None:
                 version_number = await repository.next_override_version_number(actor, asset)
             else:
-                version_number = await repository.next_system_version_number(actor, asset)
+                raise AssetForbidden(actor.request_id)
+            if version_number != head.row.version_number + 1:
+                raise AssetConflict(actor.request_id)
             payload_schema_version = self._payload_schema_version(effective_payload)
             row = AgentVersionRow(
                 agent_id=asset.id,
                 version_number=version_number,
-                workflow_status=WorkflowStatus.DRAFT.value,
                 description=effective_payload.description,
                 agents_instructions=effective_payload.agents_instructions,
                 soul=effective_payload.soul,
@@ -369,7 +355,7 @@ class AgentService:
                 model_ref=effective_payload.model_ref,
                 model_settings=self._model_settings_json(effective_payload.model_settings),
                 tool_groups=list(effective_payload.tool_groups),
-                supersedes_version_id=asset.current_published_version_id,
+                supersedes_version_id=head.row.id,
                 payload_schema_version=payload_schema_version,
                 payload_checksum=self._payload_checksum(
                     effective_payload,
@@ -382,7 +368,7 @@ class AgentService:
                     actor,
                     asset.id,
                     row,
-                    effective_payload.skill_version_ids,
+                    effective_payload.skill_refs,
                     effective_payload.mcp_version_ids,
                 )
             elif actor.project_id is not None:
@@ -390,20 +376,17 @@ class AgentService:
                     actor,
                     asset.id,
                     row,
-                    effective_payload.skill_version_ids,
+                    effective_payload.skill_refs,
                     effective_payload.mcp_version_ids,
                 )
             else:
-                record = await repository.create_system_version(
-                    actor,
-                    asset.id,
-                    row,
-                    effective_payload.skill_version_ids,
-                    effective_payload.mcp_version_ids,
-                )
-            asset.version += 1
+                raise AssetForbidden(actor.request_id)
+            asset.revision += 1
             await repository.session.flush()
-            return self._version_view(record)
+            return self._version_view(
+                record,
+                relation=VersionRelation.CANDIDATE,
+            )
 
         return await self._execute(
             actor,
@@ -431,49 +414,39 @@ class AgentService:
         async def operation(repository: AgentRepository) -> AgentVersionView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status not in {"active", "suspended"}:
+            if asset.scope != AssetScope.PROJECT.value or asset.status not in {
+                "active",
+                "suspended",
+            }:
                 raise AssetConflict(actor.request_id)
 
-            has_published_version = asset.current_published_version_id is not None
             base = await self._authoring_base(repository, actor, asset)
             if base is None:
-                description = ""
-                model_ref = ""
-                tool_groups: tuple[str, ...] = ()
-                skill_version_ids: tuple[uuid.UUID, ...] = ()
-                mcp_version_ids: tuple[uuid.UUID, ...] = ()
-                supersedes_version_id = None
-                model_settings = AgentModelSettings()
-            else:
-                description = base.row.description
-                model_ref = base.row.model_ref
-                tool_groups = tuple(base.row.tool_groups)
-                skill_version_ids = base.skill_version_ids
-                mcp_version_ids = base.mcp_version_ids
-                # Publishing is a compare-and-swap against the current live
-                # pointer. A later draft may inherit content from the latest
-                # draft, but its publication base remains the live version
-                # (or ``None`` for an Agent that has never been published).
-                supersedes_version_id = asset.current_published_version_id
-                model_settings = self._model_settings_from_row(
-                    base.row.model_settings,
-                    actor.request_id,
-                )
+                raise AssetConflict(actor.request_id)
+            description = base.row.description
+            model_ref = base.row.model_ref
+            tool_groups = tuple(base.row.tool_groups)
+            skill_refs = base.skill_refs
+            mcp_version_ids = base.mcp_version_ids
+            supersedes_version_id = base.row.id
+            model_settings = self._model_settings_from_row(
+                base.row.model_settings,
+                actor.request_id,
+            )
 
-            if has_published_version:
-                await self._validate_dependency_closure(
-                    repository,
-                    actor,
-                    skill_version_ids,
-                    mcp_version_ids,
-                )
+            await self._validate_dependency_closure(
+                repository,
+                actor,
+                skill_refs,
+                mcp_version_ids,
+            )
 
             payload = AgentPayload(
                 description=description,
                 soul=instructions.soul,
                 model_ref=model_ref,
                 tool_groups=tool_groups,
-                skill_version_ids=skill_version_ids,
+                skill_refs=skill_refs,
                 mcp_version_ids=mcp_version_ids,
                 agents_instructions=instructions.agents_instructions,
                 identity=instructions.identity,
@@ -485,7 +458,6 @@ class AgentService:
             row = AgentVersionRow(
                 agent_id=asset.id,
                 version_number=version_number,
-                workflow_status=WorkflowStatus.DRAFT.value,
                 description=payload.description,
                 agents_instructions=payload.agents_instructions,
                 soul=payload.soul,
@@ -507,12 +479,15 @@ class AgentService:
                 actor,
                 asset.id,
                 row,
-                payload.skill_version_ids,
+                payload.skill_refs,
                 payload.mcp_version_ids,
             )
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
-            return self._version_view(record)
+            return self._version_view(
+                record,
+                relation=VersionRelation.CANDIDATE,
+            )
 
         return await self._execute(
             actor,
@@ -545,7 +520,10 @@ class AgentService:
                 for_update=True,
             )
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status not in {"active", "suspended"}:
+            if asset.scope != AssetScope.PROJECT.value or asset.status not in {
+                "active",
+                "suspended",
+            }:
                 raise AssetConflict(actor.request_id)
             base = await self._authoring_base(repository, actor, asset)
             if base is None:
@@ -553,7 +531,7 @@ class AgentService:
             await self._validate_dependency_closure(
                 repository,
                 actor,
-                bindings.skill_version_ids,
+                bindings.skill_refs,
                 bindings.mcp_version_ids,
             )
             payload = AgentPayload(
@@ -561,7 +539,7 @@ class AgentService:
                 soul=base.row.soul,
                 model_ref=base.row.model_ref,
                 tool_groups=tuple(base.row.tool_groups),
-                skill_version_ids=bindings.skill_version_ids,
+                skill_refs=bindings.skill_refs,
                 mcp_version_ids=bindings.mcp_version_ids,
                 agents_instructions=base.row.agents_instructions,
                 identity=base.row.identity,
@@ -585,7 +563,6 @@ class AgentService:
                     actor,
                     asset,
                 ),
-                workflow_status=WorkflowStatus.DRAFT.value,
                 description=payload.description,
                 agents_instructions=payload.agents_instructions,
                 soul=payload.soul,
@@ -594,7 +571,7 @@ class AgentService:
                 model_ref=payload.model_ref,
                 model_settings=self._model_settings_json(payload.model_settings),
                 tool_groups=list(payload.tool_groups),
-                supersedes_version_id=asset.current_published_version_id,
+                supersedes_version_id=base.row.id,
                 payload_schema_version=payload_schema_version,
                 payload_checksum=self._payload_checksum(
                     payload,
@@ -607,12 +584,15 @@ class AgentService:
                 actor,
                 asset.id,
                 row,
-                payload.skill_version_ids,
+                payload.skill_refs,
                 payload.mcp_version_ids,
             )
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
-            return self._version_view(record)
+            return self._version_view(
+                record,
+                relation=VersionRelation.CANDIDATE,
+            )
 
         return await self._execute(
             actor,
@@ -626,7 +606,7 @@ class AgentService:
             ),
         )
 
-    async def restore_version(
+    async def activate_version(
         self,
         actor: _Actor,
         asset_id: uuid.UUID,
@@ -637,142 +617,35 @@ class AgentService:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: AgentRepository) -> AgentVersionView:
-            asset = await self._get_asset(
-                repository,
-                actor,
-                asset_id,
-                for_update=True,
-            )
-            self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status not in {"active", "suspended"}:
-                raise AssetConflict(actor.request_id)
-            target = await self._get_version(
-                repository,
-                actor,
-                asset.id,
-                version_id,
-                for_update=True,
-            )
-            if target.row.workflow_status not in {
-                WorkflowStatus.PUBLISHED.value,
-                WorkflowStatus.DRAFT.value,
-            }:
-                raise AssetConflict(actor.request_id)
-            await self._validate_dependency_closure(
-                repository,
-                actor,
-                target.skill_version_ids,
-                target.mcp_version_ids,
-            )
-            payload = AgentPayload(
-                description=target.row.description,
-                soul=target.row.soul,
-                model_ref=target.row.model_ref,
-                tool_groups=tuple(target.row.tool_groups),
-                skill_version_ids=target.skill_version_ids,
-                mcp_version_ids=target.mcp_version_ids,
-                agents_instructions=target.row.agents_instructions,
-                identity=target.row.identity,
-                user_context=target.row.user_context,
-                payload_schema_version=target.row.payload_schema_version,
-                model_settings=self._model_settings_from_row(
-                    target.row.model_settings,
-                    actor.request_id,
-                ),
-            )
-            payload = self._validate_payload(
-                actor,
-                payload,
-                payload_schema_version=target.row.payload_schema_version,
-            )
-            if (
-                self._payload_checksum(
-                    payload,
-                    payload_schema_version=target.row.payload_schema_version,
-                )
-                != target.row.payload_checksum
-            ):
-                raise AssetValidationFailed(actor.request_id)
-            row = AgentVersionRow(
-                agent_id=asset.id,
-                version_number=await self._next_version_number(
-                    repository,
-                    actor,
-                    asset,
-                ),
-                workflow_status=WorkflowStatus.DRAFT.value,
-                description=payload.description,
-                agents_instructions=payload.agents_instructions,
-                soul=payload.soul,
-                identity=payload.identity,
-                user_context=payload.user_context,
-                model_ref=payload.model_ref,
-                model_settings=self._model_settings_json(payload.model_settings),
-                tool_groups=list(payload.tool_groups),
-                supersedes_version_id=asset.current_published_version_id,
-                payload_schema_version=target.row.payload_schema_version,
-                payload_checksum=target.row.payload_checksum,
-                created_by_user_id=str(actor.user_id),
-            )
-            record = await self._create_version_record(
-                repository,
-                actor,
-                asset.id,
-                row,
-                payload.skill_version_ids,
-                payload.mcp_version_ids,
-            )
-            asset.version += 1
-            await repository.session.flush()
-            return self._version_view(record)
-
-        return await self._execute(
-            actor,
-            operation,
-            governance=lambda session, result: self._record_governance(
-                session,
-                actor,
-                asset_id,
-                result.id,
-                "agent.version.restore",
-            ),
-        )
-
-    async def publish(
-        self,
-        actor: _Actor,
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        *,
-        expected_asset_version: int,
-    ) -> AgentVersionView:
-        self._require_capability(
-            actor,
-            Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-        )
-
-        async def operation(repository: AgentRepository) -> AgentVersionView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status not in {"active", "suspended"}:
+            if asset.scope != AssetScope.PROJECT.value or asset.status not in {
+                "active",
+                "suspended",
+            }:
                 raise AssetConflict(actor.request_id)
             record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
-            if record.row.workflow_status != WorkflowStatus.DRAFT.value:
-                raise AssetConflict(actor.request_id)
-            if record.row.supersedes_version_id != asset.current_published_version_id:
+            records = await self._version_history_records(
+                repository,
+                actor,
+                asset.id,
+            )
+            relations = self._relations(asset, records)
+            if relations.get(record.row.id) is not VersionRelation.CANDIDATE:
                 raise AssetConflict(actor.request_id)
             await self._validate_dependency_closure(
                 repository,
                 actor,
-                record.skill_version_ids,
+                record.skill_refs,
                 record.mcp_version_ids,
+                require_runnable=True,
             )
             current_payload = AgentPayload(
                 description=record.row.description,
                 soul=record.row.soul,
                 model_ref=record.row.model_ref,
                 tool_groups=tuple(record.row.tool_groups),
-                skill_version_ids=record.skill_version_ids,
+                skill_refs=record.skill_refs,
                 mcp_version_ids=record.mcp_version_ids,
                 agents_instructions=record.row.agents_instructions,
                 identity=record.row.identity,
@@ -787,12 +660,9 @@ class AgentService:
                 current_payload,
                 payload_schema_version=record.row.payload_schema_version,
             )
-            if (
-                self._payload_checksum(
-                    current_payload,
-                    payload_schema_version=record.row.payload_schema_version,
-                )
-                != record.row.payload_checksum
+            if not persisted_agent_payload_checksum_matches(
+                current_payload,
+                record.row.payload_checksum,
             ):
                 raise AssetValidationFailed(actor.request_id)
             await require_agent_catalog_validation(
@@ -802,11 +672,14 @@ class AgentService:
                 model_ref=current_payload.model_ref,
                 tool_groups=current_payload.tool_groups,
             )
-            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
-            asset.current_published_version_id = record.row.id
-            asset.version += 1
+            asset.current_version_id = record.row.id
+            asset.status = "active"
+            asset.revision += 1
             await repository.session.flush()
-            return self._version_view(record)
+            return self._version_view(
+                record,
+                relation=VersionRelation.CURRENT,
+            )
 
         return await self._execute(
             actor,
@@ -816,7 +689,7 @@ class AgentService:
                 actor,
                 asset_id,
                 result.id,
-                "agent.publish",
+                "agent.version.activate",
             ),
         )
 
@@ -846,11 +719,6 @@ class AgentService:
                 asset,
                 expected_asset_version,
             )
-            if asset.current_published_version_id is not None:
-                self._require_capability(
-                    actor,
-                    Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-                )
             await repository.archive_project_asset(
                 actor,
                 asset,
@@ -887,51 +755,50 @@ class AgentService:
         *,
         expected_asset_version: int,
     ) -> AgentAssetView:
-        self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         return await self._suspend_asset(
             actor,
             asset_id,
             expected_asset_version=expected_asset_version,
         )
 
-    async def activate(
+    async def enable(
         self,
         actor: _Actor,
         asset_id: uuid.UUID,
         *,
         expected_asset_version: int,
     ) -> AgentAssetView:
-        self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: AgentRepository) -> AgentAssetView:
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status != "suspended" or asset.current_published_version_id is None:
+            if asset.scope != AssetScope.PROJECT.value or asset.status != "suspended" or asset.current_version_id is None:
                 raise AssetConflict(actor.request_id)
-            published = await self._get_version(
+            current = await self._get_version(
                 repository,
                 actor,
                 asset.id,
-                asset.current_published_version_id,
+                asset.current_version_id,
                 for_update=True,
             )
-            if published.row.workflow_status != WorkflowStatus.PUBLISHED.value:
-                raise AssetConflict(actor.request_id)
             await require_agent_catalog_validation(
                 self._catalog_validator,
                 repository.session,
                 request_id=actor.request_id,
-                model_ref=published.row.model_ref,
-                tool_groups=tuple(published.row.tool_groups),
+                model_ref=current.row.model_ref,
+                tool_groups=tuple(current.row.tool_groups),
             )
             await self._validate_dependency_closure(
                 repository,
                 actor,
-                published.skill_version_ids,
-                published.mcp_version_ids,
+                current.skill_refs,
+                current.mcp_version_ids,
+                require_runnable=True,
             )
             asset.status = "active"
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
             return self._asset_view(asset)
 
@@ -942,8 +809,8 @@ class AgentService:
                 session,
                 actor,
                 result.id,
-                result.current_published_version_id,
-                "agent.activate",
+                None,
+                "agent.enable",
             ),
         )
 
@@ -965,7 +832,7 @@ class AgentService:
                 rows = await repository.list_override_visible(actor)
             else:
                 rows = await repository.list_system_visible(actor)
-            descriptions = await repository.current_published_descriptions(
+            descriptions = await repository.current_descriptions(
                 tuple(row.id for row in rows),
             )
             return tuple(
@@ -987,12 +854,25 @@ class AgentService:
 
         async def operation(repository: AgentRepository) -> tuple[AgentVersionView, ...]:
             if isinstance(actor, ProjectContext):
+                asset = await repository.get_project_visible_asset(
+                    actor,
+                    asset_id,
+                )
                 records = await repository.get_project_version_history(actor, asset_id)
             elif actor.project_id is not None:
+                asset = await repository.get_override_asset(actor, asset_id)
                 records = await repository.get_override_version_history(actor, asset_id)
             else:
+                asset = await repository.get_system_asset(actor, asset_id)
                 records = await repository.get_system_version_history(actor, asset_id)
-            return tuple(self._version_view(record) for record in records)
+            relations = self._relations(asset, records)
+            return tuple(
+                self._version_view(
+                    record,
+                    relation=relations[record.row.id],
+                )
+                for record in records
+            )
 
         return await self._execute(actor, operation)
 
@@ -1007,10 +887,10 @@ class AgentService:
             await repository.ensure_not_current_project_default(actor, asset_id)
             asset = await self._get_asset(repository, actor, asset_id, for_update=True)
             self._require_expected_version(actor, asset, expected_asset_version)
-            if asset.status != "active":
+            if asset.scope != AssetScope.PROJECT.value or asset.status != "active":
                 raise AssetConflict(actor.request_id)
             asset.status = "suspended"
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
             return self._asset_view(asset)
 
@@ -1097,6 +977,41 @@ class AgentService:
         raise AssetForbidden("unknown")
 
     @staticmethod
+    async def _version_history_records(
+        repository: AgentRepository,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+    ) -> tuple[AgentVersionRecord, ...]:
+        if isinstance(actor, ProjectContext):
+            return await repository.get_project_version_history(actor, asset_id)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_version_history(actor, asset_id)
+        if isinstance(actor, SystemAssetGovernanceContext):
+            return await repository.get_system_version_history(actor, asset_id)
+        raise AssetForbidden("unknown")
+
+    @staticmethod
+    def _relations(
+        asset: AgentRow,
+        records: Sequence[AgentVersionRecord],
+    ) -> dict[uuid.UUID, VersionRelation]:
+        try:
+            return classify_version_relations(
+                scope=AssetScope(asset.scope),
+                current_version_id=asset.current_version_id,
+                nodes=tuple(
+                    VersionLineageNode(
+                        record.row.id,
+                        record.row.version_number,
+                        record.row.supersedes_version_id,
+                    )
+                    for record in records
+                ),
+            )
+        except (TypeError, ValueError):
+            raise AssetValidationFailed("unknown") from None
+
+    @staticmethod
     def _validate_create(actor: _Actor, command: CreateAgent) -> CreateAgent:
         request_id = getattr(actor, "request_id", "unknown")
         if not isinstance(command, CreateAgent):
@@ -1119,7 +1034,7 @@ class AgentService:
             not isinstance(payload, AgentPayload)
             or not isinstance(payload_schema_version, int)
             or isinstance(payload_schema_version, bool)
-            or payload_schema_version not in (1, 2, 3)
+            or payload_schema_version not in (1, 2, 3, 4)
             or not isinstance(payload.model_settings, AgentModelSettings)
         ):
             raise AssetValidationFailed(request_id)
@@ -1147,7 +1062,7 @@ class AgentService:
                 soul=payload.soul,
                 model_ref=payload.model_ref,
                 tool_groups=tuple(payload.tool_groups),
-                skill_version_ids=tuple(payload.skill_version_ids),
+                skill_refs=tuple(payload.skill_refs),
                 mcp_version_ids=tuple(payload.mcp_version_ids),
                 agents_instructions=payload.agents_instructions,
                 identity=payload.identity,
@@ -1178,9 +1093,13 @@ class AgentService:
             raise AssetValidationFailed(request_id)
         if len(set(normalized.tool_groups)) != len(normalized.tool_groups):
             raise AssetValidationFailed(request_id)
-        for values in (normalized.skill_version_ids, normalized.mcp_version_ids):
-            if any(not isinstance(value, uuid.UUID) for value in values) or len(set(values)) != len(values):
-                raise AssetValidationFailed(request_id)
+        if (
+            any(not isinstance(value, SkillAssetRef) or not isinstance(value.scope, AssetScope) or not isinstance(value.asset_id, uuid.UUID) for value in normalized.skill_refs)
+            or len(set(normalized.skill_refs)) != len(normalized.skill_refs)
+            or any(not isinstance(value, uuid.UUID) for value in normalized.mcp_version_ids)
+            or len(set(normalized.mcp_version_ids)) != len(normalized.mcp_version_ids)
+        ):
+            raise AssetValidationFailed(request_id)
         return normalized
 
     @staticmethod
@@ -1213,14 +1132,18 @@ class AgentService:
         if not isinstance(bindings, AgentCapabilityBindings):
             raise AssetValidationFailed(request_id)
         try:
-            skill_version_ids = tuple(bindings.skill_version_ids)
+            skill_refs = tuple(bindings.skill_refs)
             mcp_version_ids = tuple(bindings.mcp_version_ids)
         except TypeError:
             raise AssetValidationFailed(request_id) from None
-        for values in (skill_version_ids, mcp_version_ids):
-            if any(not isinstance(value, uuid.UUID) for value in values) or len(set(values)) != len(values):
-                raise AssetValidationFailed(request_id)
-        return AgentCapabilityBindings(skill_version_ids, mcp_version_ids)
+        if (
+            any(not isinstance(value, SkillAssetRef) or not isinstance(value.scope, AssetScope) or not isinstance(value.asset_id, uuid.UUID) for value in skill_refs)
+            or len(set(skill_refs)) != len(skill_refs)
+            or any(not isinstance(value, uuid.UUID) for value in mcp_version_ids)
+            or len(set(mcp_version_ids)) != len(mcp_version_ids)
+        ):
+            raise AssetValidationFailed(request_id)
+        return AgentCapabilityBindings(skill_refs, mcp_version_ids)
 
     @staticmethod
     def _validate_instruction_sizes(
@@ -1254,40 +1177,54 @@ class AgentService:
 
     @staticmethod
     def _require_expected_version(actor: _Actor, asset: AgentRow, expected: int) -> None:
-        if not isinstance(expected, int) or isinstance(expected, bool) or asset.version != expected:
+        if not isinstance(expected, int) or isinstance(expected, bool) or asset.revision != expected:
             raise AssetConflict(actor.request_id)
 
     async def _validate_dependency_closure(
         self,
         repository: AgentRepository,
         actor: _Actor,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
+        *,
+        require_runnable: bool = False,
     ) -> None:
         if isinstance(actor, ProjectContext):
-            resolved_skill_ids = await repository.resolve_project_skill_versions(actor, skill_version_ids)
+            resolved_skill_refs = await repository.resolve_project_skill_refs(
+                actor,
+                skill_refs,
+                require_runnable=require_runnable,
+            )
             resolved_mcp_ids = await repository.resolve_project_mcp_versions(actor, mcp_version_ids)
         elif isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
-            resolved_skill_ids = await repository.resolve_override_skill_versions(actor, skill_version_ids)
+            resolved_skill_refs = await repository.resolve_override_skill_refs(
+                actor,
+                skill_refs,
+                require_runnable=require_runnable,
+            )
             resolved_mcp_ids = await repository.resolve_override_mcp_versions(actor, mcp_version_ids)
         elif isinstance(actor, SystemAssetGovernanceContext):
-            resolved_skill_ids = await repository.resolve_system_skill_versions(actor, skill_version_ids)
+            resolved_skill_refs = await repository.resolve_system_skill_refs(
+                actor,
+                skill_refs,
+                require_runnable=require_runnable,
+            )
             resolved_mcp_ids = await repository.resolve_system_mcp_versions(actor, mcp_version_ids)
         else:
             raise AssetForbidden("unknown")
-        if set(resolved_skill_ids) != set(skill_version_ids) or set(resolved_mcp_ids) != set(mcp_version_ids):
+        if set(resolved_skill_refs) != set(skill_refs) or set(resolved_mcp_ids) != set(mcp_version_ids):
             raise AssetValidationFailed(actor.request_id)
-        skill_slugs = await repository.lock_skill_version_slugs(
-            skill_version_ids,
+        skill_slugs = await repository.lock_skill_asset_slugs(
+            skill_refs,
         )
-        if len(skill_slugs) != len(skill_version_ids) or len({slug.casefold() for slug in skill_slugs}) != len(skill_slugs):
+        if len(skill_slugs) != len(skill_refs) or len({slug.casefold() for slug in skill_slugs}) != len(skill_slugs):
             raise AssetValidationFailed(actor.request_id)
 
     @staticmethod
     def _payload_schema_version(payload: object) -> int:
-        if isinstance(payload, AgentPayload) and isinstance(payload.model_settings, AgentModelSettings) and not payload.model_settings.is_empty:
-            return 3
-        return 2
+        if not isinstance(payload, AgentPayload):
+            raise ValueError("invalid Agent payload")
+        return 4
 
     @staticmethod
     def _model_settings_json(
@@ -1339,8 +1276,8 @@ class AgentService:
             slug=row.slug,
             display_name=row.display_name,
             status=row.status,
-            current_published_version_id=row.current_published_version_id,
-            version=row.version,
+            current_version_id=row.current_version_id,
+            revision=row.revision,
             created_by_user_id=row.created_by_user_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -1348,18 +1285,22 @@ class AgentService:
         )
 
     @staticmethod
-    def _version_view(record: AgentVersionRecord) -> AgentVersionView:
+    def _version_view(
+        record: AgentVersionRecord,
+        *,
+        relation: VersionRelation,
+    ) -> AgentVersionView:
         row = record.row
         return AgentVersionView(
             id=row.id,
             agent_id=row.agent_id,
             version_number=row.version_number,
-            workflow_status=WorkflowStatus(row.workflow_status),
+            relation=relation,
             description=row.description,
             soul=row.soul,
             model_ref=row.model_ref,
             tool_groups=tuple(row.tool_groups),
-            skill_version_ids=record.skill_version_ids,
+            skill_refs=record.skill_refs,
             mcp_version_ids=record.mcp_version_ids,
             supersedes_version_id=row.supersedes_version_id,
             payload_checksum=row.payload_checksum,
@@ -1411,7 +1352,7 @@ class AgentService:
             soul=(payload.soul if "soul" in provided_instruction_fields else instructions.soul),
             model_ref=payload.model_ref,
             tool_groups=payload.tool_groups,
-            skill_version_ids=payload.skill_version_ids,
+            skill_refs=payload.skill_refs,
             mcp_version_ids=payload.mcp_version_ids,
             agents_instructions=(payload.agents_instructions if "agents_instructions" in provided_instruction_fields else instructions.agents_instructions),
             identity=(payload.identity if "identity" in provided_instruction_fields else instructions.identity),
@@ -1427,26 +1368,18 @@ class AgentService:
         actor: _Actor,
         asset: AgentRow,
     ) -> AgentVersionRecord | None:
-        if isinstance(actor, ProjectContext):
-            latest = await repository.get_latest_project_version(actor, asset.id)
-        elif isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
-            latest = await repository.get_latest_override_version(actor, asset.id)
-        elif isinstance(actor, SystemAssetGovernanceContext):
-            latest = await repository.get_latest_system_version(actor, asset.id)
-        else:
-            raise AssetForbidden("unknown")
-
-        live_version_id = asset.current_published_version_id
-        if latest is not None and (latest.row.id == live_version_id or (latest.row.workflow_status == WorkflowStatus.DRAFT.value and latest.row.supersedes_version_id == live_version_id)):
-            return latest
-        if live_version_id is not None:
-            return await cls._get_version(
-                repository,
-                actor,
-                asset.id,
-                live_version_id,
-            )
-        return None
+        records = await cls._version_history_records(
+            repository,
+            actor,
+            asset.id,
+        )
+        relations = cls._relations(asset, records)
+        eligible = tuple(record for record in records if relations[record.row.id] in {VersionRelation.CURRENT, VersionRelation.CANDIDATE})
+        return max(
+            eligible,
+            key=lambda record: record.row.version_number,
+            default=None,
+        )
 
     @staticmethod
     async def _next_version_number(
@@ -1458,9 +1391,7 @@ class AgentService:
             return await repository.next_project_version_number(actor, asset)
         if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
             return await repository.next_override_version_number(actor, asset)
-        if isinstance(actor, SystemAssetGovernanceContext):
-            return await repository.next_system_version_number(actor, asset)
-        raise AssetForbidden("unknown")
+        raise AssetForbidden(getattr(actor, "request_id", "unknown"))
 
     @staticmethod
     async def _create_version_record(
@@ -1468,7 +1399,7 @@ class AgentService:
         actor: _Actor,
         asset_id: uuid.UUID,
         row: AgentVersionRow,
-        skill_version_ids: Sequence[uuid.UUID],
+        skill_refs: Sequence[SkillAssetRef],
         mcp_version_ids: Sequence[uuid.UUID],
     ) -> AgentVersionRecord:
         if isinstance(actor, ProjectContext):
@@ -1476,7 +1407,7 @@ class AgentService:
                 actor,
                 asset_id,
                 row,
-                skill_version_ids,
+                skill_refs,
                 mcp_version_ids,
             )
         if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
@@ -1484,18 +1415,10 @@ class AgentService:
                 actor,
                 asset_id,
                 row,
-                skill_version_ids,
+                skill_refs,
                 mcp_version_ids,
             )
-        if isinstance(actor, SystemAssetGovernanceContext):
-            return await repository.create_system_version(
-                actor,
-                asset_id,
-                row,
-                skill_version_ids,
-                mcp_version_ids,
-            )
-        raise AssetForbidden("unknown")
+        raise AssetForbidden(getattr(actor, "request_id", "unknown"))
 
     async def _record_governance(
         self,

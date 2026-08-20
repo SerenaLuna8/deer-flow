@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 
 from app.gateway.routers import admin_assets
-from app.shared_assets import AssetConflict, SkillVersionView, WorkflowStatus
+from app.shared_assets import AssetConflict, SkillVersionView, VersionRelation
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 from deerflow.trace_context import request_trace_context
 
@@ -24,8 +24,8 @@ def _revoked_version() -> SkillVersionView:
     return SkillVersionView(
         id=_VERSION_ID,
         skill_id=_ASSET_ID,
-        version_number=4,
-        workflow_status=WorkflowStatus.PUBLISHED,
+        version_number=1,
+        relation=VersionRelation.CURRENT,
         description="Revoked packaged Skill",
         frontmatter={"name": "release-review"},
         compatibility=None,
@@ -111,7 +111,7 @@ async def test_system_admin_can_revoke_a_system_skill_version() -> None:
 
     response = await _revoke(
         _app(service),
-        body={"expected_asset_version": 7, "reason_code": "security"},
+        body={"expected_revision": 7, "reason_code": "security"},
     )
 
     assert response.status_code == 200
@@ -148,7 +148,7 @@ async def test_non_admin_cannot_revoke_a_system_skill_version() -> None:
 
     response = await _revoke(
         _app(service, system_role="user"),
-        body={"expected_asset_version": 7, "reason_code": "security"},
+        body={"expected_revision": 7, "reason_code": "security"},
     )
 
     assert response.status_code == 403
@@ -160,14 +160,14 @@ async def test_non_admin_cannot_revoke_a_system_skill_version() -> None:
 @pytest.mark.parametrize(
     "body",
     [
-        {"expected_asset_version": 7, "reason_code": "operator_request"},
+        {"expected_revision": 7, "reason_code": "operator_request"},
         {
-            "expected_asset_version": 7,
+            "expected_revision": 7,
             "reason_code": "security",
             "operator_note": "must not enter the audit contract",
         },
-        {"expected_asset_version": True, "reason_code": "security"},
-        {"expected_asset_version": False, "reason_code": "security"},
+        {"expected_revision": True, "reason_code": "security"},
+        {"expected_revision": False, "reason_code": "security"},
     ],
 )
 async def test_revocation_request_rejects_non_contract_values(body: object) -> None:
@@ -192,7 +192,7 @@ async def test_revocation_conflict_keeps_the_asset_error_contract() -> None:
 
     response = await _revoke(
         _app(service),
-        body={"expected_asset_version": 7, "reason_code": "integrity"},
+        body={"expected_revision": 7, "reason_code": "integrity"},
     )
 
     assert response.status_code == 409
@@ -224,7 +224,7 @@ async def test_revocation_rejects_malformed_path_ids_before_service_call(
         _app(service),
         asset_id=asset_id,
         version_id=version_id,
-        body={"expected_asset_version": 7, "reason_code": "policy"},
+        body={"expected_revision": 7, "reason_code": "policy"},
     )
 
     assert response.status_code == 422

@@ -38,8 +38,8 @@ class SkillRow(Base):
     slug: Mapped[str] = mapped_column(String(63), nullable=False)
     display_name: Mapped[str] = mapped_column(String(120), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active", server_default="active")
-    current_published_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
-    version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1, server_default=text("1"))
     source_key: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
@@ -51,14 +51,14 @@ class SkillRow(Base):
             name="ck_skills_scope_project",
         ),
         CheckConstraint("status IN ('active', 'archived', 'suspended')", name="ck_skills_status"),
-        CheckConstraint("version >= 1", name="ck_skills_version"),
+        CheckConstraint("revision >= 1", name="ck_skills_revision"),
         UniqueConstraint("id", "scope", name="uq_skills_id_scope"),
         UniqueConstraint("project_id", "id", name="uq_skills_project_id_id"),
         UniqueConstraint("source_key", name="uq_skills_source_key"),
         ForeignKeyConstraint(
-            ["id", "current_published_version_id"],
+            ["id", "current_version_id"],
             ["skill_versions.skill_id", "skill_versions.id"],
-            name="fk_skills_current_published_version",
+            name="fk_skills_current_version",
             use_alter=True,
         ),
         Index("uq_skills_system_slug", func.lower(slug), unique=True, postgresql_where=text("scope = 'system'")),
@@ -85,7 +85,6 @@ class SkillVersionRow(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     skill_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("skills.id", ondelete="RESTRICT"), nullable=False)
     version_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    workflow_status: Mapped[str] = mapped_column(String(24), nullable=False, default="draft", server_default="draft")
     description: Mapped[str] = mapped_column(Text, nullable=False, default="", server_default="")
     frontmatter: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     compatibility: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -94,10 +93,6 @@ class SkillVersionRow(Base):
     scan_summary: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     supersedes_version_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("skill_versions.id", ondelete="RESTRICT"), nullable=True)
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    reviewed_by_user_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("users.id"), nullable=True)
-    review_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by_user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -106,10 +101,6 @@ class SkillVersionRow(Base):
 
     __table_args__ = (
         CheckConstraint("version_number >= 1", name="ck_skill_versions_number"),
-        CheckConstraint(
-            "workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')",
-            name="ck_skill_versions_workflow_status",
-        ),
         CheckConstraint("scan_decision IN ('allow', 'warn', 'block')", name="ck_skill_versions_scan_decision"),
         CheckConstraint("payload_checksum ~ '^[0-9a-f]{64}$'", name="ck_skill_versions_checksum"),
         CheckConstraint(

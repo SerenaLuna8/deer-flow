@@ -134,7 +134,7 @@ async def _seed_agent_reference(
                 slug=f"delete-{case.name}-{agent_id.hex[:8]}",
                 display_name=f"Delete matrix: {case.name}",
                 status="suspended",
-                version=2,
+                revision=2,
                 created_by_user_id=str(seed.actor.user_id),
             )
         )
@@ -144,7 +144,6 @@ async def _seed_agent_reference(
                 id=version_id,
                 agent_id=agent_id,
                 version_number=1,
-                workflow_status="draft",
                 description="",
                 agents_instructions="",
                 soul="",
@@ -271,7 +270,7 @@ async def _assert_persisted_state(
         version = await session.scalar(select(AgentVersionRow).where(AgentVersionRow.agent_id == agent_id))
     assert agent is not None, case.name
     assert agent.status == "archived", case.name
-    assert agent.version == 3, case.name
+    assert agent.revision == 3, case.name
     assert version is not None, case.name
     assert reference is not None, case.name
 
@@ -338,7 +337,7 @@ async def _seed_executable_agent_with_oauth_state(
             slug=f"callback-race-{agent_id.hex[:8]}",
             display_name="Callback deletion race",
             status="active",
-            version=2,
+            revision=2,
             created_by_user_id=str(seed.actor.user_id),
         )
         session.add(agent)
@@ -348,7 +347,6 @@ async def _seed_executable_agent_with_oauth_state(
                 id=version_id,
                 agent_id=agent_id,
                 version_number=1,
-                workflow_status="published",
                 description="",
                 agents_instructions="",
                 soul="",
@@ -363,7 +361,7 @@ async def _seed_executable_agent_with_oauth_state(
             )
         )
         await session.flush()
-        agent.current_published_version_id = version_id
+        agent.current_version_id = version_id
         session.add(
             ChannelOAuthStateRow(
                 state_hash=ChannelConnectionRepository.hash_state(state),
@@ -477,7 +475,7 @@ async def test_agent_archive_clears_default_pointer_and_preserves_published_vers
                 ).all()
             )
         assert agent is not None and agent.status == "archived"
-        assert agent.current_published_version_id == versions[0].id
+        assert agent.current_version_id == versions[0].id
         assert len(versions) == 1
         assert default is not None
         assert default.agent_asset_id is None
@@ -538,7 +536,7 @@ async def test_agent_archive_wins_race_with_oauth_callback_without_dangling_conn
                 )
             )
         assert agent is not None and agent.status == "archived"
-        assert agent.current_published_version_id is not None
+        assert agent.current_version_id is not None
         assert connection is None
     finally:
         resume.set()

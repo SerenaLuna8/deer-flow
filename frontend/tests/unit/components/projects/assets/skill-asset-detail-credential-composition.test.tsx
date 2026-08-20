@@ -69,7 +69,7 @@ function renderDetail({
     id: SKILL_ID,
     scope,
     status: "active",
-    current_published_version_id: currentPublishedVersionId,
+    current_version_id: currentPublishedVersionId,
   } as ProjectAssetItem;
 
   return renderToStaticMarkup(
@@ -78,7 +78,7 @@ function renderDetail({
         id: versionId,
         skill_id: SKILL_ID,
         version_number: workflowStatus === "published" ? 1 : 2,
-        workflow_status: workflowStatus,
+        relation: workflowStatus === "published" ? "current" : "candidate",
         description: "Credential flow fixture",
         frontmatter: {},
         compatibility: null,
@@ -106,7 +106,7 @@ function renderDetail({
         credentialBindingsDirty,
         onEditingChange: () => undefined,
         onDirtyChange: () => undefined,
-        onPublishValidityChange: () => undefined,
+        onActivationValidityChange: () => undefined,
         onVersionCreated: () => undefined,
         canManageCredentials: true,
         credentialsHref: "/projects/demo/credentials",

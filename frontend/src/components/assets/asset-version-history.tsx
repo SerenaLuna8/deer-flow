@@ -44,7 +44,9 @@ export function activeCredentialGrantVersions(
 function versionStatus(version: AssetVersion) {
   return "workflow_status" in version
     ? version.workflow_status
-    : version.status;
+    : "relation" in version
+      ? version.relation
+      : version.status;
 }
 
 export function AssetVersionHistory({
@@ -52,6 +54,7 @@ export function AssetVersionHistory({
   scope,
   versions,
   pending = false,
+  onActivate,
   onPublish,
   onSubmit,
   onApprove,
@@ -69,6 +72,7 @@ export function AssetVersionHistory({
   scope: AssetScope;
   versions: AssetVersion[];
   pending?: boolean;
+  onActivate?: (version: AssetVersion) => void;
   onPublish?: (version: AssetVersion) => void;
   onSubmit?: (version: McpVersion) => void;
   onApprove?: (
@@ -192,6 +196,19 @@ export function AssetVersionHistory({
                   )}
                 </div>
               )}
+              {!isMcp &&
+              "relation" in version &&
+              version.relation === "candidate" &&
+              onActivate ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={pending}
+                  onClick={() => onActivate(version)}
+                >
+                  激活版本
+                </Button>
+              ) : null}
               {runtimeBlockReason ? (
                 <p role="alert" className="text-destructive text-sm">
                   {runtimeBlockReason}

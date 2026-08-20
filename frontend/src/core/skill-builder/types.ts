@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import {
-  assetSummarySchema,
+  currentVersionAssetSummarySchema,
   skillVersionSchema,
 } from "@/core/shared-assets/types";
 
@@ -418,7 +418,7 @@ export const createSkillBuilderSessionInputSchema = z
   })
   .strict();
 
-/** Opens a Builder session seeded from an existing Skill's published version. */
+/** Opens a Builder session seeded from an existing Skill's Current Version. */
 export const createSkillBuilderRevisionInputSchema = z
   .object({
     kind: z.literal("revise"),
@@ -610,7 +610,6 @@ export const commitSkillBuilderSessionInputSchema =
   validateSkillBuilderSessionInputSchema
     .extend({
       acknowledge_warnings: z.boolean(),
-      acknowledge_base_stale: z.boolean().optional(),
     })
     .strict();
 
@@ -626,7 +625,7 @@ export const skillBuilderCommitResponseSchema = z
     data: z
       .object({
         session: skillBuilderSessionSchema,
-        skill: assetSummarySchema,
+        skill: currentVersionAssetSummarySchema,
         // Current Gateway responses return the exact committed version for
         // both create and revise. Nullable remains rolling-compatible with an
         // older Gateway that omitted the create version.

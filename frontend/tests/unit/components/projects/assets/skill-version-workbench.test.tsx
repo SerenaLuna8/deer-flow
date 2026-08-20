@@ -63,28 +63,28 @@ describe("Skill version conflict recovery", () => {
     expect(
       skillVersionConflictHasLatestServerState(
         recovery,
-        { id: ASSET_ID, version: 7 },
+        { id: ASSET_ID, revision: 7 },
         { id: SOURCE_VERSION_ID },
       ),
     ).toBe(false);
     expect(
       skillVersionConflictHasLatestServerState(
         recovery,
-        { id: ASSET_ID, version: 8 },
+        { id: ASSET_ID, revision: 8 },
         { id: SOURCE_VERSION_ID },
       ),
     ).toBe(true);
     expect(
       skillVersionConflictHasLatestServerState(
         recovery,
-        { id: "another-asset", version: 8 },
+        { id: "another-asset", revision: 8 },
         { id: SOURCE_VERSION_ID },
       ),
     ).toBe(false);
     expect(
       skillVersionConflictHasLatestServerState(
         recovery,
-        { id: ASSET_ID, version: 8 },
+        { id: ASSET_ID, revision: 8 },
         { id: "another-source-version" },
       ),
     ).toBe(false);
@@ -136,15 +136,15 @@ describe("Skill version conflict recovery", () => {
     };
 
     expect(
-      skillVersionSaveIsPending(pending, { id: ASSET_ID, version: 7 }),
+      skillVersionSaveIsPending(pending, { id: ASSET_ID, revision: 7 }),
     ).toBe(true);
     expect(
-      skillVersionSaveIsPending(pending, { id: ASSET_ID, version: 8 }),
+      skillVersionSaveIsPending(pending, { id: ASSET_ID, revision: 8 }),
     ).toBe(false);
     expect(
       skillVersionSaveIsPending(pending, {
         id: "another-asset",
-        version: 7,
+        revision: 7,
       }),
     ).toBe(false);
   });

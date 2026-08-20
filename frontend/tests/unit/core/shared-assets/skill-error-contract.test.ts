@@ -36,7 +36,7 @@ describe("Project Skill error contract", () => {
 
     await expect(
       deleteProjectSkill(PROJECT_ID, ASSET_ID, {
-        expected_asset_version: 3,
+        expected_revision: 3,
       }),
     ).rejects.toMatchObject({
       status: 409,
@@ -54,8 +54,8 @@ describe("Project Skill error contract", () => {
     );
 
     await expect(
-      changeProjectAssetStatus(PROJECT_ID, "skills", ASSET_ID, "activate", {
-        expected_asset_version: 3,
+      changeProjectAssetStatus(PROJECT_ID, "skills", ASSET_ID, "enable", {
+        expected_revision: 3,
       }),
     ).rejects.toMatchObject({
       status: 409,
@@ -96,7 +96,7 @@ describe("Project Skill error contract", () => {
 
     await expect(
       deleteProjectSkill(PROJECT_ID, ASSET_ID, {
-        expected_asset_version: 3,
+        expected_revision: 3,
       }),
     ).rejects.toMatchObject({
       status: 413,

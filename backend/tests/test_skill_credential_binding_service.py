@@ -11,7 +11,6 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.errors import (
     AssetConflict,
-    AssetForbidden,
     AssetNotFound,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
@@ -54,7 +53,7 @@ def _target(
     actor: ProjectContext,
     *,
     status: str,
-    current_published_version_id: uuid.UUID | None,
+    current_version_id: uuid.UUID | None,
     version_id: uuid.UUID | None = None,
 ) -> SkillCredentialTarget:
     skill_id = uuid.uuid4()
@@ -65,13 +64,14 @@ def _target(
             scope="project",
             project_id=actor.project_id,
             status=status,
-            version=8,
-            current_published_version_id=current_published_version_id,
+            revision=8,
+            current_version_id=current_version_id,
         ),
         SimpleNamespace(
             id=selected_version_id,
             skill_id=skill_id,
-            workflow_status="draft",
+            version_number=2,
+            supersedes_version_id=current_version_id,
             revoked_at=None,
             payload_checksum="a" * 64,
             frontmatter={"secrets-autonomous": True},
@@ -111,7 +111,7 @@ def _eligible(
 
 
 @pytest.mark.asyncio
-async def test_get_for_version_builds_read_only_exact_draft_preflight(
+async def test_get_for_version_builds_read_only_candidate_readiness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
@@ -119,7 +119,7 @@ async def test_get_for_version_builds_read_only_exact_draft_preflight(
     target = _target(
         actor,
         status="active",
-        current_published_version_id=previous_version_id,
+        current_version_id=previous_version_id,
     )
     target.version.frontmatter = {}
     eligible = _eligible(actor, env=["API_KEY"])
@@ -164,12 +164,17 @@ async def test_get_for_version_builds_read_only_exact_draft_preflight(
         _Repository,
     )
     service = SkillCredentialBindingService(lambda: _Session())
+    monkeypatch.setattr(
+        service,
+        "_is_project_candidate",
+        AsyncMock(return_value=True),
+    )
 
     plan = await service.get_for_version(actor, target.asset.id, target.version.id)
 
     assert plan.skill_id == target.asset.id
     assert plan.skill_version_id == target.version.id
-    assert plan.asset_version == 8
+    assert plan.revision == 8
     assert plan.payload_checksum == "a" * 64
     assert plan.binding_revision == 0
     assert plan.secrets_autonomous is True
@@ -182,7 +187,7 @@ async def test_get_for_version_builds_read_only_exact_draft_preflight(
 
 
 @pytest.mark.asyncio
-async def test_editor_cannot_open_exact_version_publish_plan() -> None:
+async def test_editor_can_open_candidate_activation_readiness() -> None:
     actor = ProjectContext(
         user_id=uuid.uuid4(),
         project_id=uuid.uuid4(),
@@ -190,13 +195,13 @@ async def test_editor_cannot_open_exact_version_publish_plan() -> None:
         role=ProjectRole.EDITOR,
         capabilities=capabilities_for(ProjectRole.EDITOR),
         membership_version=1,
-        request_id="req-editor-publish-plan",
+        request_id="req-editor-activation-readiness",
     )
 
     def unexpected_session():
         raise AssertionError("permission denial must happen before storage access")
 
-    with pytest.raises(AssetForbidden):
+    with pytest.raises(AssertionError, match="permission denial"):
         await SkillCredentialBindingService(unexpected_session).get_for_version(
             actor,
             uuid.uuid4(),
@@ -209,18 +214,17 @@ async def test_replace_rejects_removing_required_binding_from_active_skill(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
-    published_version_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
     target = _target(
         actor,
         status="active",
-        current_published_version_id=published_version_id,
-        version_id=published_version_id,
+        current_version_id=current_version_id,
+        version_id=current_version_id,
     )
-    target.version.workflow_status = "published"
     config = SimpleNamespace(revision=2)
     existing = (
         SimpleNamespace(
-            skill_version_id=published_version_id,
+            skill_version_id=current_version_id,
             config_revision=2,
             secret_name="API_KEY",
         ),
@@ -233,7 +237,7 @@ async def test_replace_rejects_removing_required_binding_from_active_skill(
         def __init__(self, _session):
             self.lock_project = AsyncMock()
 
-        async def lock_configurable_current_published_skill(self, *_args, **_kwargs):
+        async def lock_configurable_current_skill(self, *_args, **_kwargs):
             return target
 
         async def get_config(self, *_args, **_kwargs):
@@ -259,7 +263,7 @@ async def test_replace_rejects_removing_required_binding_from_active_skill(
             actor,
             target.asset.id,
             (),
-            expected_skill_version_id=published_version_id,
+            expected_skill_version_id=current_version_id,
             expected_revision=2,
         )
 
@@ -267,7 +271,7 @@ async def test_replace_rejects_removing_required_binding_from_active_skill(
 
 
 @pytest.mark.asyncio
-async def test_replace_rejects_stale_published_version_before_binding_writes(
+async def test_replace_rejects_stale_current_version_before_binding_writes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
@@ -276,14 +280,13 @@ async def test_replace_rejects_stale_published_version_before_binding_writes(
     target = _target(
         actor,
         status="active",
-        current_published_version_id=current_version_id,
+        current_version_id=current_version_id,
         version_id=current_version_id,
     )
-    target.version.workflow_status = "published"
 
     class _Repository:
         lock_project = AsyncMock()
-        lock_configurable_current_published_skill = AsyncMock(
+        lock_configurable_current_skill = AsyncMock(
             return_value=target,
         )
         get_config = AsyncMock()
@@ -317,7 +320,7 @@ async def test_replace_rejects_stale_published_version_before_binding_writes(
     assert exc_info.value.code == "SKILL_CREDENTIAL_SELECTION_STALE"
     repository = _Repository
     repository.lock_project.assert_awaited_once_with(actor)
-    repository.lock_configurable_current_published_skill.assert_awaited_once_with(
+    repository.lock_configurable_current_skill.assert_awaited_once_with(
         actor,
         target.asset.id,
     )
@@ -335,7 +338,7 @@ async def test_selected_credential_disappearance_collapses_to_stable_stale_error
     target = _target(
         actor,
         status="active",
-        current_published_version_id=uuid.uuid4(),
+        current_version_id=uuid.uuid4(),
     )
     missing_version_id = uuid.uuid4()
     repository = SimpleNamespace(
@@ -366,7 +369,7 @@ def test_exact_version_view_supports_alias_mapping_and_redacts_for_non_approver(
     target = _target(
         actor,
         status="suspended",
-        current_published_version_id=None,
+        current_version_id=None,
     )
     eligible = _eligible(actor, env=["DB_DATABASE", "DB_PASSWORD"])
     config = SimpleNamespace(
@@ -417,19 +420,18 @@ def test_exact_version_view_supports_alias_mapping_and_redacts_for_non_approver(
 
 
 @pytest.mark.asyncio
-async def test_exact_get_keeps_current_published_system_skill_configurable(
+async def test_exact_get_keeps_current_system_skill_configurable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
     target = _target(
         actor,
         status="active",
-        current_published_version_id=None,
+        current_version_id=None,
     )
     target.asset.scope = "system"
     target.asset.project_id = None
-    target.asset.current_published_version_id = target.version.id
-    target.version.workflow_status = "published"
+    target.asset.current_version_id = target.version.id
     eligible = _eligible(actor, env=["API_KEY"])
 
     class _Repository:
@@ -474,19 +476,18 @@ async def test_exact_get_keeps_current_published_system_skill_configurable(
 
 
 @pytest.mark.asyncio
-async def test_exact_replace_writes_current_published_system_skill_mapping(
+async def test_exact_replace_writes_current_system_skill_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _context()
     target = _target(
         actor,
         status="active",
-        current_published_version_id=None,
+        current_version_id=None,
     )
     target.asset.scope = "system"
     target.asset.project_id = None
-    target.asset.current_published_version_id = target.version.id
-    target.version.workflow_status = "published"
+    target.asset.current_version_id = target.version.id
     eligible = _eligible(actor, env=["PROVIDER_TOKEN"])
     config = SimpleNamespace(
         revision=1,
@@ -570,11 +571,10 @@ async def test_exact_replace_rejects_historical_system_skill_version(
     target = _target(
         actor,
         status="active",
-        current_published_version_id=uuid.uuid4(),
+        current_version_id=uuid.uuid4(),
     )
     target.asset.scope = "system"
     target.asset.project_id = None
-    target.version.workflow_status = "published"
 
     class _Repository:
         lock_project = AsyncMock()

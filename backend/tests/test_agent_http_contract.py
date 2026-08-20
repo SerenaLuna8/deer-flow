@@ -19,7 +19,8 @@ from app.shared_assets import (
     AssetScope,
     CreateAgent,
     ProjectAgentCreateResult,
-    WorkflowStatus,
+    SkillAssetRef,
+    VersionRelation,
 )
 from app.shared_assets.contexts import SystemAssetGovernanceContext
 
@@ -56,8 +57,8 @@ def _asset() -> AgentAssetView:
         slug="release-agent",
         display_name="Release Agent",
         status="suspended",
-        current_published_version_id=None,
-        version=2,
+        current_version_id=None,
+        revision=2,
         created_by_user_id=str(_USER_ID),
         created_at=_NOW,
         updated_at=_NOW,
@@ -65,12 +66,12 @@ def _asset() -> AgentAssetView:
     )
 
 
-def _version(*, workflow_status: WorkflowStatus) -> AgentVersionView:
+def _version(*, relation: VersionRelation) -> AgentVersionView:
     return AgentVersionView(
         id=_VERSION_ID,
         agent_id=_ASSET_ID,
         version_number=1,
-        workflow_status=workflow_status,
+        relation=relation,
         description="Prepares releases",
         agents_instructions="Prepare a safe release plan.",
         soul="Be careful and explicit.",
@@ -84,7 +85,7 @@ def _version(*, workflow_status: WorkflowStatus) -> AgentVersionView:
             reasoning_effort="medium",
         ),
         tool_groups=("web", "filesystem"),
-        skill_version_ids=(_SKILL_VERSION_ID,),
+        skill_refs=(SkillAssetRef(AssetScope.PROJECT, _SKILL_VERSION_ID),),
         mcp_version_ids=(_MCP_VERSION_ID,),
         supersedes_version_id=None,
         payload_schema_version=3,
@@ -111,7 +112,7 @@ def _complete_request() -> dict[str, object]:
             "reasoning_effort": "medium",
         },
         "tool_groups": ["web", "filesystem"],
-        "skill_version_ids": [str(_SKILL_VERSION_ID)],
+        "skill_refs": [{"scope": "project", "asset_id": str(_SKILL_VERSION_ID)}],
         "mcp_version_ids": [str(_MCP_VERSION_ID)],
     }
 
@@ -125,7 +126,7 @@ class _AgentService:
                 AgentPayload,
             ]
         ] = []
-        self.publish_calls: list[tuple[ProjectContext, uuid.UUID, uuid.UUID, int]] = []
+        self.activate_calls: list[tuple[ProjectContext, uuid.UUID, uuid.UUID, int]] = []
 
     async def create_project(
         self,
@@ -136,10 +137,10 @@ class _AgentService:
         self.create_calls.append((actor, command, payload))
         return ProjectAgentCreateResult(
             asset=_asset(),
-            version=_version(workflow_status=WorkflowStatus.DRAFT),
+            version=_version(relation=VersionRelation.CANDIDATE),
         )
 
-    async def publish(
+    async def activate_version(
         self,
         actor: ProjectContext,
         asset_id: uuid.UUID,
@@ -147,8 +148,8 @@ class _AgentService:
         *,
         expected_asset_version: int,
     ) -> AgentVersionView:
-        self.publish_calls.append((actor, asset_id, version_id, expected_asset_version))
-        return _version(workflow_status=WorkflowStatus.PUBLISHED)
+        self.activate_calls.append((actor, asset_id, version_id, expected_asset_version))
+        return _version(relation=VersionRelation.CURRENT)
 
 
 def _app(
@@ -193,7 +194,7 @@ async def test_project_agent_create_requires_the_complete_definition() -> None:
 
 
 @pytest.mark.asyncio
-async def test_project_agent_create_is_atomic_asset_and_draft_version_contract() -> None:
+async def test_project_agent_create_is_atomic_asset_and_candidate_contract() -> None:
     service = _AgentService()
     application = _app(service)
 
@@ -212,8 +213,8 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
             "slug": "release-agent",
             "display_name": "Release Agent",
             "status": "suspended",
-            "current_published_version_id": None,
-            "version": 2,
+            "current_version_id": None,
+            "revision": 2,
             "created_by_user_id": str(_USER_ID),
             "created_at": _NOW.isoformat().replace("+00:00", "Z"),
             "updated_at": _NOW.isoformat().replace("+00:00", "Z"),
@@ -222,7 +223,7 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
             "id": str(_VERSION_ID),
             "agent_id": str(_ASSET_ID),
             "version_number": 1,
-            "workflow_status": "draft",
+            "relation": "candidate",
             "description": "Prepares releases",
             "agents_instructions": "Prepare a safe release plan.",
             "soul": "Be careful and explicit.",
@@ -236,7 +237,7 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
                 "reasoning_effort": "medium",
             },
             "tool_groups": ["web", "filesystem"],
-            "skill_version_ids": [str(_SKILL_VERSION_ID)],
+            "skill_refs": [{"scope": "project", "asset_id": str(_SKILL_VERSION_ID)}],
             "mcp_version_ids": [str(_MCP_VERSION_ID)],
             "supersedes_version_id": None,
             "payload_schema_version": 3,
@@ -264,7 +265,7 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
                     reasoning_effort="medium",
                 ),
                 tool_groups=("web", "filesystem"),
-                skill_version_ids=(_SKILL_VERSION_ID,),
+                skill_refs=(SkillAssetRef(AssetScope.PROJECT, _SKILL_VERSION_ID),),
                 mcp_version_ids=(_MCP_VERSION_ID,),
             ),
         )
@@ -272,20 +273,20 @@ async def test_project_agent_create_is_atomic_asset_and_draft_version_contract()
 
 
 @pytest.mark.asyncio
-async def test_project_agent_publish_has_an_explicit_cas_route() -> None:
+async def test_project_agent_activation_has_an_explicit_cas_route() -> None:
     service = _AgentService()
     application = _app(service)
 
     response = await _post(
         application,
-        (f"/api/projects/{_PROJECT_ID}/agents/{_ASSET_ID}/versions/{_VERSION_ID}/publish"),
-        {"expected_asset_version": 2},
+        (f"/api/projects/{_PROJECT_ID}/agents/{_ASSET_ID}/versions/{_VERSION_ID}/activate"),
+        {"expected_revision": 2},
     )
 
     assert response.status_code == 200
-    assert response.json()["data"]["workflow_status"] == "published"
+    assert response.json()["data"]["relation"] == "current"
     assert response.json()["request_id"] == _REQUEST_ID
-    assert service.publish_calls == [
+    assert service.activate_calls == [
         (_context(), _ASSET_ID, _VERSION_ID, 2),
     ]
 
@@ -318,7 +319,7 @@ async def test_admin_project_agent_create_uses_the_same_complete_contract() -> N
     )
 
     assert response.status_code == 201
-    assert response.json()["version"]["workflow_status"] == "draft"
+    assert response.json()["version"]["relation"] == "candidate"
     assert response.json()["request_id"] == _REQUEST_ID
     assert len(service.create_calls) == 1
     called_actor, command, payload = service.create_calls[0]
@@ -328,5 +329,5 @@ async def test_admin_project_agent_create_uses_the_same_complete_contract() -> N
         display_name="Release Agent",
     )
     assert payload.model_ref == _MODEL_REF
-    assert payload.skill_version_ids == (_SKILL_VERSION_ID,)
+    assert payload.skill_refs == (SkillAssetRef(AssetScope.PROJECT, _SKILL_VERSION_ID),)
     assert payload.mcp_version_ids == (_MCP_VERSION_ID,)

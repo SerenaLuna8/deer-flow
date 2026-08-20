@@ -47,14 +47,14 @@ function catalog(): ProjectAssetList {
         display_name: "System Ready",
         description: null,
         status: "active",
-        current_published_version_id: SYSTEM_READY_VERSION_ID,
-        version: 2,
+        current_version_id: SYSTEM_READY_VERSION_ID,
+        revision: 2,
         capabilities: ["shared_assets.read"],
         binding: {
           project_id: PROJECT_ID,
           kind: "skill",
           asset_id: SYSTEM_READY_ID,
-          version_id: SYSTEM_READY_VERSION_ID,
+          current_version_id: SYSTEM_READY_VERSION_ID,
           enabled: true,
           version: 1,
           created_by_user_id: "user-1",
@@ -74,8 +74,8 @@ function catalog(): ProjectAssetList {
         display_name: "System Disabled",
         description: null,
         status: "suspended",
-        current_published_version_id: SYSTEM_DISABLED_VERSION_ID,
-        version: 3,
+        current_version_id: SYSTEM_DISABLED_VERSION_ID,
+        revision: 3,
         capabilities: ["shared_assets.read"],
         binding: null,
         created_by_user_id: "system",
@@ -92,8 +92,8 @@ function catalog(): ProjectAssetList {
         display_name: "Project Ready",
         description: null,
         status: "active",
-        current_published_version_id: PROJECT_READY_VERSION_ID,
-        version: 4,
+        current_version_id: PROJECT_READY_VERSION_ID,
+        revision: 4,
         capabilities: ["shared_assets.read", "shared_assets.edit"],
         binding: null,
         created_by_user_id: "user-1",
@@ -108,8 +108,8 @@ function catalog(): ProjectAssetList {
         display_name: "Project Draft",
         description: null,
         status: "active",
-        current_published_version_id: null,
-        version: 1,
+        current_version_id: null,
+        revision: 1,
         capabilities: ["shared_assets.read", "shared_assets.edit"],
         binding: null,
         created_by_user_id: "user-1",
@@ -133,7 +133,7 @@ describe("Agent capability workbench recovery", () => {
       options.find((option) => option.assetId === SYSTEM_READY_ID),
     ).toEqual(
       expect.objectContaining({
-        versionId: SYSTEM_READY_VERSION_ID,
+        versionId: `system:${SYSTEM_READY_ID}`,
         disabled: false,
         reason: null,
         remediation: null,
@@ -143,7 +143,7 @@ describe("Agent capability workbench recovery", () => {
       options.find((option) => option.assetId === SYSTEM_DISABLED_ID),
     ).toEqual(
       expect.objectContaining({
-        versionId: SYSTEM_DISABLED_VERSION_ID,
+        versionId: `system:${SYSTEM_DISABLED_ID}`,
         disabled: true,
         reason: expect.stringMatching(/未激活.*系统绑定未启用/),
         remediation: expect.stringContaining("管理员"),
@@ -155,8 +155,8 @@ describe("Agent capability workbench recovery", () => {
       expect.objectContaining({
         versionId: null,
         disabled: true,
-        reason: expect.stringContaining("尚未发布"),
-        remediation: expect.stringContaining("发布"),
+        reason: expect.stringContaining("尚无当前版本"),
+        remediation: expect.stringContaining("激活"),
       }),
     );
   });
@@ -198,20 +198,20 @@ describe("Agent capability workbench recovery", () => {
       id: "00000000-0000-4000-8000-000000000030",
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published",
+      relation: "current",
       supersedes_version_id: null,
     } as AgentAssetVersion;
     const draft = {
       ...live,
       id: "00000000-0000-4000-8000-000000000031",
       version_number: 2,
-      workflow_status: "draft",
+      relation: "candidate",
       supersedes_version_id: live.id,
     } as AgentAssetVersion;
     const item = {
       id: AGENT_ID,
-      version: 6,
-      current_published_version_id: live.id,
+      revision: 6,
+      current_version_id: live.id,
     } as ProjectAssetItem;
     const snapshot: ProjectAssetList = {
       system_items: [],
@@ -229,7 +229,7 @@ describe("Agent capability workbench recovery", () => {
         history,
         afterCatalog: snapshot,
         assetId: AGENT_ID,
-        attemptedAssetVersion: 5,
+        attemptedRevision: 5,
       }),
     ).toEqual({ item, version: draft });
     expect(
@@ -238,7 +238,7 @@ describe("Agent capability workbench recovery", () => {
         history,
         afterCatalog: snapshot,
         assetId: AGENT_ID,
-        minimumAssetVersion: 6,
+        minimumRevision: 6,
       }),
     ).toEqual({ item, version: draft });
     expect(() =>
@@ -247,7 +247,7 @@ describe("Agent capability workbench recovery", () => {
         history,
         afterCatalog: snapshot,
         assetId: AGENT_ID,
-        minimumAssetVersion: 7,
+        minimumRevision: 7,
       }),
     ).toThrow(/changed while/);
     expect(() =>
@@ -256,10 +256,10 @@ describe("Agent capability workbench recovery", () => {
         history,
         afterCatalog: {
           ...snapshot,
-          project_items: [{ ...item, version: 7 }],
+          project_items: [{ ...item, revision: 7 }],
         },
         assetId: AGENT_ID,
-        attemptedAssetVersion: 5,
+        attemptedRevision: 5,
       }),
     ).toThrow(/changed while/);
     expect(() =>
@@ -268,7 +268,7 @@ describe("Agent capability workbench recovery", () => {
         history: { data: [], request_id: "stale-history" },
         afterCatalog: snapshot,
         assetId: AGENT_ID,
-        attemptedAssetVersion: 5,
+        attemptedRevision: 5,
       }),
     ).toThrow(/unavailable/);
   });
@@ -278,14 +278,14 @@ describe("Agent capability workbench recovery", () => {
       id: "00000000-0000-4000-8000-000000000030",
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published" as const,
+      relation: "current" as const,
       supersedes_version_id: null,
     };
     const staleNewerDraft = {
       id: "00000000-0000-4000-8000-000000000032",
       agent_id: AGENT_ID,
       version_number: 3,
-      workflow_status: "draft" as const,
+      relation: "historical" as const,
       supersedes_version_id: "00000000-0000-4000-8000-000000000029",
     };
 
@@ -295,6 +295,7 @@ describe("Agent capability workbench recovery", () => {
 
     const currentDraft = {
       ...staleNewerDraft,
+      relation: "candidate" as const,
       supersedes_version_id: live.id,
     };
     expect(agentAuthoringBaseVersion([live, currentDraft], live.id)).toBe(
@@ -308,13 +309,13 @@ describe("Agent capability workbench recovery", () => {
       id: "00000000-0000-4000-8000-000000000030",
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published",
+      relation: "current",
       supersedes_version_id: null,
     } as AgentAssetVersion;
     const loadedItem = {
       id: AGENT_ID,
-      version: 6,
-      current_published_version_id: live.id,
+      revision: 6,
+      current_version_id: live.id,
     } as ProjectAssetItem;
     const loadedCatalog = {
       system_items: [],
@@ -323,7 +324,7 @@ describe("Agent capability workbench recovery", () => {
     } as ProjectAssetList;
     const newerCatalog = {
       ...loadedCatalog,
-      project_items: [{ ...loadedItem, version: 7 }],
+      project_items: [{ ...loadedItem, revision: 7 }],
       request_id: "newer",
     } as ProjectAssetList;
     const reload = {
@@ -363,18 +364,18 @@ describe("Agent capability workbench recovery", () => {
       id: "00000000-0000-4000-8000-000000000030",
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published",
+      relation: "current",
       supersedes_version_id: null,
     } as AgentAssetVersion;
     const target = {
       id: AGENT_ID,
-      version: 6,
-      current_published_version_id: live.id,
+      revision: 6,
+      current_version_id: live.id,
     } as ProjectAssetItem;
     const removed = {
       id: "00000000-0000-4000-8000-000000000099",
-      version: 1,
-      current_published_version_id: null,
+      revision: 1,
+      current_version_id: null,
     } as ProjectAssetItem;
     const key = projectAssetKey("account-1", PROJECT_ID, "agents");
     queryClient.setQueryData(key, {
@@ -420,13 +421,13 @@ describe("Agent capability workbench recovery", () => {
       id: "00000000-0000-4000-8000-000000000030",
       agent_id: AGENT_ID,
       version_number: 1,
-      workflow_status: "published",
+      relation: "current",
       supersedes_version_id: null,
     } as AgentAssetVersion;
     const target = {
       id: AGENT_ID,
-      version: 6,
-      current_published_version_id: live.id,
+      revision: 6,
+      current_version_id: live.id,
     } as ProjectAssetItem;
     const key = projectAssetKey("account-1", PROJECT_ID, "agents");
     const first = {

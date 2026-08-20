@@ -556,7 +556,7 @@ class SkillDesignRepository:
             select(SkillRow, SkillVersionRow)
             .join(
                 SkillVersionRow,
-                SkillVersionRow.id == SkillRow.current_published_version_id,
+                SkillVersionRow.id == SkillRow.current_version_id,
             )
             .where(
                 SkillRow.scope == "system",
@@ -564,7 +564,7 @@ class SkillDesignRepository:
                 SkillRow.status == "active",
                 func.lower(SkillRow.slug) == _SKILL_CREATOR_SLUG,
                 SkillVersionRow.skill_id == SkillRow.id,
-                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.version_number == 1,
                 SkillVersionRow.revoked_at.is_(None),
             )
         )
@@ -602,7 +602,6 @@ class SkillDesignRepository:
                 func.lower(SkillRow.slug) == _SKILL_CREATOR_SLUG,
                 SkillVersionRow.id == row.skill_creator_version_id,
                 SkillVersionRow.skill_id == row.skill_creator_skill_id,
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
                 SkillVersionRow.payload_checksum == row.skill_creator_payload_checksum,
             )

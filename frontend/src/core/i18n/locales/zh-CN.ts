@@ -1104,12 +1104,17 @@ export const zhCN: Translations = {
       systemAssets: "系统资产",
       systemAssetsDescription:
         "系统资产只读共享；项目绑定固定到明确版本，不会自动升级。",
+      systemCurrentAssetsDescription:
+        "系统 Agent 与 Skill 只读共享；项目只绑定资产，运行时自动使用 Current Version。",
+      systemMcpDescription:
+        "系统 MCP 只读共享；项目绑定固定到明确配置，不会自动切换。",
       searchPlaceholder: "搜索名称或标识",
       filterAll: "全部状态",
       catalogReady: "目录已加载",
       totalAssets: "资产总数",
       activeAssets: "启用资产",
       unpublishedAssets: "未发布资产",
+      assetsWithoutCurrentVersion: "尚无 Current Version",
       latestUpdate: "最近更新",
       noUpdate: "暂无更新时间",
       publicationFilter: "发布状态",
@@ -1125,6 +1130,9 @@ export const zhCN: Translations = {
       lifecycleStatus: "状态",
       publicationStatus: "发布状态",
       published: "已发布",
+      currentVersionStatus: "版本状态",
+      currentVersionAvailable: "已有 Current Version",
+      currentVersionMissing: "尚无 Current Version",
       assetRevision: "资产修订",
       actions: "操作",
       viewDetails: "查看详情",
@@ -1151,7 +1159,7 @@ export const zhCN: Translations = {
       manageBinding: "管理绑定",
       projectAssets: "项目资产",
       projectAgentDescription:
-        "只属于当前项目；Agent 设定在项目 Agent 页面维护，保存后立即生效。",
+        "只属于当前项目；保存 Agent 设定会创建候选版本，激活后才成为当前版本。",
       projectVersionedDescription:
         "只属于当前项目；内容变更通过不可变新版本完成。",
       noProjectAssets: "当前项目还没有此类资产。",
@@ -1683,7 +1691,7 @@ export const zhCN: Translations = {
         deleteAria: (name) => `删除未完成的 Agent：${name}`,
         deleteTitle: "删除未完成的 Agent？",
         deleteDescription: (name) =>
-          `将删除“${name}”的设计草稿，之后无法继续。已经创建的 Agent 不受影响。`,
+          `将删除“${name}”的设计会话，之后无法继续。已经创建的 Agent 不受影响。`,
         deleting: "正在删除…",
         confirmDelete: "确认删除",
       },
@@ -1708,10 +1716,10 @@ export const zhCN: Translations = {
         conflictsTitle: "待解决冲突",
         conflictDocuments: "涉及文档",
         blockingConflictHint:
-          "请继续对话，让 Agent 重新生成设计稿；红色冲突消失后才能创建 Agent 草稿。",
-        createHint: "创建停用的 Agent 草稿；管理员发布草稿后才能启用",
+          "请继续对话，让 Agent 重新生成设计稿；红色冲突消失后才能创建 Agent。",
+        createHint: "保存后生成不可变的 v1 候选版本；激活后才会用于运行",
         creating: "正在创建…",
-        createDraft: "创建 Agent 草稿",
+        createDraft: "创建 Agent",
         validation: {
           descriptionRequired: "Agent 简介不能为空",
           modelRequired: "Agent 模型不能为空",
@@ -1767,7 +1775,7 @@ export const zhCN: Translations = {
       sectionAria: "Agent 指令文档",
       title: "指令文档",
       draftDescription:
-        "四个固定文档映射到当前 Agent 设置。保存后创建草稿，管理员发布后才会用于后续运行。",
+        "四个固定文档映射到当前 Agent 设置。保存后创建不可变的候选版本，激活后才会用于后续运行。",
       blueprintDescription: "四个固定文档会写入待创建 Agent 的设计稿。",
       edit: "编辑",
       fixedFiles: "固定文件",
@@ -1777,19 +1785,19 @@ export const zhCN: Translations = {
       empty: "暂无内容",
       editFile: (name) => `编辑 ${name}`,
       draftSaveHint:
-        "保存会同时把四项 Agent 设置写入一个新草稿，不会直接发布。",
-      blueprintSaveHint: "保存后会更新当前设计稿，然后才能创建 Agent 草稿。",
+        "保存会同时把四项 Agent 设置写入一个新的候选版本，不会直接激活。",
+      blueprintSaveHint: "保存后会更新当前设计稿，然后才能创建 Agent。",
       discard: "放弃修改",
       saving: "保存中…",
-      save: "保存草稿",
+      save: "保存候选版本",
       permissionLost: "编辑权限已被撤销。本地修改仍保留，但暂时无法保存。",
-      recoveryPreserved: "服务端草稿已变化，本地修改仍保留；请检查后重试保存。",
-      recoverySynced: "服务端草稿已变化，已同步到最新版本。",
-      recoveryFailed: "无法恢复最新草稿，已保留本地修改。",
-      recoveryReloading: "正在恢复最新草稿…",
-      invalidResponse: "服务端返回了无效的 Agent 草稿版本。",
+      recoveryPreserved: "服务端版本已变化，本地修改仍保留；请检查后重试保存。",
+      recoverySynced: "服务端版本已变化，已同步到最新版本。",
+      recoveryFailed: "无法加载最新版本，已保留本地修改。",
+      recoveryReloading: "正在加载最新版本…",
+      invalidResponse: "服务端返回了无效的 Agent 版本。",
       conflictDetected: "检测到版本冲突。",
-      reloadRequired: "请重新加载最新草稿后再编辑。",
+      reloadRequired: "请重新加载最新版本后再编辑。",
       reloading: "正在重新加载…",
       reload: "重新加载",
       discardTitle: "放弃指令修改？",
@@ -1802,12 +1810,12 @@ export const zhCN: Translations = {
         inactive: "资产未激活",
         bindingDisabled: "当前项目的系统绑定已停用",
         bindingMissing: "当前项目的系统绑定未启用",
-        noPublishedVersion: "资产尚未发布可用版本",
+        noPublishedVersion: "资产尚无当前版本",
       },
       remediation: {
         restoreSystemAsset: "请联系管理员恢复系统资产",
         enableSystemBinding: "请联系管理员启用系统绑定",
-        publishVersion: "请先发布该项目资产的版本",
+        publishVersion: "请先激活该项目资产的候选版本",
         activateProjectAsset: "请先启用该项目资产",
       },
       explanationSeparator: "；",
@@ -1818,15 +1826,15 @@ export const zhCN: Translations = {
       historicalVersion: "历史版本",
       historicalVersionDescription: "当前查看的是历史版本，能力绑定只读。",
       permissionLost: "编辑权限已被撤销。本地修改仍保留，但暂时无法保存。",
-      recoverySynced: "服务端草稿已变化，已同步到最新版本。",
-      recoveryPreserved: "服务端草稿已变化，本地修改仍保留；请检查后重试保存。",
-      recoveryFailed: "无法恢复最新草稿，已保留本地修改。",
-      recoveryReloading: "正在恢复最新草稿…",
+      recoverySynced: "服务端版本已变化，已同步到最新版本。",
+      recoveryPreserved: "服务端版本已变化，本地修改仍保留；请检查后重试保存。",
+      recoveryFailed: "无法加载最新版本，已保留本地修改。",
+      recoveryReloading: "正在加载最新版本…",
       conflictDetected: "检测到版本冲突。",
-      reloadRequired: "请重新加载最新草稿后再编辑。",
+      reloadRequired: "请重新加载最新版本后再编辑。",
       reloading: "正在重新加载…",
       permissionBlocked: "当前账号没有编辑 Agent 能力的权限。",
-      preparingDraft: "正在准备最新草稿…",
+      preparingDraft: "正在准备候选版本…",
       catalogLoading: "正在加载能力目录…",
       catalogLoadFailed: "能力目录加载失败。",
       validatingMcp: "正在校验 MCP 依赖…",
@@ -1834,7 +1842,7 @@ export const zhCN: Translations = {
       title: "能力绑定",
       description: "选择 Agent 可以使用的工具组、Skill 和 MCP。",
       saving: "正在保存…",
-      saveDraft: "保存草稿",
+      saveDraft: "保存候选版本",
       edit: "编辑",
       builtinGroups: "内置工具组",
       unchanged: "未修改",
@@ -1849,7 +1857,7 @@ export const zhCN: Translations = {
     catalog: {
       title: "Agent",
       authoringLoadFailed: "无法加载 Agent 编辑基线。",
-      authoringLoading: "正在加载最新 Agent 草稿…",
+      authoringLoading: "正在加载 Agent 编辑基线…",
       detailTabsAria: "Agent 详情标签页",
       instructionsTab: "指令",
       capabilitiesTab: "能力",
@@ -1859,7 +1867,7 @@ export const zhCN: Translations = {
       chatForbidden: "当前账号没有在该项目创建对话的权限。",
       unavailable: "该 Agent 当前不可用。",
       executeForbidden: "当前账号没有运行 Agent 的权限。",
-      publishRequired: "Agent 需要先发布并启用。",
+      publishRequired: "Agent 需要先激活一个版本并启用资产。",
       defaultAdminOnly: "只有管理员可以设置默认 Agent。",
       defaultUnavailable: "该 Agent 当前不能设为默认。",
       systemDefaultUnavailable: "系统 Agent 必须先在项目中启用。",
@@ -1980,7 +1988,7 @@ export const zhCN: Translations = {
       unsaved: "请先保存或放弃当前修改",
       loading: "正在加载当前版本，请稍候",
       revoked: "已撤销的 System Skill 版本不可导出",
-      unpublished: "System Skill 只有已发布版本可以导出",
+      unpublished: "System Skill 只有 Current Version 可以导出",
       noVersion: "请选择一个已持久化的版本",
     },
     secrets: {
@@ -1991,9 +1999,9 @@ export const zhCN: Translations = {
       title: "1. 环境变量声明",
       viewSource: "查看 SKILL.md",
       checking: "正在检查 SKILL.md…",
-      syncing: "正在写入 SKILL.md 草稿…",
+      syncing: "正在写入 SKILL.md 未保存修改…",
       recognized: (count) => `已从 SKILL.md 识别 ${count} 个环境变量`,
-      draftUpdated: "已写入 SKILL.md 草稿，尚未保存",
+      draftUpdated: "已写入 SKILL.md，修改尚未保存",
       retry: "重新检查",
       sourceStale:
         "SKILL.md 在处理期间发生了变化，当前编辑内容已保留，请重试。",
@@ -2009,7 +2017,7 @@ export const zhCN: Translations = {
         "托管字段包含无法安全保留的注释。表单已切换为只读，请通过源码修改。",
       shorthand: (count) =>
         `检测到 ${count} 条历史简写声明；只有实际修改后才会规范化。`,
-      empty: "还没有声明环境变量。添加后会同步到当前 SKILL.md 草稿。",
+      empty: "还没有声明环境变量。添加后会同步到当前 SKILL.md 未保存修改。",
       beginEdit: "创建新版本并添加变量",
       optional: "可选",
       required: "必需",
@@ -2040,7 +2048,7 @@ export const zhCN: Translations = {
       loadSource: "正在加载 SKILL.md…",
       saveBlocked: "请等待 SKILL.md 检查完成，或修复环境变量声明错误",
       publishBlocked:
-        "请等待 SKILL.md 检查完成，并先修复环境变量声明错误再发布。",
+        "请等待 SKILL.md 检查完成，并先修复环境变量声明错误再激活。",
       credentialLabel: "项目 Credential",
       noCompatibleCredential: "没有兼容的 Credential",
       optionalUnbound: "不绑定（可选）",
@@ -2068,7 +2076,7 @@ export const zhCN: Translations = {
       mappingReadOnly:
         "你可以编辑 SKILL.md 中的声明，但项目凭证来源需要由具备 Credential 审批权限的成员配置。",
       mappingHistoricalReadOnly:
-        "历史发布版本只读；项目 Skill Draft 和当前发布版本可以配置项目凭证映射。",
+        "历史版本只读；候选版本和 Current Version 可以配置项目凭证映射。",
       mappingRefreshPreserved:
         "服务器映射已更新；你的未保存选择已保留，并已合并未修改项。请核对后保存或撤销。",
       mappingReload: "重新加载",
@@ -2092,61 +2100,62 @@ export const zhCN: Translations = {
       mappingVersionChanged:
         "当前版本已变化。你的未保存选择仍保留，但已停止保存；请重新加载并重新确认。",
     },
-    publishDialog: {
-      title: "发布 Skill 版本",
+    activationDialog: {
+      title: "激活 Skill 候选版本",
       description: (version) =>
-        `发布版本 ${version}。此窗口只检查该精确版本的环境变量和项目凭证映射，不再填写 Credential。`,
-      loading: "正在执行发布检查…",
+        `激活版本 ${version}。此窗口只检查该精确版本的环境变量和项目凭证映射，不再填写 Credential。`,
+      loading: "正在检查运行条件…",
       targetVersion: "目标版本：",
       bindingRevision: "绑定修订：",
-      noRequirements: "目标版本没有声明环境变量，可以直接发布。",
+      noRequirements: "目标版本没有声明环境变量，可以直接激活。",
       bindingsTitle: "版本凭证绑定",
       required: "必需",
       optional: "可选",
       statusConfigured: "已配置",
       statusMissing: "未配置",
       statusInvalid: "需要修复",
-      preflightReady: "发布检查已通过",
-      preflightBlocked: "发布检查未通过",
+      preflightReady: "运行条件检查已通过",
+      preflightBlocked: "运行条件检查未通过",
       preflightSummary: (configuredRequired, required, invalid) =>
         `必需映射 ${configuredRequired}/${required}，失效映射 ${invalid}。`,
-      configureBeforePublish:
-        "请先回到运行凭证页面完成必需映射并修复失效映射，再重新发布。",
+      configureBeforeActivation:
+        "请先回到运行凭证页面完成必需映射并修复失效映射，再重新激活。",
       configureCredentials: "前往运行凭证",
       noApprove:
         "你没有选择 Credential 来源的权限。请由具备 Credential 审批权限的成员先在运行凭证页面完成映射。",
       approvalRequiredForActive:
-        "公开 Draft 发布前必须完成全部必需映射并修复失效映射。请由具备 Credential 审批权限的成员先配置。",
+        "候选版本激活前必须完成全部必需映射并修复失效映射。请联系 Admin 配置。",
       optionalUnbound: (count) =>
-        `${count} 个可选环境变量未绑定；发布后这些变量不会注入运行环境。`,
+        `${count} 个可选环境变量未绑定；激活后这些变量不会注入运行环境。`,
       staleBase:
-        "此草稿基于旧的已发布版本。再次确认将使用最新发布计划覆盖 live pointer；本地 Credential 选择已保留。",
+        "此候选版本不是从当前向前派生，不能激活。请基于 Current Version 创建新版本。",
       credentialChanged:
-        "Credential 已发生变化；仍然兼容的选择已保留，请检查后重新发布。",
-      assetChanged: "Skill 已发生变化，请检查最新发布计划。",
+        "Credential 已发生变化；仍然兼容的选择已保留，请检查后重新激活。",
+      assetChanged: "Skill 已发生变化，请重新检查运行条件。",
       cancel: "取消",
       retry: "重新检查",
-      publishing: "发布中…",
-      publish: "发布版本",
-      confirmOverwrite: "确认覆盖并发布",
-      discardTitle: "放弃尚未发布的 Credential 选择？",
+      activating: "激活中…",
+      activate: "激活版本",
+      confirmOverwrite: "激活版本",
+      discardTitle: "放弃尚未保存的 Credential 选择？",
       discardDescription:
-        "关闭后将清除本次发布对话框中的选择；Skill 版本和现有绑定不会改变。",
+        "关闭后将清除本次激活检查中的选择；Skill 版本和现有绑定不会改变。",
       continue: "继续配置",
       discard: "放弃并关闭",
       createdInvalid: "Credential 创建成功，但返回的版本信息无效。",
       createdIneligible:
-        "Credential 已创建，但最新版本尚未被发布检查判定为兼容。请检查字段后重试。",
+        "Credential 已创建，但最新版本尚未通过运行条件检查。请检查字段后重试。",
       incomplete: "活跃 Skill 的必需环境变量尚未全部绑定。请完成选择后重试。",
       invalidBinding:
-        "所选 Credential 与 Skill 声明不兼容，请刷新发布检查后重试。",
+        "所选 Credential 与 Skill 声明不兼容，请刷新运行条件检查后重试。",
       staleSelection: "Credential 已发生轮换、停用或撤销。已重新加载可用选项。",
-      stalePublishBase: "这个草稿基于旧的已发布版本。确认后可以覆盖并发布。",
+      staleActivationBase:
+        "这个版本不是从 Current Version 向前派生，不能激活。",
       invalidDeclaration:
-        "目标版本的环境变量声明无效，无法发布。请创建新草稿修复 SKILL.md。",
-      forbidden: "你没有发布此 Skill 的权限。",
+        "目标版本的环境变量声明无效，无法激活。请创建新版本修复 SKILL.md。",
+      forbidden: "你没有激活此 Skill 的权限。",
       credentialRequestOmitted:
-        "你没有选择 Credential 的权限，本次发布不会提交凭证绑定。",
+        "你没有选择 Credential 的权限，本次激活不会提交凭证绑定。",
     },
     builder: {
       errors: {
@@ -2170,15 +2179,15 @@ export const zhCN: Translations = {
           "目标 Skill 已被删除，本次修订会话无法继续。请返回 Skill 列表重新创建，或放弃本会话。",
         targetDeletedStatus: "目标 Skill 已被删除，本次修订无法继续",
         noChanges:
-          "草稿与基线版本完全一致，无需创建新版本。请先修改文件再提交。",
+          "候选文件与基线版本完全一致，无需创建新版本。请先修改文件再提交。",
         baseStale:
-          "线上已发布更新的版本，本次修订基于较旧的基线。请在提交时确认覆盖后重试。",
+          "Current Version 已变化，本次修订不能继续保存。请从新的 Current Version 创建修订会话。",
         targetSessionExists:
           "这个 Skill 已有一个未完成的修订会话。请在 Skill 列表上方的未完成会话中继续或放弃它。",
         targetUnsupported:
-          "当前发布版本无法在对话修订中打开（文件规模或内容超出 Builder 支持范围），请改用文件编辑方式创建新版本。",
+          "Current Version 无法在对话修订中打开（文件规模或内容超出 Builder 支持范围），请改用文件编辑方式创建新版本。",
         targetConflict:
-          "Skill 状态已发生变化（可能已被删除、归档或尚未发布），请刷新后重试。",
+          "Skill 状态已发生变化（可能已被删除、归档或尚无 Current Version），请刷新后重试。",
         attachmentTooLarge: "单个附件不能超过 256 KB。",
         attachmentNotUtf8: (name) => `「${name}」不是 UTF-8 文本文件。`,
         attachmentInvalidName: "附件名包含不支持的字符，请重命名后重试。",
@@ -2212,9 +2221,9 @@ export const zhCN: Translations = {
         deleteTitleCreate: "删除未完成的 Skill？",
         deleteTitleRevise: "删除未完成的修订？",
         deleteDescriptionCreate: (name) =>
-          `将删除“${name}”的设计草稿，之后无法继续。已经创建的 Skill 不受影响。`,
+          `将删除“${name}”的设计会话，之后无法继续。已经创建的 Skill 不受影响。`,
         deleteDescriptionRevise: (name) =>
-          `将删除“${name}”的修订草稿，之后无法继续。已经发布的 Skill 不受影响。`,
+          `将删除“${name}”的修订会话，之后无法继续。已经保存的 Skill 版本不受影响。`,
         deleting: "正在删除…",
         confirmDelete: "确认删除",
       },
@@ -2234,12 +2243,12 @@ export const zhCN: Translations = {
           "当前账号没有继续修订 Skill 的权限。你仍可查看已保存的会话和候选文件。",
         reviseIntroBefore: "已加载",
         reviseIntroAfter:
-          "的当前发布版本。请描述要修改的内容，或直接编辑右侧候选文件。",
+          "的 Current Version。请描述要修改的内容，或直接编辑右侧候选文件。",
         createIntroBefore: "新 Skill 的名称是",
         createIntroAfter:
           "。请描述用途、触发条件、输入输出和需要的参考资料或脚本。",
         creatingSkill: "正在创建 Skill…",
-        creatingDraft: "正在创建新版本草稿…",
+        creatingDraft: "正在创建候选版本…",
         processing: "Builder Agent 正在处理…",
         composerAriaCreate: "描述想要的 Skill",
         composerAriaRevise: "描述要修改的内容",
@@ -2254,7 +2263,7 @@ export const zhCN: Translations = {
         unsavedChanges: "有未保存修改",
         agentRunning: "Builder Agent 正在执行",
         checkedCreate: "已检查，可创建",
-        checkedRevise: "已检查，可创建新版本草稿",
+        checkedRevise: "已检查，可保存候选版本",
         autosave: "已自动保存，可稍后继续",
         more: "更多操作",
         abandonCreate: "放弃本次创建",
@@ -2302,7 +2311,7 @@ export const zhCN: Translations = {
         acknowledgeWarnings: "确认并接受上述警告",
         checkSkill: "检查 Skill",
         commitCreate: "创建 Skill（默认停用）",
-        commitRevise: "创建新版本（待发布）",
+        commitRevise: "保存候选版本",
       },
       activity: {
         run: {
@@ -2323,7 +2332,7 @@ export const zhCN: Translations = {
         toolSteps: (count) => `· ${count} 个工具步骤`,
         noToolSteps: "· 尚无工具步骤",
         outputLimit:
-          "本轮达到模型输出上限。已成功写入的候选草稿仍然保留；请在下方继续发送“基于现有草稿继续完成”，Builder 会重新读取草稿后续作，不会执行残缺的工具调用。",
+          "本轮达到模型输出上限。已成功写入的候选文件仍然保留；请在下方继续发送“基于现有候选文件继续完成”，Builder 会重新读取文件后续作，不会执行残缺的工具调用。",
       },
       composer: {
         mode: {
@@ -2352,28 +2361,28 @@ export const zhCN: Translations = {
       },
       dialogs: {
         commitTitleCreate: "创建 Skill？",
-        commitTitleRevise: "创建新版本草稿？",
+        commitTitleRevise: "保存候选版本？",
         commitDescriptionCreate: (project) =>
-          `将在项目 ${project} 中原子创建并发布版本 1。Skill 创建后保持停用，不会自动加入任何 Agent。`,
+          `将在项目 ${project} 中保存不可变的 v1 候选版本。Skill 创建后保持停用，不会自动加入任何 Agent。`,
         commitDescriptionRevise: (slug, version) =>
-          `将基于 ${slug} v${version} 创建新的草稿版本。发布后才会替换线上正在使用的版本，当前 Skill 仍保持原状。`,
+          `将基于 ${slug} v${version} 保存新的候选版本。激活后才会成为 Current Version，当前运行不受本次保存影响。`,
         fileMetaCreate: (count) => `${count} 个文件 · 默认停用`,
-        fileMetaRevise: (count) => `${count} 个文件 · 待发布草稿`,
+        fileMetaRevise: (count) => `${count} 个文件 · 候选版本`,
         backToReview: "返回检查",
         creating: "正在创建…",
         creatingVersion: "正在创建新版本…",
         confirmCreate: "确认创建",
         confirmCreateVersion: "确认创建新版本",
-        staleTitle: "线上已发布更新的版本",
+        staleTitle: "Current Version 已变化",
         staleDescription: (version) =>
-          `本次修订基于 v${version} 基线，但线上已更新。确认继续将生成覆盖草稿；发布前不会影响当前运行版本。`,
-        confirmOverwrite: "确认覆盖并创建草稿",
+          `本次修订基于 v${version}，但 Current Version 已变化。请放弃本会话，并从新的 Current Version 创建修订会话。`,
+        confirmOverwrite: "返回 Skill 列表",
         abandonTitleCreate: "放弃本次 Skill 创建？",
         abandonTitleRevise: "放弃本次修订？",
         abandonDescriptionCreate:
           "这个设计会话将结束，候选文件包会被清理，且不再显示在未完成列表中。",
         abandonDescriptionRevise:
-          "这个修订会话将结束，候选文件包会被清理，已发布的 Skill 不受影响。",
+          "这个修订会话将结束，候选文件包会被清理，已保存的 Skill 版本不受影响。",
         continueCreate: "继续创建",
         continueRevise: "继续修订",
         abandoning: "正在放弃…",
@@ -2385,21 +2394,21 @@ export const zhCN: Translations = {
         discardAndLeave: "放弃修改并离开",
       },
       success: {
-        withVersion: (version) => `已创建草稿版本 v${version}，前往发布`,
-        withoutVersion: "已创建草稿版本，前往发布",
-        goPublish: "前往发布",
+        withVersion: (version) => `已保存候选版本 v${version}，前往激活`,
+        withoutVersion: "已保存候选版本，前往激活",
+        goPublish: "前往激活",
         revisionWithSecrets: (version, count) =>
-          `已创建${version === null ? "草稿版本" : `草稿版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再发布。`,
+          `已保存${version === null ? "候选版本" : `候选版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再激活。`,
         createdWithSecrets: (count) =>
           `Skill 已创建并默认停用，检测到 ${count} 项环境变量声明。请先配置运行凭证。`,
         configureCredentials: "配置凭证",
       },
       publish: {
-        staleTitle: "线上已发布更新的版本",
+        staleTitle: "Current Version 已变化",
         staleNamed: (live, base) =>
-          `当前线上已是 v${live}，本次将以基于 v${base} 的版本覆盖。确认发布后，它将替换线上正在使用的版本，之后仍可在版本历史中回退。`,
+          `Current Version 已是 v${live}，本次修订基于 v${base}，不能保存或激活。请从 v${live} 创建新修订会话。`,
         staleGeneric:
-          "本版本不是基于当前线上版本创建的。确认发布后，它将覆盖线上正在使用的版本，之后仍可在版本历史中回退。",
+          "本版本不是从 Current Version 向前派生，不能保存或激活。请从 Current Version 创建新修订会话。",
       },
     },
   },
@@ -2562,7 +2571,7 @@ export const zhCN: Translations = {
     providerUnavailableDescription:
       "Worker 重试后仍无法连接所选模型服务。请检查 Worker 网络或代理配置，然后重试此消息。",
     runAdmissionNotConfirmedDescription:
-      "运行未开始：会话可能正在运行或状态已变化。草稿已保留，请稍后重试。",
+      "运行未开始：会话可能正在运行或状态已变化。输入已保留，请稍后重试。",
     restoreFailedInput: "恢复到输入框",
     restoreFailedInputBlocked: "输入框已有未发送内容或附件，请先处理后再恢复。",
     modelOutputLimitTitle: "已达到模型输出上限",
@@ -2586,7 +2595,7 @@ export const zhCN: Translations = {
     agentArchivedAction: "选择其他 Agent 新建对话",
     agentModelUnavailableTitle: "Agent 模型不可用",
     agentModelUnavailableDescription:
-      "无法解析 Agent 配置的模型。请检查其启用绑定、已发布版本和模型目录中的启用状态后重试。",
+      "无法解析 Agent 配置的模型。请检查其系统绑定、Current Version 和模型目录中的启用状态后重试。",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `实际执行：${modelDisplayName} · ${modeName} · ${supportsVision ? "支持视觉" : "仅文本"}`,
   },

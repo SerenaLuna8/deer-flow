@@ -19,7 +19,7 @@ from app.shared_assets.agent_catalog import (
 from app.shared_assets.agent_repository import AgentVersionRecord
 from app.shared_assets.agent_service import AgentService, CreateAgent
 from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.models import AgentModelSettings, AgentPayload, WorkflowStatus
+from app.shared_assets.models import AgentModelSettings, AgentPayload
 from deerflow.persistence.shared_assets import AgentVersionRow
 
 RETIRED_MODEL_REF = "00000000-0000-4000-8000-000000000309"
@@ -103,7 +103,7 @@ def _payload(
         model_ref=model_ref,
         model_settings=AgentModelSettings(),
         tool_groups=tool_groups,
-        skill_version_ids=(),
+        skill_refs=(),
         mcp_version_ids=(),
     )
 
@@ -112,8 +112,8 @@ def _asset(
     actor: ProjectContext,
     *,
     status: str,
-    version: int,
-    current_published_version_id: uuid.UUID | None,
+    revision: int,
+    current_version_id: uuid.UUID | None,
 ):
     now = datetime.now(UTC)
     return SimpleNamespace(
@@ -123,8 +123,8 @@ def _asset(
         slug="reviewer",
         display_name="Reviewer",
         status=status,
-        current_published_version_id=current_published_version_id,
-        version=version,
+        current_version_id=current_version_id,
+        revision=revision,
         created_by_user_id=str(actor.user_id),
         created_at=now,
         updated_at=now,
@@ -134,7 +134,6 @@ def _asset(
 def _version(
     asset_id: uuid.UUID,
     *,
-    workflow_status: WorkflowStatus,
     model_ref: str,
     tool_groups: tuple[str, ...],
     supersedes_version_id: uuid.UUID | None = None,
@@ -143,7 +142,6 @@ def _version(
         id=uuid.uuid4(),
         agent_id=asset_id,
         version_number=2,
-        workflow_status=workflow_status.value,
         description="Reviews changes",
         agents_instructions="# AGENTS\n\nReview carefully.",
         soul="# SOUL\n\nBe precise.",
@@ -169,7 +167,7 @@ def _version(
             model_ref=row.model_ref,
             model_settings=AgentModelSettings.model_validate(row.model_settings),
             tool_groups=tuple(row.tool_groups),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
         ),
         payload_schema_version=row.payload_schema_version,
@@ -180,9 +178,9 @@ def _version(
 def _create_repository(session: _Session):
     return SimpleNamespace(
         session=session,
-        resolve_project_skill_versions=AsyncMock(return_value=()),
+        resolve_project_skill_refs=AsyncMock(return_value=()),
         resolve_project_mcp_versions=AsyncMock(return_value=()),
-        lock_skill_version_slugs=AsyncMock(return_value=()),
+        lock_skill_asset_slugs=AsyncMock(return_value=()),
         create_project_asset=AsyncMock(side_effect=AssertionError("catalog validation must precede writes")),
     )
 
@@ -333,7 +331,7 @@ async def test_builder_package_rejects_inactive_model_before_writing(
 
 
 @pytest.mark.asyncio
-async def test_publish_revalidates_the_drafts_model_catalog(
+async def test_activate_version_revalidates_the_candidate_model_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _Session()
@@ -342,12 +340,18 @@ async def test_publish_revalidates_the_drafts_model_catalog(
     asset = _asset(
         actor,
         status="active",
-        version=8,
-        current_published_version_id=live_version_id,
+        revision=8,
+        current_version_id=live_version_id,
     )
-    draft = _version(
+    current = _version(
         asset.id,
-        workflow_status=WorkflowStatus.DRAFT,
+        model_ref="default",
+        tool_groups=("file:read",),
+    )
+    current.row.id = live_version_id
+    current.row.version_number = 1
+    candidate = _version(
+        asset.id,
         model_ref=RETIRED_MODEL_REF,
         tool_groups=("file:read",),
         supersedes_version_id=live_version_id,
@@ -355,10 +359,11 @@ async def test_publish_revalidates_the_drafts_model_catalog(
     repository = SimpleNamespace(
         session=session,
         get_project_asset=AsyncMock(return_value=asset),
-        get_project_version=AsyncMock(return_value=draft),
-        resolve_project_skill_versions=AsyncMock(return_value=()),
+        get_project_version=AsyncMock(return_value=candidate),
+        get_project_version_history=AsyncMock(return_value=(candidate, current)),
+        resolve_project_skill_refs=AsyncMock(return_value=()),
         resolve_project_mcp_versions=AsyncMock(return_value=()),
-        lock_skill_version_slugs=AsyncMock(return_value=()),
+        lock_skill_asset_slugs=AsyncMock(return_value=()),
     )
     monkeypatch.setattr(
         agent_service_module,
@@ -372,46 +377,44 @@ async def test_publish_revalidates_the_drafts_model_catalog(
             lambda: session,
             governance_sink=SimpleNamespace(append_project=AsyncMock()),
             catalog_validator=validator,
-        ).publish(
+        ).activate_version(
             actor,
             asset.id,
-            draft.row.id,
+            candidate.row.id,
             expected_asset_version=8,
         )
 
-    assert draft.row.workflow_status == WorkflowStatus.DRAFT.value
-    assert asset.current_published_version_id == live_version_id
-    assert asset.version == 8
+    assert asset.current_version_id == live_version_id
+    assert asset.revision == 8
     assert models.calls == [(RETIRED_MODEL_REF, False)]
 
 
 @pytest.mark.asyncio
-async def test_activate_revalidates_the_published_tool_group_catalog(
+async def test_enable_revalidates_the_current_tool_group_catalog(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = _Session()
     actor = _context()
-    published_id = uuid.uuid4()
+    current_id = uuid.uuid4()
     asset = _asset(
         actor,
         status="suspended",
-        version=4,
-        current_published_version_id=published_id,
+        revision=4,
+        current_version_id=current_id,
     )
-    published = _version(
+    current = _version(
         asset.id,
-        workflow_status=WorkflowStatus.PUBLISHED,
         model_ref="default",
         tool_groups=("retired-group",),
     )
-    published.row.id = published_id
+    current.row.id = current_id
     repository = SimpleNamespace(
         session=session,
         get_project_asset=AsyncMock(return_value=asset),
-        get_project_version=AsyncMock(return_value=published),
-        resolve_project_skill_versions=AsyncMock(return_value=()),
+        get_project_version=AsyncMock(return_value=current),
+        resolve_project_skill_refs=AsyncMock(return_value=()),
         resolve_project_mcp_versions=AsyncMock(return_value=()),
-        lock_skill_version_slugs=AsyncMock(return_value=()),
+        lock_skill_asset_slugs=AsyncMock(return_value=()),
     )
     monkeypatch.setattr(
         agent_service_module,
@@ -425,12 +428,12 @@ async def test_activate_revalidates_the_published_tool_group_catalog(
             lambda: session,
             governance_sink=SimpleNamespace(append_project=AsyncMock()),
             catalog_validator=validator,
-        ).activate(
+        ).enable(
             actor,
             asset.id,
             expected_asset_version=4,
         )
 
     assert asset.status == "suspended"
-    assert asset.version == 4
+    assert asset.revision == 4
     assert models.calls == []

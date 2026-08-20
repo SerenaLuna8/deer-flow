@@ -12,13 +12,14 @@ import type {
 const AGENT_ID = "11111111-1111-4111-8111-111111111111";
 const VERSION_ID = "22222222-2222-4222-8222-222222222222";
 
-test("resolves an exact model from Thread Agent metadata and its published version", () => {
+test("resolves an exact model from Thread Agent metadata and its Current Version", () => {
   const catalog = {
     project_items: [
       {
         id: AGENT_ID,
         scope: "project",
-        current_published_version_id: VERSION_ID,
+        status: "active",
+        current_version_id: VERSION_ID,
       },
     ],
     system_items: [],
@@ -28,7 +29,7 @@ test("resolves an exact model from Thread Agent metadata and its published versi
       {
         id: VERSION_ID,
         agent_id: AGENT_ID,
-        workflow_status: "published",
+        relation: "current",
         model_ref: "deepseek-v4-flash",
       },
     ],
@@ -70,7 +71,7 @@ test("does not infer a model until exact Agent metadata and version agree", () =
       {
         id: AGENT_ID,
         scope: "project",
-        current_published_version_id: VERSION_ID,
+        current_version_id: VERSION_ID,
       },
     ],
     system_items: [],
@@ -113,7 +114,7 @@ test("fails closed when the selected Agent version is absent from history", () =
       {
         id: AGENT_ID,
         scope: "project",
-        current_published_version_id: VERSION_ID,
+        current_version_id: VERSION_ID,
       },
     ],
     system_items: [],
@@ -135,7 +136,7 @@ test("fails closed when an existing Thread points at a suspended project Agent",
         id: AGENT_ID,
         scope: "project",
         status: "suspended",
-        current_published_version_id: VERSION_ID,
+        current_version_id: VERSION_ID,
       },
     ],
     system_items: [],
@@ -145,7 +146,7 @@ test("fails closed when an existing Thread points at a suspended project Agent",
       {
         id: VERSION_ID,
         agent_id: AGENT_ID,
-        workflow_status: "published",
+        relation: "current",
         model_ref: "deepseek-v4-flash",
       },
     ],
@@ -182,7 +183,7 @@ test("does not mislabel system or still-cataloged project Agents as archived", (
         id: AGENT_ID,
         scope: "project",
         status: "suspended",
-        current_published_version_id: null,
+        current_version_id: null,
       },
     ],
     system_items: [],

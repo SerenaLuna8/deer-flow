@@ -31,7 +31,7 @@ const AGENT_RUNTIME_BLOCK_REASONS: Record<
   AgentRuntimeAssessmentReasonCode,
   string
 > = {
-  agent_unavailable: "Agent 当前发布版本或项目绑定不可用，请刷新后重试。",
+  agent_unavailable: "Agent 当前版本或项目绑定不可用，请刷新后重试。",
   runtime_dependency_unavailable:
     "Agent 的 Skill、MCP 或凭据依赖当前不可用，请完成配置后重试。",
   model_unavailable: "Agent 配置的模型当前不可用，请联系管理员。",
@@ -47,15 +47,12 @@ function selectedAgentVersion(
   agent: ProjectAssetItem,
   history: VersionHistoryResponse,
 ) {
-  const versionId =
-    agent.scope === "system" && agent.binding?.enabled
-      ? agent.binding.version_id
-      : agent.current_published_version_id;
+  const versionId = agent.current_version_id;
   return history.data.find(
     (version) =>
       "agent_id" in version &&
       version.id === versionId &&
-      version.workflow_status === "published",
+      version.relation === "current",
   );
 }
 
@@ -74,7 +71,7 @@ export function agentMcpDependencyAssessment(
   if (!currentVersion || !("agent_id" in currentVersion)) {
     return {
       status: "blocked",
-      reason: "Agent 当前发布版本无法确认，请刷新后重试。",
+      reason: "Agent 当前版本无法确认，请刷新后重试。",
     };
   }
   const reason = mcpDependencyRuntimeBlockReason(

@@ -42,6 +42,9 @@ export default defineConfig({
       stderr: "pipe",
       env: {
         DEER_FLOW_AUTH_DISABLED: "1",
+        // The Current Version acceptance regenerates one completed turn in the
+        // same Thread, so each deterministic recorded turn is consumed twice.
+        DEERFLOW_REPLAY_REPEAT_COUNT: "2",
       },
     },
     {

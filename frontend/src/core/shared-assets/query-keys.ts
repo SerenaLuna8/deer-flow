@@ -288,7 +288,7 @@ export function projectSkillCredentialBindingsMutationKey(
   ] as const;
 }
 
-export function projectSkillPublishPlanKey(
+export function projectSkillActivationReadinessKey(
   accountId: string,
   projectId: string,
   skillId: string,
@@ -303,6 +303,6 @@ export function projectSkillPublishPlanKey(
     ),
     "version",
     assetIdSchema.parse(versionId),
-    "publish-plan",
+    "activation-readiness",
   ] as const;
 }

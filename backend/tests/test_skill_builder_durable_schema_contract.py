@@ -59,21 +59,19 @@ def test_packaged_skill_builder_agent_has_only_the_creator_dependency() -> None:
     releases = tuple(item for item in catalog.entries if item.source_key == "builtin:agent:skill-builder")
     payloads = tuple(json.loads(catalog_payload(catalog, entry)) for entry in releases)
 
-    assert [entry.kind for entry in releases] == ["agent", "agent"]
-    assert [entry.slug for entry in releases] == ["skill-builder", "skill-builder"]
-    assert [entry.version for entry in releases] == [1, 2]
+    assert [entry.kind for entry in releases] == ["agent"]
+    assert [entry.slug for entry in releases] == ["skill-builder"]
+    assert [entry.version for entry in releases] == [1]
     assert [payload["skill_source_keys"] for payload in payloads] == [
         ["builtin:skill:skill-creator"],
-        ["builtin:skill:skill-creator"],
     ]
-    assert [payload["mcp_source_keys"] for payload in payloads] == [[], []]
-    assert payloads[0]["tool_groups"] == []
-    assert payloads[1]["tool_groups"] == [
+    assert [payload["mcp_source_keys"] for payload in payloads] == [[]]
+    assert payloads[0]["tool_groups"] == [
         "web",
         "file:read",
         "file:write",
         "bash",
         "task",
     ]
-    assert "normal admitted Agent tools only for research and scratch work" in payloads[1]["soul"]
-    assert "only through the governed Skill Builder tools" in payloads[1]["soul"]
+    assert "normal admitted Agent tools only for research and scratch work" in payloads[0]["soul"]
+    assert "only through the governed Skill Builder tools" in payloads[0]["soul"]

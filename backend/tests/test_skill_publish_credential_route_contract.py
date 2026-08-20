@@ -13,10 +13,10 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.contexts import SystemAssetGovernanceContext
-from app.shared_assets.models import WorkflowStatus
+from app.shared_assets.models import VersionRelation
 from app.shared_assets.skill_credential_service import (
-    SkillCredentialPublishRequirementView,
-    SkillPublishPlanView,
+    SkillActivationReadinessView,
+    SkillCredentialReadinessRequirementView,
 )
 from app.shared_assets.skill_service import SkillVersionView
 
@@ -26,7 +26,7 @@ _MEMBERSHIP_ID = uuid.UUID("33333333-3333-4333-8333-333333333333")
 _SKILL_ID = uuid.UUID("44444444-4444-4444-8444-444444444444")
 _VERSION_ID = uuid.UUID("55555555-5555-4555-8555-555555555555")
 _CREDENTIAL_VERSION_ID = uuid.UUID("77777777-7777-4777-8777-777777777777")
-_REQUEST_ID = "req-publish-route"
+_REQUEST_ID = "req-activation-route"
 
 
 def _context() -> ProjectContext:
@@ -54,11 +54,11 @@ def _version() -> SkillVersionView:
         id=_VERSION_ID,
         skill_id=_SKILL_ID,
         version_number=2,
-        workflow_status=WorkflowStatus.PUBLISHED,
-        description="Publish route Skill",
+        relation=VersionRelation.CURRENT,
+        description="Activation route Skill",
         frontmatter={
-            "name": "publish-route-skill",
-            "description": "Publish route Skill",
+            "name": "activation-route-skill",
+            "description": "Activation route Skill",
             "required-secrets": [
                 {"name": "API_KEY", "optional": False},
             ],
@@ -87,10 +87,10 @@ class _PlanService:
 
     async def get_for_version(self, actor, skill_id, version_id):
         self.calls.append((actor, skill_id, version_id))
-        return SkillPublishPlanView(
+        return SkillActivationReadinessView(
             skill_id=skill_id,
             skill_version_id=version_id,
-            asset_version=8,
+            revision=8,
             payload_checksum="a" * 64,
             binding_revision=0,
             secrets_autonomous=True,
@@ -99,7 +99,7 @@ class _PlanService:
             configured_required_count=0,
             invalid_count=0,
             requirements=(
-                SkillCredentialPublishRequirementView(
+                SkillCredentialReadinessRequirementView(
                     name="API_KEY",
                     optional=False,
                     mapping_status="missing",
@@ -109,10 +109,10 @@ class _PlanService:
 
 
 @dataclass
-class _PublishService:
+class _ActivationService:
     calls: list[dict[str, object]]
 
-    async def publish(self, actor, asset_id, version_id, **kwargs):
+    async def activate_version(self, actor, asset_id, version_id, **kwargs):
         self.calls.append(
             {
                 "actor": actor,
@@ -125,7 +125,7 @@ class _PublishService:
 
 
 @pytest.mark.asyncio
-async def test_exact_version_publish_plan_route_returns_read_only_preflight() -> None:
+async def test_exact_version_activation_readiness_route_is_read_only() -> None:
     service = _PlanService(calls=[])
     context = _context()
     app = FastAPI()
@@ -137,7 +137,7 @@ async def test_exact_version_publish_plan_route_returns_read_only_preflight() ->
         transport=httpx.ASGITransport(app=app),
         base_url="http://test",
     ) as client:
-        response = await client.get(f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish-plan")
+        response = await client.get(f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activation-readiness")
 
     assert response.status_code == 200
     assert response.headers["cache-control"] == "private, no-store"
@@ -145,7 +145,7 @@ async def test_exact_version_publish_plan_route_returns_read_only_preflight() ->
     assert response.json() == {
         "skill_id": str(_SKILL_ID),
         "skill_version_id": str(_VERSION_ID),
-        "asset_version": 8,
+        "revision": 8,
         "payload_checksum": "a" * 64,
         "binding_revision": 0,
         "secrets_autonomous": True,
@@ -166,8 +166,8 @@ async def test_exact_version_publish_plan_route_returns_read_only_preflight() ->
 
 
 @pytest.mark.asyncio
-async def test_publish_route_forwards_read_only_preflight_cas_fields() -> None:
-    service = _PublishService(calls=[])
+async def test_activation_route_forwards_readiness_cas_fields() -> None:
+    service = _ActivationService(calls=[])
     context = _context()
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -179,12 +179,11 @@ async def test_publish_route_forwards_read_only_preflight_cas_fields() -> None:
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
+            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
             json={
-                "expected_asset_version": 8,
+                "expected_revision": 8,
                 "expected_payload_checksum": "a" * 64,
                 "expected_binding_revision": 0,
-                "acknowledge_stale_base": False,
             },
         )
 
@@ -197,14 +196,13 @@ async def test_publish_route_forwards_read_only_preflight_cas_fields() -> None:
             "expected_asset_version": 8,
             "expected_payload_checksum": "a" * 64,
             "expected_binding_revision": 0,
-            "acknowledge_stale_base": False,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_publish_route_requires_payload_and_binding_revision_cas() -> None:
-    service = _PublishService(calls=[])
+async def test_activation_route_requires_payload_and_binding_revision_cas() -> None:
+    service = _ActivationService(calls=[])
     context = _context()
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -216,8 +214,8 @@ async def test_publish_route_requires_payload_and_binding_revision_cas() -> None
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
-            json={"expected_asset_version": 8},
+            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
+            json={"expected_revision": 8},
         )
 
     assert response.status_code == 422
@@ -225,8 +223,8 @@ async def test_publish_route_requires_payload_and_binding_revision_cas() -> None
 
 
 @pytest.mark.asyncio
-async def test_admin_project_publish_route_does_not_require_project_binding_cas() -> None:
-    service = _PublishService(calls=[])
+async def test_admin_project_activation_route_uses_same_readiness_gate() -> None:
+    service = _ActivationService(calls=[])
     context = _admin_project_context()
     app = FastAPI()
     app.include_router(admin_assets.admin_project_router)
@@ -238,8 +236,12 @@ async def test_admin_project_publish_route_does_not_require_project_binding_cas(
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/admin/projects/{_PROJECT_ID}/assets/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
-            json={"expected_asset_version": 8},
+            f"/api/admin/projects/{_PROJECT_ID}/assets/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
+            json={
+                "expected_revision": 8,
+                "expected_payload_checksum": "a" * 64,
+                "expected_binding_revision": 0,
+            },
         )
 
     assert response.status_code == 200
@@ -249,16 +251,15 @@ async def test_admin_project_publish_route_does_not_require_project_binding_cas(
             "asset_id": _SKILL_ID,
             "version_id": _VERSION_ID,
             "expected_asset_version": 8,
-            "expected_payload_checksum": None,
-            "expected_binding_revision": None,
-            "acknowledge_stale_base": False,
+            "expected_payload_checksum": "a" * 64,
+            "expected_binding_revision": 0,
         }
     ]
 
 
 @pytest.mark.asyncio
-async def test_publish_route_rejects_inline_binding_selection() -> None:
-    service = _PublishService(calls=[])
+async def test_activation_route_rejects_inline_binding_selection() -> None:
+    service = _ActivationService(calls=[])
     context = _context()
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -270,9 +271,9 @@ async def test_publish_route_rejects_inline_binding_selection() -> None:
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
+            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
             json={
-                "expected_asset_version": 8,
+                "expected_revision": 8,
                 "expected_payload_checksum": "a" * 64,
                 "expected_binding_revision": 0,
                 "credential_bindings": [
@@ -290,8 +291,8 @@ async def test_publish_route_rejects_inline_binding_selection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_route_rejects_explicit_null_binding_selection() -> None:
-    service = _PublishService(calls=[])
+async def test_activation_route_rejects_explicit_null_binding_selection() -> None:
+    service = _ActivationService(calls=[])
     context = _context()
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -303,9 +304,9 @@ async def test_publish_route_rejects_explicit_null_binding_selection() -> None:
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
+            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
             json={
-                "expected_asset_version": 8,
+                "expected_revision": 8,
                 "expected_payload_checksum": "a" * 64,
                 "expected_binding_revision": 0,
                 "credential_bindings": None,
@@ -317,8 +318,8 @@ async def test_publish_route_rejects_explicit_null_binding_selection() -> None:
 
 
 @pytest.mark.asyncio
-async def test_publish_route_rejects_explicit_empty_binding_selection() -> None:
-    service = _PublishService(calls=[])
+async def test_activation_route_rejects_explicit_empty_binding_selection() -> None:
+    service = _ActivationService(calls=[])
     context = _context()
     app = FastAPI()
     app.include_router(project_assets.project_router)
@@ -330,9 +331,9 @@ async def test_publish_route_rejects_explicit_empty_binding_selection() -> None:
         base_url="http://test",
     ) as client:
         response = await client.post(
-            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/publish",
+            f"/api/projects/{_PROJECT_ID}/skills/{_SKILL_ID}/versions/{_VERSION_ID}/activate",
             json={
-                "expected_asset_version": 8,
+                "expected_revision": 8,
                 "expected_payload_checksum": "a" * 64,
                 "expected_binding_revision": 0,
                 "credential_bindings": [],

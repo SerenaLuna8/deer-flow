@@ -84,8 +84,8 @@ def _released_skill_histories(
     for name, history in histories.items():
         history.sort(key=lambda entry: int(entry["version"]))
         versions = [int(entry["version"]) for entry in history]
-        if versions != list(range(1, len(history) + 1)):
-            raise ValueError(f"released system Skill history is not contiguous: {name}")
+        if versions != [1]:
+            raise ValueError(f"released system Skill must contain exactly one v1: {name}")
     return histories
 
 
@@ -184,24 +184,17 @@ def _expected_outputs() -> tuple[bytes, dict[str, bytes]]:
         archive = dump_skill_archive(source.files)
         scan_decision, scan_summary = _scan_snapshot(preview)
         history = histories.get(name, [])
-        for entry in history:
-            payloads[str(entry["payload_path"])] = _released_archive(entry)
-            generated_entries.append(entry)
-        latest = history[-1] if history else None
-        archive_digest = hashlib.sha256(archive).hexdigest()
-        latest_has_snapshot = latest is not None and latest.get("scan_decision") is not None
-        latest_snapshot_matches = latest_has_snapshot and latest.get("scan_decision") == scan_decision and latest.get("scan_summary") == scan_summary
-        if latest is None or latest["sha256"] != archive_digest or (latest_has_snapshot and not latest_snapshot_matches):
-            next_version = 1 if latest is None else int(latest["version"]) + 1
-            entry = _new_skill_entry(
-                name,
-                next_version,
-                archive,
-                scan_decision=scan_decision,
-                scan_summary=scan_summary,
-            )
-            payloads[str(entry["payload_path"])] = archive
-            generated_entries.append(entry)
+        for released in history:
+            _released_archive(released)
+        entry = _new_skill_entry(
+            name,
+            1,
+            archive,
+            scan_decision=scan_decision,
+            scan_summary=scan_summary,
+        )
+        payloads[str(entry["payload_path"])] = archive
+        generated_entries.append(entry)
 
     removed_names = sorted(set(histories) - seen_names)
     if removed_names:

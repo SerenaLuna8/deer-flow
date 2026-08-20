@@ -31,30 +31,36 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Run 工具并向 Agent 提供安全的能力降级提示；其他能力和主回复继续执行。授权撤销、
   冻结快照漂移、Credential 材料化不确定等安全边界仍会终止 Run。Skill 脚本及普通
   工具失败以错误结果返回 Agent，由其使用现有上下文继续或明确说明未完成部分。
-- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。项目 Skill
-  仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz` 或 `.tgz`
-  包；常见 macOS 归档元数据会被忽略。新建 Skill 保持 suspended，修订草稿需由具备
-  资产发布权限的成员显式发布后才生效；超出上传、解压、单文件或成员数限制的包会以
-  明确的大小限制错误拒绝。Skill 详情可把当前选中的已持久化版本导出为
+- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。Project
+  Agent/Skill 保存后生成不可变 Candidate Version；显式激活会原子设置
+  `current_version_id` 并启用资产，历史版本只读且不能恢复、复制或重新激活。System
+  Agent/Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
+  项目 Skill 仅可通过 AI 对话创建/修订，或上传 `.zip`、`.skill`、`.tar`、`.tar.gz`
+  或 `.tgz` 包；常见 macOS 归档元数据会被忽略。超出上传、解压、单文件或成员数限制
+  的包会以明确的大小限制错误拒绝。Skill 详情可把当前选中的已持久化版本导出为
   `<slug>-v<version_number>.zip` 标准分发包；`SKILL.md` 位于包根目录，包内不含
-  Credential 映射、密钥、版本历史或发布状态，被治理撤销的 System Skill 版本不可导出。
+  Credential 映射、密钥或版本历史，被治理撤销的 System Skill v1 不可导出。
   项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
   Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
   名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情按所选不可变版本展示
-  指令和能力；基于旧发布版的草稿不能直接发布，但可复制为基于当前发布版的新草稿，
-  不会覆盖历史或回退当前指针。Skill 可在 `SKILL.md` 中通过
+  指令和能力；只有最新向前派生的版本可以继续编辑，Historical Version 不能形成内容
+  回退。Skill 可在 `SKILL.md` 中通过
   `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
   同一源码副本同步。版本工作台的“运行凭证”把每个目标变量映射到精确的项目
   Credential 版本及其中一个 `env` 来源字段：声明仍只写入 `SKILL.md`，项目映射只存
-  PostgreSQL。普通 Draft 在发布前必须完成全部必需映射，发布窗口只做只读预检；AI
-  或压缩包首次创建的 Skill 保持 published + suspended，允许随后为精确 v1 补齐映射，
-  但映射完整前不能启用。已发布版本仍可独立轮换运行映射，不需要重发 Skill。明文只在
+  PostgreSQL。Candidate Version 激活前必须完成全部必需映射；Editor 只能看到完整性，
+  Admin 负责配置 Credential。向前保存的新版本会继承仍兼容的映射，激活时重新校验。
+  Current Version 的运行映射仍可独立轮换。明文只在
   授权命令执行边界从选定来源字段解密，并以 Skill 声明的目标变量名注入；Local Provider
   与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
-  装配，并遵循 Local/AIO Provider 各自的安全策略；候选 Skill 仍只能经受管草稿工具、
-  检查和显式提交进入不可变版本历史。
+  装配，并遵循 Local/AIO Provider 各自的安全策略；候选文件只能经受管工具、检查和
+  显式提交进入不可变版本历史。
+- 每个 Run（包括既有 Thread 的后续消息、编辑/重新生成、Automation 和 Channel）都在
+  准入时重新解析 Agent 与 Skill 的 Current Version，并冻结为完整 Run Snapshot。Worker
+  只执行该快照，执行与重试期间不会重新查询 Current Version。Agent 对 Skill 的依赖只
+  保存 Skill Asset ID，运行时自动解析该 Skill 的 Current Version；MCP 仍绑定精确配置。
 - 长期 Memory、上下文压缩、Dream 整理、归档检索和账号级个性化控制。
 - Sub-Agent、Guardrail、Tool Search、循环检测和可扩展工具链。
 - 文本 lead model 的受治理图片识别桥接：按 Run 冻结辅助视觉模型，使用
@@ -68,8 +74,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
 
 | 项目角色 | 项目菜单             | 主要边界                             |
 | -------- | -------------------- | ------------------------------------ |
-| Admin    | 工作、能力、项目管理 | 项目治理、成员、凭证、审计及资产发布 |
-| Editor   | 工作、能力           | 运行工作，并创建或编辑项目资产 Draft |
+| Admin    | 工作、能力、项目管理 | 项目治理、成员、凭证、审计及资产生命周期 |
+| Editor   | 工作、能力           | 运行工作，并保存、激活或停用项目 Agent/Skill |
 | Runner   | 工作、Agent（只读）  | 运行工作；只读查看 Agent             |
 | Viewer   | 工作、Agent（只读）  | 查看自己的既有工作和 Agent；不能运行 |
 
@@ -138,18 +144,19 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `skill_credential_source_field`。
+  `current_asset_version_lifecycle`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
-- 已知旧版本可直接通过 `make upgrade-db` 显式升级。
+- 已知旧版本先运行 `make preflight-upgrade` 获取只读 Agent/Skill 生命周期清单并排除阻断异常，再通过 `make upgrade-db` 显式升级；升级命令会在同一维护流程内再次执行该 preflight。
 - 未知 marker、未纳管的非空 schema 或 catalog drift 会安全失败。
 - Gateway、Worker 和 Scheduler 从不自动迁移或修复 schema。
-- 打包 System Asset 有新增不可变 release 时，先停止运行服务，在维护窗口执行
-  `make upgrade-system-assets`；该命令从标准运行环境读取 `DATABASE_URL`，保留历史版本与
-  既有项目 pin，并且可幂等重跑。
-- 全局管理员可对已发布的 System Skill 版本执行不可逆治理撤销。撤销保留发布内容、历史、
-  当前指针和既有项目 pin；新绑定、新 Run 及 Worker 重试/恢复会拒绝该版本，项目管理员需
-  显式迁移到仍可绑定的版本或停用绑定。已经完成物化并正在运行的图不会被强制中断。
+- 升级打包 System Agent/Skill 时，先停止运行服务，在维护窗口执行
+  `make upgrade-system-assets`；该命令从标准运行环境读取 `DATABASE_URL`，以相同确定性
+  UUID 原地替换唯一 v1 并保持它为 Current Version，不追加版本，可幂等重跑。System MCP
+  仍遵循自己的配置治理。
+- 全局管理员可对 System Skill v1 执行不可逆治理撤销。撤销不改变 Current Version；新绑定
+  和新 Run 会拒绝该定义。软件包内容变化后的升级会清除旧定义的撤销，同字节幂等升级则
+  保留撤销。已经准入的 Run 继续使用冻结快照，不会被强制中断。
 - 生产运维应通过平台外部的 cron、systemd timer 或编排器每日运行（至少每个 UTC 月
   成功一次）`make prepare-run-event-partitions`；该幂等命令只在当前 schema head 上
   预创建 UTC 当前月至 N+2 月分区，锁等待超时后可安全重试。不要把它挂到 Gateway、

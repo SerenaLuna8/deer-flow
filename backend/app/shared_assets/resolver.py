@@ -14,7 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
-from app.shared_assets.agent_payload_checksum import agent_payload_checksum_matches
+from app.shared_assets.agent_payload_checksum import (
+    agent_payload_checksum,
+    persisted_agent_payload_checksum_matches,
+)
 from app.shared_assets.binding_repository import BindingRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
 from app.shared_assets.credential_closure import (
@@ -55,6 +58,8 @@ from app.shared_assets.models import (
     ResolvedMcpSnapshot,
     ResolvedRunAssetClosure,
     ResolvedSkillSnapshot,
+    SkillAssetRef,
+    SkillSecretRequirementSnapshot,
     WorkflowStatus,
 )
 from app.shared_assets.skill_repository import SkillVersionRecord
@@ -100,12 +105,12 @@ _BINDING_TYPES = {
     AssetKind.AGENT: (
         ProjectSystemAgentBindingRow,
         "system_agent_id",
-        "agent_version_id",
+        None,
     ),
     AssetKind.SKILL: (
         ProjectSystemSkillBindingRow,
         "system_skill_id",
-        "skill_version_id",
+        None,
     ),
     AssetKind.MCP: (
         ProjectSystemMcpBindingRow,
@@ -210,10 +215,10 @@ class ProjectAssetResolver:
     ) -> ResolvedRunAssetClosure:
         """Resolve the exact Agent/Skill/MCP closure admitted for one Run.
 
-        Only the packaged canonical Main Agent receives a dynamic project
-        view.  Every other Agent remains an exact, explicitly referenced
-        closure.  Main's current Skill/MCP pool is kept as a prefix and
-        delegated-Agent-only historical versions are appended afterwards.
+        Every Agent and Skill reference resolves its aggregate Current Version
+        under the admission transaction. MCP keeps its established exact
+        release binding. The resulting closure is persisted in full and is
+        the Worker's sole executable asset source.
         """
 
         self._validate_resolve_input(context, selection)
@@ -394,19 +399,20 @@ class ProjectAssetResolver:
             version = record.version
             if not isinstance(version, AgentVersionRow):
                 raise AssetResolutionUnavailable(context.request_id)
-            skill_ids = tuple(
+            skill_refs = tuple(
                 (
                     await session.execute(
-                        select(AgentVersionSkillRefRow.skill_version_id)
+                        select(
+                            AgentVersionSkillRefRow.skill_asset_scope,
+                            AgentVersionSkillRefRow.skill_asset_id,
+                        )
                         .where(
                             AgentVersionSkillRefRow.agent_version_id == version.id,
                         )
                         .order_by(AgentVersionSkillRefRow.sort_order)
                         .with_for_update(read=True, of=AgentVersionSkillRefRow)
                     )
-                )
-                .scalars()
-                .all()
+                ).all()
             )
             mcp_ids = tuple(
                 (
@@ -422,7 +428,7 @@ class ProjectAssetResolver:
                 .scalars()
                 .all()
             )
-            if mcp_ids or len(skill_ids) != 1:
+            if mcp_ids or len(skill_refs) != 1 or skill_refs[0][0] != AssetScope.SYSTEM.value:
                 raise AssetResolutionUnavailable(context.request_id)
             # The packaged creator is an implementation dependency of the
             # internal Builder Agent.  Resolve its exact immutable reference
@@ -433,7 +439,7 @@ class ProjectAssetResolver:
                 context,
                 kind=AssetKind.SKILL,
                 source_key=BUILTIN_SKILL_CREATOR_SOURCE_KEY,
-                version_id=skill_ids[0],
+                asset_id=skill_refs[0][1],
             )
             lead = await self._agent_snapshot(
                 session,
@@ -520,15 +526,12 @@ class ProjectAssetResolver:
                 asset_type.project_id.is_(None),
                 asset_type.source_key == source_key,
                 asset_type.status == "active",
-                version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
+                version_type.id == asset_type.current_version_id,
+                version_type.version_number == 1,
             )
             .with_for_update(read=True, of=[asset_type, version_type])
         )
-        if asset_id is None and version_id is None:
-            statement = statement.where(
-                version_type.id == asset_type.current_published_version_id,
-            )
-        elif asset_id is not None:
+        if asset_id is not None:
             statement = statement.where(asset_type.id == asset_id)
         if version_id is not None:
             statement = statement.where(version_type.id == version_id)
@@ -546,12 +549,10 @@ class ProjectAssetResolver:
         context: ProjectContext,
         selection: AssetSelection,
     ) -> ResolvedAssetSnapshot:
-        """Resolve one exact snapshot from an already-admitted Run closure.
+        """Resolve one exact current snapshot for maintenance-only callers.
 
-        Unlike the authoring/UI resolver, project assets are not constrained
-        to their current pointer: a Run may continue using an older published
-        version after a later publish.  The method is exact-only so callers
-        cannot accidentally use this historical path for new admission.
+        Worker execution uses the self-contained persisted Run Snapshot and
+        never calls this catalog resolver.
         """
 
         self._validate_resolve_input(context, selection)
@@ -607,7 +608,7 @@ class ProjectAssetResolver:
                     asset_type.project_id == context.project_id,
                     (asset_type.status.in_(("active", "archived")) if selection.kind is AssetKind.AGENT else asset_type.status == "active"),
                     version_type.id == version_id,
-                    version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
+                    *((version_type.workflow_status == WorkflowStatus.PUBLISHED.value,) if selection.kind is AssetKind.MCP else (asset_type.current_version_id == version_id,)),
                 )
                 .with_for_update(read=True, of=[asset_type, version_type])
             )
@@ -631,7 +632,7 @@ class ProjectAssetResolver:
                         AgentRow.source_key == BUILTIN_MAIN_AGENT_SOURCE_KEY,
                         AgentRow.status == "active",
                         AgentVersionRow.id == version_id,
-                        AgentVersionRow.workflow_status == WorkflowStatus.PUBLISHED.value,
+                        AgentRow.current_version_id == version_id,
                     )
                     .with_for_update(
                         read=True,
@@ -654,7 +655,7 @@ class ProjectAssetResolver:
         if binding is None or not binding.enabled:
             raise AssetResolutionUnavailable(context.request_id)
         _binding_type, _asset_column, version_column = _BINDING_TYPES[selection.kind]
-        if getattr(binding, version_column) != version_id:
+        if version_column is not None and getattr(binding, version_column) != version_id:
             raise AssetResolutionUnavailable(context.request_id)
         try:
             target = await repository.lock_target(
@@ -665,7 +666,7 @@ class ProjectAssetResolver:
             )
         except SharedAssetError:
             raise AssetResolutionUnavailable(context.request_id) from None
-        if target.asset.status != "active" or target.version.workflow_status != WorkflowStatus.PUBLISHED.value:
+        if target.asset.status != "active" or target.version.id != version_id:
             raise AssetResolutionUnavailable(context.request_id)
         record = _ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version)
         self._assert_public_agent_record(record, context.request_id)
@@ -727,20 +728,21 @@ class ProjectAssetResolver:
         kind: AssetKind,
     ) -> tuple[_ResolvedRecord, ...]:
         asset_type, version_type, parent_column = _ASSET_TYPES[kind]
+        pointer_column = asset_type.current_published_version_id if kind is AssetKind.MCP else asset_type.current_version_id
         project_rows = tuple(
             (
                 await session.execute(
                     select(asset_type, version_type)
                     .join(
                         version_type,
-                        version_type.id == asset_type.current_published_version_id,
+                        version_type.id == pointer_column,
                     )
                     .where(
                         asset_type.scope == AssetScope.PROJECT.value,
                         asset_type.project_id == context.project_id,
                         asset_type.status == "active",
                         getattr(version_type, parent_column) == asset_type.id,
-                        version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
+                        *((version_type.workflow_status == WorkflowStatus.PUBLISHED.value,) if kind is AssetKind.MCP else ()),
                     )
                     .order_by(asset_type.id, version_type.id)
                     .with_for_update(read=True, of=[asset_type, version_type])
@@ -750,6 +752,7 @@ class ProjectAssetResolver:
             .all()
         )
         binding_type, asset_column, binding_version_column = _BINDING_TYPES[kind]
+        system_version_join = version_type.id == getattr(binding_type, binding_version_column) if binding_version_column is not None else version_type.id == asset_type.current_version_id
         system_rows = tuple(
             (
                 await session.execute(
@@ -760,7 +763,7 @@ class ProjectAssetResolver:
                     )
                     .join(
                         version_type,
-                        version_type.id == getattr(binding_type, binding_version_column),
+                        system_version_join,
                     )
                     .where(
                         binding_type.project_id == context.project_id,
@@ -769,7 +772,8 @@ class ProjectAssetResolver:
                         asset_type.project_id.is_(None),
                         asset_type.status == "active",
                         getattr(version_type, parent_column) == asset_type.id,
-                        version_type.workflow_status == WorkflowStatus.PUBLISHED.value,
+                        *((version_type.workflow_status == WorkflowStatus.PUBLISHED.value,) if kind is AssetKind.MCP else ()),
+                        *((SkillVersionRow.revoked_at.is_(None),) if kind is AssetKind.SKILL else ()),
                     )
                     .order_by(asset_type.id, version_type.id)
                     .with_for_update(
@@ -935,7 +939,7 @@ class ProjectAssetResolver:
         if asset is not None:
             if selection.kind is AssetKind.AGENT and asset.status == "archived":
                 raise AgentArchived(context.request_id)
-            version_id = asset.current_published_version_id
+            version_id = asset.current_published_version_id if selection.kind is AssetKind.MCP else asset.current_version_id
             if version_id is None or (selection.version_id is not None and selection.version_id != version_id):
                 raise AssetResolutionUnavailable(context.request_id)
             version = await self._lock_version(
@@ -968,7 +972,7 @@ class ProjectAssetResolver:
                 )
             ).scalar_one_or_none()
             if main_asset is not None:
-                version_id = selection.version_id if selection.version_id is not None else main_asset.current_published_version_id
+                version_id = selection.version_id if selection.version_id is not None else main_asset.current_version_id
                 if version_id is None:
                     raise AssetResolutionUnavailable(context.request_id)
                 version = await self._lock_version(
@@ -1001,9 +1005,10 @@ class ProjectAssetResolver:
         if binding is None or not binding.enabled:
             raise AssetResolutionUnavailable(context.request_id)
         _binding_type, _asset_column, version_column = _BINDING_TYPES[selection.kind]
-        pinned_version_id = getattr(binding, version_column)
+        pinned_version_id = getattr(binding, version_column) if version_column is not None else None
         if selection.version_id is not None and selection.version_id != pinned_version_id:
-            raise AssetResolutionUnavailable(context.request_id)
+            if selection.kind is AssetKind.MCP:
+                raise AssetResolutionUnavailable(context.request_id)
         try:
             target = await repository.lock_target(
                 context,
@@ -1051,7 +1056,11 @@ class ProjectAssetResolver:
     @staticmethod
     def _assert_asset_state(asset, version, request_id: str) -> None:
         unavailable = asset.status != "active" if isinstance(asset, SkillRow) else asset.status == "suspended"
-        if unavailable or version.workflow_status != "published":
+        workflow_unavailable = isinstance(version, McpServerVersionRow) and version.workflow_status != "published"
+        current_mismatch = not isinstance(version, McpServerVersionRow) and asset.current_version_id != version.id
+        invalid_system_v1 = isinstance(asset, (AgentRow, SkillRow)) and asset.scope == AssetScope.SYSTEM.value and version.version_number != 1
+        revoked_skill = isinstance(version, SkillVersionRow) and version.revoked_at is not None
+        if unavailable or workflow_unavailable or current_mismatch or invalid_system_v1 or revoked_skill:
             raise AssetResolutionUnavailable(request_id)
 
     async def _snapshot(
@@ -1084,15 +1093,22 @@ class ProjectAssetResolver:
         version = record.version
         if not isinstance(version, AgentVersionRow):
             raise AssetResolutionUnavailable(context.request_id)
-        skill_ids = tuple(
+        skill_ref_rows = tuple(
             (
                 await session.execute(
-                    select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order).with_for_update(read=True, of=AgentVersionSkillRefRow)
+                    select(
+                        AgentVersionSkillRefRow.skill_asset_scope,
+                        AgentVersionSkillRefRow.skill_asset_id,
+                    )
+                    .where(AgentVersionSkillRefRow.agent_version_id == version.id)
+                    .order_by(AgentVersionSkillRefRow.sort_order)
+                    .with_for_update(read=True, of=AgentVersionSkillRefRow)
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
+        skill_refs = tuple(SkillAssetRef(AssetScope(scope), asset_id) for scope, asset_id in skill_ref_rows)
+        if record.scope is AssetScope.SYSTEM and any(ref.scope is not AssetScope.SYSTEM for ref in skill_refs):
+            raise AssetResolutionUnavailable(context.request_id)
         mcp_ids = tuple(
             (
                 await session.execute(
@@ -1103,11 +1119,10 @@ class ProjectAssetResolver:
             .all()
         )
         if exact_dependency_records is None:
-            skill_records = await self._assert_exact_dependencies(
+            skill_records = await self._resolve_skill_asset_refs(
                 session,
                 context,
-                AssetKind.SKILL,
-                skill_ids,
+                skill_refs,
             )
             mcp_records = await self._assert_exact_dependencies(
                 session,
@@ -1117,9 +1132,10 @@ class ProjectAssetResolver:
             )
         else:
             skill_records, mcp_records = exact_dependency_records
-            if tuple(item.version.id for item in skill_records) != skill_ids or tuple(item.version.id for item in mcp_records) != mcp_ids:
+            if tuple(SkillAssetRef(item.scope, item.asset.id) for item in skill_records) != skill_refs or tuple(item.version.id for item in mcp_records) != mcp_ids:
                 raise AssetResolutionUnavailable(context.request_id)
-        if len(skill_records) != len(skill_ids) or len(mcp_records) != len(mcp_ids):
+        skill_ids = tuple(item.version.id for item in skill_records)
+        if len(skill_records) != len(skill_refs) or len(mcp_records) != len(mcp_ids):
             raise AssetResolutionUnavailable(context.request_id)
         await self._lock_credential_closures(
             session,
@@ -1132,7 +1148,7 @@ class ProjectAssetResolver:
         except ValidationError:
             raise AssetResolutionUnavailable(context.request_id) from None
         if (
-            version.payload_schema_version not in (1, 2, 3)
+            version.payload_schema_version not in (1, 2, 3, 4)
             or (version.payload_schema_version in (1, 2) and not model_settings.is_empty)
             or (
                 version.payload_schema_version == 1
@@ -1158,23 +1174,32 @@ class ProjectAssetResolver:
             model_ref=version.model_ref,
             model_settings=model_settings,
             tool_groups=tuple(version.tool_groups),
-            skill_version_ids=skill_ids,
+            skill_refs=skill_refs,
             mcp_version_ids=mcp_ids,
         )
-        if not agent_payload_checksum_matches(
+        if not persisted_agent_payload_checksum_matches(
             payload,
             version.payload_checksum,
         ):
             raise AssetResolutionUnavailable(context.request_id)
+        # Legacy v1-v3 digests remain immutable audit metadata and bind the
+        # Skill Version IDs that existed before Current semantics. Runtime now
+        # binds Skill Asset IDs, so every newly admitted snapshot projects the
+        # attested definition into the self-consistent v4 digest contract.
+        runtime_payload = replace(payload, payload_schema_version=4) if payload.payload_schema_version in (1, 2, 3) else payload
+        runtime_checksum = agent_payload_checksum(runtime_payload)
         return ResolvedAgentSnapshot(
             kind=AssetKind.AGENT,
             scope=record.scope,
             asset_id=record.asset.id,
             version_id=version.id,
-            checksum=version.payload_checksum,
+            checksum=runtime_checksum,
             catalog_generation=generation,
             dependency_version_ids=dependencies,
-            payload=payload,
+            payload=runtime_payload,
+            skill_version_ids=skill_ids,
+            slug=record.asset.slug,
+            source_key=record.asset.source_key,
         )
 
     async def _agent_snapshot_with_dependencies(
@@ -1191,15 +1216,20 @@ class ProjectAssetResolver:
         version = record.version
         if not isinstance(version, AgentVersionRow):
             raise AssetResolutionUnavailable(context.request_id)
-        skill_ids = tuple(
+        skill_ref_rows = tuple(
             (
                 await session.execute(
-                    select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order).with_for_update(read=True, of=AgentVersionSkillRefRow)
+                    select(
+                        AgentVersionSkillRefRow.skill_asset_scope,
+                        AgentVersionSkillRefRow.skill_asset_id,
+                    )
+                    .where(AgentVersionSkillRefRow.agent_version_id == version.id)
+                    .order_by(AgentVersionSkillRefRow.sort_order)
+                    .with_for_update(read=True, of=AgentVersionSkillRefRow)
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
+        skill_refs = tuple(SkillAssetRef(AssetScope(scope), asset_id) for scope, asset_id in skill_ref_rows)
         mcp_ids = tuple(
             (
                 await session.execute(
@@ -1209,11 +1239,10 @@ class ProjectAssetResolver:
             .scalars()
             .all()
         )
-        skill_records = await self._assert_exact_dependencies(
+        skill_records = await self._resolve_skill_asset_refs(
             session,
             context,
-            AssetKind.SKILL,
-            skill_ids,
+            skill_refs,
         )
         mcp_records = await self._assert_exact_dependencies(
             session,
@@ -1252,12 +1281,19 @@ class ProjectAssetResolver:
             )
         except AssetValidationFailed:
             raise AssetResolutionUnavailable(context.request_id) from None
-        requirements: list[str] = []
+        requirements: list[SkillSecretRequirementSnapshot] = []
         for item in version.secret_requirements:
             if isinstance(item, str):
-                requirements.append(item)
-            elif isinstance(item, Mapping) and isinstance(item.get("name"), str):
-                requirements.append(str(item["name"]))
+                requirements.append(
+                    SkillSecretRequirementSnapshot(item, False),
+                )
+            elif isinstance(item, Mapping) and isinstance(item.get("name"), str) and isinstance(item.get("optional", False), bool):
+                requirements.append(
+                    SkillSecretRequirementSnapshot(
+                        str(item["name"]),
+                        bool(item.get("optional", False)),
+                    )
+                )
             else:
                 raise AssetResolutionUnavailable(context.request_id)
         return ResolvedSkillSnapshot(
@@ -1361,6 +1397,67 @@ class ProjectAssetResolver:
                 version_id,
             )
         return tuple(records_by_version_id[uuid.UUID(str(version_id))] for version_id in version_ids)
+
+    async def _resolve_skill_asset_refs(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        refs: Sequence[SkillAssetRef],
+    ) -> tuple[_ResolvedRecord, ...]:
+        records: list[_ResolvedRecord] = []
+        seen: set[SkillAssetRef] = set()
+        repository = BindingRepository(session)
+        for ref in refs:
+            if ref in seen:
+                raise AssetResolutionUnavailable(context.request_id)
+            seen.add(ref)
+            if ref.scope is AssetScope.PROJECT:
+                asset = (
+                    await session.execute(
+                        select(SkillRow)
+                        .where(
+                            SkillRow.id == ref.asset_id,
+                            SkillRow.scope == AssetScope.PROJECT.value,
+                            SkillRow.project_id == context.project_id,
+                            SkillRow.status == "active",
+                        )
+                        .with_for_update(read=True, of=SkillRow)
+                    )
+                ).scalar_one_or_none()
+                if asset is None or asset.current_version_id is None:
+                    raise AssetResolutionUnavailable(context.request_id)
+                version = await self._lock_version(
+                    session,
+                    SkillVersionRow,
+                    "skill_id",
+                    asset.id,
+                    asset.current_version_id,
+                    context.request_id,
+                )
+                self._assert_asset_state(asset, version, context.request_id)
+                records.append(_ResolvedRecord(AssetScope.PROJECT, asset, version))
+                continue
+            binding = await repository.get_binding(
+                context,
+                AssetKind.SKILL,
+                ref.asset_id,
+                for_update=True,
+                read=True,
+                required=False,
+            )
+            if binding is None or not binding.enabled:
+                raise AssetResolutionUnavailable(context.request_id)
+            try:
+                target = await repository.lock_target(
+                    context,
+                    AssetSelection(AssetKind.SKILL, ref.asset_id),
+                    read=True,
+                )
+            except SharedAssetError:
+                raise AssetResolutionUnavailable(context.request_id) from None
+            self._assert_asset_state(target.asset, target.version, context.request_id)
+            records.append(_ResolvedRecord(AssetScope.SYSTEM, target.asset, target.version))
+        return tuple(records)
 
     async def _dependency_record(
         self,

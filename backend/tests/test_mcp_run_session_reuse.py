@@ -505,6 +505,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
     from app.shared_assets.agent_payload_checksum import agent_payload_checksum
     from app.shared_assets.keyring import CredentialKeyring
+    from app.shared_assets.mcp_service import McpDefinition, McpService
     from app.shared_assets.models import AgentPayload
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
@@ -575,6 +576,13 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
         )
 
     endpoint = "http://127.0.0.1:8000/mcp"
+    mcp_checksum = McpService._checksum(
+        McpDefinition(
+            description="admitted run probe",
+            transport="http",
+            url=endpoint,
+        )
+    )
     endpoint_policy = NetworkMcpEndpointPolicy(("127.0.0.0/8",))
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     mcp_id = uuid.uuid4()
@@ -587,7 +595,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
             soul="mcp run agent",
             model_ref=TEST_MODEL_REF,
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(mcp_version_id,),
         )
     )
@@ -618,7 +626,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                     "id": mcp_version_id,
                     "mcp_id": mcp_id,
                     "url": endpoint,
-                    "checksum": "d" * 64,
+                    "checksum": mcp_checksum,
                     "owner": str(seed.owner_a.user_id),
                 },
             )
@@ -629,7 +637,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
             await session.execute(
                 text(
                     """INSERT INTO agents
-                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
                     VALUES (:id,'project',:project_id,:slug,'MCP Run Agent','active',1,:owner)"""
                 ),
                 {
@@ -642,9 +650,9 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
             await session.execute(
                 text(
                     """INSERT INTO agent_versions
-                    (id,agent_id,version_number,workflow_status,description,soul,
+                    (id,agent_id,version_number,description,soul,
                      model_ref,tool_groups,payload_checksum,created_by_user_id)
-                    VALUES (:id,:agent_id,1,'draft','','mcp run agent',:model_ref,
+                    VALUES (:id,:agent_id,1,'','mcp run agent',:model_ref,
                             '[]'::jsonb,:checksum,:owner)"""
                 ),
                 {
@@ -654,6 +662,16 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                     "checksum": agent_checksum,
                     "owner": str(seed.owner_a.user_id),
                 },
+            )
+            await session.execute(
+                text(
+                    """SELECT set_config(
+                        'deerflow.asset_version_assembly',
+                        :version_id,
+                        true
+                    )"""
+                ),
+                {"version_id": str(agent_version_id)},
             )
             await session.execute(
                 text(
@@ -667,11 +685,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 },
             )
             await session.execute(
-                text("UPDATE agent_versions SET workflow_status='published' WHERE id=:version_id"),
-                {"version_id": agent_version_id},
-            )
-            await session.execute(
-                text("UPDATE agents SET current_published_version_id=:version_id WHERE id=:agent_id"),
+                text("UPDATE agents SET current_version_id=:version_id WHERE id=:agent_id"),
                 {"version_id": agent_version_id, "agent_id": agent_id},
             )
 

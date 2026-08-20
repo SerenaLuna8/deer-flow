@@ -7,7 +7,7 @@ const base = {
   id: "11111111-1111-4111-8111-111111111111",
   occurred_at: "2026-08-13T00:00:00Z",
   actor: "user",
-  action: "asset.published",
+  action: "asset.updated",
   target_kind: "asset",
   outcome: "success",
   public_error_code: null,
@@ -19,7 +19,7 @@ describe("Agent audit fidelity", () => {
       ...base,
       metadata: {
         asset_kind: "agent",
-        operation: "agent.publish",
+        operation: "agent.version.activate",
         version_number: 7,
       },
     });
@@ -27,7 +27,7 @@ describe("Agent audit fidelity", () => {
     const presentation = describeAuditItem(item, "zh-CN");
     expect(presentation.metadata).toEqual(
       expect.arrayContaining([
-        { label: "具体操作", value: "agent.publish" },
+        { label: "具体操作", value: "agent.version.activate" },
         { label: "资产版本", value: "7" },
       ]),
     );
@@ -53,13 +53,17 @@ describe("Agent audit fidelity", () => {
     for (const metadata of [
       {
         asset_kind: "agent",
-        operation: "agent.publish",
+        operation: "agent.version.activate",
         version_id: "22222222-2222-4222-8222-222222222222",
         version_number: 7,
       },
       { asset_kind: "agent", operation: "agent.unknown", version_number: 7 },
-      { asset_kind: "agent", operation: "agent.publish" },
-      { asset_kind: "skill", operation: "agent.publish", version_number: 7 },
+      { asset_kind: "agent", operation: "agent.version.activate" },
+      {
+        asset_kind: "skill",
+        operation: "agent.version.activate",
+        version_number: 7,
+      },
     ]) {
       expect(auditItemSchema.safeParse({ ...base, metadata }).success).toBe(
         false,

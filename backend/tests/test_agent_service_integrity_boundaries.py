@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from inspect import signature
 
 import pytest
 
@@ -8,8 +9,8 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.shared_assets.agent_payload_checksum import agent_payload_checksum
-from app.shared_assets.agent_service import AgentService, CreateAgent
-from app.shared_assets.errors import AssetForbidden, AssetResolutionUnavailable
+from app.shared_assets.agent_service import AgentService
+from app.shared_assets.errors import AssetResolutionUnavailable
 from app.shared_assets.models import AgentPayload, AssetScope
 from app.shared_assets.resolver import ProjectAssetResolver, _ResolvedRecord
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
@@ -44,29 +45,12 @@ def test_agent_service_has_no_incomplete_shell_create_entrypoint() -> None:
     assert not hasattr(AgentService, "create_asset")
 
 
-@pytest.mark.asyncio
-async def test_editor_cannot_use_design_create_publish_escape_hatch() -> None:
-    actor = _context(ProjectRole.EDITOR)
-    payload = AgentPayload(
-        description="Review changes",
-        agents_instructions="# AGENTS\n\nReview carefully.",
-        soul="# SOUL\n\nBe precise.",
-        identity="# IDENTITY\n\nReviewer.",
-        user_context="# USER\n\nUse Chinese.",
-        model_ref="default",
-        tool_groups=("file:read",),
-        skill_version_ids=(),
-        mcp_version_ids=(),
-    )
-
-    with pytest.raises(AssetForbidden):
-        await AgentService(lambda: None).create_project_from_design_in_session(
-            object(),  # type: ignore[arg-type]
-            actor,
-            CreateAgent(slug="reviewer", display_name="Reviewer"),
-            payload,
-            publish=True,
-        )
+def test_design_create_has_no_implicit_activation_escape_hatch() -> None:
+    parameters = signature(
+        AgentService.create_project_from_design_in_session,
+    ).parameters
+    assert "publish" not in parameters
+    assert "activate" not in parameters
 
 
 @pytest.mark.asyncio
@@ -85,7 +69,7 @@ async def test_resolver_rejects_unauthenticated_legacy_v1_fields(
         soul="Legacy soul",
         model_ref="default",
         tool_groups=(),
-        skill_version_ids=(),
+        skill_refs=(),
         mcp_version_ids=(),
         payload_schema_version=1,
     )
@@ -102,15 +86,14 @@ async def test_resolver_rejects_unauthenticated_legacy_v1_fields(
         slug="legacy-agent",
         display_name="Legacy Agent",
         status="active",
-        current_published_version_id=version_id,
-        version=1,
+        current_version_id=version_id,
+        revision=1,
         created_by_user_id=str(context.user_id),
     )
     version = AgentVersionRow(
         id=version_id,
         agent_id=asset_id,
         version_number=1,
-        workflow_status="published",
         description=payload.description,
         agents_instructions=version_values["agents_instructions"],
         soul=payload.soul,

@@ -13,6 +13,7 @@ from deerflow.persistence.shared_assets.binding_model import (
     ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
     ProjectSystemSkillBindingRow,
+    SystemAssetUpgradeAuditRow,
 )
 from deerflow.persistence.shared_assets.credential_model import (
     CredentialEnvelopeRow,
@@ -62,6 +63,7 @@ __all__ = [
     "ProjectSystemAgentBindingRow",
     "ProjectSystemMcpBindingRow",
     "ProjectSystemSkillBindingRow",
+    "SystemAssetUpgradeAuditRow",
     "ProjectSkillCredentialBindingRow",
     "ProjectSkillCredentialConfigRow",
     "SkillRow",

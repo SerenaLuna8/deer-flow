@@ -18,7 +18,7 @@ from app.shared_assets.errors import (
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
 )
-from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
+from app.shared_assets.models import SkillArchiveFile, VersionRelation
 from app.shared_assets.skill_credential_repository import EligibleSkillCredentialRecord
 from app.shared_assets.skill_repository import SkillVersionRecord
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
@@ -32,17 +32,16 @@ def _actor() -> ProjectContext:
         role=ProjectRole.ADMIN,
         capabilities=capabilities_for(ProjectRole.ADMIN),
         membership_version=1,
-        request_id="req-atomic-skill-publish",
+        request_id="req-atomic-skill-activation",
     )
 
 
-def _draft(
+def _candidate(
     actor: ProjectContext,
     *,
     status: str,
 ) -> tuple[SkillRow, SkillVersionRecord]:
     skill_id = uuid.uuid4()
-    current_id = uuid.uuid4()
     content = b"""---
 name: atomic-secret-skill
 description: Atomic secret skill
@@ -67,8 +66,8 @@ Use the configured secret.
         slug="atomic-secret-skill",
         display_name="Atomic secret skill",
         status=status,
-        current_published_version_id=current_id,
-        version=8,
+        current_version_id=None,
+        revision=8,
         created_by_user_id=str(actor.user_id),
         created_at=created_at,
         updated_at=created_at,
@@ -76,15 +75,14 @@ Use the configured secret.
     row = SkillVersionRow(
         id=version_id,
         skill_id=skill_id,
-        version_number=2,
-        workflow_status="draft",
+        version_number=1,
         description=preview.description,
         frontmatter=dict(preview.frontmatter),
         compatibility=preview.compatibility,
         secret_requirements=[{"name": requirement.name, "optional": requirement.optional} for requirement in preview.secret_requirements],
         scan_decision=preview.scan_decision,
         scan_summary=dict(preview.scan_summary),
-        supersedes_version_id=current_id,
+        supersedes_version_id=None,
         payload_checksum=preview.checksum,
         created_by_user_id=str(actor.user_id),
         created_at=created_at,
@@ -127,9 +125,8 @@ class _Transaction:
     async def __aenter__(self):
         store = self._session.store
         self._snapshot = (
-            store.asset.current_published_version_id,
-            store.asset.version,
-            store.version.row.workflow_status,
+            store.asset.current_version_id,
+            store.asset.revision,
             copy.copy(store.config),
             tuple(copy.copy(item) for item in store.bindings),
             tuple(store.governance or ()),
@@ -141,9 +138,8 @@ class _Transaction:
             return False
         assert self._snapshot is not None
         (
-            self._session.store.asset.current_published_version_id,
-            self._session.store.asset.version,
-            self._session.store.version.row.workflow_status,
+            self._session.store.asset.current_version_id,
+            self._session.store.asset.revision,
             self._session.store.config,
             self._session.store.bindings,
             governance,
@@ -185,6 +181,9 @@ class _SkillRepository:
         self.session.store.locks.append("skill")
         return self.session.store.asset
 
+    async def ensure_project_skill_runtime_name_available(self, actor, asset):
+        assert actor.project_id == asset.project_id
+
     async def get_project_version(
         self,
         actor,
@@ -200,6 +199,11 @@ class _SkillRepository:
         assert self.session.store.locks is not None
         self.session.store.locks.append("version+files")
         return self.session.store.version
+
+    async def get_project_version_history(self, actor, asset_id):
+        assert actor.project_id == self.session.store.asset.project_id
+        assert asset_id == self.session.store.asset.id
+        return (self.session.store.version,)
 
     async def get_override_asset(self, actor, asset_id, *, for_update=False):
         return await self.get_project_asset(
@@ -222,6 +226,9 @@ class _SkillRepository:
             version_id,
             for_update=for_update,
         )
+
+    async def get_override_version_history(self, actor, asset_id):
+        return await self.get_project_version_history(actor, asset_id)
 
 
 class _CredentialRepository:
@@ -318,7 +325,7 @@ def _harness(
     fail_action: str | None = None,
 ):
     actor = _actor()
-    asset, version = _draft(actor, status=status)
+    asset, version = _candidate(actor, status=status)
     credential_id = uuid.uuid4()
     credential_version_id = uuid.uuid4()
     selected = EligibleSkillCredentialRecord(
@@ -382,13 +389,13 @@ def _seed_persisted_binding(
 
 
 @pytest.mark.asyncio
-async def test_active_skill_publish_validates_persisted_mapping_and_moves_live_pointer(
+async def test_skill_activation_validates_persisted_mapping_and_moves_current_pointer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="active")
     _seed_persisted_binding(store)
 
-    result = await service.publish(
+    result = await service.activate_version(
         actor,
         store.asset.id,
         store.version.row.id,
@@ -397,8 +404,8 @@ async def test_active_skill_publish_validates_persisted_mapping_and_moves_live_p
         expected_binding_revision=1,
     )
 
-    assert result.workflow_status is WorkflowStatus.PUBLISHED
-    assert store.asset.current_published_version_id == store.version.row.id
+    assert result.relation is VersionRelation.CURRENT
+    assert store.asset.current_version_id == store.version.row.id
     assert store.config is not None and store.config.revision == 1
     assert store.bindings[0].secret_name == "API_KEY"
     assert store.bindings[0].source_env_field_name == "API_KEY"
@@ -410,19 +417,19 @@ async def test_active_skill_publish_validates_persisted_mapping_and_moves_live_p
         "credential+version",
         "envelope",
     ]
-    assert store.governance == ["skill.publish"]
+    assert store.governance == ["skill.version.activate"]
     assert session.commit_count == 1
 
 
 @pytest.mark.asyncio
-async def test_active_skill_publish_missing_required_binding_rolls_back(
+async def test_skill_activation_missing_required_binding_rolls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="active")
-    original_pointer = store.asset.current_published_version_id
+    original_pointer = store.asset.current_version_id
 
     with pytest.raises(SkillCredentialBindingsIncomplete):
-        await service.publish(
+        await service.activate_version(
             actor,
             store.asset.id,
             store.version.row.id,
@@ -431,8 +438,7 @@ async def test_active_skill_publish_missing_required_binding_rolls_back(
             expected_binding_revision=0,
         )
 
-    assert store.asset.current_published_version_id == original_pointer
-    assert store.version.row.workflow_status == "draft"
+    assert store.asset.current_version_id == original_pointer
     assert store.config is None
     assert store.bindings == ()
     assert store.governance == []
@@ -440,7 +446,7 @@ async def test_active_skill_publish_missing_required_binding_rolls_back(
 
 
 @pytest.mark.asyncio
-async def test_admin_project_override_cannot_publish_active_skill_without_existing_required_binding(
+async def test_admin_project_override_cannot_activate_without_required_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="active")
@@ -449,18 +455,19 @@ async def test_admin_project_override_cannot_publish_active_skill_without_existi
         project_id=actor.project_id,
         request_id=actor.request_id,
     )
-    original_pointer = store.asset.current_published_version_id
+    original_pointer = store.asset.current_version_id
 
     with pytest.raises(SkillCredentialBindingsIncomplete):
-        await service.publish(
+        await service.activate_version(
             admin_override,
             store.asset.id,
             store.version.row.id,
             expected_asset_version=8,
+            expected_payload_checksum=store.version.row.payload_checksum,
+            expected_binding_revision=0,
         )
 
-    assert store.asset.current_published_version_id == original_pointer
-    assert store.version.row.workflow_status == "draft"
+    assert store.asset.current_version_id == original_pointer
     assert store.config is None
     assert store.bindings == ()
     assert store.governance == []
@@ -469,7 +476,7 @@ async def test_admin_project_override_cannot_publish_active_skill_without_existi
 
 
 @pytest.mark.asyncio
-async def test_admin_project_override_publishes_active_skill_with_valid_existing_binding(
+async def test_admin_project_override_activates_with_valid_existing_binding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="active")
@@ -490,15 +497,17 @@ async def test_admin_project_override_publishes_active_skill_with_valid_existing
         ),
     )
 
-    result = await service.publish(
+    result = await service.activate_version(
         admin_override,
         store.asset.id,
         store.version.row.id,
         expected_asset_version=8,
+        expected_payload_checksum=store.version.row.payload_checksum,
+        expected_binding_revision=1,
     )
 
-    assert result.workflow_status is WorkflowStatus.PUBLISHED
-    assert store.asset.current_published_version_id == store.version.row.id
+    assert result.relation is VersionRelation.CURRENT
+    assert store.asset.current_version_id == store.version.row.id
     assert store.config.revision == 1
     assert store.locks == [
         "skill",
@@ -508,24 +517,24 @@ async def test_admin_project_override_publishes_active_skill_with_valid_existing
         "credential+version",
         "envelope",
     ]
-    assert store.governance == ["skill.publish"]
+    assert store.governance == ["skill.version.activate"]
     assert session.commit_count == 1
 
 
 @pytest.mark.asyncio
-async def test_system_governance_publish_rejects_project_binding_cas_fields(
+async def test_global_system_governance_cannot_manually_activate_system_assets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="active")
-    admin_override = SystemAssetGovernanceContext(
+    system_admin = SystemAssetGovernanceContext(
         user_id=actor.user_id,
-        project_id=actor.project_id,
+        project_id=None,
         request_id=actor.request_id,
     )
 
     with pytest.raises(AssetForbidden):
-        await service.publish(
-            admin_override,
+        await service.activate_version(
+            system_admin,
             store.asset.id,
             store.version.row.id,
             expected_asset_version=8,
@@ -539,13 +548,13 @@ async def test_system_governance_publish_rejects_project_binding_cas_fields(
 
 
 @pytest.mark.asyncio
-async def test_suspended_skill_manual_publish_rejects_incomplete_bindings(
+async def test_suspended_skill_activation_rejects_incomplete_bindings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="suspended")
 
     with pytest.raises(SkillCredentialBindingsIncomplete):
-        await service.publish(
+        await service.activate_version(
             actor,
             store.asset.id,
             store.version.row.id,
@@ -554,30 +563,29 @@ async def test_suspended_skill_manual_publish_rejects_incomplete_bindings(
             expected_binding_revision=0,
         )
 
-    assert store.version.row.workflow_status == "draft"
     assert store.config is None
     assert store.governance == []
     assert session.rollback_count == 1
 
 
 @pytest.mark.asyncio
-async def test_publish_permission_requires_manage_but_not_credential_approve(
+async def test_activation_requires_edit_but_not_credential_approve(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(monkeypatch, status="suspended")
-    manage_only = ProjectContext(
+    editor = ProjectContext(
         user_id=actor.user_id,
         project_id=actor.project_id,
         membership_id=actor.membership_id,
         role=actor.role,
-        capabilities=frozenset({Capability.SHARED_ASSETS_MANAGE_BINDINGS}),
+        capabilities=frozenset({Capability.SHARED_ASSETS_EDIT}),
         membership_version=actor.membership_version,
         request_id=actor.request_id,
     )
     _seed_persisted_binding(store)
 
-    result = await service.publish(
-        manage_only,
+    result = await service.activate_version(
+        editor,
         store.asset.id,
         store.version.row.id,
         expected_asset_version=8,
@@ -585,12 +593,12 @@ async def test_publish_permission_requires_manage_but_not_credential_approve(
         expected_binding_revision=1,
     )
 
-    assert result.workflow_status is WorkflowStatus.PUBLISHED
+    assert result.relation is VersionRelation.CURRENT
     assert session.commit_count == 1
 
 
 @pytest.mark.asyncio
-async def test_publish_stale_envelope_and_audit_failure_both_rollback_everything(
+async def test_activation_stale_envelope_and_audit_failure_roll_back_everything(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor, store, session, service = _harness(
@@ -598,11 +606,11 @@ async def test_publish_stale_envelope_and_audit_failure_both_rollback_everything
         status="active",
         envelope_active=False,
     )
-    original_pointer = store.asset.current_published_version_id
+    original_pointer = store.asset.current_version_id
     _seed_persisted_binding(store)
 
     with pytest.raises(SkillCredentialSelectionStale):
-        await service.publish(
+        await service.activate_version(
             actor,
             store.asset.id,
             store.version.row.id,
@@ -611,20 +619,19 @@ async def test_publish_stale_envelope_and_audit_failure_both_rollback_everything
             expected_binding_revision=1,
         )
 
-    assert store.asset.current_published_version_id == original_pointer
-    assert store.version.row.workflow_status == "draft"
+    assert store.asset.current_version_id == original_pointer
     assert store.config is not None
     assert len(store.bindings) == 1
 
     actor2, store2, session2, service2 = _harness(
         monkeypatch,
         status="active",
-        fail_action="skill.publish",
+        fail_action="skill.version.activate",
     )
-    pointer2 = store2.asset.current_published_version_id
+    pointer2 = store2.asset.current_version_id
     _seed_persisted_binding(store2)
     with pytest.raises(RuntimeError, match="audit failed"):
-        await service2.publish(
+        await service2.activate_version(
             actor2,
             store2.asset.id,
             store2.version.row.id,
@@ -633,8 +640,7 @@ async def test_publish_stale_envelope_and_audit_failure_both_rollback_everything
             expected_binding_revision=1,
         )
 
-    assert store2.asset.current_published_version_id == pointer2
-    assert store2.version.row.workflow_status == "draft"
+    assert store2.asset.current_version_id == pointer2
     assert store2.config is not None
     assert len(store2.bindings) == 1
     assert store2.governance == []

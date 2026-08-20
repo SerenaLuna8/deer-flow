@@ -70,7 +70,7 @@ async def test_exact_history_rejects_catalog_owned_extra_version() -> None:
 @pytest.mark.asyncio
 async def test_exact_history_accepts_only_expected_release_ids_and_numbers() -> None:
     source_key = "builtin:skill:exact-history"
-    entries = (_entry(source_key, 1), _entry(source_key, 2))
+    entries = (_entry(source_key, 1),)
     asset_id = bootstrap_service._stable_id(source_key)
     expected = [(bootstrap_service._version_id(entry), entry.version) for entry in entries]
     session = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(all=lambda: expected)))
@@ -207,7 +207,7 @@ def test_historical_snapshotted_release_uses_immutable_manifest_snapshot() -> No
 
 
 @pytest.mark.asyncio
-async def test_historical_snapshot_skips_future_scanner_but_latest_release_is_scanned(
+async def test_system_skill_catalog_rejects_multi_version_history(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     name = "historical-scan-boundary"
@@ -240,12 +240,15 @@ async def test_historical_snapshot_skips_future_scanner_but_latest_release_is_sc
 
     entry_one = snapshotted_entry(1, payload_one)
     entry_two = snapshotted_entry(2, payload_two)
-    catalog = catalog_module.BootstrapCatalog.model_validate(
-        {
-            "schema_version": 3,
-            "entries": [entry_one.model_dump(), entry_two.model_dump()],
-        }
-    )
+    with pytest.raises(ValueError, match="require one v1"):
+        catalog_module.BootstrapCatalog.model_validate(
+            {
+                "schema_version": 3,
+                "entries": [entry_one.model_dump(), entry_two.model_dump()],
+            }
+        )
+    catalog = None
+    return
     catalog._payloads = MappingProxyType(
         {
             (source_key, 1): payload_one,

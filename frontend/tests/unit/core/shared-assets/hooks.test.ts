@@ -24,7 +24,7 @@ import {
   invalidateProjectAgentConflictQueries,
   isProjectAgentCasConflict,
   useProjectAssetVersions,
-  useRestoreProjectAgentVersion,
+  useActivateProjectAssetVersion,
 } from "@/core/shared-assets/hooks";
 import {
   projectAgentRuntimeAssessmentsRoot,
@@ -49,14 +49,14 @@ describe("shared asset hooks", () => {
         id: assetId,
         scope: "project",
         status: "suspended",
-        version: 4,
+        revision: 4,
       },
     } as unknown as AssetMutationResponse;
 
     expect(
       applyProjectAgentMutationToCatalog(current, response.item)
         ?.project_items[0],
-    ).toMatchObject({ status: "suspended", version: 4 });
+    ).toMatchObject({ status: "suspended", revision: 4 });
   });
 
   test("keeps an unselected agent version query disabled without building an empty key", () => {
@@ -132,7 +132,7 @@ describe("shared asset hooks", () => {
     ).toBe(false);
   });
 
-  test("refreshes the Agent catalog and exact history after a restore conflict", async () => {
+  test("refreshes the Agent catalog and exact history after an activation conflict", async () => {
     const accountId = "11111111-1111-4111-8111-111111111111";
     const projectId = "22222222-2222-4222-8222-222222222222";
     const assetId = "33333333-3333-4333-8333-333333333333";
@@ -148,7 +148,7 @@ describe("shared asset hooks", () => {
     });
     rs.mocked(useMutation).mockClear();
 
-    useRestoreProjectAgentVersion(accountId, projectId);
+    useActivateProjectAssetVersion(accountId, projectId, "agents");
     const mutationOptions = rs.mocked(useMutation).mock
       .calls[0]?.[0] as unknown as {
       onError: (

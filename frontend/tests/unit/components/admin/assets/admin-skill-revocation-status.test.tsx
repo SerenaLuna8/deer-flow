@@ -13,7 +13,7 @@ const revokedVersion: Extract<AssetVersion, { skill_id: string }> = {
   id: "11111111-1111-4111-8111-111111111111",
   skill_id: "22222222-2222-4222-8222-222222222222",
   version_number: 3,
-  workflow_status: "published",
+  relation: "current",
   description: "Revoked version",
   frontmatter: {},
   compatibility: null,

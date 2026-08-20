@@ -162,7 +162,7 @@ export function adminAssetCatalogSummary(
     if (item.status === "active") active += 1;
     if (item.status === "suspended") suspended += 1;
     if (item.status === "archived") archived += 1;
-    if (item.current_published_version_id === null) unpublished += 1;
+    if (item.current_version_id === null) unpublished += 1;
 
     const updatedTime = Date.parse(item.updated_at);
     if (updatedTime > latestUpdatedTime) {
@@ -193,7 +193,7 @@ function matchesAdminAssetPublication(
   publication: AdminAssetPublicationFilter,
 ): boolean {
   if (publication === "all") return true;
-  const isPublished = item.current_published_version_id !== null;
+  const isPublished = item.current_version_id !== null;
   return publication === "published" ? isPublished : !isPublished;
 }
 
@@ -325,8 +325,6 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
   ASSET_STORAGE_UNAVAILABLE: "资产存储暂时不可用，请稍后重试。",
   ASSET_UPLOAD_TOO_LARGE:
     "Skill 包超过上传、解压大小或文件数量限制，请缩小后重试。",
-  SKILL_PUBLISH_BASE_STALE:
-    "线上已发布更新的版本，本版本基于较旧的基线。请确认覆盖后再发布。",
   SKILL_RUNTIME_NAME_CONFLICT:
     "与已启用 Skill 的运行名称冲突，请先停用其中一个 Skill 后重试。",
   SKILL_CREDENTIAL_BINDINGS_INCOMPLETE:

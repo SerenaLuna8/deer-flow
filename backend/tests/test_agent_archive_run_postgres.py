@@ -12,7 +12,7 @@ from support.private_thread_seed import (
 )
 
 from app.private_work.asset_runtime import PrivateAssetRuntime
-from app.private_work.errors import PrivateWorkAgentArchived, PrivateWorkAssetStale
+from app.private_work.errors import PrivateWorkAgentArchived
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
@@ -97,7 +97,7 @@ async def test_archived_agent_slug_can_be_reused_by_builder_and_new_agent(
             soul="Review carefully.",
             model_ref="default",
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
             payload_schema_version=3,
         )
@@ -229,10 +229,11 @@ async def test_admission_snapshot_first_survives_concurrent_agent_archive(
                 )
             )
         assert agent is not None and agent.status == "archived"
-        assert version is not None and version.workflow_status == "published"
+        assert version is not None
         assert persisted is not None
         assert persisted.version_id == version.id
-        assert persisted.payload_checksum == version.payload_checksum
+        assert persisted.payload_checksum == admitted.snapshot.assets[0].payload_checksum
+        assert persisted.payload_checksum != version.payload_checksum
 
         runtime = await PrivateAssetRuntime(seed.factory).materialize(
             seed.owner_a,
@@ -335,7 +336,7 @@ async def test_agent_archive_first_blocks_new_run_with_stable_error(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_exact_run_materialization_still_rejects_suspended_agent(
+async def test_exact_run_materialization_uses_snapshot_after_agent_suspension(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -354,11 +355,14 @@ async def test_exact_run_materialization_still_rejects_suspended_agent(
             expected_asset_version=1,
         )
 
-        with pytest.raises(PrivateWorkAssetStale) as exc_info:
-            await PrivateAssetRuntime(seed.factory).materialize(
-                seed.owner_a,
-                admitted,
-            )
-        assert exc_info.value.request_id == seed.owner_a.request_id
+        runtime = await PrivateAssetRuntime(seed.factory).materialize(
+            seed.owner_a,
+            admitted,
+        )
+        try:
+            assert runtime.safe_manifest.agent_asset_id == seed.project_agent_id
+            assert runtime.safe_manifest.agent_version_id == admitted.snapshot.assets[0].version_id
+        finally:
+            await runtime.aclose()
     finally:
         await seed.engine.dispose()

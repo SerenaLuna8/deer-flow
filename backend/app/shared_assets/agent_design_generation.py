@@ -130,7 +130,7 @@ _NON_CAPABILITY_IDENTIFIERS = frozenset(
         "capability_claims",
         "mcp_version_ids",
         "model_ref",
-        "skill_version_ids",
+        "skill_refs",
         "target_fields",
         "tool_groups",
     }

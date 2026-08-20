@@ -1,10 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import {
-  ProjectSkillDetailActions,
-  skillPublishStaleBaseMessage,
-} from "@/components/projects/assets/project-asset-detail-sheet";
+import { ProjectSkillDetailActions } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   SkillBuilderConversationView,
   SkillBuilderRevisionCommitSuccess,
@@ -66,40 +63,40 @@ function session(
 }
 
 describe("skillRevisionEntryVisible", () => {
-  test("shows the entry only for live project skills with a published version", () => {
+  test("shows the entry only for live project skills with a Current Version", () => {
     expect(
       skillRevisionEntryVisible(["shared_assets.edit"], {
         scope: "project",
         status: "active",
-        current_published_version_id: "55555555-5555-4555-8555-555555555555",
+        current_version_id: "55555555-5555-4555-8555-555555555555",
       }),
     ).toBe(true);
     expect(
       skillRevisionEntryVisible(["shared_assets.edit"], {
         scope: "system",
         status: "active",
-        current_published_version_id: "55555555-5555-4555-8555-555555555555",
+        current_version_id: "55555555-5555-4555-8555-555555555555",
       }),
     ).toBe(false);
     expect(
       skillRevisionEntryVisible(["shared_assets.edit"], {
         scope: "project",
         status: "archived",
-        current_published_version_id: "55555555-5555-4555-8555-555555555555",
+        current_version_id: "55555555-5555-4555-8555-555555555555",
       }),
     ).toBe(false);
     expect(
       skillRevisionEntryVisible(["shared_assets.read"], {
         scope: "project",
         status: "active",
-        current_published_version_id: "55555555-5555-4555-8555-555555555555",
+        current_version_id: "55555555-5555-4555-8555-555555555555",
       }),
     ).toBe(false);
   });
 });
 
 describe("ProjectSkillDetailActions", () => {
-  test("places publish beside create before AI revision and delete", () => {
+  test("places activation beside create before AI revision and delete", () => {
     const html = renderUi(
       <ProjectSkillDetailActions
         actionPending={false}
@@ -111,16 +108,16 @@ describe("ProjectSkillDetailActions", () => {
         versionSelectionPending={false}
         onCreateVersion={() => undefined}
         onDelete={() => undefined}
-        publishAction={<button type="button">发布版本</button>}
+        primaryVersionAction={<button type="button">激活版本</button>}
         additionalActions={<button type="button">AI修改</button>}
       />,
     );
 
     expect(zhCN.skills.builder.revision.button).toBe("AI修改");
-    expect(html.indexOf("创建新版本")).toBeLessThan(html.indexOf("发布版本"));
-    expect(html.indexOf("发布版本")).toBeLessThan(html.indexOf("AI修改"));
+    expect(html.indexOf("创建新版本")).toBeLessThan(html.indexOf("激活版本"));
+    expect(html.indexOf("激活版本")).toBeLessThan(html.indexOf("AI修改"));
     expect(html.indexOf("AI修改")).toBeLessThan(html.indexOf("删除 Skill"));
-    expect(html).not.toContain("以当前发布版本为基线");
+    expect(html).not.toContain("从历史版本恢复");
   });
 });
 
@@ -174,7 +171,7 @@ describe("skillBuilderWorkspaceErrorMessage", () => {
         ),
         errors,
       ),
-    ).toContain("较旧的基线");
+    ).toContain("Current Version 已变化");
   });
 });
 
@@ -317,39 +314,23 @@ describe("SkillBuilderConversationView", () => {
 });
 
 describe("SkillBuilderRevisionCommitSuccess", () => {
-  test("names the created draft version and links to publish", () => {
+  test("names the saved Candidate Version and links to activation", () => {
     expect(
       skillBuilderRevisionCommitSuccessCopy(4, zhCN.skills.builder.success),
-    ).toBe("已创建草稿版本 v4，前往发布");
+    ).toBe("已保存候选版本 v4，前往激活");
     expect(
       skillBuilderRevisionCommitSuccessCopy(4, enUS.skills.builder.success),
-    ).toBe("Created draft version v4. Go publish it");
+    ).toBe("Saved Candidate Version v4. Go activate it");
     const html = renderUi(
       <SkillBuilderRevisionCommitSuccess
         versionNumber={4}
         href="/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555&skill_version_id=66666666-6666-4666-8666-666666666666"
       />,
     );
-    expect(html).toContain("已创建草稿版本 v4，前往发布");
-    expect(html).toContain("前往发布");
+    expect(html).toContain("已保存候选版本 v4，前往激活");
+    expect(html).toContain("前往激活");
     expect(html).toContain(
       "/projects/demo/skills?skill_id=55555555-5555-4555-8555-555555555555&amp;skill_version_id=66666666-6666-4666-8666-666666666666",
-    );
-  });
-});
-
-describe("skillPublishStaleBaseMessage", () => {
-  test("names the live version and the draft base", () => {
-    expect(
-      skillPublishStaleBaseMessage(
-        {
-          liveVersionNumber: 5,
-          baseVersionNumber: 3,
-        },
-        zhCN.skills.builder.publish,
-      ),
-    ).toBe(
-      "当前线上已是 v5，本次将以基于 v3 的版本覆盖。确认发布后，它将替换线上正在使用的版本，之后仍可在版本历史中回退。",
     );
   });
 });

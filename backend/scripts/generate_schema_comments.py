@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 89
-_EXPECTED_COLUMN_COUNT = 1106
+_EXPECTED_TABLE_COUNT = 90
+_EXPECTED_COLUMN_COUNT = 1107
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -51,6 +51,10 @@ class TableDefinition:
 _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "alembic_version": ("数据库迁移版本", "记录当前数据库采用的 Alembic 架构版本。"),
     "asset_catalog_state": ("资产目录状态", "记录系统资产目录的单例代次与更新时间。"),
+    "system_asset_upgrade_audit": (
+        "系统资产升级审计",
+        "记录软件包升级原子替换 System Agent 或 Skill Current v1 的校验和证据。",
+    ),
     "dead_jobs": ("死信任务", "保存超过重试边界或无法安全重试的后台任务终态。"),
     "execution_approval_requests": (
         "执行审批请求",
@@ -77,7 +81,7 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "worker_nodes": ("工作节点", "记录 Worker 节点能力、容量与心跳状态。"),
     "job_attempts": ("任务尝试", "记录后台任务每次领取和执行尝试的结算信息。"),
     "projects": ("项目", "保存项目基本信息、生命周期与所有者治理状态。"),
-    "agents": ("项目智能体", "保存项目智能体的逻辑身份和当前发布指针。"),
+    "agents": ("项目智能体", "保存智能体的逻辑身份和 Current Version 指针。"),
     "project_default_agents": ("项目默认智能体", "保存项目范围内默认智能体的唯一绑定。"),
     "audit_logs": ("审计日志", "保存脱敏且不可变的安全与治理操作审计事件。"),
     "credentials": ("受管凭据", "保存项目受管凭据的逻辑身份和当前版本指针。"),
@@ -96,7 +100,7 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "project_quotas": ("项目配额", "保存项目可收紧的平台资源限额。"),
     "project_usage_counters": ("项目用量计数", "保存项目当前计量桶中的事务性用量。"),
     "project_usage_ledger": ("项目用量台账", "保存项目已提交用量变化的追加式台账。"),
-    "skills": ("项目技能", "保存项目技能的逻辑身份和当前发布指针。"),
+    "skills": ("项目技能", "保存技能的逻辑身份和 Current Version 指针。"),
     "agent_versions": ("智能体版本", "保存不可变的项目智能体版本内容与运行配置。"),
     "agent_design_sessions": ("智能体设计会话", "保存智能体设计向导的私有会话状态与产物引用。"),
     "agent_design_operations": ("智能体设计操作", "保存智能体设计会话中的幂等操作及其结果。"),
@@ -105,14 +109,14 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "credential_versions": ("凭据版本", "保存受管凭据的不可变版本元数据。"),
     "feedback": ("运行反馈", "保存用户针对智能体运行提交的评分与意见。"),
     "mcp_server_versions": ("MCP 服务版本", "保存不可变的 MCP 服务连接与公开配置。"),
-    "run_asset_versions": ("运行资产快照", "冻结一次运行引用的智能体、技能或 MCP 资产版本。"),
+    "run_asset_versions": ("运行资产快照", "冻结一次运行准入时解析出的智能体、技能或 MCP 完整版本内容。"),
     "run_event_partition_state": ("运行事件分区状态", "记录运行事件分区维护的高水位。"),
     "run_event_invariants": ("运行事件不变量", "保存运行事件全局单调序列的单例状态。"),
     "run_events": ("运行事件", "保存按日期分区的持久化运行事件流。"),
     "skill_versions": ("技能版本", "保存不可变的项目技能版本及扫描结论。"),
     "threads_meta": ("线程元数据", "保存项目私有线程的标题、状态与活动时间。"),
     "agent_version_mcp_refs": ("智能体 MCP 引用", "保存智能体版本到 MCP 服务版本的有序依赖。"),
-    "agent_version_skill_refs": ("智能体技能引用", "保存智能体版本到技能版本的有序依赖。"),
+    "agent_version_skill_refs": ("智能体技能引用", "保存智能体版本到技能资产的有序依赖；运行时解析其 Current Version。"),
     "channel_conversations": ("渠道会话", "映射外部渠道会话与项目私有线程。"),
     "channel_inbound_deliveries": ("渠道入站投递", "保存渠道入站消息的幂等接收与处理状态。"),
     "channel_credentials": ("渠道令牌凭据", "保存渠道连接令牌的加密材料与有效期。"),
@@ -263,6 +267,8 @@ _COLUMN_PHRASES: dict[str, str] = {
     "last_checkpoint_id": "最近检查点标识",
     "dream_job_id": "记忆整理任务标识",
     "admission_kind": "准入类型",
+    "admission_only": "仅供已准入运行继续验证的退役权限标记",
+    "runtime_authority_binding_id": "退役绑定关联的当前运行权限绑定标识",
     "result_disposition": "结果处置",
     "owner_ref_hmac": "所有者引用的域分离 HMAC",
     "source_ref_hmac": "来源引用的域分离 HMAC",
@@ -357,6 +363,11 @@ _COLUMN_PHRASES: dict[str, str] = {
 # Reused column names can carry materially different privacy and storage
 # semantics. Table-specific entries take precedence over the shared glossary.
 _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
+    ("system_asset_upgrade_audit", "before_checksum"): "升级前载荷校验和",
+    ("system_asset_upgrade_audit", "after_checksum"): "升级后载荷校验和",
+    ("system_asset_upgrade_audit", "package_digest"): "升级软件包目录摘要",
+    ("system_asset_upgrade_audit", "operator_identity"): "执行数据库升级的操作主体身份",
+    ("run_asset_versions", "snapshot_json"): "准入时冻结的完整且不含明文凭据的资产内容",
     (
         "jobs",
         "execution_domain_affinity",

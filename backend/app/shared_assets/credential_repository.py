@@ -734,6 +734,7 @@ class CredentialRepository:
                     .where(
                         ProjectSkillCredentialBindingRow.credential_id == credential.id,
                         ProjectSkillCredentialBindingRow.status == "active",
+                        ProjectSkillCredentialBindingRow.admission_only.is_(False),
                     )
                     .order_by(
                         ProjectSkillCredentialBindingRow.project_id,
@@ -785,6 +786,7 @@ class CredentialRepository:
                             ProjectSkillCredentialBindingRow.skill_id == skill_id,
                             ProjectSkillCredentialBindingRow.skill_version_id == skill_version_id,
                             ProjectSkillCredentialBindingRow.status == "active",
+                            ProjectSkillCredentialBindingRow.admission_only.is_(False),
                         )
                         .order_by(
                             ProjectSkillCredentialBindingRow.secret_name,
@@ -912,6 +914,7 @@ class CredentialRepository:
             .where(
                 ProjectSkillCredentialBindingRow.credential_id == credential.id,
                 ProjectSkillCredentialBindingRow.status == "active",
+                ProjectSkillCredentialBindingRow.admission_only.is_(False),
                 version_filter,
             )
             .order_by(

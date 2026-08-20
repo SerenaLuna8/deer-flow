@@ -55,7 +55,10 @@ function describe(
       [copy.payloadSchemaVersion]: String(version.payload_schema_version),
       [copy.model]: `${modelLabel}\n${jsonObject(version.model_settings)}`,
       [copy.toolGroups]: list(version.tool_groups, separator),
-      [copy.skillVersions]: list(version.skill_version_ids, separator),
+      [copy.skillVersions]: list(
+        version.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`),
+        separator,
+      ),
       [copy.mcpVersions]: list(version.mcp_version_ids, separator),
       ...(includeAgentDocuments
         ? {

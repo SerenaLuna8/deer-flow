@@ -29,7 +29,7 @@ async def _insert_system_skill(
     actor_id: uuid.UUID,
     slug: str,
     status: str = "active",
-    publish: bool = True,
+    make_current: bool = True,
 ) -> tuple[uuid.UUID, uuid.UUID]:
     skill_id = uuid.uuid4()
     version_id = uuid.uuid4()
@@ -49,8 +49,8 @@ async def _insert_system_skill(
     await connection.execute(
         text(
             """INSERT INTO skill_versions
-            (id,skill_id,version_number,workflow_status,scan_decision,payload_checksum,created_by_user_id)
-            VALUES (:version,:skill,1,'draft','allow',:checksum,:actor)"""
+            (id,skill_id,version_number,scan_decision,payload_checksum,created_by_user_id)
+            VALUES (:version,:skill,1,'allow',:checksum,:actor)"""
         ),
         {
             "version": version_id,
@@ -59,13 +59,9 @@ async def _insert_system_skill(
             "actor": str(actor_id),
         },
     )
-    if publish:
+    if make_current:
         await connection.execute(
-            text("UPDATE skill_versions SET workflow_status='published' WHERE id=:version"),
-            {"version": version_id},
-        )
-        await connection.execute(
-            text("UPDATE skills SET current_published_version_id=:version WHERE id=:skill"),
+            text("UPDATE skills SET current_version_id=:version WHERE id=:skill"),
             {"version": version_id, "skill": skill_id},
         )
     return skill_id, version_id
@@ -104,14 +100,14 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
             async with session.begin():
                 await session.execute(
                     text("""INSERT INTO agent_versions
-                    (id,agent_id,version_number,workflow_status,soul,model_ref,payload_checksum,created_by_user_id)
-                    VALUES (:version,:asset,1,'published','Helpful','test-model',:checksum,:user)"""),
+                    (id,agent_id,version_number,soul,model_ref,payload_checksum,created_by_user_id)
+                    VALUES (:version,:asset,1,'Helpful','test-model',:checksum,:user)"""),
                     {"version": agent_version_id, "asset": agent.id, "checksum": "a" * 64, "user": str(owner)},
                 )
                 await session.execute(
                     text("""INSERT INTO skill_versions
-                    (id,skill_id,version_number,workflow_status,scan_decision,payload_checksum,created_by_user_id)
-                    VALUES (:version,:asset,1,'published','allow',:checksum,:user)"""),
+                    (id,skill_id,version_number,scan_decision,payload_checksum,created_by_user_id)
+                    VALUES (:version,:asset,1,'allow',:checksum,:user)"""),
                     {"version": skill_version_id, "asset": skill.id, "checksum": "b" * 64, "user": str(owner)},
                 )
                 await session.execute(
@@ -121,11 +117,11 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
                     {"version": mcp_version_id, "asset": mcp.id, "checksum": "c" * 64, "user": str(owner)},
                 )
                 await session.execute(
-                    text("UPDATE agents SET current_published_version_id=:version WHERE id=:asset"),
+                    text("UPDATE agents SET current_version_id=:version WHERE id=:asset"),
                     {"version": agent_version_id, "asset": agent.id},
                 )
                 await session.execute(
-                    text("UPDATE skills SET current_published_version_id=:version WHERE id=:asset"),
+                    text("UPDATE skills SET current_version_id=:version WHERE id=:asset"),
                     {"version": skill_version_id, "asset": skill.id},
                 )
                 await session.execute(
@@ -154,7 +150,7 @@ async def test_repository_create_scope_personal_state_and_cursor(migrated_postgr
 
 
 @pytest.mark.asyncio
-async def test_new_project_pins_every_active_published_system_skill_by_default(
+async def test_new_project_binds_every_active_current_system_skill_by_default(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -185,7 +181,7 @@ async def test_new_project_pins_every_active_published_system_skill_by_default(
                 connection,
                 actor_id=owner,
                 slug=f"default-draft-{uuid.uuid4().hex[:8]}",
-                publish=False,
+                make_current=False,
             )
 
         async with factory() as session:
@@ -199,17 +195,16 @@ async def test_new_project_pins_every_active_published_system_skill_by_default(
             expected = tuple(
                 (
                     await session.execute(
-                        select(SkillRow.id, SkillRow.current_published_version_id)
+                        select(SkillRow.id, SkillRow.current_version_id)
                         .join(
                             SkillVersionRow,
-                            SkillVersionRow.id == SkillRow.current_published_version_id,
+                            SkillVersionRow.id == SkillRow.current_version_id,
                         )
                         .where(
                             SkillRow.scope == "system",
                             SkillRow.project_id.is_(None),
                             SkillRow.status == "active",
-                            SkillRow.current_published_version_id.is_not(None),
-                            SkillVersionRow.workflow_status == "published",
+                            SkillRow.current_version_id.is_not(None),
                         )
                         .order_by(SkillRow.id)
                     )
@@ -220,7 +215,7 @@ async def test_new_project_pins_every_active_published_system_skill_by_default(
             mcp_binding_count = await session.scalar(select(func.count()).select_from(ProjectSystemMcpBindingRow).where(ProjectSystemMcpBindingRow.project_id == context.project_id))
 
         assert expected == (active_skill,)
-        assert tuple((row.system_skill_id, row.skill_version_id) for row in bindings) == expected
+        assert tuple(row.system_skill_id for row in bindings) == tuple(skill_id for skill_id, _version_id in expected)
         assert all(row.enabled and row.version == 1 for row in bindings)
         assert all(row.created_by_user_id == str(owner) and row.updated_by_user_id == str(owner) for row in bindings)
         assert agent_binding_count == 0

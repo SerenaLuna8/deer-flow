@@ -91,11 +91,6 @@ from app.shared_assets.models import (
     ResolvedMcpSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
-from app.shared_assets.skill_credential_closure import (
-    SkillCredentialClosureInvalid,
-    SkillCredentialClosureTarget,
-    lock_skill_credential_closures,
-)
 from deerflow.agents.lead_agent.prompt import AgentPromptBundle
 from deerflow.config.app_config import peek_current_app_config
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
@@ -405,37 +400,27 @@ class PrivateAgentRuntime:
                         ),
                     )
                 )
-                current = await repository.current_skill_credentials_in_session(
+                skill_runtime_by_version = {manifest.version_id: (path, skill) for path, (manifest, skill) in skill_by_path.items() if manifest.version_id in requested_version_ids}
+                if set(skill_runtime_by_version) != requested_version_ids:
+                    raise RunSnapshotAssetStale
+                materials = await repository.lock_admitted_skill_credentials_in_session(
                     session,
                     self._context,
-                    skill_assets,
+                    persisted,
+                    declared_targets=frozenset((manifest.version_id, requirement.name) for manifest in requested_manifests for requirement in skill_runtime_by_version[manifest.version_id][1].required_secrets),
+                    required_targets=frozenset((manifest.version_id, requirement.name) for manifest in requested_manifests for requirement in skill_runtime_by_version[manifest.version_id][1].required_secrets if not requirement.optional),
+                    load_envelopes=True,
                 )
-                if current != persisted:
-                    raise RunSnapshotAssetStale
-                try:
-                    closures = await lock_skill_credential_closures(
-                        session,
-                        self._context.project_id,
-                        tuple(
-                            SkillCredentialClosureTarget(
-                                skill_id=manifest.asset_id,
-                                skill_version_id=manifest.version_id,
-                            )
-                            for manifest in requested_manifests
-                        ),
-                        load_envelopes=True,
-                        require_required=True,
-                    )
-                except SkillCredentialClosureInvalid:
-                    raise RunSnapshotAssetStale from None
                 credential_keyring: CredentialKeyring | None = None
                 for manifest in requested_manifests:
-                    skill_path = next(path for path, (candidate, _skill) in skill_by_path.items() if candidate.version_id == manifest.version_id)
+                    skill_path = skill_runtime_by_version[manifest.version_id][0]
                     requested_names = requested_by_path.get(
                         skill_path,
                         frozenset(),
                     )
-                    for material in closures[manifest.version_id].materials:
+                    for material in materials:
+                        if material.skill_version_id != manifest.version_id:
+                            continue
                         if material.env_name not in requested_names:
                             continue
                         envelope = material.envelope
@@ -478,7 +463,6 @@ class PrivateAgentRuntime:
             AssetResolutionUnavailable,
             AssetValidationFailed,
             AssetForbidden,
-            SkillCredentialClosureInvalid,
         ):
             raise PrivateWorkAssetStale(self._context.request_id) from None
         except AssetStorageUnavailable:

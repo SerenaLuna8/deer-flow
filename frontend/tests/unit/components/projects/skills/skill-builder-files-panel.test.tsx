@@ -179,7 +179,7 @@ describe("SkillBuilderCandidateWorkbench", () => {
     expect(html).toContain("较基线 v2：新增 1 · 修改 0 · 删除 1");
     expect(html).toContain("已从基线删除");
     expect(html).toContain("legacy.md");
-    expect(html).toContain("创建新版本（待发布）");
+    expect(html).toContain("保存候选版本");
   });
 });
 

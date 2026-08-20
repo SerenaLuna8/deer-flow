@@ -64,7 +64,7 @@ import {
   useApproveAdminProjectMcpVersion,
   useChangeAdminProjectAssetStatus,
   useCreateAdminProjectAssetVersion,
-  usePublishAdminProjectAssetVersion,
+  usePublishAdminProjectMcpVersion,
   useSubmitAdminProjectMcpVersion,
   type AssetListKind,
   type AssetVersion,
@@ -157,11 +157,7 @@ function AdminProjectAssetHistory({
     kind,
     item.id,
   );
-  const publish = usePublishAdminProjectAssetVersion(
-    accountId,
-    projectId,
-    kind,
-  );
+  const publish = usePublishAdminProjectMcpVersion(accountId, projectId);
   const submit = useSubmitAdminProjectMcpVersion(accountId, projectId);
   const approve = useApproveAdminProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeAdminProjectAssetStatus(
@@ -208,21 +204,24 @@ function AdminProjectAssetHistory({
           changeStatus.mutate({
             assetId: item.id,
             action,
-            input: { expected_asset_version: item.version },
+            input:
+              kind === "skills"
+                ? { expected_revision: item.revision }
+                : { expected_asset_version: item.revision },
           })
         }
         onPublish={(version) =>
           publish.mutate({
             assetId: item.id,
             versionId: version.id,
-            input: { expected_asset_version: item.version },
+            input: { expected_asset_version: item.revision },
           })
         }
         onSubmit={(version: McpVersion) =>
           submit.mutate({
             assetId: item.id,
             versionId: version.id,
-            input: { expected_asset_version: item.version },
+            input: { expected_asset_version: item.revision },
           })
         }
         onApprove={(version: McpVersion, credentialVersions) =>
@@ -232,7 +231,7 @@ function AdminProjectAssetHistory({
               versionId: version.id,
               input: {
                 credential_versions: credentialVersions,
-                expected_asset_version: item.version,
+                expected_asset_version: item.revision,
               },
             });
             return true;
@@ -359,7 +358,11 @@ function AssetDirectoryRows({
       <div className="bg-muted/25 text-muted-foreground hidden min-w-0 grid-cols-[minmax(13rem,1.7fr)_7rem_minmax(10rem,1fr)_8rem_auto] items-center gap-3 border-b px-4 py-2 text-xs font-medium xl:grid">
         <span>{t.adminAssets.catalog.identifier}</span>
         <span>{t.adminAssets.catalog.lifecycleStatus}</span>
-        <span>{t.adminAssets.catalog.publicationStatus}</span>
+        <span>
+          {kind === "mcp-servers"
+            ? t.adminAssets.catalog.publicationStatus
+            : t.adminAssets.catalog.currentVersionStatus}
+        </span>
         <span>
           {kind === "mcp-servers"
             ? t.adminAssets.common.updatedAt
@@ -372,9 +375,13 @@ function AssetDirectoryRows({
         const canCreateVersion =
           kind === "skills" &&
           projectAssetCanCreateVersion(kind, projectAssetCanAuthor(item, kind));
-        const publication = item.current_published_version_id
-          ? t.adminAssets.catalog.publishedAvailable
-          : t.adminAssets.catalog.unpublished;
+        const publication = item.current_version_id
+          ? kind === "mcp-servers"
+            ? t.adminAssets.catalog.publishedAvailable
+            : t.adminAssets.catalog.currentVersionAvailable
+          : kind === "mcp-servers"
+            ? t.adminAssets.catalog.unpublished
+            : t.adminAssets.catalog.currentVersionMissing;
 
         return (
           <div
@@ -402,7 +409,9 @@ function AssetDirectoryRows({
             </div>
             <div className="min-w-0 text-sm">
               <span className="text-muted-foreground mr-2 text-xs xl:hidden">
-                {t.adminAssets.catalog.publicationStatus}
+                {kind === "mcp-servers"
+                  ? t.adminAssets.catalog.publicationStatus
+                  : t.adminAssets.catalog.currentVersionStatus}
               </span>
               <span>{publication}</span>
             </div>
@@ -414,7 +423,7 @@ function AssetDirectoryRows({
               </span>
               {kind === "mcp-servers"
                 ? new Date(item.updated_at).toLocaleString(locale)
-                : item.version}
+                : item.revision}
             </div>
             <div className="flex min-w-0 flex-wrap gap-2 xl:justify-end">
               {kind !== "agents" ? (
@@ -719,6 +728,7 @@ function MutableAdminProjectAssets({
     <>
       {kind === "skills" ? (
         <SystemAssetSection
+          kind={kind}
           items={adminProjectSystemSkillItems(data, kind)}
           onManageBinding={(item) => setBindingAssetId(item.id)}
         />

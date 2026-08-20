@@ -232,7 +232,8 @@ class SkillRepository:
         agent_reference_exists = await self.session.scalar(
             select(
                 exists().where(
-                    AgentVersionSkillRefRow.skill_version_id.in_(version_ids),
+                    AgentVersionSkillRefRow.skill_asset_id == asset.id,
+                    AgentVersionSkillRefRow.skill_asset_scope == "project",
                 )
             )
         )
@@ -373,8 +374,8 @@ class SkillRepository:
                 )
 
         # This transient state is never committed: it combines with the cleared
-        # pointer to authorize the published-child trigger added in revision 0002.
-        asset.current_published_version_id = None
+        # pointer to authorize the immutable-child trigger added in revision 0002.
+        asset.current_version_id = None
         asset.status = "archived"
         await self.session.flush()
         await self.session.scalar(
@@ -588,6 +589,15 @@ class SkillRepository:
         file_snapshot = tuple(files)
         self.session.add(version)
         await self.session.flush()
+        await self.session.scalar(
+            select(
+                func.set_config(
+                    "deerflow.asset_version_assembly",
+                    str(version.id),
+                    True,
+                )
+            )
+        )
         self.session.add_all(file_snapshot)
         await self.session.flush()
         return SkillVersionRecord(version, file_snapshot)
@@ -644,7 +654,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "system",
                         SkillRow.project_id.is_(None),
-                        SkillVersionRow.workflow_status == "published",
+                        SkillRow.current_version_id == SkillVersionRow.id,
                         SkillVersionRow.revoked_at.is_(None),
                     ),
                 ),
@@ -686,7 +696,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "system",
                         SkillRow.project_id.is_(None),
-                        SkillVersionRow.workflow_status == "published",
+                        SkillRow.current_version_id == SkillVersionRow.id,
                         SkillVersionRow.revoked_at.is_(None),
                     ),
                 ),
@@ -721,7 +731,7 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
-                SkillVersionRow.workflow_status == "published",
+                SkillRow.current_version_id == SkillVersionRow.id,
                 SkillVersionRow.revoked_at.is_(None),
             )
         )
@@ -753,7 +763,7 @@ class SkillRepository:
                 SkillVersionRow.skill_id == asset_id,
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
-                SkillVersionRow.workflow_status == "published",
+                SkillRow.current_version_id == SkillVersionRow.id,
                 SkillVersionRow.revoked_at.is_(None),
             )
         )
@@ -795,7 +805,7 @@ class SkillRepository:
                     and_(
                         SkillRow.scope == "system",
                         SkillRow.project_id.is_(None),
-                        SkillVersionRow.workflow_status == "published",
+                        SkillRow.current_version_id == SkillVersionRow.id,
                         SkillVersionRow.revoked_at.is_(None),
                     ),
                 ),
@@ -878,10 +888,10 @@ class SkillRepository:
             .where(
                 SkillVersionRow.id == version_id,
                 SkillVersionRow.skill_id == asset_id,
-                SkillVersionRow.workflow_status == "published",
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
                 SkillRow.status == "active",
+                SkillRow.current_version_id == SkillVersionRow.id,
                 self._project_context_exists(context),
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
@@ -893,19 +903,16 @@ class SkillRepository:
                 .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
                 .join(
                     ProjectSystemSkillBindingRow,
-                    and_(
-                        ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
-                        ProjectSystemSkillBindingRow.skill_version_id == SkillVersionRow.id,
-                    ),
+                    ProjectSystemSkillBindingRow.system_skill_id == SkillRow.id,
                 )
                 .where(
                     SkillVersionRow.id == version_id,
                     SkillVersionRow.skill_id == asset_id,
-                    SkillVersionRow.workflow_status == "published",
                     SkillVersionRow.revoked_at.is_(None),
                     SkillRow.scope == "system",
                     SkillRow.project_id.is_(None),
                     SkillRow.status == "active",
+                    SkillRow.current_version_id == SkillVersionRow.id,
                     ProjectSystemSkillBindingRow.project_id == context.project_id,
                     ProjectSystemSkillBindingRow.enabled.is_(True),
                     self._project_context_exists(context),
@@ -935,11 +942,11 @@ class SkillRepository:
             .where(
                 SkillVersionRow.id == version_id,
                 SkillVersionRow.skill_id == asset_id,
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
                 SkillRow.scope == "system",
                 SkillRow.project_id.is_(None),
                 SkillRow.status == "active",
+                SkillRow.current_version_id == SkillVersionRow.id,
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
         )
@@ -961,11 +968,11 @@ class SkillRepository:
             .where(
                 SkillVersionRow.id == version_id,
                 SkillVersionRow.skill_id == asset_id,
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
                 SkillRow.status == "active",
+                SkillRow.current_version_id == SkillVersionRow.id,
             )
             .with_for_update(read=True, of=[SkillRow, SkillVersionRow])
         )
@@ -982,19 +989,7 @@ class SkillRepository:
         self._require_project_actor(context)
         statement = (
             select(SkillRow.id, SkillVersionRow)
-            .outerjoin(
-                SkillVersionRow,
-                and_(
-                    SkillVersionRow.skill_id == SkillRow.id,
-                    or_(
-                        SkillRow.scope == "project",
-                        and_(
-                            SkillRow.scope == "system",
-                            SkillVersionRow.workflow_status == "published",
-                        ),
-                    ),
-                ),
-            )
+            .outerjoin(SkillVersionRow, SkillVersionRow.skill_id == SkillRow.id)
             .where(
                 SkillRow.id == asset_id,
                 or_(
@@ -1145,7 +1140,7 @@ class SkillRepository:
         system_rows = (await self.session.execute(system_statement)).scalars().all()
         return tuple(sorted((*project_rows, *system_rows), key=lambda row: (row.created_at, row.id)))
 
-    async def current_published_descriptions(
+    async def current_descriptions(
         self,
         asset_ids: Sequence[uuid.UUID],
     ) -> Mapping[uuid.UUID, str]:
@@ -1158,7 +1153,7 @@ class SkillRepository:
             select(SkillRow.id, SkillVersionRow.description)
             .join(
                 SkillVersionRow,
-                SkillVersionRow.id == SkillRow.current_published_version_id,
+                SkillVersionRow.id == SkillRow.current_version_id,
             )
             .where(SkillRow.id.in_(ids))
         )

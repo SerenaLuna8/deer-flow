@@ -57,8 +57,8 @@ async def test_new_resolution_distinguishes_archived_project_agent() -> None:
         slug="archived-agent",
         display_name="Archived Agent",
         status="archived",
-        version=2,
-        current_published_version_id=uuid.uuid4(),
+        revision=2,
+        current_version_id=uuid.uuid4(),
         created_by_user_id=str(context.user_id),
     )
     session = _Session(asset)

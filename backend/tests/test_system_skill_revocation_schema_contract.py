@@ -23,4 +23,4 @@ def test_system_skill_binding_trigger_rejects_revoked_versions() -> None:
     payload = FULL_SCHEMA.read_text(encoding="utf-8")
     assert "version_revoked_at timestamp with time zone;" in payload
     assert "version_revoked_at IS NOT NULL" in payload
-    assert "system binding requires non-revoked published version" in payload
+    assert "system binding requires an eligible Current Version" in payload

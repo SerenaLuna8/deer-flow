@@ -384,8 +384,8 @@ async def test_allowed_asset_query_is_bounded_and_filters_unusable_versions() ->
         )
     )
     assert "skills.status = 'active'" in sql
-    assert "skill_versions.workflow_status = 'published'" in sql
-    assert "skills.current_published_version_id = skill_versions.id" in sql
+    assert "skills.current_version_id = skill_versions.id" in sql
+    assert "skill_versions.revoked_at IS NULL" in sql
     assert "project_system_skill_bindings.enabled IS true" in sql
     assert "mcp_servers.status = 'active'" in sql
     assert "mcp_server_versions.workflow_status = 'published'" in sql

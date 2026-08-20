@@ -68,7 +68,7 @@ The temporary prevention of new execution for a Project Agent or Project Skill w
 _Avoid_: Version deactivation
 
 **System Asset Upgrade**:
-The maintenance replacement of a System Agent or System Skill's sole v1 definition. It does not create another version and affects only Runs admitted after the replacement.
+The maintenance replacement of a System Agent or System Skill's sole v1 definition at the same deterministic version identity. It does not create another version and affects only Runs admitted after the replacement.
 
 **System Governance Eligibility**:
 Whether a System Skill's current v1 definition is permitted for new Run Admission. Security revocation removes eligibility without becoming a version lifecycle state.

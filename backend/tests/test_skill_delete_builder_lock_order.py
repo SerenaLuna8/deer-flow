@@ -80,8 +80,8 @@ async def test_delete_takes_project_gate_before_asset_and_builder_cleanup(
         scope="project",
         project_id=context.project_id,
         status="suspended",
-        current_published_version_id=None,
-        version=3,
+        current_version_id=None,
+        revision=3,
     )
     events: list[str] = []
 
@@ -134,7 +134,7 @@ async def test_delete_takes_project_gate_before_asset_and_builder_cleanup(
     ).delete(
         context,
         asset.id,
-        expected_asset_version=asset.version,
+        expected_asset_version=asset.revision,
     )
 
     assert events == ["project", "asset", "plan", "cleanup"]

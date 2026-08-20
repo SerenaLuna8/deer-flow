@@ -102,7 +102,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `skill_credential_source_field`. Fresh setup runs that schema directly
+the current marker is `current_asset_version_lifecycle`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -112,13 +112,15 @@ or downgrade an application database.
   Chinese comment. LangGraph comments are applied after its third-party setup,
   and each physical `run_events` partition copies the parent comments. Run
   `uv run python scripts/generate_schema_comments.py --check` after schema edits.
-- `make upgrade-db` is the sole path for a database at a known ancestor marker.
+- `make preflight-upgrade` is the read-only Agent/Skill lifecycle inventory for a known ancestor marker. `make upgrade-db` repeats that fail-closed preflight and is the sole mutation path.
   It runs the migration chain and verifies parity with a fresh install.
 - `make check-db` is read-only and reports ready, upgrade-required, or a
   fail-closed recreate/unavailable state without exposing credentials.
 - `make upgrade-system-assets` is an explicit maintenance-window action for a
-  current schema. It preserves immutable history and existing project pins,
-  and may be rerun idempotently after checking an uncertain outcome.
+  current schema. It replaces deterministic System v1 definitions in place,
+  preserves already-admitted Run Snapshots and asset-ID project bindings, and
+  affects only later admissions. It may be rerun idempotently after checking an
+  uncertain outcome.
 - `make prepare-run-event-partitions` is an explicit, idempotent operator action
   for UTC months N through N+2. Schedule it outside application runtime; it
   refuses non-current schemas and bounds DDL lock waiting.
@@ -175,51 +177,46 @@ or downgrade an application database.
 - Packaged System Agent/Skill/MCP definitions are bootstrap-only and immutable at
   runtime. Global admin definition routes are read-only; the narrow packaged MCP
   Credential-grant route changes grants, not the definition.
-- Packaged System Agent release histories are contiguous and immutable. Bootstrap
-  appends each authenticated release, advances only the current pointer, preserves
-  prior versions and project pins, and is idempotent on rerun.
+- Packaged System Agent and Skill assets have one deterministic v1 identity and
+  expose it through `current_version_id`. Bootstrap replaces changed authenticated
+  v1 bytes in place, never appends a version, and is idempotent on rerun. Project
+  bindings store only the System Agent/Skill asset identity.
 - Server-owned Builder Agents are absent from every regular project, global-admin,
   and runtime System Agent catalog, including direct detail and version-history
   lookup. Only bootstrap and the dedicated internal resolver may address them.
-- A packaged Skill's catalog scan snapshot is release-time immutable metadata.
-  Bootstrap scans the latest release and legacy releases without snapshots;
-  historical snapshotted releases keep their authenticated result. Retrospective
-  denial uses the explicit, irreversible System Skill version-revocation path,
-  never reinterpretation during bootstrap. Revocation preserves published bytes,
-  history, the current pointer, asset release revision, and existing project pins;
-  new bindings, Run admission, retry/resume materialization, and Worker file writes
-  reject the revoked release. Existing pins must be explicitly moved to an eligible
-  release or disabled; an already materialized running graph is not force-aborted.
+- A packaged Skill's catalog scan snapshot is immutable for its authenticated v1
+  bytes. Retrospective denial uses explicit System governance revocation. A
+  same-byte bootstrap preserves revocation; changed authenticated bytes clear it.
+  New bindings and Run Admission reject a revoked v1. Already admitted Runs retain
+  their immutable Run Snapshot and are not force-aborted.
 
 #### Project assets and Credentials
 
-- Project Agent/Skill/MCP versions are immutable. Agent creation is one atomic
-  complete package (`suspended` plus draft v1); author edits and copies of any
-  persisted Agent version create a new draft based on the current live pointer
-  without moving that pointer, while a binding manager explicitly publishes the
-  selected current-base draft and controls activation. No flow mutates history
-  or moves a pointer backward to an old row.
+- Project Agent/Skill/MCP versions are immutable. Agent/Skill creation saves a
+  complete suspended asset plus Candidate Version v1. Further versions may be
+  authored only from the latest forward head. Activation atomically sets
+  `current_version_id` and enables the asset; skipped and older versions become
+  Historical Versions. No flow mutates, deletes, copies, or reactivates history,
+  and content cannot be moved backward under a higher version number.
 - Project Skill creation is available only through a validated archive upload
   or an AI Builder commit; there is no metadata-only or template-create API.
 - Skill export is a read-only, audit-required distribution operation over one
   exact persisted version. Project exports require `shared_assets.edit` and may
-  select any persisted Project version; System exports require a published,
-  non-revoked version. The deterministic root-layout ZIP excludes root `evals/`,
+  select any persisted Project version; System exports require the eligible
+  Current Version. The deterministic root-layout ZIP excludes root `evals/`,
   any `node_modules/` or `__pycache__/`, `.DS_Store`, and `*.pyc`, and never
   includes Credential mappings, secrets, lifecycle state, or version history.
 - A Skill's `SKILL.md` is the sole authority for `required-secrets` and
-  `secrets-autonomous`. Archive, Builder, validation, review, publish, and
+  `secrets-autonomous`. Archive, Builder, validation, review, activation, and
   runtime consumers use the canonical parser; form edits patch only those
   managed frontmatter fields and preserve the rest of the document.
 - Skill Credential mappings belong to one exact Skill version and map each
   declared target environment name to one exact Project Credential version and
-  one source `env` field. Draft and current-published mappings use revision
-  CAS; historical published versions are read-only. A normal Draft publish must
-  have every required mapping valid and no invalid optional mapping. The narrow
-  initial archive/AI create path may publish one suspended incomplete v1 so a
-  credential approver can configure it afterward; activation still fails with
-  the stable incomplete-binding error. Secret values never enter Skill bytes,
-  publish plans, snapshots, audit metadata, or API responses.
+  one source `env` field. Candidate and Current mappings use revision CAS;
+  Historical Versions are read-only. Saving a forward Candidate inherits only
+  compatible mappings. Activation requires every required mapping to be valid
+  and no optional mapping to be invalid. Secret values never enter Skill bytes,
+  activation readiness, snapshots, audit metadata, or API responses.
 
 #### Runtime admission and MCP
 
@@ -227,6 +224,11 @@ or downgrade an application database.
   across active Project Skills and enabled System Skill bindings. Activation and
   binding enable enforce the inverse checks under the project lock; Run
   resolution rejects any legacy conflicting closure.
+- Every Run Admission resolves current Agent/Skill asset pointers, including later
+  messages in an existing Thread, Automation, Channel, edit, regeneration, and
+  fork paths. It then persists exact versions, bytes, checksums, Credentials, MCP
+  configurations, and policy in one self-contained Run Snapshot. Worker execution
+  and retries decode only that snapshot and never reread Current Versions.
 - A newly admitted Run pins exact versions and checksums. Unrelated catalog
   changes do not invalidate it, while revoked membership, capability, binding,
   Credential, or lease fails at the applicable execution boundary.
@@ -359,7 +361,7 @@ model configuration.
    owning domain transaction.
 4. Register the router once in `app/gateway/app.py`.
 5. Add focused tests for success, outsider/wrong-owner, missing capability,
-   stale revision, and rollback behavior.
+   stale revision, and transactional failure behavior.
 
 ### PostgreSQL table or durable Job type
 
@@ -386,10 +388,10 @@ model configuration.
 ### System Skill or project asset flow
 
 - Validate all archive paths, sizes, file types, frontmatter, and static scan
-  results before persistence or publication.
+  results before persistence or activation.
 - Keep packaged System assets separate from project-authored assets and bindings.
 - Authoring services use optimistic revisions and one transaction; failed flows
-  must not leave an asset without its initial version or publish a partial
+  must not leave an asset without its initial version or activate a partial
   dependency closure.
 - Run deterministic review for each changed public Skill:
   `uv run python -m deerflow.skills.review.cli ../skills/public/<slug> --format text --fail-on error --fail-on-incomplete`.

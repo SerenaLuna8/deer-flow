@@ -100,7 +100,7 @@ async def test_postgres_runtime_policy_bootstrap_cas_snapshot_and_audit(
             await connection.execute(
                 text(
                     """INSERT INTO agents
-                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                    (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
                     VALUES (:id,'project',:project,'runtime-agent','Runtime Agent','active',1,:user)"""
                 ),
                 {

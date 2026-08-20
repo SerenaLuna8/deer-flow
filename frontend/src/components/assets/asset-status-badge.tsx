@@ -10,7 +10,10 @@ type Status =
   | "published"
   | "rejected"
   | "retired"
-  | "revoked";
+  | "revoked"
+  | "current"
+  | "candidate"
+  | "historical";
 
 export function AssetStatusBadge({
   status,
@@ -20,8 +23,12 @@ export function AssetStatusBadge({
   label?: string;
 }) {
   const { t } = useI18n();
-  const healthy = status === "active" || status === "published";
-  const warning = status === "suspended" || status === "pending_approval";
+  const healthy =
+    status === "active" || status === "published" || status === "current";
+  const warning =
+    status === "suspended" ||
+    status === "pending_approval" ||
+    status === "candidate";
   const danger = status === "rejected" || status === "revoked";
 
   return (
@@ -48,7 +55,14 @@ export function AssetStatusBadge({
           !healthy && !warning && !danger && "bg-muted-foreground/55",
         )}
       />
-      {label ?? t.adminAssets.status[status]}
+      {label ??
+        (status === "current"
+          ? "当前版本"
+          : status === "candidate"
+            ? "候选版本"
+            : status === "historical"
+              ? "历史版本"
+              : t.adminAssets.status[status])}
     </Badge>
   );
 }

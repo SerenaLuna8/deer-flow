@@ -448,7 +448,11 @@ export function ProjectMcpEditDialog({
         pending={pending}
         errorMessage={flowError}
         editConfiguration={{
-          asset: configuration.item,
+          asset: {
+            ...configuration.item,
+            current_version_id: configuration.item.current_published_version_id,
+            revision: configuration.item.version,
+          },
           version: configuration.version,
         }}
         credentialSelection={{

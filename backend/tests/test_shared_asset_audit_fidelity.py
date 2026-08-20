@@ -21,10 +21,9 @@ _AGENT_ACTIONS = (
     ("agent.version.create", AuditAction.ASSET_UPDATED, 7),
     ("agent.instructions.update", AuditAction.ASSET_UPDATED, 7),
     ("agent.capability_bindings.update", AuditAction.ASSET_UPDATED, 7),
-    ("agent.version.restore", AuditAction.ASSET_UPDATED, 7),
-    ("agent.publish", AuditAction.ASSET_PUBLISHED, 7),
+    ("agent.version.activate", AuditAction.ASSET_UPDATED, 7),
     ("agent.delete", AuditAction.ASSET_DELETED, None),
-    ("agent.activate", AuditAction.ASSET_UPDATED, 7),
+    ("agent.enable", AuditAction.ASSET_UPDATED, None),
     ("agent.suspend", AuditAction.ASSET_DEPRECATED, None),
     ("agent.default.set", AuditAction.ASSET_BOUND, None),
     ("agent.default.clear", AuditAction.ASSET_UNBOUND, None),
@@ -109,26 +108,26 @@ async def test_agent_governance_keeps_exact_operation_and_safe_version_number(
 
 
 def test_asset_audit_metadata_accepts_only_safe_agent_version_coordinates() -> None:
-    metadata_model = AUDIT_METADATA_MODELS[AuditAction.ASSET_PUBLISHED]
+    metadata_model = AUDIT_METADATA_MODELS[AuditAction.ASSET_UPDATED]
 
     parsed = metadata_model.model_validate(
         {
             "asset_kind": "agent",
-            "operation": "agent.publish",
+            "operation": "agent.version.activate",
             "version_number": 7,
         }
     )
 
     assert parsed.model_dump(mode="json", exclude_none=True) == {
         "asset_kind": "agent",
-        "operation": "agent.publish",
+        "operation": "agent.version.activate",
         "version_number": 7,
     }
     with pytest.raises(ValueError):
         metadata_model.model_validate(
             {
                 "asset_kind": "agent",
-                "operation": "agent.publish",
+                "operation": "agent.version.activate",
                 "version_number": 7,
                 "version_id": str(uuid.uuid4()),
             }
@@ -146,7 +145,7 @@ def test_asset_audit_metadata_accepts_only_safe_agent_version_coordinates() -> N
         metadata_model.model_validate(
             {
                 "asset_kind": "agent",
-                "operation": "agent.publish",
+                "operation": "agent.version.activate",
             }
         )
     with pytest.raises(ValueError):
@@ -173,9 +172,9 @@ def test_every_governance_operation_has_a_valid_closed_audit_encoding(
         "agent.version.create",
         "agent.instructions.update",
         "agent.capability_bindings.update",
-        "agent.version.restore",
-        "agent.publish",
-        "agent.activate",
+        "agent.version.activate",
+        "skill.version.create",
+        "skill.version.activate",
         "skill.export",
         "skill.version.revoke",
     }:
@@ -201,15 +200,15 @@ async def test_system_override_audit_uses_the_same_safe_agent_coordinates() -> N
         project_id=project_id,
         asset_id=asset_id,
         version_id=version_id,
-        action="agent.publish",
+        action="agent.version.activate",
         request_id="req-agent-override-audit",
         asset_kind="agent",
     )
 
-    assert append.await_args.args[2] is AuditAction.ASSET_PUBLISHED
+    assert append.await_args.args[2] is AuditAction.ASSET_UPDATED
     assert append.await_args.args[5] == {
         "asset_kind": "agent",
-        "operation": "agent.publish",
+        "operation": "agent.version.activate",
         "version_number": 7,
     }
     assert str(version_id) not in repr(append.await_args.args[5])
@@ -303,7 +302,7 @@ async def test_agent_version_audit_rejects_unknown_or_cross_asset_version() -> N
             project_id=uuid.uuid4(),
             asset_id=uuid.uuid4(),
             version_id=uuid.uuid4(),
-            action="agent.publish",
+            action="agent.version.activate",
             request_id="req-agent-audit-missing-version",
             asset_kind="agent",
         )
@@ -322,7 +321,7 @@ async def test_agent_operation_cannot_be_relabelled_as_another_asset_kind() -> N
             project_id=uuid.uuid4(),
             asset_id=uuid.uuid4(),
             version_id=uuid.uuid4(),
-            action="agent.publish",
+            action="agent.version.activate",
             request_id="req-agent-audit-kind-mismatch",
             asset_kind="skill",
         )

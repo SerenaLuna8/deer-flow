@@ -68,6 +68,9 @@ class RunAssetVersionRow(Base):
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     catalog_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    # Added by the Current Version migration; keep it physically last so
+    # upgraded and freshly installed catalogs are identical.
+    snapshot_json: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
 
     __table_args__ = (
         PrimaryKeyConstraint(

@@ -12,7 +12,7 @@ function skillVersion() {
     id: VERSION_ID,
     skill_id: SKILL_ID,
     version_number: 1,
-    workflow_status: "published" as const,
+    relation: "current" as const,
     description: "System Skill",
     frontmatter: { name: "system-skill" },
     compatibility: null,

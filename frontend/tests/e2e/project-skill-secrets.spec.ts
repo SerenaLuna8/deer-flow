@@ -90,8 +90,9 @@ const project: Project = {
 };
 
 function projectSkill(
-  assetVersion: number,
-  currentPublishedVersionId: string = VERSION_1_ID,
+  revision: number,
+  currentVersionId: string | null = VERSION_1_ID,
+  status: ProjectAssetItem["status"] = "suspended",
 ): ProjectAssetItem {
   return {
     id: SKILL_ID,
@@ -100,13 +101,14 @@ function projectSkill(
     slug: "browser-secret",
     display_name: "Browser Secret",
     description: "Browser Skill secret coverage.",
-    status: "suspended",
-    current_published_version_id: currentPublishedVersionId,
-    version: assetVersion,
+    status,
+    current_version_id: currentVersionId,
+    revision,
     capabilities: [
       "shared_assets.read",
       "shared_assets.edit",
       "shared_assets.manage_bindings",
+      "mcp.credentials.approve",
     ],
     binding: null,
     created_by_user_id: ACCOUNT_ID,
@@ -123,8 +125,8 @@ function importedSkillItem(item: ProjectAssetItem) {
     slug: item.slug,
     display_name: item.display_name,
     status: item.status,
-    current_published_version_id: item.current_published_version_id,
-    version: item.version,
+    current_version_id: item.current_version_id,
+    revision: item.revision,
     created_by_user_id: item.created_by_user_id,
     created_at: item.created_at,
     updated_at: item.updated_at,
@@ -134,14 +136,14 @@ function importedSkillItem(item: ProjectAssetItem) {
 function skillVersion({
   id,
   number,
-  workflow,
+  relation,
   content,
   requirements,
   supersedes,
 }: {
   id: string;
   number: number;
-  workflow: "draft" | "published";
+  relation: SkillAssetVersion["relation"];
   content: string;
   requirements: Requirement[];
   supersedes: string | null;
@@ -151,7 +153,7 @@ function skillVersion({
     id,
     skill_id: SKILL_ID,
     version_number: number,
-    workflow_status: workflow,
+    relation,
     description: "Browser Skill secret coverage.",
     frontmatter: {
       name: "browser-secret",
@@ -177,16 +179,16 @@ function skillVersion({
     revoked_by_user_id: null,
     revocation_reason_code: null,
     governance_status: "active",
-    binding_eligible: workflow === "published",
+    binding_eligible: relation === "current",
     created_by_user_id: ACCOUNT_ID,
     created_at: TIMESTAMP,
   };
 }
 
-const publishedV1 = skillVersion({
+const currentV1 = skillVersion({
   id: VERSION_1_ID,
   number: 1,
-  workflow: "published",
+  relation: "current",
   content: initialContent,
   requirements: [{ name: API_TOKEN, optional: false }],
   supersedes: null,
@@ -228,33 +230,33 @@ function frontmatterParseResponse(content: string, sourceSha256: string) {
 
 type SkillMockOptions = {
   initiallyImported?: boolean;
-  initialDraft?: boolean;
+  initialCandidate?: boolean;
 };
 
 async function mockProjectSkillSecrets(
   page: Page,
-  { initiallyImported = true, initialDraft = false }: SkillMockOptions = {},
+  { initiallyImported = true, initialCandidate = false }: SkillMockOptions = {},
 ) {
-  const activationDraft = skillVersion({
+  const activationCandidate = skillVersion({
     id: VERSION_2_ID,
     number: 2,
-    workflow: "draft",
+    relation: "candidate",
     content: initialContent,
     requirements: [{ name: API_TOKEN, optional: false }],
     supersedes: VERSION_1_ID,
   });
   let hasSkill = initiallyImported;
-  let asset = projectSkill(initialDraft ? 2 : 1);
-  let versions: SkillAssetVersion[] = initialDraft
-    ? [activationDraft, publishedV1]
-    : [publishedV1];
+  let asset = projectSkill(initialCandidate ? 2 : 1);
+  let versions: SkillAssetVersion[] = initialCandidate
+    ? [activationCandidate, currentV1]
+    : [currentV1];
   const contentByVersion = new Map([
     [VERSION_1_ID, initialContent],
     [VERSION_2_ID, initialContent],
   ]);
   const patchBodies: unknown[] = [];
   const forkBodies: unknown[] = [];
-  const publishBodies: unknown[] = [];
+  const activationBodies: unknown[] = [];
   const bindingBodies: unknown[] = [];
   const bindingsByVersion = new Map<
     string,
@@ -361,19 +363,24 @@ async function mockProjectSkillSecrets(
     }
     if (path === `${skillsBase}/import` && method === "POST") {
       hasSkill = true;
-      asset = projectSkill(1);
-      versions = [publishedV1];
+      asset = projectSkill(1, null);
+      const candidateV1 = {
+        ...currentV1,
+        relation: "candidate" as const,
+        binding_eligible: false,
+      };
+      versions = [candidateV1];
       return json(
         route,
         {
           item: importedSkillItem(asset),
-          version: publishedV1,
+          version: candidateV1,
           request_id: "request-import",
         },
         201,
       );
     }
-    if (path === `${skillsBase}/${SKILL_ID}/activate` && method === "POST") {
+    if (path === `${skillsBase}/${SKILL_ID}/enable` && method === "POST") {
       return json(
         route,
         {
@@ -407,7 +414,7 @@ async function mockProjectSkillSecrets(
           encoding: "utf-8",
           content,
           source_payload_checksum: version?.payload_checksum ?? sha256(content),
-          asset_version: asset.version,
+          asset_revision: asset.revision,
         },
         request_id: `request-file-${versionId}`,
       });
@@ -491,10 +498,10 @@ async function mockProjectSkillSecrets(
       const content =
         body.changes.find((change) => change.path === "SKILL.md")?.content ??
         patchedContent;
-      const draftV2 = skillVersion({
+      const candidateV2 = skillVersion({
         id: VERSION_2_ID,
         number: 2,
-        workflow: "draft",
+        relation: "candidate",
         content,
         requirements: [
           { name: API_TOKEN, optional: false },
@@ -503,23 +510,23 @@ async function mockProjectSkillSecrets(
         supersedes: VERSION_1_ID,
       });
       contentByVersion.set(VERSION_2_ID, content);
-      versions = [draftV2, publishedV1];
+      versions = [candidateV2, currentV1];
       asset = projectSkill(2);
-      return json(route, { data: draftV2, request_id: "request-fork" });
+      return json(route, { data: candidateV2, request_id: "request-fork" });
     }
     if (
       path ===
-        `${skillsBase}/${SKILL_ID}/versions/${VERSION_2_ID}/publish-plan` &&
+        `${skillsBase}/${SKILL_ID}/versions/${VERSION_2_ID}/activation-readiness` &&
       method === "GET"
     ) {
-      const draft = versions.find((version) => version.id === VERSION_2_ID);
+      const candidate = versions.find((version) => version.id === VERSION_2_ID);
       const configured = bindingsByVersion.get(VERSION_2_ID) ?? {};
       const apiTokenConfigured = Boolean(configured[API_TOKEN]);
       return json(route, {
         skill_id: SKILL_ID,
         skill_version_id: VERSION_2_ID,
-        asset_version: asset.version,
-        payload_checksum: draft?.payload_checksum ?? sha256(patchedContent),
+        revision: asset.revision,
+        payload_checksum: candidate?.payload_checksum ?? sha256(patchedContent),
         binding_revision: bindingRevisionByVersion.get(VERSION_2_ID) ?? 0,
         secrets_autonomous: true,
         ready: apiTokenConfigured,
@@ -540,25 +547,30 @@ async function mockProjectSkillSecrets(
               : "missing",
           },
         ],
-        request_id: "request-publish-plan",
+        request_id: "request-activation-readiness",
       });
     }
     if (
-      path === `${skillsBase}/${SKILL_ID}/versions/${VERSION_2_ID}/publish` &&
+      path === `${skillsBase}/${SKILL_ID}/versions/${VERSION_2_ID}/activate` &&
       method === "POST"
     ) {
-      publishBodies.push(request.postDataJSON());
-      const draft = versions.find((version) => version.id === VERSION_2_ID)!;
-      const publishedV2 = {
-        ...draft,
-        workflow_status: "published" as const,
+      activationBodies.push(request.postDataJSON());
+      const candidate = versions.find(
+        (version) => version.id === VERSION_2_ID,
+      )!;
+      const currentV2 = {
+        ...candidate,
+        relation: "current" as const,
         binding_eligible: true,
       };
-      versions = [publishedV2, publishedV1];
-      asset = projectSkill(3, VERSION_2_ID);
+      versions = [
+        currentV2,
+        { ...currentV1, relation: "historical", binding_eligible: false },
+      ];
+      asset = projectSkill(3, VERSION_2_ID, "active");
       return json(route, {
-        data: publishedV2,
-        request_id: "request-publish",
+        data: currentV2,
+        request_id: "request-activate",
       });
     }
 
@@ -570,7 +582,7 @@ async function mockProjectSkillSecrets(
     patchBodies,
     forkBodies,
     bindingBodies,
-    publishBodies,
+    activationBodies,
     unexpectedRequests,
   };
 }
@@ -835,11 +847,11 @@ async function mockBuilderSecretCandidate(page: Page) {
         validated: true,
         completed: true,
       });
-      const item = importedSkillItem(projectSkill(1));
+      const item = importedSkillItem(projectSkill(1, null));
       const version = skillVersion({
         id: VERSION_1_ID,
         number: 1,
-        workflow: "published",
+        relation: "candidate",
         content: builderPatchedContent,
         requirements: [{ name: BUILDER_TOKEN, optional: false }],
         supersedes: null,
@@ -929,7 +941,7 @@ test("archive required-secrets guides the user to Credential configuration", asy
   expect(api.unexpectedRequests).toEqual([]);
 });
 
-test("version form saves exact source-field mappings before read-only publish", async ({
+test("version form saves exact source-field mappings before activation", async ({
   page,
 }) => {
   const api = await mockProjectSkillSecrets(page);
@@ -997,20 +1009,24 @@ test("version form saves exact source-field mappings before read-only publish", 
   expect(advancedSettingsBox.y).toBeGreaterThan(
     saveMappingsBox.y + saveMappingsBox.height,
   );
-  await expect(detail.getByRole("button", { name: "发布版本" })).toBeEnabled();
-  await detail.getByRole("button", { name: "发布版本" }).click();
+  await expect(detail.getByRole("button", { name: "激活版本" })).toBeEnabled();
+  await detail.getByRole("button", { name: "激活版本" }).click();
 
-  const publishDialog = page.getByRole("dialog", {
-    name: "Publish Skill version",
+  const activationDialog = page.getByRole("dialog", {
+    name: "Activate Skill Candidate Version",
   });
-  await expect(publishDialog).toBeVisible();
+  await expect(activationDialog).toBeVisible();
   await expect(
-    publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+    activationDialog.getByLabel(new RegExp("Project Credential", "u")),
   ).toHaveCount(0);
-  await expect(publishDialog.getByText("Publish checks passed")).toBeVisible();
-  await publishDialog.getByRole("button", { name: "Publish version" }).click();
+  await expect(
+    activationDialog.getByText("Runtime requirement checks passed"),
+  ).toBeVisible();
+  await activationDialog
+    .getByRole("button", { name: "Activate version" })
+    .click();
 
-  await expect(publishDialog).toHaveCount(0);
+  await expect(activationDialog).toHaveCount(0);
   expect(api.patchBodies).toHaveLength(1);
   expect(api.forkBodies).toHaveLength(1);
   expect(api.bindingBodies).toEqual([
@@ -1035,24 +1051,23 @@ test("version form saves exact source-field mappings before read-only publish", 
       },
     ],
   });
-  expect(api.publishBodies).toEqual([
+  expect(api.activationBodies).toEqual([
     {
-      expected_asset_version: 2,
+      expected_revision: 2,
       expected_payload_checksum: sha256(patchedContent),
       expected_binding_revision: 1,
-      acknowledge_stale_base: false,
     },
   ]);
-  expect(JSON.stringify(api.publishBodies)).not.toMatch(
+  expect(JSON.stringify(api.activationBodies)).not.toMatch(
     /token-value|plaintext|ciphertext/iu,
   );
   expect(api.unexpectedRequests).toEqual([]);
 });
 
-test("failed activation leaves a Draft for the exact published Credential section", async ({
+test("failed asset enable keeps the Candidate and routes to its Credential section", async ({
   page,
 }) => {
-  const api = await mockProjectSkillSecrets(page, { initialDraft: true });
+  const api = await mockProjectSkillSecrets(page, { initialCandidate: true });
 
   await page.goto(
     `/projects/alpha/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_2_ID}`,
@@ -1070,29 +1085,29 @@ test("failed activation leaves a Draft for the exact published Credential sectio
   expect(api.unexpectedRequests).toEqual([]);
 });
 
-test("publish preflight is read-only and routes a missing Draft back to mappings", async ({
+test("activation readiness is read-only and routes a blocked Candidate back to mappings", async ({
   page,
 }) => {
-  const api = await mockProjectSkillSecrets(page, { initialDraft: true });
+  const api = await mockProjectSkillSecrets(page, { initialCandidate: true });
 
   await page.goto(
     `/projects/alpha/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_2_ID}`,
   );
   const detail = page.getByRole("dialog", { name: "Browser Secret" });
-  await detail.getByRole("button", { name: "发布版本" }).click();
-  const publishDialog = page.getByRole("dialog", {
-    name: "Publish Skill version",
+  await detail.getByRole("button", { name: "激活版本" }).click();
+  const activationDialog = page.getByRole("dialog", {
+    name: "Activate Skill Candidate Version",
   });
   await expect(
-    publishDialog.getByText("Publish checks did not pass"),
+    activationDialog.getByText("Runtime requirement checks did not pass"),
   ).toBeVisible();
   await expect(
-    publishDialog.getByRole("button", { name: "Publish version" }),
+    activationDialog.getByRole("button", { name: "Activate version" }),
   ).toBeDisabled();
   await expect(
-    publishDialog.getByLabel(new RegExp("Project Credential", "u")),
+    activationDialog.getByLabel(new RegExp("Project Credential", "u")),
   ).toHaveCount(0);
-  await publishDialog
+  await activationDialog
     .getByRole("button", { name: "Go to Runtime credentials" })
     .click();
   await expect(
@@ -1101,7 +1116,7 @@ test("publish preflight is read-only and routes a missing Draft back to mappings
   await expect(
     detail.getByRole("heading", { name: "2. Project Credential mappings" }),
   ).toBeVisible();
-  expect(api.publishBodies).toHaveLength(0);
+  expect(api.activationBodies).toHaveLength(0);
   expect(api.unexpectedRequests).toEqual([]);
 });
 

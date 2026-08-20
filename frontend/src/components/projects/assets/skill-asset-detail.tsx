@@ -185,12 +185,10 @@ export function SkillAssetDetail({
   } = workspace;
   let credentialBindings: ReactNode = null;
   if (!workspace.editing) {
-    const currentPublished =
-      version.id === workspace.item.current_published_version_id;
+    const current = version.id === workspace.item.current_version_id;
     const writable =
-      currentPublished ||
-      (workspace.item.scope === "project" &&
-        version.workflow_status === "draft");
+      current ||
+      (workspace.item.scope === "project" && version.relation === "candidate");
     credentialBindings = (
       <SkillCredentialBindings
         key={`${workspace.item.id}:${version.id}`}
@@ -198,7 +196,7 @@ export function SkillAssetDetail({
         projectId={workspace.projectId}
         skillId={workspace.item.id}
         versionId={version.id}
-        skillActive={workspace.item.status === "active" && currentPublished}
+        skillActive={workspace.item.status === "active" && current}
         canManage={canManageCredentials && writable}
         readOnlyReason={
           !canManageCredentials

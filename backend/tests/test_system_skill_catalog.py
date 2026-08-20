@@ -241,19 +241,18 @@ def test_schema_v3_allows_a_legacy_v1_without_scan_snapshot() -> None:
     assert catalog.entries[0].scan_summary is None
 
 
-def test_schema_v3_allows_a_contiguous_legacy_prefix_without_scan_snapshots() -> None:
-    catalog = catalog_module.BootstrapCatalog.model_validate(
-        {
-            "schema_version": 3,
-            "entries": [
-                _snapshot_skill_entry(1),
-                _snapshot_skill_entry(2),
-                _snapshot_skill_entry(3, include_snapshot=True),
-            ],
-        }
-    )
-
-    assert [entry.scan_decision for entry in catalog.entries] == [None, None, "allow"]
+def test_schema_v3_rejects_system_skill_version_history() -> None:
+    with pytest.raises(ValueError, match="require one v1"):
+        catalog_module.BootstrapCatalog.model_validate(
+            {
+                "schema_version": 3,
+                "entries": [
+                    _snapshot_skill_entry(1),
+                    _snapshot_skill_entry(2),
+                    _snapshot_skill_entry(3, include_snapshot=True),
+                ],
+            }
+        )
 
 
 def test_schema_v3_rejects_a_missing_snapshot_after_snapshot_history_begins() -> None:

@@ -55,7 +55,7 @@ async def _seed_skill_pairs(
                 slug=slug,
                 display_name=f"Project {slug}",
                 status="suspended",
-                version=1,
+                revision=1,
                 created_by_user_id=str(seed.owner_a.user_id),
             )
             system_skill = SkillRow(
@@ -64,7 +64,7 @@ async def _seed_skill_pairs(
                 slug=slug,
                 display_name=f"System {slug}",
                 status="active",
-                version=1,
+                revision=1,
                 created_by_user_id=str(seed.owner_a.user_id),
             )
             session.add_all((project_skill, system_skill))
@@ -73,7 +73,6 @@ async def _seed_skill_pairs(
             project_version = SkillVersionRow(
                 skill_id=project_skill.id,
                 version_number=1,
-                workflow_status="published",
                 description="Project runtime-name conflict fixture",
                 frontmatter={"name": slug},
                 compatibility=None,
@@ -86,7 +85,6 @@ async def _seed_skill_pairs(
             system_version = SkillVersionRow(
                 skill_id=system_skill.id,
                 version_number=1,
-                workflow_status="published",
                 description="System runtime-name conflict fixture",
                 frontmatter={"name": slug},
                 compatibility=None,
@@ -98,8 +96,8 @@ async def _seed_skill_pairs(
             )
             session.add_all((project_version, system_version))
             await session.flush()
-            project_skill.current_published_version_id = project_version.id
-            system_skill.current_published_version_id = system_version.id
+            project_skill.current_version_id = project_version.id
+            system_skill.current_version_id = system_version.id
             pairs[slug] = _SkillPair(
                 project_skill.id,
                 project_version.id,
@@ -129,9 +127,8 @@ async def _runtime_visibility(
                             SkillRow.scope == "project",
                             SkillRow.project_id == seed.owner_a.project_id,
                             SkillRow.status == "active",
-                            SkillRow.current_published_version_id == pair.project_version_id,
+                            SkillRow.current_version_id == pair.project_version_id,
                             SkillVersionRow.id == pair.project_version_id,
-                            SkillVersionRow.workflow_status == "published",
                             SkillVersionRow.revoked_at.is_(None),
                         )
                     )
@@ -150,19 +147,17 @@ async def _runtime_visibility(
                         )
                         .join(
                             SkillVersionRow,
-                            SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                            SkillVersionRow.id == SkillRow.current_version_id,
                         )
                         .where(
                             ProjectSystemSkillBindingRow.project_id == seed.owner_a.project_id,
                             ProjectSystemSkillBindingRow.system_skill_id == pair.system_skill_id,
-                            ProjectSystemSkillBindingRow.skill_version_id == pair.system_version_id,
                             ProjectSystemSkillBindingRow.enabled.is_(True),
                             SkillRow.scope == "system",
                             SkillRow.project_id.is_(None),
                             SkillRow.status == "active",
-                            SkillRow.current_published_version_id == pair.system_version_id,
+                            SkillRow.current_version_id == pair.system_version_id,
                             SkillVersionRow.skill_id == pair.system_skill_id,
-                            SkillVersionRow.workflow_status == "published",
                             SkillVersionRow.revoked_at.is_(None),
                         )
                     )
@@ -177,7 +172,7 @@ async def _activate_project_skill(
     actor: ProjectContext,
     pair: _SkillPair,
 ) -> None:
-    await service.activate(
+    await service.enable(
         actor,
         pair.project_skill_id,
         expected_asset_version=1,
@@ -194,7 +189,7 @@ async def _enable_system_skill(
         AssetSelection(
             AssetKind.SKILL,
             pair.system_skill_id,
-            pair.system_version_id,
+            None,
         ),
     )
 

@@ -115,6 +115,7 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "system_runtime_policy_catalog_state",
     "system_runtime_policy_versions",
     "system_runtime_policies",
+    "system_asset_upgrade_audit",
     "thread_event_sequences",
     "threads_meta",
     "user_notifications",

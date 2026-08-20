@@ -74,20 +74,20 @@ from app.shared_assets import (
     SharedAssetError,
     SkillArchiveFile,
     SkillArchiveLimitExceeded,
+    SkillAssetRef,
     SkillCredentialBindingInput,
     SkillCredentialBindingInvalid,
     SkillCredentialBindingService,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
-    SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
     SkillFileChange,
-    SkillPublishBaseStale,
     SkillRuntimeNameConflict,
     SkillService,
+    VersionRelation,
     WorkflowStatus,
 )
 from app.shared_assets.agent_catalog import (
@@ -154,6 +154,26 @@ class AssetItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class CurrentVersionAssetItemResponse(_StrictModel):
+    """Public Agent/Skill aggregate contract.
+
+    MCP intentionally retains ``AssetItemResponse`` and its established
+    release workflow; Current Version unification does not change MCP.
+    """
+
+    id: uuid.UUID
+    scope: AssetScope
+    project_id: uuid.UUID | None
+    slug: str
+    display_name: str
+    status: str
+    current_version_id: uuid.UUID | None
+    revision: int
+    created_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class BindingItemResponse(_StrictModel):
     project_id: uuid.UUID
     kind: AssetKind
@@ -174,6 +194,18 @@ class ProjectAssetItemResponse(AssetItemResponse):
 
 
 class ProjectSkillItemResponse(ProjectAssetItemResponse):
+    description: str
+
+
+class ProjectCurrentVersionAssetItemResponse(CurrentVersionAssetItemResponse):
+    capabilities: list[Capability]
+    binding: BindingItemResponse | None
+    description: str = ""
+
+
+class ProjectCurrentVersionSkillItemResponse(
+    ProjectCurrentVersionAssetItemResponse,
+):
     description: str
 
 
@@ -208,6 +240,18 @@ class ScopedSkillAssetListResponse(_StrictModel):
     request_id: str
 
 
+class ScopedCurrentVersionAssetListResponse(_StrictModel):
+    system_items: list[ProjectCurrentVersionAssetItemResponse]
+    project_items: list[ProjectCurrentVersionAssetItemResponse]
+    request_id: str
+
+
+class ScopedCurrentVersionSkillAssetListResponse(_StrictModel):
+    system_items: list[ProjectCurrentVersionSkillItemResponse]
+    project_items: list[ProjectCurrentVersionSkillItemResponse]
+    request_id: str
+
+
 class ScopedCredentialListResponse(_StrictModel):
     system_items: list[ProjectCredentialItemResponse]
     project_items: list[ProjectCredentialItemResponse]
@@ -219,8 +263,18 @@ class SystemAssetCatalogResponse(_StrictModel):
     request_id: str
 
 
+class SystemCurrentVersionCatalogResponse(_StrictModel):
+    items: list[CurrentVersionAssetItemResponse]
+    request_id: str
+
+
 class AssetMutationResponse(_StrictModel):
     item: AssetItemResponse
+    request_id: str
+
+
+class CurrentVersionAssetMutationResponse(_StrictModel):
+    item: CurrentVersionAssetItemResponse
     request_id: str
 
 
@@ -238,6 +292,11 @@ class ProjectDefaultAgentResponse(_StrictModel):
 class CreateAssetRequest(_StrictModel):
     slug: str
     display_name: str
+
+
+class SkillAssetRefRequest(_StrictModel):
+    scope: AssetScope
+    asset_id: uuid.UUID
 
 
 class AgentCreateRequest(_StrictModel):
@@ -258,7 +317,7 @@ class AgentCreateRequest(_StrictModel):
     )
     model_settings: AgentModelSettings
     tool_groups: list[str]
-    skill_version_ids: list[uuid.UUID]
+    skill_refs: list[SkillAssetRefRequest]
     mcp_version_ids: list[uuid.UUID]
 
 
@@ -266,16 +325,15 @@ class ExpectedAssetVersionRequest(_StrictModel):
     expected_asset_version: int = Field(ge=1)
 
 
-class SkillPublishRequest(ExpectedAssetVersionRequest):
-    acknowledge_stale_base: bool = False
+class ExpectedRevisionRequest(_StrictModel):
+    expected_revision: int = Field(ge=1)
+
+
+class SkillActivationRequest(ExpectedRevisionRequest):
     expected_payload_checksum: str = Field(
         pattern=r"^[0-9a-f]{64}$",
     )
     expected_binding_revision: int = Field(ge=0)
-
-
-class SkillGovernancePublishRequest(ExpectedAssetVersionRequest):
-    acknowledge_stale_base: bool = False
 
 
 class ProjectDefaultAgentRequest(_StrictModel):
@@ -289,6 +347,11 @@ class ProjectDefaultAgentRequest(_StrictModel):
 class SystemBindingRequest(_StrictModel):
     asset_id: uuid.UUID
     version_id: uuid.UUID
+    expected_binding_version: int | None = Field(default=None, ge=1)
+
+
+class CurrentSystemBindingRequest(_StrictModel):
+    asset_id: uuid.UUID
     expected_binding_version: int | None = Field(default=None, ge=1)
 
 
@@ -323,18 +386,32 @@ class BindingResponse(_StrictModel):
     request_id: str
 
 
+class CurrentBindingResponse(_StrictModel):
+    project_id: uuid.UUID
+    kind: AssetKind
+    asset_id: uuid.UUID
+    current_version_id: uuid.UUID
+    enabled: bool
+    version: int
+    created_by_user_id: str
+    updated_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+    request_id: str
+
+
 class AgentInstructionsRequest(_StrictModel):
     agents_instructions: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     soul: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     identity: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
     user_context: str = Field(max_length=MAX_AGENT_INSTRUCTION_FIELD_BYTES)
-    expected_asset_version: int = Field(ge=1)
+    expected_revision: int = Field(ge=1)
 
 
 class AgentCapabilityBindingsRequest(_StrictModel):
-    skill_version_ids: list[uuid.UUID]
+    skill_refs: list[SkillAssetRefRequest]
     mcp_version_ids: list[uuid.UUID]
-    expected_asset_version: int = Field(ge=1)
+    expected_revision: int = Field(ge=1)
 
 
 class AgentRuntimeAssessmentsRequest(_StrictModel):
@@ -402,7 +479,7 @@ class SkillVersionRequest(_StrictModel):
         min_length=1,
         max_length=MAX_SKILL_ARCHIVE_FILES,
     )
-    expected_asset_version: int = Field(ge=1)
+    expected_revision: int = Field(ge=1)
 
 
 class SkillFileCreateChangeRequest(_StrictModel):
@@ -431,7 +508,7 @@ SkillFileChangeRequest = Annotated[
 
 
 class SkillForkRequest(_StrictModel):
-    expected_asset_version: int = Field(ge=1)
+    expected_revision: int = Field(ge=1)
     expected_source_payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     changes: list[SkillFileChangeRequest] = Field(min_length=1, max_length=256)
 
@@ -514,7 +591,7 @@ class AgentVersionItemResponse(_StrictModel):
     id: uuid.UUID
     agent_id: uuid.UUID
     version_number: int
-    workflow_status: WorkflowStatus
+    relation: VersionRelation
     description: str
     agents_instructions: str
     soul: str
@@ -523,7 +600,7 @@ class AgentVersionItemResponse(_StrictModel):
     model_ref: str
     model_settings: AgentModelSettings
     tool_groups: list[str]
-    skill_version_ids: list[uuid.UUID]
+    skill_refs: list[SkillAssetRefRequest]
     mcp_version_ids: list[uuid.UUID]
     supersedes_version_id: uuid.UUID | None
     payload_schema_version: int
@@ -566,16 +643,16 @@ class SkillCredentialBindingSetResponse(_StrictModel):
     request_id: str
 
 
-class SkillCredentialPublishRequirementResponse(_StrictModel):
+class SkillCredentialReadinessRequirementResponse(_StrictModel):
     name: str
     optional: bool
     mapping_status: Literal["missing", "configured", "invalid"]
 
 
-class SkillPublishPlanResponse(_StrictModel):
+class SkillActivationReadinessResponse(_StrictModel):
     skill_id: uuid.UUID
     skill_version_id: uuid.UUID
-    asset_version: int = Field(ge=1)
+    revision: int = Field(ge=1)
     payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     binding_revision: int = Field(ge=0)
     secrets_autonomous: bool
@@ -583,7 +660,7 @@ class SkillPublishPlanResponse(_StrictModel):
     required_count: int = Field(ge=0)
     configured_required_count: int = Field(ge=0)
     invalid_count: int = Field(ge=0)
-    requirements: list[SkillCredentialPublishRequirementResponse]
+    requirements: list[SkillCredentialReadinessRequirementResponse]
     request_id: str
 
 
@@ -625,14 +702,14 @@ class SkillFileContentItemResponse(_StrictModel):
     encoding: Literal["utf-8"] | None
     content: str | None
     source_payload_checksum: str
-    asset_version: int
+    asset_revision: int
 
 
 class SkillVersionItemResponse(_StrictModel):
     id: uuid.UUID
     skill_id: uuid.UUID
     version_number: int
-    workflow_status: WorkflowStatus
+    relation: VersionRelation
     description: str
     frontmatter: dict[str, Any]
     compatibility: str | None
@@ -736,7 +813,7 @@ class AgentVersionResponse(_StrictModel):
 
 
 class AgentCreateResponse(_StrictModel):
-    item: AssetItemResponse
+    item: CurrentVersionAssetItemResponse
     version: AgentVersionItemResponse
     request_id: str
 
@@ -747,7 +824,7 @@ class SkillVersionResponse(_StrictModel):
 
 
 class SkillArchiveImportResponse(_StrictModel):
-    item: AssetItemResponse
+    item: CurrentVersionAssetItemResponse
     version: SkillVersionItemResponse
     request_id: str
 
@@ -897,12 +974,10 @@ ASSET_ERRORS = (
     SkillDesignTargetUnsupported,
     SkillDesignTargetSessionExists,
     SkillDesignTargetDeleted,
-    SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillCredentialBindingInvalid,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
-    SkillPublishBaseStale,
     SkillRuntimeNameConflict,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
@@ -925,12 +1000,10 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         SkillDesignTargetUnsupported: 422,
         SkillDesignTargetSessionExists: 409,
         SkillDesignTargetDeleted: 409,
-        SkillDesignBaseStale: 409,
         SkillDesignNoChanges: 409,
         SkillCredentialBindingInvalid: 422,
         SkillCredentialBindingsIncomplete: 422,
         SkillCredentialSelectionStale: 409,
-        SkillPublishBaseStale: 409,
         SkillRuntimeNameConflict: 409,
         AgentDesignSecretDetected: 422,
         AgentDesignSessionLimitExceeded: 429,
@@ -1109,6 +1182,13 @@ def _asset_item(view) -> AssetItemResponse:
     return AssetItemResponse.model_validate(view, from_attributes=True)
 
 
+def _current_version_asset_item(view) -> CurrentVersionAssetItemResponse:
+    return CurrentVersionAssetItemResponse.model_validate(
+        view,
+        from_attributes=True,
+    )
+
+
 def _credential_item(view) -> CredentialItemResponse:
     return CredentialItemResponse.model_validate(view, from_attributes=True)
 
@@ -1126,20 +1206,39 @@ async def _list_system_catalog(
         raise_asset_domain(exc)
 
 
-@catalog_router.get("/agents", response_model=SystemAssetCatalogResponse)
+async def _list_system_current_version_catalog(
+    actor: SystemAssetReadContext,
+    service,
+) -> SystemCurrentVersionCatalogResponse:
+    try:
+        return SystemCurrentVersionCatalogResponse(
+            items=[_current_version_asset_item(view) for view in await service.list_visible(actor)],
+            request_id=actor.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@catalog_router.get(
+    "/agents",
+    response_model=SystemCurrentVersionCatalogResponse,
+)
 async def list_system_catalog_agents(
     actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
 ):
-    return await _list_system_catalog(actor, service)
+    return await _list_system_current_version_catalog(actor, service)
 
 
-@catalog_router.get("/skills", response_model=SystemAssetCatalogResponse)
+@catalog_router.get(
+    "/skills",
+    response_model=SystemCurrentVersionCatalogResponse,
+)
 async def list_system_catalog_skills(
     actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
     service: Annotated[SkillService, Depends(get_skill_service)],
 ):
-    return await _list_system_catalog(actor, service)
+    return await _list_system_current_version_catalog(actor, service)
 
 
 @catalog_router.get("/mcp-servers", response_model=SystemAssetCatalogResponse)
@@ -1162,7 +1261,7 @@ def _asset_item_capabilities(
     }
     if scope is AssetScope.PROJECT:
         allowed.add(Capability.SHARED_ASSETS_EDIT)
-        if kind is AssetKind.MCP:
+        if kind in {AssetKind.MCP, AssetKind.SKILL}:
             allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
     return sorted(context.capabilities & allowed, key=str)
 
@@ -1182,9 +1281,17 @@ def _scoped_assets(
     bindings,
     context: ProjectContext,
     kind: AssetKind,
-) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     by_asset_id = {binding.asset_id: binding for binding in bindings}
-    item_model = ProjectSkillItemResponse if kind is AssetKind.SKILL else ProjectAssetItemResponse
+    if kind is AssetKind.SKILL:
+        item_model = ProjectCurrentVersionSkillItemResponse
+        response_model = ScopedCurrentVersionSkillAssetListResponse
+    elif kind is AssetKind.AGENT:
+        item_model = ProjectCurrentVersionAssetItemResponse
+        response_model = ScopedCurrentVersionAssetListResponse
+    else:
+        item_model = ProjectAssetItemResponse
+        response_model = ScopedAssetListResponse
     items = [
         item_model(
             **vars(view),
@@ -1193,7 +1300,6 @@ def _scoped_assets(
         )
         for view in views
     ]
-    response_model = ScopedSkillAssetListResponse if kind is AssetKind.SKILL else ScopedAssetListResponse
     return response_model(
         system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
         project_items=[item for item in items if item.scope is AssetScope.PROJECT],
@@ -1206,7 +1312,7 @@ async def _list_assets(
     kind: AssetKind,
     service,
     binding_service: BindingService,
-) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     try:
         views = await service.list_visible(context)
         bindings = await binding_service.list_visible(context, kind)
@@ -1219,6 +1325,17 @@ async def _asset_call(actor, operation):
     try:
         result = await operation()
         return AssetMutationResponse(item=_asset_item(result), request_id=actor.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+async def _current_version_asset_call(actor, operation):
+    try:
+        result = await operation()
+        return CurrentVersionAssetMutationResponse(
+            item=_current_version_asset_item(result),
+            request_id=actor.request_id,
+        )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -1458,7 +1575,6 @@ def register_asset_routes(
     include_shared_asset_mutations: bool = True,
     include_project_asset_delete: bool = False,
     include_skill_export: bool = True,
-    require_skill_publish_credential_cas: bool = True,
 ) -> None:
     async def create_agent(body: AgentCreateRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         try:
@@ -1474,12 +1590,12 @@ def register_asset_routes(
                     model_ref=body.model_ref,
                     model_settings=body.model_settings,
                     tool_groups=tuple(body.tool_groups),
-                    skill_version_ids=tuple(body.skill_version_ids),
+                    skill_refs=tuple(SkillAssetRef(item.scope, item.asset_id) for item in body.skill_refs),
                     mcp_version_ids=tuple(body.mcp_version_ids),
                 ),
             )
             return AgentCreateResponse(
-                item=_asset_item(result.asset),
+                item=_current_version_asset_item(result.asset),
                 version=AgentVersionItemResponse.model_validate(_response_data(result.version)),
                 request_id=actor.request_id,
             )
@@ -1487,7 +1603,10 @@ def register_asset_routes(
             raise_asset_domain(exc)
 
     async def get_agent(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
-        return await _asset_call(actor, lambda: service.get(actor, asset_id))
+        return await _current_version_asset_call(
+            actor,
+            lambda: service.get(actor, asset_id),
+        )
 
     async def update_agent_instructions(asset_id: uuid.UUID, body: AgentInstructionsRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         instructions = AgentInstructions(
@@ -1502,7 +1621,7 @@ def register_asset_routes(
                 actor,
                 asset_id,
                 instructions,
-                expected_asset_version=body.expected_asset_version,
+                expected_asset_version=body.expected_revision,
             ),
             AgentVersionResponse,
         )
@@ -1519,46 +1638,28 @@ def register_asset_routes(
                 actor,
                 asset_id,
                 AgentCapabilityBindings(
-                    tuple(body.skill_version_ids),
+                    tuple(SkillAssetRef(item.scope, item.asset_id) for item in body.skill_refs),
                     tuple(body.mcp_version_ids),
                 ),
-                expected_asset_version=body.expected_asset_version,
+                expected_asset_version=body.expected_revision,
             ),
             AgentVersionResponse,
         )
 
-    async def restore_agent_version(
+    async def activate_agent_version(
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
-        body: ExpectedAssetVersionRequest,
+        body: ExpectedRevisionRequest,
         actor=Depends(actor_dependency),
         service=Depends(get_agent_service),
     ):
         return await _version_call(
             actor,
-            lambda: service.restore_version(
+            lambda: service.activate_version(
                 actor,
                 asset_id,
                 version_id,
-                expected_asset_version=body.expected_asset_version,
-            ),
-            AgentVersionResponse,
-        )
-
-    async def publish_agent_version(
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        body: ExpectedAssetVersionRequest,
-        actor=Depends(actor_dependency),
-        service=Depends(get_agent_service),
-    ):
-        return await _version_call(
-            actor,
-            lambda: service.publish(
-                actor,
-                asset_id,
-                version_id,
-                expected_asset_version=body.expected_asset_version,
+                expected_asset_version=body.expected_revision,
             ),
             AgentVersionResponse,
         )
@@ -1566,69 +1667,50 @@ def register_asset_routes(
     async def get_agent_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), AgentVersionHistoryResponse)
 
-    async def delete_agent(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
+    async def delete_agent(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(get_agent_service)):
         try:
             await service.delete(
                 actor,
                 asset_id,
-                expected_asset_version=body.expected_asset_version,
+                expected_asset_version=body.expected_revision,
             )
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
     async def get_skill(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
-        return await _asset_call(actor, lambda: service.get(actor, asset_id))
+        return await _current_version_asset_call(
+            actor,
+            lambda: service.get(actor, asset_id),
+        )
 
     async def create_skill_version(asset_id: uuid.UUID, body: SkillVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         files = _decode_skill_files(body, actor.request_id)
-        return await _version_call(actor, lambda: service.create_version_from_archive(actor, asset_id, files, expected_asset_version=body.expected_asset_version), SkillVersionResponse)
+        return await _version_call(actor, lambda: service.create_version_from_archive(actor, asset_id, files, expected_asset_version=body.expected_revision), SkillVersionResponse)
 
     async def get_skill_versions(asset_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _version_history(actor, lambda: service.get_version_history(actor, asset_id), SkillVersionHistoryResponse)
 
-    async def publish_skill(asset_id: uuid.UUID, version_id: uuid.UUID, body: SkillPublishRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+    async def activate_skill_version(asset_id: uuid.UUID, version_id: uuid.UUID, body: SkillActivationRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         return await _version_call(
             actor,
-            lambda: service.publish(
+            lambda: service.activate_version(
                 actor,
                 asset_id,
                 version_id,
-                expected_asset_version=body.expected_asset_version,
-                acknowledge_stale_base=body.acknowledge_stale_base,
+                expected_asset_version=body.expected_revision,
                 expected_payload_checksum=body.expected_payload_checksum,
                 expected_binding_revision=body.expected_binding_revision,
             ),
             SkillVersionResponse,
         )
 
-    async def publish_skill_governance(
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        body: SkillGovernancePublishRequest,
-        actor=Depends(actor_dependency),
-        service=Depends(get_skill_service),
-    ):
-        return await _version_call(
-            actor,
-            lambda: service.publish(
-                actor,
-                asset_id,
-                version_id,
-                expected_asset_version=body.expected_asset_version,
-                acknowledge_stale_base=body.acknowledge_stale_base,
-                expected_payload_checksum=None,
-                expected_binding_revision=None,
-            ),
-            SkillVersionResponse,
-        )
-
-    async def delete_skill(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
+    async def delete_skill(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(get_skill_service)):
         try:
             await service.delete(
                 actor,
                 asset_id,
-                expected_asset_version=body.expected_asset_version,
+                expected_asset_version=body.expected_revision,
             )
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
@@ -1668,17 +1750,36 @@ def register_asset_routes(
 
     def add_status_route(
         segment: str,
-        action: Literal["activate", "archive", "suspend"],
+        action: Literal["activate", "archive", "enable", "suspend"],
         service_dependency,
     ) -> None:
-        async def change(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
-            return await _asset_call(actor, lambda: getattr(service, action)(actor, asset_id, expected_asset_version=body.expected_asset_version))
+        async def change_current(asset_id: uuid.UUID, body: ExpectedRevisionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
+            async def operation():
+                return await getattr(service, action)(
+                    actor,
+                    asset_id,
+                    expected_asset_version=body.expected_revision,
+                )
+
+            return await _current_version_asset_call(actor, operation)
+
+        async def change_legacy(asset_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(service_dependency)):
+            async def operation():
+                return await getattr(service, action)(
+                    actor,
+                    asset_id,
+                    expected_asset_version=body.expected_asset_version,
+                )
+
+            return await _asset_call(actor, operation)
+
+        current_contract = segment in {"agents", "skills"}
 
         router.add_api_route(
             f"/{segment}/{{asset_id}}/{action}",
-            change,
+            change_current if current_contract else change_legacy,
             methods=["POST"],
-            response_model=AssetMutationResponse,
+            response_model=(CurrentVersionAssetMutationResponse if current_contract else AssetMutationResponse),
             name=f"{action}_{segment}",
         )
 
@@ -1785,22 +1886,20 @@ def register_asset_routes(
             raise_asset_domain(exc)
 
     read_routes = (
-        ("/agents/{asset_id}", get_agent, ["GET"], AssetMutationResponse, 200),
+        ("/agents/{asset_id}", get_agent, ["GET"], CurrentVersionAssetMutationResponse, 200),
         ("/agents/{asset_id}/versions", get_agent_versions, ["GET"], AgentVersionHistoryResponse, 200),
-        ("/skills/{asset_id}", get_skill, ["GET"], AssetMutationResponse, 200),
+        ("/skills/{asset_id}", get_skill, ["GET"], CurrentVersionAssetMutationResponse, 200),
         ("/skills/{asset_id}/versions", get_skill_versions, ["GET"], SkillVersionHistoryResponse, 200),
         ("/mcp-servers/{asset_id}", get_mcp, ["GET"], AssetMutationResponse, 200),
         ("/mcp-servers/{asset_id}/versions", get_mcp_versions, ["GET"], McpVersionHistoryResponse, 200),
     )
-    publish_skill_route = publish_skill if require_skill_publish_credential_cas else publish_skill_governance
     shared_asset_write_routes = (
         ("/agents", create_agent, ["POST"], AgentCreateResponse, 201),
         ("/agents/{asset_id}/instructions", update_agent_instructions, ["PUT"], AgentVersionResponse, 200),
         ("/agents/{asset_id}/capability-bindings", update_agent_capability_bindings, ["PUT"], AgentVersionResponse, 200),
-        ("/agents/{asset_id}/versions/{version_id}/restore", restore_agent_version, ["POST"], AgentVersionResponse, 200),
-        ("/agents/{asset_id}/versions/{version_id}/publish", publish_agent_version, ["POST"], AgentVersionResponse, 200),
+        ("/agents/{asset_id}/versions/{version_id}/activate", activate_agent_version, ["POST"], AgentVersionResponse, 200),
         ("/skills/{asset_id}/versions", create_skill_version, ["POST"], SkillVersionResponse, 201),
-        ("/skills/{asset_id}/versions/{version_id}/publish", publish_skill_route, ["POST"], SkillVersionResponse, 200),
+        ("/skills/{asset_id}/versions/{version_id}/activate", activate_skill_version, ["POST"], SkillVersionResponse, 200),
         ("/mcp-servers", create_mcp, ["POST"], AssetMutationResponse, 201),
         ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], McpVersionResponse, 201),
         ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], McpVersionResponse, 200),
@@ -1857,12 +1956,12 @@ def register_asset_routes(
             name="delete_project_mcp",
         )
     if include_shared_asset_mutations:
-        add_status_route("agents", "activate", get_agent_service)
+        add_status_route("agents", "enable", get_agent_service)
         add_status_route("agents", "suspend", get_agent_service)
         add_status_route("mcp-servers", "archive", get_mcp_service)
         add_status_route("mcp-servers", "activate", get_mcp_service)
         add_status_route("mcp-servers", "suspend", get_mcp_service)
-        add_status_route("skills", "activate", get_skill_service)
+        add_status_route("skills", "enable", get_skill_service)
         add_status_route("skills", "suspend", get_skill_service)
 
 
@@ -1923,7 +2022,7 @@ async def fork_project_skill_version(
             asset_id,
             source_version_id,
             changes,
-            expected_asset_version=body.expected_asset_version,
+            expected_asset_version=body.expected_revision,
             expected_source_payload_checksum=body.expected_source_payload_checksum,
         ),
         SkillVersionResponse,
@@ -1951,7 +2050,7 @@ async def import_project_skill_archive(
             filename=filename,
         )
         return SkillArchiveImportResponse(
-            item=_asset_item(result.asset),
+            item=_current_version_asset_item(result.asset),
             version=SkillVersionItemResponse.model_validate(
                 _response_data(result.version),
             ),
@@ -1972,10 +2071,10 @@ def _skill_credential_binding_response(
 
 
 @project_router.get(
-    "/skills/{skill_id}/versions/{version_id}/publish-plan",
-    response_model=SkillPublishPlanResponse,
+    "/skills/{skill_id}/versions/{version_id}/activation-readiness",
+    response_model=SkillActivationReadinessResponse,
 )
-async def get_project_skill_publish_plan(
+async def get_project_skill_activation_readiness(
     skill_id: uuid.UUID,
     version_id: uuid.UUID,
     response: Response,
@@ -1989,7 +2088,7 @@ async def get_project_skill_publish_plan(
         value = await service.get_for_version(context, skill_id, version_id)
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        return SkillPublishPlanResponse(
+        return SkillActivationReadinessResponse(
             **_response_data(value),
             request_id=context.request_id,
         )
@@ -2119,7 +2218,10 @@ async def replace_project_skill_credential_bindings(
         raise_asset_domain(exc)
 
 
-@project_router.get("/agents", response_model=ScopedAssetListResponse)
+@project_router.get(
+    "/agents",
+    response_model=ScopedCurrentVersionAssetListResponse,
+)
 async def list_project_agents(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[AgentService, Depends(get_agent_service)],
@@ -2205,7 +2307,10 @@ async def replace_project_default_agent(
         raise_asset_domain(exc)
 
 
-@project_router.get("/skills", response_model=ScopedSkillAssetListResponse)
+@project_router.get(
+    "/skills",
+    response_model=ScopedCurrentVersionSkillAssetListResponse,
+)
 async def list_project_skills(
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[SkillService, Depends(get_skill_service)],
@@ -2313,14 +2418,24 @@ _BINDING_KINDS = {
 }
 
 
-def _binding_response(view, request_id: str) -> BindingResponse:
-    return BindingResponse(**vars(view), request_id=request_id)
+def _binding_response(
+    view,
+    request_id: str,
+) -> BindingResponse | CurrentBindingResponse:
+    values = vars(view)
+    if view.kind is AssetKind.MCP:
+        return BindingResponse(**values, request_id=request_id)
+    return CurrentBindingResponse(
+        **{key: value for key, value in values.items() if key != "version_id"},
+        current_version_id=view.version_id,
+        request_id=request_id,
+    )
 
 
 def _register_binding_routes(segment: str, kind: AssetKind) -> None:
     path = f"/system-{segment}-bindings"
 
-    async def enable(
+    async def enable_exact(
         body: SystemBindingRequest,
         context: Annotated[ProjectContext, Depends(project_asset_context)],
         service: Annotated[BindingService, Depends(get_binding_service)],
@@ -2329,6 +2444,21 @@ def _register_binding_routes(segment: str, kind: AssetKind) -> None:
             view = await service.enable(
                 context,
                 AssetSelection(kind, body.asset_id, body.version_id),
+                expected_binding_version=body.expected_binding_version,
+            )
+            return _binding_response(view, context.request_id)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+
+    async def enable_current(
+        body: CurrentSystemBindingRequest,
+        context: Annotated[ProjectContext, Depends(project_asset_context)],
+        service: Annotated[BindingService, Depends(get_binding_service)],
+    ):
+        try:
+            view = await service.enable(
+                context,
+                AssetSelection(kind, body.asset_id),
                 expected_binding_version=body.expected_binding_version,
             )
             return _binding_response(view, context.request_id)
@@ -2401,11 +2531,19 @@ def _register_binding_routes(segment: str, kind: AssetKind) -> None:
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
-    project_router.add_api_route(path, enable, methods=["POST"], response_model=BindingResponse, status_code=status.HTTP_201_CREATED, name=f"enable_system_{segment}_binding")
-    project_router.add_api_route(f"{path}/{{asset_id}}/disable", disable, methods=["POST"], response_model=BindingResponse, name=f"disable_system_{segment}_binding")
-    project_router.add_api_route(f"{path}/{{asset_id}}/upgrade", upgrade, methods=["POST"], response_model=BindingResponse, name=f"upgrade_system_{segment}_binding")
-    project_router.add_api_route(f"{path}/{{asset_id}}/rollback", rollback, methods=["POST"], response_model=BindingResponse, name=f"rollback_system_{segment}_binding")
+    response_model = BindingResponse if kind is AssetKind.MCP else CurrentBindingResponse
+    project_router.add_api_route(
+        path,
+        enable_exact if kind is AssetKind.MCP else enable_current,
+        methods=["POST"],
+        response_model=response_model,
+        status_code=status.HTTP_201_CREATED,
+        name=f"enable_system_{segment}_binding",
+    )
+    project_router.add_api_route(f"{path}/{{asset_id}}/disable", disable, methods=["POST"], response_model=response_model, name=f"disable_system_{segment}_binding")
     if kind is AssetKind.MCP:
+        project_router.add_api_route(f"{path}/{{asset_id}}/upgrade", upgrade, methods=["POST"], response_model=BindingResponse, name=f"upgrade_system_{segment}_binding")
+        project_router.add_api_route(f"{path}/{{asset_id}}/rollback", rollback, methods=["POST"], response_model=BindingResponse, name=f"rollback_system_{segment}_binding")
         project_router.add_api_route(
             f"{path}/{{asset_id}}/sync-current",
             sync_current_mcp,

@@ -100,7 +100,7 @@ async def _add_published_agent(
         soul="",
         model_ref="default",
         tool_groups=(),
-        skill_version_ids=(),
+        skill_refs=(),
         mcp_version_ids=(),
         payload_schema_version=3,
     )
@@ -111,7 +111,7 @@ async def _add_published_agent(
         slug=slug,
         display_name=slug,
         status="active",
-        version=1,
+        revision=1,
         created_by_user_id=str(actor_id),
     )
     session.add(agent)
@@ -121,7 +121,6 @@ async def _add_published_agent(
             id=version_id,
             agent_id=agent_id,
             version_number=1,
-            workflow_status="published",
             description=payload.description,
             agents_instructions=payload.agents_instructions,
             soul=payload.soul,
@@ -136,7 +135,7 @@ async def _add_published_agent(
         )
     )
     await session.flush()
-    agent.current_published_version_id = version_id
+    agent.current_version_id = version_id
     await session.flush()
     return agent_id
 

@@ -15,12 +15,10 @@ from app.gateway.routers.project_skill_builder import (
 from app.private_work.skill_builder_run_admission import SkillBuilderRunAdmissionService
 from app.shared_assets.errors import (
     AssetValidationFailed,
-    SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
-    SkillPublishBaseStale,
 )
 from app.shared_assets.skill_builder_agent_runtime import _SYSTEM_PROMPT
 from app.shared_assets.skill_design_service import (
@@ -111,9 +109,7 @@ def test_revision_errors_map_to_contract_status_codes() -> None:
         SkillDesignTargetUnsupported: 422,
         SkillDesignTargetSessionExists: 409,
         SkillDesignTargetDeleted: 409,
-        SkillDesignBaseStale: 409,
         SkillDesignNoChanges: 409,
-        SkillPublishBaseStale: 409,
     }
     for error_type, status_code in expected.items():
         with pytest.raises(HTTPException) as exc_info:

@@ -68,7 +68,12 @@ from app.shared_assets.errors import (
     SharedAssetError,
 )
 from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
-from app.shared_assets.models import AgentModelSettings, AgentPayload
+from app.shared_assets.models import (
+    AgentModelSettings,
+    AgentPayload,
+    AssetScope,
+    SkillAssetRef,
+)
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
     AgentDesignSessionRow,
@@ -161,7 +166,7 @@ class AgentDesignBlueprint:
     description: str
     model_ref: str
     tool_groups: tuple[str, ...]
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRef, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
     agents_instructions: str
     soul: str
@@ -1445,7 +1450,7 @@ class AgentDesignService:
             description=description,
             model_ref=DEFAULT_AGENT_MODEL_REF,
             tool_groups=tuple(dict.fromkeys(self._default_tool_groups_provider())),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
             agents_instructions="",
             soul="",
@@ -1460,10 +1465,10 @@ class AgentDesignService:
         context: ProjectContext,
         description: str,
     ) -> AgentDesignBlueprint:
-        skill_version_ids, mcp_version_ids = await AgentRepository(session).list_enabled_system_dependency_versions(context)
+        skill_refs, mcp_version_ids = await AgentRepository(session).list_enabled_system_dependencies(context)
         return replace(
             self._default_blueprint(description),
-            skill_version_ids=skill_version_ids,
+            skill_refs=skill_refs,
             mcp_version_ids=mcp_version_ids,
         )
 
@@ -1686,7 +1691,7 @@ class AgentDesignService:
         model_ref = blueprint.model_ref.strip()
         try:
             tool_groups = tuple(blueprint.tool_groups)
-            skill_version_ids = tuple(blueprint.skill_version_ids)
+            skill_refs = tuple(blueprint.skill_refs)
             mcp_version_ids = tuple(blueprint.mcp_version_ids)
         except TypeError:
             raise AssetValidationFailed(context.request_id) from None
@@ -1701,9 +1706,13 @@ class AgentDesignService:
             or len(set(tool_groups)) != len(tool_groups)
         ):
             raise AssetValidationFailed(context.request_id)
-        for values in (skill_version_ids, mcp_version_ids):
-            if any(not isinstance(value, uuid.UUID) for value in values) or len(set(values)) != len(values):
-                raise AssetValidationFailed(context.request_id)
+        if (
+            any(not isinstance(value, SkillAssetRef) or not isinstance(value.scope, AssetScope) or not isinstance(value.asset_id, uuid.UUID) for value in skill_refs)
+            or len(set(skill_refs)) != len(skill_refs)
+            or any(not isinstance(value, uuid.UUID) for value in mcp_version_ids)
+            or len(set(mcp_version_ids)) != len(mcp_version_ids)
+        ):
+            raise AssetValidationFailed(context.request_id)
         try:
             documents = AgentDesignDraft(
                 agents_instructions=blueprint.agents_instructions,
@@ -1727,7 +1736,7 @@ class AgentDesignService:
             description=description,
             model_ref=model_ref,
             tool_groups=tool_groups,
-            skill_version_ids=skill_version_ids,
+            skill_refs=skill_refs,
             mcp_version_ids=mcp_version_ids,
             agents_instructions=documents.agents_instructions,
             soul=documents.soul,
@@ -1749,7 +1758,7 @@ class AgentDesignService:
                 description=result.description,
                 model_ref=current.model_ref,
                 tool_groups=current.tool_groups,
-                skill_version_ids=current.skill_version_ids,
+                skill_refs=current.skill_refs,
                 mcp_version_ids=current.mcp_version_ids,
                 agents_instructions=result.documents.agents_instructions,
                 soul=result.documents.soul,
@@ -1843,13 +1852,13 @@ class AgentDesignService:
             description=blueprint.description,
             model_ref=blueprint.model_ref,
             tool_groups=blueprint.tool_groups,
-            skill_version_ids=blueprint.skill_version_ids,
+            skill_refs=blueprint.skill_refs,
             mcp_version_ids=blueprint.mcp_version_ids,
             agents_instructions=blueprint.agents_instructions,
             soul=blueprint.soul,
             identity=blueprint.identity,
             user_context=blueprint.user_context,
-            payload_schema_version=(3 if not blueprint.model_settings.is_empty else 2),
+            payload_schema_version=4,
             model_settings=blueprint.model_settings,
         )
 
@@ -2031,7 +2040,7 @@ class AgentDesignService:
             "description": blueprint.description,
             "model_ref": blueprint.model_ref,
             "tool_groups": list(blueprint.tool_groups),
-            "skill_version_ids": [str(value) for value in blueprint.skill_version_ids],
+            "skill_refs": [{"scope": value.scope.value, "asset_id": str(value.asset_id)} for value in blueprint.skill_refs],
             "mcp_version_ids": [str(value) for value in blueprint.mcp_version_ids],
             "agents_instructions": blueprint.agents_instructions,
             "soul": blueprint.soul,
@@ -2111,7 +2120,13 @@ class AgentDesignService:
                 description=str(raw["description"]),
                 model_ref=str(raw["model_ref"]),
                 tool_groups=tuple(str(item) for item in raw["tool_groups"]),
-                skill_version_ids=tuple(uuid.UUID(str(item)) for item in raw["skill_version_ids"]),
+                skill_refs=tuple(
+                    SkillAssetRef(
+                        scope=AssetScope(str(item["scope"])),
+                        asset_id=uuid.UUID(str(item["asset_id"])),
+                    )
+                    for item in raw["skill_refs"]
+                ),
                 mcp_version_ids=tuple(uuid.UUID(str(item)) for item in raw["mcp_version_ids"]),
                 agents_instructions=str(raw["agents_instructions"]),
                 soul=str(raw["soul"]),

@@ -778,12 +778,15 @@ export interface Translations {
     catalog: {
       systemAssets: string;
       systemAssetsDescription: string;
+      systemCurrentAssetsDescription: string;
+      systemMcpDescription: string;
       searchPlaceholder: string;
       filterAll: string;
       catalogReady: string;
       totalAssets: string;
       activeAssets: string;
       unpublishedAssets: string;
+      assetsWithoutCurrentVersion: string;
       latestUpdate: string;
       noUpdate: string;
       publicationFilter: string;
@@ -799,6 +802,9 @@ export interface Translations {
       lifecycleStatus: string;
       publicationStatus: string;
       published: string;
+      currentVersionStatus: string;
+      currentVersionAvailable: string;
+      currentVersionMissing: string;
       assetRevision: string;
       actions: string;
       viewDetails: string;
@@ -1876,7 +1882,7 @@ export interface Translations {
       mappingSaveFailed: string;
       mappingVersionChanged: string;
     };
-    publishDialog: {
+    activationDialog: {
       title: string;
       description: (version: number) => string;
       loading: string;
@@ -1896,7 +1902,7 @@ export interface Translations {
         required: number,
         invalid: number,
       ) => string;
-      configureBeforePublish: string;
+      configureBeforeActivation: string;
       configureCredentials: string;
       noApprove: string;
       approvalRequiredForActive: string;
@@ -1906,8 +1912,8 @@ export interface Translations {
       assetChanged: string;
       cancel: string;
       retry: string;
-      publishing: string;
-      publish: string;
+      activating: string;
+      activate: string;
       confirmOverwrite: string;
       discardTitle: string;
       discardDescription: string;
@@ -1918,7 +1924,7 @@ export interface Translations {
       incomplete: string;
       invalidBinding: string;
       staleSelection: string;
-      stalePublishBase: string;
+      staleActivationBase: string;
       invalidDeclaration: string;
       forbidden: string;
       credentialRequestOmitted: string;

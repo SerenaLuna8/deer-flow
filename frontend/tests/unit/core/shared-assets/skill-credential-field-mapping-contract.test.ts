@@ -4,8 +4,8 @@ import {
   getProjectSkillCredentialBindings,
   skillCredentialBindingsInputSchema,
   skillCredentialBindingsResponseSchema,
-  skillPublishAssetVersionInputSchema,
-  skillPublishPlanResponseSchema,
+  skillActivationInputSchema,
+  skillActivationReadinessResponseSchema,
   updateProjectSkillCredentialBindings,
 } from "@/core/shared-assets";
 
@@ -179,11 +179,11 @@ describe("Skill Credential field-mapping contract", () => {
     );
   });
 
-  test("publish plan is read-only preflight and publish rejects inline binding choices", () => {
+  test("activation readiness is read-only and activation rejects inline binding choices", () => {
     const plan = {
       skill_id: SKILL_ID,
       skill_version_id: VERSION_ID,
-      asset_version: 8,
+      revision: 8,
       payload_checksum: SHA,
       binding_revision: 3,
       secrets_autonomous: true,
@@ -198,12 +198,12 @@ describe("Skill Credential field-mapping contract", () => {
           mapping_status: "configured",
         },
       ],
-      request_id: "publish-plan",
+      request_id: "activation-readiness",
     };
-    expect(skillPublishPlanResponseSchema.parse(plan)).toEqual(plan);
+    expect(skillActivationReadinessResponseSchema.parse(plan)).toEqual(plan);
     expect(() =>
-      skillPublishAssetVersionInputSchema.parse({
-        expected_asset_version: 8,
+      skillActivationInputSchema.parse({
+        expected_revision: 8,
         expected_payload_checksum: SHA,
         expected_binding_revision: 3,
         credential_bindings: [

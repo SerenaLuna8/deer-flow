@@ -27,7 +27,12 @@ from deerflow.persistence.shared_assets import (
 
 @dataclass(frozen=True, slots=True)
 class AgentDesignAllowedAssetRecord:
-    """One exact dependency version safe to disclose to Agent Builder."""
+    """One enabled asset safe to disclose to Agent Builder.
+
+    ``version_id`` is the asset's Current Version at catalog-read time. Skill
+    blueprints persist ``(scope, asset_id)`` rather than this derived value;
+    MCP continues to use an exact version reference.
+    """
 
     kind: Literal["skill", "mcp"]
     scope: Literal["project", "system"]
@@ -249,11 +254,12 @@ class AgentDesignRepository:
         *,
         limit: int,
     ) -> tuple[AgentDesignAllowedAssetRecord, ...]:
-        """List exact active/published Skill and MCP versions usable by a project.
+        """List enabled Skill assets and exact MCP versions usable by a project.
 
-        Project assets resolve through their current published pointer. System
-        assets resolve through this project's enabled exact-version binding;
-        the global catalog alone never grants Builder visibility or use.
+        Skill rows resolve through their Current Version. System visibility
+        still requires the project's enabled asset binding; that binding no
+        longer pins a Skill version. MCP intentionally retains its release
+        workflow and exact-version binding.
         """
 
         self._require_context(context)
@@ -277,14 +283,13 @@ class AgentDesignRepository:
                 SkillVersionRow,
                 and_(
                     SkillVersionRow.skill_id == SkillRow.id,
-                    SkillRow.current_published_version_id == SkillVersionRow.id,
+                    SkillRow.current_version_id == SkillVersionRow.id,
                 ),
             )
             .where(
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
                 SkillRow.status == "active",
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
             )
         )
@@ -313,14 +318,13 @@ class AgentDesignRepository:
                 SkillVersionRow,
                 and_(
                     SkillVersionRow.skill_id == SkillRow.id,
-                    SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
                 ),
             )
             .where(
                 ProjectSystemSkillBindingRow.project_id == context.project_id,
                 ProjectSystemSkillBindingRow.enabled.is_(True),
                 SkillRow.status == "active",
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
             )
         )

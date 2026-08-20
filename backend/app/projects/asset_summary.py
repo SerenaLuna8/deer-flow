@@ -35,8 +35,7 @@ def project_asset_summary_columns(
             AgentVersionRow,
             and_(
                 AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.id == AgentRow.current_published_version_id,
-                AgentVersionRow.workflow_status == "published",
+                AgentVersionRow.id == AgentRow.current_version_id,
             ),
         )
         .where(
@@ -62,8 +61,8 @@ def project_asset_summary_columns(
             AgentVersionRow,
             and_(
                 AgentVersionRow.agent_id == AgentRow.id,
-                AgentVersionRow.id == ProjectSystemAgentBindingRow.agent_version_id,
-                AgentVersionRow.workflow_status == "published",
+                AgentVersionRow.id == AgentRow.current_version_id,
+                AgentVersionRow.version_number == 1,
             ),
         )
         .where(
@@ -81,8 +80,7 @@ def project_asset_summary_columns(
             SkillVersionRow,
             and_(
                 SkillVersionRow.skill_id == SkillRow.id,
-                SkillVersionRow.id == SkillRow.current_published_version_id,
-                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.id == SkillRow.current_version_id,
                 SkillVersionRow.revoked_at.is_(None),
             ),
         )
@@ -109,8 +107,8 @@ def project_asset_summary_columns(
             SkillVersionRow,
             and_(
                 SkillVersionRow.skill_id == SkillRow.id,
-                SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
-                SkillVersionRow.workflow_status == "published",
+                SkillVersionRow.id == SkillRow.current_version_id,
+                SkillVersionRow.version_number == 1,
                 SkillVersionRow.revoked_at.is_(None),
             ),
         )

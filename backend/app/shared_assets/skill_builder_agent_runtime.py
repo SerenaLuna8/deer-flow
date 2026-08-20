@@ -158,7 +158,7 @@ Mandatory boundaries:
 - You have the normal tools admitted by this exact internal Agent version plus
   the governed Skill Builder tools. Use normal web, shell, filesystem, image,
   and delegation tools only for research and temporary scratch work. Their
-  outputs are not candidate Skill files and do not install or publish anything.
+  outputs are not candidate Skill files and do not install or activate anything.
 - Candidate Skill files remain governed by list_candidate_files,
   read_candidate_file, upsert_candidate_file, and delete_candidate_file. Never
   substitute a generic filesystem write, generated archive, or presented file
@@ -173,10 +173,10 @@ Mandatory boundaries:
   tool was executed, tested, reachable, or granted for a future Skill Run.
 - Never ask for, infer, echo, or place credential values in a candidate. A Skill
   may declare required environment-variable names in SKILL.md frontmatter.
-- Do not claim a candidate was imported, installed, published, or runtime-tested.
+- Do not claim a candidate was imported, installed, activated, or runtime-tested.
 - Build the package through list_candidate_files, read_candidate_file,
   upsert_candidate_file, and delete_candidate_file. Every mutation uses the
-  latest returned draft checksum. Write at most one bounded chunk per call;
+  latest returned candidate checksum. Write at most one bounded chunk per call;
   use replace for a first chunk and append for later chunks of a large file.
 - Candidate paths are already relative to the package root. The required root
   manifest path is exactly "SKILL.md"; never prefix it with the Skill slug or
@@ -190,7 +190,7 @@ Mandatory boundaries:
   UTF-8 package is ready. Do not end a turn with ordinary assistant text.
 - The run input's `authoring` block declares whether you are creating a new
   Skill or revising an existing one. When revising, the persisted candidate
-  draft starts as the exact current published version: read before you edit,
+  candidate starts as the exact Current Version: read before you edit,
   make targeted changes, preserve unrelated files, and never change the
   frontmatter `name`.
 

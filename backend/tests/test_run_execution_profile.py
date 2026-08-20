@@ -8,7 +8,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
-from support.private_thread_seed import seed_private_thread_database
+from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
 
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
 from app.gateway.routers.private_work import _run_response
@@ -50,6 +50,7 @@ from app.reliability.execution import (
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.models import (
     AgentPayload,
     AssetKind,
@@ -807,7 +808,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
     run_id = str(uuid.uuid4())
     default_model_id = uuid.uuid4()
     default_version_id = uuid.uuid4()
-    selected_model_id = uuid.uuid4()
+    selected_model_id = uuid.UUID(TEST_MODEL_REF)
     selected_version_id = uuid.uuid4()
     selected_name = str(selected_model_id)
     try:
@@ -903,23 +904,26 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
             )
             generation = int((await session.execute(text("SELECT generation FROM asset_catalog_state WHERE id=1"))).scalar_one())
 
+        resolved_payload = AgentPayload(
+            description="",
+            soul="thread agent",
+            model_ref=TEST_MODEL_REF,
+            model_settings=AgentModelSettings(),
+            tool_groups=(),
+            skill_refs=(),
+            mcp_version_ids=(),
+            payload_schema_version=4,
+        )
         resolved = ResolvedAgentSnapshot(
             kind=AssetKind.AGENT,
             scope=AssetScope.PROJECT,
             asset_id=seed.project_agent_id,
             version_id=agent_version.id,
-            checksum=agent_version.payload_checksum,
+            checksum=agent_payload_checksum(resolved_payload),
             catalog_generation=generation,
             dependency_version_ids=(),
-            payload=AgentPayload(
-                description="",
-                soul="thread agent",
-                model_ref="default",
-                model_settings=AgentModelSettings(),
-                tool_groups=(),
-                skill_version_ids=(),
-                mcp_version_ids=(),
-            ),
+            skill_version_ids=(),
+            payload=resolved_payload,
         )
         repository = RunSnapshotRepository(
             seed.factory,
@@ -965,23 +969,60 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
         assert row.model_config_id == selected_model_id
         assert row.model_config_version_id == selected_version_id
 
+        incompatible_version_id = uuid.uuid4()
+        incompatible_payload = AgentPayload(
+            description=resolved.payload.description,
+            soul=resolved.payload.soul,
+            model_ref=resolved.payload.model_ref,
+            model_settings=AgentModelSettings(max_tokens=64),
+            tool_groups=resolved.payload.tool_groups,
+            skill_refs=resolved.payload.skill_refs,
+            mcp_version_ids=resolved.payload.mcp_version_ids,
+            payload_schema_version=4,
+        )
+        incompatible_checksum = agent_payload_checksum(incompatible_payload)
+        async with seed.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    """INSERT INTO agent_versions
+                       (id,agent_id,version_number,description,soul,model_ref,
+                        model_settings,tool_groups,supersedes_version_id,
+                        payload_checksum,created_by_user_id,agents_instructions,
+                        identity,user_context,payload_schema_version)
+                       SELECT :id,agent_id,2,description,soul,model_ref,
+                              CAST(:model_settings AS jsonb),tool_groups,id,
+                              :checksum,created_by_user_id,agents_instructions,
+                              identity,user_context,4
+                       FROM agent_versions WHERE id=:current_id""",
+                ),
+                {
+                    "id": incompatible_version_id,
+                    "model_settings": '{"max_tokens":64}',
+                    "checksum": incompatible_checksum,
+                    "current_id": resolved.version_id,
+                },
+            )
+            await session.execute(
+                text(
+                    """UPDATE agents
+                       SET current_version_id=:version_id,revision=revision+1
+                       WHERE id=:agent_id""",
+                ),
+                {
+                    "version_id": incompatible_version_id,
+                    "agent_id": seed.project_agent_id,
+                },
+            )
         incompatible_agent = ResolvedAgentSnapshot(
             kind=resolved.kind,
             scope=resolved.scope,
             asset_id=resolved.asset_id,
-            version_id=resolved.version_id,
-            checksum=resolved.checksum,
+            version_id=incompatible_version_id,
+            checksum=incompatible_checksum,
             catalog_generation=resolved.catalog_generation,
             dependency_version_ids=resolved.dependency_version_ids,
-            payload=AgentPayload(
-                description=resolved.payload.description,
-                soul=resolved.payload.soul,
-                model_ref=resolved.payload.model_ref,
-                model_settings=AgentModelSettings(max_tokens=64),
-                tool_groups=resolved.payload.tool_groups,
-                skill_version_ids=resolved.payload.skill_version_ids,
-                mcp_version_ids=resolved.payload.mcp_version_ids,
-            ),
+            skill_version_ids=resolved.skill_version_ids,
+            payload=incompatible_payload,
         )
         with pytest.raises(
             PrivateWorkRunExecutionProfileUnsupported,

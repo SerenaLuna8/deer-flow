@@ -28,6 +28,7 @@ from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
 from app.shared_assets.resolver import ProjectAssetResolver, _ResolvedRecord
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillVersionView
+from app.shared_assets.version_relation import VersionRelation
 from deerflow.persistence.shared_assets import (
     ProjectSystemSkillBindingRow,
     SkillRow,
@@ -37,7 +38,7 @@ from deerflow.persistence.shared_assets import (
 
 
 def test_system_skill_version_revocation_is_a_first_class_persisted_contract() -> None:
-    """Revocation must be durable and visible without rewriting published payloads."""
+    """Revocation is durable governance metadata on the immutable Current v1."""
 
     assert {
         "revoked_at",
@@ -173,8 +174,8 @@ def revocation_harness(
         slug="reviewed-system-skill",
         display_name="Reviewed System Skill",
         status="active",
-        current_published_version_id=version_id,
-        version=3,
+        current_version_id=version_id,
+        revision=3,
         source_key="builtin:skill:reviewed-system-skill",
         created_by_user_id=str(actor_id),
         created_at=now,
@@ -184,7 +185,6 @@ def revocation_harness(
         id=version_id,
         skill_id=asset_id,
         version_number=1,
-        workflow_status="published",
         description="Reviewed package",
         frontmatter={"name": asset.slug},
         compatibility=None,
@@ -220,7 +220,7 @@ def revocation_harness(
 
 
 @pytest.mark.asyncio
-async def test_global_admin_revokes_published_system_skill_version_once(
+async def test_global_admin_revokes_current_system_skill_v1_once(
     revocation_harness: tuple[skill_service_module.SkillService, _Store, _Session],
 ) -> None:
     service, store, session = revocation_harness
@@ -238,9 +238,8 @@ async def test_global_admin_revokes_published_system_skill_version_once(
     assert revoked.revocation_reason_code == "security"
     assert revoked.governance_status == "revoked"
     assert revoked.binding_eligible is False
-    assert store.record.row.workflow_status == "published"
-    assert store.asset.current_published_version_id == store.record.row.id
-    assert store.asset.version == 3
+    assert store.asset.current_version_id == store.record.row.id
+    assert store.asset.revision == 3
     assert session.flush_count == 1
     assert [event["action"] for event in store.governance] == ["skill.version.revoke"]
 
@@ -258,12 +257,15 @@ async def test_global_admin_revokes_published_system_skill_version_once(
         )
 
 
-def test_nonrevoked_published_version_is_binding_eligible(
+def test_nonrevoked_current_version_is_binding_eligible(
     revocation_harness: tuple[skill_service_module.SkillService, _Store, _Session],
 ) -> None:
     service, store, _session = revocation_harness
 
-    version = service._version_view(store.record)  # noqa: SLF001 - response contract
+    version = service._version_view(  # noqa: SLF001 - response contract
+        store.record,
+        relation=VersionRelation.CURRENT,
+    )
 
     assert version.governance_status == "active"
     assert version.revoked_at is None
@@ -272,7 +274,7 @@ def test_nonrevoked_published_version_is_binding_eligible(
 
 
 @pytest.mark.asyncio
-async def test_system_skill_revocation_rejects_stale_or_unpublished_target(
+async def test_system_skill_revocation_rejects_stale_revision_or_noncurrent_target(
     revocation_harness: tuple[skill_service_module.SkillService, _Store, _Session],
 ) -> None:
     service, store, session = revocation_harness
@@ -285,11 +287,11 @@ async def test_system_skill_revocation_rejects_stale_or_unpublished_target(
             store.record.row.id,
             expected_asset_version=2,
         )
-    assert store.asset.version == 3
+    assert store.asset.revision == 3
     assert store.record.row.revoked_at is None
     assert session.flush_count == 0
 
-    store.record.row.workflow_status = "draft"
+    store.asset.current_version_id = uuid.uuid4()
     with pytest.raises(AssetConflict):
         await service.revoke_version(
             actor,
@@ -297,7 +299,7 @@ async def test_system_skill_revocation_rejects_stale_or_unpublished_target(
             store.record.row.id,
             expected_asset_version=3,
         )
-    assert store.asset.version == 3
+    assert store.asset.revision == 3
     assert store.record.row.revoked_at is None
     assert session.flush_count == 0
 
@@ -317,7 +319,7 @@ async def test_system_skill_revocation_reason_is_a_closed_contract(
             reason_code="free-form incident details",  # type: ignore[arg-type]
         )
 
-    assert store.asset.version == 3
+    assert store.asset.revision == 3
     assert store.record.row.revoked_at is None
     assert store.record.row.revocation_reason_code is None
     assert session.flush_count == 0
@@ -353,7 +355,7 @@ async def test_system_skill_revocation_requires_global_governance_actor(
             expected_asset_version=3,
         )
 
-    assert store.asset.version == 3
+    assert store.asset.revision == 3
     assert store.record.row.revoked_at is None
     assert session.flush_count == 0
 
@@ -449,6 +451,14 @@ class _DisableBindingRepository:
         assert for_update is True
         return self.row
 
+    async def current_version_id(
+        self,
+        _actor: object,
+        _kind: AssetKind,
+        _asset_id: uuid.UUID,
+    ) -> uuid.UUID:
+        return _Repository.store.record.row.id
+
 
 class _BindingGovernanceSink:
     async def append_project(self, _session: _Session, **_kwargs: object) -> None:
@@ -456,7 +466,7 @@ class _BindingGovernanceSink:
 
 
 @pytest.mark.asyncio
-async def test_existing_binding_to_revoked_version_can_still_be_disabled(
+async def test_existing_binding_to_revoked_system_skill_can_still_be_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _project_admin()
@@ -465,7 +475,6 @@ async def test_existing_binding_to_revoked_version_can_still_be_disabled(
     row = ProjectSystemSkillBindingRow(
         project_id=actor.project_id,
         system_skill_id=asset_id,
-        skill_version_id=uuid.uuid4(),
         enabled=True,
         version=7,
         created_by_user_id=str(actor.user_id),
@@ -493,10 +502,13 @@ async def test_existing_binding_to_revoked_version_can_still_be_disabled(
 
     assert disabled.enabled is False
     assert disabled.version == 8
-    assert row.skill_version_id is not None
+    assert row.system_skill_id == asset_id
 
 
 class _RowsResult:
+    def scalars(self) -> _RowsResult:
+        return self
+
     def all(self) -> list[object]:
         return []
 

@@ -500,14 +500,13 @@ class ProjectAuthoringCatalogRepository:
                 SkillVersionRow,
                 and_(
                     SkillVersionRow.skill_id == SkillRow.id,
-                    SkillRow.current_published_version_id == SkillVersionRow.id,
+                    SkillRow.current_version_id == SkillVersionRow.id,
                 ),
             )
             .where(
                 SkillRow.scope == "project",
                 SkillRow.project_id == context.project_id,
                 SkillRow.status == "active",
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
             )
         )
@@ -536,14 +535,13 @@ class ProjectAuthoringCatalogRepository:
                 SkillVersionRow,
                 and_(
                     SkillVersionRow.skill_id == SkillRow.id,
-                    SkillVersionRow.id == ProjectSystemSkillBindingRow.skill_version_id,
+                    SkillVersionRow.id == SkillRow.current_version_id,
                 ),
             )
             .where(
                 ProjectSystemSkillBindingRow.project_id == context.project_id,
                 ProjectSystemSkillBindingRow.enabled.is_(True),
                 SkillRow.status == "active",
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
             )
         )

@@ -38,7 +38,7 @@ describe("Skill secret declaration editor product states", () => {
       "已从 SKILL.md 识别 2 个环境变量",
     );
     expect(skillSecretFeedbackMessage(copy, "draft", 2)).toBe(
-      "已写入 SKILL.md 草稿，尚未保存",
+      "已写入 SKILL.md，修改尚未保存",
     );
   });
 

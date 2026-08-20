@@ -23,7 +23,7 @@ import {
   useProjectAssets,
   listProjectAssetVersions,
   projectAssetVersionsKey,
-  type EnableSystemBindingInput,
+  type EnableCurrentSystemBindingInput,
   type ProjectDefaultAgent,
   type ProjectAssetItem,
   type ProjectAssetList,
@@ -76,7 +76,7 @@ export function configurableSystemAgents(
   return catalog.system_items.filter(
     (item) =>
       item.status === "active" &&
-      item.current_published_version_id !== null &&
+      item.current_version_id !== null &&
       !isMainProjectAgent(item) &&
       item.binding?.enabled !== true &&
       item.capabilities.includes("shared_assets.execute") &&
@@ -90,15 +90,12 @@ function selectedAgentVersion(
   agent: ProjectAssetItem,
   history: VersionHistoryResponse,
 ) {
-  const versionId =
-    agent.scope === "system" && agent.binding?.enabled
-      ? agent.binding.version_id
-      : agent.current_published_version_id;
+  const versionId = agent.current_version_id;
   return history.data.find(
     (version) =>
       "agent_id" in version &&
       version.id === versionId &&
-      version.workflow_status === "published",
+      version.relation === "current",
   );
 }
 
@@ -113,19 +110,19 @@ export function agentMcpDependencyAvailability(
 export function systemAgentDependencyAvailability(
   agent: ProjectAssetItem,
   history: VersionHistoryResponse | undefined,
-  boundSkillVersionIds: ReadonlySet<string>,
+  boundSkillAssetRefs: ReadonlySet<string>,
   boundMcpVersionIds: ReadonlySet<string>,
 ): SystemAgentDependencyAvailability {
   if (!history) return "loading";
   const currentVersion = history.data.find(
     (version) =>
       "agent_id" in version &&
-      version.id === agent.current_published_version_id &&
-      version.workflow_status === "published",
+      version.id === agent.current_version_id &&
+      version.relation === "current",
   );
   if (!currentVersion || !("agent_id" in currentVersion)) return "blocked";
-  return currentVersion.skill_version_ids.every((id) =>
-    boundSkillVersionIds.has(id),
+  return currentVersion.skill_refs.every((ref) =>
+    boundSkillAssetRefs.has(`${ref.scope}:${ref.asset_id}`),
   ) && currentVersion.mcp_version_ids.every((id) => boundMcpVersionIds.has(id))
     ? "ready"
     : "blocked";
@@ -137,8 +134,21 @@ function boundSystemVersionIds(
   return new Set(
     (catalog?.system_items ?? [])
       .filter((item) => item.binding?.enabled === true)
-      .map((item) => item.binding?.version_id)
+      .map((item) => item.binding?.current_version_id)
       .filter((id): id is string => Boolean(id)),
+  );
+}
+
+function boundSystemSkillAssetRefs(
+  catalog: ProjectAssetList | undefined,
+): Set<string> {
+  return new Set(
+    (catalog?.system_items ?? [])
+      .filter(
+        (item) =>
+          item.binding?.enabled === true && item.current_version_id !== null,
+      )
+      .map((item) => `system:${item.id}`),
   );
 }
 
@@ -151,12 +161,12 @@ export function executableProjectAgents(
     item.capabilities.includes("shared_assets.execute");
   return [
     ...catalog.project_items.filter(
-      (item) => executable(item) && item.current_published_version_id !== null,
+      (item) => executable(item) && item.current_version_id !== null,
     ),
     ...catalog.system_items.filter(
       (item) =>
         executable(item) &&
-        item.current_published_version_id !== null &&
+        item.current_version_id !== null &&
         (item.binding?.enabled === true || isMainProjectAgent(item)),
     ),
   ];
@@ -171,7 +181,7 @@ export function mainProjectAgent(
       (item) =>
         isMainProjectAgent(item) &&
         item.status === "active" &&
-        item.current_published_version_id !== null &&
+        item.current_version_id !== null &&
         item.capabilities.includes("shared_assets.execute"),
     ) ?? null
   );
@@ -228,7 +238,7 @@ export function resolveProjectDefaultAgent(
     (item) =>
       item.id === setting.agent_asset_id &&
       item.status === "active" &&
-      item.current_published_version_id !== null &&
+      item.current_version_id !== null &&
       item.capabilities.includes("shared_assets.execute"),
   );
   return agent
@@ -312,7 +322,7 @@ type EnableSystemAgentAndCreateProjectChatDependencies = Omit<
 > & {
   agent: ProjectAssetItem;
   systemAgentUnavailableMessage: string;
-  enableBinding: (input: EnableSystemBindingInput) => Promise<unknown>;
+  enableBinding: (input: EnableCurrentSystemBindingInput) => Promise<unknown>;
 };
 
 export async function enableSystemAgentAndCreateProjectChat({
@@ -324,13 +334,12 @@ export async function enableSystemAgentAndCreateProjectChat({
   if (
     agent.scope !== "system" ||
     agent.status !== "active" ||
-    agent.current_published_version_id === null
+    agent.current_version_id === null
   ) {
     throw new Error(systemAgentUnavailableMessage);
   }
   await enableBinding({
     asset_id: agent.id,
-    version_id: agent.current_published_version_id,
     ...(agent.binding
       ? { expected_binding_version: agent.binding.version }
       : {}),
@@ -721,9 +730,11 @@ export function ProjectAgentSelectorDialog({
   const blockedRuntimeAgents = candidateAgents.filter(
     (_agent, index) => candidateDependencyAvailability[index] === "blocked",
   );
-  const boundSkillVersionIds = useMemo(
+  const boundSkillAssetRefs = useMemo(
     () =>
-      boundSystemVersionIds(skillAssets.data as ProjectAssetList | undefined),
+      boundSystemSkillAssetRefs(
+        skillAssets.data as ProjectAssetList | undefined,
+      ),
     [skillAssets.data],
   );
   const boundMcpVersionIds = useMemo(() => {
@@ -737,7 +748,7 @@ export function ProjectAgentSelectorDialog({
     systemAgentDependencyAvailability(
       agent,
       systemAgentHistories[index]?.data,
-      boundSkillVersionIds,
+      boundSkillAssetRefs,
       boundMcpVersionIds,
     ),
   );

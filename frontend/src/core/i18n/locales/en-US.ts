@@ -1170,12 +1170,17 @@ export const enUS: Translations = {
       systemAssets: "System assets",
       systemAssetsDescription:
         "System assets are shared read-only. Project bindings pin an explicit version and never upgrade automatically.",
+      systemCurrentAssetsDescription:
+        "System Agents and Skills are shared read-only. Projects bind the asset and runtime resolves its Current Version.",
+      systemMcpDescription:
+        "System MCPs are shared read-only. Project bindings pin an explicit configuration and never switch automatically.",
       searchPlaceholder: "Search by name or identifier",
       filterAll: "All statuses",
       catalogReady: "Catalog loaded",
       totalAssets: "Total assets",
       activeAssets: "Active assets",
       unpublishedAssets: "Unpublished assets",
+      assetsWithoutCurrentVersion: "Without Current Version",
       latestUpdate: "Latest update",
       noUpdate: "No update yet",
       publicationFilter: "Publication status",
@@ -1191,6 +1196,9 @@ export const enUS: Translations = {
       lifecycleStatus: "Status",
       publicationStatus: "Publication",
       published: "Published",
+      currentVersionStatus: "Version status",
+      currentVersionAvailable: "Current Version available",
+      currentVersionMissing: "No Current Version",
       assetRevision: "Asset revision",
       actions: "Actions",
       viewDetails: "View details",
@@ -1218,7 +1226,7 @@ export const enUS: Translations = {
       manageBinding: "Manage binding",
       projectAssets: "Project assets",
       projectAgentDescription:
-        "Owned by this project. Agent settings are maintained on the project Agent page and take effect after saving.",
+        "Owned by this project. Saving Agent settings creates a Candidate Version; activating it makes it Current.",
       projectVersionedDescription:
         "Owned by this project. Content changes create immutable new versions.",
       noProjectAssets: "This project has no assets of this type.",
@@ -1743,7 +1751,7 @@ export const enUS: Translations = {
         slugConflict:
           "An Agent in this project already uses this name. Change the Agent name in the blueprint and retry.",
         unresolvedConflict:
-          "The blueprint still has unresolved conflicts. Continue the conversation and have the Agent regenerate it before creating the draft.",
+          "The blueprint still has unresolved conflicts. Continue the conversation and have the Agent regenerate it before creating the Agent.",
         sessionLimitExceeded:
           "You have reached the unfinished Agent design limit. Resume or cancel an existing design before starting another.",
         secretDetected:
@@ -1778,9 +1786,9 @@ export const enUS: Translations = {
         deleteAria: (name) => `Delete unfinished Agent: ${name}`,
         deleteTitle: "Delete unfinished Agent?",
         deleteDescription: (name) =>
-          `This deletes the design draft for “${name}”, so it cannot be continued. Existing Agents are not affected.`,
+          `This deletes the design session for “${name}”, so it cannot be continued. Existing Agents are not affected.`,
         deleting: "Deleting…",
-        confirmDelete: "Delete draft",
+        confirmDelete: "Delete session",
       },
       blueprint: {
         result: "Generated result",
@@ -1805,11 +1813,11 @@ export const enUS: Translations = {
         conflictsTitle: "Conflicts to resolve",
         conflictDocuments: "Related documents",
         blockingConflictHint:
-          "Continue the conversation so the Agent regenerates the blueprint. The draft cannot be created until all red conflicts disappear.",
+          "Continue the conversation so the Agent regenerates the blueprint. The Agent cannot be created until all red conflicts disappear.",
         createHint:
-          "Creates an inactive Agent draft. An administrator must publish it before activation.",
+          "Saves immutable candidate version v1. Activate it before it can run.",
         creating: "Creating…",
-        createDraft: "Create Agent draft",
+        createDraft: "Create Agent",
         validation: {
           descriptionRequired: "Agent description is required",
           modelRequired: "Agent model is required",
@@ -1866,7 +1874,7 @@ export const enUS: Translations = {
       sectionAria: "Agent instruction documents",
       title: "Instruction documents",
       draftDescription:
-        "Edit the four fixed Markdown documents and save a new Agent draft version.",
+        "Edit the four fixed Markdown documents and save an immutable Agent Candidate Version.",
       blueprintDescription:
         "Review and edit the four fixed Markdown documents.",
       edit: "Edit",
@@ -1877,24 +1885,24 @@ export const enUS: Translations = {
       empty: "No content",
       editFile: (name) => `Edit ${name}`,
       draftSaveHint:
-        "Saving creates a new Agent draft version. An administrator must still publish it.",
+        "Saving creates a new Agent Candidate Version without activating it.",
       blueprintSaveHint:
-        "Saving updates the current blueprint before an Agent draft can be created.",
+        "Saving updates the current blueprint before the Agent can be created.",
       discard: "Discard changes",
       saving: "Saving…",
-      save: "Save draft",
+      save: "Save Candidate Version",
       permissionLost:
         "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
       recoveryPreserved:
-        "The server draft changed. Local changes were preserved; review them before saving again.",
+        "The server version changed. Local changes were preserved; review them before saving again.",
       recoverySynced:
-        "The server draft changed and the latest version has been loaded.",
+        "The server version changed and the latest version has been loaded.",
       recoveryFailed:
-        "The latest draft could not be recovered. Local changes were preserved.",
-      recoveryReloading: "Recovering the latest draft…",
-      invalidResponse: "The server returned an invalid Agent draft version.",
+        "The latest version could not be loaded. Local changes were preserved.",
+      recoveryReloading: "Loading the latest version…",
+      invalidResponse: "The server returned an invalid Agent version.",
       conflictDetected: "A version conflict was detected.",
-      reloadRequired: "Reload the latest draft before editing.",
+      reloadRequired: "Reload the latest version before editing.",
       reloading: "Reloading…",
       reload: "Reload",
       discardTitle: "Discard instruction changes?",
@@ -1908,13 +1916,14 @@ export const enUS: Translations = {
         inactive: "Asset is inactive",
         bindingDisabled: "System binding is disabled",
         bindingMissing: "System binding is missing",
-        noPublishedVersion: "No published version",
+        noPublishedVersion: "No Current Version",
       },
       remediation: {
         restoreSystemAsset: "Ask an administrator to restore the system asset",
         enableSystemBinding:
           "Ask an administrator to enable the system binding",
-        publishVersion: "Publish a version of this project asset first",
+        publishVersion:
+          "Activate a Candidate Version of this project asset first",
         activateProjectAsset: "Activate this project asset first",
       },
       explanationSeparator: "; ",
@@ -1929,17 +1938,17 @@ export const enUS: Translations = {
       permissionLost:
         "Editing permission was revoked. Local changes are preserved but cannot be saved yet.",
       recoverySynced:
-        "The server draft changed and the latest version has been loaded.",
+        "The server version changed and the latest version has been loaded.",
       recoveryPreserved:
-        "The server draft changed. Local changes were preserved; review them before saving again.",
+        "The server version changed. Local changes were preserved; review them before saving again.",
       recoveryFailed:
-        "The latest draft could not be recovered. Local changes were preserved.",
-      recoveryReloading: "Recovering the latest draft…",
+        "The latest version could not be loaded. Local changes were preserved.",
+      recoveryReloading: "Loading the latest version…",
       conflictDetected: "A version conflict was detected.",
-      reloadRequired: "Reload the latest draft before editing.",
+      reloadRequired: "Reload the latest version before editing.",
       reloading: "Reloading…",
       permissionBlocked: "Your account cannot edit Agent capabilities.",
-      preparingDraft: "Preparing the latest draft…",
+      preparingDraft: "Preparing the Candidate Version…",
       catalogLoading: "Loading capability catalog…",
       catalogLoadFailed: "Capability catalog could not be loaded.",
       validatingMcp: "Validating MCP dependencies…",
@@ -1948,7 +1957,7 @@ export const enUS: Translations = {
       description:
         "Choose the tool groups, Skills, and MCPs this Agent can use.",
       saving: "Saving…",
-      saveDraft: "Save draft",
+      saveDraft: "Save Candidate Version",
       edit: "Edit",
       builtinGroups: "Built-in tool groups",
       unchanged: "Unchanged",
@@ -1963,7 +1972,7 @@ export const enUS: Translations = {
     catalog: {
       title: "Agents",
       authoringLoadFailed: "The Agent authoring base could not be loaded.",
-      authoringLoading: "Loading the latest Agent draft…",
+      authoringLoading: "Loading the Agent authoring base…",
       detailTabsAria: "Agent detail tabs",
       instructionsTab: "Instructions",
       capabilitiesTab: "Capabilities",
@@ -1973,7 +1982,8 @@ export const enUS: Translations = {
       chatForbidden: "Your account cannot create chats in this project.",
       unavailable: "This Agent is unavailable.",
       executeForbidden: "Your account cannot run Agents.",
-      publishRequired: "The Agent must be published and active first.",
+      publishRequired:
+        "The Agent needs a Current Version and the asset must be active.",
       defaultAdminOnly: "Only administrators can set the default Agent.",
       defaultUnavailable: "This Agent cannot be set as default.",
       systemDefaultUnavailable:
@@ -2099,7 +2109,7 @@ export const enUS: Translations = {
       unsaved: "Save or discard the current changes first",
       loading: "The selected version is still loading",
       revoked: "Revoked System Skill versions cannot be exported",
-      unpublished: "Only published System Skill versions can be exported",
+      unpublished: "Only the System Skill Current Version can be exported",
       noVersion: "Select a persisted version first",
     },
     secrets: {
@@ -2110,10 +2120,10 @@ export const enUS: Translations = {
       title: "1. Environment variable declarations",
       viewSource: "View SKILL.md",
       checking: "Checking SKILL.md…",
-      syncing: "Writing to the SKILL.md draft…",
+      syncing: "Writing unsaved SKILL.md changes…",
       recognized: (count) =>
         `${count} environment variable${count === 1 ? "" : "s"} recognized from SKILL.md`,
-      draftUpdated: "Written to the SKILL.md draft; not saved yet",
+      draftUpdated: "Written to SKILL.md; changes are not saved yet",
       retry: "Check again",
       sourceStale:
         "SKILL.md changed while it was being processed. Your current edits were preserved; try again.",
@@ -2133,7 +2143,7 @@ export const enUS: Translations = {
       shorthand: (count) =>
         `${count} legacy shorthand declaration${count === 1 ? " was" : "s were"} found. They are normalized only after an actual edit.`,
       empty:
-        "No environment variables are declared yet. Add one to update the current SKILL.md draft.",
+        "No environment variables are declared yet. Add one to update the unsaved SKILL.md changes.",
       beginEdit: "Create a new version and add a variable",
       optional: "Optional",
       required: "Required",
@@ -2167,7 +2177,7 @@ export const enUS: Translations = {
       saveBlocked:
         "Wait for the SKILL.md check to finish or fix the environment variable declaration",
       publishBlocked:
-        "Wait for the SKILL.md check to finish and fix the environment variable declaration before publishing.",
+        "Wait for the SKILL.md check to finish and fix the environment variable declaration before activation.",
       credentialLabel: "Project Credential",
       noCompatibleCredential: "No compatible Credential",
       optionalUnbound: "Leave unbound (optional)",
@@ -2196,7 +2206,7 @@ export const enUS: Translations = {
       mappingReadOnly:
         "You can edit the declarations in SKILL.md, but a member with Credential approval permission must configure their project Credential sources.",
       mappingHistoricalReadOnly:
-        "Historical published versions are read-only. Project Skill Drafts and the current published version support project Credential mappings.",
+        "Historical Versions are read-only. Candidate Versions and the Current Version support project Credential mappings.",
       mappingRefreshPreserved:
         "Server mappings changed. Your unsaved choices were preserved and merged with unchanged rows. Review them before saving or discarding.",
       mappingReload: "Reload",
@@ -2223,45 +2233,45 @@ export const enUS: Translations = {
       mappingVersionChanged:
         "The current version changed. Your unsaved choices are still preserved, but saving is paused; reload and confirm them again.",
     },
-    publishDialog: {
-      title: "Publish Skill version",
+    activationDialog: {
+      title: "Activate Skill Candidate Version",
       description: (version) =>
-        `Publish version ${version}. This dialog only checks the exact version's environment variables and project Credential mappings; it does not collect Credential choices.`,
-      loading: "Running publish checks…",
+        `Activate version ${version}. This dialog checks the exact version's environment variables and project Credential mappings.`,
+      loading: "Checking runtime requirements…",
       targetVersion: "Target version: ",
       bindingRevision: "Binding revision: ",
       noRequirements:
-        "The target version declares no environment variables and can be published directly.",
+        "The target version declares no environment variables and can be activated directly.",
       bindingsTitle: "Version Credential bindings",
       required: "Required",
       optional: "Optional",
       statusConfigured: "Configured",
       statusMissing: "Not configured",
       statusInvalid: "Needs repair",
-      preflightReady: "Publish checks passed",
-      preflightBlocked: "Publish checks did not pass",
+      preflightReady: "Runtime requirement checks passed",
+      preflightBlocked: "Runtime requirement checks did not pass",
       preflightSummary: (configuredRequired, required, invalid) =>
         `${configuredRequired}/${required} required mappings configured; ${invalid} invalid mapping${invalid === 1 ? "" : "s"}.`,
-      configureBeforePublish:
-        "Return to Runtime credentials, complete required mappings, and repair invalid mappings before publishing.",
+      configureBeforeActivation:
+        "Return to Runtime credentials, complete required mappings, and repair invalid mappings before activation.",
       configureCredentials: "Go to Runtime credentials",
       noApprove:
         "You cannot choose Credential sources. Ask a member with Credential approval permission to complete the mappings in Runtime credentials first.",
       approvalRequiredForActive:
-        "Every public Draft must have all required mappings configured and invalid mappings repaired before publish. Ask a Credential approver to configure them first.",
+        "Every Candidate Version must have all required mappings configured and invalid mappings repaired before activation. Ask an Admin to configure them first.",
       optionalUnbound: (count) =>
         `${count} optional variable${count === 1 ? " is" : "s are"} unbound and will not be injected at runtime.`,
       staleBase:
-        "This draft is based on an older published version. Confirm again to move the live pointer using the latest publish plan; compatible selections were preserved.",
+        "This version is not a forward descendant of the Current Version and cannot be activated.",
       credentialChanged:
-        "Credentials changed. Compatible selections were preserved; review them and publish again.",
-      assetChanged: "The Skill changed. Review the latest publish plan.",
+        "Credentials changed. Compatible selections were preserved; review them and activate again.",
+      assetChanged: "The Skill changed. Check its runtime requirements again.",
       cancel: "Cancel",
       retry: "Check again",
-      publishing: "Publishing…",
-      publish: "Publish version",
-      confirmOverwrite: "Confirm overwrite and publish",
-      discardTitle: "Discard unpublished Credential selections?",
+      activating: "Activating…",
+      activate: "Activate version",
+      confirmOverwrite: "Activate version",
+      discardTitle: "Discard unsaved Credential selections?",
       discardDescription:
         "Closing clears selections made in this dialog. The Skill version and existing bindings are unchanged.",
       continue: "Continue configuring",
@@ -2269,20 +2279,20 @@ export const enUS: Translations = {
       createdInvalid:
         "The Credential was created, but its returned version metadata is invalid.",
       createdIneligible:
-        "The Credential was created, but the latest publish check does not consider its version compatible. Check its fields and try again.",
+        "The Credential was created, but the latest runtime check does not consider its version compatible. Check its fields and try again.",
       incomplete:
         "Required environment variables for the active Skill are not fully bound. Complete the selections and try again.",
       invalidBinding:
-        "The selected Credential is incompatible with the Skill declaration. Refresh the publish check and try again.",
+        "The selected Credential is incompatible with the Skill declaration. Refresh the runtime check and try again.",
       staleSelection:
         "A Credential was rotated, suspended, or revoked. Available options were reloaded.",
-      stalePublishBase:
-        "This draft is based on an older published version. Confirm to overwrite and publish.",
+      staleActivationBase:
+        "This version is not a forward descendant of the Current Version and cannot be activated.",
       invalidDeclaration:
-        "The target version has an invalid environment variable declaration. Create a new draft and fix SKILL.md before publishing.",
-      forbidden: "You cannot publish this Skill.",
+        "The target version has an invalid environment variable declaration. Create a new version and fix SKILL.md before activation.",
+      forbidden: "You cannot activate this Skill.",
       credentialRequestOmitted:
-        "You cannot select Credentials, so this publish request will not submit bindings.",
+        "You cannot select Credentials, so this activation request will not submit bindings.",
     },
     builder: {
       errors: {
@@ -2314,15 +2324,15 @@ export const enUS: Translations = {
         targetDeletedStatus:
           "The target Skill was deleted; this revision cannot continue",
         noChanges:
-          "The draft matches the baseline exactly, so a new version is not needed. Edit a file before submitting.",
+          "The candidate files match the baseline exactly, so a new version is not needed. Edit a file before submitting.",
         baseStale:
-          "A newer version is already published. This revision is based on an older baseline. Confirm overwrite when you submit, then try again.",
+          "The Current Version changed. This revision cannot be saved; start a new revision session from the Current Version.",
         targetSessionExists:
           "This Skill already has an unfinished revision session. Continue or abandon it from the unfinished list above the Skill list.",
         targetUnsupported:
-          "The current published version cannot be opened for conversational revision (size or content is outside Builder support). Create a new version by editing files instead.",
+          "The Current Version cannot be opened for conversational revision (size or content is outside Builder support). Create a new version by editing files instead.",
         targetConflict:
-          "The Skill changed (it may have been deleted, archived, or unpublished). Refresh and try again.",
+          "The Skill changed (it may have been deleted, archived, or have no Current Version). Refresh and try again.",
         attachmentTooLarge: "Each attachment must be 256 KB or smaller.",
         attachmentNotUtf8: (name) => `“${name}” is not a UTF-8 text file.`,
         attachmentInvalidName:
@@ -2359,11 +2369,11 @@ export const enUS: Translations = {
         deleteTitleCreate: "Delete unfinished Skill?",
         deleteTitleRevise: "Delete unfinished revision?",
         deleteDescriptionCreate: (name) =>
-          `This deletes the design draft for “${name}”, so it cannot be continued. Existing Skills are not affected.`,
+          `This deletes the design session for “${name}”, so it cannot be continued. Existing Skills are not affected.`,
         deleteDescriptionRevise: (name) =>
-          `This deletes the revision draft for “${name}”, so it cannot be continued. Published Skills are not affected.`,
+          `This deletes the revision session for “${name}”, so it cannot be continued. Saved Skill versions are not affected.`,
         deleting: "Deleting…",
-        confirmDelete: "Delete draft",
+        confirmDelete: "Delete session",
       },
       revision: {
         button: "AI revise",
@@ -2381,12 +2391,12 @@ export const enUS: Translations = {
           "Your account cannot continue revising this Skill. Saved session content and candidate files remain available to view.",
         reviseIntroBefore: "Loaded",
         reviseIntroAfter:
-          "from the current published version. Describe what to change, or edit the candidate files on the right.",
+          "from the Current Version. Describe what to change, or edit the candidate files on the right.",
         createIntroBefore: "The new Skill is named",
         createIntroAfter:
           ". Describe its purpose, triggers, inputs and outputs, and any references or scripts it needs.",
         creatingSkill: "Creating Skill…",
-        creatingDraft: "Creating a new version draft…",
+        creatingDraft: "Creating a Candidate Version…",
         processing: "The Builder Agent is working…",
         composerAriaCreate: "Describe the Skill you want",
         composerAriaRevise: "Describe what to change",
@@ -2404,7 +2414,7 @@ export const enUS: Translations = {
         unsavedChanges: "Unsaved changes",
         agentRunning: "The Builder Agent is running",
         checkedCreate: "Checked; ready to create",
-        checkedRevise: "Checked; ready to create a draft version",
+        checkedRevise: "Checked; ready to save a Candidate Version",
         autosave: "Automatically saved; continue later",
         more: "More actions",
         abandonCreate: "Abandon this creation",
@@ -2455,7 +2465,7 @@ export const enUS: Translations = {
         acknowledgeWarnings: "I understand and accept the warnings above",
         checkSkill: "Check Skill",
         commitCreate: "Create Skill (disabled by default)",
-        commitRevise: "Create new version (unpublished)",
+        commitRevise: "Save Candidate Version",
       },
       activity: {
         run: {
@@ -2476,7 +2486,7 @@ export const enUS: Translations = {
         toolSteps: (count) => `· ${count} tool steps`,
         noToolSteps: "· No tool steps yet",
         outputLimit:
-          "This turn reached the model output limit. Candidate drafts that were written successfully are kept. Send “continue from the existing draft” below; the Builder will reread the draft and will not execute incomplete tool calls.",
+          "This turn reached the model output limit. Candidate files that were written successfully are kept. Send “continue from the existing candidate files” below; the Builder will reread them and will not execute incomplete tool calls.",
       },
       composer: {
         mode: {
@@ -2505,28 +2515,28 @@ export const enUS: Translations = {
       },
       dialogs: {
         commitTitleCreate: "Create Skill?",
-        commitTitleRevise: "Create a new version draft?",
+        commitTitleRevise: "Save Candidate Version?",
         commitDescriptionCreate: (project) =>
-          `This atomically creates and publishes version 1 in ${project}. The Skill stays disabled and is not added to any Agent automatically.`,
+          `This saves immutable Candidate Version v1 in ${project}. The Skill stays disabled and is not added to any Agent automatically.`,
         commitDescriptionRevise: (slug, version) =>
-          `This creates a new draft based on ${slug} v${version}. Publishing is what replaces the live version; the current Skill stays unchanged until then.`,
+          `This saves a new Candidate Version based on ${slug} v${version}. Activation makes it the Current Version; the running Skill is unchanged by saving.`,
         fileMetaCreate: (count) => `${count} files · disabled by default`,
-        fileMetaRevise: (count) => `${count} files · unpublished draft`,
+        fileMetaRevise: (count) => `${count} files · Candidate Version`,
         backToReview: "Back to review",
         creating: "Creating…",
         creatingVersion: "Creating new version…",
         confirmCreate: "Create",
         confirmCreateVersion: "Create new version",
-        staleTitle: "A newer version is already published",
+        staleTitle: "The Current Version changed",
         staleDescription: (version) =>
-          `This revision is based on v${version}, but the live version has moved on. Continuing creates an overwrite draft; the running version is unchanged until you publish.`,
-        confirmOverwrite: "Overwrite and create draft",
+          `This revision is based on v${version}, but the Current Version changed. Abandon this session and start a new one from the Current Version.`,
+        confirmOverwrite: "Back to Skills",
         abandonTitleCreate: "Abandon this Skill creation?",
         abandonTitleRevise: "Abandon this revision?",
         abandonDescriptionCreate:
           "This design session will end, the candidate files will be cleaned up, and it will leave the unfinished list.",
         abandonDescriptionRevise:
-          "This revision session will end and the candidate files will be cleaned up. Published Skills are not affected.",
+          "This revision session will end and the candidate files will be cleaned up. Saved Skill versions are not affected.",
         continueCreate: "Continue creating",
         continueRevise: "Continue revising",
         abandoning: "Abandoning…",
@@ -2539,21 +2549,21 @@ export const enUS: Translations = {
       },
       success: {
         withVersion: (version) =>
-          `Created draft version v${version}. Go publish it`,
-        withoutVersion: "Created a draft version. Go publish it",
-        goPublish: "Go publish",
+          `Saved Candidate Version v${version}. Go activate it`,
+        withoutVersion: "Saved a Candidate Version. Go activate it",
+        goPublish: "Go activate",
         revisionWithSecrets: (version, count) =>
-          `Created ${version === null ? "a draft version" : `draft version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before publishing.`,
+          `Saved ${version === null ? "a Candidate Version" : `Candidate Version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before activation.`,
         createdWithSecrets: (count) =>
           `Skill created and suspended with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before enabling it.`,
         configureCredentials: "Configure credentials",
       },
       publish: {
-        staleTitle: "A newer version is already published",
+        staleTitle: "The Current Version changed",
         staleNamed: (live, base) =>
-          `The live version is already v${live}. Publishing will overwrite it with the version based on v${base}. After you confirm, it replaces the version in use; you can still roll back from version history.`,
+          `The Current Version is v${live}. This revision is based on v${base} and cannot be saved or activated. Start a new revision from v${live}.`,
         staleGeneric:
-          "This version was not created from the current live version. Publishing will overwrite the version in use; you can still roll back from version history.",
+          "This version is not a forward descendant of the Current Version and cannot be saved or activated.",
       },
     },
   },
@@ -2728,7 +2738,7 @@ export const enUS: Translations = {
     providerUnavailableDescription:
       "The Worker could not reach the configured model provider after retrying. Check the Worker network or proxy configuration, then retry this message.",
     runAdmissionNotConfirmedDescription:
-      "The Run did not start because the conversation may already be running or its state changed. Your draft was preserved; try again shortly.",
+      "The Run did not start because the conversation may already be running or its state changed. Your input was preserved; try again shortly.",
     restoreFailedInput: "Restore to composer",
     restoreFailedInputBlocked:
       "The composer already has unsent content or attachments. Clear it before restoring this message.",
@@ -2755,7 +2765,7 @@ export const enUS: Translations = {
     agentArchivedAction: "Choose another Agent for a new chat",
     agentModelUnavailableTitle: "Agent model unavailable",
     agentModelUnavailableDescription:
-      "The Agent's configured model could not be resolved. Check its active binding, published version, and active model catalog entry, then retry.",
+      "The Agent's configured model could not be resolved. Check its system binding, Current Version, and active model catalog entry, then retry.",
     runExecutionProfile: (modelDisplayName, modeName, supportsVision) =>
       `Effective run: ${modelDisplayName} · ${modeName} · ${supportsVision ? "vision-capable" : "text only"}`,
   },

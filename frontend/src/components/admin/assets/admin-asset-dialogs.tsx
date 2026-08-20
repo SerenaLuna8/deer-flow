@@ -1238,7 +1238,7 @@ export function AddProjectMcpDialogContent({
               editConfiguration
                 ? {
                     ...mcpConfigurationInput(form, validationCopy),
-                    expected_asset_version: editConfiguration.asset.version,
+                    expected_asset_version: editConfiguration.asset.revision,
                   }
                 : configuredMcpInput(form, validationCopy),
             );
@@ -1456,7 +1456,7 @@ export function CreateVersionDialog({
                 versionInput(
                   kind,
                   new FormData(event.currentTarget),
-                  asset.version,
+                  asset.revision,
                   {
                     unsupportedMcpTransport:
                       t.adminAssets.dialogs.unsupportedMcpTransport,

@@ -5,13 +5,13 @@ import {
   projectAssetDetailDirty,
   projectAssetRequestedVersionResolution,
   projectSkillCredentialRepairVersionId,
-  versionPublishDisabled,
+  primaryVersionActionDisabled,
 } from "@/components/projects/assets/project-asset-detail-sheet";
 import {
   projectAssetCanDelete,
   projectSkillDeleteErrorMessage,
   projectSkillCredentialSetupRequired,
-  projectSkillVersionCanPublish,
+  projectSkillVersionCanActivate,
 } from "@/components/projects/assets/project-asset-view-model";
 import { projectAssetDeleteDescription } from "@/components/projects/assets/project-skill-delete-dialog";
 import { projectSkillImportErrorMessage } from "@/components/projects/assets/project-skill-import-dialog";
@@ -59,61 +59,63 @@ function mappingRequirement(
   };
 }
 
-describe("Skill publisher governance", () => {
-  test("requires binding-manager authority to publish a Skill draft", () => {
-    const draft = { workflow_status: "draft" as const };
+describe("Skill activation governance", () => {
+  test("lets an Editor or Admin activate a Skill candidate", () => {
+    const candidate = { relation: "candidate" as const };
     const editorItem = {
       scope: "project" as const,
       capabilities: [EDIT],
-      current_published_version_id: null,
+      current_version_id: null,
     };
-    const publisherItem = {
+    const adminItem = {
       ...editorItem,
       capabilities: [EDIT, MANAGE_BINDINGS],
     };
 
-    expect(projectSkillVersionCanPublish(editorItem, [EDIT], draft)).toBe(
-      false,
+    expect(projectSkillVersionCanActivate(editorItem, [EDIT], candidate)).toBe(
+      true,
     );
     expect(
-      projectSkillVersionCanPublish(
-        publisherItem,
+      projectSkillVersionCanActivate(
+        adminItem,
         [EDIT, MANAGE_BINDINGS],
-        draft,
+        candidate,
       ),
     ).toBe(true);
     expect(
-      projectSkillVersionCanPublish(publisherItem, [EDIT, MANAGE_BINDINGS], {
-        workflow_status: "published",
+      projectSkillVersionCanActivate(adminItem, [EDIT, MANAGE_BINDINGS], {
+        relation: "current",
       }),
     ).toBe(false);
   });
 
-  test("keeps publish disabled until the server validates SKILL.md", () => {
-    expect(versionPublishDisabled(false, false, false, true)).toBe(true);
-    expect(versionPublishDisabled(false, false, false, false)).toBe(false);
+  test("keeps activation disabled until the server validates SKILL.md", () => {
+    expect(primaryVersionActionDisabled(false, false, false, true)).toBe(true);
+    expect(primaryVersionActionDisabled(false, false, false, false)).toBe(
+      false,
+    );
   });
 
-  test("lets an editor delete only an unpublished Skill package", () => {
+  test("lets an Editor delete a Skill asset regardless of Current Version", () => {
     expect(
       projectAssetCanDelete("skills", {
         scope: "project",
         capabilities: [EDIT],
-        current_published_version_id: null,
+        current_version_id: null,
       }),
     ).toBe(true);
     expect(
       projectAssetCanDelete("skills", {
         scope: "project",
         capabilities: [EDIT],
-        current_published_version_id: "11111111-1111-4111-8111-111111111111",
+        current_version_id: "11111111-1111-4111-8111-111111111111",
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       projectAssetCanDelete("skills", {
         scope: "project",
         capabilities: [EDIT, MANAGE_BINDINGS],
-        current_published_version_id: "11111111-1111-4111-8111-111111111111",
+        current_version_id: "11111111-1111-4111-8111-111111111111",
       }),
     ).toBe(true);
   });

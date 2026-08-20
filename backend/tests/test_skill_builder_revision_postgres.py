@@ -21,12 +21,10 @@ from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.errors import (
     AssetConflict,
     AssetNotFound,
-    SkillDesignBaseStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
-    SkillPublishBaseStale,
 )
 from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
 from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
@@ -270,7 +268,7 @@ async def _seed_default_model(seed: PrivateThreadSeed) -> None:
         )
 
 
-async def _publish_template(skills: SkillService, context: ProjectContext, slug: str):
+async def _create_current_template(skills: SkillService, context: ProjectContext, slug: str):
     archive = io.BytesIO()
     with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as package:
         package.writestr(
@@ -282,7 +280,15 @@ async def _publish_template(skills: SkillService, context: ProjectContext, slug:
         archive.getvalue(),
         filename=f"{slug}.zip",
     )
-    return created.asset, created.version
+    current = await skills.activate_version(
+        context,
+        created.asset.id,
+        created.version.id,
+        expected_asset_version=created.asset.revision,
+        expected_payload_checksum=created.version.payload_checksum,
+        expected_binding_revision=0,
+    )
+    return await skills.get(context, created.asset.id), current
 
 
 async def _open_revision(design: SkillDesignService, context: ProjectContext, skill_id: uuid.UUID, key: str):
@@ -365,8 +371,6 @@ async def _commit_session(
     context: ProjectContext,
     session,
     key: str,
-    *,
-    acknowledge_base_stale: bool = False,
 ):
     assert session.draft_checksum is not None
     return await design.commit(
@@ -377,12 +381,11 @@ async def _commit_session(
             expected_draft_checksum=session.draft_checksum,
             acknowledge_warnings=True,
             idempotency_key=key,
-            acknowledge_base_stale=acknowledge_base_stale,
         ),
     )
 
 
-async def _insert_published_skill(
+async def _insert_current_skill(
     seed: PrivateThreadSeed,
     context: ProjectContext,
     *,
@@ -414,9 +417,9 @@ async def _insert_published_skill(
                 project_id=context.project_id,
                 slug=slug,
                 display_name=slug,
-                status="suspended",
-                current_published_version_id=None,
-                version=2,
+                status="active",
+                current_version_id=None,
+                revision=2,
                 created_by_user_id=str(context.user_id),
             )
         )
@@ -426,7 +429,6 @@ async def _insert_published_skill(
                 id=version_id,
                 skill_id=skill_id,
                 version_number=1,
-                workflow_status="draft",
                 description="Describe when and how to use this skill.",
                 frontmatter={"name": slug, "description": "Describe when and how to use this skill."},
                 compatibility=None,
@@ -438,6 +440,16 @@ async def _insert_published_skill(
             )
         )
         await session.flush()
+        await session.execute(
+            sa.text(
+                """SELECT set_config(
+                    'deerflow.asset_version_assembly',
+                    :version_id,
+                    true
+                )"""
+            ),
+            {"version_id": str(version_id)},
+        )
         for item in files:
             session.add(
                 SkillVersionFileRow(
@@ -453,8 +465,7 @@ async def _insert_published_skill(
         version = await session.get(SkillVersionRow, version_id)
         asset = await session.get(SkillRow, skill_id)
         assert version is not None and asset is not None
-        version.workflow_status = "published"
-        asset.current_published_version_id = version_id
+        asset.current_version_id = version_id
     return skill_id
 
 
@@ -492,7 +503,7 @@ async def _claim_and_begin(seed: PrivateThreadSeed, *, now: datetime):
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_create_session_validate_and_commit_publishes_suspended_v1(
+async def test_create_session_validate_and_commit_saves_candidate_v1(
     migrated_postgres_database_url: str,
 ) -> None:
     seed, context, skills, design, quota = await _environment(migrated_postgres_database_url)
@@ -549,11 +560,10 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert committed.session.files == ()
         assert committed.skill.slug == slug
         assert committed.skill.status == "suspended"
-        assert committed.skill.current_published_version_id is not None
+        assert committed.skill.current_version_id is None
         assert committed.version is not None
         assert committed.session.created_skill_version_id == committed.version.id
-        assert committed.version.id == committed.skill.current_published_version_id
-        assert committed.version.workflow_status.value == "published"
+        assert committed.version.relation.value == "candidate"
         refreshed = await design.get(context, opened.id)
         assert refreshed.created_skill_version_id == committed.version.id
 
@@ -572,9 +582,8 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert asset is not None
         assert version is not None
         assert asset.status == "suspended"
-        assert asset.current_published_version_id == version.id
+        assert asset.current_version_id is None
         assert version.version_number == 1
-        assert version.workflow_status == "published"
         assert version.supersedes_version_id is None
         assert version.payload_checksum == preview.checksum
         assert len(version_files) == 1
@@ -583,21 +592,32 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert draft_file_count == 0
         assert quota.reserved == [version.id]
 
-        next_asset = await skills.get(context, committed.skill.id)
-        next_draft = await skills.create_version_from_archive(
+        activated = await skills.activate_version(
             context,
             committed.skill.id,
-            (_skill_md(slug, "A later published revision.\n"),),
-            expected_asset_version=next_asset.version,
+            committed.version.id,
+            expected_asset_version=committed.skill.revision,
+            expected_payload_checksum=committed.version.payload_checksum,
+            expected_binding_revision=0,
         )
+        assert activated.id == committed.version.id
         next_asset = await skills.get(context, committed.skill.id)
-        next_published = await skills.publish(
+        next_candidate = await skills.create_version_from_archive(
             context,
             committed.skill.id,
-            next_draft.id,
-            expected_asset_version=next_asset.version,
+            (_skill_md(slug, "A later current revision.\n"),),
+            expected_asset_version=next_asset.revision,
         )
-        assert next_published.id != committed.version.id
+        next_asset = await skills.get(context, committed.skill.id)
+        next_current = await skills.activate_version(
+            context,
+            committed.skill.id,
+            next_candidate.id,
+            expected_asset_version=next_asset.revision,
+            expected_payload_checksum=next_candidate.payload_checksum,
+            expected_binding_revision=0,
+        )
+        assert next_current.id != committed.version.id
 
         replayed = await _commit_session(
             design,
@@ -608,7 +628,7 @@ async def test_create_session_validate_and_commit_publishes_suspended_v1(
         assert replayed.version is not None
         assert replayed.version.id == committed.version.id
         assert replayed.session.created_skill_version_id == committed.version.id
-        assert replayed.skill.current_published_version_id == next_published.id
+        assert replayed.skill.current_version_id == next_current.id
     finally:
         await seed.engine.dispose()
 
@@ -620,14 +640,14 @@ async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
 ) -> None:
     seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, published = await _publish_template(skills, context, "seed-auditor")
+        asset, current = await _create_current_template(skills, context, "seed-auditor")
         opened = await _open_revision(design, context, asset.id, "seed-open")
         assert opened.status is SkillDesignStatus.DRAFT_READY
         assert opened.session_kind == "revise"
         assert opened.target_skill_id == asset.id
-        assert opened.base_version_id == published.id
+        assert opened.base_version_id == current.id
         assert opened.base_version_number == 1
-        assert opened.draft_checksum == published.payload_checksum == opened.base_payload_checksum
+        assert opened.draft_checksum == current.payload_checksum == opened.base_payload_checksum
         assert [item.path for item in opened.files] == ["SKILL.md"]
         assert opened.files[0].content.encode() == _skill_md("seed-auditor", _template_body()).content
         assert opened.base_files[0].sha256 == opened.files[0].sha256
@@ -687,7 +707,7 @@ async def test_revision_seed_dry_run_rejects_unsupported_published_shapes(
             ("scan-blocked", blocked),
         )
         for slug, files in cases:
-            skill_id = await _insert_published_skill(seed, context, slug=slug, files=files)
+            skill_id = await _insert_current_skill(seed, context, slug=slug, files=files)
             with pytest.raises(SkillDesignTargetUnsupported):
                 await _open_revision(design, context, skill_id, f"reject-{slug}")
     finally:
@@ -701,7 +721,7 @@ async def test_revision_session_uniqueness_and_target_404(
 ) -> None:
     seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, _published = await _publish_template(skills, context, "unique-auditor")
+        asset, _current = await _create_current_template(skills, context, "unique-auditor")
         first = await _open_revision(design, context, asset.id, "unique-open")
         replay = await _open_revision(design, context, asset.id, "unique-open")
         assert replay.id == first.id
@@ -748,7 +768,7 @@ async def test_revision_session_uniqueness_and_target_404(
                 )
         assert "uq_skill_design_sessions_live_revise_target" in str(exc_info.value)
 
-        second_asset, _second_published = await _publish_template(skills, context, "race-auditor")
+        second_asset, _second_published = await _create_current_template(skills, context, "race-auditor")
         results = await asyncio.gather(
             _open_revision(design, context, second_asset.id, "race-a"),
             _open_revision(design, context, second_asset.id, "race-b"),
@@ -784,7 +804,7 @@ async def test_revision_session_uniqueness_and_target_404(
             await connection.execute(
                 sa.text(
                     """INSERT INTO skills
-                    (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                        (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
                     VALUES (:id,'project',:project,'foreign-skill','foreign-skill',
                             'suspended',1,:owner)"""
                 ),
@@ -810,7 +830,7 @@ async def test_revision_turn_authoring_payload_is_isolated(
         with_model=True,
     )
     try:
-        asset, published = await _publish_template(skills, context, "authoring-auditor")
+        asset, current = await _create_current_template(skills, context, "authoring-auditor")
         opened = await _open_revision(design, context, asset.id, "authoring-open")
         admitted = await design.submit_turn(
             context,
@@ -828,7 +848,7 @@ async def test_revision_turn_authoring_payload_is_isolated(
         assert payload["authoring"] == {
             "kind": "revise",
             "target_slug": "authoring-auditor",
-            "base_version_number": published.version_number,
+            "base_version_number": current.version_number,
         }
         assert payload["conversation"]["mode"] == "initial"
     finally:
@@ -837,12 +857,12 @@ async def test_revision_turn_authoring_payload_is_isolated(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_revision_commit_creates_draft_without_moving_pointer(
+async def test_revision_commit_creates_candidate_without_moving_current(
     migrated_postgres_database_url: str,
 ) -> None:
     seed, context, skills, design, quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, published = await _publish_template(skills, context, "commit-auditor")
+        asset, current_version = await _create_current_template(skills, context, "commit-auditor")
         opened = await _open_revision(design, context, asset.id, "commit-open")
         edited = await _edit_draft(
             design,
@@ -859,14 +879,14 @@ async def test_revision_commit_creates_draft_without_moving_pointer(
         assert committed.version is not None
         assert committed.session.created_skill_version_id == committed.version.id
         assert committed.version.version_number == 2
-        assert committed.version.workflow_status.value == "draft"
-        assert committed.version.supersedes_version_id == published.id
+        assert committed.version.relation.value == "candidate"
+        assert committed.version.supersedes_version_id == current_version.id
         assert committed.version.id in quota.reserved
         assert committed.version.id not in reserved_before
         refreshed = await design.get(context, opened.id)
         assert refreshed.created_skill_version_id == committed.version.id
-        current = await skills.get(context, asset.id)
-        assert current.current_published_version_id == published.id
+        current_asset = await skills.get(context, asset.id)
+        assert current_asset.current_version_id == current_version.id
         replayed = await _commit_session(design, context, validated, "commit-save")
         assert replayed.version is not None
         assert replayed.version.id == committed.version.id
@@ -877,12 +897,12 @@ async def test_revision_commit_creates_draft_without_moving_pointer(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_revision_commit_rejects_noop_and_requires_stale_ack(
+async def test_revision_commit_rejects_noop_and_stale_base(
     migrated_postgres_database_url: str,
 ) -> None:
     seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, published = await _publish_template(skills, context, "noop-auditor")
+        asset, current = await _create_current_template(skills, context, "noop-auditor")
         opened = await _open_revision(design, context, asset.id, "noop-open")
         validated = await _validate_session(design, context, opened, "noop-validate")
         with pytest.raises(SkillDesignNoChanges):
@@ -901,21 +921,24 @@ async def test_revision_commit_rejects_noop_and_requires_stale_ack(
         media_validated = await _validate_session(design, context, media_only, "media-validate")
         media_committed = await _commit_session(design, context, media_validated, "media-commit")
         assert media_committed.version is not None
-        assert media_committed.version.supersedes_version_id == published.id
+        assert media_committed.version.supersedes_version_id == current.id
 
-        stale_asset, stale_base = await _publish_template(skills, context, "stale-auditor")
+        stale_asset, stale_base = await _create_current_template(skills, context, "stale-auditor")
         stale_session = await _open_revision(design, context, stale_asset.id, "stale-open")
-        live_draft = await skills.create_version_from_archive(
+        live_candidate = await skills.create_version_from_archive(
             context,
             stale_asset.id,
             (_skill_md("stale-auditor", "Newer live successor.\n"),),
-            expected_asset_version=stale_asset.version,
+            expected_asset_version=stale_asset.revision,
         )
-        live = await skills.publish(
+        stale_asset = await skills.get(context, stale_asset.id)
+        live = await skills.activate_version(
             context,
             stale_asset.id,
-            live_draft.id,
-            expected_asset_version=stale_asset.version + 1,
+            live_candidate.id,
+            expected_asset_version=stale_asset.revision,
+            expected_payload_checksum=live_candidate.payload_checksum,
+            expected_binding_revision=0,
         )
         edited = await _edit_draft(
             design,
@@ -925,28 +948,11 @@ async def test_revision_commit_rejects_noop_and_requires_stale_ack(
             key="stale-edit",
         )
         stale_validated = await _validate_session(design, context, edited, "stale-validate")
-        with pytest.raises(SkillDesignBaseStale):
+        with pytest.raises(AssetConflict):
             await _commit_session(design, context, stale_validated, "stale-commit")
-        committed = await _commit_session(
-            design,
-            context,
-            stale_validated,
-            "stale-ack",
-            acknowledge_base_stale=True,
-        )
-        assert committed.version is not None
-        assert committed.version.supersedes_version_id == stale_base.id
-        current = await skills.get(context, stale_asset.id)
-        assert current.current_published_version_id == live.id
-        replayed = await _commit_session(
-            design,
-            context,
-            stale_validated,
-            "stale-ack",
-            acknowledge_base_stale=True,
-        )
-        assert replayed.version is not None
-        assert replayed.version.id == committed.version.id
+        current_asset = await skills.get(context, stale_asset.id)
+        assert current_asset.current_version_id == live.id
+        assert stale_base.id != live.id
     finally:
         await seed.engine.dispose()
 
@@ -958,7 +964,7 @@ async def test_revision_delete_and_commit_converge_without_deadlock(
 ) -> None:
     seed, context, skills, design, _quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, _published = await _publish_template(skills, context, "race-delete")
+        asset, _current = await _create_current_template(skills, context, "race-delete")
         opened = await _open_revision(design, context, asset.id, "race-delete-open")
         edited = await _edit_draft(
             design,
@@ -975,7 +981,7 @@ async def test_revision_delete_and_commit_converge_without_deadlock(
                 skills.delete(
                     context,
                     asset.id,
-                    expected_asset_version=current.version,
+                    expected_asset_version=current.revision,
                 ),
                 _commit_session(design, context, validated, "race-delete-commit"),
                 return_exceptions=True,
@@ -1000,7 +1006,7 @@ async def test_revision_delete_and_commit_converge_without_deadlock(
             assert commit_ok
             assert commit_result.version is not None
             persisted = await skills.get(context, asset.id)
-            assert persisted.current_published_version_id == current.current_published_version_id
+            assert persisted.current_version_id == current.current_version_id
     finally:
         await seed.engine.dispose()
 
@@ -1015,7 +1021,7 @@ async def test_revision_delete_fails_open_sessions_and_revokes_in_flight_tools(
         with_model=True,
     )
     try:
-        asset, _published = await _publish_template(skills, context, "delete-auditor")
+        asset, _current = await _create_current_template(skills, context, "delete-auditor")
         opened = await _open_revision(design, context, asset.id, "delete-open")
         admitted = await design.submit_turn(
             context,
@@ -1028,7 +1034,7 @@ async def test_revision_delete_fails_open_sessions_and_revokes_in_flight_tools(
         )
         claim = await _claim_and_begin(seed, now=datetime.now(UTC))
         current = await skills.get(context, asset.id)
-        await skills.delete(context, asset.id, expected_asset_version=current.version)
+        await skills.delete(context, asset.id, expected_asset_version=current.revision)
 
         closed = await design.get(context, opened.id)
         assert closed.status is SkillDesignStatus.FAILED
@@ -1101,7 +1107,7 @@ async def test_revision_delete_project_gate_prevents_builder_lock_cycle(
     retry_task: asyncio.Task | None = None
     delete_task: asyncio.Task | None = None
     try:
-        asset, _published = await _publish_template(
+        asset, _current = await _create_current_template(
             skills,
             context,
             "delete-builder-lock-order",
@@ -1170,7 +1176,7 @@ async def test_revision_delete_project_gate_prevents_builder_lock_cycle(
             skills.delete(
                 context,
                 asset.id,
-                expected_asset_version=current.version,
+                expected_asset_version=current.revision,
             )
         )
         await asyncio.wait_for(delete_reached_project_gate.wait(), timeout=5)
@@ -1212,70 +1218,79 @@ async def test_revision_delete_project_gate_prevents_builder_lock_cycle(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_publish_lineage_guard_on_postgres(
+async def test_forward_activation_lineage_guard_on_postgres(
     migrated_postgres_database_url: str,
 ) -> None:
     seed, context, skills, _design, _quota = await _environment(migrated_postgres_database_url)
     try:
-        asset, first = await _publish_template(skills, context, "lineage-auditor")
+        asset, first = await _create_current_template(skills, context, "lineage-auditor")
         assert first.supersedes_version_id is None
         current = await skills.get(context, asset.id)
-        assert current.current_published_version_id == first.id
+        assert current.current_version_id == first.id
 
-        live_draft = await skills.create_version_from_archive(
+        second_candidate = await skills.create_version_from_archive(
             context,
             asset.id,
             (_skill_md("lineage-auditor", "Newer live successor.\n"),),
-            expected_asset_version=current.version,
+            expected_asset_version=current.revision,
         )
-        await skills.publish(
+        current = await skills.get(context, asset.id)
+        second = await skills.activate_version(
             context,
             asset.id,
-            live_draft.id,
-            expected_asset_version=current.version + 1,
+            second_candidate.id,
+            expected_asset_version=current.revision,
+            expected_payload_checksum=second_candidate.payload_checksum,
+            expected_binding_revision=0,
         )
         latest = await skills.get(context, asset.id)
-        forked = await skills.fork_version(
-            context,
-            asset.id,
-            first.id,
-            (
-                SkillFileChange(
-                    "replace",
-                    "SKILL.md",
-                    _skill_md("lineage-auditor", "Forked from the first version.\n").content.decode(),
-                    "text/markdown",
-                ),
-            ),
-            expected_asset_version=latest.version,
-            expected_source_payload_checksum=first.payload_checksum,
-        )
-        latest = await skills.get(context, asset.id)
-        with pytest.raises(SkillPublishBaseStale):
-            await skills.publish(
-                context,
-                asset.id,
-                forked.id,
-                expected_asset_version=latest.version,
-            )
         with pytest.raises(AssetConflict):
-            await skills.publish(
+            await skills.fork_version(
                 context,
                 asset.id,
-                forked.id,
-                expected_asset_version=latest.version - 1,
-                acknowledge_stale_base=True,
+                first.id,
+                (
+                    SkillFileChange(
+                        "replace",
+                        "SKILL.md",
+                        _skill_md(
+                            "lineage-auditor",
+                            "Attempted history branch.\n",
+                        ).content.decode(),
+                        "text/markdown",
+                    ),
+                ),
+                expected_asset_version=latest.revision,
+                expected_source_payload_checksum=first.payload_checksum,
             )
-        published_fork = await skills.publish(
+
+        third_candidate = await skills.create_version_from_archive(
             context,
             asset.id,
-            forked.id,
-            expected_asset_version=latest.version,
-            acknowledge_stale_base=True,
+            (_skill_md("lineage-auditor", "Forward successor three.\n"),),
+            expected_asset_version=latest.revision,
         )
-        assert published_fork.id == forked.id
-        assert published_fork.supersedes_version_id == first.id
+        latest = await skills.get(context, asset.id)
+        with pytest.raises(AssetConflict):
+            await skills.activate_version(
+                context,
+                asset.id,
+                third_candidate.id,
+                expected_asset_version=latest.revision - 1,
+                expected_payload_checksum=third_candidate.payload_checksum,
+                expected_binding_revision=0,
+            )
+        third = await skills.activate_version(
+            context,
+            asset.id,
+            third_candidate.id,
+            expected_asset_version=latest.revision,
+            expected_payload_checksum=third_candidate.payload_checksum,
+            expected_binding_revision=0,
+        )
+        assert third.id == third_candidate.id
+        assert third.supersedes_version_id == second.id
         after = await skills.get(context, asset.id)
-        assert after.current_published_version_id == forked.id
+        assert after.current_version_id == third.id
     finally:
         await seed.engine.dispose()

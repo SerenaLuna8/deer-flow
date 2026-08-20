@@ -276,9 +276,7 @@ export function skillBuilderCreatedSecretSetup(
   const { session, skill, version } = response.data;
   const validation = session.validation;
   const exactVersionId =
-    session.created_skill_version_id ??
-    version?.id ??
-    skill.current_published_version_id;
+    session.created_skill_version_id ?? version?.id ?? skill.current_version_id;
   const requirements =
     version?.secret_requirements ?? validation?.secret_requirements;
   if (
@@ -290,7 +288,7 @@ export function skillBuilderCreatedSecretSetup(
     (version !== null &&
       (version.id !== exactVersionId ||
         version.skill_id !== skill.id ||
-        version.workflow_status !== "published" ||
+        version.relation !== "candidate" ||
         version.payload_checksum !== session.draft_checksum)) ||
     !validation ||
     !skillBuilderValidationCurrent(session) ||
@@ -880,8 +878,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   >(null);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
-  const [baseStaleOpen, setBaseStaleOpen] = useState(false);
-  const [createdDraftVersion, setCreatedDraftVersion] = useState<{
+  const [createdCandidateVersion, setCreatedCandidateVersion] = useState<{
     id: string;
     versionNumber: number;
   } | null>(null);
@@ -1432,7 +1429,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     });
   }
 
-  function confirmCommit(acknowledgeBaseStale = false) {
+  function confirmCommit() {
     const draftChecksum = session?.draft_checksum;
     if (
       !draftChecksum ||
@@ -1451,23 +1448,20 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       draft_checksum: draftChecksum,
       expected_revision: session.revision,
       acknowledge_warnings: acknowledgeWarnings,
-      acknowledge_base_stale: acknowledgeBaseStale,
     });
     const command = idempotency.acquire("commit", signature, (key) => ({
       expected_revision: session.revision,
       expected_draft_checksum: draftChecksum,
       acknowledge_warnings: acknowledgeWarnings,
-      ...(acknowledgeBaseStale ? { acknowledge_base_stale: true } : {}),
       idempotency_key: key,
     }));
     commit.mutate(command, {
       onSuccess: (response) => {
         idempotency.complete("commit", signature);
         setCommitOpen(false);
-        setBaseStaleOpen(false);
         if (response.data.session.session_kind === "revise") {
           const createdVersion = response.data.version;
-          setCreatedDraftVersion(
+          setCreatedCandidateVersion(
             createdVersion
               ? {
                   id: createdVersion.id,
@@ -1491,13 +1485,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       },
       onError: (error) => {
         refreshAfterConflict("commit", signature, error);
-        if (
-          error instanceof SkillBuilderApiError &&
-          error.serverCode === "SKILL_DESIGN_BASE_STALE"
-        ) {
-          setCommitOpen(false);
-          setBaseStaleOpen(true);
-        }
       },
     });
   }
@@ -1529,7 +1516,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       ? skillBuilderWorkspaceErrorMessage(submitTurn.error, errors)
       : validate.error
         ? skillBuilderWorkspaceErrorMessage(validate.error, errors)
-        : commit.error && !baseStaleOpen
+        : commit.error
           ? skillBuilderWorkspaceErrorMessage(commit.error, errors, true)
           : cancel.error
             ? skillBuilderWorkspaceErrorMessage(cancel.error, errors)
@@ -1543,7 +1530,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     : null;
   const effectiveSecretSetup = createdSecretSetup ?? durableSecretSetup;
   const exactCreatedVersionId =
-    session?.created_skill_version_id ?? createdDraftVersion?.id ?? null;
+    session?.created_skill_version_id ?? createdCandidateVersion?.id ?? null;
   const createSecretHref =
     (session
       ? skillBuilderCompletedVersionHref(listHref, session, {
@@ -1697,7 +1684,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           session.created_skill_id &&
           revisionHref ? (
           <SkillBuilderRevisionCommitSuccess
-            versionNumber={createdDraftVersion?.versionNumber ?? null}
+            versionNumber={createdCandidateVersion?.versionNumber ?? null}
             href={revisionHref}
             credentialRequirementCount={
               effectiveSecretSetup?.skillId === session.created_skill_id &&
@@ -1850,11 +1837,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           </div>
           <SkillBuilderDialogError
             message={
-              commit.error &&
-              !(
-                commit.error instanceof SkillBuilderApiError &&
-                commit.error.serverCode === "SKILL_DESIGN_BASE_STALE"
-              )
+              commit.error
                 ? skillBuilderWorkspaceErrorMessage(commit.error, errors, true)
                 : null
             }
@@ -1879,7 +1862,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   secretDeclarationValid ? "valid" : "pending",
                 )
               }
-              onClick={() => confirmCommit(false)}
+              onClick={() => confirmCommit()}
             >
               {commit.isPending ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />
@@ -1891,69 +1874,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : revising
                   ? dialogs.confirmCreateVersion
                   : dialogs.confirmCreate}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={baseStaleOpen}
-        onOpenChange={(open) => {
-          if (commit.isPending) return;
-          setBaseStaleOpen(open);
-          if (!open) commit.reset();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{dialogs.staleTitle}</DialogTitle>
-            <DialogDescription>
-              {dialogs.staleDescription(
-                String(session?.base_version_number ?? "-"),
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          {commit.error &&
-          !(
-            commit.error instanceof SkillBuilderApiError &&
-            commit.error.serverCode === "SKILL_DESIGN_BASE_STALE"
-          ) ? (
-            <p role="alert" className="text-destructive text-sm">
-              {skillBuilderWorkspaceErrorMessage(commit.error, errors, true)}
-            </p>
-          ) : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={commit.isPending}
-              onClick={() => {
-                setBaseStaleOpen(false);
-                commit.reset();
-              }}
-            >
-              {dialogs.backToReview}
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={
-                commit.isPending ||
-                !session ||
-                !skillBuilderCanCommitCandidate(
-                  session,
-                  drafts,
-                  secretDeclarationValid ? "valid" : "pending",
-                )
-              }
-              onClick={() => confirmCommit(true)}
-            >
-              {commit.isPending ? (
-                <Loader2Icon aria-hidden className="size-4 animate-spin" />
-              ) : null}
-              {commit.isPending
-                ? dialogs.creatingVersion
-                : dialogs.confirmOverwrite}
             </Button>
           </DialogFooter>
         </DialogContent>

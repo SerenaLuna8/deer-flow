@@ -284,9 +284,9 @@ export function adminAssetVersionStatus(version: AssetVersion) {
   ) {
     return "revoked";
   }
-  return "workflow_status" in version
-    ? version.workflow_status
-    : version.status;
+  if ("workflow_status" in version) return version.workflow_status;
+  if ("relation" in version) return version.relation;
+  return version.status;
 }
 
 function formatByteCount(bytes: number) {
@@ -349,8 +349,10 @@ function VersionDetail({
             value={version.tool_groups.join(", ")}
           />
           <AdminTechnicalValue
-            label={t.adminAssets.diff.skillVersions}
-            value={version.skill_version_ids.join(", ")}
+            label="Skill 资产引用"
+            value={version.skill_refs
+              .map((reference) => `${reference.scope}:${reference.asset_id}`)
+              .join(", ")}
           />
           <AdminTechnicalValue
             label={t.adminAssets.diff.mcpVersions}
@@ -1064,7 +1066,7 @@ function SelectedAssetDetail({
     versions.find(
       (version) =>
         version.id ===
-        (asset?.current_published_version_id ?? credential?.current_version_id),
+        (asset?.current_version_id ?? credential?.current_version_id),
     ) ??
     versions[0] ??
     null;
@@ -1083,10 +1085,7 @@ function SelectedAssetDetail({
                   selectedVersion !== null &&
                   "governance_status" in selectedVersion &&
                   selectedVersion.governance_status === "revoked",
-                unpublished:
-                  selectedVersion !== null &&
-                  "workflow_status" in selectedVersion &&
-                  selectedVersion.workflow_status !== "published",
+                unpublished: false,
               })}
               download={() => {
                 if (!selectedVersion) {
@@ -1150,7 +1149,7 @@ function SelectedAssetDetail({
           <dl className="grid min-w-0 gap-4 rounded-xl border p-4 sm:grid-cols-2">
             <AdminTechnicalValue
               label={t.adminAssets.catalog.assetRevision}
-              value={asset.version}
+              value={asset.revision}
             />
             <div>
               <dt className="text-muted-foreground text-xs">
@@ -1165,9 +1164,9 @@ function SelectedAssetDetail({
               label={
                 kind === "mcp-servers"
                   ? t.adminAssets.common.currentPublishedMcpConfiguration
-                  : t.adminAssets.common.currentPublishedVersion
+                  : "当前版本"
               }
-              value={asset.current_published_version_id}
+              value={asset.current_version_id}
             />
             <AdminTechnicalValue
               className="sm:col-span-2"
@@ -1245,12 +1244,9 @@ function SelectedAssetDetail({
             kind={kind}
             versions={history.data?.data ?? []}
             currentVersionId={
-              asset?.current_published_version_id ??
-              credential?.current_version_id
+              asset?.current_version_id ?? credential?.current_version_id
             }
-            configureCredentialGrantsVersionId={
-              asset?.current_published_version_id
-            }
+            configureCredentialGrantsVersionId={asset?.current_version_id}
             onConfigureCredentialGrants={
               kind === "mcp-servers" ? setGrantVersion : undefined
             }
@@ -1715,13 +1711,20 @@ function SystemCatalogMetric({
   );
 }
 
-function PublicationBadge({ published }: { published: boolean }) {
+function VersionAvailabilityBadge({
+  hasCurrentVersion,
+  kind,
+}: {
+  hasCurrentVersion: boolean;
+  kind: SystemCatalogKind;
+}) {
   const { t } = useI18n();
+  const isMcp = kind === "mcp-servers";
   return (
     <span
       className={cn(
         "inline-flex w-fit items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium",
-        published
+        hasCurrentVersion
           ? "border-success/25 bg-success/10 text-foreground"
           : "border-border bg-muted text-muted-foreground",
       )}
@@ -1730,12 +1733,16 @@ function PublicationBadge({ published }: { published: boolean }) {
         aria-hidden
         className={cn(
           "size-1.5 rounded-full",
-          published ? "bg-success" : "bg-muted-foreground/50",
+          hasCurrentVersion ? "bg-success" : "bg-muted-foreground/50",
         )}
       />
-      {published
-        ? t.adminAssets.catalog.published
-        : t.adminAssets.catalog.unpublished}
+      {hasCurrentVersion
+        ? isMcp
+          ? t.adminAssets.catalog.published
+          : t.adminAssets.catalog.currentVersionAvailable
+        : isMcp
+          ? t.adminAssets.catalog.unpublished
+          : t.adminAssets.catalog.currentVersionMissing}
     </span>
   );
 }
@@ -1814,7 +1821,11 @@ function SystemCatalogDirectory({
           }
         />
         <SystemCatalogMetric
-          label={t.adminAssets.catalog.unpublishedAssets}
+          label={
+            kind === "mcp-servers"
+              ? t.adminAssets.catalog.unpublishedAssets
+              : t.adminAssets.catalog.assetsWithoutCurrentVersion
+          }
           value={summary.unpublished}
         />
         <SystemCatalogMetric
@@ -1928,10 +1939,9 @@ function SystemCatalogDirectory({
                         </span>
                         <span className="mt-2 flex flex-wrap items-center gap-2">
                           <AssetStatusBadge status={item.status} />
-                          <PublicationBadge
-                            published={
-                              item.current_published_version_id !== null
-                            }
+                          <VersionAvailabilityBadge
+                            kind={kind}
+                            hasCurrentVersion={item.current_version_id !== null}
                           />
                         </span>
                       </span>
@@ -1960,7 +1970,9 @@ function SystemCatalogDirectory({
                         {t.adminAssets.catalog.lifecycleStatus}
                       </th>
                       <th className="w-[12%] px-3 py-2.5 text-xs font-medium">
-                        {t.adminAssets.catalog.publicationStatus}
+                        {kind === "mcp-servers"
+                          ? t.adminAssets.catalog.publicationStatus
+                          : t.adminAssets.catalog.currentVersionStatus}
                       </th>
                       <th className="w-[9%] px-3 py-2.5 text-xs font-medium">
                         {t.adminAssets.catalog.assetRevision}
@@ -2015,14 +2027,15 @@ function SystemCatalogDirectory({
                             <AssetStatusBadge status={item.status} />
                           </td>
                           <td className="px-3 py-3">
-                            <PublicationBadge
-                              published={
-                                item.current_published_version_id !== null
+                            <VersionAvailabilityBadge
+                              kind={kind}
+                              hasCurrentVersion={
+                                item.current_version_id !== null
                               }
                             />
                           </td>
                           <td className="px-3 py-3 font-mono text-xs tabular-nums">
-                            {item.version}
+                            {item.revision}
                           </td>
                           <td className="px-3 py-3">
                             <time className="text-muted-foreground block text-xs leading-4">

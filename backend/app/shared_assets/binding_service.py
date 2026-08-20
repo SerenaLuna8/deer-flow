@@ -84,7 +84,11 @@ class BindingService:
         *,
         expected_binding_version: int | None = None,
     ) -> SystemAssetBinding:
-        selection = self._validate_selection(actor, selection, require_version=True)
+        selection = self._validate_selection(
+            actor,
+            selection,
+            require_version=selection.kind is AssetKind.MCP,
+        )
         self._require_manage_bindings(actor)
 
         async def operation(repository: BindingRepository) -> SystemAssetBinding:
@@ -106,17 +110,13 @@ class BindingService:
                         target,
                     )
                 await repository.validate_target_dependencies(actor, selection)
-                version_column = {
-                    AssetKind.AGENT: "agent_version_id",
-                    AssetKind.SKILL: "skill_version_id",
-                    AssetKind.MCP: "mcp_server_version_id",
-                }[selection.kind]
-                setattr(existing, version_column, selection.version_id)
+                if selection.kind is AssetKind.MCP:
+                    existing.mcp_server_version_id = selection.version_id
                 existing.enabled = True
                 existing.version += 1
                 existing.updated_by_user_id = str(actor.user_id)
                 await repository.session.flush()
-                return self._view(selection.kind, existing)
+                return self._view(selection.kind, existing, target.version.id)
             if expected_binding_version is not None:
                 raise AssetConflict(actor.request_id)
             target = await repository.lock_target(actor, selection)
@@ -126,7 +126,11 @@ class BindingService:
                     target,
                 )
             await repository.validate_target_dependencies(actor, selection)
-            return self._view(selection.kind, await repository.add_binding(actor, selection))
+            return self._view(
+                selection.kind,
+                await repository.add_binding(actor, selection),
+                target.version.id,
+            )
 
         return await self._execute(
             actor,
@@ -145,7 +149,20 @@ class BindingService:
 
         async def operation(repository: BindingRepository) -> tuple[SystemAssetBinding, ...]:
             rows = await repository.list_bindings(actor, kind)
-            return tuple(self._view(kind, row) for row in rows)
+            asset_id_field = {
+                AssetKind.AGENT: "system_agent_id",
+                AssetKind.SKILL: "system_skill_id",
+                AssetKind.MCP: "system_mcp_server_id",
+            }[kind]
+            visible: list[SystemAssetBinding] = []
+            for row in rows:
+                current_version_id = await repository.current_version_id(
+                    actor,
+                    kind,
+                    getattr(row, asset_id_field),
+                )
+                visible.append(self._view(kind, row, current_version_id))
+            return tuple(visible)
 
         return await self._execute(actor, operation)
 
@@ -206,7 +223,7 @@ class BindingService:
                 row = existing
                 action = "binding.sync_current" if was_enabled else "binding.enable"
             return _BindingSyncResult(
-                binding=self._view(AssetKind.MCP, row),
+                binding=self._view(AssetKind.MCP, row, selection.version_id),
                 selection=selection,
                 action=action,
             )
@@ -230,6 +247,8 @@ class BindingService:
         *,
         expected_binding_version: int,
     ) -> SystemAssetBinding:
+        if selection.kind is not AssetKind.MCP:
+            raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
         return await self._move(
             actor,
             selection,
@@ -244,6 +263,8 @@ class BindingService:
         *,
         expected_binding_version: int,
     ) -> SystemAssetBinding:
+        if selection.kind is not AssetKind.MCP:
+            raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
         return await self._move(
             actor,
             selection,
@@ -276,7 +297,12 @@ class BindingService:
             row.version += 1
             row.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
-            return self._view(selection.kind, row)
+            current_version_id = await repository.current_version_id(
+                actor,
+                selection.kind,
+                selection.asset_id,
+            )
+            return self._view(selection.kind, row, current_version_id)
 
         return await self._execute(
             actor,
@@ -308,11 +334,9 @@ class BindingService:
                 raise AssetConflict(actor.request_id)
             target = await repository.lock_target(actor, selection)
             await repository.validate_target_dependencies(actor, selection)
-            version_column = {
-                AssetKind.AGENT: "agent_version_id",
-                AssetKind.SKILL: "skill_version_id",
-                AssetKind.MCP: "mcp_server_version_id",
-            }[selection.kind]
+            # Agent and Skill bindings follow the aggregate Current Version.
+            # Only MCP retains an exact bound release and can move it.
+            version_column = "mcp_server_version_id"
             current_version_id = getattr(row, version_column)
             if current_version_id == selection.version_id:
                 raise AssetConflict(actor.request_id)
@@ -330,7 +354,7 @@ class BindingService:
             row.version += 1
             row.updated_by_user_id = str(actor.user_id)
             await repository.session.flush()
-            return self._view(selection.kind, row)
+            return self._view(selection.kind, row, selection.version_id)
 
         return await self._execute(
             actor,
@@ -401,21 +425,17 @@ class BindingService:
         return expected
 
     @staticmethod
-    def _view(kind: AssetKind, row) -> SystemAssetBinding:
+    def _view(
+        kind: AssetKind,
+        row,
+        version_id: uuid.UUID,
+    ) -> SystemAssetBinding:
         asset_id = getattr(
             row,
             {
                 AssetKind.AGENT: "system_agent_id",
                 AssetKind.SKILL: "system_skill_id",
                 AssetKind.MCP: "system_mcp_server_id",
-            }[kind],
-        )
-        version_id = getattr(
-            row,
-            {
-                AssetKind.AGENT: "agent_version_id",
-                AssetKind.SKILL: "skill_version_id",
-                AssetKind.MCP: "mcp_server_version_id",
             }[kind],
         )
         return SystemAssetBinding(

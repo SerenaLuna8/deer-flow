@@ -130,7 +130,7 @@ describe("SkillBuilderRunActivity", () => {
     );
 
     expect(html).toContain("本轮达到模型输出上限");
-    expect(html).toContain("已成功写入的候选草稿仍然保留");
-    expect(html).toContain("基于现有草稿继续完成");
+    expect(html).toContain("已成功写入的候选文件仍然保留");
+    expect(html).toContain("基于现有候选文件继续完成");
   });
 });

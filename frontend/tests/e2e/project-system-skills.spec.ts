@@ -57,8 +57,8 @@ const systemSkill: ProjectAssetItem = {
   display_name: "System Skill",
   description: "A packaged System Skill used by this project.",
   status: "active",
-  current_published_version_id: VERSION_ID,
-  version: 1,
+  current_version_id: VERSION_ID,
+  revision: 1,
   capabilities: ["shared_assets.read", "shared_assets.manage_bindings"],
   binding: null,
   created_by_user_id: "system",
@@ -70,7 +70,7 @@ const systemSkillVersion: SkillAssetVersion = {
   id: VERSION_ID,
   skill_id: ASSET_ID,
   version_number: 1,
-  workflow_status: "published",
+  relation: "current",
   description: "Published System Skill version.",
   frontmatter: {
     name: "system-skill",
@@ -215,7 +215,7 @@ async function mockProjectSystemSkills(page: Page) {
           encoding: "utf-8",
           content: SYSTEM_SKILL_CONTENT,
           source_payload_checksum: SYSTEM_SKILL_SHA,
-          asset_version: systemSkill.version,
+          asset_version: systemSkill.revision,
         },
         request_id: "request-system-skill-file",
       });

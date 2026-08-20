@@ -83,7 +83,7 @@ def test_authoring_catalog_request_dtos_are_closed_and_bounded() -> None:
 
 
 @pytest.mark.asyncio
-async def test_skill_search_query_uses_only_current_or_exact_bound_versions() -> None:
+async def test_skill_search_query_uses_current_versions_and_asset_bindings() -> None:
     context = _context(Capability.SHARED_ASSETS_READ)
     rows = [
         SimpleNamespace(
@@ -137,11 +137,11 @@ async def test_skill_search_query_uses_only_current_or_exact_bound_versions() ->
     assert session.statement is not None
     sql = _sql(session.statement)
     assert "skills.status = 'active'" in sql
-    assert "skills.current_published_version_id = skill_versions.id" in sql
-    assert "skill_versions.workflow_status = 'published'" in sql
+    assert "skills.current_version_id = skill_versions.id" in sql
     assert "skill_versions.revoked_at IS NULL" in sql
     assert "project_system_skill_bindings.enabled IS true" in sql
-    assert "skill_versions.id = project_system_skill_bindings.skill_version_id" in sql
+    assert "skill_versions.id = skills.current_version_id" in sql
+    assert "project_system_skill_bindings.skill_version_id" not in sql
     assert "project_memberships.user_id" in sql
     assert "project_memberships.version = 7" in sql
     assert "LIMIT 2" in sql

@@ -23,6 +23,23 @@ CREATE TABLE asset_catalog_state (
     CONSTRAINT ck_asset_catalog_state_singleton CHECK (id = 1)
 );
 
+CREATE TABLE system_asset_upgrade_audit (
+    id UUID NOT NULL,
+    asset_kind VARCHAR(16) NOT NULL,
+    asset_id UUID NOT NULL,
+    version_id UUID NOT NULL,
+    before_checksum VARCHAR(64) NOT NULL,
+    after_checksum VARCHAR(64) NOT NULL,
+    package_digest VARCHAR(64) NOT NULL,
+    operator_identity VARCHAR(255) NOT NULL,
+    occurred_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_system_asset_upgrade_audit_kind CHECK (asset_kind IN ('agent', 'skill')),
+    CONSTRAINT ck_system_asset_upgrade_audit_before_checksum CHECK (before_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_system_asset_upgrade_audit_after_checksum CHECK (after_checksum ~ '^[0-9a-f]{64}$'),
+    CONSTRAINT ck_system_asset_upgrade_audit_package_digest CHECK (package_digest ~ '^[0-9a-f]{64}$')
+);
+
 CREATE TABLE dead_jobs (
     job_id UUID NOT NULL,
     project_id UUID NOT NULL,
@@ -329,8 +346,8 @@ CREATE TABLE agents (
     slug VARCHAR(63) NOT NULL,
     display_name VARCHAR(120) NOT NULL,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
-    current_published_version_id UUID,
-    version BIGINT DEFAULT 1 NOT NULL,
+    current_version_id UUID,
+    revision BIGINT DEFAULT 1 NOT NULL,
     source_key VARCHAR(255),
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -338,7 +355,7 @@ CREATE TABLE agents (
     PRIMARY KEY (id),
     CONSTRAINT ck_agents_scope_project CHECK ((scope = 'system' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL)),
     CONSTRAINT ck_agents_status CHECK (status IN ('active', 'archived', 'suspended')),
-    CONSTRAINT ck_agents_version CHECK (version >= 1),
+    CONSTRAINT ck_agents_revision CHECK (revision >= 1),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
     FOREIGN KEY(project_id) REFERENCES projects (id),
     CONSTRAINT uq_agents_id_scope UNIQUE (id, scope),
@@ -749,8 +766,8 @@ CREATE TABLE skills (
     slug VARCHAR(63) NOT NULL,
     display_name VARCHAR(120) NOT NULL,
     status VARCHAR(16) DEFAULT 'active' NOT NULL,
-    current_published_version_id UUID,
-    version BIGINT DEFAULT 1 NOT NULL,
+    current_version_id UUID,
+    revision BIGINT DEFAULT 1 NOT NULL,
     source_key VARCHAR(255),
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
@@ -758,7 +775,7 @@ CREATE TABLE skills (
     PRIMARY KEY (id),
     CONSTRAINT ck_skills_scope_project CHECK ((scope = 'system' AND project_id IS NULL) OR (scope = 'project' AND project_id IS NOT NULL)),
     CONSTRAINT ck_skills_status CHECK (status IN ('active', 'archived', 'suspended')),
-    CONSTRAINT ck_skills_version CHECK (version >= 1),
+    CONSTRAINT ck_skills_revision CHECK (revision >= 1),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
     FOREIGN KEY(project_id) REFERENCES projects (id),
     CONSTRAINT uq_skills_id_scope UNIQUE (id, scope),
@@ -775,7 +792,6 @@ CREATE TABLE agent_versions (
     id UUID NOT NULL,
     agent_id UUID NOT NULL,
     version_number BIGINT NOT NULL,
-    workflow_status VARCHAR(24) DEFAULT 'draft' NOT NULL,
     description TEXT DEFAULT '' NOT NULL,
     soul TEXT NOT NULL,
     model_ref VARCHAR(255) NOT NULL,
@@ -783,10 +799,6 @@ CREATE TABLE agent_versions (
     tool_groups JSONB DEFAULT '[]'::jsonb NOT NULL,
     supersedes_version_id UUID,
     payload_checksum CHAR(64) NOT NULL,
-    submitted_at TIMESTAMP WITH TIME ZONE,
-    reviewed_at TIMESTAMP WITH TIME ZONE,
-    reviewed_by_user_id VARCHAR(36),
-    review_note TEXT,
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     agents_instructions TEXT DEFAULT '' NOT NULL,
@@ -795,11 +807,11 @@ CREATE TABLE agent_versions (
     payload_schema_version INTEGER DEFAULT 1 NOT NULL,
     PRIMARY KEY (id),
     CONSTRAINT ck_agent_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
-    CONSTRAINT ck_agent_versions_payload_schema_version CHECK (payload_schema_version IN (1, 2, 3)),
+    CONSTRAINT ck_agent_versions_payload_schema_version CHECK (payload_schema_version IN (1, 2, 3, 4)),
     CONSTRAINT ck_agent_versions_model_settings CHECK (
         jsonb_typeof(model_settings) = 'object'
         AND (
-            payload_schema_version = 3
+            payload_schema_version IN (3, 4)
             OR model_settings = '{}'::jsonb
         )
         AND model_settings - 'temperature' - 'max_tokens'
@@ -834,11 +846,9 @@ CREATE TABLE agent_versions (
             )
         )
     ),
-    CONSTRAINT ck_agent_versions_workflow_status CHECK (workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')),
     CONSTRAINT ck_agent_versions_number CHECK (version_number >= 1),
     FOREIGN KEY(agent_id) REFERENCES agents (id) ON DELETE RESTRICT,
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
-    FOREIGN KEY(reviewed_by_user_id) REFERENCES users (id),
     FOREIGN KEY(supersedes_version_id) REFERENCES agent_versions (id) ON DELETE RESTRICT,
     CONSTRAINT uq_agent_versions_asset_id UNIQUE (agent_id, id),
     CONSTRAINT uq_agent_versions_asset_number UNIQUE (agent_id, version_number)
@@ -1091,6 +1101,7 @@ CREATE TABLE run_asset_versions (
     payload_checksum CHAR(64) NOT NULL,
     catalog_generation BIGINT NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    snapshot_json JSONB NOT NULL,
     CONSTRAINT pk_run_asset_versions PRIMARY KEY (project_id, owner_user_id, run_id, asset_kind, dependency_order),
     CONSTRAINT ck_run_asset_versions_kind CHECK (asset_kind IN ('agent', 'skill', 'mcp')),
     CONSTRAINT ck_run_asset_versions_scope CHECK (asset_scope IN ('system', 'project')),
@@ -1165,7 +1176,6 @@ CREATE TABLE skill_versions (
     id UUID NOT NULL,
     skill_id UUID NOT NULL,
     version_number BIGINT NOT NULL,
-    workflow_status VARCHAR(24) DEFAULT 'draft' NOT NULL,
     description TEXT DEFAULT '' NOT NULL,
     frontmatter JSONB DEFAULT '{}'::jsonb NOT NULL,
     compatibility VARCHAR(255),
@@ -1174,10 +1184,6 @@ CREATE TABLE skill_versions (
     scan_summary JSONB DEFAULT '{}'::jsonb NOT NULL,
     supersedes_version_id UUID,
     payload_checksum CHAR(64) NOT NULL,
-    submitted_at TIMESTAMP WITH TIME ZONE,
-    reviewed_at TIMESTAMP WITH TIME ZONE,
-    reviewed_by_user_id VARCHAR(36),
-    review_note TEXT,
     created_by_user_id VARCHAR(36) NOT NULL,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     revoked_at TIMESTAMP WITH TIME ZONE,
@@ -1186,12 +1192,10 @@ CREATE TABLE skill_versions (
     PRIMARY KEY (id),
     CONSTRAINT ck_skill_versions_checksum CHECK (payload_checksum ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_skill_versions_scan_decision CHECK (scan_decision IN ('allow', 'warn', 'block')),
-    CONSTRAINT ck_skill_versions_workflow_status CHECK (workflow_status IN ('draft', 'pending_approval', 'published', 'rejected')),
     CONSTRAINT ck_skill_versions_number CHECK (version_number >= 1),
     CONSTRAINT ck_skill_versions_revocation CHECK ((revoked_at IS NULL) = (revoked_by_user_id IS NULL) AND (revoked_at IS NULL) = (revocation_reason_code IS NULL)),
     CONSTRAINT ck_skill_versions_revocation_reason CHECK (revocation_reason_code IS NULL OR revocation_reason_code IN ('security', 'policy', 'integrity')),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
-    FOREIGN KEY(reviewed_by_user_id) REFERENCES users (id),
     CONSTRAINT fk_skill_versions_revoked_by_user_id FOREIGN KEY(revoked_by_user_id) REFERENCES users (id),
     FOREIGN KEY(skill_id) REFERENCES skills (id) ON DELETE RESTRICT,
     FOREIGN KEY(supersedes_version_id) REFERENCES skill_versions (id) ON DELETE RESTRICT,
@@ -1348,12 +1352,14 @@ CREATE TABLE agent_version_mcp_refs (
 
 CREATE TABLE agent_version_skill_refs (
     agent_version_id UUID NOT NULL,
-    skill_version_id UUID NOT NULL,
     sort_order BIGINT DEFAULT 0 NOT NULL,
-    PRIMARY KEY (agent_version_id, skill_version_id),
+    skill_asset_scope VARCHAR(16) NOT NULL,
+    skill_asset_id UUID NOT NULL,
+    PRIMARY KEY (agent_version_id, skill_asset_scope, skill_asset_id),
+    CONSTRAINT ck_agent_version_skill_refs_scope CHECK (skill_asset_scope IN ('system', 'project')),
     CONSTRAINT ck_agent_version_skill_refs_sort_order CHECK (sort_order >= 0),
     FOREIGN KEY(agent_version_id) REFERENCES agent_versions (id) ON DELETE RESTRICT,
-    FOREIGN KEY(skill_version_id) REFERENCES skill_versions (id) ON DELETE RESTRICT
+    CONSTRAINT fk_agent_version_skill_refs_skill_asset FOREIGN KEY(skill_asset_id, skill_asset_scope) REFERENCES skills (id, scope) ON DELETE RESTRICT
 );
 
 CREATE TABLE channel_conversations (
@@ -1562,7 +1568,6 @@ CREATE TABLE project_system_agent_bindings (
     project_id UUID NOT NULL,
     system_agent_id UUID NOT NULL,
     system_asset_scope VARCHAR(16) DEFAULT 'system' NOT NULL,
-    agent_version_id UUID NOT NULL,
     enabled BOOLEAN DEFAULT true NOT NULL,
     version BIGINT DEFAULT 1 NOT NULL,
     created_by_user_id VARCHAR(36) NOT NULL,
@@ -1574,7 +1579,6 @@ CREATE TABLE project_system_agent_bindings (
     CONSTRAINT ck_project_system_agent_bindings_version CHECK (version >= 1),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
     FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT fk_project_system_agent_bindings_version FOREIGN KEY(system_agent_id, agent_version_id) REFERENCES agent_versions (agent_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_project_system_agent_bindings_system_asset FOREIGN KEY(system_agent_id, system_asset_scope) REFERENCES agents (id, scope) ON DELETE RESTRICT,
     FOREIGN KEY(updated_by_user_id) REFERENCES users (id)
 );
@@ -1604,7 +1608,6 @@ CREATE TABLE project_system_skill_bindings (
     project_id UUID NOT NULL,
     system_skill_id UUID NOT NULL,
     system_asset_scope VARCHAR(16) DEFAULT 'system' NOT NULL,
-    skill_version_id UUID NOT NULL,
     enabled BOOLEAN DEFAULT true NOT NULL,
     version BIGINT DEFAULT 1 NOT NULL,
     created_by_user_id VARCHAR(36) NOT NULL,
@@ -1616,7 +1619,6 @@ CREATE TABLE project_system_skill_bindings (
     CONSTRAINT ck_project_system_skill_bindings_version CHECK (version >= 1),
     FOREIGN KEY(created_by_user_id) REFERENCES users (id),
     FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT fk_project_system_skill_bindings_version FOREIGN KEY(system_skill_id, skill_version_id) REFERENCES skill_versions (skill_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_project_system_skill_bindings_system_asset FOREIGN KEY(system_skill_id, system_asset_scope) REFERENCES skills (id, scope) ON DELETE RESTRICT,
     FOREIGN KEY(updated_by_user_id) REFERENCES users (id)
 );
@@ -1871,17 +1873,30 @@ ALTER TABLE scheduled_task_runs ADD CONSTRAINT fk_scheduled_task_runs_private_th
 
 ALTER TABLE scheduled_task_runs ADD CONSTRAINT fk_scheduled_task_runs_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT;
 
-ALTER TABLE agents ADD CONSTRAINT fk_agents_current_published_version FOREIGN KEY(id, current_published_version_id) REFERENCES agent_versions (agent_id, id);
+ALTER TABLE agents ADD CONSTRAINT fk_agents_current_version FOREIGN KEY(id, current_version_id) REFERENCES agent_versions (agent_id, id);
 
 ALTER TABLE credentials ADD CONSTRAINT fk_credentials_current_version FOREIGN KEY(id, current_version_id) REFERENCES credential_versions (credential_id, id);
 
 ALTER TABLE mcp_servers ADD CONSTRAINT fk_mcp_servers_current_published_version FOREIGN KEY(id, current_published_version_id) REFERENCES mcp_server_versions (mcp_server_id, id);
 
-ALTER TABLE skills ADD CONSTRAINT fk_skills_current_published_version FOREIGN KEY(id, current_published_version_id) REFERENCES skill_versions (skill_id, id);
+ALTER TABLE skills ADD CONSTRAINT fk_skills_current_version FOREIGN KEY(id, current_version_id) REFERENCES skill_versions (skill_id, id);
 
 CREATE OR REPLACE FUNCTION prevent_shared_asset_version_payload_update()
 RETURNS trigger AS $$
+DECLARE
+    asset_scope text;
 BEGIN
+    IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
+       AND TG_TABLE_NAME IN ('agent_versions', 'skill_versions') THEN
+        IF TG_TABLE_NAME = 'agent_versions' THEN
+            SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
+        ELSE
+            SELECT scope INTO asset_scope FROM skills WHERE id = NEW.skill_id;
+        END IF;
+        IF asset_scope = 'system' THEN
+            RETURN NEW;
+        END IF;
+    END IF;
     IF (to_jsonb(NEW) - ARRAY[
         'workflow_status', 'status', 'submitted_at', 'reviewed_at',
         'reviewed_by_user_id', 'review_note', 'retired_at', 'revoked_at',
@@ -1911,29 +1926,33 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION ensure_system_binding_published_version()
+CREATE OR REPLACE FUNCTION ensure_system_binding_eligible_version()
 RETURNS trigger AS $$
 DECLARE
-    version_status text;
     version_revoked_at timestamp with time zone;
+    current_id uuid;
+    asset_status text;
+    version_status text;
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'project_system_agent_bindings' THEN
-            SELECT workflow_status INTO version_status
-            FROM agent_versions
-            WHERE id = NEW.agent_version_id AND agent_id = NEW.system_agent_id
+            SELECT current_version_id, status INTO current_id, asset_status
+            FROM agents
+            WHERE id = NEW.system_agent_id AND scope = 'system'
             FOR UPDATE;
         WHEN 'project_system_skill_bindings' THEN
-            SELECT workflow_status, revoked_at
-            INTO version_status, version_revoked_at
+            SELECT current_version_id, status INTO current_id, asset_status
+            FROM skills
+            WHERE id = NEW.system_skill_id AND scope = 'system'
+            FOR UPDATE;
+            SELECT revoked_at INTO version_revoked_at
             FROM skill_versions
-            WHERE id = NEW.skill_version_id AND skill_id = NEW.system_skill_id
+            WHERE id = current_id AND skill_id = NEW.system_skill_id
             FOR UPDATE;
             IF TG_OP = 'UPDATE'
                AND OLD.enabled IS TRUE
                AND NEW.enabled IS FALSE
-               AND OLD.system_skill_id = NEW.system_skill_id
-               AND OLD.skill_version_id = NEW.skill_version_id THEN
+               AND OLD.system_skill_id = NEW.system_skill_id THEN
                 RETURN NEW;
             END IF;
         WHEN 'project_system_mcp_bindings' THEN
@@ -1945,10 +1964,16 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'unsupported system binding table';
     END CASE;
-    IF version_status IS DISTINCT FROM 'published'
+    IF TG_TABLE_NAME = 'project_system_mcp_bindings'
+       AND version_status IS DISTINCT FROM 'published' THEN
+        RAISE EXCEPTION 'system MCP binding requires a published version'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
+    IF TG_TABLE_NAME IN ('project_system_agent_bindings', 'project_system_skill_bindings')
+       AND (current_id IS NULL OR asset_status IS DISTINCT FROM 'active'
        OR (TG_TABLE_NAME = 'project_system_skill_bindings'
-           AND version_revoked_at IS NOT NULL) THEN
-        RAISE EXCEPTION 'system binding requires non-revoked published version'
+           AND version_revoked_at IS NOT NULL)) THEN
+        RAISE EXCEPTION 'system binding requires an eligible Current Version'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
@@ -1960,6 +1985,7 @@ RETURNS trigger AS $$
 DECLARE
     asset_scope text;
     asset_project_id uuid;
+    current_id uuid;
 BEGIN
     IF TG_OP = 'INSERT' THEN
         IF NEW.revoked_at IS NOT NULL
@@ -1976,57 +2002,62 @@ BEGIN
        AND NEW.revocation_reason_code IS NOT DISTINCT FROM OLD.revocation_reason_code THEN
         RETURN NEW;
     END IF;
+
+    IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
+       AND OLD.revoked_at IS NOT NULL
+       AND NEW.revoked_at IS NULL
+       AND NEW.revoked_by_user_id IS NULL
+       AND NEW.revocation_reason_code IS NULL THEN
+        SELECT scope, project_id, current_version_id
+        INTO asset_scope, asset_project_id, current_id
+        FROM skills
+        WHERE id = NEW.skill_id
+        FOR UPDATE;
+        IF asset_scope = 'system'
+           AND asset_project_id IS NULL
+           AND current_id = NEW.id
+           AND NEW.version_number = 1 THEN
+            RETURN NEW;
+        END IF;
+    END IF;
     IF OLD.revoked_at IS NOT NULL
        OR OLD.revoked_by_user_id IS NOT NULL
        OR OLD.revocation_reason_code IS NOT NULL
        OR NEW.revoked_at IS NULL
        OR NEW.revoked_by_user_id IS NULL
        OR NEW.revocation_reason_code IS NULL
-       OR NEW.revocation_reason_code NOT IN ('security', 'policy', 'integrity')
-       OR NEW.workflow_status IS DISTINCT FROM 'published' THEN
+       OR NEW.revocation_reason_code NOT IN ('security', 'policy', 'integrity') THEN
         RAISE EXCEPTION 'system skill version revocation is irreversible'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
 
-    SELECT scope, project_id
-    INTO asset_scope, asset_project_id
+    SELECT scope, project_id, current_version_id
+    INTO asset_scope, asset_project_id, current_id
     FROM skills
     WHERE id = NEW.skill_id
     FOR UPDATE;
-    IF asset_scope IS DISTINCT FROM 'system' OR asset_project_id IS NOT NULL THEN
-        RAISE EXCEPTION 'only published system skill versions can be revoked'
+    IF asset_scope IS DISTINCT FROM 'system'
+       OR asset_project_id IS NOT NULL
+       OR current_id IS DISTINCT FROM NEW.id
+       OR NEW.version_number != 1 THEN
+        RAISE EXCEPTION 'only a System Skill Current v1 can be revoked'
             USING ERRCODE = 'integrity_constraint_violation';
     END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION prevent_bound_published_version_downgrade()
+CREATE OR REPLACE FUNCTION prevent_bound_mcp_published_version_downgrade()
 RETURNS trigger AS $$
 DECLARE
     is_bound boolean;
 BEGIN
     IF OLD.workflow_status = 'published'
        AND NEW.workflow_status IS DISTINCT FROM 'published' THEN
-        CASE TG_TABLE_NAME
-            WHEN 'agent_versions' THEN
-                SELECT EXISTS (
-                    SELECT 1 FROM project_system_agent_bindings
-                    WHERE agent_version_id = OLD.id
-                ) INTO is_bound;
-            WHEN 'skill_versions' THEN
-                SELECT EXISTS (
-                    SELECT 1 FROM project_system_skill_bindings
-                    WHERE skill_version_id = OLD.id
-                ) INTO is_bound;
-            WHEN 'mcp_server_versions' THEN
-                SELECT EXISTS (
-                    SELECT 1 FROM project_system_mcp_bindings
-                    WHERE mcp_server_version_id = OLD.id
-                ) INTO is_bound;
-            ELSE
-                is_bound := false;
-        END CASE;
+        SELECT EXISTS (
+            SELECT 1 FROM project_system_mcp_bindings
+            WHERE mcp_server_version_id = OLD.id
+        ) INTO is_bound;
         IF is_bound THEN
             RAISE EXCEPTION 'bound published version cannot change workflow status'
                 USING ERRCODE = 'integrity_constraint_violation';
@@ -2036,19 +2067,25 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE OR REPLACE FUNCTION prevent_published_version_child_mutation()
+CREATE OR REPLACE FUNCTION prevent_asset_version_child_mutation()
 RETURNS trigger AS $$
 DECLARE
     parent_version_id uuid;
     parent_status text;
+    parent_scope text;
+    parent_project_id uuid;
+    parent_asset_id uuid;
     purge_allowed boolean := false;
 BEGIN
     CASE TG_TABLE_NAME
         WHEN 'skill_version_files' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.skill_version_id ELSE NEW.skill_version_id END;
-            SELECT workflow_status INTO parent_status
-            FROM skill_versions WHERE id = parent_version_id FOR UPDATE;
+            SELECT asset.scope, asset.project_id, asset.id
+            INTO parent_scope, parent_project_id, parent_asset_id
+            FROM skill_versions version
+            JOIN skills asset ON asset.id = version.skill_id
+            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
             IF TG_OP = 'DELETE' THEN
                 SELECT EXISTS (
                     SELECT 1
@@ -2067,7 +2104,7 @@ BEGIN
                               project.status = 'active'
                               AND project.is_suspended IS FALSE
                               AND asset.status = 'archived'
-                              AND asset.current_published_version_id IS NULL
+                              AND asset.current_version_id IS NULL
                               AND current_setting(
                                   'deerflow.skill_hard_delete_asset_id',
                                   true
@@ -2079,8 +2116,11 @@ BEGIN
         WHEN 'agent_version_skill_refs' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT workflow_status INTO parent_status
-            FROM agent_versions WHERE id = parent_version_id FOR UPDATE;
+            SELECT asset.scope, asset.project_id, asset.id
+            INTO parent_scope, parent_project_id, parent_asset_id
+            FROM agent_versions version
+            JOIN agents asset ON asset.id = version.agent_id
+            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
             IF TG_OP = 'DELETE' THEN
                 SELECT EXISTS (
                     SELECT 1
@@ -2099,30 +2139,23 @@ BEGIN
                               project.status = 'active'
                               AND project.is_suspended IS FALSE
                               AND asset.status = 'archived'
-                              AND asset.current_published_version_id IS NULL
+                              AND asset.current_version_id IS NULL
                               AND current_setting(
                                   'deerflow.agent_hard_delete_asset_id',
                                   true
                               ) = asset.id::text
                           )
                       )
-                ) OR EXISTS (
-                    SELECT 1
-                    FROM skill_versions version
-                    JOIN skills asset ON asset.id = version.skill_id
-                    JOIN projects project ON project.id = asset.project_id
-                    WHERE version.id = OLD.skill_version_id
-                      AND asset.scope = 'project'
-                      AND project.status = 'pending_deletion'
-                      AND project.deletion_effective_at IS NOT NULL
-                      AND project.deletion_effective_at <= now()
                 ) INTO purge_allowed;
             END IF;
         WHEN 'agent_version_mcp_refs' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.agent_version_id ELSE NEW.agent_version_id END;
-            SELECT workflow_status INTO parent_status
-            FROM agent_versions WHERE id = parent_version_id FOR UPDATE;
+            SELECT asset.scope, asset.project_id, asset.id
+            INTO parent_scope, parent_project_id, parent_asset_id
+            FROM agent_versions version
+            JOIN agents asset ON asset.id = version.agent_id
+            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
             IF TG_OP = 'DELETE' THEN
                 SELECT EXISTS (
                     SELECT 1
@@ -2141,7 +2174,7 @@ BEGIN
                               project.status = 'active'
                               AND project.is_suspended IS FALSE
                               AND asset.status = 'archived'
-                              AND asset.current_published_version_id IS NULL
+                              AND asset.current_version_id IS NULL
                               AND current_setting(
                                   'deerflow.agent_hard_delete_asset_id',
                                   true
@@ -2195,6 +2228,27 @@ BEGIN
         ELSE
             RAISE EXCEPTION 'unsupported version child table';
     END CASE;
+    IF TG_TABLE_NAME IN (
+        'skill_version_files',
+        'agent_version_skill_refs',
+        'agent_version_mcp_refs'
+    ) THEN
+        IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
+           AND parent_scope = 'system' THEN
+            IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+            RETURN NEW;
+        END IF;
+        IF current_setting('deerflow.asset_version_assembly', true)
+           = parent_version_id::text THEN
+            IF TG_OP = 'DELETE' THEN RETURN OLD; END IF;
+            RETURN NEW;
+        END IF;
+        IF TG_OP = 'DELETE' AND purge_allowed THEN
+            RETURN OLD;
+        END IF;
+        RAISE EXCEPTION 'Agent and Skill version child rows are immutable'
+            USING ERRCODE = 'integrity_constraint_violation';
+    END IF;
     IF TG_OP = 'DELETE' AND purge_allowed THEN
         RETURN OLD;
     END IF;
@@ -2252,43 +2306,31 @@ CREATE TRIGGER trg_agent_version_mcp_refs_immutable BEFORE UPDATE ON agent_versi
 
 CREATE TRIGGER trg_mcp_credential_slots_immutable BEFORE UPDATE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update();
 
-CREATE TRIGGER trg_agent_bindings_published BEFORE INSERT OR UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_published_version();
+CREATE TRIGGER trg_agent_bindings_current BEFORE INSERT OR UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version();
 
-CREATE TRIGGER trg_skill_bindings_published BEFORE INSERT OR UPDATE ON project_system_skill_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_published_version();
+CREATE TRIGGER trg_skill_bindings_current BEFORE INSERT OR UPDATE ON project_system_skill_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version();
 
-CREATE TRIGGER trg_mcp_bindings_published BEFORE INSERT OR UPDATE ON project_system_mcp_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_published_version();
+CREATE TRIGGER trg_mcp_bindings_published BEFORE INSERT OR UPDATE ON project_system_mcp_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version();
 
-CREATE TRIGGER trg_agent_versions_bound_published BEFORE UPDATE OF workflow_status ON agent_versions FOR EACH ROW EXECUTE FUNCTION prevent_bound_published_version_downgrade();
+CREATE TRIGGER trg_mcp_server_versions_bound_published BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_bound_mcp_published_version_downgrade();
 
-CREATE TRIGGER trg_skill_versions_bound_published BEFORE UPDATE OF workflow_status ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_bound_published_version_downgrade();
+CREATE TRIGGER trg_skill_version_files_child_immutable BEFORE INSERT OR DELETE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
-CREATE TRIGGER trg_mcp_server_versions_bound_published BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_bound_published_version_downgrade();
+CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
-CREATE TRIGGER trg_skill_version_files_child_immutable BEFORE INSERT OR DELETE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation();
+CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
-CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation();
-
-CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation();
-
-CREATE TRIGGER trg_mcp_credential_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_published_version_child_mutation();
-
-CREATE TRIGGER trg_agent_versions_state_transition BEFORE UPDATE OF workflow_status ON agent_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition();
-
-CREATE TRIGGER trg_skill_versions_state_transition BEFORE UPDATE OF workflow_status ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition();
+CREATE TRIGGER trg_mcp_credential_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation();
 
 CREATE TRIGGER trg_mcp_server_versions_state_transition BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition();
 
 CREATE TRIGGER trg_credential_versions_state_transition BEFORE UPDATE OF status ON credential_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition();
 
-CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_published_version_id ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
+CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_version_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
-CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_published_version_id ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
+CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_version_id, revision ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
 CREATE TRIGGER trg_mcp_servers_generation AFTER UPDATE OF status, current_published_version_id ON mcp_servers FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
-
-CREATE TRIGGER trg_agent_versions_generation AFTER UPDATE OF workflow_status ON agent_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
-
-CREATE TRIGGER trg_skill_versions_generation AFTER UPDATE OF workflow_status ON skill_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
 CREATE TRIGGER trg_skill_version_revocations_generation AFTER UPDATE OF revoked_at ON skill_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation();
 
@@ -2864,14 +2906,17 @@ CREATE TABLE project_skill_credential_bindings (
     revoked_at TIMESTAMP WITH TIME ZONE,
     revoked_by_user_id VARCHAR(36),
     source_env_field_name VARCHAR(255) NOT NULL,
+    admission_only BOOLEAN DEFAULT false NOT NULL,
+    runtime_authority_binding_id UUID,
     CONSTRAINT pk_project_skill_credential_bindings PRIMARY KEY (id),
     CONSTRAINT ck_project_skill_credential_bindings_secret_name CHECK (secret_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'),
     CONSTRAINT ck_project_skill_credential_bindings_source_env_field_name CHECK (length(source_env_field_name) BETWEEN 1 AND 255),
     CONSTRAINT ck_project_skill_credential_bindings_revision CHECK (config_revision >= 1),
     CONSTRAINT ck_project_skill_credential_bindings_status CHECK (status IN ('active', 'revoked')),
     CONSTRAINT ck_project_skill_credential_bindings_revocation CHECK ((status = 'active' AND revoked_at IS NULL AND revoked_by_user_id IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)),
-    CONSTRAINT fk_project_skill_credential_bindings_config FOREIGN KEY(project_id, skill_id, skill_version_id) REFERENCES project_skill_credential_configs (project_id, skill_id, skill_version_id) ON DELETE CASCADE,
-    CONSTRAINT fk_project_skill_credential_bindings_skill_version FOREIGN KEY(skill_id, skill_version_id) REFERENCES skill_versions (skill_id, id) ON DELETE CASCADE,
+    CONSTRAINT ck_project_skill_credential_bindings_runtime_authority CHECK (runtime_authority_binding_id IS NULL OR admission_only = true),
+    CONSTRAINT fk_project_skill_credential_bindings_skill FOREIGN KEY(skill_id) REFERENCES skills (id) ON DELETE CASCADE,
+    CONSTRAINT fk_project_skill_credential_bindings_runtime_authority FOREIGN KEY(runtime_authority_binding_id) REFERENCES project_skill_credential_bindings (id) ON DELETE RESTRICT,
     CONSTRAINT fk_project_skill_credential_bindings_credential_version FOREIGN KEY(credential_id, credential_version_id) REFERENCES credential_versions (credential_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_project_skill_credential_bindings_project_credential FOREIGN KEY(project_id, credential_id) REFERENCES credentials (project_id, id) ON DELETE RESTRICT,
     CONSTRAINT fk_project_skill_credential_bindings_creator FOREIGN KEY(created_by_user_id) REFERENCES users (id) ON DELETE RESTRICT,
@@ -2879,7 +2924,7 @@ CREATE TABLE project_skill_credential_bindings (
     CONSTRAINT uq_project_skill_credential_bindings_scope_id UNIQUE (project_id, skill_id, skill_version_id, id)
 );
 
-CREATE UNIQUE INDEX uq_project_skill_credential_bindings_active_name ON project_skill_credential_bindings (project_id, skill_id, skill_version_id, secret_name) WHERE status = 'active';
+CREATE UNIQUE INDEX uq_project_skill_credential_bindings_active_name ON project_skill_credential_bindings (project_id, skill_id, skill_version_id, secret_name) WHERE status = 'active' AND admission_only = false;
 
 CREATE INDEX ix_project_skill_credential_bindings_credential ON project_skill_credential_bindings (credential_id, credential_version_id, status);
 
@@ -2888,6 +2933,79 @@ CREATE INDEX ix_project_skill_credential_bindings_config ON project_skill_creden
 CREATE INDEX ix_project_skill_credential_bindings_skill_version ON project_skill_credential_bindings (skill_id, skill_version_id);
 
 CREATE INDEX ix_project_skill_credential_bindings_project_credential ON project_skill_credential_bindings (project_id, credential_id);
+
+CREATE OR REPLACE FUNCTION enforce_live_skill_credential_binding_target()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.admission_only = false AND NOT EXISTS (
+        SELECT 1
+        FROM project_skill_credential_configs config
+        JOIN skill_versions version
+          ON version.skill_id = config.skill_id
+         AND version.id = config.skill_version_id
+        WHERE config.project_id = NEW.project_id
+          AND config.skill_id = NEW.skill_id
+          AND config.skill_version_id = NEW.skill_version_id
+    ) THEN
+        RAISE EXCEPTION 'live Skill credential binding target unavailable'
+            USING ERRCODE = '23503';
+    END IF;
+    IF NEW.runtime_authority_binding_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM project_skill_credential_bindings authority
+        WHERE authority.id = NEW.runtime_authority_binding_id
+          AND authority.project_id = NEW.project_id
+          AND authority.skill_id = NEW.skill_id
+          AND authority.secret_name = NEW.secret_name
+          AND authority.admission_only = false
+    ) THEN
+        RAISE EXCEPTION 'retired Skill credential runtime authority unavailable'
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_project_skill_credential_bindings_live_target
+BEFORE INSERT OR UPDATE OF project_id, skill_id, skill_version_id, secret_name, admission_only, runtime_authority_binding_id
+ON project_skill_credential_bindings
+FOR EACH ROW EXECUTE FUNCTION enforce_live_skill_credential_binding_target();
+
+CREATE OR REPLACE FUNCTION protect_live_skill_credential_binding_target()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_TABLE_NAME = 'project_skill_credential_configs' THEN
+        IF EXISTS (
+            SELECT 1 FROM project_skill_credential_bindings binding
+            WHERE binding.project_id = OLD.project_id
+              AND binding.skill_id = OLD.skill_id
+              AND binding.skill_version_id = OLD.skill_version_id
+              AND binding.admission_only = false
+        ) THEN
+            RAISE EXCEPTION 'live Skill credential config is referenced'
+                USING ERRCODE = '23503';
+        END IF;
+    ELSIF EXISTS (
+        SELECT 1 FROM project_skill_credential_bindings binding
+        WHERE binding.skill_id = OLD.skill_id
+          AND binding.skill_version_id = OLD.id
+          AND binding.admission_only = false
+    ) THEN
+        RAISE EXCEPTION 'live Skill credential version is referenced'
+            USING ERRCODE = '23503';
+    END IF;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_project_skill_credential_configs_live_binding
+BEFORE DELETE OR UPDATE OF project_id, skill_id, skill_version_id
+ON project_skill_credential_configs
+FOR EACH ROW EXECUTE FUNCTION protect_live_skill_credential_binding_target();
+
+CREATE TRIGGER trg_skill_versions_live_credential_binding
+BEFORE DELETE OR UPDATE OF id, skill_id
+ON skill_versions
+FOR EACH ROW EXECUTE FUNCTION protect_live_skill_credential_binding_target();
 
 CREATE TABLE run_skill_credential_snapshots (
     project_id UUID NOT NULL,
@@ -3478,7 +3596,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 89 static tables and 1106 columns.
+-- Coverage: 90 static tables and 1107 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -3488,6 +3606,17 @@ COMMENT ON TABLE asset_catalog_state IS '记录系统资产目录的单例代次
 COMMENT ON COLUMN asset_catalog_state.id IS '资产目录状态：主键标识。';
 COMMENT ON COLUMN asset_catalog_state.generation IS '资产目录状态：单调代次。';
 COMMENT ON COLUMN asset_catalog_state.updated_at IS '资产目录状态：记录最近更新时间。';
+
+COMMENT ON TABLE system_asset_upgrade_audit IS '记录软件包升级原子替换 System Agent 或 Skill Current v1 的校验和证据。';
+COMMENT ON COLUMN system_asset_upgrade_audit.id IS '系统资产升级审计：主键标识。';
+COMMENT ON COLUMN system_asset_upgrade_audit.asset_kind IS '系统资产升级审计：资产类型。';
+COMMENT ON COLUMN system_asset_upgrade_audit.asset_id IS '系统资产升级审计：资产标识。';
+COMMENT ON COLUMN system_asset_upgrade_audit.version_id IS '系统资产升级审计：版本标识。';
+COMMENT ON COLUMN system_asset_upgrade_audit.before_checksum IS '系统资产升级审计：升级前载荷校验和。';
+COMMENT ON COLUMN system_asset_upgrade_audit.after_checksum IS '系统资产升级审计：升级后载荷校验和。';
+COMMENT ON COLUMN system_asset_upgrade_audit.package_digest IS '系统资产升级审计：升级软件包目录摘要。';
+COMMENT ON COLUMN system_asset_upgrade_audit.operator_identity IS '系统资产升级审计：执行数据库升级的操作主体身份。';
+COMMENT ON COLUMN system_asset_upgrade_audit.occurred_at IS '系统资产升级审计：发生时间。';
 
 COMMENT ON TABLE dead_jobs IS '保存超过重试边界或无法安全重试的后台任务终态。';
 COMMENT ON COLUMN dead_jobs.job_id IS '死信任务：任务标识。';
@@ -3664,15 +3793,15 @@ COMMENT ON COLUMN projects.created_by_user_id IS '项目：创建操作的用户
 COMMENT ON COLUMN projects.created_at IS '项目：记录创建时间。';
 COMMENT ON COLUMN projects.updated_at IS '项目：记录最近更新时间。';
 
-COMMENT ON TABLE agents IS '保存项目智能体的逻辑身份和当前发布指针。';
+COMMENT ON TABLE agents IS '保存智能体的逻辑身份和 Current Version 指针。';
 COMMENT ON COLUMN agents.id IS '项目智能体：主键标识。';
 COMMENT ON COLUMN agents.scope IS '项目智能体：资产或数据归属范围。';
 COMMENT ON COLUMN agents.project_id IS '项目智能体：所属项目标识。';
 COMMENT ON COLUMN agents.slug IS '项目智能体：稳定可读标识名。';
 COMMENT ON COLUMN agents.display_name IS '项目智能体：展示名称。';
 COMMENT ON COLUMN agents.status IS '项目智能体：生命周期状态。';
-COMMENT ON COLUMN agents.current_published_version_id IS '项目智能体：当前发布版本标识。';
-COMMENT ON COLUMN agents.version IS '项目智能体：记录版本号。';
+COMMENT ON COLUMN agents.current_version_id IS '项目智能体：当前版本标识。';
+COMMENT ON COLUMN agents.revision IS '项目智能体：配置修订号。';
 COMMENT ON COLUMN agents.source_key IS '项目智能体：来源键。';
 COMMENT ON COLUMN agents.created_by_user_id IS '项目智能体：创建操作的用户标识。';
 COMMENT ON COLUMN agents.created_at IS '项目智能体：记录创建时间。';
@@ -3888,15 +4017,15 @@ COMMENT ON COLUMN project_usage_ledger.idempotency_key IS '项目用量台账：
 COMMENT ON COLUMN project_usage_ledger.request_id IS '项目用量台账：请求标识。';
 COMMENT ON COLUMN project_usage_ledger.occurred_at IS '项目用量台账：发生时间。';
 
-COMMENT ON TABLE skills IS '保存项目技能的逻辑身份和当前发布指针。';
+COMMENT ON TABLE skills IS '保存技能的逻辑身份和 Current Version 指针。';
 COMMENT ON COLUMN skills.id IS '项目技能：主键标识。';
 COMMENT ON COLUMN skills.scope IS '项目技能：资产或数据归属范围。';
 COMMENT ON COLUMN skills.project_id IS '项目技能：所属项目标识。';
 COMMENT ON COLUMN skills.slug IS '项目技能：稳定可读标识名。';
 COMMENT ON COLUMN skills.display_name IS '项目技能：展示名称。';
 COMMENT ON COLUMN skills.status IS '项目技能：生命周期状态。';
-COMMENT ON COLUMN skills.current_published_version_id IS '项目技能：当前发布版本标识。';
-COMMENT ON COLUMN skills.version IS '项目技能：记录版本号。';
+COMMENT ON COLUMN skills.current_version_id IS '项目技能：当前版本标识。';
+COMMENT ON COLUMN skills.revision IS '项目技能：配置修订号。';
 COMMENT ON COLUMN skills.source_key IS '项目技能：来源键。';
 COMMENT ON COLUMN skills.created_by_user_id IS '项目技能：创建操作的用户标识。';
 COMMENT ON COLUMN skills.created_at IS '项目技能：记录创建时间。';
@@ -3906,7 +4035,6 @@ COMMENT ON TABLE agent_versions IS '保存不可变的项目智能体版本内�
 COMMENT ON COLUMN agent_versions.id IS '智能体版本：主键标识。';
 COMMENT ON COLUMN agent_versions.agent_id IS '智能体版本：智能体标识。';
 COMMENT ON COLUMN agent_versions.version_number IS '智能体版本：版本编号。';
-COMMENT ON COLUMN agent_versions.workflow_status IS '智能体版本：工作流状态。';
 COMMENT ON COLUMN agent_versions.description IS '智能体版本：用途描述。';
 COMMENT ON COLUMN agent_versions.soul IS '智能体版本：项目智能体人格设定。';
 COMMENT ON COLUMN agent_versions.model_ref IS '智能体版本：模型引用。';
@@ -3914,10 +4042,6 @@ COMMENT ON COLUMN agent_versions.model_settings IS '智能体版本：模型调�
 COMMENT ON COLUMN agent_versions.tool_groups IS '智能体版本：允许使用的工具分组。';
 COMMENT ON COLUMN agent_versions.supersedes_version_id IS '智能体版本：替代目标版本标识。';
 COMMENT ON COLUMN agent_versions.payload_checksum IS '智能体版本：载荷内容校验和。';
-COMMENT ON COLUMN agent_versions.submitted_at IS '智能体版本：提交时间。';
-COMMENT ON COLUMN agent_versions.reviewed_at IS '智能体版本：审核时间。';
-COMMENT ON COLUMN agent_versions.reviewed_by_user_id IS '智能体版本：执行审核的用户标识。';
-COMMENT ON COLUMN agent_versions.review_note IS '智能体版本：静态审核说明。';
 COMMENT ON COLUMN agent_versions.created_by_user_id IS '智能体版本：创建操作的用户标识。';
 COMMENT ON COLUMN agent_versions.created_at IS '智能体版本：记录创建时间。';
 COMMENT ON COLUMN agent_versions.agents_instructions IS '智能体版本：项目智能体行为指令。';
@@ -4049,7 +4173,7 @@ COMMENT ON COLUMN mcp_server_versions.review_note IS 'MCP 服务版本：静态�
 COMMENT ON COLUMN mcp_server_versions.created_by_user_id IS 'MCP 服务版本：创建操作的用户标识。';
 COMMENT ON COLUMN mcp_server_versions.created_at IS 'MCP 服务版本：记录创建时间。';
 
-COMMENT ON TABLE run_asset_versions IS '冻结一次运行引用的智能体、技能或 MCP 资产版本。';
+COMMENT ON TABLE run_asset_versions IS '冻结一次运行准入时解析出的智能体、技能或 MCP 完整版本内容。';
 COMMENT ON COLUMN run_asset_versions.project_id IS '运行资产快照：所属项目标识。';
 COMMENT ON COLUMN run_asset_versions.owner_user_id IS '运行资产快照：私有数据所有者的用户标识。';
 COMMENT ON COLUMN run_asset_versions.thread_id IS '运行资产快照：线程标识。';
@@ -4062,6 +4186,7 @@ COMMENT ON COLUMN run_asset_versions.version_id IS '运行资产快照：版本�
 COMMENT ON COLUMN run_asset_versions.payload_checksum IS '运行资产快照：载荷内容校验和。';
 COMMENT ON COLUMN run_asset_versions.catalog_generation IS '运行资产快照：目录代次。';
 COMMENT ON COLUMN run_asset_versions.created_at IS '运行资产快照：记录创建时间。';
+COMMENT ON COLUMN run_asset_versions.snapshot_json IS '运行资产快照：准入时冻结的完整且不含明文凭据的资产内容。';
 
 COMMENT ON TABLE run_event_partition_state IS '记录运行事件分区维护的高水位。';
 COMMENT ON COLUMN run_event_partition_state.singleton IS '运行事件分区状态：单例约束标识。';
@@ -4095,7 +4220,6 @@ COMMENT ON TABLE skill_versions IS '保存不可变的项目技能版本及扫�
 COMMENT ON COLUMN skill_versions.id IS '技能版本：主键标识。';
 COMMENT ON COLUMN skill_versions.skill_id IS '技能版本：技能标识。';
 COMMENT ON COLUMN skill_versions.version_number IS '技能版本：版本编号。';
-COMMENT ON COLUMN skill_versions.workflow_status IS '技能版本：工作流状态。';
 COMMENT ON COLUMN skill_versions.description IS '技能版本：用途描述。';
 COMMENT ON COLUMN skill_versions.frontmatter IS '技能版本：技能入口文件的元数据头。';
 COMMENT ON COLUMN skill_versions.compatibility IS '技能版本：兼容性。';
@@ -4104,10 +4228,6 @@ COMMENT ON COLUMN skill_versions.scan_decision IS '技能版本：安全扫描�
 COMMENT ON COLUMN skill_versions.scan_summary IS '技能版本：安全扫描摘要。';
 COMMENT ON COLUMN skill_versions.supersedes_version_id IS '技能版本：替代目标版本标识。';
 COMMENT ON COLUMN skill_versions.payload_checksum IS '技能版本：载荷内容校验和。';
-COMMENT ON COLUMN skill_versions.submitted_at IS '技能版本：提交时间。';
-COMMENT ON COLUMN skill_versions.reviewed_at IS '技能版本：审核时间。';
-COMMENT ON COLUMN skill_versions.reviewed_by_user_id IS '技能版本：执行审核的用户标识。';
-COMMENT ON COLUMN skill_versions.review_note IS '技能版本：静态审核说明。';
 COMMENT ON COLUMN skill_versions.created_by_user_id IS '技能版本：创建操作的用户标识。';
 COMMENT ON COLUMN skill_versions.created_at IS '技能版本：记录创建时间。';
 COMMENT ON COLUMN skill_versions.revoked_at IS '技能版本：不可逆治理撤销时间。';
@@ -4184,10 +4304,11 @@ COMMENT ON COLUMN agent_version_mcp_refs.agent_version_id IS '智能体 MCP 引�
 COMMENT ON COLUMN agent_version_mcp_refs.mcp_server_version_id IS '智能体 MCP 引用：MCP服务版本标识。';
 COMMENT ON COLUMN agent_version_mcp_refs.sort_order IS '智能体 MCP 引用：排序顺序。';
 
-COMMENT ON TABLE agent_version_skill_refs IS '保存智能体版本到技能版本的有序依赖。';
+COMMENT ON TABLE agent_version_skill_refs IS '保存智能体版本到技能资产的有序依赖；运行时解析其 Current Version。';
 COMMENT ON COLUMN agent_version_skill_refs.agent_version_id IS '智能体技能引用：智能体版本标识。';
-COMMENT ON COLUMN agent_version_skill_refs.skill_version_id IS '智能体技能引用：技能版本标识。';
 COMMENT ON COLUMN agent_version_skill_refs.sort_order IS '智能体技能引用：排序顺序。';
+COMMENT ON COLUMN agent_version_skill_refs.skill_asset_scope IS '智能体技能引用：技能资产范围。';
+COMMENT ON COLUMN agent_version_skill_refs.skill_asset_id IS '智能体技能引用：技能资产标识。';
 
 COMMENT ON TABLE channel_conversations IS '映射外部渠道会话与项目私有线程。';
 COMMENT ON COLUMN channel_conversations.id IS '渠道会话：主键标识。';
@@ -4297,7 +4418,6 @@ COMMENT ON TABLE project_system_agent_bindings IS '保存项目对系统智能�
 COMMENT ON COLUMN project_system_agent_bindings.project_id IS '项目系统智能体绑定：所属项目标识。';
 COMMENT ON COLUMN project_system_agent_bindings.system_agent_id IS '项目系统智能体绑定：系统智能体标识。';
 COMMENT ON COLUMN project_system_agent_bindings.system_asset_scope IS '项目系统智能体绑定：系统资产范围。';
-COMMENT ON COLUMN project_system_agent_bindings.agent_version_id IS '项目系统智能体绑定：智能体版本标识。';
 COMMENT ON COLUMN project_system_agent_bindings.enabled IS '项目系统智能体绑定：是否启用。';
 COMMENT ON COLUMN project_system_agent_bindings.version IS '项目系统智能体绑定：记录版本号。';
 COMMENT ON COLUMN project_system_agent_bindings.created_by_user_id IS '项目系统智能体绑定：创建操作的用户标识。';
@@ -4321,7 +4441,6 @@ COMMENT ON TABLE project_system_skill_bindings IS '保存项目对系统技能�
 COMMENT ON COLUMN project_system_skill_bindings.project_id IS '项目系统技能绑定：所属项目标识。';
 COMMENT ON COLUMN project_system_skill_bindings.system_skill_id IS '项目系统技能绑定：系统技能标识。';
 COMMENT ON COLUMN project_system_skill_bindings.system_asset_scope IS '项目系统技能绑定：系统资产范围。';
-COMMENT ON COLUMN project_system_skill_bindings.skill_version_id IS '项目系统技能绑定：技能版本标识。';
 COMMENT ON COLUMN project_system_skill_bindings.enabled IS '项目系统技能绑定：是否启用。';
 COMMENT ON COLUMN project_system_skill_bindings.version IS '项目系统技能绑定：记录版本号。';
 COMMENT ON COLUMN project_system_skill_bindings.created_by_user_id IS '项目系统技能绑定：创建操作的用户标识。';
@@ -4544,6 +4663,8 @@ COMMENT ON COLUMN project_skill_credential_bindings.created_at IS '技能凭据�
 COMMENT ON COLUMN project_skill_credential_bindings.revoked_at IS '技能凭据绑定：撤销时间。';
 COMMENT ON COLUMN project_skill_credential_bindings.revoked_by_user_id IS '技能凭据绑定：执行撤销的用户标识。';
 COMMENT ON COLUMN project_skill_credential_bindings.source_env_field_name IS '技能凭据绑定：来源环境变量字段名称。';
+COMMENT ON COLUMN project_skill_credential_bindings.admission_only IS '技能凭据绑定：仅供已准入运行继续验证的退役权限标记。';
+COMMENT ON COLUMN project_skill_credential_bindings.runtime_authority_binding_id IS '技能凭据绑定：退役绑定关联的当前运行权限绑定标识。';
 
 COMMENT ON TABLE run_skill_credential_snapshots IS '冻结运行使用技能时的凭据绑定闭包。';
 COMMENT ON COLUMN run_skill_credential_snapshots.project_id IS '运行技能凭据快照：所属项目标识。';
@@ -4774,6 +4895,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('skill_credential_source_field');
+INSERT INTO alembic_version (version_num) VALUES ('current_asset_version_lifecycle');
 
 COMMIT;

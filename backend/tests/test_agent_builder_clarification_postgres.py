@@ -612,7 +612,7 @@ async def test_commit_recovers_from_original_slug_conflict_with_an_override(
                 soul="保持简洁。",
                 model_ref="default",
                 tool_groups=(),
-                skill_version_ids=(),
+                skill_refs=(),
                 mcp_version_ids=(),
             ),
         )

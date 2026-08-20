@@ -1,17 +1,17 @@
 import { describe, expect, test } from "@rstest/core";
 
 import {
-  buildSkillPublishInput,
-  missingRequiredSkillPublishRequirements,
+  buildSkillActivationInput,
+  missingRequiredSkillActivationRequirements,
   skillFrontmatterPatchInputSchema,
   skillFrontmatterParseResponseSchema,
   skillFrontmatterPatchResponseSchema,
-  skillPublishRequiredBindingsBlocked,
-  skillPublishPlanResponseSchema,
+  skillActivationBlocked,
+  skillActivationReadinessResponseSchema,
 } from "@/core/shared-assets/skill-secret-declarations";
 import {
   skillCredentialBindingsInputSchema,
-  skillPublishAssetVersionInputSchema,
+  skillActivationInputSchema,
 } from "@/core/shared-assets/types";
 
 const SKILL_ID = "33333333-3333-4333-8333-333333333333";
@@ -19,7 +19,7 @@ const VERSION_ID = "44444444-4444-4444-8444-444444444444";
 const CREDENTIAL_VERSION_ID = "66666666-6666-4666-8666-666666666666";
 const SHA = "a".repeat(64);
 
-function publishPlan(
+function activationReadiness(
   requirements: Array<{
     name: string;
     optional: boolean;
@@ -36,7 +36,7 @@ function publishPlan(
   return {
     skill_id: SKILL_ID,
     skill_version_id: VERSION_ID,
-    asset_version: 8,
+    revision: 8,
     payload_checksum: SHA,
     binding_revision: 2,
     secrets_autonomous: false,
@@ -46,7 +46,7 @@ function publishPlan(
     configured_required_count: configuredRequired.length,
     invalid_count: invalid.length,
     requirements,
-    request_id: "publish-plan",
+    request_id: "activation-readiness",
   };
 }
 
@@ -112,9 +112,9 @@ describe("Skill secret declaration contracts", () => {
     ).toThrow();
   });
 
-  test("publish plan exposes readiness only, never selectable Credential metadata", () => {
-    const plan = skillPublishPlanResponseSchema.parse(
-      publishPlan([
+  test("activation readiness exposes status only, never selectable Credential metadata", () => {
+    const plan = skillActivationReadinessResponseSchema.parse(
+      activationReadiness([
         {
           name: "OPENAI_API_KEY",
           optional: false,
@@ -129,7 +129,7 @@ describe("Skill secret declaration contracts", () => {
       mapping_status: "configured",
     });
     expect(() =>
-      skillPublishPlanResponseSchema.parse({
+      skillActivationReadinessResponseSchema.parse({
         ...plan,
         requirements: [
           {
@@ -152,28 +152,29 @@ describe("Skill secret declaration contracts", () => {
       }).required_secrets[0]?.name,
     ).toBe(historicalName);
     expect(
-      skillPublishPlanResponseSchema.parse(
-        publishPlan([
+      skillActivationReadinessResponseSchema.parse(
+        activationReadiness([
           { name: historicalName, optional: false, mapping_status: "missing" },
         ]),
       ).requirements[0]?.name,
     ).toBe(historicalName);
   });
 
-  test("publish body always pins payload and binding revision but rejects selections", () => {
-    const plan = skillPublishPlanResponseSchema.parse(publishPlan([]));
-    const input = skillPublishAssetVersionInputSchema.parse(
-      buildSkillPublishInput({ plan }),
+  test("activation body pins payload and binding revision but rejects selections", () => {
+    const plan = skillActivationReadinessResponseSchema.parse(
+      activationReadiness([]),
+    );
+    const input = skillActivationInputSchema.parse(
+      buildSkillActivationInput({ readiness: plan }),
     );
     expect(input).toEqual({
-      expected_asset_version: 8,
+      expected_revision: 8,
       expected_payload_checksum: SHA,
       expected_binding_revision: 2,
-      acknowledge_stale_base: false,
     });
     expect(input).not.toHaveProperty("credential_bindings");
     expect(() =>
-      skillPublishAssetVersionInputSchema.parse({
+      skillActivationInputSchema.parse({
         ...input,
         credential_bindings: [],
       }),
@@ -204,10 +205,10 @@ describe("Skill secret declaration contracts", () => {
     });
   });
 
-  test("rejects a publish summary that disagrees with requirement status", () => {
+  test("rejects readiness that disagrees with requirement status", () => {
     expect(() =>
-      skillPublishPlanResponseSchema.parse({
-        ...publishPlan([
+      skillActivationReadinessResponseSchema.parse({
+        ...activationReadiness([
           { name: "API_KEY", optional: false, mapping_status: "missing" },
         ]),
         ready: true,
@@ -215,23 +216,23 @@ describe("Skill secret declaration contracts", () => {
     ).toThrow();
   });
 
-  test("blocks every public Draft until the read-only preflight is ready", () => {
-    const blocked = skillPublishPlanResponseSchema.parse(
-      publishPlan([
+  test("blocks every Candidate until the read-only preflight is ready", () => {
+    const blocked = skillActivationReadinessResponseSchema.parse(
+      activationReadiness([
         { name: "API_KEY", optional: false, mapping_status: "missing" },
         { name: "OPTIONAL", optional: true, mapping_status: "invalid" },
       ]),
     );
-    expect(missingRequiredSkillPublishRequirements(blocked)).toMatchObject([
+    expect(missingRequiredSkillActivationRequirements(blocked)).toMatchObject([
       { name: "API_KEY" },
     ]);
-    expect(skillPublishRequiredBindingsBlocked({ plan: blocked })).toBe(true);
+    expect(skillActivationBlocked({ readiness: blocked })).toBe(true);
 
-    const ready = skillPublishPlanResponseSchema.parse(
-      publishPlan([
+    const ready = skillActivationReadinessResponseSchema.parse(
+      activationReadiness([
         { name: "API_KEY", optional: false, mapping_status: "configured" },
       ]),
     );
-    expect(skillPublishRequiredBindingsBlocked({ plan: ready })).toBe(false);
+    expect(skillActivationBlocked({ readiness: ready })).toBe(false);
   });
 });

@@ -6,7 +6,7 @@ import asyncio
 import threading
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from pydantic import ValidationError
@@ -16,7 +16,10 @@ from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
-from app.shared_assets.agent_payload_checksum import agent_payload_checksum_matches
+from app.shared_assets.agent_payload_checksum import (
+    agent_payload_checksum,
+    persisted_agent_payload_checksum_matches,
+)
 from app.shared_assets.credential_closure import (
     McpCredentialClosureInvalid,
     McpCredentialClosureTarget,
@@ -36,6 +39,7 @@ from app.shared_assets.models import (
     AssetKind,
     AssetScope,
     ResolvedMcpSnapshot,
+    SkillAssetRef,
 )
 from app.shared_assets.resolver import materialize_mcp_secrets as materialize_resolved_mcp_secrets
 from app.shared_assets.skill_repository import SkillVersionRecord
@@ -86,7 +90,7 @@ class PostgresAssetCatalogProvider:
 
     Every public lookup reads ``asset_catalog_state`` before consulting the
     process cache. A generation change clears all three asset-kind caches in
-    one operation, so publish, suspend and credential/grant revocation cannot
+    one operation, so activation, suspend and credential/grant revocation cannot
     leave a cross-kind stale snapshot behind.
     """
 
@@ -336,7 +340,7 @@ class PostgresAssetCatalogProvider:
         rows = (
             await session.execute(
                 select(AgentRow, AgentVersionRow)
-                .join(AgentVersionRow, AgentVersionRow.id == AgentRow.current_published_version_id)
+                .join(AgentVersionRow, AgentVersionRow.id == AgentRow.current_version_id)
                 .where(
                     AgentRow.scope == "system",
                     AgentRow.project_id.is_(None),
@@ -345,7 +349,7 @@ class PostgresAssetCatalogProvider:
                         AgentRow.source_key.is_(None),
                         AgentRow.source_key != BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
                     ),
-                    AgentVersionRow.workflow_status == "published",
+                    AgentVersionRow.version_number == 1,
                 )
                 .order_by(AgentRow.slug)
             )
@@ -356,18 +360,37 @@ class PostgresAssetCatalogProvider:
                 continue
             if asset.status != "active":
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
-            raw_skill_ids = tuple((await session.execute(select(AgentVersionSkillRefRow.skill_version_id).where(AgentVersionSkillRefRow.agent_version_id == version.id).order_by(AgentVersionSkillRefRow.sort_order))).scalars().all())
+            raw_skill_refs = tuple(
+                (
+                    await session.execute(
+                        select(
+                            AgentVersionSkillRefRow.skill_asset_scope,
+                            AgentVersionSkillRefRow.skill_asset_id,
+                        )
+                        .where(AgentVersionSkillRefRow.agent_version_id == version.id)
+                        .order_by(AgentVersionSkillRefRow.sort_order)
+                    )
+                ).all()
+            )
             skill_rows = (
                 await session.execute(
-                    select(AgentVersionSkillRefRow.skill_version_id, SkillRow.slug)
-                    .join(SkillVersionRow, SkillVersionRow.id == AgentVersionSkillRefRow.skill_version_id)
-                    .join(SkillRow, SkillRow.id == SkillVersionRow.skill_id)
+                    select(
+                        SkillRow.scope,
+                        SkillRow.id,
+                        SkillVersionRow.id,
+                        SkillRow.slug,
+                    )
+                    .join(
+                        SkillRow,
+                        (SkillRow.scope == AgentVersionSkillRefRow.skill_asset_scope) & (SkillRow.id == AgentVersionSkillRefRow.skill_asset_id),
+                    )
+                    .join(SkillVersionRow, SkillVersionRow.id == SkillRow.current_version_id)
                     .where(
                         AgentVersionSkillRefRow.agent_version_id == version.id,
                         SkillRow.scope == "system",
                         SkillRow.project_id.is_(None),
                         SkillRow.status == "active",
-                        SkillVersionRow.workflow_status == "published",
+                        SkillVersionRow.version_number == 1,
                         SkillVersionRow.revoked_at.is_(None),
                     )
                     .order_by(AgentVersionSkillRefRow.sort_order)
@@ -389,15 +412,25 @@ class PostgresAssetCatalogProvider:
                     .order_by(AgentVersionMcpRefRow.sort_order)
                 )
             ).all()
-            if raw_skill_ids != tuple(row[0] for row in skill_rows) or raw_mcp_ids != tuple(row[0] for row in mcp_rows):
+            if raw_skill_refs != tuple((row[0], row[1]) for row in skill_rows) or raw_mcp_ids != tuple(row[0] for row in mcp_rows):
                 raise AssetCatalogUnavailable("system agent dependency catalog is invalid")
             try:
                 model_settings = AgentModelSettings.model_validate({} if version.model_settings is None else version.model_settings)
             except ValidationError:
                 raise AssetCatalogUnavailable("system agent catalog is invalid") from None
             if (
-                version.payload_schema_version not in (1, 2, 3)
+                version.payload_schema_version not in (1, 2, 3, 4)
                 or (version.payload_schema_version in (1, 2) and not model_settings.is_empty)
+                or (
+                    version.payload_schema_version == 1
+                    and any(
+                        (
+                            version.agents_instructions,
+                            version.identity,
+                            version.user_context,
+                        )
+                    )
+                )
                 or not isinstance(version.tool_groups, list)
                 or (version.model_ref != DEFAULT_MODEL_REF and exact_model_ref(version.model_ref) is None)
             ):
@@ -407,7 +440,13 @@ class PostgresAssetCatalogProvider:
                 soul=version.soul,
                 model_ref=version.model_ref,
                 tool_groups=tuple(version.tool_groups),
-                skill_version_ids=tuple(uuid.UUID(str(row[0])) for row in skill_rows),
+                skill_refs=tuple(
+                    SkillAssetRef(
+                        scope=AssetScope(str(row[0])),
+                        asset_id=uuid.UUID(str(row[1])),
+                    )
+                    for row in skill_rows
+                ),
                 mcp_version_ids=tuple(uuid.UUID(str(row[0])) for row in mcp_rows),
                 payload_schema_version=version.payload_schema_version,
                 agents_instructions=version.agents_instructions,
@@ -415,11 +454,13 @@ class PostgresAssetCatalogProvider:
                 user_context=version.user_context,
                 model_settings=model_settings,
             )
-            if not agent_payload_checksum_matches(
+            if not persisted_agent_payload_checksum_matches(
                 payload,
                 version.payload_checksum,
             ):
                 raise AssetCatalogUnavailable("system agent catalog is invalid")
+            runtime_payload = replace(payload, payload_schema_version=4) if payload.payload_schema_version in (1, 2, 3) else payload
+            runtime_checksum = agent_payload_checksum(runtime_payload)
             snapshots.append(
                 AssetCatalogAgentSnapshot(
                     slug=asset.slug,
@@ -427,16 +468,16 @@ class PostgresAssetCatalogProvider:
                     asset_id=uuid.UUID(str(asset.id)),
                     version_id=uuid.UUID(str(version.id)),
                     generation=generation,
-                    checksum=version.payload_checksum,
+                    checksum=runtime_checksum,
                     description=version.description,
                     soul=version.soul,
                     model_ref=version.model_ref,
-                    tool_groups=payload.tool_groups,
-                    skill_version_ids=payload.skill_version_ids,
-                    mcp_version_ids=payload.mcp_version_ids,
-                    skill_slugs=tuple(str(row[1]) for row in skill_rows),
+                    tool_groups=runtime_payload.tool_groups,
+                    skill_version_ids=tuple(uuid.UUID(str(row[2])) for row in skill_rows),
+                    mcp_version_ids=runtime_payload.mcp_version_ids,
+                    skill_slugs=tuple(str(row[3]) for row in skill_rows),
                     mcp_slugs=tuple(str(row[1]) for row in mcp_rows),
-                    payload_schema_version=version.payload_schema_version,
+                    payload_schema_version=runtime_payload.payload_schema_version,
                     agents_instructions=version.agents_instructions,
                     identity=version.identity,
                     user_context=version.user_context,
@@ -450,12 +491,12 @@ class PostgresAssetCatalogProvider:
         rows = (
             await session.execute(
                 select(SkillRow, SkillVersionRow)
-                .join(SkillVersionRow, SkillVersionRow.id == SkillRow.current_published_version_id)
+                .join(SkillVersionRow, SkillVersionRow.id == SkillRow.current_version_id)
                 .where(
                     SkillRow.scope == "system",
                     SkillRow.project_id.is_(None),
                     SkillRow.status == "active",
-                    SkillVersionRow.workflow_status == "published",
+                    SkillVersionRow.version_number == 1,
                     SkillVersionRow.revoked_at.is_(None),
                 )
                 .order_by(SkillRow.slug)

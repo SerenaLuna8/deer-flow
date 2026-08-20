@@ -186,7 +186,6 @@ class SkillDesignValidateRequest(_StrictModel):
 
 class SkillDesignCommitRequest(SkillDesignValidateRequest):
     acknowledge_warnings: bool
-    acknowledge_base_stale: bool = False
 
 
 class SkillDesignCancelRequest(_StrictModel):
@@ -797,7 +796,6 @@ async def commit_skill_design_session(
                 expected_draft_checksum=body.expected_draft_checksum,
                 acknowledge_warnings=body.acknowledge_warnings,
                 idempotency_key=body.idempotency_key,
-                acknowledge_base_stale=body.acknowledge_base_stale,
             ),
         )
         return _commit_response(result, context)

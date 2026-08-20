@@ -123,7 +123,7 @@ class ProjectSkillCredentialConfigRow(Base):
 
 
 class ProjectSkillCredentialBindingRow(Base):
-    """Immutable binding revision; replacement revokes instead of deleting."""
+    """Binding authority; retired System mappings remain for admitted Runs."""
 
     __tablename__ = "project_skill_credential_bindings"
 
@@ -133,7 +133,15 @@ class ProjectSkillCredentialBindingRow(Base):
         default=uuid.uuid4,
     )
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    skill_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    skill_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "skills.id",
+            name="fk_project_skill_credential_bindings_skill",
+            ondelete="CASCADE",
+        ),
+        nullable=False,
+    )
     skill_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     secret_name: Mapped[str] = mapped_column(String(255), nullable=False)
     credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
@@ -176,27 +184,25 @@ class ProjectSkillCredentialBindingRow(Base):
     # New migration columns stay physically last so upgraded and fresh
     # PostgreSQL catalogs have identical attribute order.
     source_env_field_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    admission_only: Mapped[bool] = mapped_column(
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    runtime_authority_binding_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey(
+            "project_skill_credential_bindings.id",
+            name="fk_project_skill_credential_bindings_runtime_authority",
+            ondelete="RESTRICT",
+        ),
+        nullable=True,
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint(
             "id",
             name="pk_project_skill_credential_bindings",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "skill_id", "skill_version_id"],
-            [
-                "project_skill_credential_configs.project_id",
-                "project_skill_credential_configs.skill_id",
-                "project_skill_credential_configs.skill_version_id",
-            ],
-            name="fk_project_skill_credential_bindings_config",
-            ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["skill_id", "skill_version_id"],
-            ["skill_versions.skill_id", "skill_versions.id"],
-            name="fk_project_skill_credential_bindings_skill_version",
-            ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
             ["credential_id", "credential_version_id"],
@@ -230,6 +236,10 @@ class ProjectSkillCredentialBindingRow(Base):
             "(status = 'active' AND revoked_at IS NULL AND revoked_by_user_id IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
             name="ck_project_skill_credential_bindings_revocation",
         ),
+        CheckConstraint(
+            "runtime_authority_binding_id IS NULL OR admission_only = true",
+            name="ck_project_skill_credential_bindings_runtime_authority",
+        ),
         UniqueConstraint(
             "project_id",
             "skill_id",
@@ -244,7 +254,7 @@ class ProjectSkillCredentialBindingRow(Base):
             skill_version_id,
             secret_name,
             unique=True,
-            postgresql_where=text("status = 'active'"),
+            postgresql_where=text("status = 'active' AND admission_only = false"),
         ),
         Index(
             "ix_project_skill_credential_bindings_credential",

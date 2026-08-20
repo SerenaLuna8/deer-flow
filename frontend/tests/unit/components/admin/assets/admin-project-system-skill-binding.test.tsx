@@ -26,8 +26,8 @@ const item: ProjectAssetItem = {
   display_name: "System Skill",
   description: "System description",
   status: "active",
-  current_published_version_id: VERSION_ID,
-  version: 1,
+  current_version_id: VERSION_ID,
+  revision: 1,
   capabilities: ["shared_assets.read", "shared_assets.manage_bindings"],
   binding: null,
   created_by_user_id: "system",
@@ -49,6 +49,7 @@ describe("admin project System Skill binding", () => {
     const markup = renderToStaticMarkup(
       <I18nProvider initialLocale="zh-CN">
         <SystemAssetSection
+          kind="skills"
           items={adminProjectSystemSkillItems(data, "skills")}
           onManageBinding={() => undefined}
         />
@@ -61,14 +62,14 @@ describe("admin project System Skill binding", () => {
   test("keeps revoked versions visible but not bindable", () => {
     expect(
       adminSystemSkillVersionIsBindable({
-        workflow_status: "published",
+        relation: "current",
         governance_status: "active",
         binding_eligible: true,
       }),
     ).toBe(true);
     expect(
       adminSystemSkillVersionIsBindable({
-        workflow_status: "published",
+        relation: "current",
         governance_status: "revoked",
         binding_eligible: false,
       }),

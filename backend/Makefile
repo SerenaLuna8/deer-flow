@@ -33,6 +33,9 @@ setup-db:
 upgrade-db:
 	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/upgrade_postgres.py $(ARGS)
 
+preflight-upgrade:
+	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/upgrade_postgres.py --preflight-only
+
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 

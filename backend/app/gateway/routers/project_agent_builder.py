@@ -12,8 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from app.gateway.deps import get_config
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
-    AssetItemResponse,
     AssetRoute,
+    CurrentVersionAssetItemResponse,
+    SkillAssetRefRequest,
     project_asset_context,
     raise_asset_domain,
 )
@@ -42,7 +43,7 @@ from app.shared_assets.agent_design_service import (
 )
 from app.shared_assets.agent_service import AgentService
 from app.shared_assets.errors import AssetStorageUnavailable
-from app.shared_assets.models import AgentModelSettings
+from app.shared_assets.models import AgentModelSettings, SkillAssetRef
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.engine import get_session_factory
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
@@ -106,7 +107,7 @@ class AgentDesignBlueprintRequest(_StrictModel):
         ),
     )
     tool_groups: list[str]
-    skill_version_ids: list[uuid.UUID]
+    skill_refs: list[SkillAssetRefRequest]
     mcp_version_ids: list[uuid.UUID]
     agents_instructions: str
     soul: str
@@ -182,7 +183,7 @@ class AgentDesignBlueprintResponse(_StrictModel):
     description: str
     model_ref: str
     tool_groups: tuple[str, ...]
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRefRequest, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
     agents_instructions: str
     soul: str
@@ -287,12 +288,12 @@ class AgentDesignSessionListV2Response(_StrictModel):
 
 class AgentDesignCommitDataV1Response(_StrictModel):
     session: AgentDesignSessionItemV1Response
-    agent: AssetItemResponse
+    agent: CurrentVersionAssetItemResponse
 
 
 class AgentDesignCommitDataV2Response(_StrictModel):
     session: AgentDesignSessionItemV2Response
-    agent: AssetItemResponse
+    agent: CurrentVersionAssetItemResponse
 
 
 class AgentDesignCommitV1Response(_StrictModel):
@@ -372,7 +373,7 @@ def _blueprint(value: AgentDesignBlueprintRequest) -> AgentDesignBlueprint:
         description=value.description,
         model_ref=value.model_ref,
         tool_groups=tuple(value.tool_groups),
-        skill_version_ids=tuple(value.skill_version_ids),
+        skill_refs=tuple(SkillAssetRef(scope=item.scope, asset_id=item.asset_id) for item in value.skill_refs),
         mcp_version_ids=tuple(value.mcp_version_ids),
         agents_instructions=value.agents_instructions,
         soul=value.soul,
@@ -466,7 +467,7 @@ def _commit_response(
     *,
     contract_version: Literal["1", "2"],
 ) -> AgentDesignCommitNegotiatedResponse:
-    agent = AssetItemResponse.model_validate(
+    agent = CurrentVersionAssetItemResponse.model_validate(
         result.agent,
         from_attributes=True,
     )

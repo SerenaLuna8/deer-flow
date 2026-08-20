@@ -26,6 +26,18 @@ class WorkflowStatus(StrEnum):
     REJECTED = "rejected"
 
 
+class VersionRelation(StrEnum):
+    CURRENT = "current"
+    CANDIDATE = "candidate"
+    HISTORICAL = "historical"
+
+
+@dataclass(frozen=True)
+class SkillAssetRef:
+    scope: AssetScope
+    asset_id: uuid.UUID
+
+
 @dataclass(frozen=True)
 class AssetSelection:
     kind: AssetKind
@@ -39,7 +51,7 @@ class AgentPayload:
     soul: str
     model_ref: str
     tool_groups: tuple[str, ...]
-    skill_version_ids: tuple[uuid.UUID, ...]
+    skill_refs: tuple[SkillAssetRef, ...]
     mcp_version_ids: tuple[uuid.UUID, ...]
     agents_instructions: str = ""
     identity: str = ""
@@ -56,6 +68,12 @@ class SkillArchiveFile:
 
 
 @dataclass(frozen=True)
+class SkillSecretRequirementSnapshot:
+    name: str
+    optional: bool
+
+
+@dataclass(frozen=True)
 class ResolvedAssetSnapshot:
     kind: AssetKind
     scope: AssetScope
@@ -69,12 +87,15 @@ class ResolvedAssetSnapshot:
 @dataclass(frozen=True)
 class ResolvedAgentSnapshot(ResolvedAssetSnapshot):
     payload: AgentPayload
+    skill_version_ids: tuple[uuid.UUID, ...]
+    slug: str = ""
+    source_key: str | None = None
 
 
 @dataclass(frozen=True)
 class ResolvedSkillSnapshot(ResolvedAssetSnapshot):
     files: tuple[SkillArchiveFile, ...]
-    secret_requirements: tuple[str, ...]
+    secret_requirements: tuple[SkillSecretRequirementSnapshot, ...]
 
 
 @dataclass(frozen=True)
@@ -88,10 +109,10 @@ class ResolvedRunAssetClosure:
     """Exact immutable asset closure admitted for one Run.
 
     ``skills`` and ``mcps`` deliberately keep the canonical Main Agent's
-    current project pool as a prefix.  Any historical versions referenced only
-    by delegated Agents follow that prefix.  The explicit boundary lets the
-    Worker expose only the current pool to Main while retaining every exact
-    historical dependency required to execute a delegated Agent.
+    current project pool as a prefix. The explicit boundary lets the Worker
+    expose that pool to Main while retaining the exact dependency closure
+    admitted for every delegated Agent. Agent and Skill dependencies are
+    always resolved from Current Version; MCP keeps exact release semantics.
     """
 
     lead_agent: ResolvedAgentSnapshot

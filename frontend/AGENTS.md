@@ -121,7 +121,7 @@ generator. A necessary local patch needs focused coverage and an explanation.
   merges are revision-monotonic, so late responses cannot overwrite a newer
   cancelled tombstone.
 - Mutations that carry `expected_version` treat `409` as an explicit concurrent
-  edit. Preserve the local draft and refresh authoritative state; never silently
+  edit. Preserve local unsaved changes and refresh authoritative state; never silently
   overwrite it.
 - Conversation rendering is a lead-Agent projection. Subagent/middleware events
   use their dedicated task/progress surfaces and must not be attached to an
@@ -133,16 +133,17 @@ generator. A necessary local patch needs focused coverage and an explanation.
 
 - Project Agent/Skill/MCP versions are immutable server objects. The UI authors
   through aggregate mutations and optimistic revisions; it never fabricates a
-  published pointer, capability, binding, or dependency closure.
-- Agent and Skill draft revisions do not move their live pointer; only a user
-  with binding-management authority may explicitly publish or activate them. An
-  Agent `409` recovery must reload both the Agent catalog and complete version
-  history, preserve the local draft, and adopt the backend's live-pointer
-  authoring base only after the returned CAS revision is newer.
+  Current Version, capability, binding, or dependency closure.
+- Saving a Project Agent or Skill creates an immutable Candidate Version without
+  moving `current_version_id`. Activation atomically selects the Candidate and
+  enables the asset. Asset suspension is a separate emergency stop that keeps the
+  same Current Version. Editor and Admin may save, activate, enable, and suspend.
 - An Agent version selection owns the visible Instructions and Capabilities for
-  that exact immutable version. Only the current live-pointer authoring base is
-  editable. A stale Draft is never published directly: the UI explains why and
-  lets an author copy it into a new current-base Draft before publication.
+  that exact immutable version. Only the latest forward head is editable.
+  Historical Versions are view-only and have no restore, copy, delete, edit, or
+  activation action. A `409` recovery reloads the catalog and complete history,
+  preserves unsaved local edits, and adopts authority only from a newer CAS
+  revision.
 - Agent `AGENTS.md`, `SOUL.md`, `IDENTITY.md`, and `USER.md` are four logical
   version fields, not a filesystem editor.
 - Builder sessions are account/project/owner scoped. Candidate edits remain
@@ -160,29 +161,29 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Skill secret declaration forms are a server-parsed projection of the current
   `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
   Parse/patch races must preserve newer local edits; invalid or pending source
-  blocks save, validation, and publish without discarding the draft.
+  blocks save, validation, and activation without discarding unsaved changes.
 - The Skill version workbench presents one `Runtime credentials` surface while
   preserving two distinct authorities: declarations edit the current
   `SKILL.md` buffer, and project Credential mappings target one exact immutable
-  Skill version. After a new Draft is saved, the workbench focuses that Draft's
-  mapping editor before publish. Project Drafts and the current published
-  version are writable; historical versions are read-only, and a current System
+  Skill version. After a new Candidate Version is saved, the workbench focuses
+  that version's mapping editor before activation. Project Candidate and Current
+  Versions are writable; Historical Versions are read-only, and a current System
   Skill may still receive project Credential mappings. Each mapping selects both
   an exact Credential version and one safe `env` field name, while values remain
   server-only. Hiding the surface must not discard an unsaved mapping, and a
   revision conflict preserves local selections until explicit reload.
-- Skill publishing uses a read-only server publish plan. The publish request
-  always pins the exact payload checksum and mapping revision and never submits
-  Credential choices or secret values. A public Draft cannot publish until the
-  plan is ready. Archive plus Builder create/revise results with declarations
+- Skill activation uses read-only server readiness. The activation request pins
+  the exact payload checksum and mapping revision and never submits Credential
+  choices or secret values. A Candidate cannot activate until readiness passes.
+  Archive plus Builder create/revise results with declarations
   must lead to the exact created version's Runtime credentials controls; AI
   never chooses a Credential or source field.
 - System asset definitions are read-only in global admin views. Project binding
   and Credential-grant operations are separate, narrow mutations.
-- System Skill version history keeps revoked releases visible and labels them as
-  ineligible. A project pin is never silently moved or resurrected: the binding
-  UI may explicitly upgrade/rollback to an eligible release or disable the pin,
-  while optimistic `409` responses refresh authority and require a fresh choice.
+- System Agent/Skill definitions are read-only single-v1 assets. Project bindings
+  store only the asset identity and runtime resolves its Current Version. System
+  Skill revocation is displayed as governance eligibility, not a version state;
+  optimistic `409` responses refresh authority and require a fresh choice.
 - Project and global System Skill details export the currently selected,
   persisted version through the same `Export ZIP` interaction. Unsaved Skill or
   Credential-mapping edits disable export until saved or discarded; revoked

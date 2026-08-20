@@ -252,10 +252,10 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
         assert first.counts["skill"] > 0
         assert first.counts["agent"] > 0
         assert first.counts["mcp"] == 0
-        assert first.applied_releases == sum(first.counts.values()) + 1
+        assert first.applied_changes == sum(first.counts.values())
         assert second.counts == first.counts
         assert second.digest == first.digest
-        assert second.applied_releases == 0
+        assert second.applied_changes == 0
 
         async with factory() as session:
             leftover = (
@@ -275,35 +275,22 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
                 )
             ).scalar_one()
             builder_versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == builder.id).order_by(AgentVersionRow.version_number))).scalars().all())
-            assert [version.version_number for version in builder_versions] == [1, 2]
-            assert [version.workflow_status for version in builder_versions] == [
-                "published",
-                "published",
-            ]
-            assert builder.current_published_version_id == builder_versions[1].id
-            assert builder.version == 2
-            assert builder_versions[0].tool_groups == []
-            assert builder_versions[1].tool_groups == [
+            assert [version.version_number for version in builder_versions] == [1]
+            assert builder.current_version_id == builder_versions[0].id
+            assert builder.revision == 1
+            assert builder_versions[0].tool_groups == [
                 "web",
                 "file:read",
                 "file:write",
                 "bash",
                 "task",
             ]
-            assert builder_versions[1].supersedes_version_id == builder_versions[0].id
+            assert builder_versions[0].supersedes_version_id is None
 
             creator = (
                 await session.execute(
                     select(SkillRow).where(
                         SkillRow.source_key == "builtin:skill:skill-creator",
-                    )
-                )
-            ).scalar_one()
-            creator_v1 = (
-                await session.execute(
-                    select(SkillVersionRow).where(
-                        SkillVersionRow.skill_id == creator.id,
-                        SkillVersionRow.version_number == 1,
                     )
                 )
             ).scalar_one()
@@ -320,7 +307,14 @@ async def test_postgres_packaged_v3_catalog_bootstraps_and_reruns_idempotently(
                 .scalars()
                 .all()
             )
-            assert [(reference.skill_version_id, reference.sort_order) for reference in skill_refs] == [(creator_v1.id, 0), (creator_v1.id, 0)]
+            assert [
+                (
+                    reference.skill_asset_scope,
+                    reference.skill_asset_id,
+                    reference.sort_order,
+                )
+                for reference in skill_refs
+            ] == [("system", creator.id, 0)]
             mcp_refs = (
                 (
                     await session.execute(
@@ -437,17 +431,16 @@ async def _canonical_skill_state(
         )
         catalog_state = await session.get(AssetCatalogStateRow, 1)
         assert catalog_state is not None
-        assert asset.current_published_version_id is not None
+        assert asset.current_version_id is not None
         return _CanonicalSkillState(
             asset_id=asset.id,
-            current_version_id=asset.current_published_version_id,
-            asset_revision=asset.version,
+            current_version_id=asset.current_version_id,
+            asset_revision=asset.revision,
             asset_updated_at=asset.updated_at,
             versions=tuple(
                 (
                     row.id,
                     row.version_number,
-                    row.workflow_status,
                     row.supersedes_version_id,
                     row.payload_checksum,
                     row.created_at,
@@ -515,12 +508,12 @@ async def _skill_state(
         binding = bindings[0]
         catalog_state = await session.get(AssetCatalogStateRow, 1)
         assert catalog_state is not None
-        assert asset.current_published_version_id is not None
+        assert asset.current_version_id is not None
 
         return _SkillState(
             asset_id=asset.id,
-            current_version_id=asset.current_published_version_id,
-            asset_revision=asset.version,
+            current_version_id=asset.current_version_id,
+            asset_revision=asset.revision,
             asset=(
                 asset.id,
                 asset.scope,
@@ -528,8 +521,8 @@ async def _skill_state(
                 asset.slug,
                 asset.display_name,
                 asset.status,
-                asset.current_published_version_id,
-                asset.version,
+                asset.current_version_id,
+                asset.revision,
                 asset.source_key,
                 asset.created_by_user_id,
                 asset.created_at,
@@ -540,7 +533,6 @@ async def _skill_state(
                     row.id,
                     row.skill_id,
                     row.version_number,
-                    row.workflow_status,
                     row.description,
                     _json_snapshot(row.frontmatter),
                     row.compatibility,
@@ -549,12 +541,11 @@ async def _skill_state(
                     _json_snapshot(row.scan_summary),
                     row.supersedes_version_id,
                     row.payload_checksum,
-                    row.submitted_at,
-                    row.reviewed_at,
-                    row.reviewed_by_user_id,
-                    row.review_note,
                     row.created_by_user_id,
                     row.created_at,
+                    row.revoked_at,
+                    row.revoked_by_user_id,
+                    row.revocation_reason_code,
                 )
                 for row in versions
             ),
@@ -573,7 +564,6 @@ async def _skill_state(
                 binding.project_id,
                 binding.system_skill_id,
                 binding.system_asset_scope,
-                binding.skill_version_id,
                 binding.enabled,
                 binding.version,
                 binding.created_by_user_id,
@@ -619,10 +609,7 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
         version_two_root,
         schema_version=2,
         name=name,
-        releases=(
-            (1, version_one_payload),
-            (2, version_two_payload),
-        ),
+        releases=((1, version_two_payload),),
     )
     active_root = version_one_root
     monkeypatch.setattr(catalog_module, "_package_root", lambda: active_root)
@@ -632,7 +619,7 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
     owner_id = uuid.uuid4()
     try:
         first = await bootstrap_service.bootstrap_system_assets(factory)
-        assert first.applied_releases == 1
+        assert first.applied_changes == 1
 
         async with factory.begin() as session:
             session.add(
@@ -664,15 +651,14 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
         )
         assert before_upgrade.asset_revision == 1
         assert len(before_upgrade.versions) == 1
-        assert before_upgrade.versions[0][2:4] == (1, "published")
+        assert before_upgrade.versions[0][2] == 1
         version_one_id = before_upgrade.versions[0][0]
         assert before_upgrade.current_version_id == version_one_id
-        assert before_upgrade.binding[3] == version_one_id
-        assert before_upgrade.binding[4:6] == (True, 1)
+        assert before_upgrade.binding[3:5] == (True, 1)
 
         active_root = version_two_root
         upgraded = await upgrade_system_assets(migrated_postgres_database_url)
-        assert upgraded.applied_releases == 1
+        assert upgraded.applied_changes == 1
         assert upgraded.digest != first.digest
 
         after_upgrade = await _skill_state(
@@ -682,21 +668,18 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
         )
         assert after_upgrade.asset_id == before_upgrade.asset_id
         assert after_upgrade.asset_revision == 2
-        assert len(after_upgrade.versions) == 2
-        assert tuple(row[2:4] for row in after_upgrade.versions) == (
-            (1, "published"),
-            (2, "published"),
-        )
-        version_two_id = after_upgrade.versions[1][0]
-        assert after_upgrade.current_version_id == version_two_id
-        assert after_upgrade.versions[1][10] == version_one_id
-        assert after_upgrade.versions[0] == before_upgrade.versions[0]
-        assert tuple(row for row in after_upgrade.files if row[0] == version_one_id) == tuple(row for row in before_upgrade.files if row[0] == version_one_id)
+        assert len(after_upgrade.versions) == 1
+        assert after_upgrade.versions[0][0] == version_one_id
+        assert after_upgrade.versions[0][2] == 1
+        assert after_upgrade.current_version_id == version_one_id
+        assert after_upgrade.versions[0][9] is None
+        assert after_upgrade.versions[0][10] != before_upgrade.versions[0][10]
+        assert after_upgrade.files != before_upgrade.files
         assert after_upgrade.binding == before_upgrade.binding
         assert after_upgrade.catalog_state[0] > before_upgrade.catalog_state[0]
 
         repeated = await upgrade_system_assets(migrated_postgres_database_url)
-        assert repeated.applied_releases == 0
+        assert repeated.applied_changes == 0
         assert repeated.digest == upgraded.digest
         after_rerun = await _skill_state(
             factory,
@@ -734,7 +717,7 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
         tool_groups=("web", "file:read"),
     )
     agent_one = _agent_entry(agent_name, 1, version_one_payload)
-    agent_two = _agent_entry(agent_name, 2, version_two_payload)
+    agent_two = _agent_entry(agent_name, 1, version_two_payload)
     version_one_root = tmp_path / "agent-catalog-v1"
     version_two_root = tmp_path / "agent-catalog-v2"
     _write_entries(
@@ -749,10 +732,9 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
     _write_entries(
         version_two_root,
         schema_version=3,
-        entries=[skill_entry, agent_one, agent_two],
+        entries=[skill_entry, agent_two],
         payloads={
             str(skill_entry["payload_path"]): skill_payload,
-            str(agent_one["payload_path"]): version_one_payload,
             str(agent_two["payload_path"]): version_two_payload,
         },
     )
@@ -765,7 +747,7 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
     source_key = str(agent_one["source_key"])
     try:
         first = await bootstrap_service.bootstrap_system_assets(factory)
-        assert first.applied_releases == 2
+        assert first.applied_changes == 2
 
         async with factory.begin() as session:
             session.add(
@@ -803,7 +785,6 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
                 ProjectSystemAgentBindingRow(
                     project_id=project.project_id,
                     system_agent_id=asset.id,
-                    agent_version_id=version_one.id,
                     enabled=True,
                     created_by_user_id=str(owner_id),
                     updated_by_user_id=str(owner_id),
@@ -819,7 +800,7 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
         )
         active_root = version_two_root
         upgraded = await upgrade_system_assets(migrated_postgres_database_url)
-        assert upgraded.applied_releases == 1
+        assert upgraded.applied_changes == 1
 
         async with factory() as session:
             asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
@@ -829,23 +810,20 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
                 (project.project_id, asset.id),
             )
             assert binding is not None
-            assert asset.version == 2
-            assert asset.current_published_version_id == versions[1].id
-            assert [version.version_number for version in versions] == [1, 2]
-            assert versions[1].supersedes_version_id == versions[0].id
-            assert (
-                versions[0].id,
-                versions[0].description,
-                tuple(versions[0].tool_groups),
-                versions[0].payload_checksum,
-                versions[0].created_at,
-            ) == version_one_snapshot
-            assert binding.agent_version_id == versions[0].id
+            assert asset.revision == 2
+            assert asset.current_version_id == versions[0].id
+            assert [version.version_number for version in versions] == [1]
+            assert versions[0].supersedes_version_id is None
+            assert versions[0].id == version_one_snapshot[0]
+            assert versions[0].description != version_one_snapshot[1]
+            assert tuple(versions[0].tool_groups) != version_one_snapshot[2]
+            assert versions[0].payload_checksum != version_one_snapshot[3]
+            assert versions[0].created_at == version_one_snapshot[4]
             assert binding.enabled is True
             assert binding.version == 1
             upgraded_snapshot = (
-                asset.current_published_version_id,
-                asset.version,
+                asset.current_version_id,
+                asset.revision,
                 tuple(
                     (
                         version.id,
@@ -855,12 +833,11 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
                     )
                     for version in versions
                 ),
-                binding.agent_version_id,
                 binding.version,
             )
 
         repeated = await upgrade_system_assets(migrated_postgres_database_url)
-        assert repeated.applied_releases == 0
+        assert repeated.applied_changes == 0
         async with factory() as session:
             asset = (await session.execute(select(AgentRow).where(AgentRow.source_key == source_key))).scalar_one()
             versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).order_by(AgentVersionRow.version_number))).scalars().all())
@@ -870,8 +847,8 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
             )
             assert binding is not None
             assert (
-                asset.current_published_version_id,
-                asset.version,
+                asset.current_version_id,
+                asset.revision,
                 tuple(
                     (
                         version.id,
@@ -881,7 +858,6 @@ async def test_postgres_system_agent_upgrade_preserves_v1_pin_and_reruns_idempot
                     )
                     for version in versions
                 ),
-                binding.agent_version_id,
                 binding.version,
             ) == upgraded_snapshot
     finally:
@@ -919,10 +895,7 @@ async def test_postgres_bootstrap_nowait_fails_before_writes_and_retries_after_r
         version_two_root,
         schema_version=2,
         name=name,
-        releases=(
-            (1, version_one_payload),
-            (2, version_two_payload),
-        ),
+        releases=((1, version_two_payload),),
     )
     active_root = version_one_root
     monkeypatch.setattr(catalog_module, "_package_root", lambda: active_root)
@@ -931,7 +904,7 @@ async def test_postgres_bootstrap_nowait_fails_before_writes_and_retries_after_r
     factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
         first = await bootstrap_service.bootstrap_system_assets(factory)
-        assert first.applied_releases == 1
+        assert first.applied_changes == 1
         before_failure = await _canonical_skill_state(
             factory,
             source_key=source_key,
@@ -959,20 +932,19 @@ async def test_postgres_bootstrap_nowait_fails_before_writes_and_retries_after_r
             )
 
         upgraded = await bootstrap_service.bootstrap_system_assets(factory)
-        assert upgraded.applied_releases == 1
+        assert upgraded.applied_changes == 1
         after_retry = await _canonical_skill_state(
             factory,
             source_key=source_key,
         )
         assert after_retry.asset_id == before_failure.asset_id
         assert after_retry.asset_revision == 2
-        assert len(after_retry.versions) == 2
-        assert tuple(row[1:3] for row in after_retry.versions) == (
-            (1, "published"),
-            (2, "published"),
-        )
-        assert after_retry.versions[1][3] == after_retry.versions[0][0]
-        assert after_retry.current_version_id == after_retry.versions[1][0]
+        assert len(after_retry.versions) == 1
+        assert after_retry.versions[0][0] == before_failure.versions[0][0]
+        assert after_retry.versions[0][1] == 1
+        assert after_retry.versions[0][2] is None
+        assert after_retry.versions[0][3] != before_failure.versions[0][3]
+        assert after_retry.current_version_id == after_retry.versions[0][0]
     finally:
         await engine.dispose()
 
@@ -1075,8 +1047,8 @@ async def test_postgres_concurrent_bootstraps_serialize_on_advisory_xact_lock(
             asyncio.gather(first_task, second_task),
             timeout=5,
         )
-        assert first_result.applied_releases == 1
-        assert second_result.applied_releases == 0
+        assert first_result.applied_changes == 1
+        assert second_result.applied_changes == 0
         assert first_result.digest == second_result.digest
         assert post_advisory_calls == 2
 

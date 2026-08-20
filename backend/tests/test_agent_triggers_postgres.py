@@ -27,7 +27,7 @@ class _TriggerSeed:
     project_id: uuid.UUID
     agent_id: uuid.UUID
     agent_version_id: uuid.UUID
-    skill_version_ids: tuple[uuid.UUID, uuid.UUID]
+    skill_ids: tuple[uuid.UUID, uuid.UUID]
     mcp_version_ids: tuple[uuid.UUID, uuid.UUID]
 
 
@@ -96,12 +96,12 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
         await connection.execute(
             text(
                 """INSERT INTO agent_versions
-                (id,agent_id,version_number,workflow_status,description,
+                (id,agent_id,version_number,description,
                  agents_instructions,soul,identity,user_context,model_ref,
                  model_settings,tool_groups,payload_schema_version,
                  payload_checksum,created_by_user_id)
                 VALUES
-                (:id,:agent,1,'draft','Initial description','# Agent',
+                (:id,:agent,1,'Initial description','# Agent',
                  '# Soul','# Identity','# User','default','{}'::jsonb,
                  '["research"]'::jsonb,3,:checksum,:owner)"""
             ),
@@ -134,10 +134,10 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
         await connection.execute(
             text(
                 """INSERT INTO skill_versions
-                (id,skill_id,version_number,workflow_status,scan_decision,
+                (id,skill_id,version_number,scan_decision,
                  payload_checksum,created_by_user_id)
                 VALUES
-                (:id,:asset,1,'published','allow',:checksum,:owner)"""
+                (:id,:asset,1,'allow',:checksum,:owner)"""
             ),
             [
                 {
@@ -155,7 +155,7 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
         await connection.execute(
             text(
                 """UPDATE skills
-                SET current_published_version_id=:version
+                SET current_version_id=:version
                 WHERE id=:asset"""
             ),
             [
@@ -224,13 +224,23 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
         )
         await connection.execute(
             text(
+                """SELECT set_config(
+                    'deerflow.asset_version_assembly',
+                    :version_id,
+                    true
+                )"""
+            ),
+            {"version_id": str(agent_version_id)},
+        )
+        await connection.execute(
+            text(
                 """INSERT INTO agent_version_skill_refs
-                (agent_version_id,skill_version_id,sort_order)
-                VALUES (:agent_version,:dependency,0)"""
+                (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
+                VALUES (:agent_version,'project',:dependency,0)"""
             ),
             {
                 "agent_version": agent_version_id,
-                "dependency": skill_version_ids[0],
+                "dependency": skill_ids[0],
             },
         )
         await connection.execute(
@@ -244,13 +254,20 @@ async def _seed_trigger_graph(engine: AsyncEngine) -> _TriggerSeed:
                 "dependency": mcp_version_ids[0],
             },
         )
+        await connection.execute(
+            text(
+                """UPDATE agents SET current_version_id=:version
+                WHERE id=:agent"""
+            ),
+            {"agent": agent_id, "version": agent_version_id},
+        )
 
     return _TriggerSeed(
         user_id=user_id,
         project_id=project_id,
         agent_id=agent_id,
         agent_version_id=agent_version_id,
-        skill_version_ids=skill_version_ids,
+        skill_ids=skill_ids,
         mcp_version_ids=mcp_version_ids,
     )
 
@@ -289,7 +306,7 @@ async def _seed_default_agent_matrix(
             soul="Reliable",
             model_ref="default",
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
             payload_schema_version=3,
         )
@@ -390,11 +407,11 @@ async def _seed_default_agent_matrix(
         await connection.execute(
             text(
                 """INSERT INTO agent_versions
-                (id,agent_id,version_number,workflow_status,description,
+                (id,agent_id,version_number,description,
                  soul,model_ref,model_settings,tool_groups,
                  payload_schema_version,payload_checksum,created_by_user_id)
                 VALUES
-                (:id,:agent,1,'published','Default Agent','Reliable',
+                (:id,:agent,1,'Default Agent','Reliable',
                  'default','{}'::jsonb,'[]'::jsonb,3,:checksum,:owner)"""
             ),
             [
@@ -415,7 +432,7 @@ async def _seed_default_agent_matrix(
         await connection.execute(
             text(
                 """UPDATE agents
-                SET current_published_version_id=:version
+                SET current_version_id=:version
                 WHERE id=:asset"""
             ),
             [
@@ -456,7 +473,7 @@ async def _seed_default_agent_matrix(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_agent_version_payload_is_immutable_and_published_is_terminal(
+async def test_agent_version_payload_is_immutable(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
@@ -491,49 +508,11 @@ async def test_agent_version_payload_is_immutable_and_published_is_terminal(
                 "shared asset version payload is immutable",
             )
 
-        async with engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """UPDATE agent_versions SET workflow_status='published'
-                    WHERE id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-            await connection.execute(
-                text(
-                    """UPDATE agents SET current_published_version_id=:version
-                    WHERE id=:agent"""
-                ),
-                {
-                    "agent": seed.agent_id,
-                    "version": seed.agent_version_id,
-                },
-            )
-
-        for target_status in ("draft", "pending_approval", "rejected"):
-            with pytest.raises(DBAPIError) as error:
-                async with engine.begin() as connection:
-                    await connection.execute(
-                        text(
-                            """UPDATE agent_versions
-                            SET workflow_status=:target_status
-                            WHERE id=:version"""
-                        ),
-                        {
-                            "target_status": target_status,
-                            "version": seed.agent_version_id,
-                        },
-                    )
-            _assert_database_message(
-                error.value,
-                "invalid shared asset version workflow transition",
-            )
-
         async with engine.connect() as connection:
             row = (
                 await connection.execute(
                     text(
-                        """SELECT workflow_status,description,
+                        """SELECT description,
                                   agents_instructions,soul,identity,user_context,
                                   model_ref,model_settings,tool_groups,
                                   payload_schema_version,payload_checksum
@@ -543,7 +522,6 @@ async def test_agent_version_payload_is_immutable_and_published_is_terminal(
                 )
             ).one()
         assert row == (
-            "published",
             "Initial description",
             "# Agent",
             "# Soul",
@@ -561,36 +539,45 @@ async def test_agent_version_payload_is_immutable_and_published_is_terminal(
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_published_agent_refs_are_frozen_and_delete_escape_is_exact(
+async def test_agent_refs_are_frozen_and_delete_escape_is_exact(
     migrated_postgres_database_url: str,
 ) -> None:
     engine = create_async_engine(migrated_postgres_database_url)
     try:
         seed = await _seed_trigger_graph(engine)
 
-        # Draft child rows are replaceable. Once the parent is published, both
-        # dependency tables must reject new outbound refs.
+        # Version child rows may only be assembled under the exact version GUC.
         async with engine.begin() as connection:
             await connection.execute(
                 text(
+                    """SELECT set_config(
+                        'deerflow.asset_version_assembly',
+                        :version_id,
+                        true
+                    )"""
+                ),
+                {"version_id": str(seed.agent_version_id)},
+            )
+            await connection.execute(
+                text(
                     """INSERT INTO agent_version_skill_refs
-                    (agent_version_id,skill_version_id,sort_order)
-                    VALUES (:version,:dependency,1)"""
+                    (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
+                    VALUES (:version,'project',:dependency,1)"""
                 ),
                 {
                     "version": seed.agent_version_id,
-                    "dependency": seed.skill_version_ids[1],
+                    "dependency": seed.skill_ids[1],
                 },
             )
             await connection.execute(
                 text(
                     """DELETE FROM agent_version_skill_refs
                     WHERE agent_version_id=:version
-                      AND skill_version_id=:dependency"""
+                      AND skill_asset_id=:dependency"""
                 ),
                 {
                     "version": seed.agent_version_id,
-                    "dependency": seed.skill_version_ids[1],
+                    "dependency": seed.skill_ids[1],
                 },
             )
             await connection.execute(
@@ -615,44 +602,27 @@ async def test_published_agent_refs_are_frozen_and_delete_escape_is_exact(
                     "dependency": seed.mcp_version_ids[1],
                 },
             )
-            await connection.execute(
-                text(
-                    """UPDATE agent_versions SET workflow_status='published'
-                    WHERE id=:version"""
-                ),
-                {"version": seed.agent_version_id},
-            )
-            await connection.execute(
-                text(
-                    """UPDATE agents SET current_published_version_id=:version
-                    WHERE id=:agent"""
-                ),
-                {
-                    "agent": seed.agent_id,
-                    "version": seed.agent_version_id,
-                },
-            )
 
         frozen_mutations = (
             (
                 """INSERT INTO agent_version_skill_refs
-                (agent_version_id,skill_version_id,sort_order)
-                VALUES (:version,:dependency,1)""",
-                seed.skill_version_ids[1],
-                "published version child rows are immutable",
+                (agent_version_id,skill_asset_scope,skill_asset_id,sort_order)
+                VALUES (:version,'project',:dependency,1)""",
+                seed.skill_ids[1],
+                "Agent and Skill version child rows are immutable",
             ),
             (
                 """INSERT INTO agent_version_mcp_refs
                 (agent_version_id,mcp_server_version_id,sort_order)
                 VALUES (:version,:dependency,1)""",
                 seed.mcp_version_ids[1],
-                "published version child rows are immutable",
+                "Agent and Skill version child rows are immutable",
             ),
             (
                 """UPDATE agent_version_skill_refs SET sort_order=1
                 WHERE agent_version_id=:version
-                  AND skill_version_id=:dependency""",
-                seed.skill_version_ids[0],
+                  AND skill_asset_id=:dependency""",
+                seed.skill_ids[0],
                 "shared asset version payload is immutable",
             ),
             (
@@ -665,16 +635,16 @@ async def test_published_agent_refs_are_frozen_and_delete_escape_is_exact(
             (
                 """DELETE FROM agent_version_skill_refs
                 WHERE agent_version_id=:version
-                  AND skill_version_id=:dependency""",
-                seed.skill_version_ids[0],
-                "published version child rows are immutable",
+                  AND skill_asset_id=:dependency""",
+                seed.skill_ids[0],
+                "Agent and Skill version child rows are immutable",
             ),
             (
                 """DELETE FROM agent_version_mcp_refs
                 WHERE agent_version_id=:version
                   AND mcp_server_version_id=:dependency""",
                 seed.mcp_version_ids[0],
-                "published version child rows are immutable",
+                "Agent and Skill version child rows are immutable",
             ),
         )
         for statement, dependency_id, message in frozen_mutations:
@@ -712,14 +682,14 @@ async def test_published_agent_refs_are_frozen_and_delete_escape_is_exact(
                 )
         _assert_database_message(
             error.value,
-            "published version child rows are immutable",
+            "Agent and Skill version child rows are immutable",
         )
 
         async with engine.begin() as connection:
             await connection.execute(
                 text(
                     """UPDATE agents
-                    SET status='archived',current_published_version_id=NULL
+                    SET status='archived',current_version_id=NULL
                     WHERE id=:agent"""
                 ),
                 {"agent": seed.agent_id},
@@ -748,7 +718,7 @@ async def test_published_agent_refs_are_frozen_and_delete_escape_is_exact(
                     )
             _assert_database_message(
                 error.value,
-                "published version child rows are immutable",
+                "Agent and Skill version child rows are immutable",
             )
 
         async with engine.begin() as connection:

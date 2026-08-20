@@ -8,7 +8,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from deerflow.error_codes import LLM_PUBLIC_ERROR_CODES
+from deerflow.public_error_codes import LLM_PUBLIC_ERROR_CODES
 
 _STREAM_EVENT = re.compile(r"[a-z][a-z0-9_.-]{0,31}")
 _STREAM_NAMESPACE_MAX_DEPTH = 32

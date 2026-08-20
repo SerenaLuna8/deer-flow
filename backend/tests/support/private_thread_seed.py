@@ -73,7 +73,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
             soul="thread agent",
             model_ref=TEST_MODEL_REF,
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
         )
     )
@@ -127,7 +127,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         await connection.execute(
             text(
                 """INSERT INTO agents
-                (id,scope,project_id,slug,display_name,status,version,created_by_user_id)
+                (id,scope,project_id,slug,display_name,status,revision,created_by_user_id)
                 VALUES (:id,:scope,:project_id,:slug,:name,'active',1,:owner)"""
             ),
             {
@@ -142,9 +142,9 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         await connection.execute(
             text(
                 """INSERT INTO agent_versions
-                (id,agent_id,version_number,workflow_status,description,soul,
+                (id,agent_id,version_number,description,soul,
                  model_ref,tool_groups,payload_checksum,created_by_user_id)
-                VALUES (:id,:agent_id,1,'published','','thread agent',:model_ref,
+                VALUES (:id,:agent_id,1,'','thread agent',:model_ref,
                         '[]'::jsonb,:checksum,:owner)"""
             ),
             {
@@ -157,7 +157,7 @@ async def seed_private_thread_database(database_url: str) -> PrivateThreadSeed:
         )
         await connection.execute(
             text(
-                """UPDATE agents SET current_published_version_id=:version_id
+                """UPDATE agents SET current_version_id=:version_id
                 WHERE id=:agent_id"""
             ),
             {"agent_id": project_agent_id, "version_id": project_agent_version_id},

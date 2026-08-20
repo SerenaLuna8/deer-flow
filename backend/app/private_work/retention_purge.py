@@ -1149,9 +1149,19 @@ async def purge_project_shared_scope(
             parameters,
         )
 
-    # Run Skill credential snapshots were removed with private work. Removing
-    # the project-local config now cascades both active and revoked binding
-    # history, including configurations for packaged System Skills.
+    # Run Skill credential snapshots were removed with private work. Retired
+    # System binding authorities deliberately have no version/config FK, so the
+    # physical purge removes every binding before its project-local configs.
+    await session.execute(
+        text(
+            "UPDATE project_skill_credential_bindings SET runtime_authority_binding_id=NULL WHERE project_id=:project_id",
+        ),
+        parameters,
+    )
+    await session.execute(
+        text("DELETE FROM project_skill_credential_bindings WHERE project_id=:project_id"),
+        parameters,
+    )
     await session.execute(
         text("DELETE FROM project_skill_credential_configs WHERE project_id=:project_id"),
         parameters,

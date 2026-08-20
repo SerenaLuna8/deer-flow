@@ -37,8 +37,6 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { useI18n } from "@/core/i18n/hooks";
-import type { Translations } from "@/core/i18n/locales/types";
 import { useModels } from "@/core/models/hooks";
 import type { Capability } from "@/core/projects/types";
 import {
@@ -49,9 +47,8 @@ import {
   exportProjectSkillVersion,
   useProjectAssetVersions,
   useProjectMcpEditableConfiguration,
-  usePublishProjectAssetVersion,
-  useRestoreProjectAgentVersion,
-  SharedAssetApiError,
+  useActivateProjectAssetVersion,
+  usePublishProjectMcpVersion,
   type AssetListKind,
   type AssetVersion,
   type ProjectAssetItem,
@@ -67,11 +64,11 @@ import {
   projectAssetDetailLifecycleActions,
   projectAssetCanAuthor,
   projectAgentDeleteErrorMessage,
-  projectAgentVersionCanPublish,
+  projectAgentVersionCanActivate,
   projectMcpDeleteErrorMessage,
   projectSkillDeleteErrorMessage,
   projectSkillCredentialSetupRequired,
-  projectSkillVersionCanPublish,
+  projectSkillVersionCanActivate,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import {
@@ -79,12 +76,8 @@ import {
   ProjectMcpDeleteDialog,
   ProjectSkillDeleteDialog,
 } from "./project-skill-delete-dialog";
-import { SkillPublishDialog } from "./skill-publish-dialog";
+import { SkillActivationDialog } from "./skill-activation-dialog";
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
-type ProjectAgentRecoveryVersion = Pick<
-  Extract<AssetVersion, { agent_id: string }>,
-  "id" | "workflow_status" | "supersedes_version_id"
->;
 
 export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
@@ -132,102 +125,6 @@ export function ProjectAgentVersionWorkbenchSlot<T extends { id: string }>({
       className="border-border/70 border-t pt-5"
     >
       {render(selection.version, canAuthor && selection.canAuthor)}
-    </div>
-  );
-}
-
-export function projectAgentVersionCanRestore(
-  kind: MutableAssetKind,
-  scope: ProjectAssetItem["scope"],
-  canAuthor: boolean,
-  version: ProjectAgentRecoveryVersion | null,
-  currentPublishedVersionId: string | null,
-): boolean {
-  const recoverableVersion =
-    version?.workflow_status === "published"
-      ? version.id !== currentPublishedVersionId
-      : version?.workflow_status === "draft" &&
-        version.supersedes_version_id !== currentPublishedVersionId;
-  return (
-    kind === "agents" && scope === "project" && canAuthor && recoverableVersion
-  );
-}
-
-export function projectAgentStaleDraftPublishReason(
-  version: ProjectAgentRecoveryVersion | null,
-  currentPublishedVersionId: string | null,
-): string | null {
-  return version?.workflow_status === "draft" &&
-    version.supersedes_version_id !== currentPublishedVersionId
-    ? "此草稿基于旧的发布版本，不能直接发布。请基于此版本创建新草稿，再发布新草稿。"
-    : null;
-}
-
-export function ProjectAgentVersionRecoveryControls({
-  kind,
-  scope,
-  canAuthor,
-  version,
-  currentPublishedVersionId,
-  actionPending,
-  dirty,
-  versionSelectionPending,
-  onCreateDraft,
-}: {
-  kind: MutableAssetKind;
-  scope: ProjectAssetItem["scope"];
-  canAuthor: boolean;
-  version: ProjectAgentRecoveryVersion | null;
-  currentPublishedVersionId: string | null;
-  actionPending: boolean;
-  dirty: boolean;
-  versionSelectionPending: boolean;
-  onCreateDraft: () => void;
-}) {
-  if (!canAuthor) return null;
-
-  const reason = projectAgentStaleDraftPublishReason(
-    version,
-    currentPublishedVersionId,
-  );
-  const canCreateDraft = projectAgentVersionCanRestore(
-    kind,
-    scope,
-    canAuthor,
-    version,
-    currentPublishedVersionId,
-  );
-  if (!reason && !canCreateDraft) return null;
-
-  return (
-    <div className="border-border/70 bg-muted/25 flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3">
-      {reason ? (
-        <p role="status" className="text-warning-foreground text-sm">
-          {reason}
-        </p>
-      ) : (
-        <p className="text-muted-foreground text-sm">
-          可复制此历史版本的全部设置，创建一个基于当前发布版本的新草稿。
-        </p>
-      )}
-      {canCreateDraft ? (
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={actionPending || dirty || versionSelectionPending}
-          title={
-            dirty
-              ? "请先保存或放弃当前未保存修改"
-              : versionSelectionPending
-                ? "正在切换版本，请稍候"
-                : undefined
-          }
-          onClick={onCreateDraft}
-        >
-          基于此版本创建新草稿
-        </Button>
-      ) : null}
     </div>
   );
 }
@@ -330,29 +227,13 @@ export function projectAssetDetailContentVersion(
 }
 
 export function projectMcpSystemUsageLabel(
-  item: Pick<ProjectAssetItem, "binding" | "current_published_version_id">,
+  item: Pick<ProjectAssetItem, "binding" | "current_version_id">,
 ): "未启用" | "已启用" | "有配置更新" {
   if (!item.binding?.enabled) return "未启用";
-  return item.current_published_version_id &&
-    item.binding.version_id !== item.current_published_version_id
+  return item.current_version_id &&
+    item.binding.current_version_id !== item.current_version_id
     ? "有配置更新"
     : "已启用";
-}
-
-export function skillPublishStaleBaseMessage(
-  {
-    liveVersionNumber,
-    baseVersionNumber,
-  }: {
-    liveVersionNumber: number | null;
-    baseVersionNumber: number | null;
-  },
-  copy: Translations["skills"]["builder"]["publish"],
-): string {
-  if (liveVersionNumber && baseVersionNumber) {
-    return copy.staleNamed(liveVersionNumber, baseVersionNumber);
-  }
-  return copy.staleGeneric;
 }
 
 export function projectAssetDetailSummaryGridColumns(
@@ -366,7 +247,7 @@ export function projectAssetDetailSummaryGridColumns(
 
 export function projectAssetDetailVersionTerms(
   kind: MutableAssetKind,
-  scope: ProjectAssetItem["scope"],
+  _scope: ProjectAssetItem["scope"],
 ): {
   current: string;
   history: string;
@@ -382,7 +263,7 @@ export function projectAssetDetailVersionTerms(
     };
   }
   return {
-    current: scope === "system" ? "系统最新发布" : "当前发布",
+    current: "当前版本",
     history: "版本",
     edit: "创建新版本",
     empty: "尚未创建版本。",
@@ -413,12 +294,12 @@ export function projectAssetDetailRevisionCopy(kind: MutableAssetKind): {
   }
   return {
     label: (number) => `版本 ${number}`,
-    publishedFallback: "已有发布版本",
-    pinnedFallback: "已固定版本",
-    updateAvailable: "有新版本",
+    publishedFallback: "已有当前版本",
+    pinnedFallback: "自动使用当前版本",
+    updateAvailable: "",
     viewAria: "查看版本",
     loading: "正在加载新版本，请稍候",
-    publish: "发布版本",
+    publish: "激活版本",
     technical: "版本技术信息",
   };
 }
@@ -472,13 +353,13 @@ export type ProjectSkillDeleteSnapshot = Readonly<{
 }>;
 
 export function createProjectSkillDeleteSnapshot(
-  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "revision">,
   startedAt: number,
 ): ProjectSkillDeleteSnapshot {
   return Object.freeze({
     assetId: item.id,
     skillName: item.display_name,
-    expectedAssetVersion: item.version,
+    expectedAssetVersion: item.revision,
     startedAt,
   });
 }
@@ -491,13 +372,13 @@ export type ProjectAgentDeleteSnapshot = Readonly<{
 }>;
 
 export function createProjectAgentDeleteSnapshot(
-  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "revision">,
   startedAt: number,
 ): ProjectAgentDeleteSnapshot {
   return Object.freeze({
     assetId: item.id,
     agentName: item.display_name,
-    expectedAssetVersion: item.version,
+    expectedAssetVersion: item.revision,
     startedAt,
   });
 }
@@ -510,13 +391,13 @@ export type ProjectMcpDeleteSnapshot = Readonly<{
 }>;
 
 export function createProjectMcpDeleteSnapshot(
-  item: Pick<ProjectAssetItem, "id" | "display_name" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "display_name" | "revision">,
   startedAt: number,
 ): ProjectMcpDeleteSnapshot {
   return Object.freeze({
     assetId: item.id,
     mcpName: item.display_name,
-    expectedAssetVersion: item.version,
+    expectedAssetVersion: item.revision,
     startedAt,
   });
 }
@@ -531,7 +412,7 @@ export type ProjectAssetVersionRenderContext = {
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
   onCredentialBindingsDirtyChange: (dirty: boolean) => void;
-  onPublishValidityChange: (valid: boolean) => void;
+  onActivationValidityChange: (valid: boolean) => void;
   onVersionCreated: (
     versionId: string,
     options?: { focusCredentials?: boolean },
@@ -548,6 +429,9 @@ const VERSION_STATUS_LABEL: Record<VersionStatus, string> = {
   active: "启用",
   retired: "已替换",
   revoked: "已撤销",
+  current: "当前版本",
+  candidate: "候选版本",
+  historical: "历史版本",
 };
 
 export function projectMcpCurrentConfigurationLabel(
@@ -571,16 +455,19 @@ export function projectAssetVersionDisplayStatus(
   | "rejected"
   | "active"
   | "retired"
-  | "revoked" {
+  | "revoked"
+  | "current"
+  | "candidate"
+  | "historical" {
   if (
     "governance_status" in version &&
     version.governance_status === "revoked"
   ) {
     return "revoked";
   }
-  return "workflow_status" in version
-    ? version.workflow_status
-    : version.status;
+  if ("workflow_status" in version) return version.workflow_status;
+  if ("relation" in version) return version.relation;
+  return version.status;
 }
 
 function AgentVersionCapabilitySummary({
@@ -599,7 +486,7 @@ function AgentVersionCapabilitySummary({
       <div className="bg-muted/35 rounded-xl p-4">
         <dt className="text-muted-foreground text-xs">Skill</dt>
         <dd className="mt-2 text-sm font-medium">
-          {version.skill_version_ids.length} 个
+          {version.skill_refs.length} 个
         </dd>
       </div>
       <div className="bg-muted/35 rounded-xl p-4">
@@ -612,7 +499,7 @@ function AgentVersionCapabilitySummary({
   );
 }
 
-export function versionPublishDisabled(
+export function primaryVersionActionDisabled(
   actionPending: boolean,
   versionDirty: boolean,
   versionSelectionPending = false,
@@ -738,7 +625,7 @@ export function ProjectSkillDetailActions({
   versionSelectionPending,
   onCreateVersion,
   onDelete,
-  publishAction,
+  primaryVersionAction,
 }: {
   actionPending: boolean;
   additionalActions?: ReactNode;
@@ -750,7 +637,7 @@ export function ProjectSkillDetailActions({
   versionSelectionPending: boolean;
   onCreateVersion: () => void;
   onDelete: () => void;
-  publishAction?: ReactNode;
+  primaryVersionAction?: ReactNode;
 }) {
   return (
     <>
@@ -771,7 +658,7 @@ export function ProjectSkillDetailActions({
           创建新版本
         </Button>
       ) : null}
-      {publishAction}
+      {primaryVersionAction}
       {additionalActions}
       {canDelete ? (
         <Button
@@ -792,17 +679,17 @@ export function ProjectAgentDetailActions({
   canDelete,
   lifecycleActions,
   onDelete,
-  publishAction,
+  primaryVersionAction,
 }: {
   actionPending: boolean;
   canDelete: boolean;
   lifecycleActions?: ReactNode;
   onDelete: () => void;
-  publishAction?: ReactNode;
+  primaryVersionAction?: ReactNode;
 }) {
   return (
     <>
-      {publishAction}
+      {primaryVersionAction}
       {lifecycleActions}
       {canDelete ? (
         <Button
@@ -855,7 +742,7 @@ export function ProjectMcpDangerZone({
 
 export function projectAssetLifecycleActionLabel(
   kind: MutableAssetKind,
-  action: "activate" | "suspend",
+  action: "activate" | "enable" | "suspend",
 ): string {
   if (action === "suspend") return "停用";
   return kind === "mcp-servers" ? "重新启用" : "启用";
@@ -919,7 +806,6 @@ export function ProjectAssetDetailSheet({
   onSkillCredentialsFocused?: () => void;
   onSkillCredentialSetupRequired?: (versionId: string | null) => void;
 }) {
-  const { t } = useI18n();
   const { models } = useModels({ enabled: open && kind === "agents" });
   const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
   const editableMcpConfigurationEnabled =
@@ -935,15 +821,16 @@ export function ProjectAssetDetailSheet({
   const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
   const revisionCopy = projectAssetDetailRevisionCopy(kind);
   const discardCopy = projectAssetDiscardCopy(kind);
-  const publish = usePublishProjectAssetVersion(accountId, projectId, kind);
+  const activate = useActivateProjectAssetVersion(
+    accountId,
+    projectId,
+    kind === "skills" ? "skills" : "agents",
+  );
+  const publishMcp = usePublishProjectMcpVersion(accountId, projectId);
   const changeStatus = useChangeProjectAssetStatus(accountId, projectId, kind);
   const deleteSkill = useDeleteProjectSkill(accountId, projectId);
   const deleteAgent = useDeleteProjectAgent(accountId, projectId);
   const deleteMcp = useDeleteProjectMcp(accountId, projectId);
-  const restoreAgentVersion = useRestoreProjectAgentVersion(
-    accountId,
-    projectId,
-  );
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [versionDirty, setVersionDirty] = useState(false);
   const [credentialBindingsDirty, setCredentialBindingsDirty] = useState(false);
@@ -954,17 +841,11 @@ export function ProjectAssetDetailSheet({
     useState<ProjectAgentDeleteSnapshot | null>(null);
   const [mcpDeleteSnapshot, setMcpDeleteSnapshot] =
     useState<ProjectMcpDeleteSnapshot | null>(null);
-  const [agentRestoreTarget, setAgentRestoreTarget] = useState<Extract<
-    AssetVersion,
-    { agent_id: string }
-  > | null>(null);
-  const [publishStaleVersion, setPublishStaleVersion] =
-    useState<AssetVersion | null>(null);
-  const [skillPublishVersion, setSkillPublishVersion] = useState<Extract<
+  const [skillActivationVersion, setSkillActivationVersion] = useState<Extract<
     AssetVersion,
     { skill_id: string }
   > | null>(null);
-  const [skillPublishValidity, setSkillPublishValidity] = useState<{
+  const [skillActivationValidity, setSkillActivationValidity] = useState<{
     versionId: string;
     valid: boolean;
   } | null>(null);
@@ -999,7 +880,7 @@ export function ProjectAssetDetailSheet({
       ? resolveMcpCurrentConfiguration(
           versions,
           item.scope,
-          item.current_published_version_id,
+          item.current_version_id,
         )
       : null;
   const selectedVersion =
@@ -1007,14 +888,14 @@ export function ProjectAssetDetailSheet({
       ? (mcpConfiguration?.version ?? null)
       : (versions.find((version) => version.id === selectedVersionId) ?? null);
   const selectedVersionIdentity = selectedVersion?.id ?? null;
-  const selectedSkillPublishValid =
+  const selectedSkillActivationValid =
     kind !== "skills" ||
-    (skillPublishValidity?.versionId === selectedVersionIdentity &&
-      skillPublishValidity?.valid === true);
-  const handleSkillPublishValidityChange = useCallback(
+    (skillActivationValidity?.versionId === selectedVersionIdentity &&
+      skillActivationValidity?.valid === true);
+  const handleSkillActivationValidityChange = useCallback(
     (valid: boolean) => {
       if (!selectedVersionIdentity) return;
-      setSkillPublishValidity((current) =>
+      setSkillActivationValidity((current) =>
         current?.versionId === selectedVersionIdentity &&
         current.valid === valid
           ? current
@@ -1046,10 +927,10 @@ export function ProjectAssetDetailSheet({
       ? mcpVersionRuntimeBlockReason(selectedVersion, item.scope)
       : null;
   const currentPublished = versions.find(
-    (version) => version.id === item.current_published_version_id,
+    (version) => version.id === item.current_version_id,
   );
   const pinnedVersion = versions.find(
-    (version) => version.id === item.binding?.version_id,
+    (version) => version.id === item.binding?.current_version_id,
   );
   const effectiveVersion = effectiveAssetVersion(
     item.scope,
@@ -1063,7 +944,7 @@ export function ProjectAssetDetailSheet({
       (version): version is Extract<AssetVersion, { agent_id: string }> =>
         "agent_id" in version,
     ),
-    item.current_published_version_id,
+    item.current_version_id,
   );
   const agentWorkbenchSelection = projectAgentVersionWorkbenchSelection(
     selectedAgentVersion,
@@ -1089,7 +970,7 @@ export function ProjectAssetDetailSheet({
         kind,
         item.scope,
         versions,
-        item.current_published_version_id,
+        item.current_version_id,
       );
       setSelectedVersionId(preferredId);
       if (requestedVersionResolution === "available" && requestedVersionId) {
@@ -1106,7 +987,7 @@ export function ProjectAssetDetailSheet({
       kind,
       item.scope,
       versions,
-      item.current_published_version_id,
+      item.current_version_id,
     );
     setSelectedVersionId((current) =>
       versions.some((version) => version.id === current)
@@ -1114,7 +995,7 @@ export function ProjectAssetDetailSheet({
         : preferredId,
     );
   }, [
-    item.current_published_version_id,
+    item.current_version_id,
     item.id,
     item.scope,
     history.isSuccess,
@@ -1134,9 +1015,8 @@ export function ProjectAssetDetailSheet({
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
     setMcpDeleteSnapshot(null);
-    setAgentRestoreTarget(null);
-    setSkillPublishVersion(null);
-    setSkillPublishValidity(null);
+    setSkillActivationVersion(null);
+    setSkillActivationValidity(null);
     setDiscardAction(null);
   }, [open, updateCredentialBindingsDirty, updateVersionDirty]);
 
@@ -1153,21 +1033,25 @@ export function ProjectAssetDetailSheet({
 
   const canAuthor =
     item.scope === "project" && projectAssetCanAuthor(item, kind);
-  const canPublishSelectedAgentVersion =
+  const canAuthorSelectedVersion =
+    canAuthor &&
+    selectedVersion !== null &&
+    "relation" in selectedVersion &&
+    selectedVersion.relation !== "historical" &&
+    versions[0]?.id === selectedVersion.id;
+  const canActivateSelectedAgentVersion =
     kind === "agents" &&
-    projectAgentVersionCanPublish(
+    projectAgentVersionCanActivate(
       item,
       projectCapabilities,
       selectedAgentVersion,
     );
-  const canPublishSelectedSkillVersion =
+  const canActivateSelectedSkillVersion =
     kind === "skills" &&
-    projectSkillVersionCanPublish(
+    projectSkillVersionCanActivate(
       item,
       projectCapabilities,
-      selectedVersion && "workflow_status" in selectedVersion
-        ? selectedVersion
-        : null,
+      selectedVersion && "skill_id" in selectedVersion ? selectedVersion : null,
     );
   const lifecycleActions =
     item.scope === "project"
@@ -1177,11 +1061,11 @@ export function ProjectAssetDetailSheet({
   const canCreateVersion = projectAssetCanCreateVersion(kind, canAuthor);
   const showSkillDetailActions =
     kind === "skills" &&
-    (canAuthor || canDeleteAsset || canPublishSelectedSkillVersion);
+    (canAuthor || canDeleteAsset || canActivateSelectedSkillVersion);
   const canExportSkill =
     kind === "skills" && projectCapabilities.includes("shared_assets.edit");
   const showAgentDetailActions =
-    kind === "agents" && (canPublishSelectedAgentVersion || canDeleteAsset);
+    kind === "agents" && (canActivateSelectedAgentVersion || canDeleteAsset);
   const showDetailActions =
     canCreateVersion ||
     lifecycleActions.length > 0 ||
@@ -1191,6 +1075,7 @@ export function ProjectAssetDetailSheet({
   const showVersionPicker = showsVersionHistory && versions.length > 1;
   const versionActions = useMemo(() => {
     if (
+      kind !== "mcp-servers" ||
       item.scope !== "project" ||
       !selectedVersion ||
       !("workflow_status" in selectedVersion)
@@ -1206,18 +1091,17 @@ export function ProjectAssetDetailSheet({
   }, [item.scope, kind, selectedVersion]);
 
   const actionPending =
-    publish.isPending ||
+    activate.isPending ||
+    publishMcp.isPending ||
     changeStatus.isPending ||
     deleteSkill.isPending ||
     deleteAgent.isPending ||
-    deleteMcp.isPending ||
-    restoreAgentVersion.isPending;
+    deleteMcp.isPending;
   const versionSelectionPending = requestedVersionId !== null;
-  const actionError =
-    publish.error ?? changeStatus.error ?? restoreAgentVersion.error;
+  const actionError = activate.error ?? publishMcp.error ?? changeStatus.error;
   const optimisticSkillStatus =
     kind === "skills" && changeStatus.isPending
-      ? changeStatus.variables?.action === "activate"
+      ? changeStatus.variables?.action === "enable"
       : undefined;
 
   const handleWorkbenchVersionCreated = useCallback(
@@ -1239,56 +1123,42 @@ export function ProjectAssetDetailSheet({
     ],
   );
 
-  function publishSelectedVersion(version: AssetVersion) {
+  function activateSelectedVersion(version: AssetVersion) {
     if ("skill_id" in version) {
-      setSkillPublishVersion(version);
+      setSkillActivationVersion(version);
       return;
     }
-    if (
-      isMcpVersion(version) &&
-      mcpVersionRuntimeBlockReason(version, item.scope)
-    ) {
-      return;
-    }
-    publish.mutate(
+    if (!("agent_id" in version)) return;
+    activate.mutate(
       {
         assetId: item.id,
         versionId: version.id,
-        input: { expected_asset_version: item.version },
+        input: { expected_revision: item.revision },
       },
       {
         onSuccess: (result) => {
           setSelectedVersionId(result.data.id);
           handleWorkbenchVersionCreated(result.data.id);
         },
-        onError: (error) => {
-          if (
-            error instanceof SharedAssetApiError &&
-            error.code === "SKILL_PUBLISH_BASE_STALE"
-          ) {
-            setPublishStaleVersion(version);
-          }
-        },
       },
     );
   }
 
-  function confirmStalePublish() {
-    const version = publishStaleVersion;
-    if (!version || publish.isPending) return;
-    publish.mutate(
+  function publishSelectedMcpVersion(version: AssetVersion) {
+    if (
+      !isMcpVersion(version) ||
+      mcpVersionRuntimeBlockReason(version, item.scope)
+    ) {
+      return;
+    }
+    publishMcp.mutate(
       {
         assetId: item.id,
         versionId: version.id,
-        input: {
-          expected_asset_version: item.version,
-          acknowledge_stale_base: true,
-        },
+        input: { expected_asset_version: item.revision },
       },
       {
         onSuccess: (result) => {
-          setPublishStaleVersion(null);
-          publish.reset();
           setSelectedVersionId(result.data.id);
           handleWorkbenchVersionCreated(result.data.id);
         },
@@ -1353,7 +1223,7 @@ export function ProjectAssetDetailSheet({
       await deleteSkill.mutateAsync({
         assetId: snapshot.assetId,
         input: {
-          expected_asset_version: snapshot.expectedAssetVersion,
+          expected_revision: snapshot.expectedAssetVersion,
         },
       });
       setSkillDeleteSnapshot(null);
@@ -1370,7 +1240,7 @@ export function ProjectAssetDetailSheet({
       await deleteAgent.mutateAsync({
         assetId: snapshot.assetId,
         input: {
-          expected_asset_version: snapshot.expectedAssetVersion,
+          expected_revision: snapshot.expectedAssetVersion,
         },
       });
       setAgentDeleteSnapshot(null);
@@ -1397,23 +1267,6 @@ export function ProjectAssetDetailSheet({
     }
   }
 
-  async function confirmAgentVersionRestore() {
-    const target = agentRestoreTarget;
-    if (!target) return;
-    try {
-      const result = await restoreAgentVersion.mutateAsync({
-        assetId: item.id,
-        versionId: target.id,
-        input: { expected_asset_version: item.version },
-      });
-      setAgentRestoreTarget(null);
-      setSelectedVersionId(result.data.id);
-      handleWorkbenchVersionCreated(result.data.id);
-    } catch {
-      // The mapped public error remains visible in the confirmation dialog.
-    }
-  }
-
   function toggleProjectSkillStatus(checked: boolean) {
     if (kind !== "skills") return;
     const toggleState = projectSkillStatusToggleState(item);
@@ -1421,14 +1274,14 @@ export function ProjectAssetDetailSheet({
     changeStatus.mutate(
       {
         assetId: item.id,
-        action: checked ? "activate" : "suspend",
-        input: { expected_asset_version: item.version },
+        action: checked ? "enable" : "suspend",
+        input: { expected_revision: item.revision },
       },
       {
         onError: (error) => {
           const repairVersionId = projectSkillCredentialRepairVersionId(
             error,
-            item.current_published_version_id,
+            item.current_version_id,
           );
           if (!projectSkillCredentialSetupRequired(error)) return;
           if (repairVersionId) {
@@ -1479,7 +1332,7 @@ export function ProjectAssetDetailSheet({
     onEditingChange: setVersionEditing,
     onDirtyChange: updateVersionDirty,
     onCredentialBindingsDirtyChange: updateCredentialBindingsDirty,
-    onPublishValidityChange: handleSkillPublishValidityChange,
+    onActivationValidityChange: handleSkillActivationValidityChange,
     onVersionCreated: handleWorkbenchVersionCreated,
     focusSkillCredentials,
     onSkillCredentialsFocused: onSkillCredentialsFocused ?? (() => undefined),
@@ -1522,9 +1375,9 @@ export function ProjectAssetDetailSheet({
                             : "当前配置无法确认"
                         : currentPublished
                           ? revisionCopy.label(currentPublished.version_number)
-                          : item.current_published_version_id
+                          : item.current_version_id
                             ? revisionCopy.publishedFallback
-                            : "尚未发布"}
+                            : "尚无当前版本"}
                     </p>
                   </div>
                   {item.scope === "system" ? (
@@ -1539,8 +1392,7 @@ export function ProjectAssetDetailSheet({
                               ? "已从项目停用"
                               : pinnedVersion
                                 ? `${revisionCopy.label(pinnedVersion.version_number)}${
-                                    item.current_published_version_id !==
-                                    pinnedVersion.id
+                                    item.current_version_id !== pinnedVersion.id
                                       ? ` · ${revisionCopy.updateAvailable}`
                                       : ""
                                   }`
@@ -1615,20 +1467,19 @@ export function ProjectAssetDetailSheet({
                             changeStatus.mutate({
                               assetId: item.id,
                               action,
-                              input: { expected_asset_version: item.version },
+                              input: { expected_revision: item.revision },
                             })
                           }
                         >
                           {projectAssetLifecycleActionLabel(kind, action)}
                         </Button>
                       ))}
-                      publishAction={
+                      primaryVersionAction={
                         selectedVersion !== null &&
-                        versionActions.includes("publish") &&
-                        canPublishSelectedAgentVersion ? (
+                        canActivateSelectedAgentVersion ? (
                           <Button
                             type="button"
-                            disabled={versionPublishDisabled(
+                            disabled={primaryVersionActionDisabled(
                               actionPending ||
                                 Boolean(selectedRuntimeBlockReason),
                               detailDirty,
@@ -1643,7 +1494,7 @@ export function ProjectAssetDetailSheet({
                                   : undefined)
                             }
                             onClick={() =>
-                              publishSelectedVersion(selectedVersion)
+                              activateSelectedVersion(selectedVersion)
                             }
                           >
                             {revisionCopy.publish}
@@ -1665,11 +1516,21 @@ export function ProjectAssetDetailSheet({
                         variant="outline"
                         disabled={actionPending}
                         onClick={() =>
-                          changeStatus.mutate({
-                            assetId: item.id,
-                            action,
-                            input: { expected_asset_version: item.version },
-                          })
+                          changeStatus.mutate(
+                            kind === "skills"
+                              ? {
+                                  assetId: item.id,
+                                  action,
+                                  input: { expected_revision: item.revision },
+                                }
+                              : {
+                                  assetId: item.id,
+                                  action,
+                                  input: {
+                                    expected_asset_version: item.revision,
+                                  },
+                                },
+                          )
                         }
                       >
                         {projectAssetLifecycleActionLabel(kind, action)}
@@ -1691,11 +1552,7 @@ export function ProjectAssetDetailSheet({
                               selectedVersion !== null &&
                               "governance_status" in selectedVersion &&
                               selectedVersion.governance_status === "revoked",
-                            unpublished:
-                              item.scope === "system" &&
-                              selectedVersion !== null &&
-                              "workflow_status" in selectedVersion &&
-                              selectedVersion.workflow_status !== "published",
+                            unpublished: false,
                           })}
                           download={() => {
                             if (!selectedVersion) {
@@ -1717,38 +1574,37 @@ export function ProjectAssetDetailSheet({
                           item,
                           editing: versionEditing,
                         })}
-                        canAuthor={canAuthor}
+                        canAuthor={canAuthorSelectedVersion}
                         canDelete={canDeleteAsset}
                         editing={versionEditing}
                         hasSelectedVersion={selectedVersion !== null}
                         versionDirty={detailDirty}
                         versionSelectionPending={versionSelectionPending}
                         onCreateVersion={() => setVersionEditing(true)}
-                        publishAction={
+                        primaryVersionAction={
                           selectedVersion !== null &&
-                          versionActions.includes("publish") &&
-                          canPublishSelectedSkillVersion ? (
+                          canActivateSelectedSkillVersion ? (
                             <Button
                               type="button"
-                              disabled={versionPublishDisabled(
+                              disabled={primaryVersionActionDisabled(
                                 actionPending ||
                                   Boolean(selectedRuntimeBlockReason),
                                 detailDirty,
                                 versionSelectionPending,
-                                !selectedSkillPublishValid,
+                                !selectedSkillActivationValid,
                               )}
                               title={
                                 selectedRuntimeBlockReason ??
                                 (detailDirty
                                   ? "请先保存或放弃当前未保存修改"
-                                  : !selectedSkillPublishValid
-                                    ? t.skills.secrets.publishBlocked
+                                  : !selectedSkillActivationValid
+                                    ? "请先修正 Skill 声明后再激活"
                                     : versionSelectionPending
                                       ? revisionCopy.loading
                                       : undefined)
                               }
                               onClick={() =>
-                                publishSelectedVersion(selectedVersion)
+                                activateSelectedVersion(selectedVersion)
                               }
                             >
                               {revisionCopy.publish}
@@ -1770,24 +1626,6 @@ export function ProjectAssetDetailSheet({
               {versionPickerPlacement === "before-editor"
                 ? versionPicker
                 : null}
-
-              {kind === "agents" ? (
-                <ProjectAgentVersionRecoveryControls
-                  kind={kind}
-                  scope={item.scope}
-                  canAuthor={canAuthor}
-                  version={selectedAgentVersion}
-                  currentPublishedVersionId={item.current_published_version_id}
-                  actionPending={actionPending}
-                  dirty={detailDirty}
-                  versionSelectionPending={versionSelectionPending}
-                  onCreateDraft={() => {
-                    if (!selectedAgentVersion) return;
-                    restoreAgentVersion.reset();
-                    setAgentRestoreTarget(selectedAgentVersion);
-                  }}
-                />
-              ) : null}
 
               {renderAssetEditor ? (
                 history.isLoading ? (
@@ -1882,7 +1720,7 @@ export function ProjectAssetDetailSheet({
                                 <Button
                                   type="button"
                                   size="sm"
-                                  disabled={versionPublishDisabled(
+                                  disabled={primaryVersionActionDisabled(
                                     actionPending ||
                                       Boolean(selectedRuntimeBlockReason),
                                     detailDirty,
@@ -1897,7 +1735,7 @@ export function ProjectAssetDetailSheet({
                                         : undefined)
                                   }
                                   onClick={() =>
-                                    publishSelectedVersion(selectedVersion)
+                                    publishSelectedMcpVersion(selectedVersion)
                                   }
                                 >
                                   {revisionCopy.publish}
@@ -1927,15 +1765,17 @@ export function ProjectAssetDetailSheet({
                             accountId,
                             projectId,
                             item,
-                            canAuthor: canAuthor && !versionSelectionPending,
+                            canAuthor:
+                              canAuthorSelectedVersion &&
+                              !versionSelectionPending,
                             editing: versionEditing,
                             credentialBindingsDirty,
                             onEditingChange: setVersionEditing,
                             onDirtyChange: updateVersionDirty,
                             onCredentialBindingsDirtyChange:
                               updateCredentialBindingsDirty,
-                            onPublishValidityChange:
-                              handleSkillPublishValidityChange,
+                            onActivationValidityChange:
+                              handleSkillActivationValidityChange,
                             onVersionCreated: handleWorkbenchVersionCreated,
                             focusSkillCredentials,
                             onSkillCredentialsFocused:
@@ -2067,130 +1907,29 @@ export function ProjectAssetDetailSheet({
         />
       )}
 
-      {skillPublishVersion !== null ? (
-        <SkillPublishDialog
+      {skillActivationVersion !== null ? (
+        <SkillActivationDialog
           accountId={accountId}
           projectId={projectId}
           item={item}
-          version={skillPublishVersion}
+          version={skillActivationVersion}
           open
           onOpenChange={(next) => {
-            if (!next) setSkillPublishVersion(null);
+            if (!next) setSkillActivationVersion(null);
           }}
-          onPublished={(versionId) => {
-            setSkillPublishVersion(null);
+          onActivated={(versionId) => {
+            setSkillActivationVersion(null);
             setSelectedVersionId(versionId);
             handleWorkbenchVersionCreated(versionId);
           }}
           onConfigureCredentials={() => {
-            requestVersionChange(skillPublishVersion.id, {
+            setSkillActivationVersion(null);
+            requestVersionChange(skillActivationVersion.id, {
               focusSkillCredentials: true,
             });
           }}
         />
       ) : null}
-
-      <Dialog
-        open={agentRestoreTarget !== null}
-        onOpenChange={(next) => {
-          if (next || restoreAgentVersion.isPending) return;
-          setAgentRestoreTarget(null);
-          restoreAgentVersion.reset();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>基于这个 Agent 版本创建新草稿？</DialogTitle>
-            <DialogDescription>
-              将复制版本 {agentRestoreTarget?.version_number ?? "-"}
-              的全部设定与工具绑定，并创建一个新草稿。管理员发布前不会影响当前运行版本；现有版本记录不会被覆盖或删除。
-            </DialogDescription>
-          </DialogHeader>
-          {restoreAgentVersion.error ? (
-            <ErrorNotice error={restoreAgentVersion.error} />
-          ) : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={restoreAgentVersion.isPending}
-              onClick={() => {
-                setAgentRestoreTarget(null);
-                restoreAgentVersion.reset();
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              disabled={restoreAgentVersion.isPending}
-              onClick={() => void confirmAgentVersionRestore()}
-            >
-              {restoreAgentVersion.isPending ? "恢复中…" : "确认创建新草稿"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
-      <Dialog
-        open={publishStaleVersion !== null}
-        onOpenChange={(next) => {
-          if (next || publish.isPending) return;
-          setPublishStaleVersion(null);
-          publish.reset();
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t.skills.builder.publish.staleTitle}</DialogTitle>
-            <DialogDescription>
-              {skillPublishStaleBaseMessage(
-                {
-                  liveVersionNumber: currentPublished?.version_number ?? null,
-                  baseVersionNumber:
-                    publishStaleVersion &&
-                    "supersedes_version_id" in publishStaleVersion
-                      ? (versions.find(
-                          (version) =>
-                            version.id ===
-                            publishStaleVersion.supersedes_version_id,
-                        )?.version_number ?? null)
-                      : null,
-                },
-                t.skills.builder.publish,
-              )}
-            </DialogDescription>
-          </DialogHeader>
-          {publish.error &&
-          !(
-            publish.error instanceof SharedAssetApiError &&
-            publish.error.code === "SKILL_PUBLISH_BASE_STALE"
-          ) ? (
-            <ErrorNotice error={publish.error} />
-          ) : null}
-          <DialogFooter>
-            <Button
-              type="button"
-              variant="outline"
-              disabled={publish.isPending}
-              onClick={() => {
-                setPublishStaleVersion(null);
-                publish.reset();
-              }}
-            >
-              取消
-            </Button>
-            <Button
-              type="button"
-              variant="destructive"
-              disabled={publish.isPending}
-              onClick={confirmStalePublish}
-            >
-              {publish.isPending ? "发布中…" : "确认覆盖并发布"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
 
       <Dialog
         open={discardAction !== null}

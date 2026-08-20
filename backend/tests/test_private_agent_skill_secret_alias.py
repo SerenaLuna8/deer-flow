@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,7 +21,14 @@ from app.private_work.snapshot_repository import (
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
-from app.shared_assets.models import AssetKind, AssetScope
+from app.shared_assets.models import (
+    AssetKind,
+    AssetScope,
+    ResolvedSkillSnapshot,
+    SkillArchiveFile,
+    SkillSecretRequirementSnapshot,
+)
+from app.shared_assets.run_snapshot_codec import encode_run_asset_snapshot
 from app.shared_assets.skill_credential_closure import (
     LockedSkillCredentialClosure,
     LockedSkillCredentialMaterial,
@@ -116,14 +125,41 @@ async def test_private_runtime_maps_credential_source_to_only_declared_target(
         enabled=True,
         runtime_read_only=True,
     )
+    skill_content = b"# demo\n"
+    skill_checksum = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    "path": "SKILL.md",
+                    "sha256": hashlib.sha256(skill_content).hexdigest(),
+                    "size_bytes": len(skill_content),
+                }
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    resolved_skill = ResolvedSkillSnapshot(
+        kind=AssetKind.SKILL,
+        scope=AssetScope.PROJECT,
+        asset_id=skill_id,
+        version_id=skill_version_id,
+        checksum=skill_checksum,
+        catalog_generation=1,
+        dependency_version_ids=(),
+        files=(SkillArchiveFile("SKILL.md", skill_content, "text/markdown"),),
+        secret_requirements=(SkillSecretRequirementSnapshot("TARGET_API_KEY", False),),
+    )
     asset_snapshot = RunAssetSnapshot(
         asset_kind=AssetKind.SKILL.value,
         dependency_order=0,
         asset_scope=AssetScope.PROJECT.value,
         asset_id=skill_id,
         version_id=skill_version_id,
-        payload_checksum="b" * 64,
+        payload_checksum=skill_checksum,
         catalog_generation=1,
+        snapshot_json=encode_run_asset_snapshot(resolved_skill),
     )
     credential_snapshot = RunSkillCredentialSnapshot(
         skill_id=skill_id,
@@ -150,12 +186,12 @@ async def test_private_runtime_maps_credential_source_to_only_declared_target(
         ):
             return (credential_snapshot,)
 
-        async def current_skill_credentials_in_session(
+        async def lock_admitted_skill_credentials_in_session(
             self,
             *_args: object,
             **_kwargs: object,
         ):
-            return (credential_snapshot,)
+            return closure.materials
 
     class _RunRepository:
         def __init__(self, _session: object) -> None:
@@ -195,9 +231,6 @@ async def test_private_runtime_maps_credential_source_to_only_declared_target(
         ),
     )
 
-    async def closures(*_args: object, **_kwargs: object):
-        return {skill_version_id: closure}
-
     decrypted_payloads: list[dict[str, object]] = []
 
     def decrypt(*_args: object, **_kwargs: object) -> dict[str, object]:
@@ -222,7 +255,6 @@ async def test_private_runtime_maps_credential_source_to_only_declared_target(
         "resolve_project_context_in_transaction",
         resolve,
     )
-    monkeypatch.setattr(runtime_module, "lock_skill_credential_closures", closures)
     monkeypatch.setattr(
         runtime_module.CredentialKeyring,
         "from_environment",

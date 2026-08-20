@@ -122,7 +122,7 @@ class SkillCredentialRepository:
         if (await self.session.execute(statement)).scalar_one_or_none() is None:
             raise AssetNotFound(context.request_id)
 
-    async def lock_configurable_current_published_skill(
+    async def lock_configurable_current_skill(
         self,
         context: ProjectContext,
         skill_id: uuid.UUID,
@@ -151,14 +151,13 @@ class SkillCredentialRepository:
             .with_for_update(read=read, of=SkillRow)
         )
         asset = (await self.session.execute(asset_statement)).scalar_one_or_none()
-        if asset is None or asset.current_published_version_id is None:
+        if asset is None or asset.current_version_id is None:
             raise AssetNotFound(context.request_id)
         version_statement = (
             select(SkillVersionRow)
             .where(
-                SkillVersionRow.id == asset.current_published_version_id,
+                SkillVersionRow.id == asset.current_version_id,
                 SkillVersionRow.skill_id == asset.id,
-                SkillVersionRow.workflow_status == "published",
                 SkillVersionRow.revoked_at.is_(None),
             )
             .with_for_update(read=read, of=SkillVersionRow)
@@ -179,7 +178,7 @@ class SkillCredentialRepository:
         """Lock one exact project Skill version after the project gate.
 
         Callers acquire ``lock_project`` first. Keeping that gate separate lets
-        a composite publish transaction reuse the Project lock already held by
+        a composite activation transaction reuse the Project lock already held by
         ``SkillRepository`` instead of attempting an unsafe lock upgrade.
         """
 
@@ -222,7 +221,7 @@ class SkillCredentialRepository:
     ) -> SkillCredentialTarget:
         """Lock an exact Project Skill or a System Skill version.
 
-        Services keep Project draft/history and System current-published policy
+        Services keep Project Candidate/Historical and System Current policy
         explicit after this scoped lookup. The project membership predicate is
         retained even for a packaged System Skill because mappings are owned by
         the requesting project.
@@ -303,6 +302,7 @@ class SkillCredentialRepository:
                 ProjectSkillCredentialBindingRow.skill_id == skill_id,
                 ProjectSkillCredentialBindingRow.skill_version_id == skill_version_id,
                 ProjectSkillCredentialBindingRow.status == "active",
+                ProjectSkillCredentialBindingRow.admission_only.is_(False),
                 self._binding_project_exists(context),
             )
             .order_by(
@@ -498,9 +498,10 @@ class SkillCredentialRepository:
 
     async def create_config(
         self,
-        context: ProjectContext,
+        context: ProjectContext | SystemAssetGovernanceContext,
         target: SkillCredentialTarget,
     ) -> ProjectSkillCredentialConfigRow:
+        self._require_binding_actor(context)
         row = ProjectSkillCredentialConfigRow(
             project_id=context.project_id,
             skill_id=target.asset.id,
@@ -515,7 +516,7 @@ class SkillCredentialRepository:
 
     async def replace_bindings(
         self,
-        context: ProjectContext,
+        context: ProjectContext | SystemAssetGovernanceContext,
         config: ProjectSkillCredentialConfigRow,
         target: SkillCredentialTarget,
         bindings: Sequence[tuple[str, str, EligibleSkillCredentialRecord]],
@@ -524,7 +525,35 @@ class SkillCredentialRepository:
         existing: Sequence[ProjectSkillCredentialBindingRow],
         new_revision: int,
     ) -> tuple[ProjectSkillCredentialBindingRow, ...]:
-        for row in existing:
+        self._require_binding_actor(context)
+        live_binding_ids = [row.id for row in existing]
+        retired = (
+            tuple(
+                (
+                    await self.session.execute(
+                        select(ProjectSkillCredentialBindingRow)
+                        .where(
+                            ProjectSkillCredentialBindingRow.project_id == context.project_id,
+                            ProjectSkillCredentialBindingRow.skill_id == target.asset.id,
+                            ProjectSkillCredentialBindingRow.runtime_authority_binding_id.in_(
+                                live_binding_ids,
+                            ),
+                            ProjectSkillCredentialBindingRow.admission_only.is_(
+                                True,
+                            ),
+                            ProjectSkillCredentialBindingRow.status == "active",
+                        )
+                        .order_by(ProjectSkillCredentialBindingRow.id)
+                        .with_for_update(of=ProjectSkillCredentialBindingRow)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            if live_binding_ids
+            else ()
+        )
+        for row in (*existing, *retired):
             row.status = "revoked"
             row.revoked_at = now
             row.revoked_by_user_id = str(context.user_id)

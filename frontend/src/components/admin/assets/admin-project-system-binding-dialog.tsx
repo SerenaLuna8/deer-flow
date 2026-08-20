@@ -38,14 +38,14 @@ const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
 
 type AdminSystemSkillBindingVersion = Pick<
   Extract<AssetVersion, { skill_id: string }>,
-  "binding_eligible" | "governance_status" | "workflow_status"
+  "binding_eligible" | "governance_status" | "relation"
 >;
 
 export function adminSystemSkillVersionIsBindable(
   version: AdminSystemSkillBindingVersion,
 ): boolean {
   return (
-    version.workflow_status === "published" &&
+    version.relation === "current" &&
     version.governance_status === "active" &&
     version.binding_eligible
   );
@@ -87,12 +87,12 @@ export function AdminProjectSystemBindingDialog({
   const upgrade = useUpgradeAdminProjectSystemBinding(
     accountId,
     projectId,
-    assetKind,
+    "mcp",
   );
   const rollback = useRollbackAdminProjectSystemBinding(
     accountId,
     projectId,
-    assetKind,
+    "mcp",
   );
   const disable = useDisableAdminProjectSystemBinding(
     accountId,
@@ -102,12 +102,13 @@ export function AdminProjectSystemBindingDialog({
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const published = useMemo(
     () =>
-      (history.data?.data ?? []).filter(
-        (version) =>
-          "workflow_status" in version &&
-          version.workflow_status === "published",
+      (history.data?.data ?? []).filter((version) =>
+        kind === "mcp-servers"
+          ? "workflow_status" in version &&
+            version.workflow_status === "published"
+          : "relation" in version && version.relation === "current",
       ),
-    [history.data],
+    [history.data, kind],
   );
   const bindablePublished = useMemo(
     () =>
@@ -156,7 +157,7 @@ export function AdminProjectSystemBindingDialog({
     [item.scope, kind, published, t.adminAssets.runtime],
   );
   const currentPublished = published.find(
-    (version) => version.id === item.current_published_version_id,
+    (version) => version.id === item.current_version_id,
   );
   const defaultUnboundVersionId =
     kind === "skills"
@@ -165,17 +166,19 @@ export function AdminProjectSystemBindingDialog({
         adminSystemSkillVersionIsBindable(currentPublished)
         ? currentPublished.id
         : ""
-      : (item.current_published_version_id ?? "");
+      : (item.current_version_id ?? "");
 
   useEffect(() => {
     if (!open) return;
     setSelectedVersionId(
-      item.binding?.enabled ? item.binding.version_id : defaultUnboundVersionId,
+      item.binding?.enabled
+        ? item.binding.current_version_id
+        : defaultUnboundVersionId,
     );
   }, [
     defaultUnboundVersionId,
     item.binding?.enabled,
-    item.binding?.version_id,
+    item.binding?.current_version_id,
     open,
   ]);
 
@@ -188,7 +191,7 @@ export function AdminProjectSystemBindingDialog({
     enable.error ?? upgrade.error ?? rollback.error ?? disable.error;
   const target = published.find((version) => version.id === selectedVersionId);
   const pinned = published.find(
-    (version) => version.id === item.binding?.version_id,
+    (version) => version.id === item.binding?.current_version_id,
   );
   const pinnedRevoked = Boolean(
     pinned && "skill_id" in pinned && pinned.governance_status === "revoked",
@@ -200,7 +203,7 @@ export function AdminProjectSystemBindingDialog({
     Boolean(target) &&
     bindablePublished.some((version) => version.id === selectedVersionId) &&
     selectedVersionId !==
-      (item.binding?.enabled ? item.binding.version_id : "");
+      (item.binding?.enabled ? item.binding.current_version_id : "");
 
   function mutationSucceeded() {
     onOpenChange(false);
@@ -219,7 +222,7 @@ export function AdminProjectSystemBindingDialog({
       enable.mutate(
         {
           asset_id: item.id,
-          version_id: target.id,
+          ...(kind === "mcp-servers" ? { version_id: target.id } : {}),
           ...(item.binding
             ? { expected_binding_version: item.binding.version }
             : {}),
@@ -228,6 +231,7 @@ export function AdminProjectSystemBindingDialog({
       );
       return;
     }
+    if (kind !== "mcp-servers") return;
     if (!pinned || target.id === pinned.id) return;
     const variables = {
       assetId: item.id,
@@ -291,7 +295,7 @@ export function AdminProjectSystemBindingDialog({
                 : t.adminAssets.dialogs.binding.notEnabled}
             </p>
             <p className="text-muted-foreground mt-1 min-w-0 font-mono text-xs [overflow-wrap:anywhere]">
-              {item.binding?.version_id ?? t.adminAssets.catalog.none}
+              {item.binding?.current_version_id ?? t.adminAssets.catalog.none}
             </p>
           </div>
           <div className="border-primary/20 bg-primary/5 min-w-0 rounded-lg border p-3">
@@ -332,9 +336,17 @@ export function AdminProjectSystemBindingDialog({
           </div>
         ) : (
           <label className="grid min-w-0 gap-2 text-sm font-medium">
-            <span>{t.adminAssets.dialogs.binding.selectPublished}</span>
+            <span>
+              {kind === "mcp-servers"
+                ? t.adminAssets.dialogs.binding.selectPublished
+                : "当前版本"}
+            </span>
             <select
-              aria-label={t.adminAssets.dialogs.binding.selectPublishedAria}
+              aria-label={
+                kind === "mcp-servers"
+                  ? t.adminAssets.dialogs.binding.selectPublishedAria
+                  : "当前版本"
+              }
               value={selectedVersionId}
               onChange={(event) => setSelectedVersionId(event.target.value)}
               disabled={pending}
@@ -438,11 +450,14 @@ export function AdminProjectSystemBindingDialog({
           <Button type="button" disabled={!canSubmit} onClick={save}>
             {!item.binding?.enabled
               ? t.adminAssets.dialogs.binding.enable
-              : target &&
+              : kind === "mcp-servers" &&
+                  target &&
                   pinned &&
                   target.version_number < pinned.version_number
                 ? t.adminAssets.dialogs.binding.rollback
-                : t.adminAssets.dialogs.binding.switchVersion}
+                : kind === "mcp-servers"
+                  ? t.adminAssets.dialogs.binding.switchVersion
+                  : "已使用当前版本"}
           </Button>
         </DialogFooter>
       </DialogContent>

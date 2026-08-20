@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
-from sqlalchemy import or_, select, text, update
+from sqlalchemy import delete, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,6 +21,7 @@ from app.bootstrap_identities import (
     BUILTIN_ASSET_USER_ID,
     BUILTIN_ASSET_USERNAME,
 )
+from app.shared_assets.agent_payload_checksum import agent_payload_checksum
 from app.shared_assets.bootstrap.catalog import (
     BootstrapCatalog,
     BootstrapCatalogError,
@@ -32,7 +33,12 @@ from app.shared_assets.bootstrap.catalog import (
 from app.shared_assets.bootstrap.skill_archive import load_skill_archive
 from app.shared_assets.errors import AssetValidationFailed
 from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
-from app.shared_assets.models import AgentPayload, SkillArchiveFile
+from app.shared_assets.models import (
+    AgentPayload,
+    AssetScope,
+    SkillArchiveFile,
+    SkillAssetRef,
+)
 from app.shared_assets.skill_service import (
     _analyze_skill_files,
     normalize_skill_files,
@@ -56,6 +62,7 @@ from deerflow.persistence.shared_assets import (
     SkillRow,
     SkillVersionFileRow,
     SkillVersionRow,
+    SystemAssetUpgradeAuditRow,
 )
 from deerflow.persistence.user import UserRow
 
@@ -116,13 +123,13 @@ class _McpPayload(BaseModel):
 class BootstrapResult:
     digest: str
     counts: Mapping[str, int]
-    applied_releases: int
+    applied_changes: int
 
     @property
     def created(self) -> int:
-        """Backward-compatible alias for the number of applied releases."""
+        """Backward-compatible truthy count for callers that only need change state."""
 
-        return self.applied_releases
+        return self.applied_changes
 
 
 def _stable_id(value: str) -> uuid.UUID:
@@ -141,20 +148,7 @@ def _decode_json(model: type[BaseModel], content: bytes):
 
 
 def _agent_checksum(payload: AgentPayload) -> str:
-    canonical = json.dumps(
-        {
-            "description": payload.description,
-            "mcp_version_ids": [str(value) for value in payload.mcp_version_ids],
-            "model_ref": payload.model_ref,
-            "skill_version_ids": [str(value) for value in payload.skill_version_ids],
-            "soul": payload.soul,
-            "tool_groups": list(payload.tool_groups),
-        },
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(canonical).hexdigest()
+    return agent_payload_checksum(payload, payload_schema_version=4)
 
 
 def _validated_skill_preview_with_scan_mode(
@@ -381,6 +375,7 @@ def _validate_asset_row(
     *,
     expected_revision: int | None = None,
 ) -> None:
+    revision = getattr(row, "revision", getattr(row, "version", None))
     if (
         row.id != _stable_id(entry.source_key)
         or row.scope != "system"
@@ -388,10 +383,10 @@ def _validate_asset_row(
         or row.slug != entry.slug
         or row.display_name != entry.display_name
         or row.status != "active"
-        or not isinstance(row.version, int)
-        or isinstance(row.version, bool)
-        or row.version < 1
-        or (expected_revision is not None and row.version != expected_revision)
+        or not isinstance(revision, int)
+        or isinstance(revision, bool)
+        or revision < 1
+        or (expected_revision is not None and revision != expected_revision)
         or row.source_key != entry.source_key
         or row.created_by_user_id != str(BUILTIN_ASSET_USER_ID)
     ):
@@ -417,18 +412,10 @@ def _matches(row: object, **expected: object) -> bool:
 
 
 async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
+    if entry.version != 1:
+        raise BootstrapCatalogError("System Skills require exactly one v1")
     payload = catalog_payload(catalog, entry)
-    archive_files = (
-        load_skill_archive(payload)
-        if entry.payload_format == "skill_archive_v1"
-        else (
-            SkillArchiveFile(
-                path="SKILL.md",
-                content=payload,
-                media_type="text/markdown",
-            ),
-        )
-    )
+    archive_files = load_skill_archive(payload) if entry.payload_format == "skill_archive_v1" else (SkillArchiveFile("SKILL.md", payload, "text/markdown"),)
     try:
         archive_files = normalize_skill_files(
             archive_files,
@@ -436,227 +423,153 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         )
     except AssetValidationFailed as error:
         raise BootstrapCatalogError("bootstrap Skill archive is invalid") from error
-    history = tuple(
-        sorted(
-            (item for item in catalog.entries if item.kind == "skill" and item.source_key == entry.source_key),
-            key=lambda item: item.version,
-        )
-    )
-    latest_version = history[-1].version
-    preview_loader = _validated_historical_skill_preview if entry.scan_summary is not None and entry.version != latest_version else _validated_skill_preview
-    preview = await asyncio.to_thread(
-        preview_loader,
-        entry,
-        archive_files,
-    )
-    frontmatter = dict(preview.frontmatter)
-    description = preview.description
-    compatibility = preview.compatibility
-    requirements = [
-        {
-            "name": requirement.name,
-            "optional": requirement.optional,
-        }
-        for requirement in preview.secret_requirements
-    ]
-    checksum = preview.checksum
-    asset_id = _stable_id(entry.source_key)
-    version_id = _version_id(entry)
+    preview = await asyncio.to_thread(_validated_skill_preview, entry, archive_files)
     scan_decision, scan_summary = _entry_scan_snapshot(
         entry,
         preview,
-        is_latest=entry.version == latest_version,
+        is_latest=True,
     )
+    requirements = [{"name": item.name, "optional": item.optional} for item in preview.secret_requirements]
+    asset_id = _stable_id(entry.source_key)
+    version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
-    if asset is not None:
-        _validate_asset_row(asset, entry)
-        version = await session.get(SkillVersionRow, version_id)
-        if version is None:
-            if entry.version == 1:
-                raise BootstrapConflict("existing system Skill conflicts with canonical payload")
-            previous_entry = next(
-                (item for item in catalog.entries if item.kind == "skill" and item.source_key == entry.source_key and item.version == entry.version - 1),
-                None,
-            )
-            if previous_entry is None or asset.current_published_version_id != _version_id(previous_entry):
-                raise BootstrapConflict("existing system Skill release history conflicts with canonical payload")
-            if asset.version != entry.version - 1:
-                raise BootstrapConflict("existing system Skill revision conflicts with canonical release history")
-            version = SkillVersionRow(
-                id=version_id,
-                skill_id=asset_id,
-                version_number=entry.version,
-                workflow_status="draft",
-                description=description,
-                frontmatter=frontmatter,
-                compatibility=compatibility,
-                secret_requirements=requirements,
-                scan_decision=scan_decision,
-                scan_summary=scan_summary,
-                supersedes_version_id=_version_id(previous_entry),
-                payload_checksum=checksum,
-                created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-            )
-            session.add(version)
-            await session.flush()
-            session.add_all(
-                [
-                    SkillVersionFileRow(
-                        skill_version_id=version_id,
-                        path=file.path,
-                        media_type=file.media_type,
-                        size_bytes=len(file.content),
-                        sha256=hashlib.sha256(file.content).hexdigest(),
-                        content=file.content,
-                    )
-                    for file in archive_files
-                ]
-            )
-            await session.flush()
-            version.workflow_status = "published"
-            await session.flush()
-            asset.current_published_version_id = version_id
-            asset.version += 1
-            await session.flush()
-            if entry.version == latest_version:
-                await _assert_exact_version_history(
-                    session,
-                    SkillVersionRow,
-                    SkillVersionRow.skill_id,
-                    asset_id,
-                    history,
-                )
-            return True
-
-        expected_supersedes = _version_id(next(item for item in catalog.entries if item.kind == "skill" and item.source_key == entry.source_key and item.version == entry.version - 1)) if entry.version > 1 else None
-        expected_scan = (
-            {
-                "scan_decision": scan_decision,
-                "scan_summary": scan_summary,
-            }
-            if entry.scan_decision is not None
-            else {}
-        )
-        if not _matches(
-            version,
-            skill_id=asset_id,
-            version_number=entry.version,
-            workflow_status="published",
-            description=description,
-            frontmatter=frontmatter,
-            compatibility=compatibility,
-            secret_requirements=requirements,
-            supersedes_version_id=expected_supersedes,
-            payload_checksum=checksum,
-            submitted_at=None,
-            reviewed_at=None,
-            reviewed_by_user_id=None,
-            review_note=None,
+    expected_files = tuple(sorted(archive_files, key=lambda item: item.path))
+    if asset is None:
+        asset = SkillRow(
+            id=asset_id,
+            scope="system",
+            project_id=None,
+            slug=entry.slug,
+            display_name=entry.display_name,
+            status="active",
+            current_version_id=None,
+            revision=1,
+            source_key=entry.source_key,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-            **expected_scan,
-        ):
-            raise BootstrapConflict("existing system Skill conflicts with canonical payload")
-        persisted_files = (await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path))).scalars().all()
-        expected_files = [
-            (
-                version_id,
-                file.path,
-                file.media_type,
-                len(file.content),
-                hashlib.sha256(file.content).hexdigest(),
-                file.content,
-            )
-            for file in sorted(archive_files, key=lambda item: item.path)
-        ]
-        actual_files = sorted(
-            [
-                (
-                    file.skill_version_id,
-                    file.path,
-                    file.media_type,
-                    file.size_bytes,
-                    file.sha256,
-                    bytes(file.content),
-                )
-                for file in persisted_files
-            ],
-            key=lambda item: item[1],
         )
-        if actual_files != expected_files:
-            raise BootstrapConflict("existing system Skill files conflict with canonical payload")
-        if entry.version == latest_version and asset.current_published_version_id != version_id:
-            raise BootstrapConflict("existing system Skill published pointer conflicts with canonical payload")
-        if entry.version == latest_version and asset.version != latest_version:
-            raise BootstrapConflict("existing system Skill revision conflicts with canonical release history")
-        if entry.version == latest_version:
-            await _assert_exact_version_history(
-                session,
-                SkillVersionRow,
-                SkillVersionRow.skill_id,
-                asset_id,
-                history,
-            )
-        return False
+        version = SkillVersionRow(
+            id=version_id,
+            skill_id=asset_id,
+            version_number=1,
+            description=preview.description,
+            frontmatter=dict(preview.frontmatter),
+            compatibility=preview.compatibility,
+            secret_requirements=requirements,
+            scan_decision=scan_decision,
+            scan_summary=scan_summary,
+            supersedes_version_id=None,
+            payload_checksum=preview.checksum,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+        )
+        session.add_all([asset, version])
+        await session.flush()
+        session.add_all(_skill_file_rows(version_id, expected_files))
+        await session.flush()
+        asset.current_version_id = version_id
+        await session.flush()
+        return True
 
-    if entry.version != 1:
-        raise BootstrapConflict("system Skill release history must start from version 1")
-
-    asset = SkillRow(
-        id=asset_id,
-        scope="system",
-        project_id=None,
-        slug=entry.slug,
-        display_name=entry.display_name,
-        status="active",
-        current_published_version_id=None,
-        version=1,
-        source_key=entry.source_key,
-        created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-    )
-    version = SkillVersionRow(
-        id=version_id,
+    _validate_asset_row(asset, entry)
+    versions = tuple((await session.execute(select(SkillVersionRow).where(SkillVersionRow.skill_id == asset.id).with_for_update(of=SkillVersionRow))).scalars().all())
+    if len(versions) != 1 or versions[0].version_number != 1 or asset.current_version_id != versions[0].id:
+        raise BootstrapConflict("existing System Skill is not a single Current v1")
+    version = versions[0]
+    if uuid.UUID(str(version.id)) != version_id:
+        raise BootstrapConflict("existing System Skill Current v1 identity is not canonical")
+    persisted_files = tuple((await session.execute(select(SkillVersionFileRow).where(SkillVersionFileRow.skill_version_id == version_id).order_by(SkillVersionFileRow.path).with_for_update(of=SkillVersionFileRow))).scalars().all())
+    exact = _matches(
+        version,
         skill_id=asset_id,
-        version_number=entry.version,
-        workflow_status="draft",
-        description=description,
-        frontmatter=frontmatter,
-        compatibility=compatibility,
+        version_number=1,
+        description=preview.description,
+        frontmatter=dict(preview.frontmatter),
+        compatibility=preview.compatibility,
         secret_requirements=requirements,
         scan_decision=scan_decision,
         scan_summary=scan_summary,
         supersedes_version_id=None,
-        payload_checksum=checksum,
+        payload_checksum=preview.checksum,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-    )
-    session.add_all([asset, version])
-    await session.flush()
-    session.add_all(
-        [
-            SkillVersionFileRow(
-                skill_version_id=version_id,
-                path=file.path,
-                media_type=file.media_type,
-                size_bytes=len(file.content),
-                sha256=hashlib.sha256(file.content).hexdigest(),
-                content=file.content,
-            )
-            for file in archive_files
-        ]
-    )
-    await session.flush()
-    version.workflow_status = "published"
-    await session.flush()
-    asset.current_published_version_id = version_id
-    await session.flush()
-    if entry.version == latest_version:
-        await _assert_exact_version_history(
-            session,
-            SkillVersionRow,
-            SkillVersionRow.skill_id,
-            asset_id,
-            history,
+    ) and _skill_files_match(version_id, persisted_files, expected_files)
+    if version.payload_checksum == preview.checksum:
+        if not exact:
+            raise BootstrapConflict("existing System Skill checksum has drifted content")
+        return False
+
+    before_checksum = version.payload_checksum
+    version.description = preview.description
+    version.frontmatter = dict(preview.frontmatter)
+    version.compatibility = preview.compatibility
+    version.secret_requirements = requirements
+    version.scan_decision = scan_decision
+    version.scan_summary = scan_summary
+    version.payload_checksum = preview.checksum
+    version.revoked_at = None
+    version.revoked_by_user_id = None
+    version.revocation_reason_code = None
+    await session.execute(
+        delete(SkillVersionFileRow).where(
+            SkillVersionFileRow.skill_version_id == version_id,
         )
+    )
+    session.add_all(_skill_file_rows(version_id, expected_files))
+    asset.revision += 1
+    await session.flush()
+    await _record_system_upgrade(
+        session,
+        kind="skill",
+        asset_id=asset_id,
+        version_id=version_id,
+        before_checksum=before_checksum,
+        after_checksum=preview.checksum,
+        package_digest=catalog_digest(catalog),
+    )
     return True
+
+
+def _skill_file_rows(
+    version_id: uuid.UUID,
+    files: tuple[SkillArchiveFile, ...],
+) -> tuple[SkillVersionFileRow, ...]:
+    return tuple(
+        SkillVersionFileRow(
+            skill_version_id=version_id,
+            path=item.path,
+            media_type=item.media_type,
+            size_bytes=len(item.content),
+            sha256=hashlib.sha256(item.content).hexdigest(),
+            content=item.content,
+        )
+        for item in files
+    )
+
+
+def _skill_files_match(
+    version_id: uuid.UUID,
+    actual: tuple[SkillVersionFileRow, ...],
+    expected: tuple[SkillArchiveFile, ...],
+) -> bool:
+    return tuple(
+        (
+            row.skill_version_id,
+            row.path,
+            row.media_type,
+            row.size_bytes,
+            row.sha256,
+            bytes(row.content),
+        )
+        for row in sorted(actual, key=lambda item: item.path)
+    ) == tuple(
+        (
+            version_id,
+            item.path,
+            item.media_type,
+            len(item.content),
+            hashlib.sha256(item.content).hexdigest(),
+            item.content,
+        )
+        for item in sorted(expected, key=lambda item: item.path)
+    )
 
 
 def _resolved_dependency_ids(
@@ -666,9 +579,6 @@ def _resolved_dependency_ids(
 ) -> tuple[uuid.UUID, ...]:
     resolved: list[uuid.UUID] = []
     for source_key in source_keys:
-        # Packaged Agent payloads use source-key-only dependency references.
-        # Their immutable meaning is therefore the v1 release, not whichever
-        # release happens to be latest in a newer deployment catalog.
         dependency = entries_by_release.get((source_key, 1))
         if dependency is None or dependency.kind != expected_kind:
             raise BootstrapCatalogError("bootstrap dependency is missing or has the wrong kind")
@@ -678,209 +588,236 @@ def _resolved_dependency_ids(
     return tuple(resolved)
 
 
+def _resolved_skill_refs(
+    entries_by_release: Mapping[tuple[str, int], BootstrapEntry],
+    source_keys: tuple[str, ...],
+) -> tuple[SkillAssetRef, ...]:
+    refs: list[SkillAssetRef] = []
+    for source_key in source_keys:
+        dependency = entries_by_release.get((source_key, 1))
+        if dependency is None or dependency.kind != "skill":
+            raise BootstrapCatalogError("System Agent Skill dependency is missing or not System scope")
+        refs.append(
+            SkillAssetRef(
+                scope=AssetScope.SYSTEM,
+                asset_id=_stable_id(dependency.source_key),
+            )
+        )
+    if len(refs) != len(set(refs)):
+        raise BootstrapCatalogError("bootstrap dependencies must be unique")
+    return tuple(refs)
+
+
 async def _seed_agent(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
+    if entry.version != 1:
+        raise BootstrapCatalogError("System Agents require exactly one v1")
     raw = _decode_json(_AgentPayload, catalog_payload(catalog, entry))
     entries = {(item.source_key, item.version): item for item in catalog.entries}
-    history = tuple(
-        sorted(
-            (item for item in catalog.entries if item.kind == "agent" and item.source_key == entry.source_key),
-            key=lambda item: item.version,
-        )
-    )
-    latest_version = history[-1].version
     payload = AgentPayload(
         description=raw.description,
         soul=raw.soul,
         model_ref=raw.model_ref,
         tool_groups=raw.tool_groups,
-        skill_version_ids=_resolved_dependency_ids(entries, raw.skill_source_keys, "skill"),
+        skill_refs=_resolved_skill_refs(entries, raw.skill_source_keys),
         mcp_version_ids=_resolved_dependency_ids(entries, raw.mcp_source_keys, "mcp"),
+        payload_schema_version=4,
     )
     checksum = _agent_checksum(payload)
     asset_id = _stable_id(entry.source_key)
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
-    if asset is not None:
-        _validate_asset_row(asset, entry)
-        version = await session.get(AgentVersionRow, version_id)
-        if version is None:
-            if entry.version == 1:
-                raise BootstrapConflict("existing system Agent conflicts with canonical payload")
-            previous_entry = next(
-                (item for item in history if item.version == entry.version - 1),
-                None,
-            )
-            if previous_entry is None or asset.current_published_version_id != _version_id(previous_entry):
-                raise BootstrapConflict("existing system Agent release history conflicts with canonical payload")
-            if asset.version != entry.version - 1:
-                raise BootstrapConflict("existing system Agent revision conflicts with canonical release history")
-            version = AgentVersionRow(
-                id=version_id,
-                agent_id=asset_id,
-                version_number=entry.version,
-                workflow_status="draft",
-                description=payload.description,
-                soul=payload.soul,
-                model_ref=payload.model_ref,
-                model_settings={},
-                tool_groups=list(payload.tool_groups),
-                supersedes_version_id=_version_id(previous_entry),
-                payload_checksum=checksum,
-                payload_schema_version=1,
-                created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-            )
-            session.add(version)
-            await session.flush()
-            session.add_all(
-                [
-                    AgentVersionSkillRefRow(
-                        agent_version_id=version_id,
-                        skill_version_id=skill_version_id,
-                        sort_order=index,
-                    )
-                    for index, skill_version_id in enumerate(payload.skill_version_ids)
-                ]
-            )
-            session.add_all(
-                [
-                    AgentVersionMcpRefRow(
-                        agent_version_id=version_id,
-                        mcp_server_version_id=mcp_version_id,
-                        sort_order=index,
-                    )
-                    for index, mcp_version_id in enumerate(payload.mcp_version_ids)
-                ]
-            )
-            await session.flush()
-            version.workflow_status = "published"
-            await session.flush()
-            asset.current_published_version_id = version_id
-            asset.version += 1
-            await session.flush()
-            if entry.version == latest_version:
-                await _assert_exact_version_history(
-                    session,
-                    AgentVersionRow,
-                    AgentVersionRow.agent_id,
-                    asset_id,
-                    history,
-                )
-            return True
+    if asset is None:
+        expected_skill_refs = _expected_agent_skill_refs(version_id, payload)
+        expected_mcp_refs = _expected_agent_mcp_refs(version_id, payload)
+        asset = AgentRow(
+            id=asset_id,
+            scope="system",
+            project_id=None,
+            slug=entry.slug,
+            display_name=entry.display_name,
+            status="active",
+            current_version_id=None,
+            revision=1,
+            source_key=entry.source_key,
+            created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+        )
+        version = _agent_version_row(version_id, asset_id, payload, checksum)
+        session.add_all([asset, version])
+        await session.flush()
+        session.add_all(_agent_skill_ref_rows(expected_skill_refs))
+        session.add_all(_agent_mcp_ref_rows(expected_mcp_refs))
+        await session.flush()
+        asset.current_version_id = version_id
+        await session.flush()
+        return True
 
-        expected_supersedes = _version_id(next(item for item in history if item.version == entry.version - 1)) if entry.version > 1 else None
-        if not _matches(
+    _validate_asset_row(asset, entry)
+    versions = tuple((await session.execute(select(AgentVersionRow).where(AgentVersionRow.agent_id == asset.id).with_for_update(of=AgentVersionRow))).scalars().all())
+    if len(versions) != 1 or versions[0].version_number != 1 or asset.current_version_id != versions[0].id:
+        raise BootstrapConflict("existing System Agent is not a single Current v1")
+    version = versions[0]
+    if uuid.UUID(str(version.id)) != version_id:
+        raise BootstrapConflict("existing System Agent Current v1 identity is not canonical")
+    expected_skill_refs = _expected_agent_skill_refs(version_id, payload)
+    expected_mcp_refs = _expected_agent_mcp_refs(version_id, payload)
+    skill_refs = tuple(
+        (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version_id).order_by(AgentVersionSkillRefRow.sort_order).with_for_update(of=AgentVersionSkillRefRow))).scalars().all()
+    )
+    mcp_refs = tuple((await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version_id).order_by(AgentVersionMcpRefRow.sort_order).with_for_update(of=AgentVersionMcpRefRow))).scalars().all())
+    exact = (
+        _matches(
             version,
             agent_id=asset_id,
-            version_number=entry.version,
-            workflow_status="published",
+            version_number=1,
             description=payload.description,
-            agents_instructions="",
+            agents_instructions=payload.agents_instructions,
             soul=payload.soul,
-            identity="",
-            user_context="",
+            identity=payload.identity,
+            user_context=payload.user_context,
             model_ref=payload.model_ref,
             model_settings={},
             tool_groups=list(payload.tool_groups),
-            supersedes_version_id=expected_supersedes,
+            supersedes_version_id=None,
             payload_checksum=checksum,
-            payload_schema_version=1,
-            submitted_at=None,
-            reviewed_at=None,
-            reviewed_by_user_id=None,
-            review_note=None,
+            payload_schema_version=4,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-        ):
-            raise BootstrapConflict("existing system Agent conflicts with canonical payload")
-        skill_refs = (
-            (await session.execute(select(AgentVersionSkillRefRow).where(AgentVersionSkillRefRow.agent_version_id == version_id).order_by(AgentVersionSkillRefRow.sort_order, AgentVersionSkillRefRow.skill_version_id))).scalars().all()
         )
-        mcp_refs = (await session.execute(select(AgentVersionMcpRefRow).where(AgentVersionMcpRefRow.agent_version_id == version_id).order_by(AgentVersionMcpRefRow.sort_order, AgentVersionMcpRefRow.mcp_server_version_id))).scalars().all()
-        actual_skills = [(row.agent_version_id, row.skill_version_id, row.sort_order) for row in skill_refs]
-        expected_skills = [(version_id, skill_version_id, index) for index, skill_version_id in enumerate(payload.skill_version_ids)]
-        actual_mcps = [(row.agent_version_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs]
-        expected_mcps = [(version_id, mcp_version_id, index) for index, mcp_version_id in enumerate(payload.mcp_version_ids)]
-        if actual_skills != expected_skills or actual_mcps != expected_mcps:
-            raise BootstrapConflict("existing system Agent references conflict with canonical payload")
-        if entry.version == latest_version:
-            if asset.current_published_version_id != version_id:
-                raise BootstrapConflict("existing system Agent published pointer conflicts with canonical payload")
-            if asset.version != latest_version:
-                raise BootstrapConflict("existing system Agent revision conflicts with canonical release history")
-            await _assert_exact_version_history(
-                session,
-                AgentVersionRow,
-                AgentVersionRow.agent_id,
-                asset_id,
-                history,
-            )
+        and tuple((row.agent_version_id, row.skill_asset_scope, row.skill_asset_id, row.sort_order) for row in skill_refs) == expected_skill_refs
+        and tuple((row.agent_version_id, row.mcp_server_version_id, row.sort_order) for row in mcp_refs) == expected_mcp_refs
+    )
+    if version.payload_checksum == checksum:
+        if not exact:
+            raise BootstrapConflict("existing System Agent checksum has drifted content")
         return False
 
-    if entry.version != 1:
-        raise BootstrapConflict("system Agent release history must start from version 1")
-
-    asset = AgentRow(
-        id=asset_id,
-        scope="system",
-        project_id=None,
-        slug=entry.slug,
-        display_name=entry.display_name,
-        status="active",
-        current_published_version_id=None,
-        version=1,
-        source_key=entry.source_key,
-        created_by_user_id=str(BUILTIN_ASSET_USER_ID),
+    before_checksum = version.payload_checksum
+    version.description = payload.description
+    version.agents_instructions = payload.agents_instructions
+    version.soul = payload.soul
+    version.identity = payload.identity
+    version.user_context = payload.user_context
+    version.model_ref = payload.model_ref
+    version.model_settings = {}
+    version.tool_groups = list(payload.tool_groups)
+    version.payload_checksum = checksum
+    version.payload_schema_version = 4
+    await session.execute(
+        delete(AgentVersionSkillRefRow).where(
+            AgentVersionSkillRefRow.agent_version_id == version_id,
+        )
     )
-    version = AgentVersionRow(
+    await session.execute(
+        delete(AgentVersionMcpRefRow).where(
+            AgentVersionMcpRefRow.agent_version_id == version_id,
+        )
+    )
+    session.add_all(_agent_skill_ref_rows(expected_skill_refs))
+    session.add_all(_agent_mcp_ref_rows(expected_mcp_refs))
+    asset.revision += 1
+    await session.flush()
+    await _record_system_upgrade(
+        session,
+        kind="agent",
+        asset_id=asset_id,
+        version_id=version_id,
+        before_checksum=before_checksum,
+        after_checksum=checksum,
+        package_digest=catalog_digest(catalog),
+    )
+    return True
+
+
+def _agent_version_row(
+    version_id: uuid.UUID,
+    asset_id: uuid.UUID,
+    payload: AgentPayload,
+    checksum: str,
+) -> AgentVersionRow:
+    return AgentVersionRow(
         id=version_id,
         agent_id=asset_id,
-        version_number=entry.version,
-        workflow_status="draft",
+        version_number=1,
         description=payload.description,
+        agents_instructions=payload.agents_instructions,
         soul=payload.soul,
+        identity=payload.identity,
+        user_context=payload.user_context,
         model_ref=payload.model_ref,
         model_settings={},
         tool_groups=list(payload.tool_groups),
         supersedes_version_id=None,
         payload_checksum=checksum,
-        payload_schema_version=1,
+        payload_schema_version=4,
         created_by_user_id=str(BUILTIN_ASSET_USER_ID),
     )
-    session.add_all([asset, version])
-    await session.flush()
-    session.add_all(
-        [
-            AgentVersionSkillRefRow(
-                agent_version_id=version_id,
-                skill_version_id=skill_version_id,
-                sort_order=index,
-            )
-            for index, skill_version_id in enumerate(payload.skill_version_ids)
-        ]
-    )
-    session.add_all(
-        [
-            AgentVersionMcpRefRow(
-                agent_version_id=version_id,
-                mcp_server_version_id=mcp_version_id,
-                sort_order=index,
-            )
-            for index, mcp_version_id in enumerate(payload.mcp_version_ids)
-        ]
-    )
-    await session.flush()
-    version.workflow_status = "published"
-    await session.flush()
-    asset.current_published_version_id = version_id
-    await session.flush()
-    if entry.version == latest_version:
-        await _assert_exact_version_history(
-            session,
-            AgentVersionRow,
-            AgentVersionRow.agent_id,
-            asset_id,
-            history,
+
+
+def _agent_skill_ref_rows(
+    refs: tuple[tuple[uuid.UUID, str, uuid.UUID, int], ...],
+) -> tuple[AgentVersionSkillRefRow, ...]:
+    return tuple(
+        AgentVersionSkillRefRow(
+            agent_version_id=version_id,
+            skill_asset_scope=scope,
+            skill_asset_id=asset_id,
+            sort_order=sort_order,
         )
-    return True
+        for version_id, scope, asset_id, sort_order in refs
+    )
+
+
+def _expected_agent_skill_refs(
+    version_id: uuid.UUID,
+    payload: AgentPayload,
+) -> tuple[tuple[uuid.UUID, str, uuid.UUID, int], ...]:
+    return tuple((version_id, ref.scope.value, ref.asset_id, index) for index, ref in enumerate(payload.skill_refs))
+
+
+def _expected_agent_mcp_refs(
+    version_id: uuid.UUID,
+    payload: AgentPayload,
+) -> tuple[tuple[uuid.UUID, uuid.UUID, int], ...]:
+    return tuple((version_id, mcp_id, index) for index, mcp_id in enumerate(payload.mcp_version_ids))
+
+
+def _agent_mcp_ref_rows(
+    refs: tuple[tuple[uuid.UUID, uuid.UUID, int], ...],
+) -> tuple[AgentVersionMcpRefRow, ...]:
+    return tuple(
+        AgentVersionMcpRefRow(
+            agent_version_id=version_id,
+            mcp_server_version_id=mcp_id,
+            sort_order=sort_order,
+        )
+        for version_id, mcp_id, sort_order in refs
+    )
+
+
+async def _record_system_upgrade(
+    session: AsyncSession,
+    *,
+    kind: str,
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    before_checksum: str,
+    after_checksum: str,
+    package_digest: str,
+) -> None:
+    operator = await session.scalar(select(text("current_user")))
+    if not isinstance(operator, str) or not operator:
+        raise BootstrapConflict("database operator identity is unavailable")
+    session.add(
+        SystemAssetUpgradeAuditRow(
+            asset_kind=kind,
+            asset_id=asset_id,
+            version_id=version_id,
+            before_checksum=before_checksum,
+            after_checksum=after_checksum,
+            package_digest=package_digest,
+            operator_identity=operator,
+        )
+    )
+    await session.flush()
 
 
 def _mcp_checksum(raw: _McpPayload) -> str:
@@ -1023,10 +960,10 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
 
 
 async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -> BootstrapResult:
-    """Apply canonical system-asset releases atomically.
+    """Apply canonical System Asset definitions atomically.
 
-    ``counts`` reports unique assets by kind; ``applied_releases`` reports
-    immutable releases inserted by this invocation.
+    ``counts`` reports unique assets by kind; ``applied_changes`` reports
+    definitions created or updated in place by this invocation.
     """
 
     catalog = load_bootstrap_catalog()
@@ -1045,6 +982,7 @@ async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -
                 text("SELECT pg_advisory_xact_lock(:lock_key)"),
                 {"lock_key": _BOOTSTRAP_LOCK_KEY},
             )
+            await session.execute(text("SELECT set_config('deerflow.system_asset_upgrade', 'on', true)"))
             await _lock_existing_canonical_assets(session, catalog)
             await _ensure_builtin_principal(session)
             for entry in sorted(
@@ -1066,7 +1004,7 @@ async def bootstrap_system_assets(session_factory: Callable[[], AsyncSession]) -
     return BootstrapResult(
         digest=catalog_digest(catalog),
         counts=result_counts,
-        applied_releases=created,
+        applied_changes=created,
     )
 
 

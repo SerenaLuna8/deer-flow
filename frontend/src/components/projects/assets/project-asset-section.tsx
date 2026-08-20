@@ -63,26 +63,24 @@ export function ProjectAssetSection({
                 </div>
               </CardHeader>
               <CardContent className="space-y-4 text-sm">
-                {kind !== "agents" ? (
-                  <dl className="grid gap-3 sm:grid-cols-2">
-                    <div>
-                      <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.common.assetVersion}
-                      </dt>
-                      <dd>{item.version}</dd>
-                    </div>
-                    <div>
-                      <dt className="text-muted-foreground text-xs">
-                        {t.adminAssets.catalog.publishStatus}
-                      </dt>
-                      <dd>
-                        {item.current_published_version_id
-                          ? t.adminAssets.catalog.publishedAvailable
-                          : t.adminAssets.catalog.unpublished}
-                      </dd>
-                    </div>
-                  </dl>
-                ) : null}
+                <dl className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <dt className="text-muted-foreground text-xs">
+                      {t.adminAssets.common.assetVersion}
+                    </dt>
+                    <dd>{item.revision}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-muted-foreground text-xs">
+                      {t.adminAssets.catalog.currentVersionStatus}
+                    </dt>
+                    <dd>
+                      {item.current_version_id
+                        ? t.adminAssets.catalog.currentVersionAvailable
+                        : t.adminAssets.catalog.currentVersionMissing}
+                    </dd>
+                  </div>
+                </dl>
                 {projectAssetCanCreateVersion(
                   kind,
                   projectAssetCanAuthor(item, kind),

@@ -3963,6 +3963,7 @@ class _AtomicContinuationAdmission:
                         version_id=self._agent_version_id,
                         payload_checksum="a" * 64,
                         catalog_generation=1,
+                        snapshot_json={},
                     ),
                 )
                 session.add(
@@ -4085,23 +4086,21 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     role="admin",
                 ),
             )
-            session.add(
-                AgentRow(
-                    id=agent_id,
-                    scope="project",
-                    project_id=project_id,
-                    slug="approval-agent",
-                    display_name="Approval Agent",
-                    created_by_user_id=str(owner_id),
-                ),
+            agent = AgentRow(
+                id=agent_id,
+                scope="project",
+                project_id=project_id,
+                slug="approval-agent",
+                display_name="Approval Agent",
+                created_by_user_id=str(owner_id),
             )
+            session.add(agent)
             await session.flush()
             session.add(
                 AgentVersionRow(
                     id=agent_version_id,
                     agent_id=agent_id,
                     version_number=1,
-                    workflow_status="published",
                     description="",
                     soul="test",
                     model_ref=str(model_config_id),
@@ -4112,6 +4111,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 ),
             )
             await session.flush()
+            agent.current_version_id = agent_version_id
             model_config = SystemModelConfigRow(
                 id=model_config_id,
                 display_name="Test model",
@@ -4222,6 +4222,7 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     version_id=agent_version_id,
                     payload_checksum="a" * 64,
                     catalog_generation=1,
+                    snapshot_json={},
                 ),
             )
             session.add(

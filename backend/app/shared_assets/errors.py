@@ -148,11 +148,11 @@ class AgentArchived(AssetResolutionUnavailable):
 
 
 class SkillDesignTargetUnsupported(SharedAssetError):
-    """The published base version cannot seed a Builder revision session."""
+    """The selected base cannot seed a forward Builder revision session."""
 
     code = "SKILL_DESIGN_TARGET_UNSUPPORTED"
     status_code = 422
-    public_message = "Skill Builder cannot revise this Skill's published version"
+    public_message = "Skill Builder can revise only this Skill's current version"
 
 
 class SkillDesignTargetSessionExists(SharedAssetError):
@@ -171,32 +171,16 @@ class SkillDesignTargetDeleted(SharedAssetError):
     public_message = "The revision target Skill was deleted"
 
 
-class SkillDesignBaseStale(SharedAssetError):
-    """The live published version moved since the revision session pinned its base."""
-
-    code = "SKILL_DESIGN_BASE_STALE"
-    status_code = 409
-    public_message = "The published version changed since this revision session started"
-
-
 class SkillDesignNoChanges(SharedAssetError):
-    """The candidate draft is byte-identical to the pinned base version."""
+    """The candidate is byte-identical to the pinned base version."""
 
     code = "SKILL_DESIGN_NO_CHANGES"
     status_code = 409
-    public_message = "The draft is identical to the base version"
-
-
-class SkillPublishBaseStale(SharedAssetError):
-    """Publishing would supersede a version that is no longer the live one."""
-
-    code = "SKILL_PUBLISH_BASE_STALE"
-    status_code = 409
-    public_message = "The version being published was not based on the live published version"
+    public_message = "The candidate is identical to the base version"
 
 
 class SkillCredentialBindingsIncomplete(AssetValidationFailed):
-    """An active Skill version would be published without every required secret."""
+    """A Skill Candidate cannot activate without every required secret."""
 
     code = "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE"
     public_message = "Required Skill credential bindings are incomplete"
@@ -210,7 +194,7 @@ class SkillCredentialBindingInvalid(AssetValidationFailed):
 
 
 class SkillCredentialSelectionStale(AssetConflict):
-    """A selected Credential or publish-plan revision is no longer current."""
+    """A selected Credential or activation-plan revision is no longer current."""
 
     code = "SKILL_CREDENTIAL_SELECTION_STALE"
     public_message = "Skill credential selection is stale"

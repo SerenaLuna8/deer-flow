@@ -35,10 +35,9 @@ from app.shared_assets.errors import (
     SkillCredentialBindingInvalid,
     SkillCredentialBindingsIncomplete,
     SkillCredentialSelectionStale,
-    SkillPublishBaseStale,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
-from app.shared_assets.models import AssetScope, SkillArchiveFile, WorkflowStatus
+from app.shared_assets.models import AssetScope, SkillArchiveFile, VersionRelation
 from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
@@ -54,12 +53,17 @@ from app.shared_assets.skill_credential_repository import (
     SkillCredentialTarget,
 )
 from app.shared_assets.skill_credential_service import (
+    inherit_compatible_skill_credential_bindings_in_transaction,
     prepare_skill_credential_bindings_in_transaction,
 )
 from app.shared_assets.skill_repository import (
     SkillRepository,
     SkillVersionFileMetadataRecord,
     SkillVersionRecord,
+)
+from app.shared_assets.version_relation import (
+    VersionLineageNode,
+    classify_version_relations,
 )
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 from deerflow.skills.frontmatter import (
@@ -185,7 +189,7 @@ class SkillFileContentView:
     encoding: Literal["utf-8"] | None
     content: str | None
     source_payload_checksum: str
-    asset_version: int
+    asset_revision: int
 
 
 @dataclass(frozen=True)
@@ -247,8 +251,8 @@ class SkillAssetView:
     slug: str
     display_name: str
     status: str
-    current_published_version_id: uuid.UUID | None
-    version: int
+    current_version_id: uuid.UUID | None
+    revision: int
     created_by_user_id: str
     created_at: datetime
     updated_at: datetime
@@ -260,7 +264,7 @@ class SkillVersionView:
     id: uuid.UUID
     skill_id: uuid.UUID
     version_number: int
-    workflow_status: WorkflowStatus
+    relation: VersionRelation
     description: str
     frontmatter: Mapping[str, object]
     compatibility: str | None
@@ -484,7 +488,7 @@ def _file_views(files: Sequence[SkillArchiveFile]) -> tuple[SkillFileView, ...]:
 def _snapshot_checksum(file_views: Sequence[SkillFileView]) -> str:
     # Keep the revision-0001 persisted checksum contract. Runtime Skill
     # materialization is byte-based; media_type is validated separately, and a
-    # published file row is immutable at the database boundary.
+    # Persisted Skill file rows are immutable at the database boundary.
     canonical = json.dumps(
         [
             {
@@ -692,7 +696,7 @@ class SkillService:
         *,
         filename: str,
     ) -> ProjectSkillArchiveCreateResult:
-        """Create and publish one suspended Project Skill in one transaction."""
+        """Create one suspended Project Skill with an immutable Candidate v1."""
 
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         if not isinstance(actor, ProjectContext):
@@ -737,7 +741,7 @@ class SkillService:
         command: CreateSkill,
         preview: SkillArchivePreview,
     ) -> ProjectSkillArchiveCreateResult:
-        """Create suspended Skill + published v1 in the caller transaction."""
+        """Create suspended Skill + Candidate v1 in the caller transaction."""
 
         command = self._validate_create(actor, command)
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
@@ -774,12 +778,7 @@ class SkillService:
         *,
         supersedes_version_id: uuid.UUID,
     ) -> SkillVersionView:
-        """Create one draft version for an existing Project Skill in the caller transaction.
-
-        The caller pins the revision base: ``supersedes_version_id`` records the
-        version the draft was derived from, which the publish lineage guard
-        later compares against the live pointer.
-        """
+        """Create one immutable Candidate from the latest persisted head."""
 
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         if not isinstance(actor, ProjectContext):
@@ -791,6 +790,10 @@ class SkillService:
         repository = SkillRepository(session)
         asset = await repository.get_project_asset(actor, asset_id, for_update=True)
         if asset.status not in {"active", "suspended"}:
+            raise AssetConflict(actor.request_id)
+        history = await repository.get_project_version_history(actor, asset.id)
+        head = self._forward_head(asset, history, actor.request_id)
+        if head is None or head.row.id != supersedes_version_id:
             raise AssetConflict(actor.request_id)
         self._require_archive_name_matches_asset(actor, asset, preview)
         version = await self._create_version(
@@ -824,11 +827,6 @@ class SkillService:
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
         if type(execute) is not bool or type(replace) is not bool:
             raise AssetValidationFailed(actor.request_id)
-        if execute and replace:
-            self._require_capability(
-                actor,
-                Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-            )
         prepared = await self._prepare_project_archive_imports(actor, imports)
 
         async def operation(repository: SkillRepository) -> ProjectSkillArchiveImportResult:
@@ -934,7 +932,7 @@ class SkillService:
                 encoding=encoding,
                 content=content,
                 source_payload_checksum=record.version.payload_checksum,
-                asset_version=record.asset.version,
+                asset_revision=record.asset.revision,
             )
 
         return await self._execute(actor, operation)
@@ -1079,6 +1077,10 @@ class SkillService:
             )
             if source.row.payload_checksum != expected_source_payload_checksum:
                 raise AssetConflict(actor.request_id)
+            history = await repository.get_project_version_history(actor, asset.id)
+            head = self._forward_head(asset, history, actor.request_id)
+            if head is None or head.row.id != source.row.id:
+                raise AssetConflict(actor.request_id)
             source_files = await asyncio.to_thread(
                 self._verified_archive_files,
                 source,
@@ -1110,43 +1112,32 @@ class SkillService:
             governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.version.create"),
         )
 
-    async def publish(
+    async def activate_version(
         self,
         actor: _Actor,
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
         *,
         expected_asset_version: int,
-        acknowledge_stale_base: bool = False,
         expected_payload_checksum: str | None = None,
         expected_binding_revision: int | None = None,
     ) -> SkillVersionView:
-        self._require_capability(
-            actor,
-            Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-        )
-        if type(acknowledge_stale_base) is not bool:
-            raise AssetValidationFailed(getattr(actor, "request_id", "unknown"))
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         request_id = getattr(actor, "request_id", "unknown")
-        if isinstance(actor, ProjectContext) and (not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None):
-            raise SkillCredentialBindingInvalid(request_id)
-        if isinstance(actor, ProjectContext) and (not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0):
-            raise SkillCredentialBindingInvalid(request_id)
-        if expected_payload_checksum is not None and (not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None):
-            raise SkillCredentialBindingInvalid(request_id)
-        if expected_binding_revision is not None and (not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0):
-            raise SkillCredentialBindingInvalid(request_id)
-        if expected_binding_revision is not None and not isinstance(actor, ProjectContext):
+        if not (isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None)):
             raise AssetForbidden(request_id)
+        if not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None:
+            raise SkillCredentialBindingInvalid(request_id)
+        if not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0:
+            raise SkillCredentialBindingInvalid(request_id)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
-            return await self._publish_in_transaction(
+            return await self._activate_version_in_transaction(
                 repository,
                 actor,
                 asset_id,
                 version_id,
                 expected_asset_version=expected_asset_version,
-                acknowledge_stale_base=acknowledge_stale_base,
                 expected_payload_checksum=expected_payload_checksum,
                 expected_binding_revision=expected_binding_revision,
             )
@@ -1154,7 +1145,7 @@ class SkillService:
         return await self._execute(
             actor,
             operation,
-            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.publish"),
+            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "skill.version.activate"),
         )
 
     async def delete(
@@ -1180,11 +1171,6 @@ class SkillService:
                 asset,
                 expected_asset_version,
             )
-            if asset.current_published_version_id is not None:
-                self._require_capability(
-                    actor,
-                    Capability.SHARED_ASSETS_MANAGE_BINDINGS,
-                )
             versions = await repository.plan_project_asset_deletion(actor, asset)
             quota = self._quota
             if versions and quota is None:
@@ -1233,7 +1219,7 @@ class SkillService:
         *,
         expected_asset_version: int,
     ) -> SkillAssetView:
-        self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         return await self._change_status(
             actor,
             asset_id,
@@ -1242,14 +1228,14 @@ class SkillService:
             audit_action="skill.suspend",
         )
 
-    async def activate(
+    async def enable(
         self,
         actor: _Actor,
         asset_id: uuid.UUID,
         *,
         expected_asset_version: int,
     ) -> SkillAssetView:
-        self._require_capability(actor, Capability.SHARED_ASSETS_MANAGE_BINDINGS)
+        self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
 
         async def operation(repository: SkillRepository) -> SkillAssetView:
             asset = await self._get_asset(
@@ -1263,7 +1249,7 @@ class SkillService:
                 asset,
                 expected_asset_version,
             )
-            if asset.status != "suspended" or asset.current_published_version_id is None:
+            if asset.scope != AssetScope.PROJECT.value or asset.status != "suspended" or asset.current_version_id is None:
                 raise AssetConflict(actor.request_id)
             if asset.scope == "project":
                 await repository.ensure_project_skill_runtime_name_available(
@@ -1274,11 +1260,9 @@ class SkillService:
                 repository,
                 actor,
                 asset.id,
-                asset.current_published_version_id,
+                asset.current_version_id,
                 for_update=True,
             )
-            if current.row.workflow_status != WorkflowStatus.PUBLISHED.value:
-                raise AssetConflict(actor.request_id)
             project_id = getattr(actor, "project_id", None)
             if not isinstance(project_id, uuid.UUID):
                 raise AssetForbidden(actor.request_id)
@@ -1295,7 +1279,7 @@ class SkillService:
                         actor.request_id,
                     ) from None
             asset.status = "active"
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
             return self._asset_view(asset)
 
@@ -1307,7 +1291,7 @@ class SkillService:
                 actor,
                 result.id,
                 None,
-                "skill.activate",
+                "skill.enable",
             ),
         )
 
@@ -1329,7 +1313,7 @@ class SkillService:
                 rows = await repository.list_override_visible(actor)
             else:
                 rows = await repository.list_system_visible(actor)
-            descriptions = await repository.current_published_descriptions(
+            descriptions = await repository.current_descriptions(
                 tuple(row.id for row in rows),
             )
             return tuple(
@@ -1353,8 +1337,15 @@ class SkillService:
             raise AssetForbidden(getattr(actor, "request_id", "unknown"))
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
+            asset = await repository.get_project_asset(actor, asset_id)
+            records = await repository.get_project_version_history(actor, asset_id)
+            relations = self._relations(asset, records, actor.request_id)
+            record = next((item for item in records if item.row.id == version_id), None)
+            if record is None:
+                raise AssetNotFound(actor.request_id)
             return self._version_view(
-                await repository.get_project_version(actor, asset_id, version_id),
+                record,
+                relation=relations[record.row.id],
             )
 
         return await self._execute(actor, operation)
@@ -1367,13 +1358,10 @@ class SkillService:
         self._require_capability(actor, Capability.SHARED_ASSETS_READ)
 
         async def operation(repository: SkillRepository) -> tuple[SkillVersionView, ...]:
-            if isinstance(actor, ProjectContext):
-                records = await repository.get_project_version_history(actor, asset_id)
-            elif actor.project_id is not None:
-                records = await repository.get_override_version_history(actor, asset_id)
-            else:
-                records = await repository.get_system_version_history(actor, asset_id)
-            return tuple(self._version_view(record) for record in records)
+            asset = await self._get_asset(repository, actor, asset_id)
+            records = await self._version_history_records(repository, actor, asset_id)
+            relations = self._relations(asset, records, actor.request_id)
+            return tuple(self._version_view(record, relation=relations[record.row.id]) for record in records)
 
         return await self._execute(actor, operation)
 
@@ -1386,12 +1374,7 @@ class SkillService:
         expected_asset_version: int,
         reason_code: Literal["security", "policy", "integrity"] = "security",
     ) -> SkillVersionView:
-        """Irreversibly revoke one published System Skill release.
-
-        Revocation is orthogonal to the immutable publication workflow.  The
-        published bytes and current pointer remain intact for history and
-        forensics, while binding and runtime boundaries reject the version.
-        """
+        """Irreversibly revoke the System Skill current v1 governance eligibility."""
 
         self._require_global_governance_actor(actor)
         if not isinstance(asset_id, uuid.UUID) or not isinstance(version_id, uuid.UUID):
@@ -1413,13 +1396,13 @@ class SkillService:
                 for_update=True,
             )
             row = record.row
-            if row.workflow_status != WorkflowStatus.PUBLISHED.value or row.revoked_at is not None or row.revoked_by_user_id is not None or row.revocation_reason_code is not None:
+            if asset.current_version_id != row.id or row.version_number != 1 or row.revoked_at is not None or row.revoked_by_user_id is not None or row.revocation_reason_code is not None:
                 raise AssetConflict(actor.request_id)
             row.revoked_at = datetime.now(UTC)
             row.revoked_by_user_id = str(actor.user_id)
             row.revocation_reason_code = reason_code
             await repository.session.flush()
-            return self._version_view(record)
+            return self._version_view(record, relation=VersionRelation.CURRENT)
 
         return await self._execute(
             actor,
@@ -1553,16 +1536,14 @@ class SkillService:
                 selected.id,
                 for_update=execute,
             )
-            if asset.status not in {"active", "suspended"} or asset.current_published_version_id is None:
+            if asset.status not in {"active", "suspended"} or asset.current_version_id is None:
                 raise AssetConflict(actor.request_id)
             source = await repository.get_project_version(
                 actor,
                 asset.id,
-                asset.current_published_version_id,
+                asset.current_version_id,
                 for_update=execute,
             )
-            if source.row.workflow_status != WorkflowStatus.PUBLISHED.value:
-                raise AssetConflict(actor.request_id)
             source_files = await asyncio.to_thread(
                 self._verified_archive_files,
                 source,
@@ -1600,36 +1581,21 @@ class SkillService:
             None,
             "skill.create",
         )
-        draft = await self._create_version_from_preview_in_transaction(
+        candidate = await self._create_version_from_preview_in_transaction(
             repository,
             actor,
             asset.id,
             prepared.preview,
-            expected_asset_version=asset.version,
+            expected_asset_version=asset.revision,
         )
         await self._record_governance(
             repository.session,
             actor,
             asset.id,
-            draft.id,
+            candidate.id,
             "skill.version.create",
         )
-        published = await self._publish_in_transaction(
-            repository,
-            actor,
-            asset.id,
-            draft.id,
-            expected_asset_version=asset.version + 1,
-            allow_incomplete_suspended=True,
-        )
-        await self._record_governance(
-            repository.session,
-            actor,
-            asset.id,
-            published.id,
-            "skill.publish",
-        )
-        if published.workflow_status is not WorkflowStatus.PUBLISHED or published.payload_checksum != prepared.preview.checksum:
+        if candidate.relation is not VersionRelation.CANDIDATE or candidate.payload_checksum != prepared.preview.checksum:
             raise AssetValidationFailed(actor.request_id)
         created = await repository.get_project_asset(
             actor,
@@ -1639,9 +1605,9 @@ class SkillService:
         return ProjectSkillArchiveCreateResult(
             asset=self._asset_view(
                 created,
-                description=published.description,
+                description=candidate.description,
             ),
-            version=published,
+            version=candidate,
         )
 
     async def _execute_project_archive_replace(
@@ -1651,41 +1617,29 @@ class SkillService:
         prepared: _PreparedProjectSkillArchive,
         asset: SkillRow,
     ) -> None:
-        expected_asset_version = asset.version
-        source_version_id = asset.current_published_version_id
-        if source_version_id is None:
+        expected_asset_version = asset.revision
+        history = await repository.get_project_version_history(actor, asset.id)
+        head = self._forward_head(asset, history, actor.request_id)
+        if head is None:
             raise AssetConflict(actor.request_id)
-        draft = await self._create_version_from_preview_in_transaction(
+        source_version_id = head.row.id
+        candidate = await self._create_version_from_preview_in_transaction(
             repository,
             actor,
             asset.id,
             prepared.preview,
             expected_asset_version=expected_asset_version,
         )
-        if draft.supersedes_version_id != source_version_id:
+        if candidate.supersedes_version_id != source_version_id:
             raise AssetConflict(actor.request_id)
         await self._record_governance(
             repository.session,
             actor,
             asset.id,
-            draft.id,
+            candidate.id,
             "skill.version.create",
         )
-        published = await self._publish_in_transaction(
-            repository,
-            actor,
-            asset.id,
-            draft.id,
-            expected_asset_version=expected_asset_version + 1,
-        )
-        await self._record_governance(
-            repository.session,
-            actor,
-            asset.id,
-            published.id,
-            "skill.publish",
-        )
-        if published.workflow_status is not WorkflowStatus.PUBLISHED or published.payload_checksum != prepared.preview.checksum:
+        if candidate.relation is not VersionRelation.CANDIDATE or candidate.payload_checksum != prepared.preview.checksum:
             raise AssetValidationFailed(actor.request_id)
 
     async def _create_asset_in_transaction(
@@ -1711,15 +1665,17 @@ class SkillService:
         if asset.status not in {"active", "suspended"}:
             raise AssetConflict(actor.request_id)
         self._require_archive_name_matches_asset(actor, asset, preview)
+        records = await self._version_history_records(repository, actor, asset.id)
+        head = self._forward_head(asset, records, actor.request_id)
         return await self._create_version(
             repository,
             actor,
             asset,
             preview,
-            supersedes_version_id=asset.current_published_version_id,
+            supersedes_version_id=None if head is None else head.row.id,
         )
 
-    async def _publish_in_transaction(
+    async def _activate_version_in_transaction(
         self,
         repository: SkillRepository,
         actor: _Actor,
@@ -1727,24 +1683,18 @@ class SkillService:
         version_id: uuid.UUID,
         *,
         expected_asset_version: int,
-        acknowledge_stale_base: bool = False,
         expected_payload_checksum: str | None = None,
         expected_binding_revision: int | None = None,
-        allow_incomplete_suspended: bool = False,
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
-        if asset.status not in {"active", "suspended"}:
+        if asset.scope != AssetScope.PROJECT.value or asset.status not in {"active", "suspended"}:
             raise AssetConflict(actor.request_id)
         record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
-        if record.row.workflow_status != WorkflowStatus.DRAFT.value:
+        records = await self._version_history_records(repository, actor, asset.id)
+        relations = self._relations(asset, records, actor.request_id)
+        if relations.get(record.row.id) is not VersionRelation.CANDIDATE:
             raise AssetConflict(actor.request_id)
-        # Lineage guard: publishing a draft whose recorded base is no longer the
-        # live pointer silently shadows the newer live version. Require an
-        # explicit acknowledgement for that; the first published version
-        # (supersedes NULL onto a NULL pointer) never triggers.
-        if record.row.supersedes_version_id != asset.current_published_version_id and not acknowledge_stale_base:
-            raise SkillPublishBaseStale(actor.request_id)
         files = await asyncio.to_thread(
             self._archive_files,
             record,
@@ -1767,25 +1717,21 @@ class SkillService:
             if isinstance(actor, ProjectContext):
                 raise SkillCredentialSelectionStale(actor.request_id)
             raise AssetConflict(actor.request_id)
-        project_binding_actor: ProjectContext | SystemAssetGovernanceContext | None
-        if isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None):
-            project_binding_actor = actor
-        else:
-            project_binding_actor = None
-        if project_binding_actor is not None and (bool(record.row.secret_requirements) or expected_binding_revision is not None):
+        if bool(record.row.secret_requirements) or expected_binding_revision is not None:
             await prepare_skill_credential_bindings_in_transaction(
                 SkillCredentialRepository(repository.session),
-                project_binding_actor,
+                actor,
                 SkillCredentialTarget(asset, record.row),
                 None,
                 expected_revision=expected_binding_revision,
-                require_complete=not (allow_incomplete_suspended and asset.status == "suspended"),
+                require_complete=True,
             )
-        record.row.workflow_status = WorkflowStatus.PUBLISHED.value
-        asset.current_published_version_id = record.row.id
-        asset.version += 1
+        await repository.ensure_project_skill_runtime_name_available(actor, asset)
+        asset.current_version_id = record.row.id
+        asset.status = "active"
+        asset.revision += 1
         await repository.session.flush()
-        return self._version_view(record)
+        return self._version_view(record, relation=VersionRelation.CURRENT)
 
     async def _create_version(
         self,
@@ -1796,12 +1742,18 @@ class SkillService:
         *,
         supersedes_version_id: uuid.UUID | None,
     ) -> SkillVersionView:
-        if isinstance(actor, ProjectContext):
-            version_number = await repository.next_project_version_number(actor, asset)
-        elif actor.project_id is not None:
-            version_number = await repository.next_override_version_number(actor, asset)
-        else:
-            version_number = await repository.next_system_version_number(actor, asset)
+        if asset.scope != AssetScope.PROJECT.value:
+            raise AssetForbidden(actor.request_id)
+        records = await self._version_history_records(repository, actor, asset.id)
+        head = self._forward_head(asset, records, actor.request_id)
+        expected_base = None if head is None else head.row.id
+        if supersedes_version_id != expected_base:
+            raise AssetConflict(actor.request_id)
+        latest_number = max(
+            (item.row.version_number for item in records),
+            default=0,
+        )
+        version_number = latest_number + 1
         version_id = uuid.uuid4()
         if asset.scope == AssetScope.PROJECT.value:
             if asset.project_id is None or self._quota is None:
@@ -1821,7 +1773,6 @@ class SkillService:
             id=version_id,
             skill_id=asset.id,
             version_number=version_number,
-            workflow_status=WorkflowStatus.DRAFT.value,
             description=preview.description,
             frontmatter=dict(preview.frontmatter),
             compatibility=preview.compatibility,
@@ -1849,9 +1800,25 @@ class SkillService:
             record = await repository.create_override_version(actor, asset.id, row, file_rows)
         else:
             record = await repository.create_system_version(actor, asset.id, row, file_rows)
-        asset.version += 1
+        if supersedes_version_id is not None:
+            if not isinstance(actor, (ProjectContext, SystemAssetGovernanceContext)):
+                raise AssetForbidden(actor.request_id)
+            source = await self._get_version(
+                repository,
+                actor,
+                asset.id,
+                supersedes_version_id,
+                for_update=True,
+            )
+            await inherit_compatible_skill_credential_bindings_in_transaction(
+                SkillCredentialRepository(repository.session),
+                actor,
+                SkillCredentialTarget(asset, source.row),
+                SkillCredentialTarget(asset, record.row),
+            )
+        asset.revision += 1
         await repository.session.flush()
-        return self._version_view(record)
+        return self._version_view(record, relation=VersionRelation.CANDIDATE)
 
     async def _change_status(
         self,
@@ -1868,7 +1835,7 @@ class SkillService:
             if asset.status != "active" or status != "suspended":
                 raise AssetConflict(actor.request_id)
             asset.status = status
-            asset.version += 1
+            asset.revision += 1
             await repository.session.flush()
             return self._asset_view(asset)
 
@@ -1963,8 +1930,59 @@ class SkillService:
 
     @staticmethod
     def _require_expected_version(actor: _Actor, asset: SkillRow, expected: int) -> None:
-        if not isinstance(expected, int) or isinstance(expected, bool) or asset.version != expected:
+        if not isinstance(expected, int) or isinstance(expected, bool) or asset.revision != expected:
             raise AssetConflict(actor.request_id)
+
+    @staticmethod
+    async def _version_history_records(
+        repository: SkillRepository,
+        actor: _Actor,
+        asset_id: uuid.UUID,
+    ) -> tuple[SkillVersionRecord, ...]:
+        if isinstance(actor, ProjectContext):
+            return await repository.get_project_version_history(actor, asset_id)
+        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
+            return await repository.get_override_version_history(actor, asset_id)
+        if isinstance(actor, SystemAssetGovernanceContext):
+            return await repository.get_system_version_history(actor, asset_id)
+        raise AssetForbidden(getattr(actor, "request_id", "unknown"))
+
+    @staticmethod
+    def _relations(
+        asset: SkillRow,
+        records: Sequence[SkillVersionRecord],
+        request_id: str,
+    ) -> dict[uuid.UUID, VersionRelation]:
+        try:
+            return classify_version_relations(
+                scope=AssetScope(asset.scope),
+                current_version_id=asset.current_version_id,
+                nodes=tuple(
+                    VersionLineageNode(
+                        item.row.id,
+                        item.row.version_number,
+                        item.row.supersedes_version_id,
+                    )
+                    for item in records
+                ),
+            )
+        except (TypeError, ValueError):
+            raise AssetValidationFailed(request_id) from None
+
+    @classmethod
+    def _forward_head(
+        cls,
+        asset: SkillRow,
+        records: Sequence[SkillVersionRecord],
+        request_id: str,
+    ) -> SkillVersionRecord | None:
+        relations = cls._relations(asset, records, request_id)
+        eligible = tuple(record for record in records if relations[record.row.id] in {VersionRelation.CURRENT, VersionRelation.CANDIDATE})
+        return max(
+            eligible,
+            key=lambda record: record.row.version_number,
+            default=None,
+        )
 
     @staticmethod
     def _require_archive_name_matches_asset(
@@ -2111,8 +2129,8 @@ class SkillService:
             slug=row.slug,
             display_name=row.display_name,
             status=row.status,
-            current_published_version_id=row.current_published_version_id,
-            version=row.version,
+            current_version_id=row.current_version_id,
+            revision=row.revision,
             created_by_user_id=row.created_by_user_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
@@ -2120,7 +2138,11 @@ class SkillService:
         )
 
     @staticmethod
-    def _version_view(record: SkillVersionRecord) -> SkillVersionView:
+    def _version_view(
+        record: SkillVersionRecord,
+        *,
+        relation: VersionRelation,
+    ) -> SkillVersionView:
         row = record.row
         requirements = tuple(SkillSecretRequirementView(name=str(item["name"]), optional=bool(item.get("optional", False))) for item in row.secret_requirements if isinstance(item, dict) and isinstance(item.get("name"), str))
         file_views = tuple(SkillFileView(path=file.path, media_type=file.media_type, size_bytes=file.size_bytes, sha256=file.sha256) for file in record.files)
@@ -2129,7 +2151,7 @@ class SkillService:
             id=row.id,
             skill_id=row.skill_id,
             version_number=row.version_number,
-            workflow_status=WorkflowStatus(row.workflow_status),
+            relation=relation,
             description=row.description,
             frontmatter=dict(row.frontmatter),
             compatibility=row.compatibility,
@@ -2144,7 +2166,7 @@ class SkillService:
             revoked_by_user_id=row.revoked_by_user_id,
             revocation_reason_code=row.revocation_reason_code,
             governance_status="revoked" if row.revoked_at is not None else "active",
-            binding_eligible=(row.workflow_status == WorkflowStatus.PUBLISHED.value and row.revoked_at is None),
+            binding_eligible=(relation is VersionRelation.CURRENT and row.revoked_at is None),
             created_by_user_id=row.created_by_user_id,
             created_at=row.created_at,
         )

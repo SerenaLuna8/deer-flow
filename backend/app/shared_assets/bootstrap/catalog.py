@@ -126,10 +126,8 @@ class BootstrapCatalog(BaseModel):
                 for entry in history
             ):
                 raise ValueError("bootstrap release metadata must remain stable")
-            if first.kind in {"agent", "skill"}:
-                versions = [entry.version for entry in history]
-                if versions != list(range(1, len(history) + 1)):
-                    raise ValueError(f"bootstrap {first.kind.title()} release history must be contiguous")
+            if first.kind in {"agent", "skill"} and (len(history) != 1 or first.version != 1):
+                raise ValueError(f"bootstrap {first.kind.title()} assets require one v1 definition")
             if first.kind == "skill":
                 if self.schema_version < 3 and any(entry.scan_summary is not None for entry in history):
                     raise ValueError("bootstrap schema v3 is required for scan snapshots")

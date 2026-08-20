@@ -14,20 +14,27 @@ from app.gateway.routers.project_assets import (
     BindingItemResponse,
     BindingResponse,
     CredentialItemResponse,
+    CurrentBindingResponse,
+    CurrentSystemBindingRequest,
+    CurrentVersionAssetItemResponse,
     DisableSystemBindingRequest,
     McpVersionResponse,
     MoveSystemBindingRequest,
     ProjectAssetItemResponse,
     ProjectCredentialItemResponse,
-    ProjectSkillItemResponse,
+    ProjectCurrentVersionAssetItemResponse,
+    ProjectCurrentVersionSkillItemResponse,
     ScopedAssetListResponse,
     ScopedCredentialListResponse,
-    ScopedSkillAssetListResponse,
+    ScopedCurrentVersionAssetListResponse,
+    ScopedCurrentVersionSkillAssetListResponse,
     SkillVersionResponse,
     SystemBindingRequest,
     SystemMcpCredentialGrantRequest,
     _asset_item,
+    _binding_response,
     _credential_item,
+    _current_version_asset_item,
     _StrictModel,
     _version_call,
     get_agent_service,
@@ -62,6 +69,11 @@ class AdminAssetListResponse(_StrictModel):
     request_id: str
 
 
+class AdminCurrentVersionAssetListResponse(_StrictModel):
+    items: list[CurrentVersionAssetItemResponse]
+    request_id: str
+
+
 class AdminCredentialListResponse(_StrictModel):
     items: list[CredentialItemResponse]
     request_id: str
@@ -75,7 +87,7 @@ class CredentialRotationStatusResponse(_StrictModel):
 
 
 class SystemSkillVersionRevocationRequest(_StrictModel):
-    expected_asset_version: StrictInt = Field(ge=1)
+    expected_revision: StrictInt = Field(ge=1)
     reason_code: Literal["security", "policy", "integrity"]
 
 
@@ -106,10 +118,21 @@ async def _admin_project_actor(
         raise_asset_domain(exc)
 
 
-async def _list_assets(actor: SystemAssetGovernanceContext, service) -> AdminAssetListResponse:
+async def _list_assets(
+    actor: SystemAssetGovernanceContext,
+    service,
+    *,
+    current_version: bool = False,
+) -> AdminAssetListResponse | AdminCurrentVersionAssetListResponse:
     try:
+        views = await service.list_visible(actor)
+        if current_version:
+            return AdminCurrentVersionAssetListResponse(
+                items=[_current_version_asset_item(view) for view in views],
+                request_id=actor.request_id,
+            )
         return AdminAssetListResponse(
-            items=[_asset_item(view) for view in await service.list_visible(actor)],
+            items=[_asset_item(view) for view in views],
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
@@ -137,7 +160,7 @@ def _override_asset_capabilities(scope: AssetScope, kind: AssetKind) -> list[Cap
     }
     if scope is AssetScope.PROJECT:
         allowed.add(Capability.SHARED_ASSETS_EDIT)
-        if kind is AssetKind.MCP:
+        if kind in {AssetKind.MCP, AssetKind.SKILL}:
             allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
     return sorted(allowed, key=str)
 
@@ -147,7 +170,7 @@ async def _list_override_assets(
     kind: AssetKind,
     service,
     binding_service,
-) -> ScopedAssetListResponse | ScopedSkillAssetListResponse:
+) -> ScopedAssetListResponse | ScopedCurrentVersionAssetListResponse | ScopedCurrentVersionSkillAssetListResponse:
     try:
         project_views = await service.list_visible(actor)
         catalog_actor = SystemAssetReadContext(
@@ -161,7 +184,15 @@ async def _list_override_assets(
         if any(view.scope is not AssetScope.SYSTEM or view.project_id is not None for view in system_views):
             raise AssetValidationFailed(actor.request_id)
         by_asset_id = {binding.asset_id: binding for binding in bindings}
-        item_model = ProjectSkillItemResponse if kind is AssetKind.SKILL else ProjectAssetItemResponse
+        if kind is AssetKind.SKILL:
+            item_model = ProjectCurrentVersionSkillItemResponse
+            response_model = ScopedCurrentVersionSkillAssetListResponse
+        elif kind is AssetKind.AGENT:
+            item_model = ProjectCurrentVersionAssetItemResponse
+            response_model = ScopedCurrentVersionAssetListResponse
+        else:
+            item_model = ProjectAssetItemResponse
+            response_model = ScopedAssetListResponse
         system_items = [
             item_model(
                 **vars(view),
@@ -178,7 +209,6 @@ async def _list_override_assets(
             )
             for view in project_views
         ]
-        response_model = ScopedSkillAssetListResponse if kind is AssetKind.SKILL else ScopedAssetListResponse
         return response_model(
             system_items=system_items,
             project_items=project_items,
@@ -214,20 +244,26 @@ async def _scoped_override_credentials(
         raise_asset_domain(exc)
 
 
-@admin_router.get("/agents", response_model=AdminAssetListResponse)
+@admin_router.get(
+    "/agents",
+    response_model=AdminCurrentVersionAssetListResponse,
+)
 async def list_system_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
 ):
-    return await _list_assets(actor, service)
+    return await _list_assets(actor, service, current_version=True)
 
 
-@admin_router.get("/skills", response_model=AdminAssetListResponse)
+@admin_router.get(
+    "/skills",
+    response_model=AdminCurrentVersionAssetListResponse,
+)
 async def list_system_skills(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
     service: Annotated[SkillService, Depends(get_skill_service)],
 ):
-    return await _list_assets(actor, service)
+    return await _list_assets(actor, service, current_version=True)
 
 
 @admin_router.post(
@@ -247,7 +283,7 @@ async def revoke_system_skill_version(
             actor,
             asset_id,
             version_id,
-            expected_asset_version=body.expected_asset_version,
+            expected_asset_version=body.expected_revision,
             reason_code=body.reason_code,
         ),
         SkillVersionResponse,
@@ -309,7 +345,10 @@ async def get_system_credential_rotation_status(
         raise_asset_domain(exc)
 
 
-@admin_project_router.get("/agents", response_model=ScopedAssetListResponse)
+@admin_project_router.get(
+    "/agents",
+    response_model=ScopedCurrentVersionAssetListResponse,
+)
 async def list_override_agents(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[AgentService, Depends(get_agent_service)],
@@ -318,7 +357,10 @@ async def list_override_agents(
     return await _list_override_assets(actor, AssetKind.AGENT, service, binding_service)
 
 
-@admin_project_router.get("/skills", response_model=ScopedSkillAssetListResponse)
+@admin_project_router.get(
+    "/skills",
+    response_model=ScopedCurrentVersionSkillAssetListResponse,
+)
 async def list_override_skills(
     actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
     service: Annotated[SkillService, Depends(get_skill_service)],
@@ -353,21 +395,31 @@ register_asset_routes(
     admin_project_router,
     _admin_project_actor,
     include_skill_export=False,
-    require_skill_publish_credential_cas=False,
 )
 
 
 def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:
     path = f"/system-{segment}-bindings"
 
-    async def enable(body: SystemBindingRequest, actor=Depends(_admin_project_actor), service=Depends(get_binding_service)):
+    async def enable_exact(body: SystemBindingRequest, actor=Depends(_admin_project_actor), service=Depends(get_binding_service)):
         try:
             view = await service.enable(
                 actor,
                 AssetSelection(kind, body.asset_id, body.version_id),
                 expected_binding_version=body.expected_binding_version,
             )
-            return BindingResponse(**vars(view), request_id=actor.request_id)
+            return _binding_response(view, actor.request_id)
+        except ASSET_ERRORS as exc:
+            raise_asset_domain(exc)
+
+    async def enable_current(body: CurrentSystemBindingRequest, actor=Depends(_admin_project_actor), service=Depends(get_binding_service)):
+        try:
+            view = await service.enable(
+                actor,
+                AssetSelection(kind, body.asset_id),
+                expected_binding_version=body.expected_binding_version,
+            )
+            return _binding_response(view, actor.request_id)
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
@@ -378,7 +430,7 @@ def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:
                 AssetSelection(kind, asset_id, body.version_id),
                 expected_binding_version=body.expected_binding_version,
             )
-            return BindingResponse(**vars(view), request_id=actor.request_id)
+            return _binding_response(view, actor.request_id)
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
@@ -395,14 +447,22 @@ def _register_override_binding_routes(segment: str, kind: AssetKind) -> None:
                 AssetSelection(kind, asset_id),
                 expected_binding_version=body.expected_binding_version,
             )
-            return BindingResponse(**vars(view), request_id=actor.request_id)
+            return _binding_response(view, actor.request_id)
         except ASSET_ERRORS as exc:
             raise_asset_domain(exc)
 
-    admin_project_router.add_api_route(path, enable, methods=["POST"], response_model=BindingResponse, status_code=201)
-    admin_project_router.add_api_route(f"{path}/{{asset_id}}/upgrade", upgrade, methods=["POST"], response_model=BindingResponse)
-    admin_project_router.add_api_route(f"{path}/{{asset_id}}/rollback", rollback, methods=["POST"], response_model=BindingResponse)
-    admin_project_router.add_api_route(f"{path}/{{asset_id}}/disable", disable, methods=["POST"], response_model=BindingResponse)
+    response_model = BindingResponse if kind is AssetKind.MCP else CurrentBindingResponse
+    admin_project_router.add_api_route(
+        path,
+        enable_exact if kind is AssetKind.MCP else enable_current,
+        methods=["POST"],
+        response_model=response_model,
+        status_code=201,
+    )
+    admin_project_router.add_api_route(f"{path}/{{asset_id}}/disable", disable, methods=["POST"], response_model=response_model)
+    if kind is AssetKind.MCP:
+        admin_project_router.add_api_route(f"{path}/{{asset_id}}/upgrade", upgrade, methods=["POST"], response_model=BindingResponse)
+        admin_project_router.add_api_route(f"{path}/{{asset_id}}/rollback", rollback, methods=["POST"], response_model=BindingResponse)
 
 
 for _segment, _kind in (("agent", AssetKind.AGENT), ("skill", AssetKind.SKILL), ("mcp", AssetKind.MCP)):

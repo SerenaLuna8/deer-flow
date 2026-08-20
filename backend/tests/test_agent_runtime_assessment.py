@@ -72,6 +72,7 @@ def _closure(
         checksum="a" * 64,
         catalog_generation=9,
         dependency_version_ids=(),
+        skill_version_ids=(),
         payload=AgentPayload(
             description="Runtime assessment fixture",
             agents_instructions="Run safely.",
@@ -81,7 +82,7 @@ def _closure(
             model_ref=model_ref,
             model_settings=AgentModelSettings(),
             tool_groups=(),
-            skill_version_ids=(),
+            skill_refs=(),
             mcp_version_ids=(),
         ),
     )

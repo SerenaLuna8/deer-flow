@@ -213,7 +213,7 @@ def _wire_operator(
         return BootstrapResult(
             digest="a" * 64,
             counts={"agent": 1, "skill": 2, "mcp": 1},
-            applied_releases=1,
+            applied_changes=1,
         )
 
     monkeypatch.setattr(module, "create_async_engine", create_engine)
@@ -242,8 +242,8 @@ async def test_current_schema_holds_shared_session_lock_while_bootstrapping(
 
     result = await upgrade_module.upgrade_system_assets(_DATABASE_URL)
 
-    assert result.applied_releases == 1
-    assert result.created == result.applied_releases
+    assert result.applied_changes == 1
+    assert result.created == result.applied_changes
     assert len(wiring.bootstrap_calls) == 1
     significant_events = tuple(
         event
@@ -622,7 +622,7 @@ def test_main_success_output_never_contains_dsn_or_credentials(
         return BootstrapResult(
             digest="b" * 64,
             counts={"agent": 1, "skill": 2, "mcp": 1},
-            applied_releases=1,
+            applied_changes=1,
         )
 
     monkeypatch.setenv("DATABASE_URL", _DATABASE_URL)

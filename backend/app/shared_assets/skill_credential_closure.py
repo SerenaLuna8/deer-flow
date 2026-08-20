@@ -28,6 +28,20 @@ class SkillCredentialClosureTarget:
 
 
 @dataclass(frozen=True)
+class AdmittedSkillCredentialReference:
+    """Secret-free Credential authority frozen by Run Admission."""
+
+    skill_id: uuid.UUID
+    skill_version_id: uuid.UUID
+    env_name: str
+    credential_field_name: str
+    binding_id: uuid.UUID
+    binding_revision: int
+    credential_id: uuid.UUID
+    credential_version_id: uuid.UUID
+
+
+@dataclass(frozen=True)
 class LockedSkillCredentialMaterial:
     binding_id: uuid.UUID
     binding_revision: int
@@ -95,6 +109,199 @@ def _env_schema_contains(version: CredentialVersionRow, name: str) -> bool:
     return isinstance(env, list) and all(isinstance(item, str) for item in env) and name in env
 
 
+async def lock_admitted_skill_credential_materials(
+    session: AsyncSession,
+    project_id: uuid.UUID,
+    references: Sequence[AdmittedSkillCredentialReference],
+    *,
+    declared_targets: frozenset[tuple[uuid.UUID, str]],
+    required_targets: frozenset[tuple[uuid.UUID, str]],
+    load_envelopes: bool = False,
+) -> tuple[LockedSkillCredentialMaterial, ...]:
+    """Revalidate only revocable authority for an admitted Skill closure.
+
+    Skill bytes, requirements, Current Version selection, and governance
+    eligibility were frozen by Run Admission. Worker materialization must not
+    reread those mutable catalog decisions. Binding, Credential, Credential
+    Version, and envelope authority remain independently revocable, so this
+    boundary locks and validates the exact persisted references before use.
+    """
+
+    if (
+        not isinstance(project_id, uuid.UUID)
+        or not isinstance(load_envelopes, bool)
+        or not isinstance(declared_targets, frozenset)
+        or not isinstance(required_targets, frozenset)
+        or any(not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], uuid.UUID) or not isinstance(item[1], str) or not item[1] for item in (*declared_targets, *required_targets))
+        or not required_targets <= declared_targets
+    ):
+        raise SkillCredentialClosureInvalid
+    normalized: list[AdmittedSkillCredentialReference] = []
+    seen_binding_ids: set[uuid.UUID] = set()
+    seen_targets: set[tuple[uuid.UUID, str]] = set()
+    for reference in references:
+        if (
+            not isinstance(reference, AdmittedSkillCredentialReference)
+            or not isinstance(reference.skill_id, uuid.UUID)
+            or not isinstance(reference.skill_version_id, uuid.UUID)
+            or not isinstance(reference.binding_id, uuid.UUID)
+            or not isinstance(reference.credential_id, uuid.UUID)
+            or not isinstance(reference.credential_version_id, uuid.UUID)
+            or not isinstance(reference.env_name, str)
+            or not reference.env_name
+            or not isinstance(reference.credential_field_name, str)
+            or not reference.credential_field_name
+            or isinstance(reference.binding_revision, bool)
+            or not isinstance(reference.binding_revision, int)
+            or reference.binding_revision < 1
+        ):
+            raise SkillCredentialClosureInvalid
+        binding_id = uuid.UUID(str(reference.binding_id))
+        target = (
+            uuid.UUID(str(reference.skill_version_id)),
+            reference.env_name,
+        )
+        if binding_id in seen_binding_ids or target in seen_targets:
+            raise SkillCredentialClosureInvalid
+        seen_binding_ids.add(binding_id)
+        seen_targets.add(target)
+        normalized.append(reference)
+    if not required_targets <= seen_targets or not seen_targets <= declared_targets:
+        raise SkillCredentialClosureInvalid
+    normalized.sort(
+        key=lambda item: (
+            item.skill_version_id.int,
+            item.env_name,
+            item.binding_id.int,
+            item.credential_version_id.int,
+        )
+    )
+
+    materials: list[LockedSkillCredentialMaterial] = []
+    for reference in normalized:
+        binding = (
+            await session.execute(
+                select(ProjectSkillCredentialBindingRow)
+                .where(
+                    ProjectSkillCredentialBindingRow.id == reference.binding_id,
+                    ProjectSkillCredentialBindingRow.project_id == project_id,
+                    ProjectSkillCredentialBindingRow.skill_id == reference.skill_id,
+                    ProjectSkillCredentialBindingRow.skill_version_id == reference.skill_version_id,
+                    ProjectSkillCredentialBindingRow.secret_name == reference.env_name,
+                    ProjectSkillCredentialBindingRow.source_env_field_name == reference.credential_field_name,
+                    ProjectSkillCredentialBindingRow.config_revision == reference.binding_revision,
+                    ProjectSkillCredentialBindingRow.credential_id == reference.credential_id,
+                    ProjectSkillCredentialBindingRow.credential_version_id == reference.credential_version_id,
+                    ProjectSkillCredentialBindingRow.status == "active",
+                )
+                .with_for_update(read=True, of=ProjectSkillCredentialBindingRow)
+            )
+        ).scalar_one_or_none()
+        if binding is None:
+            raise SkillCredentialClosureInvalid
+        if binding.admission_only and binding.runtime_authority_binding_id is not None:
+            runtime_authority = (
+                await session.execute(
+                    select(ProjectSkillCredentialBindingRow)
+                    .where(
+                        ProjectSkillCredentialBindingRow.id == binding.runtime_authority_binding_id,
+                        ProjectSkillCredentialBindingRow.project_id == binding.project_id,
+                        ProjectSkillCredentialBindingRow.skill_id == binding.skill_id,
+                        ProjectSkillCredentialBindingRow.secret_name == binding.secret_name,
+                        ProjectSkillCredentialBindingRow.admission_only.is_(False),
+                        ProjectSkillCredentialBindingRow.status == "active",
+                    )
+                    .with_for_update(
+                        read=True,
+                        of=ProjectSkillCredentialBindingRow,
+                    )
+                )
+            ).scalar_one_or_none()
+            if runtime_authority is None:
+                raise SkillCredentialClosureInvalid
+
+        credential = (
+            await session.execute(
+                select(CredentialRow)
+                .where(
+                    CredentialRow.id == reference.credential_id,
+                    CredentialRow.scope == "project",
+                    CredentialRow.project_id == project_id,
+                    CredentialRow.status == "active",
+                    CredentialRow.is_delete.is_(False),
+                    CredentialRow.current_version_id == reference.credential_version_id,
+                )
+                .with_for_update(read=True, of=CredentialRow)
+            )
+        ).scalar_one_or_none()
+        credential_version = (
+            await session.execute(
+                select(CredentialVersionRow)
+                .where(
+                    CredentialVersionRow.id == reference.credential_version_id,
+                    CredentialVersionRow.credential_id == reference.credential_id,
+                    CredentialVersionRow.status == "active",
+                )
+                .with_for_update(read=True, of=CredentialVersionRow)
+            )
+        ).scalar_one_or_none()
+        if (
+            credential is None
+            or credential_version is None
+            or not _env_schema_contains(
+                credential_version,
+                reference.credential_field_name,
+            )
+        ):
+            raise SkillCredentialClosureInvalid
+
+        envelope: CredentialEnvelopeRow | None = None
+        if load_envelopes:
+            envelope = (
+                await session.execute(
+                    select(CredentialEnvelopeRow)
+                    .where(
+                        CredentialEnvelopeRow.credential_version_id == reference.credential_version_id,
+                        CredentialEnvelopeRow.is_active.is_(True),
+                    )
+                    .with_for_update(read=True, of=CredentialEnvelopeRow)
+                )
+            ).scalar_one_or_none()
+            if envelope is None:
+                raise SkillCredentialClosureInvalid
+            envelope_id = uuid.UUID(str(envelope.id))
+        else:
+            envelope_value = (
+                await session.execute(
+                    select(CredentialEnvelopeRow.id)
+                    .where(
+                        CredentialEnvelopeRow.credential_version_id == reference.credential_version_id,
+                        CredentialEnvelopeRow.is_active.is_(True),
+                    )
+                    .with_for_update(read=True, of=CredentialEnvelopeRow)
+                )
+            ).scalar_one_or_none()
+            if envelope_value is None:
+                raise SkillCredentialClosureInvalid
+            envelope_id = uuid.UUID(str(envelope_value))
+        materials.append(
+            LockedSkillCredentialMaterial(
+                binding_id=reference.binding_id,
+                binding_revision=reference.binding_revision,
+                skill_id=reference.skill_id,
+                skill_version_id=reference.skill_version_id,
+                env_name=reference.env_name,
+                credential_id=reference.credential_id,
+                credential_version_id=reference.credential_version_id,
+                credential_field_group="env",
+                credential_field_name=reference.credential_field_name,
+                envelope_id=envelope_id,
+                envelope=envelope,
+            )
+        )
+    return tuple(materials)
+
+
 async def lock_skill_credential_closures(
     session: AsyncSession,
     project_id: uuid.UUID,
@@ -128,7 +335,6 @@ async def lock_skill_credential_closures(
                 .where(
                     SkillVersionRow.id == version_id,
                     SkillVersionRow.skill_id == target.skill_id,
-                    SkillVersionRow.workflow_status == "published",
                     SkillVersionRow.revoked_at.is_(None),
                 )
                 .with_for_update(read=True, of=SkillVersionRow)
@@ -170,6 +376,7 @@ async def lock_skill_credential_closures(
                         ProjectSkillCredentialBindingRow.skill_id == target.skill_id,
                         ProjectSkillCredentialBindingRow.skill_version_id == version_id,
                         ProjectSkillCredentialBindingRow.status == "active",
+                        ProjectSkillCredentialBindingRow.admission_only.is_(False),
                     )
                     .order_by(
                         ProjectSkillCredentialBindingRow.secret_name,

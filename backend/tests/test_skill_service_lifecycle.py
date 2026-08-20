@@ -18,11 +18,9 @@ from app.shared_assets.errors import (
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
     SkillCredentialBindingsIncomplete,
-    SkillPublishBaseStale,
     SkillRuntimeNameConflict,
 )
-from app.shared_assets.models import SkillArchiveFile, WorkflowStatus
-from app.shared_assets.skill_credential_closure import SkillCredentialClosureInvalid
+from app.shared_assets.models import SkillArchiveFile, VersionRelation
 from app.shared_assets.skill_repository import SkillVersionRecord
 from deerflow.persistence.shared_assets import SkillRow, SkillVersionFileRow, SkillVersionRow
 
@@ -62,8 +60,8 @@ def _seed_asset(store: _Store, actor: ProjectContext, *, slug: str) -> SkillRow:
         slug=slug,
         display_name=slug.replace("-", " ").title(),
         status="suspended",
-        current_published_version_id=None,
-        version=1,
+        current_version_id=None,
+        revision=1,
         created_by_user_id=str(actor.user_id),
         created_at=now,
         updated_at=now,
@@ -96,7 +94,6 @@ class _StoreSnapshot:
     assets: dict[uuid.UUID, SkillRow]
     asset_state: dict[uuid.UUID, tuple[str, uuid.UUID | None, int]]
     versions: dict[uuid.UUID, SkillVersionRecord]
-    version_status: dict[uuid.UUID, str]
     reservations: tuple[_Reservation, ...]
     governance: tuple[dict[str, object], ...]
 
@@ -107,13 +104,12 @@ def _snapshot(store: _Store) -> _StoreSnapshot:
         asset_state={
             asset_id: (
                 asset.status,
-                asset.current_published_version_id,
-                asset.version,
+                asset.current_version_id,
+                asset.revision,
             )
             for asset_id, asset in store.assets.items()
         },
         versions=dict(store.versions),
-        version_status={version_id: record.row.workflow_status for version_id, record in store.versions.items()},
         reservations=tuple(store.reservations),
         governance=tuple(store.governance),
     )
@@ -122,17 +118,14 @@ def _snapshot(store: _Store) -> _StoreSnapshot:
 def _restore(store: _Store, snapshot: _StoreSnapshot) -> None:
     store.assets.clear()
     store.assets.update(snapshot.assets)
-    for asset_id, (status, current_version_id, version) in snapshot.asset_state.items():
+    for asset_id, (status, current_version_id, revision) in snapshot.asset_state.items():
         asset = store.assets[asset_id]
         asset.status = status
-        asset.current_published_version_id = current_version_id
-        asset.version = version
+        asset.current_version_id = current_version_id
+        asset.revision = revision
 
     store.versions.clear()
     store.versions.update(snapshot.versions)
-    for version_id, workflow_status in snapshot.version_status.items():
-        store.versions[version_id].row.workflow_status = workflow_status
-
     store.reservations[:] = snapshot.reservations
     store.governance[:] = snapshot.governance
 
@@ -192,8 +185,8 @@ class _Repository:
             slug=command.slug,
             display_name=command.display_name,
             status="suspended",
-            current_published_version_id=None,
-            version=1,
+            current_version_id=None,
+            revision=1,
             created_by_user_id=str(context.user_id),
             created_at=now,
             updated_at=now,
@@ -282,6 +275,22 @@ class _Repository:
         if asset is None or asset.project_id != context.project_id:
             raise AssetNotFound(context.request_id)
         return record
+
+    async def get_project_version_history(
+        self,
+        context: ProjectContext,
+        asset_id: uuid.UUID,
+    ) -> tuple[SkillVersionRecord, ...]:
+        asset = self.store.assets.get(asset_id)
+        if asset is None or asset.project_id != context.project_id:
+            raise AssetNotFound(context.request_id)
+        return tuple(
+            sorted(
+                (record for record in self.store.versions.values() if record.row.skill_id == asset_id),
+                key=lambda record: record.row.version_number,
+                reverse=True,
+            )
+        )
 
     get_override_asset = get_project_asset
     next_override_version_number = next_project_version_number
@@ -386,16 +395,18 @@ def _persisted_payload(record: SkillVersionRecord) -> tuple[object, ...]:
     )
 
 
-async def _create_draft(
+async def _create_candidate(
     harness: _Harness,
     actor: ProjectContext,
     slug: str,
+    *,
+    files: tuple[SkillArchiveFile, ...] | None = None,
 ) -> tuple[SkillRow, SkillVersionRecord]:
     asset = _seed_asset(harness.store, actor, slug=slug)
     version = await harness.service.create_version_from_archive(
         actor,
         asset.id,
-        _files(slug),
+        _files(slug) if files is None else files,
         expected_asset_version=1,
     )
     return asset, harness.store.versions[version.id]
@@ -419,10 +430,11 @@ async def test_initial_archive_create_allows_required_secret_without_binding(
 
     assert result.created_count == 1
     created = next(iter(harness.store.assets.values()))
-    version = harness.store.versions[created.current_published_version_id]
+    version = next(iter(harness.store.versions.values()))
     assert created.status == "suspended"
-    assert created.version == 3
-    assert version.row.workflow_status == WorkflowStatus.PUBLISHED.value
+    assert created.current_version_id is None
+    assert created.revision == 2
+    assert version.row.version_number == 1
     assert version.row.secret_requirements == [
         {"name": "TARGET_API_KEY", "optional": False},
     ]
@@ -450,8 +462,8 @@ async def test_builder_preview_create_allows_required_secret_without_binding(
 
     created = harness.store.assets[result.asset.id]
     assert created.status == "suspended"
-    assert created.current_published_version_id == result.version.id
-    assert result.version.workflow_status is WorkflowStatus.PUBLISHED
+    assert created.current_version_id is None
+    assert result.version.relation is VersionRelation.CANDIDATE
     assert result.version.secret_requirements == (
         skill_service_module.SkillSecretRequirementView(
             name="TARGET_API_KEY",
@@ -461,58 +473,67 @@ async def test_builder_preview_create_allows_required_secret_without_binding(
 
 
 @pytest.mark.asyncio
-async def test_archive_replace_does_not_reuse_incomplete_create_exception(
+async def test_archive_replace_saves_incomplete_candidate_without_moving_current(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    original = _files_with_required_secret("archive-replace-required")
+    original = _files("archive-replace-required")
     await harness.service.import_project_archives_atomic(
         actor,
         (skill_service_module.ProjectSkillArchiveImport(files=original),),
         execute=True,
     )
     created = next(iter(harness.store.assets.values()))
-    original_version_id = created.current_published_version_id
+    original = next(iter(harness.store.versions.values()))
+    await harness.service.activate_version(
+        actor,
+        created.id,
+        original.row.id,
+        expected_asset_version=2,
+        expected_payload_checksum=original.row.payload_checksum,
+        expected_binding_revision=0,
+    )
+    original_version_id = created.current_version_id
 
-    with pytest.raises(SkillCredentialBindingsIncomplete):
-        await harness.service.import_project_archives_atomic(
-            actor,
-            (
-                skill_service_module.ProjectSkillArchiveImport(
-                    files=_files_with_required_secret(
-                        "archive-replace-required",
-                        body="Use the mapped credential in revision two.\n",
-                    ),
+    result = await harness.service.import_project_archives_atomic(
+        actor,
+        (
+            skill_service_module.ProjectSkillArchiveImport(
+                files=_files_with_required_secret(
+                    "archive-replace-required",
+                    body="Use the mapped credential in revision two.\n",
                 ),
             ),
-            execute=True,
-            replace=True,
-        )
+        ),
+        execute=True,
+        replace=True,
+    )
 
-    assert created.current_published_version_id == original_version_id
-    assert created.version == 3
-    assert tuple(harness.store.versions) == (original_version_id,)
+    assert result.replaced_count == 1
+    assert created.current_version_id == original_version_id
+    assert created.revision == 4
+    assert len(harness.store.versions) == 2
 
 
 @pytest.mark.asyncio
-async def test_publish_preserves_version_payload_history_and_moves_current_pointer(
+async def test_activation_preserves_version_payload_history_and_moves_current_pointer(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset, first_draft = await _create_draft(
+    asset, first_candidate = await _create_candidate(
         harness,
         actor,
         "history-skill",
     )
-    first = await harness.service.publish(
+    first = await harness.service.activate_version(
         actor,
         asset.id,
-        first_draft.row.id,
+        first_candidate.row.id,
         expected_asset_version=2,
-        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_payload_checksum=first_candidate.row.payload_checksum,
         expected_binding_revision=0,
     )
-    assert first.workflow_status is WorkflowStatus.PUBLISHED
+    assert first.relation is VersionRelation.CURRENT
 
     second = await harness.service.create_version_from_archive(
         actor,
@@ -525,7 +546,7 @@ async def test_publish_preserves_version_payload_history_and_moves_current_point
     first_payload_before = _persisted_payload(first_record)
     second_payload_before = _persisted_payload(second_record)
 
-    published = await harness.service.publish(
+    activated = await harness.service.activate_version(
         actor,
         asset.id,
         second.id,
@@ -535,54 +556,45 @@ async def test_publish_preserves_version_payload_history_and_moves_current_point
     )
 
     persisted_asset = harness.store.assets[asset.id]
-    assert published.id == second.id
-    assert published.workflow_status is WorkflowStatus.PUBLISHED
-    assert persisted_asset.current_published_version_id == second.id
-    assert persisted_asset.version == 5
-    assert first_record.row.workflow_status == WorkflowStatus.PUBLISHED.value
+    assert activated.id == second.id
+    assert activated.relation is VersionRelation.CURRENT
+    assert persisted_asset.current_version_id == second.id
+    assert persisted_asset.revision == 5
     assert _persisted_payload(first_record) == first_payload_before
     assert _persisted_payload(second_record) == second_payload_before
 
 
 @pytest.mark.asyncio
-async def test_suspended_skill_can_publish_activate_and_suspend(
+async def test_suspended_skill_can_activate_version_and_suspend_asset(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    created, draft = await _create_draft(
+    created, candidate = await _create_candidate(
         harness,
         actor,
         "toggle-skill",
     )
 
-    published = await harness.service.publish(
+    current = await harness.service.activate_version(
         actor,
         created.id,
-        draft.row.id,
+        candidate.row.id,
         expected_asset_version=2,
-        expected_payload_checksum=draft.row.payload_checksum,
+        expected_payload_checksum=candidate.row.payload_checksum,
         expected_binding_revision=0,
-    )
-    activated = await harness.service.activate(
-        actor,
-        created.id,
-        expected_asset_version=3,
     )
     suspended = await harness.service.suspend(
         actor,
         created.id,
-        expected_asset_version=4,
+        expected_asset_version=3,
     )
 
-    assert published.workflow_status is WorkflowStatus.PUBLISHED
-    assert activated.status == "active"
-    assert activated.version == 4
+    assert current.relation is VersionRelation.CURRENT
     assert suspended.status == "suspended"
-    assert suspended.version == 5
+    assert suspended.revision == 4
     assert [event["action"] for event in harness.store.governance] == [
         "skill.version.create",
-        "skill.publish",
-        "skill.activate",
+        "skill.version.activate",
         "skill.suspend",
     ]
 
@@ -593,39 +605,34 @@ async def test_activation_reports_incomplete_required_credential_bindings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     actor = _admin_context()
-    created, draft = await _create_draft(
+    created, candidate = await _create_candidate(
         harness,
         actor,
         "credential-gated-skill",
+        files=_files_with_required_secret("credential-gated-skill"),
     )
-    await harness.service.publish(
-        actor,
-        created.id,
-        draft.row.id,
-        expected_asset_version=2,
-        expected_payload_checksum=draft.row.payload_checksum,
-        expected_binding_revision=0,
-    )
-    draft.row.secret_requirements = [{"name": "API_KEY", "optional": False}]
 
     async def reject_incomplete(*_args: object, **_kwargs: object) -> None:
-        raise SkillCredentialClosureInvalid("incomplete")
+        raise SkillCredentialBindingsIncomplete(actor.request_id)
 
     monkeypatch.setattr(
         skill_service_module,
-        "lock_skill_credential_closure",
+        "prepare_skill_credential_bindings_in_transaction",
         reject_incomplete,
     )
 
     with pytest.raises(SkillCredentialBindingsIncomplete):
-        await harness.service.activate(
+        await harness.service.activate_version(
             actor,
             created.id,
-            expected_asset_version=3,
+            candidate.row.id,
+            expected_asset_version=2,
+            expected_payload_checksum=candidate.row.payload_checksum,
+            expected_binding_revision=0,
         )
 
     assert harness.store.assets[created.id].status == "suspended"
-    assert harness.store.assets[created.id].version == 3
+    assert harness.store.assets[created.id].revision == 2
 
 
 @pytest.mark.asyncio
@@ -633,39 +640,34 @@ async def test_project_skill_activation_rejects_enabled_system_name_conflict(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    created, draft = await _create_draft(
+    created, candidate = await _create_candidate(
         harness,
         actor,
         "conflicting-skill",
     )
-    await harness.service.publish(
-        actor,
-        created.id,
-        draft.row.id,
-        expected_asset_version=2,
-        expected_payload_checksum=draft.row.payload_checksum,
-        expected_binding_revision=0,
-    )
     harness.store.system_skill_name_conflict = True
 
     with pytest.raises(SkillRuntimeNameConflict):
-        await harness.service.activate(
+        await harness.service.activate_version(
             actor,
             created.id,
-            expected_asset_version=3,
+            candidate.row.id,
+            expected_asset_version=2,
+            expected_payload_checksum=candidate.row.payload_checksum,
+            expected_binding_revision=0,
         )
 
     assert harness.store.assets[created.id].status == "suspended"
-    assert harness.store.assets[created.id].version == 3
+    assert harness.store.assets[created.id].revision == 2
     assert harness.session.rollback_count == 1
 
 
 @pytest.mark.asyncio
-async def test_stale_publish_expected_version_has_no_side_effects(
+async def test_stale_activation_expected_revision_has_no_side_effects(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    created, draft = await _create_draft(
+    created, candidate = await _create_candidate(
         harness,
         actor,
         "stale-skill",
@@ -677,20 +679,19 @@ async def test_stale_publish_expected_version_has_no_side_effects(
     rollbacks_before = harness.session.rollback_count
 
     with pytest.raises(AssetConflict) as exc_info:
-        await harness.service.publish(
+        await harness.service.activate_version(
             actor,
             created.id,
-            draft.row.id,
+            candidate.row.id,
             expected_asset_version=1,
-            expected_payload_checksum=draft.row.payload_checksum,
+            expected_payload_checksum=candidate.row.payload_checksum,
             expected_binding_revision=0,
         )
 
     assert exc_info.value.request_id == actor.request_id
     persisted_asset = harness.store.assets[created.id]
-    assert persisted_asset.version == 2
-    assert persisted_asset.current_published_version_id is None
-    assert draft.row.workflow_status == WorkflowStatus.DRAFT.value
+    assert persisted_asset.revision == 2
+    assert persisted_asset.current_version_id is None
     assert tuple(harness.store.reservations) == reservations_before
     assert tuple(harness.store.reservation_attempts) == reservation_attempts_before
     assert tuple(harness.store.governance) == governance_before
@@ -715,7 +716,7 @@ async def test_quota_failure_stops_version_persistence_without_side_effects(
         )
 
     assert exc_info.value.request_id == actor.request_id
-    assert asset.version == 1
+    assert asset.revision == 1
     assert harness.store.versions == {}
     assert harness.store.persist_attempts == 0
     assert len(harness.store.reservation_attempts) == 1
@@ -745,7 +746,7 @@ async def test_version_persistence_failure_rolls_back_quota_and_governance(
     assert harness.store.persist_attempts == 1
     assert len(harness.store.reservation_attempts) == 1
     assert harness.store.assets == {asset.id: asset}
-    assert asset.version == 1
+    assert asset.revision == 1
     assert harness.store.versions == {}
     assert harness.store.reservations == []
     assert harness.store.governance == []
@@ -754,95 +755,86 @@ async def test_version_persistence_failure_rolls_back_quota_and_governance(
 
 
 @pytest.mark.asyncio
-async def test_publish_lineage_guard_requires_ack_when_live_pointer_moved(
+async def test_only_forward_head_can_be_activated_and_history_cannot_return(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset, first_draft = await _create_draft(
+    asset, first_candidate = await _create_candidate(
         harness,
         actor,
         "lineage-skill",
     )
-    first = await harness.service.publish(
+    first = await harness.service.activate_version(
         actor,
         asset.id,
-        first_draft.row.id,
+        first_candidate.row.id,
         expected_asset_version=2,
-        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_payload_checksum=first_candidate.row.payload_checksum,
         expected_binding_revision=0,
     )
-    stale = await harness.service.create_version_from_archive(
+    second = await harness.service.create_version_from_archive(
         actor,
         asset.id,
-        _files("lineage-skill", body="Stale fork from the first published version.\n"),
+        _files("lineage-skill", body="Forward revision two.\n"),
         expected_asset_version=3,
     )
-    live = await harness.service.create_version_from_archive(
+    third = await harness.service.create_version_from_archive(
         actor,
         asset.id,
-        _files("lineage-skill", body="Newer live successor of the first version.\n"),
+        _files("lineage-skill", body="Forward revision three.\n"),
         expected_asset_version=4,
     )
-    published_live = await harness.service.publish(
+    current = await harness.service.activate_version(
         actor,
         asset.id,
-        live.id,
+        third.id,
         expected_asset_version=5,
-        expected_payload_checksum=harness.store.versions[live.id].row.payload_checksum,
+        expected_payload_checksum=harness.store.versions[third.id].row.payload_checksum,
         expected_binding_revision=0,
     )
 
-    with pytest.raises(SkillPublishBaseStale) as exc_info:
-        await harness.service.publish(
+    with pytest.raises(AssetConflict) as exc_info:
+        await harness.service.activate_version(
             actor,
             asset.id,
-            stale.id,
+            second.id,
             expected_asset_version=6,
-            expected_payload_checksum=harness.store.versions[stale.id].row.payload_checksum,
+            expected_payload_checksum=harness.store.versions[second.id].row.payload_checksum,
             expected_binding_revision=0,
         )
 
     persisted = harness.store.assets[asset.id]
     assert exc_info.value.request_id == actor.request_id
-    assert persisted.current_published_version_id == published_live.id
-    assert harness.store.versions[stale.id].row.workflow_status == WorkflowStatus.DRAFT.value
-
-    published_stale = await harness.service.publish(
-        actor,
-        asset.id,
-        stale.id,
-        expected_asset_version=6,
-        acknowledge_stale_base=True,
-        expected_payload_checksum=harness.store.versions[stale.id].row.payload_checksum,
-        expected_binding_revision=0,
-    )
-    assert published_stale.id == stale.id
-    assert published_stale.workflow_status is WorkflowStatus.PUBLISHED
-    assert harness.store.assets[asset.id].current_published_version_id == stale.id
-    assert first.workflow_status is WorkflowStatus.PUBLISHED
+    assert current.id == third.id
+    assert persisted.current_version_id == third.id
+    history = await harness.service.get_version_history(actor, asset.id)
+    relations = {item.id: item.relation for item in history}
+    assert relations[first.id] is VersionRelation.HISTORICAL
+    assert relations[second.id] is VersionRelation.HISTORICAL
+    assert relations[third.id] is VersionRelation.CURRENT
 
 
 @pytest.mark.asyncio
-async def test_create_project_version_from_preview_pins_supersedes_without_publishing(
+async def test_create_project_version_from_preview_pins_forward_head(
     harness: _Harness,
 ) -> None:
     actor = _admin_context()
-    asset, first_draft = await _create_draft(
+    asset, first_candidate = await _create_candidate(
         harness,
         actor,
         "revise-skill",
     )
-    published = await harness.service.publish(
+    current = await harness.service.activate_version(
         actor,
         asset.id,
-        first_draft.row.id,
+        first_candidate.row.id,
         expected_asset_version=2,
-        expected_payload_checksum=first_draft.row.payload_checksum,
+        expected_payload_checksum=first_candidate.row.payload_checksum,
         expected_binding_revision=0,
     )
     preview = await harness.service.preview_archive(
         actor,
-        _files("revise-skill", body="Revision draft from the published base.\n"),
+        _files("revise-skill", body="Revision Candidate from Current.\n"),
     )
 
     created = await harness.service.create_project_version_from_preview_in_session(
@@ -850,13 +842,13 @@ async def test_create_project_version_from_preview_pins_supersedes_without_publi
         actor,
         asset.id,
         preview,
-        supersedes_version_id=published.id,
+        supersedes_version_id=current.id,
     )
 
     persisted = harness.store.assets[asset.id]
     record = harness.store.versions[created.id]
-    assert created.workflow_status is WorkflowStatus.DRAFT
-    assert created.supersedes_version_id == published.id
-    assert record.row.supersedes_version_id == published.id
-    assert persisted.current_published_version_id == published.id
-    assert persisted.status == "suspended"
+    assert created.relation is VersionRelation.CANDIDATE
+    assert created.supersedes_version_id == current.id
+    assert record.row.supersedes_version_id == current.id
+    assert persisted.current_version_id == current.id
+    assert persisted.status == "active"

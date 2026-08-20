@@ -15,7 +15,7 @@ import app.shared_assets as shared_assets
 from app.gateway.routers import admin_assets, project_assets, project_skill_builder
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
-from app.shared_assets.models import AssetScope, WorkflowStatus
+from app.shared_assets.models import AssetScope, VersionRelation
 from app.shared_assets.skill_repository import SkillRepository
 from app.shared_assets.skill_service import (
     ProjectSkillArchiveCreateResult,
@@ -59,8 +59,8 @@ def _archive_create_result() -> ProjectSkillArchiveCreateResult:
             slug="route-import-skill",
             display_name="route-import-skill",
             status="suspended",
-            current_published_version_id=_VERSION_ID,
-            version=3,
+            current_version_id=None,
+            revision=2,
             created_by_user_id=str(_USER_ID),
             created_at=now,
             updated_at=now,
@@ -70,7 +70,7 @@ def _archive_create_result() -> ProjectSkillArchiveCreateResult:
             id=_VERSION_ID,
             skill_id=_SKILL_ID,
             version_number=1,
-            workflow_status=WorkflowStatus.PUBLISHED,
+            relation=VersionRelation.CANDIDATE,
             description="Route import test",
             frontmatter={
                 "name": "route-import-skill",
@@ -180,8 +180,8 @@ async def test_project_skill_archive_import_forwards_multipart_upload_and_return
             "slug": "route-import-skill",
             "display_name": "route-import-skill",
             "status": "suspended",
-            "current_published_version_id": str(_VERSION_ID),
-            "version": 3,
+            "current_version_id": None,
+            "revision": 2,
             "created_by_user_id": str(_USER_ID),
             "created_at": "2026-08-18T00:00:00Z",
             "updated_at": "2026-08-18T00:00:00Z",
@@ -190,7 +190,7 @@ async def test_project_skill_archive_import_forwards_multipart_upload_and_return
             "id": str(_VERSION_ID),
             "skill_id": str(_SKILL_ID),
             "version_number": 1,
-            "workflow_status": "published",
+            "relation": "candidate",
             "description": "Route import test",
             "frontmatter": {
                 "name": "route-import-skill",

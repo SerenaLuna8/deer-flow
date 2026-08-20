@@ -59,17 +59,19 @@ REQUIRED_FUNCTIONS = frozenset(
         "cleanup_run_event_invariant",
         "drop_run_event_partitions_before",
         "enforce_run_model_snapshot_credential_closure",
+        "enforce_live_skill_credential_binding_target",
         "enforce_run_event_identity_immutable",
         "enforce_scheduled_task_agent_project",
         "enforce_shared_asset_version_state_transition",
         "enforce_stream_terminal_invariant",
         "ensure_run_events_month_partition",
-        "ensure_system_binding_published_version",
+        "ensure_system_binding_eligible_version",
         "enforce_system_skill_version_revocation",
-        "prevent_bound_published_version_downgrade",
+        "prevent_bound_mcp_published_version_downgrade",
         "prevent_memory_document_sections_mutation",
-        "prevent_published_version_child_mutation",
+        "prevent_asset_version_child_mutation",
         "prevent_run_memory_snapshot_sections_mutation",
+        "protect_live_skill_credential_binding_target",
         "prevent_shared_asset_version_payload_update",
         "reject_m7_append_only_mutation",
         "reject_direct_run_model_snapshot_mutation",
@@ -103,40 +105,40 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=88,
-        digest="298fda9873260893925b11aa7782b91b5d3fef63b4c74b91933ca27437605a17",
+        count=89,
+        digest="a4fd0b13c4575c86f7c31a7bf9d7b93b2d393402eca4bcc93b17ca3d6435ee3e",
     ),
     "columns": CatalogInvariant(
-        count=1105,
-        digest="8b74050ccd694069b392488c5f078950fd8a89bd92855b91d3446f617cb142f3",
+        count=1106,
+        digest="d8f3978c704ce43abdad4cb3bdbe6619b0fd8cafbcf1896c036b02550db75868",
     ),
     "table_comments": CatalogInvariant(
-        count=89,
-        digest="ea2aaa5c8fd166c1082707e52f50029869b0cde3a69c5e0a649f37267e9406d7",
+        count=90,
+        digest="edf9dbb3da65d53941fdfe712027714e085529a9fc423d1a423524139fff9892",
     ),
     "column_comments": CatalogInvariant(
-        count=1106,
-        digest="43f39997a1aaeeb6b50ef4ed5a664fddbeabbf793865f9ff7b883d5687d88720",
+        count=1107,
+        digest="f7eadea1b2217f47a34f5d5e56127767e05ce88d94caf5a8da0832c6a640d9bd",
     ),
     "sequences": CatalogInvariant(
         count=2,
         digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
     ),
     "constraints": CatalogInvariant(
-        count=830,
-        digest="27fa356bd862b8e22c82f84640fcdca1e21fd942bde2d5b41d8fde39d0b19e3d",
+        count=831,
+        digest="02dd6b8b52bfa60d7e0c27e88cef5f47fed7c2f169935d27dff25e5e512f3117",
     ),
     "indexes": CatalogInvariant(
-        count=311,
-        digest="2b37b18e5d3bcac2d6434c65fded6bde803378a6b4a658a99d429599f9c4a306",
+        count=312,
+        digest="e4c306bababc1691a3fc4b98990b9e144a1bfb595eb07319b1201ac8fc6bd830",
     ),
     "functions": CatalogInvariant(
-        count=21,
-        digest="8ceff26ea07e6587f4c96e8619e2f25995d5f624fefe884f74fc040c847277d5",
+        count=23,
+        digest="f51bd157876ea08ba0f53a634ec1b2e9e5fa7b197bd601ee4d95c466421590f6",
     ),
     "triggers": CatalogInvariant(
-        count=88,
-        digest="25f62ad0015251d0182bf1ca44476294a28ce8c17230219a9bd0e060129e1e99",
+        count=85,
+        digest="33b8d78c50c9529bc162f825761e050fa20233694ca214e5182c391e31380abf",
     ),
 }
 
@@ -297,6 +299,13 @@ def _rows_digest(rows: tuple[tuple[object, ...], ...]) -> str:
 def _normalize_catalog_value(value: object) -> object:
     if not isinstance(value, str):
         return value
+
+    # PostgreSQL preserves PL/pgSQL source indentation. Migration scripts and
+    # the consolidated snapshot intentionally share the same token stream but
+    # need not share Python/SQL embedding indentation, so compare function
+    # definitions after presentation-only whitespace normalization.
+    if value.lstrip().startswith("CREATE OR REPLACE FUNCTION"):
+        value = " ".join(value.split())
 
     # PostgreSQL may render text-array ANY expressions with a cast on each
     # element even though the baseline DDL uses one cast on the array. Normalize

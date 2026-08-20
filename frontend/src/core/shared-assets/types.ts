@@ -16,6 +16,11 @@ export const ASSET_WORKFLOW_STATUSES = [
   "published",
   "rejected",
 ] as const;
+export const VERSION_RELATIONS = [
+  "current",
+  "candidate",
+  "historical",
+] as const;
 export const SKILL_SCAN_DECISIONS = ["allow", "warn", "block"] as const;
 export const SKILL_FILE_PREVIEW_STATUSES = [
   "ready",
@@ -66,6 +71,7 @@ export const assetListKindSchema = z.enum(ASSET_LIST_KINDS);
 export const assetScopeSchema = z.enum(["system", "project"]);
 export const assetStatusSchema = z.enum(ASSET_STATUSES);
 export const assetWorkflowStatusSchema = z.enum(ASSET_WORKFLOW_STATUSES);
+export const versionRelationSchema = z.enum(VERSION_RELATIONS);
 export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
 export const skillFilePreviewStatusSchema = z.enum(SKILL_FILE_PREVIEW_STATUSES);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
@@ -99,6 +105,34 @@ export const assetSummarySchema = z
     updated_at: z.string().datetime({ offset: true }),
   })
   .strict();
+
+export const currentVersionAssetSummarySchema = z
+  .object({
+    id: assetIdSchema,
+    scope: assetScopeSchema,
+    project_id: assetIdSchema.nullable(),
+    slug: z.string().min(1),
+    display_name: z.string().min(1),
+    status: assetStatusSchema,
+    current_version_id: assetIdSchema.nullable(),
+    revision: z.number().int().positive(),
+    created_by_user_id: z.string().min(1),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+export const legacyCompatibleAssetSummarySchema = z
+  .union([currentVersionAssetSummarySchema, assetSummarySchema])
+  .transform((value) => {
+    if ("current_version_id" in value) return value;
+    const { current_published_version_id, version, ...item } = value;
+    return {
+      ...item,
+      current_version_id: current_published_version_id,
+      revision: version,
+    };
+  });
 
 const FORBIDDEN_RESPONSE_FIELDS = new Set([
   "plaintext",
@@ -211,7 +245,7 @@ export const agentVersionSchema = z
     id: assetIdSchema,
     agent_id: assetIdSchema,
     version_number: z.number().int().positive(),
-    workflow_status: assetWorkflowStatusSchema,
+    relation: versionRelationSchema,
     description: z.string(),
     agents_instructions: z.string(),
     soul: z.string(),
@@ -221,7 +255,9 @@ export const agentVersionSchema = z
     model_ref: z.string(),
     model_settings: agentModelSettingsSchema.optional(),
     tool_groups: z.array(z.string()),
-    skill_version_ids: z.array(assetIdSchema),
+    skill_refs: z.array(
+      z.object({ scope: assetScopeSchema, asset_id: assetIdSchema }).strict(),
+    ),
     mcp_version_ids: z.array(assetIdSchema),
     supersedes_version_id: assetIdSchema.nullable(),
     payload_checksum: z.string().min(1),
@@ -432,7 +468,7 @@ export const skillVersionFileContentSchema = z
     encoding: z.literal("utf-8").nullable(),
     content: z.string().nullable(),
     source_payload_checksum: z.string().min(1),
-    asset_version: z.number().int().positive(),
+    asset_revision: z.number().int().positive(),
   })
   .strict()
   .superRefine((value, context) => {
@@ -481,7 +517,7 @@ export const skillFileChangeSchema = z.union([
 ]);
 export const skillFileForkInputSchema = z
   .object({
-    expected_asset_version: z.number().int().positive(),
+    expected_revision: z.number().int().positive(),
     expected_source_payload_checksum: z.string().min(1),
     changes: z.array(skillFileChangeSchema).min(1).max(256),
   })
@@ -498,7 +534,7 @@ export const skillVersionSchema = z
     id: assetIdSchema,
     skill_id: assetIdSchema,
     version_number: z.number().int().positive(),
-    workflow_status: assetWorkflowStatusSchema,
+    relation: versionRelationSchema,
     description: z.string(),
     frontmatter: safeJsonObjectSchema,
     compatibility: z.string().nullable(),
@@ -538,7 +574,7 @@ export const skillVersionSchema = z
         path: ["governance_status"],
       });
     }
-    const bindingEligible = value.workflow_status === "published" && !revoked;
+    const bindingEligible = value.relation === "current" && !revoked;
     if (value.binding_eligible !== bindingEligible) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -1045,7 +1081,7 @@ export const credentialMetadataSchema = z
   })
   .strict();
 
-const systemBindingItemSchema = z
+const legacySystemBindingItemSchema = z
   .object({
     project_id: assetIdSchema,
     kind: assetKindSchema,
@@ -1060,17 +1096,77 @@ const systemBindingItemSchema = z
   })
   .strict();
 
-export const systemBindingSchema = systemBindingItemSchema
+const currentSystemBindingItemSchema = z
+  .object({
+    project_id: assetIdSchema,
+    kind: assetKindSchema,
+    asset_id: assetIdSchema,
+    current_version_id: assetIdSchema,
+    enabled: z.boolean(),
+    version: z.number().int().positive(),
+    created_by_user_id: z.string().min(1),
+    updated_by_user_id: z.string().min(1),
+    created_at: z.string().datetime({ offset: true }),
+    updated_at: z.string().datetime({ offset: true }),
+  })
+  .strict();
+
+const systemBindingItemSchema = z
+  .union([currentSystemBindingItemSchema, legacySystemBindingItemSchema])
+  .transform((value) => {
+    if ("current_version_id" in value) return value;
+    const { version_id, ...binding } = value;
+    return { ...binding, current_version_id: version_id };
+  });
+
+export const systemBindingSchema = z
+  .union([
+    currentSystemBindingItemSchema
+      .extend({ request_id: z.string().min(1) })
+      .strict(),
+    legacySystemBindingItemSchema
+      .extend({ request_id: z.string().min(1) })
+      .strict(),
+  ])
+  .transform((value) => {
+    if ("current_version_id" in value) return value;
+    const { version_id, ...binding } = value;
+    return { ...binding, current_version_id: version_id };
+  });
+
+export const currentSystemBindingSchema = currentSystemBindingItemSchema
   .extend({ request_id: z.string().min(1) })
   .strict();
 
-export const projectAssetItemSchema = assetSummarySchema
+const legacyProjectAssetItemSchema = assetSummarySchema
   .extend({
     capabilities: assetCapabilitiesSchema,
     binding: systemBindingItemSchema.nullable(),
     description: z.string().nullable().optional(),
   })
   .strict();
+
+export const currentVersionProjectAssetItemSchema = currentVersionAssetSummarySchema
+  .extend({
+    capabilities: assetCapabilitiesSchema,
+    binding: currentSystemBindingItemSchema.nullable(),
+    description: z.string().nullable().optional(),
+  })
+  .strict();
+
+export const legacyCompatibleProjectAssetItemSchema = z
+  .union([currentVersionProjectAssetItemSchema, legacyProjectAssetItemSchema])
+  .transform((value) => {
+    if ("current_version_id" in value) return value;
+    const { current_published_version_id, version, ...item } = value;
+    return {
+      ...item,
+      current_version_id: current_published_version_id,
+      revision: version,
+    };
+  });
+
+export const projectAssetItemSchema = currentVersionProjectAssetItemSchema;
 
 export const projectCredentialItemSchema = credentialMetadataSchema
   .extend({ capabilities: assetCapabilitiesSchema })
@@ -1080,6 +1176,14 @@ export const projectAssetListSchema = z
   .object({
     system_items: z.array(projectAssetItemSchema),
     project_items: z.array(projectAssetItemSchema),
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const legacyCompatibleProjectAssetListSchema = z
+  .object({
+    system_items: z.array(legacyCompatibleProjectAssetItemSchema),
+    project_items: z.array(legacyCompatibleProjectAssetItemSchema),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1094,7 +1198,14 @@ export const projectCredentialListSchema = z
 
 export const adminAssetListSchema = z
   .object({
-    items: z.array(assetSummarySchema),
+    items: z.array(currentVersionAssetSummarySchema),
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const legacyCompatibleAdminAssetListSchema = z
+  .object({
+    items: z.array(legacyCompatibleAssetSummarySchema),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1108,14 +1219,21 @@ export const adminCredentialListSchema = z
 
 export const assetMutationResponseSchema = z
   .object({
-    item: assetSummarySchema,
+    item: currentVersionAssetSummarySchema,
+    request_id: z.string().min(1),
+  })
+  .strict();
+
+export const legacyCompatibleAssetMutationResponseSchema = z
+  .object({
+    item: legacyCompatibleAssetSummarySchema,
     request_id: z.string().min(1),
   })
   .strict();
 
 export const projectSkillImportResponseSchema = z
   .object({
-    item: assetSummarySchema,
+    item: currentVersionAssetSummarySchema,
     version: skillVersionSchema,
     request_id: z.string().min(1),
   })
@@ -1150,14 +1268,16 @@ export const createAgentInputSchema = z
     model_ref: z.string().trim().min(1),
     model_settings: agentModelSettingsSchema,
     tool_groups: z.array(z.string().trim().min(1)),
-    skill_version_ids: z.array(assetIdSchema),
+    skill_refs: z.array(
+      z.object({ scope: assetScopeSchema, asset_id: assetIdSchema }).strict(),
+    ),
     mcp_version_ids: z.array(assetIdSchema),
   })
   .strict();
 
 export const agentCreateResponseSchema = z
   .object({
-    item: assetSummarySchema,
+    item: currentVersionAssetSummarySchema,
     version: agentVersionSchema,
     request_id: z.string().min(1),
   })
@@ -1176,7 +1296,7 @@ export const agentCreateResponseSchema = z
     }
     if (
       value.item.status !== "suspended" ||
-      value.item.current_published_version_id !== null
+      value.item.current_version_id !== null
     ) {
       invalid(
         ["item", "status"],
@@ -1185,12 +1305,12 @@ export const agentCreateResponseSchema = z
     }
     if (
       value.version.version_number !== 1 ||
-      value.version.workflow_status !== "draft" ||
+      value.version.relation !== "candidate" ||
       value.version.supersedes_version_id !== null
     ) {
       invalid(
         ["version"],
-        "Created Agent must return an initial standalone draft",
+        "Created Agent must return an initial standalone Candidate Version",
       );
     }
   });
@@ -1198,22 +1318,15 @@ export const agentCreateResponseSchema = z
 export const expectedAssetVersionInputSchema = z
   .object({ expected_asset_version: z.number().int().positive() })
   .strict();
-/**
- * Publish accepts an explicit stale-base acknowledgement: publishing a draft
- * whose recorded base is no longer the live pointer requires user consent
- * (Skill lineage guard). Only Skill publish sends the flag.
- */
-export const publishAssetVersionInputSchema = expectedAssetVersionInputSchema
-  .extend({ acknowledge_stale_base: z.boolean().optional() })
+export const expectedRevisionInputSchema = z
+  .object({ expected_revision: z.number().int().positive() })
   .strict();
-export const skillPublishAssetVersionInputSchema =
-  expectedAssetVersionInputSchema
-    .extend({
-      acknowledge_stale_base: z.boolean().optional(),
-      expected_payload_checksum: z.string().regex(/^[a-f0-9]{64}$/u),
-      expected_binding_revision: z.number().int().nonnegative(),
-    })
-    .strict();
+export const skillActivationInputSchema = expectedRevisionInputSchema
+  .extend({
+    expected_payload_checksum: z.string().regex(/^[a-f0-9]{64}$/u),
+    expected_binding_revision: z.number().int().nonnegative(),
+  })
+  .strict();
 export const projectDefaultAgentSchema = z
   .object({
     agent_asset_id: assetIdSchema.nullable(),
@@ -1238,20 +1351,22 @@ export const agentInstructionsInputSchema = z
     soul: z.string(),
     identity: z.string(),
     user_context: z.string(),
-    expected_asset_version: z.number().int().positive(),
+    expected_revision: z.number().int().positive(),
   })
   .strict();
 export const agentCapabilityBindingsInputSchema = z
   .object({
-    skill_version_ids: z.array(assetIdSchema),
+    skill_refs: z.array(
+      z.object({ scope: assetScopeSchema, asset_id: assetIdSchema }).strict(),
+    ),
     mcp_version_ids: z.array(assetIdSchema),
-    expected_asset_version: z.number().int().positive(),
+    expected_revision: z.number().int().positive(),
   })
   .strict()
   .refine(
     (value) =>
-      new Set(value.skill_version_ids).size ===
-        value.skill_version_ids.length &&
+      new Set(value.skill_refs.map((item) => `${item.scope}:${item.asset_id}`))
+        .size === value.skill_refs.length &&
       new Set(value.mcp_version_ids).size === value.mcp_version_ids.length,
     { message: "Agent capability version IDs must be unique" },
   );
@@ -1268,7 +1383,7 @@ export const skillVersionInputSchema = z
           .strict(),
       )
       .min(1),
-    expected_asset_version: z.number().int().positive(),
+    expected_revision: z.number().int().positive(),
   })
   .strict();
 const mcpCredentialSlotInputSchema = z
@@ -1516,6 +1631,12 @@ export const enableSystemBindingInputSchema = z
     expected_binding_version: z.number().int().positive().optional(),
   })
   .strict();
+export const enableCurrentSystemBindingInputSchema = z
+  .object({
+    asset_id: assetIdSchema,
+    expected_binding_version: z.number().int().positive().optional(),
+  })
+  .strict();
 export const moveSystemBindingInputSchema = z
   .object({
     version_id: assetIdSchema,
@@ -1530,10 +1651,12 @@ export type AssetKind = z.infer<typeof assetKindSchema>;
 export type AssetListKind = z.infer<typeof assetListKindSchema>;
 export type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
 export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
-  Kind extends MutableAssetListKind ? "activate" | "suspend" : never;
+  Kind extends "skills" | "agents"
+    ? "enable" | "suspend"
+    : "activate" | "suspend";
 export type AdminProjectAssetStatusAction<Kind extends MutableAssetListKind> =
   Kind extends "skills" | "agents"
-    ? "activate" | "suspend"
+    ? "enable" | "suspend"
     : "archive" | "suspend";
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
@@ -1541,10 +1664,13 @@ export type CredentialPayloadGroup = z.infer<
   typeof credentialPayloadGroupSchema
 >;
 export type CredentialPayload = z.infer<typeof credentialPayloadSchema>;
-export type AssetSummary = z.infer<typeof assetSummarySchema>;
+export type AssetSummary = z.infer<typeof currentVersionAssetSummarySchema>;
 export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
 export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
+export type AgentVersion = z.infer<typeof agentVersionSchema>;
+export type SkillVersion = z.infer<typeof skillVersionSchema>;
+export type McpVersion = z.infer<typeof mcpVersionSchema>;
 export type McpTool = z.infer<typeof mcpToolSchema>;
 export type McpToolInventory = z.infer<typeof mcpToolInventorySchema>;
 export type McpToolInventoryResponse = z.infer<
@@ -1650,12 +1776,8 @@ export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
   typeof expectedAssetVersionInputSchema
 >;
-export type PublishAssetVersionInput = z.input<
-  typeof publishAssetVersionInputSchema
->;
-export type SkillPublishAssetVersionInput = z.input<
-  typeof skillPublishAssetVersionInputSchema
->;
+export type ExpectedRevisionInput = z.input<typeof expectedRevisionInputSchema>;
+export type SkillActivationInput = z.input<typeof skillActivationInputSchema>;
 export type ProjectDefaultAgentInput = z.input<
   typeof projectDefaultAgentInputSchema
 >;
@@ -1673,6 +1795,9 @@ export type ConfigureSystemMcpCredentialGrantsInput = z.input<
 >;
 export type EnableSystemBindingInput = z.input<
   typeof enableSystemBindingInputSchema
+>;
+export type EnableCurrentSystemBindingInput = z.input<
+  typeof enableCurrentSystemBindingInputSchema
 >;
 export type MoveSystemBindingInput = z.input<
   typeof moveSystemBindingInputSchema

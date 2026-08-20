@@ -62,6 +62,7 @@ import {
   type AssetListKind,
   type AssetVersion,
   type DisableSystemBindingInput,
+  type EnableCurrentSystemBindingInput,
   type EnableSystemBindingInput,
   type ProjectAssetItem,
   type ProjectAssetList,
@@ -151,17 +152,17 @@ function assetAvailability(
     if (!item.binding) return "未启用";
     if (!item.binding.enabled) return "已从项目停用";
     if (
-      item.current_published_version_id &&
-      item.current_published_version_id !== item.binding.version_id
+      item.current_version_id &&
+      item.current_version_id !== item.binding.current_version_id
     ) {
       return kind === "mcp-servers" ? "有新配置" : "有新版本";
     }
     return "已在项目启用";
   }
-  if (!item.current_published_version_id) {
-    return kind === "mcp-servers" ? "尚未生效" : "尚未发布";
+  if (!item.current_version_id) {
+    return kind === "mcp-servers" ? "尚未生效" : "尚无当前版本";
   }
-  return kind === "mcp-servers" ? "已有生效配置" : "已有发布版本";
+  return kind === "mcp-servers" ? "已有生效配置" : "已有当前版本";
 }
 
 export function filterProjectAssetItems(
@@ -337,8 +338,8 @@ export function systemBindingToggleState(
   const targetVersionId =
     item.scope === "system"
       ? kind === "mcp-servers"
-        ? item.current_published_version_id
-        : (item.binding?.version_id ?? item.current_published_version_id)
+        ? item.current_version_id
+        : (item.binding?.current_version_id ?? item.current_version_id)
       : null;
   return {
     checked,
@@ -365,13 +366,16 @@ export function systemMcpBindingNeedsUpdate(item: ProjectAssetItem): boolean {
     item.status === "active" &&
     item.capabilities.includes("shared_assets.manage_bindings") &&
     item.binding?.enabled === true &&
-    item.current_published_version_id !== null &&
-    item.binding.version_id !== item.current_published_version_id
+    item.current_version_id !== null &&
+    item.binding.current_version_id !== item.current_version_id
   );
 }
 
 export type ProjectSystemBindingListAction =
-  | { type: "enable"; input: EnableSystemBindingInput }
+  | {
+      type: "enable";
+      input: EnableSystemBindingInput | EnableCurrentSystemBindingInput;
+    }
   | {
       type: "sync-current";
       assetId: string;
@@ -406,7 +410,7 @@ export function projectSystemBindingListAction(
 
   if (checked) {
     if (kind === "mcp-servers") {
-      if (!item.current_published_version_id) return null;
+      if (!item.current_version_id) return null;
       return {
         type: "sync-current",
         assetId: item.id,
@@ -420,7 +424,6 @@ export function projectSystemBindingListAction(
       type: "enable",
       input: {
         asset_id: item.id,
-        version_id: state.targetVersionId,
         ...(item.binding
           ? { expected_binding_version: item.binding.version }
           : {}),
@@ -1521,19 +1524,29 @@ function ProjectAssetCatalog({
     changeStatus.mutate(
       {
         assetId: item.id,
-        action: checked ? "activate" : "suspend",
-        input: { expected_asset_version: item.version },
+        action:
+          kind === "skills"
+            ? checked
+              ? "enable"
+              : "suspend"
+            : checked
+              ? "activate"
+              : "suspend",
+        input:
+          kind === "skills"
+            ? { expected_revision: item.revision }
+            : { expected_asset_version: item.revision },
       },
       {
         onError: (error) => {
           if (kind === "skills" && projectSkillCredentialSetupRequired(error)) {
             setCredentialSetupAssetId(item.id);
-            const publishedVersionId = item.current_published_version_id;
-            if (publishedVersionId) {
+            const currentVersionId = item.current_version_id;
+            if (currentVersionId) {
               setCreatedVersions((current) =>
-                rememberRequestedVersion(current, item.id, publishedVersionId),
+                rememberRequestedVersion(current, item.id, currentVersionId),
               );
-              navigateToSkillVersion(item.id, publishedVersionId, true, "push");
+              navigateToSkillVersion(item.id, currentVersionId, true, "push");
             } else {
               navigateToAsset(item.id, "push");
             }

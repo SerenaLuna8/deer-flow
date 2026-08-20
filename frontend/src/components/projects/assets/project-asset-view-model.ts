@@ -12,19 +12,19 @@ import {
 
 type ProjectLifecycleItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_published_version_id" | "status"
+  "capabilities" | "current_version_id" | "status"
 >;
 type ProjectAssetDeleteItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_published_version_id" | "scope"
+  "capabilities" | "current_version_id" | "scope"
 >;
-type ProjectAgentPublishItem = Pick<
+type ProjectVersionActivationItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_published_version_id" | "scope"
+  "capabilities" | "scope"
 >;
 type ProjectSkillStatusItem = Pick<
   ProjectAssetItem,
-  "capabilities" | "current_published_version_id" | "scope" | "status"
+  "capabilities" | "current_version_id" | "scope" | "status"
 >;
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 
@@ -81,7 +81,9 @@ export function projectAgentDeleteErrorMessage(error: unknown): string {
 }
 
 export type ProjectAssetDetailLifecycleAction<Kind extends MutableAssetKind> =
-  Kind extends "skills" ? never : "activate" | "suspend";
+  Kind extends "skills" | "agents"
+    ? "enable" | "suspend"
+    : "activate" | "suspend";
 
 export function projectAssetCanCreateVersion(
   kind: MutableAssetKind,
@@ -101,33 +103,31 @@ export function projectAssetCanAuthor(
   );
 }
 
-export function projectAgentVersionCanPublish(
-  item: ProjectAgentPublishItem,
+export function projectAgentVersionCanActivate(
+  item: ProjectVersionActivationItem,
   projectCapabilities: readonly Capability[],
   version: {
-    workflow_status: string;
-    supersedes_version_id: string | null;
+    relation: string;
   } | null,
 ): boolean {
   return (
     item.scope === "project" &&
-    version?.workflow_status === "draft" &&
-    version.supersedes_version_id === item.current_published_version_id &&
-    projectCapabilities.includes("shared_assets.manage_bindings") &&
-    item.capabilities.includes("shared_assets.manage_bindings")
+    version?.relation === "candidate" &&
+    projectCapabilities.includes("shared_assets.edit") &&
+    item.capabilities.includes("shared_assets.edit")
   );
 }
 
-export function projectSkillVersionCanPublish(
-  item: ProjectAgentPublishItem,
+export function projectSkillVersionCanActivate(
+  item: ProjectVersionActivationItem,
   projectCapabilities: readonly Capability[],
-  version: { workflow_status: string } | null,
+  version: { relation: string } | null,
 ): boolean {
   return (
     item.scope === "project" &&
-    version?.workflow_status === "draft" &&
-    projectCapabilities.includes("shared_assets.manage_bindings") &&
-    item.capabilities.includes("shared_assets.manage_bindings")
+    version?.relation === "candidate" &&
+    projectCapabilities.includes("shared_assets.edit") &&
+    item.capabilities.includes("shared_assets.edit")
   );
 }
 
@@ -138,34 +138,29 @@ export function projectAssetDetailLifecycleActions<
   item: ProjectLifecycleItem,
   projectCapabilities: readonly Capability[] = item.capabilities,
 ): ProjectAssetDetailLifecycleAction<Kind>[] {
-  if (kind === "skills") {
-    return [] as ProjectAssetDetailLifecycleAction<Kind>[];
-  }
-  const canSuspend = projectCapabilities.includes(
-    "shared_assets.manage_bindings",
-  );
-  if (kind === "agents") {
+  if (kind === "agents" || kind === "skills") {
     const canManageLifecycle =
-      canSuspend && item.capabilities.includes("shared_assets.manage_bindings");
+      projectCapabilities.includes("shared_assets.edit") &&
+      item.capabilities.includes("shared_assets.edit");
     if (!canManageLifecycle) {
       return [] as ProjectAssetDetailLifecycleAction<Kind>[];
     }
     return (
       item.status === "active"
         ? ["suspend" as const]
-        : item.status === "suspended" &&
-            item.current_published_version_id !== null
-          ? ["activate" as const]
+        : item.status === "suspended" && item.current_version_id !== null
+          ? ["enable" as const]
           : []
     ) as ProjectAssetDetailLifecycleAction<Kind>[];
   }
   if (kind === "mcp-servers") {
     const canManageLifecycle =
-      canSuspend && item.capabilities.includes("shared_assets.manage_bindings");
+      projectCapabilities.includes("shared_assets.manage_bindings") &&
+      item.capabilities.includes("shared_assets.manage_bindings");
     if (
       !canManageLifecycle ||
       item.status === "archived" ||
-      item.current_published_version_id === null
+      item.current_version_id === null
     ) {
       return [] as ProjectAssetDetailLifecycleAction<Kind>[];
     }
@@ -190,10 +185,7 @@ export function adminProjectAssetDetailLifecycleActions<
   kind: Kind,
   item: ProjectLifecycleItem,
 ): AdminProjectAssetDetailLifecycleAction<Kind>[] {
-  if (kind === "skills") {
-    return [] as AdminProjectAssetDetailLifecycleAction<Kind>[];
-  }
-  if (kind === "agents") {
+  if (kind === "agents" || kind === "skills") {
     return projectAssetDetailLifecycleActions(
       kind,
       item,
@@ -229,7 +221,7 @@ export type ProjectSkillStatusToggleState = {
 export function projectSkillStatusToggleState(
   item: ProjectSkillStatusItem,
 ): ProjectSkillStatusToggleState {
-  return projectStatusToggleState(item, "请先发布版本");
+  return projectStatusToggleState(item, "请先激活一个版本");
 }
 
 export function projectMcpStatusToggleState(
@@ -247,7 +239,7 @@ function projectStatusToggleState(
     item.scope === "project" &&
     item.capabilities.includes("shared_assets.manage_bindings");
   const canActivate =
-    item.status === "suspended" && item.current_published_version_id !== null;
+    item.status === "suspended" && item.current_version_id !== null;
   const supportedStatus =
     item.status === "active" || item.status === "suspended";
   return {
@@ -256,7 +248,7 @@ function projectStatusToggleState(
     disabledReason:
       canManage &&
       item.status === "suspended" &&
-      item.current_published_version_id === null
+      item.current_version_id === null
         ? unpublishedReason
         : null,
   };
@@ -271,10 +263,5 @@ export function projectAssetCanDelete(
     item.scope === "project" &&
     item.capabilities.includes("shared_assets.edit");
   if (!canEdit) return false;
-  const publishedPackageNeedsPublisher = kind === "agents" || kind === "skills";
-  return (
-    !publishedPackageNeedsPublisher ||
-    item.current_published_version_id === null ||
-    item.capabilities.includes("shared_assets.manage_bindings")
-  );
+  return true;
 }

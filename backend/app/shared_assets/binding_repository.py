@@ -56,12 +56,12 @@ _BINDING_TYPES = {
     AssetKind.AGENT: (
         ProjectSystemAgentBindingRow,
         "system_agent_id",
-        "agent_version_id",
+        None,
     ),
     AssetKind.SKILL: (
         ProjectSystemSkillBindingRow,
         "system_skill_id",
-        "skill_version_id",
+        None,
     ),
     AssetKind.MCP: (
         ProjectSystemMcpBindingRow,
@@ -188,6 +188,27 @@ class BindingRepository:
         statement = statement.order_by(getattr(binding_type, asset_column))
         return tuple((await self.session.execute(statement)).scalars().all())
 
+    async def current_version_id(
+        self,
+        context: _Actor,
+        kind: AssetKind,
+        asset_id: uuid.UUID,
+    ) -> uuid.UUID:
+        if kind is AssetKind.MCP:
+            row = await self.get_binding(context, kind, asset_id, read=True)
+            return uuid.UUID(str(row.mcp_server_version_id))
+        asset_type, _version_type, _parent_column = _TARGET_TYPES[kind]
+        value = await self.session.scalar(
+            select(asset_type.current_version_id).where(
+                asset_type.id == asset_id,
+                asset_type.scope == AssetScope.SYSTEM.value,
+                asset_type.project_id.is_(None),
+            )
+        )
+        if not isinstance(value, uuid.UUID):
+            raise AssetNotFound(context.request_id)
+        return value
+
     async def lock_target(
         self,
         context: _Actor,
@@ -196,7 +217,7 @@ class BindingRepository:
         allow_archived: bool = False,
         read: bool = False,
     ) -> BindingTarget:
-        if selection.version_id is None:
+        if selection.kind is AssetKind.MCP and selection.version_id is None:
             raise AssetValidationFailed(context.request_id)
         asset_type, version_type, parent_column = _TARGET_TYPES[selection.kind]
         asset_statement = (
@@ -217,18 +238,28 @@ class BindingRepository:
             raise AssetNotFound(context.request_id)
         if asset.status == "suspended" or (asset.status == "archived" and not allow_archived):
             raise AssetValidationFailed(context.request_id)
+        resolved_version_id = selection.version_id if selection.kind is AssetKind.MCP else asset.current_version_id
+        if not isinstance(resolved_version_id, uuid.UUID):
+            raise AssetValidationFailed(context.request_id)
         version_statement = (
             select(version_type)
             .where(
-                version_type.id == selection.version_id,
+                version_type.id == resolved_version_id,
                 getattr(version_type, parent_column) == selection.asset_id,
-                version_type.workflow_status == "published",
             )
             .with_for_update(read=read, of=version_type)
         )
+        if selection.kind in {AssetKind.AGENT, AssetKind.SKILL}:
+            version_statement = version_statement.where(
+                version_type.version_number == 1,
+            )
         if selection.kind is AssetKind.SKILL:
             version_statement = version_statement.where(
                 SkillVersionRow.revoked_at.is_(None),
+            )
+        elif selection.kind is AssetKind.MCP:
+            version_statement = version_statement.where(
+                McpServerVersionRow.workflow_status == "published",
             )
         version = (await self.session.execute(version_statement)).scalar_one_or_none()
         if version is None:
@@ -321,10 +352,13 @@ class BindingRepository:
             .where(
                 version_type.id == version_id,
                 getattr(version_type, parent_column) == asset_id,
-                version_type.workflow_status == "published",
             )
             .with_for_update(read=read, of=version_type)
         )
+        if kind is AssetKind.MCP:
+            statement = statement.where(
+                McpServerVersionRow.workflow_status == "published",
+            )
         if kind is AssetKind.SKILL and not allow_revoked:
             statement = statement.where(SkillVersionRow.revoked_at.is_(None))
         version = (await self.session.execute(statement)).scalar_one_or_none()
@@ -339,12 +373,12 @@ class BindingRepository:
     ):
         project_id = self._project_id(context)
         binding_type, asset_column, version_column = _BINDING_TYPES[selection.kind]
+        values = {asset_column: selection.asset_id}
+        if version_column is not None:
+            values[version_column] = selection.version_id
         row = binding_type(
             project_id=project_id,
-            **{
-                asset_column: selection.asset_id,
-                version_column: selection.version_id,
-            },
+            **values,
             enabled=True,
             created_by_user_id=str(context.user_id),
             updated_by_user_id=str(context.user_id),
@@ -358,18 +392,19 @@ class BindingRepository:
         context: _Actor,
         selection: AssetSelection,
     ) -> None:
-        if selection.version_id is None:
-            raise AssetValidationFailed(context.request_id)
         if selection.kind is AssetKind.MCP:
+            if selection.version_id is None:
+                raise AssetValidationFailed(context.request_id)
             await self._validate_mcp_versions((selection.version_id,), context.request_id)
             return
+        target = await self.lock_target(context, selection, read=True)
         if selection.kind is AssetKind.SKILL:
             try:
                 await lock_skill_credential_closure(
                     self.session,
                     self._project_id(context),
                     selection.asset_id,
-                    selection.version_id,
+                    target.version.id,
                 )
             except SkillCredentialClosureInvalid:
                 raise AssetValidationFailed(context.request_id) from None
@@ -379,20 +414,21 @@ class BindingRepository:
         skill_ids = tuple(
             (
                 await self.session.execute(
-                    select(AgentVersionSkillRefRow.skill_version_id)
-                    .where(AgentVersionSkillRefRow.agent_version_id == selection.version_id)
-                    .order_by(AgentVersionSkillRefRow.skill_version_id)
+                    select(
+                        AgentVersionSkillRefRow.skill_asset_scope,
+                        AgentVersionSkillRefRow.skill_asset_id,
+                    )
+                    .where(AgentVersionSkillRefRow.agent_version_id == target.version.id)
+                    .order_by(AgentVersionSkillRefRow.sort_order)
                     .with_for_update(read=True, of=AgentVersionSkillRefRow)
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
         mcp_ids = tuple(
             (
                 await self.session.execute(
                     select(AgentVersionMcpRefRow.mcp_server_version_id)
-                    .where(AgentVersionMcpRefRow.agent_version_id == selection.version_id)
+                    .where(AgentVersionMcpRefRow.agent_version_id == target.version.id)
                     .order_by(AgentVersionMcpRefRow.mcp_server_version_id)
                     .with_for_update(read=True, of=AgentVersionMcpRefRow)
                 )
@@ -400,12 +436,23 @@ class BindingRepository:
             .scalars()
             .all()
         )
-        if not await self._system_versions_are_bound(
-            context,
-            AssetKind.SKILL,
-            skill_ids,
-        ):
+        if any(scope != AssetScope.SYSTEM.value for scope, _asset_id in skill_ids):
             raise AssetValidationFailed(context.request_id)
+        for _scope, skill_asset_id in skill_ids:
+            binding = await self.get_binding(
+                context,
+                AssetKind.SKILL,
+                skill_asset_id,
+                read=True,
+                required=False,
+            )
+            if binding is None or not binding.enabled:
+                raise AssetValidationFailed(context.request_id)
+            await self.lock_target(
+                context,
+                AssetSelection(AssetKind.SKILL, skill_asset_id),
+                read=True,
+            )
         if not await self._system_versions_are_bound(
             context,
             AssetKind.MCP,

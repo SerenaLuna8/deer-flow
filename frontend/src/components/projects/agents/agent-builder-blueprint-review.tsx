@@ -205,7 +205,7 @@ export function AgentBuilderBlueprintReview({
             <WrenchIcon aria-hidden className="size-3.5" />
             {copy.dependencySummary(
               blueprint.tool_groups.length,
-              blueprint.skill_version_ids.length,
+              blueprint.skill_refs.length,
               blueprint.mcp_version_ids.length,
             )}
           </p>

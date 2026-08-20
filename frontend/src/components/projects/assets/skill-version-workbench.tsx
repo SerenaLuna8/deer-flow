@@ -193,21 +193,21 @@ type PendingSavedSkillVersion = {
 
 export function skillVersionConflictHasLatestServerState(
   conflict: SkillVersionConflictRecovery | null,
-  item: Pick<ProjectAssetItem, "id" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "revision">,
   sourceVersion: Pick<SkillAssetVersion, "id">,
 ): boolean {
   return (
     conflict?.assetId === item.id &&
     conflict.sourceVersionId === sourceVersion.id &&
-    item.version > conflict.assetVersion
+    item.revision > conflict.assetVersion
   );
 }
 
 export function skillVersionSaveIsPending(
   pending: PendingSavedSkillVersion | null,
-  item: Pick<ProjectAssetItem, "id" | "version">,
+  item: Pick<ProjectAssetItem, "id" | "revision">,
 ): boolean {
-  return pending?.assetId === item.id && item.version < pending.assetVersion;
+  return pending?.assetId === item.id && item.revision < pending.assetVersion;
 }
 
 export function skillVersionDraftMatchesSubmittedChanges(
@@ -237,7 +237,7 @@ export function SkillVersionWorkbench({
   editing,
   onEditingChange,
   onDirtyChange,
-  onPublishValidityChange,
+  onActivationValidityChange,
   onVersionCreated,
   credentialBindingsDirty = false,
   focusCredentials = false,
@@ -252,7 +252,7 @@ export function SkillVersionWorkbench({
   editing: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onPublishValidityChange: (valid: boolean) => void;
+  onActivationValidityChange: (valid: boolean) => void;
   onVersionCreated: (
     versionId: string,
     options?: { focusCredentials?: boolean },
@@ -302,9 +302,9 @@ export function SkillVersionWorkbench({
   const [discardOpen, setDiscardOpen] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
   const changesRef = useRef(changes);
-  const expectedAssetVersionRef = useRef(item.version);
+  const expectedAssetVersionRef = useRef(item.revision);
   const appliedServerStateRef = useRef(
-    `${item.id}:${item.version}:${version.id}`,
+    `${item.id}:${item.revision}:${version.id}`,
   );
   const conflictRecoveryRef = useRef<SkillVersionConflictRecovery | null>(null);
   const pendingSavedVersionRef = useRef<PendingSavedSkillVersion | null>(null);
@@ -388,7 +388,7 @@ export function SkillVersionWorkbench({
     skillMdChange && skillMdChange.op !== "delete"
       ? skillMdChange.content
       : (loadedSources["SKILL.md"] ?? skillMdServerFile?.content ?? null);
-  const serverState = `${item.id}:${item.version}:${version.id}`;
+  const serverState = `${item.id}:${item.revision}:${version.id}`;
   const emptyExplicitFolders = explicitFolders.filter(
     (folder) =>
       !workingFiles.some((file) => file.path.startsWith(`${folder}/`)),
@@ -445,11 +445,11 @@ export function SkillVersionWorkbench({
     if (
       skillVersionConflictHasLatestServerState(conflictRecovery, item, version)
     ) {
-      expectedAssetVersionRef.current = item.version;
+      expectedAssetVersionRef.current = item.revision;
       appliedServerStateRef.current = serverState;
       conflictRecoveryRef.current = null;
       setLocalError(
-        "已加载最新资产修订并保留本地修改。再次保存仍会基于当前所选的不可变 Skill 版本创建新草稿，请确认后重试。",
+        "已加载最新资产修订并保留本地修改。再次保存会基于当前版本创建新的候选版本，请确认后重试。",
       );
       return;
     }
@@ -470,9 +470,9 @@ export function SkillVersionWorkbench({
     }
     if (serverState === appliedServerStateRef.current || dirty) return;
 
-    expectedAssetVersionRef.current = item.version;
+    expectedAssetVersionRef.current = item.revision;
     appliedServerStateRef.current = serverState;
-  }, [dirty, item, item.id, item.version, serverState, version, version.id]);
+  }, [dirty, item, item.id, item.revision, serverState, version, version.id]);
 
   useEffect(() => {
     if (canAuthor || !editing) return;
@@ -511,9 +511,9 @@ export function SkillVersionWorkbench({
   const handleSecretValidityChange = useCallback(
     (valid: boolean) => {
       setSecretDeclarationValid(valid);
-      onPublishValidityChange(valid);
+      onActivationValidityChange(valid);
     },
-    [onPublishValidityChange],
+    [onActivationValidityChange],
   );
 
   useEffect(() => {
@@ -746,7 +746,7 @@ export function SkillVersionWorkbench({
         assetId: item.id,
         sourceVersionId: version.id,
         input: {
-          expected_asset_version: expectedAssetVersion,
+          expected_revision: expectedAssetVersion,
           expected_source_payload_checksum: version.payload_checksum,
           changes,
         },
@@ -813,9 +813,9 @@ export function SkillVersionWorkbench({
         <h3 className="text-sm font-semibold">2. 项目凭证映射</h3>
       </div>
       <p className="text-muted-foreground text-sm leading-6">
-        当前正在编辑 SKILL.md。先保存为精确
-        Draft；保存后仍在此页面为每个声明选择项目 Credential 和具体来源 env
-        字段。发布窗口只做检查，不再填写凭证。
+        当前正在编辑
+        SKILL.md。先保存为精确候选版本；保存后仍在此页面为每个声明选择项目
+        Credential 和具体来源 env 字段。激活窗口只做运行前检查，不再填写凭证。
       </p>
     </section>
   ) : (
@@ -828,7 +828,7 @@ export function SkillVersionWorkbench({
         <h3 className="text-sm font-semibold">版本内容</h3>
         <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
           文件来自版本 {version.version_number}{" "}
-          的不可变快照。修改会另存为新的草稿版本，当前版本不会被覆盖。
+          的不可变快照。修改会另存为新的候选版本，当前版本不会被覆盖。
         </p>
       </div>
 
@@ -1498,7 +1498,7 @@ export function SkillVersionWorkbench({
           <DialogHeader>
             <DialogTitle>从新版本中删除文件？</DialogTitle>
             <DialogDescription>
-              {deletePath} 会从新草稿中移除，原版本的文件不会受影响。
+              {deletePath} 会从新候选版本中移除，原版本的文件不会受影响。
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

@@ -17,9 +17,9 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from deerflow.error_codes import LLM_PUBLIC_ERROR_CODES
 from deerflow.persistence.jobs.model import DeadJobRow, JobAttemptRow, JobRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
+from deerflow.public_error_codes import LLM_PUBLIC_ERROR_CODES
 from deerflow.trace_context import normalize_trace_id
 
 JobType = Literal[

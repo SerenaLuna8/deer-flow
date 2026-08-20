@@ -1,4 +1,4 @@
-"""Explicitly apply packaged System Asset releases to a current database."""
+"""Explicitly apply packaged System Asset definitions to a current database."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class SystemAssetUpgradeError(RuntimeError):
 
 
 async def upgrade_system_assets(database_url: str) -> BootstrapResult:
-    """Apply new immutable releases while schema mutation is excluded."""
+    """Apply packaged definitions while schema mutation is excluded."""
 
     lock_engine = None
     mutation_engine = None
@@ -80,7 +80,7 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
                 if state == "behind":
                     raise SystemAssetUpgradeError("目标库 schema 不是当前链头；请运行 `make upgrade-db`")
                 if state != "current":
-                    raise SystemAssetUpgradeError("目标库 schema 状态不受支持；未应用任何 System Asset release")
+                    raise SystemAssetUpgradeError("目标库 schema 状态不受支持；未应用任何 System Asset 变更")
 
                 try:
                     return await bootstrap_system_assets(
@@ -90,13 +90,13 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
                         )
                     )
                 except BootstrapConflict:
-                    raise SystemAssetUpgradeError("现有 System Asset 与打包发布历史冲突；未应用任何 release") from None
+                    raise SystemAssetUpgradeError("现有 System Asset 与打包定义冲突；未应用任何变更") from None
                 except BootstrapCatalogError:
                     raise SystemAssetUpgradeError("打包 System Asset catalog 无效；未修改数据库") from None
                 except SQLAlchemyError:
-                    raise SystemAssetUpgradeError("System Asset release 应用结果不确定；操作幂等，请检查数据库后安全重跑") from None
+                    raise SystemAssetUpgradeError("System Asset 变更应用结果不确定；操作幂等，请检查数据库后安全重跑") from None
                 except Exception:
-                    raise SystemAssetUpgradeError("System Asset release 应用结果不确定；操作幂等，请检查数据库后安全重跑") from None
+                    raise SystemAssetUpgradeError("System Asset 变更应用结果不确定；操作幂等，请检查数据库后安全重跑") from None
             except SystemAssetUpgradeError as error:
                 primary_error = error
                 raise
@@ -138,16 +138,16 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
 
 
 def print_result(result: BootstrapResult) -> None:
-    """Print only non-sensitive catalog and release counts."""
+    """Print only non-sensitive catalog and change counts."""
 
     print("System Asset catalog 已完成校验与应用")
-    print(f"本次新增不可变 release: {result.applied_releases}")
+    print(f"本次创建或原位更新的 System Asset v1: {result.applied_changes}")
     print(f"打包资产: Agent {result.counts['agent']} / Skill {result.counts['skill']} / MCP {result.counts['mcp']}")
     print(f"Catalog SHA-256: {result.digest}")
 
 
 def _parser() -> argparse.ArgumentParser:
-    return argparse.ArgumentParser(description=("显式应用打包 System Asset 的新增不可变 release；请在停止 Gateway/Worker/Scheduler 的维护窗口执行"))
+    return argparse.ArgumentParser(description=("显式应用打包 System Asset 定义；Agent/Skill 始终原位更新同一个 Current v1；请在停止 Gateway/Worker/Scheduler 的维护窗口执行"))
 
 
 def main(argv: list[str] | None = None) -> int:

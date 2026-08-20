@@ -4,7 +4,6 @@ import asyncio
 import logging
 import uuid
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Literal
 
 from sqlalchemy.exc import DBAPIError
@@ -87,12 +86,15 @@ from app.shared_assets.errors import (
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
-    AssetSelection,
     ResolvedAgentSnapshot,
     ResolvedMcpSnapshot,
     ResolvedSkillSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.shared_assets.run_snapshot_codec import (
+    RunAssetSnapshotInvalid,
+    decode_run_asset_snapshot,
+)
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.sandbox.sandbox import AuthorizationRevoked
@@ -177,7 +179,7 @@ class PrivateAssetRuntime:
                         Capability.SHARED_ASSETS_EXECUTE,
                     )
                 )
-                current = await self._revalidator.require(
+                await self._revalidator.require(
                     session,
                     context,
                     *required_capabilities,
@@ -228,32 +230,20 @@ class PrivateAssetRuntime:
                         kind = AssetKind(asset.asset_kind)
                     except ValueError:
                         raise RunSnapshotAssetStale from None
-                    selection = AssetSelection(
-                        kind,
-                        asset.asset_id,
-                        asset.version_id,
-                    )
-                    snapshot = (
-                        await self._resolver.resolve_internal_skill_builder_snapshot_in_session(
-                            session,
-                            current,
-                            selection,
-                        )
-                        if runtime_kind == "skill_builder"
-                        else await self._resolver.resolve_run_asset_snapshot_in_session(
-                            session,
-                            current,
-                            selection,
-                        )
-                    )
-                    if snapshot.kind is not kind or snapshot.scope.value != asset.asset_scope or snapshot.asset_id != asset.asset_id or snapshot.version_id != asset.version_id or snapshot.checksum != asset.payload_checksum:
+                    try:
+                        snapshot = decode_run_asset_snapshot(asset.snapshot_json)
+                    except RunAssetSnapshotInvalid:
+                        raise RunSnapshotAssetStale from None
+                    if (
+                        snapshot.kind is not kind
+                        or snapshot.scope.value != asset.asset_scope
+                        or snapshot.asset_id != asset.asset_id
+                        or snapshot.version_id != asset.version_id
+                        or snapshot.checksum != asset.payload_checksum
+                        or snapshot.catalog_generation != persisted_generation
+                    ):
                         raise RunSnapshotAssetStale
-                    resolved.append(
-                        replace(
-                            snapshot,
-                            catalog_generation=persisted_generation,
-                        )
-                    )
+                    resolved.append(snapshot)
 
                 agent_count = 0
                 while agent_count < len(resolved) and type(resolved[agent_count]) is ResolvedAgentSnapshot:
@@ -270,11 +260,7 @@ class PrivateAssetRuntime:
                 delegated_agents = agents[1:]
                 skill_snapshots = tuple(resolved[agent_count:skill_end])
                 mcp_snapshots = tuple(resolved[skill_end:])
-                agent_identities = await _agent_runtime_identities(
-                    session,
-                    agents,
-                    project_id=context.project_id,
-                )
+                agent_identities = _agent_runtime_identities(agents)
                 is_builtin_main = agent.scope is AssetScope.SYSTEM and agent_identities[0].source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY
                 if any(identity.source_key == _BUILTIN_MAIN_AGENT_SOURCE_KEY for identity in agent_identities[1:]):
                     raise RunSnapshotAssetStale
@@ -283,7 +269,7 @@ class PrivateAssetRuntime:
                 if len(skill_by_version) != len(skill_snapshots) or len(mcp_by_version) != len(mcp_snapshots):
                     raise RunSnapshotAssetStale
                 if is_builtin_main:
-                    if agent.payload.skill_version_ids or agent.payload.mcp_version_ids:
+                    if agent.skill_version_ids or agent.payload.mcp_version_ids:
                         raise RunSnapshotAssetStale
                     lead_skill_snapshots = _main_pool_prefix(  # type: ignore[assignment]
                         skill_snapshots
@@ -295,7 +281,7 @@ class PrivateAssetRuntime:
                     if delegated_agents:
                         raise RunSnapshotAssetStale
                     try:
-                        lead_skill_snapshots = tuple(skill_by_version[version_id] for version_id in agent.payload.skill_version_ids)
+                        lead_skill_snapshots = tuple(skill_by_version[version_id] for version_id in agent.skill_version_ids)
                         lead_mcp_snapshots = tuple(mcp_by_version[version_id] for version_id in agent.payload.mcp_version_ids)
                     except KeyError:
                         raise RunSnapshotAssetStale from None
@@ -303,7 +289,7 @@ class PrivateAssetRuntime:
                 required_skill_versions = {item.version_id for item in lead_skill_snapshots}
                 required_mcp_versions = {item.version_id for item in lead_mcp_snapshots}
                 for delegated in delegated_agents:
-                    required_skill_versions.update(delegated.payload.skill_version_ids)
+                    required_skill_versions.update(delegated.skill_version_ids)
                     required_mcp_versions.update(delegated.payload.mcp_version_ids)
                 if required_skill_versions != set(skill_by_version) or required_mcp_versions != set(mcp_by_version):
                     raise RunSnapshotAssetStale
@@ -325,12 +311,6 @@ class PrivateAssetRuntime:
                 )
                 if current_grants != persisted_grants:
                     raise RunSnapshotAssetStale
-                skill_assets = tuple(asset for asset in assets if asset.asset_kind == AssetKind.SKILL.value)
-                current_skill_credentials = await self._snapshots.current_skill_credentials_in_session(
-                    session,
-                    context,
-                    skill_assets,
-                )
                 persisted_skill_credentials = tuple(
                     sorted(
                         skill_credentials,
@@ -342,8 +322,13 @@ class PrivateAssetRuntime:
                         ),
                     )
                 )
-                if current_skill_credentials != persisted_skill_credentials:
-                    raise RunSnapshotAssetStale
+                await self._snapshots.lock_admitted_skill_credentials_in_session(
+                    session,
+                    context,
+                    persisted_skill_credentials,
+                    declared_targets=frozenset((snapshot.version_id, requirement.name) for snapshot in skill_snapshots for requirement in snapshot.secret_requirements),
+                    required_targets=frozenset((snapshot.version_id, requirement.name) for snapshot in skill_snapshots for requirement in snapshot.secret_requirements if not requirement.optional),
+                )
         except (RunSnapshotAssetStale, AssetResolutionUnavailable, AssetValidationFailed, AssetForbidden):
             raise PrivateWorkAssetStale(context.request_id) from None
         except AssetStorageUnavailable:
@@ -390,7 +375,7 @@ class PrivateAssetRuntime:
                 _private_agent_manifest(
                     delegated,
                     runtime_key=identity.runtime_key,
-                    skills=tuple(skill_manifest_by_version[version_id] for version_id in delegated.payload.skill_version_ids),
+                    skills=tuple(skill_manifest_by_version[version_id] for version_id in delegated.skill_version_ids),
                     mcps=tuple(mcp_manifest_by_version[version_id] for version_id in delegated.payload.mcp_version_ids),
                 )
                 for delegated, identity in zip(

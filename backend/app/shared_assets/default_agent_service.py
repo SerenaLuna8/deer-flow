@@ -156,7 +156,7 @@ class ProjectDefaultAgentService:
                             actor,
                             agent_asset_id,
                         )
-                        if target.status != "active" or target.current_published_version_id is None:
+                        if target.status != "active" or target.current_version_id is None:
                             raise AssetConflict(actor.request_id)
                         try:
                             resolved = await self._resolver.resolve_project_asset_snapshot_in_session(

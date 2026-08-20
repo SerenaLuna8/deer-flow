@@ -2,7 +2,8 @@ import { z } from "zod";
 
 import {
   agentModelSettingsSchema,
-  assetSummarySchema,
+  assetScopeSchema,
+  currentVersionAssetSummarySchema,
 } from "@/core/shared-assets/types";
 
 const uuidSchema = z.string().uuid();
@@ -78,7 +79,9 @@ export const agentBuilderBlueprintSchema = z
     description: z.string(),
     model_ref: z.string().trim().min(1),
     tool_groups: z.array(z.string().trim().min(1)),
-    skill_version_ids: z.array(uuidSchema),
+    skill_refs: z.array(
+      z.object({ scope: assetScopeSchema, asset_id: uuidSchema }).strict(),
+    ),
     mcp_version_ids: z.array(uuidSchema),
     agents_instructions: z.string(),
     soul: z.string(),
@@ -258,7 +261,7 @@ export const agentBuilderCommitResponseSchema = z
     data: z
       .object({
         session: agentBuilderSessionSchema,
-        agent: assetSummarySchema,
+        agent: currentVersionAssetSummarySchema,
       })
       .strict(),
     request_id: z.string().trim().min(1),

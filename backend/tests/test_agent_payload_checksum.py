@@ -10,7 +10,12 @@ from app.shared_assets.agent_payload_checksum import (
     agent_payload_checksum_matches,
 )
 from app.shared_assets.agent_service import AgentService
-from app.shared_assets.models import AgentModelSettings, AgentPayload
+from app.shared_assets.models import (
+    AgentModelSettings,
+    AgentPayload,
+    AssetScope,
+    SkillAssetRef,
+)
 
 _MODEL_REF = "88888888-8888-4888-8888-888888888891"
 
@@ -25,7 +30,12 @@ def _payload(
         soul="soul",
         model_ref=_MODEL_REF,
         tool_groups=("file:read", "task"),
-        skill_version_ids=(uuid.UUID("11111111-1111-1111-1111-111111111111"),),
+        skill_refs=(
+            SkillAssetRef(
+                AssetScope.PROJECT,
+                uuid.UUID("11111111-1111-1111-1111-111111111111"),
+            ),
+        ),
         mcp_version_ids=(uuid.UUID("22222222-2222-2222-2222-222222222222"),),
         agents_instructions="agents",
         identity="identity",
@@ -40,11 +50,11 @@ def _payload(
     [
         (
             _payload(payload_schema_version=1),
-            "0bec4cafa2aa2762ed4ed4d8b15e39570f92c776f59f3616ed8b5aa2aadb3cc8",
+            "d9bdb3790bc982925d4073ac0741ac594d00803bbd62681dfad23821c3ba9741",
         ),
         (
             _payload(payload_schema_version=2),
-            "e44d78be94287d8a211d7bbe966469977b4705a113c41b01f332dabd4f874a01",
+            "07371c6d9174fd65064c94363d12e05e7f0ed0f11ece0ce24a8ec2de3380af8b",
         ),
         (
             _payload(
@@ -54,7 +64,17 @@ def _payload(
                     max_tokens=123,
                 ),
             ),
-            "d70c97307b92b1a805e3759ace3bfe514e2d085424ae83e2e64bdbc0e97f712d",
+            "d67a74de93f5f9c7cd5272615d56b97b18d5524005d0d21ac784886de6f8eca7",
+        ),
+        (
+            _payload(
+                payload_schema_version=4,
+                model_settings=AgentModelSettings(
+                    temperature=0.5,
+                    max_tokens=123,
+                ),
+            ),
+            "d67a74de93f5f9c7cd5272615d56b97b18d5524005d0d21ac784886de6f8eca7",
         ),
     ],
 )
@@ -95,7 +115,7 @@ def test_agent_payload_checksum_rejects_invalid_schema_settings_pair() -> None:
             )
         )
     with pytest.raises(ValueError, match="schema version"):
-        agent_payload_checksum(replace(_payload(payload_schema_version=1), payload_schema_version=4))
+        agent_payload_checksum(replace(_payload(payload_schema_version=1), payload_schema_version=5))
 
 
 def test_agent_payload_checksum_matcher_fails_closed() -> None:

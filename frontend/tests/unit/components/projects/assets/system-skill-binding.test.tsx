@@ -37,8 +37,8 @@ function systemSkill(
     display_name: "System Skill",
     description: "System description",
     status: "active",
-    current_published_version_id: VERSION_ID,
-    version: 1,
+    current_version_id: VERSION_ID,
+    revision: 1,
     capabilities: ["shared_assets.read", "shared_assets.manage_bindings"],
     binding: null,
     created_by_user_id: "system",
@@ -96,7 +96,7 @@ describe("project System Skill binding", () => {
         project_id: PROJECT_ID,
         kind: "skill",
         asset_id: ASSET_ID,
-        version_id: VERSION_ID,
+        current_version_id: VERSION_ID,
         enabled: true,
         version: 2,
         created_by_user_id: "user-1",
@@ -112,7 +112,7 @@ describe("project System Skill binding", () => {
 
   test("shows revoked history but excludes it from submit targets", () => {
     const revoked = {
-      workflow_status: "published" as const,
+      relation: "current" as const,
       governance_status: "revoked" as const,
       binding_eligible: false,
     };
@@ -120,7 +120,7 @@ describe("project System Skill binding", () => {
     expect(systemSkillVersionIsBindable(revoked)).toBe(false);
     expect(
       systemSkillBindingVersionLabel({ ...revoked, version_number: 1 }),
-    ).toBe("版本 1（已撤销，不可绑定）");
+    ).toBe("当前版本 v1（已撤销，不可启用）");
     expect(
       systemBindingDialogAvailability({
         historyLoading: false,
@@ -128,13 +128,13 @@ describe("project System Skill binding", () => {
         historyRetryPending: false,
         mutationPending: false,
         selectedVersionId: VERSION_ID,
-        publishedVersionIds: [],
+        eligibleVersionIds: [],
         boundVersionId: null,
       }).canSubmit,
     ).toBe(false);
     expect(
       projectAssetVersionDisplayStatus({
-        workflow_status: "published",
+        relation: "current",
         governance_status: "revoked",
       } as AssetVersion),
     ).toBe("revoked");

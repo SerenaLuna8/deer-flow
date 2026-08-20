@@ -12,6 +12,7 @@ from app.projects.models import ProjectRole
 from app.shared_assets import agent_design_service as agent_design_service_module
 from app.shared_assets.agent_design_service import AgentDesignService
 from app.shared_assets.agent_repository import AgentRepository
+from app.shared_assets.models import AssetScope, SkillAssetRef
 
 
 def test_all_internal_tool_groups_follow_runtime_config_and_include_task() -> None:
@@ -42,6 +43,7 @@ async def test_default_blueprint_freezes_all_enabled_system_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     skill_ids = (uuid.uuid4(), uuid.uuid4())
+    skill_refs = tuple(SkillAssetRef(AssetScope.SYSTEM, skill_id) for skill_id in skill_ids)
     mcp_ids = (uuid.uuid4(),)
     captured_contexts: list[object] = []
 
@@ -49,12 +51,12 @@ async def test_default_blueprint_freezes_all_enabled_system_dependencies(
         def __init__(self, session: object) -> None:
             assert session is fake_session
 
-        async def list_enabled_system_dependency_versions(
+        async def list_enabled_system_dependencies(
             self,
             context: object,
         ) -> tuple[tuple[uuid.UUID, ...], tuple[uuid.UUID, ...]]:
             captured_contexts.append(context)
-            return skill_ids, mcp_ids
+            return skill_refs, mcp_ids
 
     fake_session = object()
     context = object()
@@ -88,13 +90,13 @@ async def test_default_blueprint_freezes_all_enabled_system_dependencies(
         "bash",
         "task",
     )
-    assert blueprint.skill_version_ids == skill_ids
+    assert blueprint.skill_refs == skill_refs
     assert blueprint.mcp_version_ids == mcp_ids
     assert captured_contexts == [context]
 
 
 @pytest.mark.asyncio
-async def test_default_system_dependencies_only_query_enabled_active_published_bindings() -> None:
+async def test_default_system_dependencies_query_enabled_active_current_assets() -> None:
     skill_ids = (uuid.uuid4(), uuid.uuid4())
     mcp_ids = (uuid.uuid4(),)
 
@@ -133,14 +135,18 @@ async def test_default_system_dependencies_only_query_enabled_active_published_b
     session = _Session()
     repository = _Repository(session)  # type: ignore[arg-type]
 
-    resolved = await repository.list_enabled_system_dependency_versions(context)
+    resolved = await repository.list_enabled_system_dependencies(context)
 
-    assert resolved == (skill_ids, mcp_ids)
+    assert resolved == (
+        tuple(SkillAssetRef(AssetScope.SYSTEM, skill_id) for skill_id in skill_ids),
+        mcp_ids,
+    )
     assert repository.locked_context is context
     skill_sql, mcp_sql = (str(statement.compile(compile_kwargs={"literal_binds": True})).lower() for statement in session.statements)
     assert "project_system_skill_bindings.enabled is true" in skill_sql
     assert "skills.status = 'active'" in skill_sql
-    assert "skill_versions.workflow_status = 'published'" in skill_sql
+    assert "skill_versions.id = skills.current_version_id" in skill_sql
+    assert "skill_versions.revoked_at is null" in skill_sql
     assert "project_system_mcp_bindings.enabled is true" in mcp_sql
     assert "mcp_servers.status = 'active'" in mcp_sql
     assert "mcp_server_versions.workflow_status = 'published'" in mcp_sql

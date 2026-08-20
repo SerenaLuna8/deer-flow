@@ -9,7 +9,7 @@ from app.private_work.asset_runtime_contracts import (
 )
 from app.private_work.snapshot_repository import RunSnapshotAssetStale
 from app.shared_assets.agent_payload_checksum import (
-    agent_payload_checksum_matches,
+    resolved_agent_payload_checksum_matches,
 )
 from app.shared_assets.models import ResolvedAgentSnapshot
 
@@ -23,9 +23,10 @@ def build_private_agent_manifest(
 ) -> PrivateAgentManifest:
     """Build the secret-free runtime manifest from one exact snapshot."""
 
-    if not agent_payload_checksum_matches(
+    if not resolved_agent_payload_checksum_matches(
         agent.payload,
         agent.checksum,
+        skill_version_ids=agent.skill_version_ids,
     ):
         raise RunSnapshotAssetStale
     return PrivateAgentManifest(

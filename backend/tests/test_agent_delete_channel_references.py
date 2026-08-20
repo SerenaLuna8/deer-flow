@@ -38,8 +38,8 @@ def _asset(context: ProjectContext, *, status: str = "active") -> SimpleNamespac
         scope="project",
         project_id=context.project_id,
         status=status,
-        version=7,
-        current_published_version_id=uuid.uuid4(),
+        revision=7,
+        current_version_id=uuid.uuid4(),
     )
 
 
@@ -50,7 +50,7 @@ async def test_archive_changes_only_agent_lifecycle_state(
 ) -> None:
     context = _context()
     asset = _asset(context, status=initial_status)
-    published_version_id = asset.current_published_version_id
+    current_version_id = asset.current_version_id
     session = _Session()
 
     await AgentRepository(session).archive_project_asset(  # type: ignore[arg-type]
@@ -59,8 +59,8 @@ async def test_archive_changes_only_agent_lifecycle_state(
     )
 
     assert asset.status == "archived"
-    assert asset.version == 8
-    assert asset.current_published_version_id == published_version_id
+    assert asset.revision == 8
+    assert asset.current_version_id == current_version_id
     assert session.flushed == 1
 
 

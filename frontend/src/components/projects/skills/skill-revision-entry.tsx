@@ -23,14 +23,11 @@ import { skillBuilderErrorMessage } from "./skill-builder-start";
 
 export function skillRevisionEntryVisible(
   capabilities: Project["capabilities"],
-  item: Pick<
-    ProjectAssetItem,
-    "scope" | "status" | "current_published_version_id"
-  >,
+  item: Pick<ProjectAssetItem, "scope" | "status" | "current_version_id">,
 ): boolean {
   return (
     item.scope === "project" &&
-    item.current_published_version_id !== null &&
+    item.current_version_id !== null &&
     (item.status === "active" || item.status === "suspended") &&
     skillBuilderCanAuthor(capabilities)
   );

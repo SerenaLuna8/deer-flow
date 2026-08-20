@@ -47,15 +47,14 @@ def _skill_record(
         slug=slug,
         display_name=slug,
         status="active",
-        current_published_version_id=None,
-        version=1,
+        current_version_id=None,
+        revision=1,
         created_by_user_id=str(uuid.uuid4()),
     )
     version = SkillVersionRow(
         id=uuid.uuid4(),
         skill_id=selected_asset_id,
         version_number=1,
-        workflow_status="published",
         description="runtime name test",
         frontmatter={"name": slug},
         compatibility=None,
@@ -65,6 +64,7 @@ def _skill_record(
         payload_checksum="a" * 64,
         created_by_user_id=str(uuid.uuid4()),
     )
+    asset.current_version_id = version.id
     return _ResolvedRecord(scope, asset, version)
 
 

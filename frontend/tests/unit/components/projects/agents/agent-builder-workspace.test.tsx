@@ -38,7 +38,7 @@ function blueprint(): AgentBuilderBlueprint {
     description: "审查代码并给出可执行建议",
     model_ref: "default",
     tool_groups: ["read"],
-    skill_version_ids: [],
+    skill_refs: [],
     mcp_version_ids: [],
     agents_instructions: "# AGENTS.md\n\n审查代码。",
     soul: "# SOUL.md\n\n严谨。",
@@ -316,7 +316,7 @@ describe("Agent Builder workspace", () => {
         onCreate={() => undefined}
       />,
     );
-    const labelIndex = html.lastIndexOf("创建 Agent 草稿");
+    const labelIndex = html.lastIndexOf("创建 Agent");
     const buttonStart = html.lastIndexOf("<button", labelIndex);
     const buttonEnd = html.indexOf(">", buttonStart);
 
@@ -361,7 +361,7 @@ describe("Agent Builder workspace", () => {
         onCreate={() => undefined}
       />,
     );
-    const labelIndex = html.lastIndexOf("创建 Agent 草稿");
+    const labelIndex = html.lastIndexOf("创建 Agent");
     const buttonStart = html.lastIndexOf("<button", labelIndex);
     const buttonEnd = html.indexOf(">", buttonStart);
 

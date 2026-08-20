@@ -615,7 +615,7 @@ class PostgresProjectChannelGroupBindingRepository:
     ) -> bool:
         statement = select(AgentRow.id).join(
             AgentVersionRow,
-            AgentVersionRow.id == AgentRow.current_published_version_id,
+            AgentVersionRow.id == AgentRow.current_version_id,
         )
         if agent_scope == "project":
             statement = statement.where(
@@ -623,7 +623,6 @@ class PostgresProjectChannelGroupBindingRepository:
                 AgentRow.scope == "project",
                 AgentRow.project_id == project_id,
                 AgentRow.status == "active",
-                AgentVersionRow.workflow_status == "published",
             ).with_for_update(read=True, of=[AgentRow, AgentVersionRow])
         elif agent_scope == "system":
             statement = (
@@ -636,9 +635,8 @@ class PostgresProjectChannelGroupBindingRepository:
                     AgentRow.scope == "system",
                     AgentRow.project_id.is_(None),
                     AgentRow.status == "active",
-                    AgentVersionRow.workflow_status == "published",
                     ProjectSystemAgentBindingRow.enabled.is_(True),
-                    ProjectSystemAgentBindingRow.agent_version_id == AgentVersionRow.id,
+                    AgentVersionRow.version_number == 1,
                 )
                 .with_for_update(
                     read=True,

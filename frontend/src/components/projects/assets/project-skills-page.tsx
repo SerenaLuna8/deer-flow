@@ -76,7 +76,7 @@ export function ProjectSkillsPage({
               onDirtyChange: context.onDirtyChange,
               onCredentialBindingsDirtyChange:
                 context.onCredentialBindingsDirtyChange,
-              onPublishValidityChange: context.onPublishValidityChange,
+              onActivationValidityChange: context.onActivationValidityChange,
               onVersionCreated: context.onVersionCreated,
               canManageCredentials: project.capabilities.includes(
                 "mcp.credentials.approve",

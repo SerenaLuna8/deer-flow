@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, rs, test } from "@rstest/core";
 
 import {
-  getProjectSkillPublishPlan,
+  getProjectSkillActivationReadiness,
   parseProjectSkillFrontmatter,
   patchProjectSkillFrontmatter,
-  publishProjectAssetVersion,
+  activateProjectAssetVersion,
   updateProjectSkillCredentialBindings,
   type SharedAssetApiError,
 } from "@/core/shared-assets";
@@ -96,11 +96,11 @@ describe("Skill secret API", () => {
     );
   });
 
-  test("loads a version-bound publish plan and rejects a mismatched identity", async () => {
+  test("loads version-bound activation readiness and rejects a mismatched identity", async () => {
     const plan = {
       skill_id: SKILL_ID,
       skill_version_id: VERSION_ID,
-      asset_version: 4,
+      revision: 4,
       payload_checksum: SHA,
       binding_revision: 1,
       secrets_autonomous: false,
@@ -122,7 +122,7 @@ describe("Skill secret API", () => {
       rs.fn(async () => jsonResponse(plan)),
     );
     await expect(
-      getProjectSkillPublishPlan(PROJECT_ID, SKILL_ID, VERSION_ID),
+      getProjectSkillActivationReadiness(PROJECT_ID, SKILL_ID, VERSION_ID),
     ).resolves.toEqual(plan);
 
     rs.stubGlobal(
@@ -135,19 +135,19 @@ describe("Skill secret API", () => {
       ),
     );
     await expect(
-      getProjectSkillPublishPlan(PROJECT_ID, SKILL_ID, VERSION_ID),
+      getProjectSkillActivationReadiness(PROJECT_ID, SKILL_ID, VERSION_ID),
     ).rejects.toMatchObject({
       code: "ASSET_RESPONSE_INVALID",
     } satisfies Partial<SharedAssetApiError>);
   });
 
-  test("publishes the target version with payload and binding CAS only", async () => {
+  test("activates the target version with payload and binding CAS only", async () => {
     const response = {
       data: {
         id: VERSION_ID,
         skill_id: SKILL_ID,
         version_number: 2,
-        workflow_status: "published",
+        relation: "current",
         description: "Example",
         frontmatter: { name: "example" },
         compatibility: null,
@@ -173,18 +173,18 @@ describe("Skill secret API", () => {
         created_by_user_id: USER_ID,
         created_at: "2026-08-19T09:00:00Z",
       },
-      request_id: "publish-request",
+      request_id: "activation-request",
     };
     const fetchMock = rs.fn(async () => jsonResponse(response));
     rs.stubGlobal("fetch", fetchMock);
     const input = {
-      expected_asset_version: 4,
+      expected_revision: 4,
       expected_payload_checksum: SHA,
       expected_binding_revision: 1,
     };
 
     await expect(
-      publishProjectAssetVersion(
+      activateProjectAssetVersion(
         PROJECT_ID,
         "skills",
         SKILL_ID,
@@ -194,7 +194,7 @@ describe("Skill secret API", () => {
     ).resolves.toEqual(response);
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
-        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/publish`,
+        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/activate`,
       ),
       expect.objectContaining({
         method: "POST",

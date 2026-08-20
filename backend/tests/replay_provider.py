@@ -83,6 +83,7 @@ from langchain_core.runnables import Runnable
 from pydantic import PrivateAttr
 
 _FIXTURE_ENV = "DEERFLOW_REPLAY_FIXTURE"
+_REPEAT_COUNT_ENV = "DEERFLOW_REPLAY_REPEAT_COUNT"
 _DEFAULT_CALLER = "lead_agent"
 _CALLER_TAG_PREFIXES = ("middleware:", "subagent:")
 _CALLER_NAME_ALIASES = {
@@ -259,30 +260,39 @@ class _ReplayTurn:
 def _load_fixture(fixture_path: str) -> dict[str, deque[_ReplayTurn]]:
     with open(fixture_path, encoding="utf-8") as handle:
         payload = json.load(handle)
+    raw_repeat_count = os.environ.get(_REPEAT_COUNT_ENV, "1")
+    try:
+        repeat_count = int(raw_repeat_count)
+    except ValueError as exc:
+        raise ValueError(f"${_REPEAT_COUNT_ENV} must be an integer") from exc
+    if not 1 <= repeat_count <= 10:
+        raise ValueError(f"${_REPEAT_COUNT_ENV} must be between 1 and 10")
     table: dict[str, deque[_ReplayTurn]] = {}
-    for index, turn in enumerate(payload.get("turns", [])):
-        input_hash = turn["input_hash"]
-        (message,) = messages_from_dict([turn["output"]])
-        if not isinstance(message, AIMessage):
-            raise ValueError(f"replay fixture {fixture_path!r} turn {index} output is {type(message).__name__}, expected AIMessage")
-        text_chunk_chars: int | None = None
-        stream = turn.get("stream")
-        if stream is not None:
-            if not isinstance(stream, dict) or set(stream) != {"provenance", "text_chunk_chars"}:
-                raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream metadata is invalid")
-            if stream.get("provenance") != "derived_from_recorded_output":
-                raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream provenance is invalid")
-            text_chunk_chars = stream.get("text_chunk_chars")
-            if type(text_chunk_chars) is not int or not 1 <= text_chunk_chars <= 256:
-                raise ValueError(f"replay fixture {fixture_path!r} turn {index} text chunk size is invalid")
-            if not isinstance(message.content, str) or not message.content or message.tool_calls or message.invalid_tool_calls:
-                raise ValueError(f"replay fixture {fixture_path!r} turn {index} cannot derive plain-text stream chunks")
-        table.setdefault(input_hash, deque()).append(
-            _ReplayTurn(
-                message=message,
-                text_chunk_chars=text_chunk_chars,
+    turns = payload.get("turns", [])
+    for _ in range(repeat_count):
+        for index, turn in enumerate(turns):
+            input_hash = turn["input_hash"]
+            (message,) = messages_from_dict([turn["output"]])
+            if not isinstance(message, AIMessage):
+                raise ValueError(f"replay fixture {fixture_path!r} turn {index} output is {type(message).__name__}, expected AIMessage")
+            text_chunk_chars: int | None = None
+            stream = turn.get("stream")
+            if stream is not None:
+                if not isinstance(stream, dict) or set(stream) != {"provenance", "text_chunk_chars"}:
+                    raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream metadata is invalid")
+                if stream.get("provenance") != "derived_from_recorded_output":
+                    raise ValueError(f"replay fixture {fixture_path!r} turn {index} stream provenance is invalid")
+                text_chunk_chars = stream.get("text_chunk_chars")
+                if type(text_chunk_chars) is not int or not 1 <= text_chunk_chars <= 256:
+                    raise ValueError(f"replay fixture {fixture_path!r} turn {index} text chunk size is invalid")
+                if not isinstance(message.content, str) or not message.content or message.tool_calls or message.invalid_tool_calls:
+                    raise ValueError(f"replay fixture {fixture_path!r} turn {index} cannot derive plain-text stream chunks")
+            table.setdefault(input_hash, deque()).append(
+                _ReplayTurn(
+                    message=message,
+                    text_chunk_chars=text_chunk_chars,
+                )
             )
-        )
     return table
 
 
@@ -293,6 +303,11 @@ class ReplayChatModel(BaseChatModel):
     the real ``tool_calls``, so the agent dispatches them as if a live model had
     produced them.
     """
+
+    # The production runtime validates this server-owned override against the
+    # provider's declared field surface before construction. Replay never
+    # retries, but it must expose the same explicit contract as real providers.
+    max_retries: int = 0
 
     _table: dict[str, deque[_ReplayTurn]] = PrivateAttr(default_factory=dict)
     _fixture_path: str = PrivateAttr(default="")

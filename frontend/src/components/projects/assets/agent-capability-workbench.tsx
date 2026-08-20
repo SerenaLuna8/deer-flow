@@ -74,8 +74,13 @@ export function agentDependencyOptions(
   copy: CapabilityCopy,
 ): AgentDependencyOption[] {
   const systemOptions = catalog.system_items.map((item) => {
-    const versionId =
-      item.binding?.version_id ?? item.current_published_version_id;
+    const currentVersionId =
+      item.binding?.current_version_id ?? item.current_version_id;
+    const versionId = currentVersionId
+      ? kind === "skill"
+        ? `system:${item.id}`
+        : currentVersionId
+      : null;
     const statusReason = inactiveReason(item.status, copy);
     const bindingReason = item.binding?.enabled
       ? null
@@ -108,7 +113,7 @@ export function agentDependencyOptions(
   });
   const projectOptions = catalog.project_items.map((item) => {
     const statusReason = inactiveReason(item.status, copy);
-    const versionReason = item.current_published_version_id
+    const versionReason = item.current_version_id
       ? null
       : copy.reasons.noPublishedVersion;
     const reason = joinExplanations(
@@ -118,7 +123,11 @@ export function agentDependencyOptions(
     return {
       kind,
       assetId: item.id,
-      versionId: item.current_published_version_id,
+      versionId: item.current_version_id
+        ? kind === "skill"
+          ? `project:${item.id}`
+          : item.current_version_id
+        : null,
       scope: "project" as const,
       name: item.display_name,
       slug: item.slug,
@@ -146,7 +155,7 @@ export function agentDependencyOptionCanToggle(
 
 export type AgentCapabilityConflictRecovery = {
   assetId: string;
-  assetVersion: number;
+  assetRevision: number;
   generation: number;
   status: "refreshing" | "error";
 };
@@ -327,7 +336,8 @@ export function AgentCapabilityWorkbench({
   const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
   const update = useUpdateProjectAgentCapabilityBindings(accountId, projectId);
-  const initialSkills = version?.skill_version_ids ?? [];
+  const initialSkills =
+    version?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
   const initialMcps = version?.mcp_version_ids ?? [];
   const [baselineSkills, setBaselineSkills] = useState(initialSkills);
   const [baselineMcps, setBaselineMcps] = useState(initialMcps);
@@ -344,7 +354,7 @@ export function AgentCapabilityWorkbench({
   const scopeKey = `${accountId}:${projectId}:${item.id}`;
   const scopeKeyRef = useRef(scopeKey);
   const savedVersionIdRef = useRef<string | null>(null);
-  const expectedAssetVersionRef = useRef(item.version);
+  const expectedRevisionRef = useRef(item.revision);
   const dirty =
     !sameIds(baselineSkills, draftSkills) || !sameIds(baselineMcps, draftMcps);
   const skillOptions = useMemo(
@@ -418,17 +428,18 @@ export function AgentCapabilityWorkbench({
       savedVersionIdRef.current &&
       version?.id !== savedVersionIdRef.current
     ) {
-      if (item.version <= expectedAssetVersionRef.current) return;
+      if (item.revision <= expectedRevisionRef.current) return;
     }
     savedVersionIdRef.current = null;
-    const nextSkills = version?.skill_version_ids ?? [];
+    const nextSkills =
+      version?.skill_refs.map((ref) => `${ref.scope}:${ref.asset_id}`) ?? [];
     const nextMcps = version?.mcp_version_ids ?? [];
     setBaselineSkills(nextSkills);
     setBaselineMcps(nextMcps);
     setDraftSkills(nextSkills);
     setDraftMcps(nextMcps);
-    expectedAssetVersionRef.current = item.version;
-  }, [conflictRecovery, dirty, item.version, update.isPending, version]);
+    expectedRevisionRef.current = item.revision;
+  }, [conflictRecovery, dirty, item.revision, update.isPending, version]);
 
   function discard() {
     cancelRecovery();
@@ -455,7 +466,7 @@ export function AgentCapabilityWorkbench({
         reloadProjectAgentAuthoringState({
           projectId,
           assetId: recovery.assetId,
-          attemptedAssetVersion: recovery.assetVersion,
+          attemptedRevision: recovery.assetRevision,
           includeDependencyCatalogs: true,
           signal: scopeSignal
             ? AbortSignal.any([controller.signal, scopeSignal])
@@ -473,11 +484,13 @@ export function AgentCapabilityWorkbench({
         isCurrent: () => recoveryIsCurrent(recovery, controller),
       });
       if (!recoveryIsCurrent(recovery, controller)) return;
-      const nextSkills = reload.version.skill_version_ids;
+      const nextSkills = reload.version.skill_refs.map(
+        (ref) => `${ref.scope}:${ref.asset_id}`,
+      );
       const nextMcps = reload.version.mcp_version_ids;
       setBaselineSkills(nextSkills);
       setBaselineMcps(nextMcps);
-      expectedAssetVersionRef.current = reload.item.version;
+      expectedRevisionRef.current = reload.item.revision;
       savedVersionIdRef.current = reload.version.id;
       setConflictRecovery(null);
       setLocalError(
@@ -520,9 +533,15 @@ export function AgentCapabilityWorkbench({
       const result = await update.mutateAsync({
         assetId: item.id,
         input: {
-          skill_version_ids: draftSkills,
+          skill_refs: draftSkills.map((value) => {
+            const [scope, asset_id] = value.split(":", 2);
+            if ((scope !== "system" && scope !== "project") || !asset_id) {
+              throw new TypeError("Invalid Skill asset reference");
+            }
+            return { scope, asset_id };
+          }),
           mcp_version_ids: draftMcps,
-          expected_asset_version: expectedAssetVersionRef.current,
+          expected_revision: expectedRevisionRef.current,
         },
       });
       if (
@@ -534,11 +553,14 @@ export function AgentCapabilityWorkbench({
         return;
       }
       const nextVersion = result.data;
-      setBaselineSkills(nextVersion.skill_version_ids);
+      const nextSkillRefs = nextVersion.skill_refs.map(
+        (ref) => `${ref.scope}:${ref.asset_id}`,
+      );
+      setBaselineSkills(nextSkillRefs);
       setBaselineMcps(nextVersion.mcp_version_ids);
-      setDraftSkills(nextVersion.skill_version_ids);
+      setDraftSkills(nextSkillRefs);
       setDraftMcps(nextVersion.mcp_version_ids);
-      expectedAssetVersionRef.current += 1;
+      expectedRevisionRef.current += 1;
       savedVersionIdRef.current = nextVersion.id;
       setConflictRecovery(null);
       setEditing(false);
@@ -560,7 +582,7 @@ export function AgentCapabilityWorkbench({
         const controller = new AbortController();
         const recovery: AgentCapabilityConflictRecovery = {
           assetId: item.id,
-          assetVersion: expectedAssetVersionRef.current,
+          assetRevision: expectedRevisionRef.current,
           generation: recoveryGenerationRef.current + 1,
           status: "refreshing",
         };
