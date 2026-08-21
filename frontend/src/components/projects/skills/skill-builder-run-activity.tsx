@@ -10,6 +10,7 @@ import {
 
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
+import { skillBuilderActivityTerminal } from "@/core/skill-builder";
 import type {
   SkillBuilderActivity,
   SkillBuilderRunAdmission,
@@ -157,33 +158,41 @@ export function SkillBuilderActivityBlock({
 }) {
   const { t } = useI18n();
   const copy = t.skills.builder.activity;
-  const terminal = [...activities]
-    .reverse()
-    .find((activity) =>
-      ["run_terminal", "commit_terminal"].includes(activity.kind),
-    );
-  const active = terminal === undefined;
-  const terminalStatus =
-    terminal && "status" in terminal.payload ? terminal.payload.status : null;
+  const terminal = skillBuilderActivityTerminal(activities);
+  const active = terminal === null;
+  const terminalStatus = terminal?.status ?? null;
   const startedAt = activities[0]
     ? Date.parse(activities[0].created_at)
     : Number.NaN;
-  const finishedAt = terminal ? Date.parse(terminal.created_at) : Number.NaN;
+  const finishedAt = terminal
+    ? Date.parse(terminal.activity.created_at)
+    : Number.NaN;
   const durationMs =
     Number.isFinite(startedAt) && Number.isFinite(finishedAt)
       ? Math.max(0, finishedAt - startedAt)
       : null;
-  const reasoningByAttempt = new Map<number, string>();
+  const timeline: Array<
+    | { kind: "activity"; activity: SkillBuilderActivity }
+    | { kind: "reasoning"; seq: string; attempt: number | null; text: string }
+  > = [];
   for (const activity of activities) {
-    if (
-      activity.kind === "reasoning" &&
-      activity.attempt !== null &&
-      activity.payload.text
-    ) {
-      reasoningByAttempt.set(
-        activity.attempt,
-        `${reasoningByAttempt.get(activity.attempt) ?? ""}${activity.payload.text}`,
-      );
+    if (activity.kind === "reasoning" && activity.payload.text) {
+      const previous = timeline.at(-1);
+      if (
+        previous?.kind === "reasoning" &&
+        previous.attempt === activity.attempt
+      ) {
+        previous.text += activity.payload.text;
+      } else {
+        timeline.push({
+          kind: "reasoning",
+          seq: activity.seq,
+          attempt: activity.attempt,
+          text: activity.payload.text,
+        });
+      }
+    } else {
+      timeline.push({ kind: "activity", activity });
     }
   }
 
@@ -221,32 +230,53 @@ export function SkillBuilderActivityBlock({
         ) : null}
       </summary>
       <div className="mt-3 space-y-3 pl-5">
-        <ol className="text-muted-foreground space-y-1 text-xs">
-          {activities
-            .filter((activity) => activity.kind !== "reasoning")
-            .map((activity) => (
-              <li key={activity.seq}>
-                {copy.stages[activity.kind]}
-                {activity.kind.startsWith("tool_") &&
-                "tool_name" in activity.payload
-                  ? ` · ${activity.payload.tool_name}`
-                  : ""}
-                {activity.attempt !== null
-                  ? ` · ${copy.attempt(activity.attempt)}`
-                  : ""}
-              </li>
-            ))}
-        </ol>
-        {[...reasoningByAttempt.entries()].map(([attempt, reasoning]) => (
-          <section key={attempt} className="space-y-1.5">
-            <p className="text-muted-foreground text-xs font-medium">
-              {copy.reasoning(attempt)}
+        {timeline.map((item) => {
+          if (item.kind === "reasoning") {
+            return (
+              <section key={item.seq} className="space-y-1.5">
+                <p className="text-muted-foreground text-xs font-medium">
+                  {item.attempt === null
+                    ? copy.title
+                    : copy.reasoning(item.attempt)}
+                </p>
+                <div className="text-sm leading-6">
+                  <SafeStreamdown>{item.text}</SafeStreamdown>
+                </div>
+              </section>
+            );
+          }
+          const { activity } = item;
+          const toolDetails =
+            activity.kind.startsWith("tool_") && "tool_name" in activity.payload
+              ? [
+                  typeof activity.payload.resource_name === "string"
+                    ? activity.payload.resource_name
+                    : undefined,
+                  typeof activity.payload.path === "string"
+                    ? activity.payload.path
+                    : undefined,
+                  typeof activity.payload.result_count === "number"
+                    ? copy.resultCount(activity.payload.result_count)
+                    : undefined,
+                  typeof activity.payload.size_bytes === "number"
+                    ? copy.sizeBytes(activity.payload.size_bytes)
+                    : undefined,
+                ].filter((value): value is string => Boolean(value))
+              : [];
+          return (
+            <p key={activity.seq} className="text-muted-foreground text-xs">
+              {copy.stages[activity.kind]}
+              {activity.kind.startsWith("tool_") &&
+              "tool_name" in activity.payload
+                ? ` · ${activity.payload.tool_name}`
+                : ""}
+              {toolDetails.length > 0 ? ` · ${toolDetails.join(" · ")}` : ""}
+              {activity.attempt !== null
+                ? ` · ${copy.attempt(activity.attempt)}`
+                : ""}
             </p>
-            <div className="text-sm leading-6">
-              <SafeStreamdown>{reasoning}</SafeStreamdown>
-            </div>
-          </section>
-        ))}
+          );
+        })}
       </div>
     </details>
   );

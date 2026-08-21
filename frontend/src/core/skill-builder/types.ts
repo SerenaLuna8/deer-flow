@@ -118,9 +118,22 @@ const skillBuilderEmptyActivitySchema = skillBuilderActivityBaseSchema
 const skillBuilderReasoningActivitySchema = skillBuilderActivityBaseSchema
   .extend({
     kind: z.literal("reasoning"),
-    payload: z.object({ text: z.string().min(1).max(65_536) }).strict(),
+    payload: z.object({ text: z.string().min(1) }).strict(),
   })
   .strict();
+
+const skillBuilderToolDetailFields: Record<string, ReadonlySet<string>> = {
+  search_available_skills: new Set(["result_count"]),
+  read_skill_version: new Set(["resource_name"]),
+  search_available_mcp_tools: new Set(["result_count"]),
+  inspect_mcp_tool: new Set(["resource_name"]),
+  list_candidate_files: new Set(["result_count"]),
+  read_candidate_file: new Set(["path", "size_bytes"]),
+  upsert_candidate_file: new Set(["path", "size_bytes"]),
+  delete_candidate_file: new Set(["path", "size_bytes"]),
+  request_skill_clarification: new Set<string>(),
+  finalize_skill_candidate: new Set<string>(),
+} as const;
 
 const skillBuilderToolActivitySchema = skillBuilderActivityBaseSchema
   .extend({
@@ -128,9 +141,56 @@ const skillBuilderToolActivitySchema = skillBuilderActivityBaseSchema
     payload: z
       .object({
         tool_call_id: z.string().trim().min(1).max(512),
-        tool_name: z.string().trim().min(1).max(255),
+        tool_name: z.enum([
+          "search_available_skills",
+          "read_skill_version",
+          "search_available_mcp_tools",
+          "inspect_mcp_tool",
+          "list_candidate_files",
+          "read_candidate_file",
+          "upsert_candidate_file",
+          "delete_candidate_file",
+          "request_skill_clarification",
+          "finalize_skill_candidate",
+        ]),
+        result_count: z.number().int().min(0).max(128).nullish(),
+        resource_name: z.string().trim().min(1).max(512).nullish(),
+        path: z
+          .string()
+          .trim()
+          .min(1)
+          .max(1_024)
+          .refine(
+            (value) =>
+              !value.startsWith("/") && !value.split("/").includes(".."),
+          )
+          .nullish(),
+        size_bytes: z
+          .number()
+          .int()
+          .min(0)
+          .max(2 * 1024 * 1024)
+          .nullish(),
       })
-      .strict(),
+      .strict()
+      .superRefine((payload, context) => {
+        const allowed = skillBuilderToolDetailFields[payload.tool_name];
+        if (!allowed) return;
+        for (const field of [
+          "result_count",
+          "resource_name",
+          "path",
+          "size_bytes",
+        ] as const) {
+          if (payload[field] != null && !allowed.has(field)) {
+            context.addIssue({
+              code: "custom",
+              path: [field],
+              message: "field is not public for this tool",
+            });
+          }
+        }
+      }),
   })
   .strict();
 
@@ -140,7 +200,7 @@ const skillBuilderTerminalActivitySchema = skillBuilderActivityBaseSchema
     payload: z
       .object({
         status: z.enum(["completed", "failed", "stopped"]),
-        code: z.string().trim().min(1).max(64).optional(),
+        code: z.string().trim().min(1).max(64).nullish(),
       })
       .strict(),
   })
@@ -152,6 +212,38 @@ export const skillBuilderActivitySchema = z.union([
   skillBuilderToolActivitySchema,
   skillBuilderTerminalActivitySchema,
 ]);
+
+export function skillBuilderActivityTerminal(
+  activities: readonly SkillBuilderActivity[],
+): {
+  activity: SkillBuilderActivity;
+  status: "completed" | "failed" | "stopped";
+} | null {
+  const terminal = [...activities]
+    .reverse()
+    .find(
+      (activity) =>
+        activity.kind === "run_terminal" || activity.kind === "commit_terminal",
+    );
+  if (
+    terminal &&
+    (terminal.kind === "run_terminal" || terminal.kind === "commit_terminal")
+  ) {
+    return { activity: terminal, status: terminal.payload.status };
+  }
+  const last = activities.at(-1);
+  if (
+    last?.run_id === null &&
+    !activities.some((activity) => activity.run_id !== null) &&
+    (last.kind === "validation_passed" || last.kind === "validation_failed")
+  ) {
+    return {
+      activity: last,
+      status: last.kind === "validation_passed" ? "completed" : "failed",
+    };
+  }
+  return null;
+}
 
 export const skillBuilderActivityListResponseSchema = z
   .object({

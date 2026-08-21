@@ -2101,6 +2101,8 @@ export interface Translations {
         duration: (milliseconds: number) => string;
         attempt: (attempt: number) => string;
         reasoning: (attempt: number) => string;
+        resultCount: (count: number) => string;
+        sizeBytes: (count: number) => string;
         stop: string;
         stopping: string;
         stages: Record<
@@ -2201,6 +2203,8 @@ export interface Translations {
         withVersion: (version: number) => string;
         withoutVersion: string;
         goActivate: string;
+        viewSkill: string;
+        viewCandidateVersion: string;
         revisionWithSecrets: (version: number | null, count: number) => string;
         createdWithSecrets: (count: number) => string;
         configureCredentials: string;

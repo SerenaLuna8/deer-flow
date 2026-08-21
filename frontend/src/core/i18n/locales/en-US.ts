@@ -2517,6 +2517,8 @@ export const enUS: Translations = {
           attempt === 1 ? "Initial generation" : `Retry ${attempt - 1}`,
         reasoning: (attempt) =>
           attempt === 1 ? "Model reasoning" : `Retry ${attempt - 1} reasoning`,
+        resultCount: (count) => `${count} result${count === 1 ? "" : "s"}`,
+        sizeBytes: (count) => `${count} bytes`,
         stop: "Stop this turn",
         stopping: "Stopping…",
         stages: {
@@ -2531,7 +2533,7 @@ export const enUS: Translations = {
           validation_passed: "Deterministic validation passed",
           validation_failed: "Deterministic validation failed",
           repair_started: "Safe retry started",
-          run_terminal: "Generation turn finished",
+          run_terminal: "Operation finished",
           commit_accepted: "Create request received",
           commit_validation_started: "Candidate validation started",
           commit_validation_passed: "Candidate validation passed",
@@ -2625,6 +2627,8 @@ export const enUS: Translations = {
           `Saved Candidate Version v${version}. Go activate it`,
         withoutVersion: "Saved a Candidate Version. Go activate it",
         goActivate: "Go activate",
+        viewSkill: "View Skill",
+        viewCandidateVersion: "View Candidate Version",
         revisionWithSecrets: (version, count) =>
           `Saved ${version === null ? "a Candidate Version" : `Candidate Version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before activation.`,
         createdWithSecrets: (count) =>

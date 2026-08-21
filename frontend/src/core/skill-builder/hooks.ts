@@ -65,11 +65,14 @@ export function mergeSkillBuilderActivities(
   current: readonly SkillBuilderActivity[],
   incoming: readonly SkillBuilderActivity[],
 ): SkillBuilderActivity[] {
-  const bySeq = new Map(current.map((activity) => [activity.seq, activity]));
-  for (const activity of incoming) bySeq.set(activity.seq, activity);
-  return [...bySeq.values()].sort((left, right) =>
-    compareActivitySeq(left.seq, right.seq),
-  );
+  const merged: SkillBuilderActivity[] = [];
+  let cursor = "0";
+  for (const activity of [...current, ...incoming]) {
+    if (compareActivitySeq(activity.seq, cursor) <= 0) continue;
+    merged.push(activity);
+    cursor = activity.seq;
+  }
+  return merged;
 }
 
 export function useSkillBuilderRunStream({

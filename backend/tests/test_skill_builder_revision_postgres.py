@@ -668,6 +668,13 @@ async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
         assert validated.status is SkillDesignStatus.VALIDATED
         assert validated.validation is not None
         assert validated.base_files == opened.base_files
+        activities = await design.list_activities(context, opened.id)
+        assert [item.kind.value for item in activities] == [
+            "validation_started",
+            "validation_passed",
+            "run_terminal",
+        ]
+        assert activities[-1].payload == {"status": "completed"}
     finally:
         await seed.engine.dispose()
 

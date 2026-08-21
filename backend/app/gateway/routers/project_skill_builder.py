@@ -19,7 +19,14 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    model_validator,
+)
 
 from app.gateway.deps import get_system_model_catalog
 from app.gateway.routers.project_assets import (
@@ -300,33 +307,92 @@ class SkillDesignMessageResponse(_StrictModel):
     operation_id: uuid.UUID | None = None
 
 
-class SkillDesignActivityResponse(_StrictModel):
+class _SkillDesignActivityBaseResponse(_StrictModel):
     seq: str
     operation_id: uuid.UUID
     run_id: str | None
+    attempt: int | None
+    created_at: datetime
+
+
+class SkillDesignEmptyActivityPayloadResponse(_StrictModel):
+    pass
+
+
+class SkillDesignReasoningActivityPayloadResponse(_StrictModel):
+    text: str = Field(min_length=1)
+
+
+class SkillDesignToolActivityPayloadResponse(_StrictModel):
+    tool_call_id: str = Field(min_length=1, max_length=512)
+    tool_name: Literal[
+        "search_available_skills",
+        "read_skill_version",
+        "search_available_mcp_tools",
+        "inspect_mcp_tool",
+        "list_candidate_files",
+        "read_candidate_file",
+        "upsert_candidate_file",
+        "delete_candidate_file",
+        "request_skill_clarification",
+        "finalize_skill_candidate",
+    ]
+    result_count: int | None = Field(default=None, ge=0, le=128)
+    resource_name: str | None = Field(default=None, min_length=1, max_length=512)
+    path: str | None = Field(default=None, min_length=1, max_length=1_024)
+    size_bytes: int | None = Field(
+        default=None,
+        ge=0,
+        le=2 * 1024 * 1024,
+    )
+
+
+class SkillDesignTerminalActivityPayloadResponse(_StrictModel):
+    status: Literal["completed", "failed", "stopped"]
+    code: str | None = Field(default=None, min_length=1, max_length=64)
+
+
+class SkillDesignEmptyActivityResponse(_SkillDesignActivityBaseResponse):
     kind: Literal[
         "request_accepted",
         "attempt_started",
-        "reasoning",
-        "tool_started",
-        "tool_completed",
-        "tool_failed",
         "candidate_generated",
         "validation_started",
         "validation_passed",
         "validation_failed",
         "repair_started",
-        "run_terminal",
         "commit_accepted",
         "commit_validation_started",
         "commit_validation_passed",
         "commit_persistence_started",
         "commit_persistence_completed",
-        "commit_terminal",
     ]
-    attempt: int | None
-    payload: dict[str, object]
-    created_at: datetime
+    payload: SkillDesignEmptyActivityPayloadResponse
+
+
+class SkillDesignReasoningActivityResponse(_SkillDesignActivityBaseResponse):
+    kind: Literal["reasoning"]
+    payload: SkillDesignReasoningActivityPayloadResponse
+
+
+class SkillDesignToolActivityResponse(_SkillDesignActivityBaseResponse):
+    kind: Literal["tool_started", "tool_completed", "tool_failed"]
+    payload: SkillDesignToolActivityPayloadResponse
+
+
+class SkillDesignTerminalActivityResponse(_SkillDesignActivityBaseResponse):
+    kind: Literal["run_terminal", "commit_terminal"]
+    payload: SkillDesignTerminalActivityPayloadResponse
+
+
+SkillDesignActivityResponse = Annotated[
+    SkillDesignEmptyActivityResponse | SkillDesignReasoningActivityResponse | SkillDesignToolActivityResponse | SkillDesignTerminalActivityResponse,
+    Field(discriminator="kind"),
+]
+
+_SKILL_DESIGN_ACTIVITY_RESPONSE_ADAPTER = TypeAdapter(
+    SkillDesignActivityResponse,
+)
 
 
 class SkillDesignActivityListResponse(_StrictModel):
@@ -747,14 +813,16 @@ def _activity_cursor(value: str | None, request_id: str) -> int:
 def _activity_response(
     activity: SkillDesignActivity,
 ) -> SkillDesignActivityResponse:
-    return SkillDesignActivityResponse(
-        seq=str(activity.seq),
-        operation_id=activity.operation_id,
-        run_id=activity.run_id,
-        kind=activity.kind.value,
-        attempt=activity.attempt,
-        payload=activity.payload,
-        created_at=activity.created_at,
+    return _SKILL_DESIGN_ACTIVITY_RESPONSE_ADAPTER.validate_python(
+        {
+            "seq": str(activity.seq),
+            "operation_id": activity.operation_id,
+            "run_id": activity.run_id,
+            "kind": activity.kind.value,
+            "attempt": activity.attempt,
+            "payload": activity.payload,
+            "created_at": activity.created_at,
+        }
     )
 
 

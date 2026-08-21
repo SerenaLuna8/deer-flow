@@ -54,7 +54,10 @@ async def test_stream_bridge_keeps_only_real_reasoning_and_safe_tool_lifecycle()
                     {
                         "id": "call-1",
                         "name": "read_candidate_file",
-                        "args": {"secret": "must-not-project"},
+                        "args": {
+                            "path": "references/guide.md",
+                            "secret": "must-not-project",
+                        },
                     },
                     {"id": "call-2", "name": "bash", "args": {}},
                 ],
@@ -70,7 +73,7 @@ async def test_stream_bridge_keeps_only_real_reasoning_and_safe_tool_lifecycle()
                 "type": "tool",
                 "tool_call_id": "call-1",
                 "name": "read_candidate_file",
-                "content": "must-not-project",
+                "content": ('{"path":"references/guide.md","file_size_bytes":42,"content":"must-not-project"}'),
             },
             {},
         ],
@@ -88,6 +91,7 @@ async def test_stream_bridge_keeps_only_real_reasoning_and_safe_tool_lifecycle()
             {
                 "tool_call_id": "call-1",
                 "tool_name": "read_candidate_file",
+                "path": "references/guide.md",
             },
             "tool-started:call-1",
         ),
@@ -96,6 +100,8 @@ async def test_stream_bridge_keeps_only_real_reasoning_and_safe_tool_lifecycle()
             {
                 "tool_call_id": "call-1",
                 "tool_name": "read_candidate_file",
+                "path": "references/guide.md",
+                "size_bytes": 42,
             },
             "tool-completed:call-1",
         ),

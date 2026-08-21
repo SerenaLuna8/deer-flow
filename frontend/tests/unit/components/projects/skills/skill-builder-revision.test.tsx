@@ -363,6 +363,27 @@ describe("SkillBuilderConversationView", () => {
             operation_id: operationId,
             run_id: "99999999-9999-4999-8999-999999999999",
             attempt: 1,
+            kind: "tool_started",
+            payload: {
+              tool_call_id: "tool-1",
+              tool_name: "read_candidate_file",
+            },
+            created_at: NOW,
+          },
+          {
+            seq: "4",
+            operation_id: operationId,
+            run_id: "99999999-9999-4999-8999-999999999999",
+            attempt: 1,
+            kind: "reasoning",
+            payload: { text: "然后生成候选文件。" },
+            created_at: NOW,
+          },
+          {
+            seq: "5",
+            operation_id: operationId,
+            run_id: "99999999-9999-4999-8999-999999999999",
+            attempt: 1,
             kind: "run_terminal",
             payload: { status: "completed" },
             created_at: NOW,
@@ -381,6 +402,12 @@ describe("SkillBuilderConversationView", () => {
       html.indexOf("候选文件已准备好"),
     );
     expect(html).toContain("先确认输入和输出。");
+    expect(html.indexOf("先确认输入和输出。")).toBeLessThan(
+      html.indexOf("read_candidate_file"),
+    );
+    expect(html.indexOf("read_candidate_file")).toBeLessThan(
+      html.indexOf("然后生成候选文件。"),
+    );
   });
 
   test("keeps the completed Builder readable with a target-version link", () => {
@@ -394,8 +421,9 @@ describe("SkillBuilderConversationView", () => {
         errorMessage={null}
         completion={{
           message: "Skill 已创建并默认停用，可前往查看并激活。",
-          href: "/projects/example/skills?skill_id=1",
-          action: "前往激活",
+          skillHref: "/projects/example/skills?skill_id=1",
+          versionHref: "/projects/example/skills?skill_id=1&skill_version_id=2",
+          credentialHref: null,
         }}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
@@ -405,6 +433,8 @@ describe("SkillBuilderConversationView", () => {
 
     expect(html).toContain("Skill 已创建并默认停用");
     expect(html).toContain('href="/projects/example/skills?skill_id=1"');
+    expect(html).toContain("查看 Skill");
+    expect(html).toContain("查看候选版本");
     expect(html).not.toContain("<textarea");
   });
 });

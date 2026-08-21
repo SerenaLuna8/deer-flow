@@ -61,6 +61,7 @@ import {
   skillBuilderComposerDisabled,
   skillBuilderFileDraftContent,
   skillBuilderMergeAttachment,
+  skillBuilderActivityTerminal,
   skillBuilderSemanticSignature,
   skillBuilderValidationCurrent,
   updateSkillBuilderFileDraft,
@@ -238,6 +239,11 @@ function skillBuilderExactVersionHref(
   if (configureCredentials) {
     params.set("configure_credentials", "1");
   }
+  return `${listHref}?${params.toString()}`;
+}
+
+function skillBuilderSkillHref(listHref: string, skillId: string): string {
+  const params = new URLSearchParams({ skill_id: skillId });
   return `${listHref}?${params.toString()}`;
 }
 
@@ -458,8 +464,9 @@ export function SkillBuilderConversationView({
   stopPending?: boolean;
   completion?: {
     message: string;
-    href: string;
-    action: string;
+    skillHref: string;
+    versionHref: string;
+    credentialHref: string | null;
   };
   onComposerTextChange: (value: string) => void;
   onSubmitMessage: () => void;
@@ -493,10 +500,7 @@ export function SkillBuilderConversationView({
     ([operationId]) => !messageOperationIds.has(operationId),
   );
   const hasActiveActivity = [...activitiesByOperation.values()].some(
-    (items) =>
-      !items.some((item) =>
-        ["run_terminal", "commit_terminal"].includes(item.kind),
-      ),
+    (items) => skillBuilderActivityTerminal(items) === null,
   );
   const lastAssistantMessage = [...session.messages]
     .reverse()
@@ -612,9 +616,35 @@ export function SkillBuilderConversationView({
         {completion ? (
           <section className="border-border/70 bg-muted/20 rounded-2xl border p-4">
             <p className="text-sm leading-6">{completion.message}</p>
-            <Button asChild type="button" className="mt-4 min-h-10">
-              <Link href={completion.href}>{completion.action}</Link>
-            </Button>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {completion.credentialHref ? (
+                <Button asChild type="button" className="min-h-10">
+                  <Link href={completion.credentialHref}>
+                    {t.skills.builder.success.configureCredentials}
+                  </Link>
+                </Button>
+              ) : null}
+              <Button
+                asChild
+                type="button"
+                variant={completion.credentialHref ? "outline" : "default"}
+                className="min-h-10"
+              >
+                <Link href={completion.versionHref}>
+                  {t.skills.builder.success.viewCandidateVersion}
+                </Link>
+              </Button>
+              <Button
+                asChild
+                type="button"
+                variant="outline"
+                className="min-h-10"
+              >
+                <Link href={completion.skillHref}>
+                  {t.skills.builder.success.viewSkill}
+                </Link>
+              </Button>
+            </div>
           </section>
         ) : null}
 
@@ -719,7 +749,7 @@ export function SkillBuilderConversationView({
           <div className="flex items-center justify-between gap-2 p-1">
             <SkillBuilderComposerControls
               attachDisabled={composerDisabled}
-              pickersDisabled={pending}
+              pickersDisabled={composerDisabled}
               models={models}
               selectedModel={executionModel}
               thinkingMode={thinkingMode}
@@ -1638,14 +1668,10 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           true,
         )
       : null);
-  const revisionHref =
+  const versionHref =
     (session
       ? skillBuilderCompletedVersionHref(listHref, session, {
-          configureCredentials: Boolean(
-            revising &&
-            effectiveSecretSetup?.skillId === session.created_skill_id &&
-            effectiveSecretSetup.skillVersionId === exactCreatedVersionId,
-          ),
+          configureCredentials: false,
         })
       : null) ??
     (session?.status === "completed" &&
@@ -1665,14 +1691,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       : null;
   const completionSecretCount =
     completionSecretSetup?.requirementNames.length ?? 0;
-  const completionHref =
-    session?.status === "completed"
-      ? completionSecretCount > 0
-        ? createSecretHref
-        : revisionHref
+  const completionSkillHref =
+    session?.status === "completed" && session.created_skill_id
+      ? skillBuilderSkillHref(listHref, session.created_skill_id)
       : null;
   const completion =
-    session?.status === "completed" && completionHref
+    session?.status === "completed" && completionSkillHref && versionHref
       ? {
           message:
             completionSecretCount > 0
@@ -1690,11 +1714,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                     t.skills.builder.success,
                   )
                 : t.skills.builder.success.created,
-          href: completionHref,
-          action:
-            completionSecretCount > 0
-              ? t.skills.builder.success.configureCredentials
-              : t.skills.builder.success.goActivate,
+          skillHref: completionSkillHref,
+          versionHref,
+          credentialHref: completionSecretCount > 0 ? createSecretHref : null,
         }
       : undefined;
 

@@ -23,6 +23,19 @@ from deerflow.persistence.shared_assets import (
 MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION = 4 * 1024 * 1024
 _TERMINAL_RESERVE_BYTES = 1_024
 
+_TOOL_DETAIL_FIELDS = {
+    "search_available_skills": frozenset({"result_count"}),
+    "read_skill_version": frozenset({"resource_name"}),
+    "search_available_mcp_tools": frozenset({"result_count"}),
+    "inspect_mcp_tool": frozenset({"resource_name"}),
+    "list_candidate_files": frozenset({"result_count"}),
+    "read_candidate_file": frozenset({"path", "size_bytes"}),
+    "upsert_candidate_file": frozenset({"path", "size_bytes"}),
+    "delete_candidate_file": frozenset({"path", "size_bytes"}),
+    "request_skill_clarification": frozenset(),
+    "finalize_skill_candidate": frozenset(),
+}
+
 
 class SkillDesignActivityKind(StrEnum):
     REQUEST_ACCEPTED = "request_accepted"
@@ -75,8 +88,8 @@ def _public_payload(
     value = dict(payload or {})
     if kind is SkillDesignActivityKind.REASONING:
         text = value.get("text")
-        if not isinstance(text, str) or not text or len(text) > 65_536:
-            raise TypeError("reasoning payload requires bounded text")
+        if set(value) != {"text"} or not isinstance(text, str) or not text:
+            raise TypeError("reasoning payload requires text only")
         return {"text": text}
     if kind in {
         SkillDesignActivityKind.TOOL_STARTED,
@@ -85,12 +98,41 @@ def _public_payload(
     }:
         call_id = value.get("tool_call_id")
         tool_name = value.get("tool_name")
-        if not isinstance(call_id, str) or not call_id or len(call_id) > 512 or not isinstance(tool_name, str) or not tool_name or len(tool_name) > 255:
+        allowed_details = _TOOL_DETAIL_FIELDS.get(tool_name) if isinstance(tool_name, str) else None
+        if allowed_details is None or set(value) - {"tool_call_id", "tool_name"} - allowed_details or not isinstance(call_id, str) or not call_id or len(call_id) > 512:
             raise TypeError("tool activity requires safe identity fields")
-        return {"tool_call_id": call_id, "tool_name": tool_name}
+        result: dict[str, object] = {
+            "tool_call_id": call_id,
+            "tool_name": tool_name,
+        }
+        result_count = value.get("result_count")
+        if "result_count" in value:
+            if not isinstance(result_count, int) or isinstance(result_count, bool) or result_count < 0 or result_count > 128:
+                raise TypeError("tool result count must be bounded")
+            result["result_count"] = result_count
+        resource_name = value.get("resource_name")
+        if "resource_name" in value:
+            if not isinstance(resource_name, str) or not resource_name or len(resource_name) > 512 or any(ord(char) < 32 for char in resource_name):
+                raise TypeError("tool resource name must be public-safe")
+            result["resource_name"] = resource_name
+        path = value.get("path")
+        if "path" in value:
+            if not isinstance(path, str) or not path or len(path) > 1_024 or path.startswith("/") or ".." in path.split("/") or any(ord(char) < 32 for char in path):
+                raise TypeError("tool path must be candidate-relative")
+            result["path"] = path
+        size_bytes = value.get("size_bytes")
+        if "size_bytes" in value:
+            if not isinstance(size_bytes, int) or isinstance(size_bytes, bool) or size_bytes < 0 or size_bytes > 2 * 1024 * 1024:
+                raise TypeError("tool byte count must be bounded")
+            result["size_bytes"] = size_bytes
+        return result
     if kind in _TERMINAL_KINDS:
         status = value.get("status")
-        if status not in {"completed", "failed", "stopped"}:
+        if set(value) - {"status", "code"} or status not in {
+            "completed",
+            "failed",
+            "stopped",
+        }:
             raise TypeError("terminal activity requires a public status")
         code = value.get("code")
         result: dict[str, object] = {"status": status}

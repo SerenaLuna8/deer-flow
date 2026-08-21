@@ -2360,6 +2360,8 @@ export const zhCN: Translations = {
           attempt === 1 ? "首次生成" : `修复重试 ${attempt - 1}`,
         reasoning: (attempt) =>
           attempt === 1 ? "模型思考" : `修复重试 ${attempt - 1} 的模型思考`,
+        resultCount: (count) => `${count} 项结果`,
+        sizeBytes: (count) => `${count} 字节`,
         stop: "停止本轮生成",
         stopping: "正在停止…",
         stages: {
@@ -2374,7 +2376,7 @@ export const zhCN: Translations = {
           validation_passed: "确定性校验通过",
           validation_failed: "确定性校验失败",
           repair_started: "开始安全修复重试",
-          run_terminal: "本轮生成结束",
+          run_terminal: "本次操作结束",
           commit_accepted: "已接收创建请求",
           commit_validation_started: "开始校验候选",
           commit_validation_passed: "候选校验通过",
@@ -2466,6 +2468,8 @@ export const zhCN: Translations = {
         withVersion: (version) => `已保存候选版本 v${version}，前往激活`,
         withoutVersion: "已保存候选版本，前往激活",
         goActivate: "前往激活",
+        viewSkill: "查看 Skill",
+        viewCandidateVersion: "查看候选版本",
         revisionWithSecrets: (version, count) =>
           `已保存${version === null ? "候选版本" : `候选版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再激活。`,
         createdWithSecrets: (count) =>

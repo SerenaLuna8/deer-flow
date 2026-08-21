@@ -70,6 +70,7 @@ from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
+    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
@@ -880,6 +881,107 @@ async def test_stop_current_builder_run_restores_baseline_and_keeps_session(
             ).scalar_one()
             assert operation.status == "stopped"
             assert operation.stop_requested_at is not None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_stale_builder_run_restores_baseline_and_records_failed_terminal(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, service, _quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="stale-rollback-skill",
+                display_name="Stale Rollback Skill",
+                idempotency_key="create-stale-rollback",
+            ),
+        )
+        baseline = SkillArchiveFile(
+            path="SKILL.md",
+            media_type="text/markdown",
+            content=b"---\nname: stale-rollback-skill\ndescription: baseline\n---\n",
+        )
+        async with seed.factory() as session, session.begin():
+            repository = SkillDesignRepository(session)
+            row = await repository.get(context, design.id, for_update=True)
+            await repository.replace_draft_files(context, row.id, (baseline,))
+            row.draft_checksum = service._draft_snapshot(
+                context,
+                (baseline,),
+            ).draft_checksum
+            row.status = "draft_ready"
+            row.progress_json = service._progress_json(
+                SkillDesignStatus.DRAFT_READY,
+            )
+            row.revision += 1
+
+        ready = await service.get(context, design.id)
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="模拟 Worker 终态结算丢失",
+                revision=ready.revision,
+                key="stale-generation-turn",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+
+        partial = SkillArchiveFile(
+            path="SKILL.md",
+            media_type="text/markdown",
+            content=b"unverified stale partial",
+        )
+        async with seed.factory() as session, session.begin():
+            repository = SkillDesignRepository(session)
+            await repository.replace_draft_files(context, design.id, (partial,))
+            run = await session.get(RunRow, admission.run_id)
+            assert run is not None
+            run.status = "error"
+            row = await repository.get(context, design.id, for_update=True)
+            recovered = await service._recover_stale_generating(
+                repository,
+                context,
+                row,
+                now=datetime.now(UTC) + timedelta(days=1),
+            )
+            assert recovered
+
+        recovered = await service.get(context, design.id)
+        assert recovered.status is SkillDesignStatus.FAILED
+        assert recovered.files[0].content == baseline.content.decode()
+        assert recovered.draft_checksum == ready.draft_checksum
+        activities = await service.list_activities(context, design.id)
+        assert activities[-1].kind is SkillDesignActivityKind.RUN_TERMINAL
+        assert activities[-1].payload == {
+            "status": "failed",
+            "code": "SKILL_DESIGN_GENERATION_INTERRUPTED",
+        }
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admission.run_id,
+                    )
+                )
+            ).scalar_one()
+            assert operation.status == "failed"
+            assert (
+                await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(SkillDesignOperationBaselineFileRow)
+                    .where(
+                        SkillDesignOperationBaselineFileRow.operation_id == operation.id,
+                    )
+                )
+                == 0
+            )
     finally:
         await seed.engine.dispose()
 

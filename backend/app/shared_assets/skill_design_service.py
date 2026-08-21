@@ -108,6 +108,7 @@ from app.shared_assets.skill_service import (
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.shared_assets import (
+    SkillDesignActivityRow,
     SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
@@ -706,6 +707,17 @@ class SkillDesignService:
                     operation_id=operation.id,
                     kind=SkillDesignActivityKind.VALIDATION_FAILED,
                     source_event_id="validation-failed",
+                )
+                await SkillDesignActivityRepository(session).append(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                    kind=SkillDesignActivityKind.RUN_TERMINAL,
+                    payload={
+                        "status": "failed",
+                        "code": public_error_code[:64],
+                    },
+                    source_event_id="validation-terminal",
                 )
         except (SharedAssetError, DBAPIError):
             return
@@ -2165,6 +2177,14 @@ class SkillDesignService:
                         kind=SkillDesignActivityKind.VALIDATION_PASSED,
                         source_event_id="validation-passed",
                     )
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.RUN_TERMINAL,
+                        payload={"status": "completed"},
+                        source_event_id="validation-terminal",
+                    )
                     await session.flush()
                     current_files = await repository.load_draft_files(
                         context,
@@ -3025,6 +3045,13 @@ class SkillDesignService:
                         )
                         await session.flush()
                         return admission
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.REQUEST_ACCEPTED,
+                        source_event_id="request-accepted",
+                    )
                     await session.flush()
                     return (
                         row.revision,
@@ -3112,6 +3139,14 @@ class SkillDesignService:
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     operation.public_error_code = None
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.RUN_TERMINAL,
+                        payload={"status": "completed"},
+                        source_event_id="run-terminal",
+                    )
                     await session.flush()
                     return await self._session_view_for_row(
                         repository,
@@ -3175,6 +3210,17 @@ class SkillDesignService:
                     operation.status = "failed"
                     operation.result_revision = row.revision
                     operation.public_error_code = error_code
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.RUN_TERMINAL,
+                        payload={
+                            "status": "failed",
+                            "code": error_code,
+                        },
+                        source_event_id="run-terminal",
+                    )
                     await session.flush()
                     files = await repository.load_draft_files(
                         context,
@@ -3208,7 +3254,55 @@ class SkillDesignService:
         )
         if linked_run is not None and linked_run.status in {"pending", "running"}:
             return False
+        operation = (
+            await repository.session.execute(
+                select(SkillDesignOperationRow)
+                .where(
+                    SkillDesignOperationRow.project_id == context.project_id,
+                    SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                    SkillDesignOperationRow.session_id == row.id,
+                    SkillDesignOperationRow.operation_kind == "turn",
+                    SkillDesignOperationRow.status == "in_progress",
+                )
+                .order_by(SkillDesignOperationRow.created_at.desc())
+                .limit(1)
+                .with_for_update(of=SkillDesignOperationRow)
+            )
+        ).scalar_one_or_none()
         code = SkillDesignServiceErrorCode.GENERATION_INTERRUPTED.value
+        if operation is not None:
+            has_new_activity_contract = await repository.session.scalar(
+                select(SkillDesignActivityRow.seq)
+                .where(
+                    SkillDesignActivityRow.operation_id == operation.id,
+                    SkillDesignActivityRow.kind == SkillDesignActivityKind.REQUEST_ACCEPTED.value,
+                )
+                .limit(1)
+            )
+            if has_new_activity_contract is not None:
+                files = await repository.restore_operation_baseline(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                )
+                row.draft_checksum = self._draft_snapshot(
+                    context,
+                    files,
+                ).draft_checksum
+                await SkillDesignActivityRepository(repository.session).append(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                    run_id=operation.run_id,
+                    kind=SkillDesignActivityKind.RUN_TERMINAL,
+                    payload={"status": "failed", "code": code},
+                    source_event_id="run-terminal",
+                )
+                await repository.clear_operation_baseline(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                )
         row.status = SkillDesignStatus.FAILED.value
         row.validation_json = None
         row.validated_draft_checksum = None
@@ -3217,20 +3311,10 @@ class SkillDesignService:
         row.progress_json = self._progress_json(SkillDesignStatus.FAILED)
         row.active_clarification_json = None
         row.revision += 1
-        await repository.session.execute(
-            update(SkillDesignOperationRow)
-            .where(
-                SkillDesignOperationRow.project_id == context.project_id,
-                SkillDesignOperationRow.owner_user_id == str(context.user_id),
-                SkillDesignOperationRow.session_id == row.id,
-                SkillDesignOperationRow.status == "in_progress",
-            )
-            .values(
-                status="failed",
-                result_revision=row.revision,
-                public_error_code=code,
-            )
-        )
+        if operation is not None:
+            operation.status = "failed"
+            operation.result_revision = row.revision
+            operation.public_error_code = code
         await repository.session.flush()
         return True
 

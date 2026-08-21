@@ -3,8 +3,10 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 import {
   SkillBuilderApiError,
   listSkillBuilderActivities,
+  mergeSkillBuilderActivities,
   stopSkillBuilderTurn,
   setSkillBuilderExecutionPreference,
+  skillBuilderActivityTerminal,
   submitSkillBuilderTurn,
 } from "@/core/skill-builder";
 
@@ -174,6 +176,51 @@ describe("setSkillBuilderExecutionPreference", () => {
 });
 
 describe("Skill Builder Activity API", () => {
+  test("treats only legacy standalone validation results as terminal", () => {
+    const validation = {
+      seq: "2",
+      operation_id: "55555555-5555-4555-8555-555555555555",
+      run_id: null,
+      kind: "validation_passed" as const,
+      attempt: null,
+      payload: {},
+      created_at: NOW,
+    };
+
+    expect(skillBuilderActivityTerminal([validation])?.status).toBe(
+      "completed",
+    );
+    expect(
+      skillBuilderActivityTerminal([{ ...validation, run_id: RUN_ID }]),
+    ).toBeNull();
+  });
+
+  test("drops duplicate and non-increasing Activity frames", () => {
+    const activity = {
+      seq: "2",
+      operation_id: "55555555-5555-4555-8555-555555555555",
+      run_id: RUN_ID,
+      kind: "reasoning" as const,
+      attempt: 1,
+      payload: { text: "已回放" },
+      created_at: NOW,
+    };
+
+    expect(
+      mergeSkillBuilderActivities(
+        [activity],
+        [
+          { ...activity, payload: { text: "重复帧" } },
+          { ...activity, seq: "1", payload: { text: "倒退帧" } },
+          { ...activity, seq: "3", payload: { text: "实时增量" } },
+        ],
+      ).map((item) => [item.seq, item.payload]),
+    ).toEqual([
+      ["2", { text: "已回放" }],
+      ["3", { text: "实时增量" }],
+    ]);
+  });
+
   test("parses only the isolated public-safe Activity contract", async () => {
     const response = {
       data: [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from collections.abc import Mapping
 from typing import Any
@@ -53,7 +54,6 @@ class SkillBuilderActivityEmitter:
         self.operation_id = operation_id
         self.run_id = run_id
         self.attempt = attempt
-        self._terminal_written = False
 
     @classmethod
     async def create(
@@ -125,24 +125,6 @@ class SkillBuilderActivityEmitter:
                 source_event_id=source_event_id,
             )
 
-    async def terminal(
-        self,
-        *,
-        status: str,
-        code: str | None = None,
-    ) -> None:
-        if self._terminal_written:
-            return
-        payload: dict[str, object] = {"status": status}
-        if code:
-            payload["code"] = code
-        await self.append(
-            SkillDesignActivityKind.RUN_TERMINAL,
-            payload=payload,
-            source_event_id="run-terminal",
-        )
-        self._terminal_written = True
-
 
 def _record(value: Any) -> Mapping[str, Any] | None:
     return value if isinstance(value, Mapping) else None
@@ -169,6 +151,103 @@ def _safe_tool_call(call: Any) -> tuple[str, str] | None:
     return call_id, name
 
 
+def _safe_candidate_path(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 1_024 or value.startswith("/") or ".." in value.split("/") or any(ord(char) < 32 for char in value):
+        return None
+    return value
+
+
+def _safe_resource_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > 512 or any(ord(char) < 32 for char in value):
+        return None
+    return value
+
+
+def _safe_size_bytes(value: Any) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > 2 * 1024 * 1024:
+        return None
+    return value
+
+
+def _tool_arguments(call: Mapping[str, Any]) -> Mapping[str, Any]:
+    value = call.get("args")
+    return value if isinstance(value, Mapping) else {}
+
+
+def _tool_result(message: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    value = message.get("content")
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str) or not value or len(value) > 3 * 1024 * 1024:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, Mapping) else None
+
+
+def _started_tool_details(
+    tool_name: str,
+    arguments: Mapping[str, Any],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    if tool_name in {"read_skill_version", "inspect_mcp_tool"}:
+        resource_name = _safe_resource_name(arguments.get("reference"))
+        if resource_name is not None:
+            result["resource_name"] = resource_name
+    if tool_name in {
+        "read_candidate_file",
+        "upsert_candidate_file",
+        "delete_candidate_file",
+    }:
+        path = _safe_candidate_path(arguments.get("path"))
+        if path is not None:
+            result["path"] = path
+    if tool_name == "delete_candidate_file":
+        size_bytes = _safe_size_bytes(arguments.get("expected_file_size_bytes"))
+        if size_bytes is not None:
+            result["size_bytes"] = size_bytes
+    return result
+
+
+def _completed_tool_details(
+    tool_name: str,
+    result: Mapping[str, Any] | None,
+    started: Mapping[str, object],
+) -> dict[str, object]:
+    details = dict(started)
+    if result is None:
+        return details
+    if tool_name in {
+        "search_available_skills",
+        "search_available_mcp_tools",
+        "list_candidate_files",
+    }:
+        items = result.get("items")
+        if isinstance(items, list) and len(items) <= 128:
+            details = {"result_count": len(items)}
+    elif tool_name == "read_candidate_file":
+        path = _safe_candidate_path(result.get("path"))
+        size_bytes = _safe_size_bytes(result.get("file_size_bytes"))
+        details = {}
+        if path is not None:
+            details["path"] = path
+        if size_bytes is not None:
+            details["size_bytes"] = size_bytes
+    elif tool_name == "upsert_candidate_file":
+        file = result.get("file")
+        details = {}
+        if isinstance(file, Mapping):
+            path = _safe_candidate_path(file.get("path"))
+            size_bytes = _safe_size_bytes(file.get("size_bytes"))
+            if path is not None:
+                details["path"] = path
+            if size_bytes is not None:
+                details["size_bytes"] = size_bytes
+    return details
+
+
 class SkillBuilderActivityStreamBridge:
     """Keep raw Run streaming intact while projecting only safe Builder data."""
 
@@ -176,6 +255,7 @@ class SkillBuilderActivityStreamBridge:
         self._bridge = bridge
         self._emitter = emitter
         self._tool_names: dict[str, str] = {}
+        self._tool_details: dict[str, dict[str, object]] = {}
 
     @property
     def supports_cross_process(self) -> bool:
@@ -204,11 +284,17 @@ class SkillBuilderActivityStreamBridge:
                         continue
                     call_id, tool_name = call
                     self._tool_names[call_id] = tool_name
+                    details = _started_tool_details(
+                        tool_name,
+                        _tool_arguments(raw_call),
+                    )
+                    self._tool_details[call_id] = details
                     await self._emitter.append(
                         SkillDesignActivityKind.TOOL_STARTED,
                         payload={
                             "tool_call_id": call_id,
                             "tool_name": tool_name,
+                            **details,
                         },
                         source_event_id=f"tool-started:{call_id}",
                     )
@@ -223,9 +309,20 @@ class SkillBuilderActivityStreamBridge:
         if tool_name is None:
             return
         failed = message.get("status") in {"error", "failed"}
+        details = self._tool_details.get(call_id, {})
+        if not failed:
+            details = _completed_tool_details(
+                tool_name,
+                _tool_result(message),
+                details,
+            )
         await self._emitter.append(
             (SkillDesignActivityKind.TOOL_FAILED if failed else SkillDesignActivityKind.TOOL_COMPLETED),
-            payload={"tool_call_id": call_id, "tool_name": tool_name},
+            payload={
+                "tool_call_id": call_id,
+                "tool_name": tool_name,
+                **details,
+            },
             source_event_id=f"tool-{'failed' if failed else 'completed'}:{call_id}",
         )
 
