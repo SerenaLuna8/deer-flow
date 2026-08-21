@@ -213,10 +213,10 @@ async def test_editing_an_agent_without_current_keeps_forward_candidate(
         actor,
         asset_id,
         AgentInstructions(
-            agents_instructions="# AGENTS\n\nSecond draft.",
-            soul="# SOUL\n\nSecond draft.",
-            identity="# IDENTITY\n\nSecond draft.",
-            user_context="# USER\n\nSecond draft.",
+            agents_instructions="# AGENTS\n\nSecond candidate.",
+            soul="# SOUL\n\nSecond candidate.",
+            identity="# IDENTITY\n\nSecond candidate.",
+            user_context="# USER\n\nSecond candidate.",
         ),
         expected_asset_version=2,
     )

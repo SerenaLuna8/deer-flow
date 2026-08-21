@@ -39,7 +39,6 @@ export function skillCredentialBindingsMounted({
   editing,
 }: {
   selectedVersionId: string;
-  currentPublishedVersionId: string | null;
   editing: boolean;
 }): boolean {
   return !editing && selectedVersionId !== "";
@@ -47,11 +46,9 @@ export function skillCredentialBindingsMounted({
 
 export function skillCredentialBindingsVisible(
   selectedVersionId: string,
-  currentPublishedVersionId: string | null,
 ): boolean {
   return skillCredentialBindingsMounted({
     selectedVersionId,
-    currentPublishedVersionId,
     editing: false,
   });
 }

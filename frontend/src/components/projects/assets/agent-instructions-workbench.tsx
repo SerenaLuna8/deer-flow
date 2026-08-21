@@ -197,7 +197,7 @@ export function AgentInstructionWorkspace({
               : readOnly
                 ? copy.readOnlyDescription
                 : saveTarget === "draft"
-                  ? copy.draftDescription
+                  ? copy.editDescription
                   : copy.blueprintDescription}
           </p>
         </div>
@@ -312,7 +312,7 @@ export function AgentInstructionWorkspace({
         <div className="bg-background/95 sticky bottom-0 z-10 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
           <p className="text-muted-foreground text-xs">
             {saveTarget === "draft"
-              ? copy.draftSaveHint
+              ? copy.candidateSaveHint
               : copy.blueprintSaveHint}
           </p>
           <div className="flex gap-2">

@@ -563,7 +563,7 @@ class _CountingEmptySession:
 
 
 @pytest.mark.asyncio
-async def test_revoked_system_skill_fails_before_new_run_or_exact_materialization(
+async def test_revoked_system_skill_fails_before_new_run_resolution(
     revocation_harness: tuple[skill_service_module.SkillService, _Store, _Session],
 ) -> None:
     _service, store, _session = revocation_harness
@@ -584,6 +584,7 @@ async def test_revoked_system_skill_fails_before_new_run_or_exact_materializatio
             4,
         )
 
-    # Both new admission and Worker exact re-materialization converge on this
-    # snapshot boundary, so revocation must fail before reading package bytes.
+    # New Run Admission must reject the revoked Current v1 before reading its
+    # package bytes. Worker materialization is covered separately through the
+    # already-admitted immutable Run Snapshot boundary.
     assert session.execute_count == 0

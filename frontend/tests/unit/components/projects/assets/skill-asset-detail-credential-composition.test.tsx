@@ -39,8 +39,8 @@ rs.mock("@/components/projects/assets/skill-credential-bindings", () => ({
 }));
 
 const SKILL_ID = "11111111-1111-4111-8111-111111111111";
-const PUBLISHED_VERSION_ID = "22222222-2222-4222-8222-222222222222";
-const DRAFT_VERSION_ID = "33333333-3333-4333-8333-333333333333";
+const CURRENT_VERSION_ID = "22222222-2222-4222-8222-222222222222";
+const CANDIDATE_VERSION_ID = "33333333-3333-4333-8333-333333333333";
 const HISTORICAL_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
 const skillFile: SkillAssetVersion["file_views"][number] = {
@@ -51,25 +51,25 @@ const skillFile: SkillAssetVersion["file_views"][number] = {
 };
 
 function renderDetail({
-  versionId = PUBLISHED_VERSION_ID,
-  workflowStatus = "published",
+  versionId = CURRENT_VERSION_ID,
+  relation = "current",
   editing = false,
   credentialBindingsDirty = false,
-  currentPublishedVersionId = PUBLISHED_VERSION_ID,
+  currentVersionId = CURRENT_VERSION_ID,
   scope = "project",
 }: {
   versionId?: string;
-  workflowStatus?: "draft" | "published";
+  relation?: "current" | "candidate" | "historical";
   editing?: boolean;
   credentialBindingsDirty?: boolean;
-  currentPublishedVersionId?: string;
+  currentVersionId?: string;
   scope?: "project" | "system";
 } = {}): string {
   const item = {
     id: SKILL_ID,
     scope,
     status: "active",
-    current_version_id: currentPublishedVersionId,
+    current_version_id: currentVersionId,
   } as ProjectAssetItem;
 
   return renderToStaticMarkup(
@@ -77,8 +77,8 @@ function renderDetail({
       version={{
         id: versionId,
         skill_id: SKILL_ID,
-        version_number: workflowStatus === "published" ? 1 : 2,
-        relation: workflowStatus === "published" ? "current" : "candidate",
+        version_number: relation === "current" ? 1 : 2,
+        relation,
         description: "Credential flow fixture",
         frontmatter: {},
         compatibility: null,
@@ -93,7 +93,7 @@ function renderDetail({
         revoked_by_user_id: null,
         revocation_reason_code: null,
         governance_status: "active",
-        binding_eligible: workflowStatus === "published",
+        binding_eligible: relation === "current",
         created_by_user_id: "owner-1",
         created_at: "2026-08-19T00:00:00Z",
       }}
@@ -124,7 +124,7 @@ describe("Skill detail running Credential composition", () => {
     capturedBindingsProps = null;
   });
 
-  test("passes current published bindings into the workbench tab panel slot", () => {
+  test("passes Current Version bindings into the workbench tab panel slot", () => {
     const html = renderDetail();
 
     expect(capturedWorkbenchProps?.credentialBindings).toBeTruthy();
@@ -133,7 +133,7 @@ describe("Skill detail running Credential composition", () => {
     );
   });
 
-  test("does not pass current published bindings into a new-version editing session", () => {
+  test("does not pass Current Version bindings into a new-version editing session", () => {
     const html = renderDetail({ editing: true });
 
     expect(capturedWorkbenchProps?.credentialBindings).toBeNull();
@@ -142,21 +142,24 @@ describe("Skill detail running Credential composition", () => {
     );
   });
 
-  test("mounts a writable exact-version mapping editor for a Draft", () => {
+  test("mounts a writable exact-version mapping editor for a Candidate Version", () => {
     const html = renderDetail({
-      versionId: DRAFT_VERSION_ID,
-      workflowStatus: "draft",
+      versionId: CANDIDATE_VERSION_ID,
+      relation: "candidate",
     });
 
     expect(html).toContain('data-testid="exact-version-credential-bindings"');
     expect(capturedBindingsProps).toMatchObject({
-      versionId: DRAFT_VERSION_ID,
+      versionId: CANDIDATE_VERSION_ID,
       canManage: true,
     });
   });
 
   test("mounts historical mappings read-only", () => {
-    const html = renderDetail({ versionId: HISTORICAL_VERSION_ID });
+    const html = renderDetail({
+      versionId: HISTORICAL_VERSION_ID,
+      relation: "historical",
+    });
 
     expect(html).toContain('data-testid="exact-version-credential-bindings"');
     expect(capturedBindingsProps).toMatchObject({
@@ -168,7 +171,7 @@ describe("Skill detail running Credential composition", () => {
   test("keeps a dirty exact-version binding editor mounted after the live pointer moves", () => {
     const html = renderDetail({
       credentialBindingsDirty: true,
-      currentPublishedVersionId: DRAFT_VERSION_ID,
+      currentVersionId: CANDIDATE_VERSION_ID,
     });
 
     expect(html).toContain('data-testid="exact-version-credential-bindings"');
@@ -178,7 +181,7 @@ describe("Skill detail running Credential composition", () => {
     renderDetail({ scope: "system" });
 
     expect(capturedBindingsProps).toMatchObject({
-      versionId: PUBLISHED_VERSION_ID,
+      versionId: CURRENT_VERSION_ID,
       canManage: true,
     });
   });

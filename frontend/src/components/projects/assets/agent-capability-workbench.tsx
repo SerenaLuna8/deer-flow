@@ -87,7 +87,7 @@ export function agentDependencyOptions(
       : item.binding
         ? copy.reasons.bindingDisabled
         : copy.reasons.bindingMissing;
-    const versionReason = versionId ? null : copy.reasons.noPublishedVersion;
+    const versionReason = versionId ? null : copy.reasons.noCurrentVersion;
     const reason = joinExplanations(
       [statusReason, bindingReason, versionReason],
       copy.explanationSeparator,
@@ -105,7 +105,7 @@ export function agentDependencyOptions(
         [
           statusReason ? copy.remediation.restoreSystemAsset : null,
           bindingReason ? copy.remediation.enableSystemBinding : null,
-          versionReason ? copy.remediation.publishVersion : null,
+          versionReason ? copy.remediation.activateCandidateVersion : null,
         ],
         copy.explanationSeparator,
       ),
@@ -115,7 +115,7 @@ export function agentDependencyOptions(
     const statusReason = inactiveReason(item.status, copy);
     const versionReason = item.current_version_id
       ? null
-      : copy.reasons.noPublishedVersion;
+      : copy.reasons.noCurrentVersion;
     const reason = joinExplanations(
       [statusReason, versionReason],
       copy.explanationSeparator,
@@ -136,7 +136,7 @@ export function agentDependencyOptions(
       remediation: joinExplanations(
         [
           statusReason ? copy.remediation.activateProjectAsset : null,
-          versionReason ? copy.remediation.publishVersion : null,
+          versionReason ? copy.remediation.activateCandidateVersion : null,
         ],
         copy.explanationSeparator,
       ),
@@ -604,7 +604,7 @@ export function AgentCapabilityWorkbench({
     : !canAuthor
       ? copy.permissionBlocked
       : authoringPreparationPending
-        ? copy.preparingDraft
+        ? copy.preparingCandidate
         : catalogLoading
           ? copy.catalogLoading
           : catalogError
@@ -652,7 +652,7 @@ export function AgentCapabilityWorkbench({
                 {update.isPending ? (
                   <Loader2Icon aria-hidden className="size-4 animate-spin" />
                 ) : null}
-                {update.isPending ? copy.saving : copy.saveDraft}
+                {update.isPending ? copy.saving : copy.saveCandidate}
               </Button>
             </>
           ) : canAuthor ? (

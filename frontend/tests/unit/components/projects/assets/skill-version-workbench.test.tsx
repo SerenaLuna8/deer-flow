@@ -2,7 +2,7 @@ import { describe, expect, rs, test } from "@rstest/core";
 import type { QueryClient } from "@tanstack/react-query";
 
 import {
-  notifySkillDraftVersionCreated,
+  notifySkillCandidateVersionCreated,
   skillVersionConflictHasLatestServerState,
   skillVersionDraftMatchesSubmittedChanges,
   skillVersionSaveIsPending,
@@ -21,7 +21,7 @@ const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 describe("Skill version conflict recovery", () => {
   test("focuses Runtime credentials after saving a Candidate with declarations", () => {
     const events: unknown[][] = [];
-    notifySkillDraftVersionCreated((...args) => events.push(args), {
+    notifySkillCandidateVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
       secret_requirements: [{ name: "API_KEY", optional: false }],
     });
@@ -30,7 +30,7 @@ describe("Skill version conflict recovery", () => {
 
   test("does not force Runtime credentials after saving a Candidate without declarations", () => {
     const events: unknown[][] = [];
-    notifySkillDraftVersionCreated((...args) => events.push(args), {
+    notifySkillCandidateVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
       secret_requirements: [],
     });

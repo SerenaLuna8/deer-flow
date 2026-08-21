@@ -232,7 +232,7 @@ export function projectMcpStatusToggleState(
 
 function projectStatusToggleState(
   item: ProjectSkillStatusItem,
-  unpublishedReason: string,
+  missingCurrentReason: string,
 ): ProjectSkillStatusToggleState {
   const checked = item.scope === "project" && item.status === "active";
   const canManage =
@@ -249,7 +249,7 @@ function projectStatusToggleState(
       canManage &&
       item.status === "suspended" &&
       item.current_version_id === null
-        ? unpublishedReason
+        ? missingCurrentReason
         : null,
   };
 }

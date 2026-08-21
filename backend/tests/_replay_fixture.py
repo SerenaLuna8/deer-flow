@@ -230,10 +230,11 @@ async def prepare_replay_runtime_catalog(
 async def bootstrap_replay_test_database(
     database_url: str | None = None,
 ) -> None:
-    """Install the test schema only into an explicitly named replay database."""
+    """Install the complete test schema into an explicitly named replay database."""
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from deerflow.persistence.bootstrap import bootstrap_schema
+    from scripts.setup_postgres import _bootstrap_langgraph_schemas
 
     resolved_url = _validated_replay_database_url(
         database_url,
@@ -244,6 +245,10 @@ async def bootstrap_replay_test_database(
         await bootstrap_schema(engine)
     finally:
         await engine.dispose()
+    # Gateway and Worker both enforce the complete catalog before startup.
+    # Install and document the optional LangGraph-owned tables before either
+    # process begins so concurrent startup cannot observe a partial catalog.
+    await _bootstrap_langgraph_schemas(resolved_url)
 
 
 def prepare_hermetic_skills(home: Path) -> None:

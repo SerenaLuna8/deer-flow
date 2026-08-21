@@ -18,7 +18,7 @@ export type SkillExportBlockReason =
   | "unsaved"
   | "loading"
   | "revoked"
-  | "unpublished"
+  | "not-current"
   | "no-version";
 
 export function skillExportBlockReason({
@@ -26,18 +26,18 @@ export function skillExportBlockReason({
   unsaved,
   loading,
   revoked,
-  unpublished,
+  notCurrent,
 }: {
   hasVersion: boolean;
   unsaved?: boolean;
   loading?: boolean;
   revoked?: boolean;
-  unpublished?: boolean;
+  notCurrent?: boolean;
 }): SkillExportBlockReason | null {
   if (unsaved) return "unsaved";
   if (loading) return "loading";
   if (revoked) return "revoked";
-  if (unpublished) return "unpublished";
+  if (notCurrent) return "not-current";
   return hasVersion ? null : "no-version";
 }
 
@@ -79,8 +79,8 @@ export function SkillExportButton({
         ? copy.loading
         : blockReason === "revoked"
           ? copy.revoked
-          : blockReason === "unpublished"
-            ? copy.unpublished
+          : blockReason === "not-current"
+            ? copy.notCurrent
             : blockReason === "no-version" || versionNumber === null
               ? copy.noVersion
               : copy.tooltip(versionNumber);

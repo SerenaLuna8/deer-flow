@@ -79,7 +79,7 @@ export function beginSkillCredentialEditing(
   onEditingChange(true);
 }
 
-export function notifySkillDraftVersionCreated(
+export function notifySkillCandidateVersionCreated(
   onVersionCreated: (
     versionId: string,
     options?: { focusCredentials?: boolean },
@@ -750,7 +750,7 @@ export function SkillVersionWorkbench({
     setDisplayMode("source");
   }
 
-  async function saveAsDraft() {
+  async function saveCandidateVersion() {
     if (fork.isPending) return;
     setLocalError(null);
     const expectedAssetVersion = expectedAssetVersionRef.current;
@@ -788,7 +788,7 @@ export function SkillVersionWorkbench({
         setLoadedSources({});
         onEditingChange(false);
         onDirtyChange(false);
-        notifySkillDraftVersionCreated(onVersionCreated, result.data);
+        notifySkillCandidateVersionCreated(onVersionCreated, result.data);
       } else {
         setLocalError(
           "提交时的修改已保存为新版本；保存期间产生的后续修改仍保留在当前编辑副本中，请再次保存或手动放弃。",
@@ -929,7 +929,7 @@ export function SkillVersionWorkbench({
                   ? secretCopy.saveBlocked
                   : undefined
               }
-              onClick={() => void saveAsDraft()}
+              onClick={() => void saveCandidateVersion()}
             >
               {fork.isPending ? (
                 <Loader2Icon aria-hidden className="size-4 animate-spin" />

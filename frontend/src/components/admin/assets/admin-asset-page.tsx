@@ -1085,7 +1085,7 @@ function SelectedAssetDetail({
                   selectedVersion !== null &&
                   "governance_status" in selectedVersion &&
                   selectedVersion.governance_status === "revoked",
-                unpublished: false,
+                notCurrent: false,
               })}
               download={() => {
                 if (!selectedVersion) {

@@ -13,18 +13,42 @@ from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from app.projects.models import CreateProject
+from app.private_work.context import PrivateWorkContext
+from app.private_work.errors import PrivateWorkAssetStale
+from app.private_work.run_admission import PrivateRunAdmissionService
+from app.private_work.run_repository import PrivateRunCreate
+from app.private_work.thread_repository import (
+    PrivateThreadRepository,
+    ThreadAgentRef,
+)
+from app.projects.capabilities import capabilities_for
+from app.projects.context import ProjectContext
+from app.projects.models import CreateProject, ProjectRole
 from app.projects.repository import ProjectRepository
+from app.shared_assets.agent_service import AgentService, CreateAgent
 from app.shared_assets.bootstrap import catalog as catalog_module
 from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.bootstrap.skill_archive import dump_skill_archive
-from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.models import (
+    AgentPayload,
+    AssetScope,
+    SkillArchiveFile,
+    SkillAssetRef,
+)
+from app.shared_assets.skill_credential_policy import SkillCredentialBindingInput
+from app.shared_assets.skill_credential_service import (
+    SkillCredentialBindingService,
+)
+from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
     AssetCatalogStateRow,
+    CredentialEnvelopeRow,
+    CredentialRow,
+    CredentialVersionRow,
     McpServerRow,
     ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
@@ -37,12 +61,21 @@ from deerflow.persistence.user import UserRow
 from scripts.upgrade_system_assets import upgrade_system_assets
 
 
-def _skill_archive(name: str, description: str, release_note: str) -> bytes:
+def _skill_archive(
+    name: str,
+    description: str,
+    release_note: str,
+    *,
+    required_secrets: tuple[str, ...] = (),
+) -> bytes:
+    secret_frontmatter = ""
+    if required_secrets:
+        secret_frontmatter = "required-secrets:\n" + "".join(f"  - name: {secret}\n    optional: false\n" for secret in required_secrets)
     return dump_skill_archive(
         (
             SkillArchiveFile(
                 path="SKILL.md",
-                content=(f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n\nUse reviewed inputs.\n").encode(),
+                content=(f"---\nname: {name}\ndescription: {description}\n{secret_frontmatter}---\n\n# {name}\n\nUse reviewed inputs.\n").encode(),
                 media_type="text/markdown",
             ),
             SkillArchiveFile(
@@ -193,6 +226,78 @@ def _json_snapshot(value: object) -> str:
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+class _AcceptingAgentCatalogValidator:
+    async def validate(self, *_args: object, **_kwargs: object) -> None:
+        return None
+
+
+async def _add_project_credential(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    env_fields: tuple[str, ...],
+) -> uuid.UUID:
+    credential_id = uuid.uuid4()
+    version_id = uuid.uuid4()
+    credential = CredentialRow(
+        id=credential_id,
+        scope="project",
+        project_id=project_id,
+        name=f"system-skill-upgrade-{uuid.uuid4().hex[:8]}",
+        display_name="System Skill Upgrade Credential",
+        credential_type="skill_auth",
+        status="active",
+        is_delete=False,
+        current_version_id=None,
+        version=1,
+        created_by_user_id=str(user_id),
+    )
+    session.add(credential)
+    await session.flush()
+    session.add(
+        CredentialVersionRow(
+            id=version_id,
+            credential_id=credential_id,
+            version_number=1,
+            status="active",
+            payload_schema_version=1,
+            payload_schema={"env": list(env_fields)},
+            created_by_user_id=str(user_id),
+        )
+    )
+    await session.flush()
+    session.add(
+        CredentialEnvelopeRow(
+            credential_version_id=version_id,
+            envelope_generation=1,
+            key_id="system-skill-upgrade-test",
+            nonce=b"n" * 12,
+            ciphertext=b"c" * 32,
+            is_active=True,
+            created_by_user_id=str(user_id),
+        )
+    )
+    credential.current_version_id = version_id
+    await session.flush()
+    return version_id
+
+
+async def _create_private_thread(
+    factory: async_sessionmaker[AsyncSession],
+    context: ProjectContext,
+    thread_id: str,
+    agent_id: uuid.UUID,
+) -> None:
+    private = PrivateWorkContext.from_project(context)
+    async with factory() as session, session.begin():
+        await PrivateThreadRepository(session).create(
+            scope=private.resource_scope,
+            thread_id=thread_id,
+            agent=ThreadAgentRef(agent_id, "project"),
+        )
 
 
 @dataclass(frozen=True)
@@ -687,6 +792,231 @@ async def test_postgres_system_skill_upgrade_preserves_binding_and_reruns_idempo
             project_id=project.project_id,
         )
         assert after_rerun == after_upgrade
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_system_skill_upgrade_rechecks_changed_credential_declarations_for_new_runs(
+    migrated_postgres_database_url: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = f"credential-evolution-{uuid.uuid4().hex[:8]}"
+    release_one = _skill_archive(
+        name,
+        "Requires one configured token.",
+        "release one\n",
+        required_secrets=("API_TOKEN",),
+    )
+    release_two = _skill_archive(
+        name,
+        "Adds one newly required token.",
+        "release two\n",
+        required_secrets=("API_TOKEN", "NEW_TOKEN"),
+    )
+    version_one_root = tmp_path / "credential-catalog-v1"
+    version_two_root = tmp_path / "credential-catalog-v2"
+    _write_catalog(
+        version_one_root,
+        schema_version=1,
+        name=name,
+        releases=((1, release_one),),
+    )
+    _write_catalog(
+        version_two_root,
+        schema_version=2,
+        name=name,
+        releases=((1, release_two),),
+    )
+    active_root = version_one_root
+    monkeypatch.setattr(catalog_module, "_package_root", lambda: active_root)
+
+    engine = create_async_engine(migrated_postgres_database_url)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    admin_id = uuid.uuid4()
+    editor_id = uuid.uuid4()
+    try:
+        await bootstrap_service.bootstrap_system_assets(factory)
+        async with factory.begin() as session:
+            session.add_all(
+                (
+                    UserRow(
+                        id=str(admin_id),
+                        email=f"{admin_id.hex}@example.test",
+                        username=f"u{admin_id.hex[:8]}",
+                        password_hash=None,
+                        system_role="user",
+                        oauth_provider=None,
+                        oauth_id=None,
+                        needs_setup=False,
+                        token_version=0,
+                    ),
+                    UserRow(
+                        id=str(editor_id),
+                        email=f"{editor_id.hex}@example.test",
+                        username=f"u{editor_id.hex[:8]}",
+                        password_hash=None,
+                        system_role="user",
+                        oauth_provider=None,
+                        oauth_id=None,
+                        needs_setup=False,
+                        token_version=0,
+                    ),
+                )
+            )
+        async with factory() as session:
+            admin = await ProjectRepository(session).create_with_admin(
+                admin_id,
+                CreateProject(
+                    slug=f"credential-evolution-{uuid.uuid4().hex[:8]}",
+                    display_name="Credential Evolution Project",
+                ),
+                "req-system-skill-credential-upgrade",
+            )
+        editor_membership_id = uuid.uuid4()
+        async with factory.begin() as session:
+            session.add(
+                ProjectMembershipRow(
+                    id=editor_membership_id,
+                    project_id=admin.project_id,
+                    user_id=str(editor_id),
+                    role="editor",
+                    status="active",
+                    version=1,
+                )
+            )
+            credential_version_id = await _add_project_credential(
+                session,
+                project_id=admin.project_id,
+                user_id=admin_id,
+                env_fields=("API_TOKEN",),
+            )
+            skill_asset, skill_version = (
+                await session.execute(
+                    select(SkillRow, SkillVersionRow)
+                    .join(
+                        SkillVersionRow,
+                        SkillVersionRow.id == SkillRow.current_version_id,
+                    )
+                    .where(SkillRow.source_key == f"builtin:skill:{name}")
+                )
+            ).one()
+
+        configured = await SkillCredentialBindingService(
+            factory,
+        ).replace_for_version(
+            admin,
+            skill_asset.id,
+            skill_version.id,
+            (
+                SkillCredentialBindingInput(
+                    "API_TOKEN",
+                    credential_version_id,
+                    "API_TOKEN",
+                ),
+            ),
+            expected_revision=0,
+        )
+        assert [(item.name, item.mapping_status) for item in configured.requirements] == [("API_TOKEN", "configured")]
+
+        agent_service = AgentService(
+            factory,
+            catalog_validator=_AcceptingAgentCatalogValidator(),
+        )
+        created_agent = await agent_service.create_project(
+            admin,
+            CreateAgent(
+                slug=f"credential-upgrade-agent-{uuid.uuid4().hex[:8]}",
+                display_name="Credential Upgrade Agent",
+            ),
+            AgentPayload(
+                description="Uses the evolving System Skill.",
+                soul="Use the admitted System Skill.",
+                model_ref="f605d8f9-0ec1-53f1-9b1f-4287626b1e12",
+                tool_groups=(),
+                skill_refs=(
+                    SkillAssetRef(
+                        AssetScope.SYSTEM,
+                        skill_asset.id,
+                    ),
+                ),
+                mcp_version_ids=(),
+            ),
+        )
+        await agent_service.activate_version(
+            admin,
+            created_agent.asset.id,
+            created_agent.version.id,
+            expected_asset_version=created_agent.asset.revision,
+        )
+
+        private = PrivateWorkContext.from_project(admin)
+        baseline_thread = f"system-skill-ready-{uuid.uuid4()}"
+        await _create_private_thread(
+            factory,
+            admin,
+            baseline_thread,
+            created_agent.asset.id,
+        )
+        await PrivateRunAdmissionService(factory).admit(
+            private,
+            baseline_thread,
+            PrivateRunCreate(run_id=f"system-skill-ready-run-{uuid.uuid4()}"),
+        )
+
+        active_root = version_two_root
+        upgraded = await upgrade_system_assets(
+            migrated_postgres_database_url,
+        )
+        assert upgraded.applied_changes == 1
+
+        admin_view = await SkillCredentialBindingService(factory).get_exact(
+            admin,
+            skill_asset.id,
+            skill_version.id,
+        )
+        assert [(item.name, item.mapping_status) for item in admin_view.requirements] == [
+            ("API_TOKEN", "configured"),
+            ("NEW_TOKEN", "missing"),
+        ]
+
+        editor = ProjectContext(
+            user_id=editor_id,
+            project_id=admin.project_id,
+            membership_id=editor_membership_id,
+            role=ProjectRole.EDITOR,
+            capabilities=capabilities_for(ProjectRole.EDITOR),
+            membership_version=1,
+            request_id="req-editor-system-skill-readiness",
+        )
+        editor_view = await SkillCredentialBindingService(factory).get_exact(
+            editor,
+            skill_asset.id,
+            skill_version.id,
+        )
+        assert [(item.name, item.mapping_status) for item in editor_view.requirements] == [
+            ("API_TOKEN", "configured"),
+            ("NEW_TOKEN", "missing"),
+        ]
+        assert all(item.credential_id is None and item.credential_version_id is None and item.source_env_field_name is None and item.eligible_credentials == () for item in editor_view.requirements)
+
+        blocked_thread = f"system-skill-incomplete-{uuid.uuid4()}"
+        await _create_private_thread(
+            factory,
+            admin,
+            blocked_thread,
+            created_agent.asset.id,
+        )
+        with pytest.raises(PrivateWorkAssetStale):
+            await PrivateRunAdmissionService(factory).admit(
+                private,
+                blocked_thread,
+                PrivateRunCreate(
+                    run_id=f"system-skill-incomplete-run-{uuid.uuid4()}",
+                ),
+            )
     finally:
         await engine.dispose()
 

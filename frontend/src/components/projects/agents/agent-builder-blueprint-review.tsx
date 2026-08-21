@@ -332,7 +332,7 @@ export function AgentBuilderBlueprintReview({
             {creating ? (
               <Loader2Icon aria-hidden className="size-4 animate-spin" />
             ) : null}
-            {creating ? copy.creating : copy.createDraft}
+            {creating ? copy.creating : copy.createAgent}
           </Button>
         </div>
       ) : null}

@@ -735,7 +735,7 @@ function AssetList({
                     !toggleState.targetVersionId && !checked
                       ? kind === "mcp-servers"
                         ? "没有可启用的已发布配置"
-                        : "没有可启用的已发布版本"
+                        : "没有可启用的当前版本"
                       : undefined
                   }
                   onCheckedChange={(next) => onToggleSystemBinding(item, next)}

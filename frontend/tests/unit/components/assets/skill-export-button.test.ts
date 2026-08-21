@@ -22,9 +22,9 @@ describe("Skill export availability", () => {
     expect(skillExportBlockReason({ hasVersion: false })).toBe("no-version");
   });
 
-  test("blocks an unpublished System Skill version", () => {
-    expect(
-      skillExportBlockReason({ hasVersion: true, unpublished: true }),
-    ).toBe("unpublished");
+  test("blocks a System Skill version that is not Current", () => {
+    expect(skillExportBlockReason({ hasVersion: true, notCurrent: true })).toBe(
+      "not-current",
+    );
   });
 });

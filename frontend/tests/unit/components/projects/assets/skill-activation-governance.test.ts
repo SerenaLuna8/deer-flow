@@ -191,7 +191,7 @@ describe("Skill activation governance", () => {
     );
   });
 
-  test("blocks a partially completed active mapping set but lets a Draft save complete rows", () => {
+  test("blocks a partially completed Current mapping set but lets a Candidate save complete rows", () => {
     const requirements = [
       mappingRequirement("API_KEY"),
       mappingRequirement("DATABASE_URL"),

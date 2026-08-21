@@ -100,7 +100,7 @@ export function AdminProjectSystemBindingDialog({
     assetKind,
   );
   const [selectedVersionId, setSelectedVersionId] = useState("");
-  const published = useMemo(
+  const availableVersions = useMemo(
     () =>
       (history.data?.data ?? []).filter((version) =>
         kind === "mcp-servers"
@@ -110,9 +110,9 @@ export function AdminProjectSystemBindingDialog({
       ),
     [history.data, kind],
   );
-  const bindablePublished = useMemo(
+  const bindableVersions = useMemo(
     () =>
-      published.filter((version) => {
+      availableVersions.filter((version) => {
         if (kind === "skills") {
           return (
             "skill_id" in version && adminSystemSkillVersionIsBindable(version)
@@ -128,12 +128,12 @@ export function AdminProjectSystemBindingDialog({
           ) === null
         );
       }),
-    [item.scope, kind, published, t.adminAssets.runtime],
+    [availableVersions, item.scope, kind, t.adminAssets.runtime],
   );
   const firstRuntimeBlockReason = useMemo(
     () =>
       kind === "mcp-servers"
-        ? (published
+        ? (availableVersions
             .filter(
               (version) =>
                 "mcp_server_id" in version &&
@@ -154,17 +154,17 @@ export function AdminProjectSystemBindingDialog({
             )
             .find((reason): reason is string => reason !== null) ?? null)
         : null,
-    [item.scope, kind, published, t.adminAssets.runtime],
+    [availableVersions, item.scope, kind, t.adminAssets.runtime],
   );
-  const currentPublished = published.find(
+  const currentVersion = availableVersions.find(
     (version) => version.id === item.current_version_id,
   );
   const defaultUnboundVersionId =
     kind === "skills"
-      ? currentPublished &&
-        "skill_id" in currentPublished &&
-        adminSystemSkillVersionIsBindable(currentPublished)
-        ? currentPublished.id
+      ? currentVersion &&
+        "skill_id" in currentVersion &&
+        adminSystemSkillVersionIsBindable(currentVersion)
+        ? currentVersion.id
         : ""
       : (item.current_version_id ?? "");
 
@@ -189,8 +189,10 @@ export function AdminProjectSystemBindingDialog({
     disable.isPending;
   const error =
     enable.error ?? upgrade.error ?? rollback.error ?? disable.error;
-  const target = published.find((version) => version.id === selectedVersionId);
-  const pinned = published.find(
+  const target = availableVersions.find(
+    (version) => version.id === selectedVersionId,
+  );
+  const pinned = availableVersions.find(
     (version) => version.id === item.binding?.current_version_id,
   );
   const pinnedRevoked = Boolean(
@@ -201,7 +203,7 @@ export function AdminProjectSystemBindingDialog({
     !history.error &&
     !pending &&
     Boolean(target) &&
-    bindablePublished.some((version) => version.id === selectedVersionId) &&
+    bindableVersions.some((version) => version.id === selectedVersionId) &&
     selectedVersionId !==
       (item.binding?.enabled ? item.binding.current_version_id : "");
 
@@ -300,7 +302,9 @@ export function AdminProjectSystemBindingDialog({
           </div>
           <div className="border-primary/20 bg-primary/5 min-w-0 rounded-lg border p-3">
             <p className="text-muted-foreground text-xs font-medium">
-              {t.adminAssets.dialogs.binding.selectPublished}
+              {kind === "mcp-servers"
+                ? t.adminAssets.dialogs.binding.selectPublished
+                : "当前版本"}
             </p>
             <p className="mt-1.5 text-sm font-semibold">
               {target
@@ -355,7 +359,7 @@ export function AdminProjectSystemBindingDialog({
               <option value="">
                 {t.adminAssets.dialogs.binding.selectPlaceholder}
               </option>
-              {published.map((version) => (
+              {availableVersions.map((version) => (
                 <option
                   key={version.id}
                   value={version.id}
@@ -390,9 +394,11 @@ export function AdminProjectSystemBindingDialog({
                 </option>
               ))}
             </select>
-            {bindablePublished.length === 0 ? (
+            {bindableVersions.length === 0 ? (
               <span className="text-muted-foreground text-xs font-normal">
-                {t.adminAssets.dialogs.binding.noBindableVersions}
+                {kind === "mcp-servers"
+                  ? t.adminAssets.dialogs.binding.noBindableVersions
+                  : "当前版本不可用"}
               </span>
             ) : null}
           </label>
@@ -411,8 +417,10 @@ export function AdminProjectSystemBindingDialog({
             className="border-destructive/30 bg-destructive/5 text-destructive rounded-lg border px-3 py-2 text-sm"
           >
             {t.adminAssets.status.revoked}:{" "}
-            {t.adminAssets.dialogs.binding.selectPublished} /{" "}
-            {t.adminAssets.dialogs.binding.disable}
+            {kind === "mcp-servers"
+              ? t.adminAssets.dialogs.binding.selectPublished
+              : "当前版本"}{" "}
+            / {t.adminAssets.dialogs.binding.disable}
           </p>
         ) : null}
         {error ? (

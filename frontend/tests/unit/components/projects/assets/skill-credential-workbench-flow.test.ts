@@ -7,8 +7,8 @@ import {
 } from "@/components/projects/assets/skill-credential-bindings";
 import { beginSkillCredentialEditing } from "@/components/projects/assets/skill-version-workbench";
 
-const PUBLISHED_VERSION_ID = "11111111-1111-4111-8111-111111111111";
-const DRAFT_VERSION_ID = "22222222-2222-4222-8222-222222222222";
+const CURRENT_VERSION_ID = "11111111-1111-4111-8111-111111111111";
+const CANDIDATE_VERSION_ID = "22222222-2222-4222-8222-222222222222";
 
 describe("Skill running Credential workbench flow", () => {
   test("enters editing without leaving the running Credential tab", () => {
@@ -22,11 +22,10 @@ describe("Skill running Credential workbench flow", () => {
     expect(events).toEqual(["surface:secrets", "editing:true"]);
   });
 
-  test("keeps published bindings mounted while tabs hide and reveal the running Credential panel", () => {
+  test("keeps Current Version bindings mounted while tabs hide and reveal the running Credential panel", () => {
     expect(
       skillCredentialBindingsMounted({
-        selectedVersionId: PUBLISHED_VERSION_ID,
-        currentPublishedVersionId: PUBLISHED_VERSION_ID,
+        selectedVersionId: CURRENT_VERSION_ID,
         editing: false,
       }),
     ).toBe(true);
@@ -35,18 +34,16 @@ describe("Skill running Credential workbench flow", () => {
   test("unmounts exact-version mappings only while SKILL.md has no new version id yet", () => {
     expect(
       skillCredentialBindingsMounted({
-        selectedVersionId: PUBLISHED_VERSION_ID,
-        currentPublishedVersionId: PUBLISHED_VERSION_ID,
+        selectedVersionId: CURRENT_VERSION_ID,
         editing: true,
       }),
     ).toBe(false);
   });
 
-  test("renders the exact Draft mapping editor before publish", () => {
+  test("renders the exact Candidate Version mapping editor before activation", () => {
     expect(
       skillCredentialBindingsMounted({
-        selectedVersionId: DRAFT_VERSION_ID,
-        currentPublishedVersionId: PUBLISHED_VERSION_ID,
+        selectedVersionId: CANDIDATE_VERSION_ID,
         editing: false,
       }),
     ).toBe(true);
@@ -55,14 +52,14 @@ describe("Skill running Credential workbench flow", () => {
   test("retains the exact-version editor and enters conflict when a newer version response arrives", () => {
     const retained = {
       skill_id: "33333333-3333-4333-8333-333333333333",
-      skill_version_id: PUBLISHED_VERSION_ID,
+      skill_version_id: CURRENT_VERSION_ID,
       revision: 4,
       requirements: [],
       request_id: "binding-v1",
     };
     const newer = {
       ...retained,
-      skill_version_id: DRAFT_VERSION_ID,
+      skill_version_id: CANDIDATE_VERSION_ID,
       revision: 0,
       request_id: "binding-v2",
     };
@@ -70,7 +67,7 @@ describe("Skill running Credential workbench flow", () => {
     expect(
       skillCredentialVersionGuardAfterResponse(
         { retained, conflicted: false },
-        PUBLISHED_VERSION_ID,
+        CURRENT_VERSION_ID,
         newer,
       ),
     ).toEqual({ retained, conflicted: true });

@@ -169,7 +169,7 @@ export function SkillBuilderRevisionCommitSuccess({
         <Link href={href}>
           {credentialRequirementCount > 0
             ? copy.configureCredentials
-            : copy.goPublish}
+            : copy.goActivate}
         </Link>
       </Button>
     </div>
@@ -589,7 +589,7 @@ export function SkillBuilderConversationView({
             <Loader2Icon aria-hidden className="size-3.5 animate-spin" />
             {session.status === "committing"
               ? session.session_kind === "revise"
-                ? copy.creatingDraft
+                ? copy.creatingCandidate
                 : copy.creatingSkill
               : copy.processing}
           </p>
@@ -1366,7 +1366,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     return true;
   }
 
-  function saveDraft() {
+  function saveCandidateVersion() {
     const snapshot = session
       ? skillBuilderDraftMutationSnapshot(session, changes)
       : null;
@@ -1787,7 +1787,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                   }
                   onSecretValidityChange={handleSecretValidityChange}
                   onDisplayModeChange={setDisplayMode}
-                  onSave={saveDraft}
+                  onSave={saveCandidateVersion}
                   onDiscard={() => {
                     setDrafts({});
                     setDraftBaselineChecksum(null);

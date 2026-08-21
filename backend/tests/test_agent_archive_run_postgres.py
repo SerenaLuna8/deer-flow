@@ -12,11 +12,14 @@ from support.private_thread_seed import (
 )
 
 from app.private_work.asset_runtime import PrivateAssetRuntime
-from app.private_work.errors import PrivateWorkAgentArchived
+from app.private_work.errors import PrivateWorkAgentArchived, PrivateWorkAssetStale
 from app.private_work.run_admission import PrivateRunAdmissionService
 from app.private_work.run_repository import PrivateRunCreate
 from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
 from app.projects.context import ProjectContext
+from app.projects.default_skill_bindings import (
+    seed_new_project_system_skill_bindings,
+)
 from app.shared_assets import agent_service as agent_service_module
 from app.shared_assets.agent_design_service import (
     AgentDesignService,
@@ -24,11 +27,23 @@ from app.shared_assets.agent_design_service import (
 )
 from app.shared_assets.agent_repository import AgentRepository
 from app.shared_assets.agent_service import AgentService, CreateAgent
+from app.shared_assets.bootstrap.service import bootstrap_system_assets
+from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetConflict
-from app.shared_assets.models import AgentPayload
+from app.shared_assets.models import (
+    AgentPayload,
+    AssetScope,
+    SkillAssetRef,
+)
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.shared_assets.skill_service import SkillService
 from deerflow.persistence.private_work import RunAssetVersionRow
-from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
+from deerflow.persistence.shared_assets import (
+    AgentRow,
+    AgentVersionRow,
+    SkillRow,
+    SkillVersionRow,
+)
 
 
 class _AcceptingAgentCatalogValidator:
@@ -364,5 +379,113 @@ async def test_exact_run_materialization_uses_snapshot_after_agent_suspension(
             assert runtime.safe_manifest.agent_version_id == admitted.snapshot.assets[0].version_id
         finally:
             await runtime.aclose()
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_admitted_run_uses_system_skill_snapshot_after_governance_revocation(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    context = _project_context(seed)
+    thread_id = f"system-skill-revoked-{uuid.uuid4()}"
+    rejected_thread_id = f"system-skill-revoked-new-{uuid.uuid4()}"
+    admitted_run_id = f"system-skill-admitted-{uuid.uuid4()}"
+    rejected_run_id = f"system-skill-rejected-{uuid.uuid4()}"
+    try:
+        await bootstrap_system_assets(seed.factory)
+        async with seed.factory() as session, session.begin():
+            await seed_new_project_system_skill_bindings(
+                session,
+                project_id=context.project_id,
+                actor_user_id=context.user_id,
+            )
+            system_skill = (
+                await session.execute(
+                    select(SkillRow, SkillVersionRow)
+                    .join(
+                        SkillVersionRow,
+                        SkillVersionRow.id == SkillRow.current_version_id,
+                    )
+                    .where(
+                        SkillRow.scope == "system",
+                        SkillRow.status == "active",
+                        SkillVersionRow.revoked_at.is_(None),
+                        SkillVersionRow.secret_requirements == [],
+                    )
+                    .order_by(SkillRow.id)
+                    .limit(1)
+                )
+            ).one()
+
+        skill_asset, skill_version = system_skill
+        agent_service = AgentService(
+            seed.factory,
+            catalog_validator=_AcceptingAgentCatalogValidator(),
+        )
+        candidate = await agent_service.create_version(
+            context,
+            seed.project_agent_id,
+            AgentPayload(
+                description="Agent with one governed System Skill",
+                soul="Use the admitted System Skill snapshot.",
+                model_ref="f605d8f9-0ec1-53f1-9b1f-4287626b1e12",
+                tool_groups=(),
+                skill_refs=(
+                    SkillAssetRef(
+                        scope=AssetScope.SYSTEM,
+                        asset_id=skill_asset.id,
+                    ),
+                ),
+                mcp_version_ids=(),
+            ),
+            expected_asset_version=1,
+        )
+        await agent_service.activate_version(
+            context,
+            seed.project_agent_id,
+            candidate.id,
+            expected_asset_version=2,
+        )
+        await _create_thread(seed, thread_id)
+        admitted = await PrivateRunAdmissionService(seed.factory).admit(
+            seed.owner_a,
+            thread_id,
+            PrivateRunCreate(run_id=admitted_run_id),
+        )
+
+        await SkillService(seed.factory).revoke_version(
+            SystemAssetGovernanceContext(
+                user_id=context.user_id,
+                request_id="req-revoke-after-admission",
+            ),
+            skill_asset.id,
+            skill_version.id,
+            expected_asset_version=skill_asset.revision,
+        )
+
+        runtime = await PrivateAssetRuntime(seed.factory).materialize(
+            seed.owner_a,
+            admitted,
+        )
+        try:
+            assert [item.asset_id for item in runtime.safe_manifest.skills] == [
+                skill_asset.id,
+            ]
+            assert [item.version_id for item in runtime.safe_manifest.skills] == [
+                skill_version.id,
+            ]
+        finally:
+            await runtime.aclose()
+
+        await _create_thread(seed, rejected_thread_id)
+        with pytest.raises(PrivateWorkAssetStale):
+            await PrivateRunAdmissionService(seed.factory).admit(
+                seed.owner_a,
+                rejected_thread_id,
+                PrivateRunCreate(run_id=rejected_run_id),
+            )
     finally:
         await seed.engine.dispose()

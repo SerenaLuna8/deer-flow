@@ -134,19 +134,19 @@ export function projectAssetDetailPreferredVersionId(
   kind: MutableAssetKind,
   scope: ProjectAssetItem["scope"],
   versions: readonly Pick<AssetVersion, "id">[],
-  currentPublishedVersionId: string | null,
+  currentVersionId: string | null,
 ): string {
   if (kind === "mcp-servers") {
     return (
       resolveMcpCurrentConfiguration(
         versions as readonly AssetVersion[],
         scope,
-        currentPublishedVersionId,
+        currentVersionId,
       ).version?.id ?? ""
     );
   }
   return (
-    versions.find((version) => version.id === currentPublishedVersionId)?.id ??
+    versions.find((version) => version.id === currentVersionId)?.id ??
     versions[0]?.id ??
     ""
   );
@@ -166,11 +166,9 @@ export function projectAssetRequestedVersionResolution(
 
 export function projectSkillCredentialRepairVersionId(
   error: unknown,
-  currentPublishedVersionId: string | null,
+  currentVersionId: string | null,
 ): string | null {
-  return projectSkillCredentialSetupRequired(error)
-    ? currentPublishedVersionId
-    : null;
+  return projectSkillCredentialSetupRequired(error) ? currentVersionId : null;
 }
 
 export function projectAgentPreviousVersion(
@@ -290,34 +288,34 @@ export function projectAssetDetailVersionTerms(
 
 export function projectAssetDetailRevisionCopy(kind: MutableAssetKind): {
   label: (number: number) => string;
-  publishedFallback: string;
+  currentFallback: string;
   pinnedFallback: string;
   updateAvailable: string;
   viewAria: string;
   loading: string;
-  publish: string;
+  primaryAction: string;
   technical: string;
 } {
   if (kind === "mcp-servers") {
     return {
       label: () => "配置",
-      publishedFallback: "已发布",
+      currentFallback: "已发布",
       pinnedFallback: "已启用",
       updateAvailable: "有配置更新",
       viewAria: "查看配置",
       loading: "正在加载配置，请稍候",
-      publish: "发布配置",
+      primaryAction: "发布配置",
       technical: "配置技术信息",
     };
   }
   return {
     label: (number) => `版本 ${number}`,
-    publishedFallback: "已有当前版本",
+    currentFallback: "已有当前版本",
     pinnedFallback: "自动使用当前版本",
     updateAvailable: "",
     viewAria: "查看版本",
     loading: "正在加载新版本，请稍候",
-    publish: "激活版本",
+    primaryAction: "激活版本",
     technical: "版本技术信息",
   };
 }
@@ -350,12 +348,12 @@ export function effectiveAssetVersion(
   scope: ProjectAssetItem["scope"],
   bindingEnabled: boolean,
   pinnedVersion: AssetVersion | undefined,
-  currentPublished: AssetVersion | undefined,
+  currentVersion: AssetVersion | undefined,
   latestVersion: AssetVersion | undefined,
 ): AssetVersion | null {
   return (
     (scope === "system" && bindingEnabled ? pinnedVersion : null) ??
-    currentPublished ??
+    currentVersion ??
     latestVersion ??
     null
   );
@@ -951,7 +949,7 @@ export function ProjectAssetDetailSheet({
     selectedVersion && isMcpVersion(selectedVersion)
       ? mcpVersionRuntimeBlockReason(selectedVersion, item.scope)
       : null;
-  const currentPublished = versions.find(
+  const currentVersion = versions.find(
     (version) => version.id === item.current_version_id,
   );
   const pinnedVersion = versions.find(
@@ -961,7 +959,7 @@ export function ProjectAssetDetailSheet({
     item.scope,
     item.binding?.enabled === true,
     pinnedVersion,
-    currentPublished,
+    currentVersion,
     versions[0],
   );
   const agentAuthoringVersion = agentAuthoringBaseVersion(
@@ -1398,10 +1396,10 @@ export function ProjectAssetDetailSheet({
                           : mcpConfiguration?.state === "empty"
                             ? "尚未保存配置"
                             : "当前配置无法确认"
-                        : currentPublished
-                          ? revisionCopy.label(currentPublished.version_number)
+                        : currentVersion
+                          ? revisionCopy.label(currentVersion.version_number)
                           : item.current_version_id
-                            ? revisionCopy.publishedFallback
+                            ? revisionCopy.currentFallback
                             : "尚无当前版本"}
                     </p>
                   </div>
@@ -1510,7 +1508,7 @@ export function ProjectAssetDetailSheet({
                               activateSelectedVersion(selectedVersion)
                             }
                           >
-                            {revisionCopy.publish}
+                            {revisionCopy.primaryAction}
                           </Button>
                         ) : undefined
                       }
@@ -1565,7 +1563,7 @@ export function ProjectAssetDetailSheet({
                               selectedVersion !== null &&
                               "governance_status" in selectedVersion &&
                               selectedVersion.governance_status === "revoked",
-                            unpublished: false,
+                            notCurrent: false,
                           })}
                           download={() => {
                             if (!selectedVersion) {
@@ -1620,7 +1618,7 @@ export function ProjectAssetDetailSheet({
                                 activateSelectedVersion(selectedVersion)
                               }
                             >
-                              {revisionCopy.publish}
+                              {revisionCopy.primaryAction}
                             </Button>
                           ) : undefined
                         }
@@ -1751,7 +1749,7 @@ export function ProjectAssetDetailSheet({
                                     publishSelectedMcpVersion(selectedVersion)
                                   }
                                 >
-                                  {revisionCopy.publish}
+                                  {revisionCopy.primaryAction}
                                 </Button>
                               )}
                           </div>
