@@ -41,6 +41,7 @@ from app.private_work.skill_builder_run_admission import (
     SkillBuilderRunAdmissionService,
 )
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_design_profile import agent_design_mode_matches_profile
 from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFailed
 from app.shared_assets.skill_builder_admission_contract import (
     SkillBuilderRunAdmission,
@@ -258,13 +259,11 @@ class SkillDesignExecutionPreferenceRequest(_StrictModel):
 
     @model_validator(mode="after")
     def validate_profile(self) -> SkillDesignExecutionPreferenceRequest:
-        expected = {
-            "flash": (False, {None, "none"}),
-            "thinking": (True, {None, "low"}),
-            "pro": (True, {"medium"}),
-            "ultra": (True, {"high"}),
-        }[self.mode]
-        if self.thinking_enabled is not expected[0] or self.reasoning_effort not in expected[1]:
+        if not agent_design_mode_matches_profile(
+            self.mode,
+            thinking_enabled=self.thinking_enabled,
+            reasoning_effort=self.reasoning_effort,
+        ):
             raise ValueError("mode and reasoning profile are inconsistent")
         return self
 
@@ -276,13 +275,11 @@ def _validate_turn_profile(
         return
     if value.model_name is None or value.mode is None or value.thinking_enabled is None:
         raise ValueError("a turn execution profile must be complete")
-    expected = {
-        "flash": (False, {None, "none"}),
-        "thinking": (True, {None, "low"}),
-        "pro": (True, {"medium"}),
-        "ultra": (True, {"high"}),
-    }[value.mode]
-    if value.thinking_enabled is not expected[0] or value.reasoning_effort not in expected[1]:
+    if not agent_design_mode_matches_profile(
+        value.mode,
+        thinking_enabled=value.thinking_enabled,
+        reasoning_effort=value.reasoning_effort,
+    ):
         raise ValueError("turn mode and reasoning profile are inconsistent")
 
 
@@ -352,12 +349,15 @@ class SkillDesignTerminalActivityPayloadResponse(_StrictModel):
     code: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class SkillDesignValidationStageActivityPayloadResponse(_StrictModel):
+    stage: Literal["package_files", "safety_scan"]
+
+
 class SkillDesignEmptyActivityResponse(_SkillDesignActivityBaseResponse):
     kind: Literal[
         "request_accepted",
         "attempt_started",
         "candidate_generated",
-        "validation_started",
         "validation_passed",
         "validation_failed",
         "repair_started",
@@ -368,6 +368,13 @@ class SkillDesignEmptyActivityResponse(_SkillDesignActivityBaseResponse):
         "commit_persistence_completed",
     ]
     payload: SkillDesignEmptyActivityPayloadResponse
+
+
+class SkillDesignValidationStartedActivityResponse(
+    _SkillDesignActivityBaseResponse,
+):
+    kind: Literal["validation_started"]
+    payload: SkillDesignEmptyActivityPayloadResponse | SkillDesignValidationStageActivityPayloadResponse
 
 
 class SkillDesignReasoningActivityResponse(_SkillDesignActivityBaseResponse):
@@ -386,7 +393,7 @@ class SkillDesignTerminalActivityResponse(_SkillDesignActivityBaseResponse):
 
 
 SkillDesignActivityResponse = Annotated[
-    SkillDesignEmptyActivityResponse | SkillDesignReasoningActivityResponse | SkillDesignToolActivityResponse | SkillDesignTerminalActivityResponse,
+    SkillDesignEmptyActivityResponse | SkillDesignValidationStartedActivityResponse | SkillDesignReasoningActivityResponse | SkillDesignToolActivityResponse | SkillDesignTerminalActivityResponse,
     Field(discriminator="kind"),
 ]
 

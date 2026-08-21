@@ -97,7 +97,6 @@ const skillBuilderEmptyActivityKinds = [
   "request_accepted",
   "attempt_started",
   "candidate_generated",
-  "validation_started",
   "validation_passed",
   "validation_failed",
   "repair_started",
@@ -114,6 +113,21 @@ const skillBuilderEmptyActivitySchema = skillBuilderActivityBaseSchema
     payload: z.object({}).strict(),
   })
   .strict();
+
+const skillBuilderValidationStartedActivitySchema =
+  skillBuilderActivityBaseSchema
+    .extend({
+      kind: z.literal("validation_started"),
+      payload: z.union([
+        z.object({}).strict(),
+        z
+          .object({
+            stage: z.enum(["package_files", "safety_scan"]),
+          })
+          .strict(),
+      ]),
+    })
+    .strict();
 
 const skillBuilderReasoningActivitySchema = skillBuilderActivityBaseSchema
   .extend({
@@ -208,6 +222,7 @@ const skillBuilderTerminalActivitySchema = skillBuilderActivityBaseSchema
 
 export const skillBuilderActivitySchema = z.union([
   skillBuilderEmptyActivitySchema,
+  skillBuilderValidationStartedActivitySchema,
   skillBuilderReasoningActivitySchema,
   skillBuilderToolActivitySchema,
   skillBuilderTerminalActivitySchema,

@@ -219,16 +219,29 @@ export function useSkillBuilderActivities(
   );
   const query = useQuery({
     queryKey: key,
-    queryFn: ({ signal }) =>
-      listSkillBuilderActivities(projectId, sessionId, "0", signal).then(
-        (response) => response.data,
-      ),
+    queryFn: async ({ signal }) => {
+      const response = await listSkillBuilderActivities(
+        projectId,
+        sessionId,
+        "0",
+        signal,
+      );
+      // A refetch may finish after newer SSE frames; Activity cache state is
+      // append-only, so an older REST snapshot must never replace it.
+      return mergeSkillBuilderActivities(
+        queryClient.getQueryData<SkillBuilderActivity[]>(key) ?? [],
+        response.data,
+      );
+    },
     enabled,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
     if (
       !enabled ||
+      !query.isSuccess ||
       access.scope.accountId !== accountId ||
       access.scope.projectId !== projectId ||
       !access.subscribeEventStream
@@ -250,7 +263,16 @@ export function useSkillBuilderActivities(
         }
       },
     );
-  }, [access, accountId, enabled, key, projectId, queryClient, sessionId]);
+  }, [
+    access,
+    accountId,
+    enabled,
+    key,
+    projectId,
+    query.isSuccess,
+    queryClient,
+    sessionId,
+  ]);
 
   return query;
 }

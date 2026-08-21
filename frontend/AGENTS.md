@@ -97,10 +97,14 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Durable SSE cursor state is keyed by account/project/thread. Event IDs and
   non-SSE message/event `seq` values remain canonical signed-BIGINT decimal
   strings. Compare by decimal length/value; never convert to JavaScript number.
-- Skill Builder Run activity joins through the project-scoped private client
-  from cursor `0` and reduces live/replayed frames to tool call ID, bounded
-  tool name, and lifecycle status only. Arguments, results, provider errors,
+- Skill Builder joins its dedicated account/project/session Activity stream
+  from cursor `0`; it does not project process UI from the private Run stream.
+  The closed tool projection may show only its allowlisted safe detail: result
+  count, public resource name, candidate-relative path, or byte count. Raw
+  arguments, results, file content, provider errors, internal references,
   message content, and delegated-subgraph payloads never enter that UI state.
+- Activity replay and live SSE frames merge monotonically by decimal `seq`;
+  initial or later REST snapshots must never replace newer cached SSE frames.
 - Drop duplicate or non-advancing frames. A newly mounted projection joins an
   active Run from cursor `0` because an old hidden consumer's cursor does not
   prove that the new UI rendered those frames.

@@ -2519,6 +2519,10 @@ export const enUS: Translations = {
           attempt === 1 ? "Model reasoning" : `Retry ${attempt - 1} reasoning`,
         resultCount: (count) => `${count} result${count === 1 ? "" : "s"}`,
         sizeBytes: (count) => `${count} bytes`,
+        validationStages: {
+          package_files: "Package file validation started",
+          safety_scan: "Safety scan started",
+        },
         stop: "Stop this turn",
         stopping: "Stopping…",
         stages: {

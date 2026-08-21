@@ -50,6 +50,12 @@ class LinkedSkillDesignRun:
     error: str | None
 
 
+@dataclass(frozen=True, slots=True)
+class RestoredSkillDesignBaseline:
+    files: tuple[SkillArchiveFile, ...]
+    draft_checksum: str | None
+
+
 def _metadata_checksum(files: tuple[SkillVersionFileRow, ...]) -> str:
     canonical = json.dumps(
         [
@@ -555,16 +561,57 @@ class SkillDesignRepository:
     ) -> tuple[SkillArchiveFile, ...]:
         """Replace the candidate with the immutable operation baseline."""
 
-        await self.get(context, session_id, for_update=True)
+        design = await self.get(context, session_id, for_update=True)
+        operation = (
+            await self.session.execute(
+                select(SkillDesignOperationRow)
+                .where(
+                    SkillDesignOperationRow.project_id == context.project_id,
+                    SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                    SkillDesignOperationRow.session_id == session_id,
+                    SkillDesignOperationRow.id == operation_id,
+                )
+                .with_for_update(of=SkillDesignOperationRow)
+            )
+        ).scalar_one_or_none()
+        if operation is None:
+            raise AssetNotFound(context.request_id)
+        return (
+            await self.restore_locked_operation_baseline(
+                operation,
+                design,
+                request_id=context.request_id,
+            )
+        ).files
+
+    async def restore_locked_operation_baseline(
+        self,
+        operation: SkillDesignOperationRow,
+        design: SkillDesignSessionRow,
+        *,
+        request_id: str,
+    ) -> RestoredSkillDesignBaseline:
+        """Restore a settlement-locked operation without reconstructing authority."""
+
+        if (
+            not isinstance(operation, SkillDesignOperationRow)
+            or not isinstance(design, SkillDesignSessionRow)
+            or not isinstance(request_id, str)
+            or not request_id
+            or operation.project_id != design.project_id
+            or operation.owner_user_id != design.owner_user_id
+            or operation.session_id != design.id
+        ):
+            raise AssetValidationFailed(request_id or "unknown")
         rows = tuple(
             (
                 await self.session.execute(
                     select(SkillDesignOperationBaselineFileRow)
                     .where(
-                        SkillDesignOperationBaselineFileRow.project_id == context.project_id,
-                        SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
-                        SkillDesignOperationBaselineFileRow.session_id == session_id,
-                        SkillDesignOperationBaselineFileRow.operation_id == operation_id,
+                        SkillDesignOperationBaselineFileRow.project_id == operation.project_id,
+                        SkillDesignOperationBaselineFileRow.owner_user_id == operation.owner_user_id,
+                        SkillDesignOperationBaselineFileRow.session_id == operation.session_id,
+                        SkillDesignOperationBaselineFileRow.operation_id == operation.id,
                     )
                     .order_by(SkillDesignOperationBaselineFileRow.path)
                     .with_for_update(
@@ -576,7 +623,7 @@ class SkillDesignRepository:
         files: list[SkillArchiveFile] = []
         for row in rows:
             if len(row.content) != row.size_bytes or hashlib.sha256(row.content).hexdigest() != row.sha256:
-                raise AssetValidationFailed(context.request_id)
+                raise AssetValidationFailed(request_id)
             files.append(
                 SkillArchiveFile(
                     path=row.path,
@@ -584,8 +631,44 @@ class SkillDesignRepository:
                     media_type=row.media_type,
                 )
             )
-        await self.replace_draft_files(context, session_id, tuple(files))
-        return tuple(files)
+        await self.session.execute(
+            delete(SkillDesignDraftFileRow).where(
+                SkillDesignDraftFileRow.project_id == operation.project_id,
+                SkillDesignDraftFileRow.owner_user_id == operation.owner_user_id,
+                SkillDesignDraftFileRow.session_id == operation.session_id,
+            )
+        )
+        for item in files:
+            self.session.add(
+                SkillDesignDraftFileRow(
+                    project_id=operation.project_id,
+                    owner_user_id=operation.owner_user_id,
+                    session_id=operation.session_id,
+                    path=item.path,
+                    media_type=item.media_type,
+                    size_bytes=len(item.content),
+                    sha256=hashlib.sha256(item.content).hexdigest(),
+                    content=item.content,
+                )
+            )
+        await self.session.flush()
+        canonical = json.dumps(
+            [
+                {
+                    "path": item.path,
+                    "sha256": hashlib.sha256(item.content).hexdigest(),
+                    "size_bytes": len(item.content),
+                }
+                for item in files
+            ],
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+        return RestoredSkillDesignBaseline(
+            files=tuple(files),
+            draft_checksum=(hashlib.sha256(canonical).hexdigest() if files else None),
+        )
 
     async def clear_operation_baseline(
         self,
@@ -601,6 +684,21 @@ class SkillDesignRepository:
                 SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
                 SkillDesignOperationBaselineFileRow.session_id == session_id,
                 SkillDesignOperationBaselineFileRow.operation_id == operation_id,
+            )
+        )
+
+    async def clear_locked_operation_baseline(
+        self,
+        operation: SkillDesignOperationRow,
+    ) -> None:
+        if not isinstance(operation, SkillDesignOperationRow):
+            raise TypeError("operation must be a SkillDesignOperationRow")
+        await self.session.execute(
+            delete(SkillDesignOperationBaselineFileRow).where(
+                SkillDesignOperationBaselineFileRow.project_id == operation.project_id,
+                SkillDesignOperationBaselineFileRow.owner_user_id == operation.owner_user_id,
+                SkillDesignOperationBaselineFileRow.session_id == operation.session_id,
+                SkillDesignOperationBaselineFileRow.operation_id == operation.id,
             )
         )
 
@@ -761,4 +859,8 @@ class SkillDesignRepository:
         )
 
 
-__all__ = ["PinnedSkillCreator", "SkillDesignRepository"]
+__all__ = [
+    "PinnedSkillCreator",
+    "RestoredSkillDesignBaseline",
+    "SkillDesignRepository",
+]

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, rs, test } from "@rstest/core";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 rs.mock("@tanstack/react-query", () => ({
   useMutation: rs.fn(),
@@ -9,6 +9,7 @@ rs.mock("@tanstack/react-query", () => ({
 }));
 rs.mock("react", () => ({
   useEffect: rs.fn(),
+  useMemo: rs.fn(),
   useRef: rs.fn(),
   useState: rs.fn(),
 }));
@@ -21,7 +22,10 @@ rs.mock("@/core/skill-builder/api", () => ({
   createSkillBuilderRevisionSession: rs.fn(),
   createSkillBuilderSession: rs.fn(),
   getSkillBuilderSession: rs.fn(),
+  listSkillBuilderActivities: rs.fn(),
   listSkillBuilderSessions: rs.fn(),
+  parseSkillBuilderActivity: rs.fn((value) => value),
+  skillBuilderActivityStreamURL: rs.fn(() => "/skill-builder/activities"),
   submitSkillBuilderTurn: rs.fn(),
   validateSkillBuilderSession: rs.fn(),
 }));
@@ -29,12 +33,18 @@ rs.mock("@/core/skill-builder/api", () => ({
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import type { PrivateWorkAccess } from "@/core/private-work/types";
 import {
+  mergeSkillBuilderActivities,
   skillBuilderSessionKey,
   skillBuilderSessionsInvalidation,
   useCreateSkillBuilderRevisionSession,
+  useSkillBuilderActivities,
   useSkillBuilderRunStream,
 } from "@/core/skill-builder";
-import type { SkillBuilderSession } from "@/core/skill-builder/types";
+import { listSkillBuilderActivities } from "@/core/skill-builder/api";
+import type {
+  SkillBuilderActivity,
+  SkillBuilderSession,
+} from "@/core/skill-builder/types";
 
 const ACCOUNT_ID = "11111111-1111-4111-8111-111111111111";
 const PROJECT_ID = "22222222-2222-4222-8222-222222222222";
@@ -52,8 +62,10 @@ const mockedUseQuery = rs.mocked(useQuery);
 const mockedUseQueryClient = rs.mocked(useQueryClient);
 const mockedUsePrivateWorkAccess = rs.mocked(usePrivateWorkAccess);
 const mockedUseEffect = rs.mocked(useEffect);
+const mockedUseMemo = rs.mocked(useMemo);
 const mockedUseRef = rs.mocked(useRef);
 const mockedUseState = rs.mocked(useState);
+const mockedListSkillBuilderActivities = rs.mocked(listSkillBuilderActivities);
 
 type EffectRecord = {
   cleanup?: () => void;
@@ -159,6 +171,7 @@ function reviseSession(): SkillBuilderSession {
 beforeEach(() => {
   rs.clearAllMocks();
   mockedUseQuery.mockReturnValue({ data: undefined } as never);
+  mockedUseMemo.mockImplementation((factory) => factory() as never);
   mockedUsePrivateWorkAccess.mockReturnValue({
     apiBaseURL: `/api/projects/${PROJECT_ID}/private-work`,
     scope: { accountId: ACCOUNT_ID, projectId: PROJECT_ID },
@@ -166,6 +179,83 @@ beforeEach(() => {
       operation(new AbortController().signal),
     isActive: () => true,
   } as unknown as PrivateWorkAccess);
+});
+
+describe("useSkillBuilderActivities", () => {
+  const activity = (seq: string, text: string): SkillBuilderActivity => ({
+    seq,
+    operation_id: "55555555-5555-4555-8555-555555555555",
+    run_id: "66666666-6666-4666-8666-666666666666",
+    kind: "reasoning",
+    attempt: 1,
+    payload: { text },
+    created_at: NOW,
+  });
+
+  test("keeps newer SSE cache entries when a stale REST replay finishes", async () => {
+    const cached = [activity("1", "first"), activity("3", "live")];
+    const replay = [activity("1", "first"), activity("2", "replay")];
+    const subscribeEventStream = rs.fn(() => rs.fn());
+    const queryClient = {
+      getQueryData: rs.fn(() => cached),
+      setQueryData: rs.fn(),
+    };
+    let queryOptions:
+      | {
+          queryFn: (input: { signal: AbortSignal }) => Promise<unknown>;
+          refetchOnReconnect: boolean;
+          refetchOnWindowFocus: boolean;
+        }
+      | undefined;
+    mockedUseQueryClient.mockReturnValue(queryClient as never);
+    mockedUseQuery.mockImplementation((options) => {
+      queryOptions = options as unknown as typeof queryOptions;
+      return { data: cached, isSuccess: true } as never;
+    });
+    mockedUseEffect.mockImplementation((effect) => {
+      effect();
+    });
+    mockedUsePrivateWorkAccess.mockReturnValue({
+      apiBaseURL: `/api/projects/${PROJECT_ID}/private-work`,
+      scope: { accountId: ACCOUNT_ID, projectId: PROJECT_ID },
+      subscribeEventStream,
+      runAbortable: (operation: (signal: AbortSignal) => Promise<unknown>) =>
+        operation(new AbortController().signal),
+      isActive: () => true,
+    } as unknown as PrivateWorkAccess);
+    mockedListSkillBuilderActivities.mockResolvedValue({
+      data: replay,
+      request_id: "request-replay",
+    });
+
+    useSkillBuilderActivities(ACCOUNT_ID, PROJECT_ID, SESSION_ID);
+    const result = await queryOptions?.queryFn({
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toEqual(cached);
+    expect(queryOptions?.refetchOnReconnect).toBe(false);
+    expect(queryOptions?.refetchOnWindowFocus).toBe(false);
+    expect(subscribeEventStream).toHaveBeenCalledTimes(1);
+  });
+
+  test("drops duplicate and non-increasing Activity frames", () => {
+    const current = activity("2", "已回放");
+
+    expect(
+      mergeSkillBuilderActivities(
+        [current],
+        [
+          activity("2", "重复帧"),
+          activity("1", "倒退帧"),
+          activity("3", "实时增量"),
+        ],
+      ).map((item) => [item.seq, item.payload]),
+    ).toEqual([
+      ["2", { text: "已回放" }],
+      ["3", { text: "实时增量" }],
+    ]);
+  });
 });
 
 describe("useSkillBuilderRunStream", () => {

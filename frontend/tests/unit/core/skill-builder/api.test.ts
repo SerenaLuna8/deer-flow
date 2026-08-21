@@ -3,7 +3,6 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 import {
   SkillBuilderApiError,
   listSkillBuilderActivities,
-  mergeSkillBuilderActivities,
   stopSkillBuilderTurn,
   setSkillBuilderExecutionPreference,
   skillBuilderActivityTerminal,
@@ -195,32 +194,6 @@ describe("Skill Builder Activity API", () => {
     ).toBeNull();
   });
 
-  test("drops duplicate and non-increasing Activity frames", () => {
-    const activity = {
-      seq: "2",
-      operation_id: "55555555-5555-4555-8555-555555555555",
-      run_id: RUN_ID,
-      kind: "reasoning" as const,
-      attempt: 1,
-      payload: { text: "已回放" },
-      created_at: NOW,
-    };
-
-    expect(
-      mergeSkillBuilderActivities(
-        [activity],
-        [
-          { ...activity, payload: { text: "重复帧" } },
-          { ...activity, seq: "1", payload: { text: "倒退帧" } },
-          { ...activity, seq: "3", payload: { text: "实时增量" } },
-        ],
-      ).map((item) => [item.seq, item.payload]),
-    ).toEqual([
-      ["2", { text: "已回放" }],
-      ["3", { text: "实时增量" }],
-    ]);
-  });
-
   test("parses only the isolated public-safe Activity contract", async () => {
     const response = {
       data: [
@@ -242,6 +215,39 @@ describe("Skill Builder Activity API", () => {
     await expect(
       listSkillBuilderActivities(PROJECT_ID, SESSION_ID),
     ).resolves.toEqual(response);
+  });
+
+  test("accepts only the two public validation stage names", async () => {
+    const base = {
+      operation_id: "55555555-5555-4555-8555-555555555555",
+      run_id: null,
+      kind: "validation_started",
+      attempt: null,
+      created_at: NOW,
+    };
+    const response = {
+      data: [
+        { ...base, seq: "1", payload: { stage: "package_files" } },
+        { ...base, seq: "2", payload: { stage: "safety_scan" } },
+      ],
+      request_id: "request-validation-activity",
+    };
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", async () => Response.json(response));
+
+    await expect(
+      listSkillBuilderActivities(PROJECT_ID, SESSION_ID),
+    ).resolves.toEqual(response);
+
+    rs.stubGlobal("fetch", async () =>
+      Response.json({
+        ...response,
+        data: [{ ...base, seq: "3", payload: { stage: "provider_scan" } }],
+      }),
+    );
+    await expect(
+      listSkillBuilderActivities(PROJECT_ID, SESSION_ID),
+    ).rejects.toMatchObject({ code: "SKILL_BUILDER_RESPONSE_INVALID" });
   });
 
   test("rejects tool arguments and results from a successful Activity response", async () => {

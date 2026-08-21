@@ -2362,6 +2362,10 @@ export const zhCN: Translations = {
           attempt === 1 ? "模型思考" : `修复重试 ${attempt - 1} 的模型思考`,
         resultCount: (count) => `${count} 项结果`,
         sizeBytes: (count) => `${count} 字节`,
+        validationStages: {
+          package_files: "开始校验包文件",
+          safety_scan: "开始安全扫描",
+        },
         stop: "停止本轮生成",
         stopping: "正在停止…",
         stages: {

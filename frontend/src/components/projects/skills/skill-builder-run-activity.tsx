@@ -246,6 +246,11 @@ export function SkillBuilderActivityBlock({
             );
           }
           const { activity } = item;
+          const stageLabel =
+            activity.kind === "validation_started" &&
+            "stage" in activity.payload
+              ? copy.validationStages[activity.payload.stage]
+              : copy.stages[activity.kind];
           const toolDetails =
             activity.kind.startsWith("tool_") && "tool_name" in activity.payload
               ? [
@@ -265,7 +270,7 @@ export function SkillBuilderActivityBlock({
               : [];
           return (
             <p key={activity.seq} className="text-muted-foreground text-xs">
-              {copy.stages[activity.kind]}
+              {stageLabel}
               {activity.kind.startsWith("tool_") &&
               "tool_name" in activity.payload
                 ? ` · ${activity.payload.tool_name}`

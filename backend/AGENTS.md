@@ -274,6 +274,18 @@ or downgrade an application database.
   owner-private append-only table and SSE cursor, never a Thread/Run event; its
   payload is a closed public projection and cancellation removes it with the
   session's private draft content.
+- Skill Builder keeps Run/Job/Worker settlement authoritative and projects only
+  provider reasoning plus allowlisted safe stages into its separate
+  owner-private Activity stream. Each model turn captures one immutable draft
+  baseline shared by all Job attempts; stop/failure settlement restores it
+  before writing the unique terminal. Whole-session cancellation must complete
+  that stop/restore/terminal flow before clearing Activity and draft content.
+  Validation records request, package-file validation, safety scan, result, and
+  terminal stages; Commit success remains atomic with Skill/Candidate Version,
+  while a rolled-back Commit records a separate failed terminal projection.
+  Authoring-owner reads with edit capability fail stale in-progress Commit
+  operations and restore a stranded `committing` session to its still-validated
+  candidate so it can be retried.
 - Project Agent DELETE is a soft archive. It retains immutable versions and all
   Thread/Run/Automation/Channel/OAuth references, atomically clears a matching
   project-default pointer, hides the Agent from project catalogs, and rejects new

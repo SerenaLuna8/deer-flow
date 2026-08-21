@@ -86,6 +86,17 @@ def _public_payload(
     payload: dict[str, object] | None,
 ) -> dict[str, object]:
     value = dict(payload or {})
+    if kind is SkillDesignActivityKind.VALIDATION_STARTED:
+        if not value:
+            # Upgrade-created history used an empty payload for this stage.
+            return {}
+        stage = value.get("stage")
+        if set(value) != {"stage"} or stage not in {
+            "package_files",
+            "safety_scan",
+        }:
+            raise TypeError("validation stage must be public and known")
+        return {"stage": stage}
     if kind is SkillDesignActivityKind.REASONING:
         text = value.get("text")
         if set(value) != {"text"} or not isinstance(text, str) or not text:
@@ -239,6 +250,56 @@ class SkillDesignActivityRepository:
             attempt=attempt,
             source_event_id=source_event_id,
             kind=kind.value,
+            payload_json=public_payload,
+        )
+        self.session.add(row)
+        await self.session.flush()
+        return row
+
+    async def append_locked_settlement_terminal(
+        self,
+        operation: SkillDesignOperationRow,
+        *,
+        status: str,
+        code: str | None,
+    ) -> SkillDesignActivityRow:
+        """Append the one safe terminal for a settlement-locked Builder turn."""
+
+        if not isinstance(operation, SkillDesignOperationRow) or operation.operation_kind != "turn" or operation.run_id is None:
+            raise TypeError("settlement terminal requires a locked Builder turn")
+        payload_input: dict[str, object] = {"status": status}
+        if code is not None:
+            payload_input["code"] = code
+        public_payload = _public_payload(
+            SkillDesignActivityKind.RUN_TERMINAL,
+            payload_input,
+        )
+        existing = (
+            await self.session.execute(
+                select(SkillDesignActivityRow).where(
+                    SkillDesignActivityRow.operation_id == operation.id,
+                    SkillDesignActivityRow.kind == SkillDesignActivityKind.RUN_TERMINAL.value,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            if existing.payload_json != public_payload:
+                raise TypeError("Builder turn already has a different terminal")
+            return existing
+        attempt = await self.session.scalar(
+            select(func.max(SkillDesignActivityRow.attempt)).where(
+                SkillDesignActivityRow.operation_id == operation.id,
+            )
+        )
+        row = SkillDesignActivityRow(
+            project_id=operation.project_id,
+            owner_user_id=operation.owner_user_id,
+            session_id=operation.session_id,
+            operation_id=operation.id,
+            run_id=operation.run_id,
+            attempt=int(attempt) if attempt is not None else None,
+            source_event_id="run-terminal",
+            kind=SkillDesignActivityKind.RUN_TERMINAL.value,
             payload_json=public_payload,
         )
         self.session.add(row)

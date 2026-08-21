@@ -2103,6 +2103,10 @@ export interface Translations {
         reasoning: (attempt: number) => string;
         resultCount: (count: number) => string;
         sizeBytes: (count: number) => string;
+        validationStages: {
+          package_files: string;
+          safety_scan: string;
+        };
         stop: string;
         stopping: string;
         stages: Record<

@@ -34,6 +34,7 @@ from app.projects.context import (
     resolve_project_context_in_transaction,
 )
 from app.projects.errors import ProjectForbidden, ProjectNotFound
+from app.shared_assets.agent_design_profile import agent_design_mode_matches_profile
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
@@ -178,6 +179,7 @@ class SkillDesignServiceErrorCode(StrEnum):
     GENERATION_INTERRUPTED = "SKILL_DESIGN_GENERATION_INTERRUPTED"
     GENERATION_UNAVAILABLE = "SKILL_DESIGN_GENERATION_UNAVAILABLE"
     INVALID_MODEL_OUTPUT = "SKILL_DESIGN_INVALID_MODEL_OUTPUT"
+    COMMIT_INTERRUPTED = "SKILL_DESIGN_COMMIT_INTERRUPTED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,6 +691,7 @@ class SkillDesignService:
                     idempotency_key_hash=operation_hash,
                     for_update=True,
                 )
+                row = await repository.get(context, session_id, for_update=True)
                 if operation is None or operation.status != "in_progress":
                     return
                 self._require_matching_operation(
@@ -697,7 +700,6 @@ class SkillDesignService:
                     session_id=session_id,
                     request_checksum=request_checksum,
                 )
-                row = await repository.get(context, session_id, for_update=True)
                 operation.status = "failed"
                 operation.result_revision = row.revision
                 operation.public_error_code = public_error_code[:64]
@@ -718,6 +720,82 @@ class SkillDesignService:
                         "code": public_error_code[:64],
                     },
                     source_event_id="validation-terminal",
+                )
+        except (SharedAssetError, DBAPIError):
+            return
+
+    async def _record_commit_failure(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_hash: str,
+        request_checksum: str,
+        public_error_code: str,
+        validation_passed: bool,
+        persistence_started: bool,
+    ) -> None:
+        """Persist the failed Commit projection after its business tx rolls back."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                await repository.lock_context(context)
+                row = await repository.get(context, session_id, for_update=True)
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="commit",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                if operation is None or operation.status != "in_progress":
+                    return
+                self._require_matching_operation(
+                    context,
+                    operation,
+                    session_id=session_id,
+                    request_checksum=request_checksum,
+                )
+                code = public_error_code[:64]
+                operation.status = "failed"
+                operation.result_revision = row.revision
+                operation.public_error_code = code
+                if row.status == SkillDesignStatus.COMMITTING.value:
+                    row.status = SkillDesignStatus.VALIDATED.value
+                    row.progress_json = self._progress_json(
+                        SkillDesignStatus.VALIDATED,
+                    )
+                activity_repository = SkillDesignActivityRepository(session)
+                stages: list[tuple[SkillDesignActivityKind, str]] = []
+                if validation_passed:
+                    stages.append(
+                        (
+                            SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
+                            "commit-validation-passed",
+                        )
+                    )
+                if persistence_started:
+                    stages.append(
+                        (
+                            SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+                            "commit-persistence-started",
+                        )
+                    )
+                for kind, source_event_id in stages:
+                    await activity_repository.append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=kind,
+                        source_event_id=source_event_id,
+                    )
+                await activity_repository.append(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                    kind=SkillDesignActivityKind.COMMIT_TERMINAL,
+                    payload={"status": "failed", "code": code},
+                    source_event_id="commit-terminal",
                 )
         except (SharedAssetError, DBAPIError):
             return
@@ -961,18 +1039,33 @@ class SkillDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    if Capability.SHARED_ASSETS_EDIT in context.capabilities:
+                        await repository.lock_context(context)
                     rows = await repository.list_incomplete(context, limit=limit)
                     now = self._now()
                     result: list[SkillDesignSessionSummary] = []
                     for listed in rows:
                         row = listed
-                        if Capability.SHARED_ASSETS_EDIT in context.capabilities and self._is_stale_generating(row, now=now):
+                        if Capability.SHARED_ASSETS_EDIT in context.capabilities and (
+                            self._is_stale_generating(row, now=now)
+                            or row.status
+                            in {
+                                SkillDesignStatus.VALIDATED.value,
+                                SkillDesignStatus.COMMITTING.value,
+                            }
+                        ):
                             row = await repository.get(
                                 context,
                                 row.id,
                                 for_update=True,
                             )
                             await self._recover_stale_generating(
+                                repository,
+                                context,
+                                row,
+                                now=now,
+                            )
+                            await self._recover_stale_commit(
                                 repository,
                                 context,
                                 row,
@@ -997,6 +1090,8 @@ class SkillDesignService:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    if Capability.SHARED_ASSETS_EDIT in context.capabilities:
+                        await repository.lock_context(context)
                     row = await repository.get(
                         context,
                         session_id,
@@ -1004,6 +1099,12 @@ class SkillDesignService:
                     )
                     if Capability.SHARED_ASSETS_EDIT in context.capabilities:
                         await self._recover_stale_generating(
+                            repository,
+                            context,
+                            row,
+                            now=self._now(),
+                        )
+                        await self._recover_stale_commit(
                             repository,
                             context,
                             row,
@@ -1259,6 +1360,25 @@ class SkillDesignService:
                         request_id=context.request_id,
                     )
                 if cancel_result == "cancelled":
+                    job_type = await session.scalar(
+                        select(JobRow.job_type).where(
+                            JobRow.id == linked_run.job_id,
+                            JobRow.project_id == context.project_id,
+                            JobRow.owner_user_id == str(context.user_id),
+                        )
+                    )
+                    if job_type != "private_run":
+                        raise AssetConflict(context.request_id)
+                    await self._audit.run_terminal(
+                        session,
+                        private_context.resource_scope,
+                        run_id=linked_run.run_id,
+                        job_id=linked_run.job_id,
+                        job_type=job_type,
+                        status="interrupted",
+                        public_error_code=None,
+                        request_id=context.request_id,
+                    )
                     files = await repository.restore_operation_baseline(
                         context,
                         session_id=row.id,
@@ -2103,14 +2223,32 @@ class SkillDesignService:
                         request_checksum=request_checksum,
                     )
                     await repository.create_operation(context, operation)
-                    await SkillDesignActivityRepository(session).append(
+                    activity_repository = SkillDesignActivityRepository(session)
+                    await activity_repository.append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.REQUEST_ACCEPTED,
+                        source_event_id="validation-request-accepted",
+                    )
+                    await activity_repository.append(
                         context,
                         session_id=row.id,
                         operation_id=operation.id,
                         kind=SkillDesignActivityKind.VALIDATION_STARTED,
-                        source_event_id="validation-started",
+                        payload={"stage": "package_files"},
+                        source_event_id="validation-package-files-started",
                     )
             files = self._validate_builder_files(context, files)
+            async with self._session_factory() as session, session.begin():
+                await SkillDesignActivityRepository(session).append(
+                    context,
+                    session_id=session_id,
+                    operation_id=operation.id,
+                    kind=SkillDesignActivityKind.VALIDATION_STARTED,
+                    payload={"stage": "safety_scan"},
+                    source_event_id="validation-safety-scan-started",
+                )
             preview = await self._skill_service.preview_archive(context, files)
             self._require_preview_name(context, preview, row.slug)
             validation = self._validation_from_preview(
@@ -2206,9 +2344,35 @@ class SkillDesignService:
             )
             raise
         except IntegrityError as exc:
-            self._raise_integrity(context, exc)
+            try:
+                self._raise_integrity(context, exc)
+            except SharedAssetError as domain_error:
+                await self._record_validation_failure(
+                    context,
+                    session_id=session_id,
+                    operation_hash=operation_hash,
+                    request_checksum=request_checksum,
+                    public_error_code=domain_error.code,
+                )
+                raise
         except DBAPIError:
+            await self._record_validation_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                public_error_code=AssetStorageUnavailable.code,
+            )
             raise AssetStorageUnavailable(context.request_id) from None
+        except Exception:
+            await self._record_validation_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                public_error_code=AssetStorageUnavailable.code,
+            )
+            raise
 
     async def commit(
         self,
@@ -2231,35 +2395,25 @@ class SkillDesignService:
         repeated_session: SkillDesignSessionView | None = None
         created_result: ProjectSkillArchiveCreateResult | None = None
         created_version: SkillVersionView | None = None
+        commit_started = False
+        commit_validation_passed = False
+        commit_persistence_started = False
         try:
+            # Admit the Commit first so request/revalidation progress is durable
+            # and observable before deterministic work starts.
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    await repository.lock_context(context)
+                    row = await repository.get(
+                        context,
+                        session_id,
+                        for_update=True,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="commit",
                         idempotency_key_hash=operation_hash,
-                        for_update=True,
-                    )
-                    # Lock order: Project → Membership → Skill →
-                    # SkillDesignSession. Read the session without a lock to
-                    # learn the revise target, lock the Skill row first, then
-                    # lock the session row and re-validate what we read.
-                    unlocked = await repository.get(context, session_id)
-                    target_asset = None
-                    if unlocked.session_kind == "revise" and not unlocked.target_skill_deleted and unlocked.target_skill_id is not None:
-                        skill_repository = SkillRepository(session)
-                        try:
-                            target_asset = await skill_repository.get_project_asset(
-                                context,
-                                unlocked.target_skill_id,
-                                for_update=True,
-                            )
-                        except AssetNotFound:
-                            target_asset = None
-                    row = await repository.get(
-                        context,
-                        session_id,
                         for_update=True,
                     )
                     if operation is not None:
@@ -2293,6 +2447,79 @@ class SkillDesignService:
                             (),
                         )
                     else:
+                        operation = self._new_operation(
+                            context,
+                            session_id,
+                            kind="commit",
+                            idempotency_hash=operation_hash,
+                            request_checksum=request_checksum,
+                        )
+                        await repository.create_operation(context, operation)
+                        activity_repository = SkillDesignActivityRepository(
+                            session,
+                        )
+                        for kind, source_event_id in (
+                            (
+                                SkillDesignActivityKind.COMMIT_ACCEPTED,
+                                "commit-accepted",
+                            ),
+                            (
+                                SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+                                "commit-validation-started",
+                            ),
+                        ):
+                            await activity_repository.append(
+                                context,
+                                session_id=row.id,
+                                operation_id=operation.id,
+                                kind=kind,
+                                source_event_id=source_event_id,
+                            )
+                        await session.flush()
+                        commit_started = True
+
+            if repeated_session is None:
+                # Revalidate under locks, then make the draft immutable to all
+                # other Builder mutations before announcing persistence.
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        repository = self._repository_factory(session)
+                        await repository.lock_context(context)
+                        # Lock order: Project → Membership → Skill →
+                        # SkillDesignSession. Learn the target first, then lock
+                        # its Skill before the Builder session.
+                        unlocked = await repository.get(context, session_id)
+                        target_asset = None
+                        if unlocked.session_kind == "revise" and not unlocked.target_skill_deleted and unlocked.target_skill_id is not None:
+                            try:
+                                target_asset = await SkillRepository(
+                                    session,
+                                ).get_project_asset(
+                                    context,
+                                    unlocked.target_skill_id,
+                                    for_update=True,
+                                )
+                            except AssetNotFound:
+                                target_asset = None
+                        row = await repository.get(
+                            context,
+                            session_id,
+                            for_update=True,
+                        )
+                        operation = await repository.get_operation(
+                            context,
+                            operation_kind="commit",
+                            idempotency_key_hash=operation_hash,
+                            for_update=True,
+                        )
+                        if operation is None or operation.status != "in_progress":
+                            raise AssetConflict(context.request_id)
+                        self._require_matching_operation(
+                            context,
+                            operation,
+                            session_id=session_id,
+                            request_checksum=request_checksum,
+                        )
                         self._require_revise_target_live(context, row)
                         self._require_expected_revision(
                             context,
@@ -2340,45 +2567,82 @@ class SkillDesignService:
                             draft_identity = {(item.path, item.sha256, item.size_bytes, item.media_type) for item in preview.file_views}
                             if base_identity == draft_identity:
                                 raise SkillDesignNoChanges(context.request_id)
-                        operation = self._new_operation(
-                            context,
-                            session_id,
-                            kind="commit",
-                            idempotency_hash=operation_hash,
-                            request_checksum=request_checksum,
+                        row.status = SkillDesignStatus.COMMITTING.value
+                        operation.updated_at = self._now()
+                        row.progress_json = self._progress_json(
+                            SkillDesignStatus.COMMITTING,
                         )
-                        await repository.create_operation(context, operation)
                         activity_repository = SkillDesignActivityRepository(
                             session,
                         )
-                        for kind, source_event_id in (
-                            (
-                                SkillDesignActivityKind.COMMIT_ACCEPTED,
-                                "commit-accepted",
-                            ),
-                            (
-                                SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
-                                "commit-validation-started",
-                            ),
-                            (
-                                SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
-                                "commit-validation-passed",
-                            ),
-                            (
-                                SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
-                                "commit-persistence-started",
-                            ),
-                        ):
-                            await activity_repository.append(
-                                context,
-                                session_id=row.id,
-                                operation_id=operation.id,
-                                kind=kind,
-                                source_event_id=source_event_id,
-                            )
-                        row.status = SkillDesignStatus.COMMITTING.value
+                        await activity_repository.append(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                            kind=(SkillDesignActivityKind.COMMIT_VALIDATION_PASSED),
+                            source_event_id="commit-validation-passed",
+                        )
+                        await activity_repository.append(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                            kind=(SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED),
+                            source_event_id="commit-persistence-started",
+                        )
                         await session.flush()
+                commit_validation_passed = True
+                commit_persistence_started = True
+
+                # Asset/version persistence and the successful terminal Activity
+                # remain one atomic transaction.
+                async with self._session_factory() as session:
+                    async with session.begin():
+                        repository = self._repository_factory(session)
+                        await repository.lock_context(context)
+                        unlocked = await repository.get(context, session_id)
+                        target_asset = None
+                        if unlocked.session_kind == "revise" and not unlocked.target_skill_deleted and unlocked.target_skill_id is not None:
+                            try:
+                                target_asset = await SkillRepository(
+                                    session,
+                                ).get_project_asset(
+                                    context,
+                                    unlocked.target_skill_id,
+                                    for_update=True,
+                                )
+                            except AssetNotFound:
+                                target_asset = None
+                        row = await repository.get(
+                            context,
+                            session_id,
+                            for_update=True,
+                        )
+                        operation = await repository.get_operation(
+                            context,
+                            operation_kind="commit",
+                            idempotency_key_hash=operation_hash,
+                            for_update=True,
+                        )
+                        if operation is None or operation.status != "in_progress":
+                            raise AssetConflict(context.request_id)
+                        self._require_matching_operation(
+                            context,
+                            operation,
+                            session_id=session_id,
+                            request_checksum=request_checksum,
+                        )
+                        self._require_revise_target_live(context, row)
+                        self._require_expected_revision(
+                            context,
+                            row,
+                            command.expected_revision,
+                        )
+                        if row.status != SkillDesignStatus.COMMITTING.value or row.draft_checksum != command.expected_draft_checksum:
+                            raise AssetConflict(context.request_id)
+                        assert preview is not None
                         if row.session_kind == "revise":
+                            if row.target_skill_id is None or row.base_version_id is None or target_asset is None or target_asset.id != row.target_skill_id or target_asset.status not in {"active", "suspended"}:
+                                raise AssetConflict(context.request_id)
                             created_version = await self._skill_service.create_project_version_from_preview_in_session(
                                 session,
                                 context,
@@ -2400,14 +2664,16 @@ class SkillDesignService:
                             )
                             row.created_skill_id = created_result.asset.id
                             row.created_skill_version_id = created_result.version.id
-                        # Completion CHECK forbids created_skill_* while status is
-                        # still committing. Set the terminal status before any
-                        # follow-up query that would autoflush the session row.
                         row.status = SkillDesignStatus.COMPLETED.value
                         row.revision += 1
-                        row.progress_json = self._progress_json(SkillDesignStatus.COMPLETED)
+                        row.progress_json = self._progress_json(
+                            SkillDesignStatus.COMPLETED,
+                        )
                         operation.status = "completed"
                         operation.result_revision = row.revision
+                        activity_repository = SkillDesignActivityRepository(
+                            session,
+                        )
                         await activity_repository.append(
                             context,
                             session_id=row.id,
@@ -2449,30 +2715,75 @@ class SkillDesignService:
                     skill=skill,
                     version=created_version,
                 )
-            if repeated_session.created_skill_id is None or row.created_skill_deleted:
+            if repeated_session.created_skill_id is None:
                 raise AssetConflict(context.request_id)
             skill = await self._skill_service.get(
                 context,
                 repeated_session.created_skill_id,
             )
             replayed_version: SkillVersionView | None = None
-            if row.created_skill_version_id is not None:
+            if repeated_session.created_skill_version_id is not None:
                 replayed_version = await self._skill_service.get_project_version_view(
                     context,
                     repeated_session.created_skill_id,
-                    row.created_skill_version_id,
+                    repeated_session.created_skill_version_id,
                 )
             return SkillDesignCommitResult(
                 session=repeated_session,
                 skill=skill,
                 version=replayed_version,
             )
-        except SharedAssetError:
+        except SharedAssetError as exc:
+            if commit_started:
+                await self._record_commit_failure(
+                    context,
+                    session_id=session_id,
+                    operation_hash=operation_hash,
+                    request_checksum=request_checksum,
+                    public_error_code=exc.code,
+                    validation_passed=commit_validation_passed,
+                    persistence_started=commit_persistence_started,
+                )
             raise
         except IntegrityError as exc:
-            self._raise_integrity(context, exc)
+            try:
+                self._raise_integrity(context, exc)
+            except SharedAssetError as domain_error:
+                if commit_started:
+                    await self._record_commit_failure(
+                        context,
+                        session_id=session_id,
+                        operation_hash=operation_hash,
+                        request_checksum=request_checksum,
+                        public_error_code=domain_error.code,
+                        validation_passed=commit_validation_passed,
+                        persistence_started=commit_persistence_started,
+                    )
+                raise
         except DBAPIError:
+            if commit_started:
+                await self._record_commit_failure(
+                    context,
+                    session_id=session_id,
+                    operation_hash=operation_hash,
+                    request_checksum=request_checksum,
+                    public_error_code=AssetStorageUnavailable.code,
+                    validation_passed=commit_validation_passed,
+                    persistence_started=commit_persistence_started,
+                )
             raise AssetStorageUnavailable(context.request_id) from None
+        except Exception:
+            if commit_started:
+                await self._record_commit_failure(
+                    context,
+                    session_id=session_id,
+                    operation_hash=operation_hash,
+                    request_checksum=request_checksum,
+                    public_error_code=AssetStorageUnavailable.code,
+                    validation_passed=commit_validation_passed,
+                    persistence_started=commit_persistence_started,
+                )
+            raise
 
     async def cancel(
         self,
@@ -2490,6 +2801,17 @@ class SkillDesignService:
                 "expected_revision": command.expected_revision,
             }
         )
+        effective_expected_revision = command.expected_revision
+        current = await self.get(context, session_id)
+        if current.status is SkillDesignStatus.GENERATING:
+            if current.revision != command.expected_revision:
+                raise AssetConflict(context.request_id)
+            stopped = await self.stop_current_run(context, session_id)
+            if stopped.status is SkillDesignStatus.GENERATING:
+                # The Worker still owns the Provider call. Keep the session and
+                # its Activity intact so a retry can finish the protected flow.
+                raise AssetConflict(context.request_id)
+            effective_expected_revision = stopped.revision
         try:
             async with self._session_factory() as session:
                 async with session.begin():
@@ -2537,7 +2859,7 @@ class SkillDesignService:
                     self._require_expected_revision(
                         context,
                         row,
-                        command.expected_revision,
+                        effective_expected_revision,
                     )
                     operation = self._new_operation(
                         context,
@@ -2547,55 +2869,6 @@ class SkillDesignService:
                         request_checksum=request_checksum,
                     )
                     await repository.create_operation(context, operation)
-                    linked_run = await repository.latest_linked_run(
-                        context,
-                        row.id,
-                    )
-                    if linked_run is not None and linked_run.status in {"pending", "running"} and linked_run.job_id is not None:
-                        private_context = PrivateWorkContext.from_project(context)
-                        cancel_result = await PrivateRunRepository(
-                            session,
-                        ).request_cancel(
-                            scope=private_context.resource_scope,
-                            thread_id=linked_run.thread_id,
-                            run_id=linked_run.run_id,
-                            job_id=linked_run.job_id,
-                            reason="skill_builder_cancelled",
-                        )
-                        if cancel_result != "terminal":
-                            await self._audit.run_cancel_requested(
-                                session,
-                                private_context,
-                                run_id=linked_run.run_id,
-                                job_id=linked_run.job_id,
-                            )
-                        if cancel_result in {"cancelled", "terminal"}:
-                            await self._quota.release_concurrent_run(
-                                session,
-                                private_context.resource_scope,
-                                run_id=linked_run.run_id,
-                                request_id=context.request_id,
-                            )
-                        if cancel_result == "cancelled":
-                            job_type = await session.scalar(
-                                select(JobRow.job_type).where(
-                                    JobRow.id == linked_run.job_id,
-                                    JobRow.project_id == context.project_id,
-                                    JobRow.owner_user_id == str(context.user_id),
-                                )
-                            )
-                            if job_type != "private_run":
-                                raise AssetConflict(context.request_id)
-                            await self._audit.run_terminal(
-                                session,
-                                private_context.resource_scope,
-                                run_id=linked_run.run_id,
-                                job_id=linked_run.job_id,
-                                job_type=job_type,
-                                status="interrupted",
-                                public_error_code=None,
-                                request_id=context.request_id,
-                            )
                     await repository.clear_draft_files(context, row.id)
                     await SkillDesignActivityRepository(session).clear_session(
                         context,
@@ -3318,6 +3591,69 @@ class SkillDesignService:
         await repository.session.flush()
         return True
 
+    async def _recover_stale_commit(
+        self,
+        repository: SkillDesignRepository,
+        context: ProjectContext,
+        row: SkillDesignSessionRow,
+        *,
+        now: datetime,
+    ) -> bool:
+        if row.status not in {
+            SkillDesignStatus.VALIDATED.value,
+            SkillDesignStatus.COMMITTING.value,
+        }:
+            return False
+        operations = tuple(
+            (
+                await repository.session.execute(
+                    select(SkillDesignOperationRow)
+                    .where(
+                        SkillDesignOperationRow.project_id == context.project_id,
+                        SkillDesignOperationRow.owner_user_id == str(context.user_id),
+                        SkillDesignOperationRow.session_id == row.id,
+                        SkillDesignOperationRow.operation_kind == "commit",
+                        SkillDesignOperationRow.status == "in_progress",
+                    )
+                    .order_by(SkillDesignOperationRow.created_at.asc())
+                    .with_for_update(of=SkillDesignOperationRow)
+                )
+            )
+            .scalars()
+            .all()
+        )
+        stale: list[SkillDesignOperationRow] = []
+        has_fresh = False
+        for operation in operations:
+            updated_at = operation.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=UTC)
+            if now - updated_at >= self._stale_after:
+                stale.append(operation)
+            else:
+                has_fresh = True
+        if not stale:
+            return False
+        code = SkillDesignServiceErrorCode.COMMIT_INTERRUPTED.value
+        activity_repository = SkillDesignActivityRepository(repository.session)
+        for operation in stale:
+            operation.status = "failed"
+            operation.result_revision = row.revision
+            operation.public_error_code = code
+            await activity_repository.append(
+                context,
+                session_id=row.id,
+                operation_id=operation.id,
+                kind=SkillDesignActivityKind.COMMIT_TERMINAL,
+                payload={"status": "failed", "code": code},
+                source_event_id="commit-terminal",
+            )
+        if row.status == SkillDesignStatus.COMMITTING.value and not has_fresh:
+            row.status = SkillDesignStatus.VALIDATED.value
+            row.progress_json = self._progress_json(SkillDesignStatus.VALIDATED)
+        await repository.session.flush()
+        return True
+
     def _is_stale_generating(
         self,
         row: SkillDesignSessionRow,
@@ -3504,13 +3840,11 @@ class SkillDesignService:
             context,
             command.reasoning_effort,
         )
-        expected = {
-            "flash": (False, {None, "none"}),
-            "thinking": (True, {None, "low"}),
-            "pro": (True, {"medium"}),
-            "ultra": (True, {"high"}),
-        }[command.mode]
-        if command.thinking_enabled is not expected[0] or effort not in expected[1]:
+        if not agent_design_mode_matches_profile(
+            command.mode,
+            thinking_enabled=command.thinking_enabled,
+            reasoning_effort=effort,
+        ):
             raise AssetValidationFailed(context.request_id)
         return SetSkillDesignExecutionPreference(
             model_name=model_name,

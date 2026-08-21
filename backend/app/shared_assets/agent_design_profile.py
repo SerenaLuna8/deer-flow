@@ -65,6 +65,29 @@ def agent_design_mode_profile(
     return True, "medium" if mode == "pro" else "high"
 
 
+def agent_design_mode_matches_profile(
+    mode: str,
+    *,
+    thinking_enabled: bool,
+    reasoning_effort: str | None,
+) -> bool:
+    """Validate a normalized chooser value without model capability state."""
+
+    if mode not in _MODES or type(thinking_enabled) is not bool:
+        return False
+    if reasoning_effort not in {None, "none", "low", "medium", "high"}:
+        return False
+    try:
+        expected = agent_design_mode_profile(
+            mode,  # type: ignore[arg-type]
+            supports_thinking=thinking_enabled,
+            supports_reasoning_effort=reasoning_effort is not None,
+        )
+    except AgentDesignGenerationProfileUnsupported:
+        return False
+    return expected == (thinking_enabled, reasoning_effort)
+
+
 def resolve_agent_design_generation_profile(
     *,
     requested_model_ref: str,
@@ -118,5 +141,6 @@ __all__ = [
     "AgentDesignGenerationProfileUnsupported",
     "AgentDesignReasoningEffort",
     "agent_design_mode_profile",
+    "agent_design_mode_matches_profile",
     "resolve_agent_design_generation_profile",
 ]

@@ -121,3 +121,87 @@ async def test_stream_bridge_does_not_invent_reasoning() -> None:
     )
 
     assert emitter.events == []
+
+
+@pytest.mark.asyncio
+async def test_stream_bridge_never_projects_catalog_references() -> None:
+    emitter = _Emitter()
+    bridge = SkillBuilderActivityStreamBridge(_Bridge(), emitter)  # type: ignore[arg-type]
+
+    await bridge.publish(
+        "run-1",
+        "messages",
+        [
+            {
+                "type": "ai",
+                "tool_calls": [
+                    {
+                        "id": "read-1",
+                        "name": "read_skill_version",
+                        "args": {"reference": "skill:project:private-name:v4"},
+                    },
+                    {
+                        "id": "inspect-1",
+                        "name": "inspect_mcp_tool",
+                        "args": {"reference": "mcp:project:private-server:v2:secret"},
+                    },
+                ],
+            },
+            {},
+        ],
+    )
+    await bridge.publish(
+        "run-1",
+        "messages",
+        [
+            {
+                "type": "tool",
+                "tool_call_id": "read-1",
+                "name": "read_skill_version",
+                "status": "failed",
+                "content": "must-not-project",
+            },
+            {},
+        ],
+    )
+    await bridge.publish(
+        "run-1",
+        "messages",
+        [
+            {
+                "type": "tool",
+                "tool_call_id": "inspect-1",
+                "name": "inspect_mcp_tool",
+                "content": ('{"reference":"mcp:project:private-server:v2:secret","server_name":"Public Server","tool_name":"Public Tool"}'),
+            },
+            {},
+        ],
+    )
+
+    assert emitter.events == [
+        (
+            SkillDesignActivityKind.TOOL_STARTED,
+            {"tool_call_id": "read-1", "tool_name": "read_skill_version"},
+            "tool-started:read-1",
+        ),
+        (
+            SkillDesignActivityKind.TOOL_STARTED,
+            {"tool_call_id": "inspect-1", "tool_name": "inspect_mcp_tool"},
+            "tool-started:inspect-1",
+        ),
+        (
+            SkillDesignActivityKind.TOOL_FAILED,
+            {"tool_call_id": "read-1", "tool_name": "read_skill_version"},
+            "tool-failed:read-1",
+        ),
+        (
+            SkillDesignActivityKind.TOOL_COMPLETED,
+            {
+                "tool_call_id": "inspect-1",
+                "tool_name": "inspect_mcp_tool",
+                "resource_name": "Public Server / Public Tool",
+            },
+            "tool-completed:inspect-1",
+        ),
+    ]
+    assert "private" not in repr(emitter.events)

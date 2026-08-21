@@ -28,6 +28,7 @@ from app.shared_assets.errors import (
 )
 from app.shared_assets.skill_builder_contract import SkillBuilderCandidateFileList
 from app.shared_assets.skill_builder_run_admission import SkillBuilderRunAdmissionService
+from app.shared_assets.skill_design_activity import SkillDesignActivityKind
 from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.shared_assets.skill_design_service import (
     CommitSkillDesignSession,
@@ -89,6 +90,10 @@ class _SkillQuota:
 
     async def reconcile_project_storage(self, _session, project_id) -> None:
         assert project_id
+
+
+class _SimulatedCommitCrash(BaseException):
+    pass
 
 
 class _RecordingRunQuota:
@@ -385,6 +390,490 @@ async def _commit_session(
     )
 
 
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_validate_records_package_scan_result_and_terminal_stages(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug="validation-activity",
+                display_name="Validation Activity",
+                idempotency_key="create-validation-activity",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (_skill_md("validation-activity", "Validate every stage."),),
+        )
+        validated = await _validate_session(
+            design,
+            context,
+            drafted,
+            "validate-stage-activity",
+        )
+
+        assert validated.status is SkillDesignStatus.VALIDATED
+        activities = await design.list_activities(context, opened.id)
+        assert [(item.kind, item.payload) for item in activities] == [
+            (SkillDesignActivityKind.REQUEST_ACCEPTED, {}),
+            (
+                SkillDesignActivityKind.VALIDATION_STARTED,
+                {"stage": "package_files"},
+            ),
+            (
+                SkillDesignActivityKind.VALIDATION_STARTED,
+                {"stage": "safety_scan"},
+            ),
+            (SkillDesignActivityKind.VALIDATION_PASSED, {}),
+            (
+                SkillDesignActivityKind.RUN_TERMINAL,
+                {"status": "completed"},
+            ),
+        ]
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_validation_unexpected_failure_has_durable_terminal(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug="validation-unexpected-failure",
+                display_name="Validation Unexpected Failure",
+                idempotency_key="create-validation-unexpected-failure",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (
+                _skill_md(
+                    "validation-unexpected-failure",
+                    "Record a safe validation terminal.",
+                ),
+            ),
+        )
+
+        async def fail_validation(*_args, **_kwargs):
+            raise RuntimeError("unexpected validation failure")
+
+        monkeypatch.setattr(skills, "preview_archive", fail_validation)
+        with pytest.raises(RuntimeError, match="unexpected validation failure"):
+            await _validate_session(
+                design,
+                context,
+                drafted,
+                "validate-unexpected-failure",
+            )
+
+        current = await design.get(context, opened.id)
+        assert current.status is SkillDesignStatus.DRAFT_READY
+        activities = await design.list_activities(context, opened.id)
+        assert [(item.kind, item.payload) for item in activities] == [
+            (SkillDesignActivityKind.REQUEST_ACCEPTED, {}),
+            (
+                SkillDesignActivityKind.VALIDATION_STARTED,
+                {"stage": "package_files"},
+            ),
+            (
+                SkillDesignActivityKind.VALIDATION_STARTED,
+                {"stage": "safety_scan"},
+            ),
+            (SkillDesignActivityKind.VALIDATION_FAILED, {}),
+            (
+                SkillDesignActivityKind.RUN_TERMINAL,
+                {
+                    "status": "failed",
+                    "code": "asset_storage_unavailable",
+                },
+            ),
+        ]
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.session_id == opened.id,
+                        SkillDesignOperationRow.operation_kind == "validate",
+                    )
+                )
+            ).scalar_one()
+            assert operation.status == "failed"
+            assert operation.public_error_code == "asset_storage_unavailable"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+@pytest.mark.parametrize("crash_stage", ["validation", "persistence"])
+async def test_stale_commit_is_recovered_with_failed_terminal(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    crash_stage: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        slug = f"stale-commit-{crash_stage}"
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug=slug,
+                display_name=f"Stale Commit {crash_stage}",
+                idempotency_key=f"create-{slug}",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (_skill_md(slug, "Recover an interrupted Commit."),),
+        )
+        validated = await _validate_session(
+            design,
+            context,
+            drafted,
+            f"validate-{slug}",
+        )
+
+        async def crash(*_args, **_kwargs):
+            raise _SimulatedCommitCrash
+
+        if crash_stage == "validation":
+            monkeypatch.setattr(skills, "preview_archive", crash)
+        else:
+            monkeypatch.setattr(
+                skills,
+                "create_project_from_preview_in_session",
+                crash,
+            )
+        with pytest.raises(_SimulatedCommitCrash):
+            await _commit_session(
+                design,
+                context,
+                validated,
+                f"commit-{slug}",
+            )
+
+        recovery_design = SkillDesignService(
+            seed.factory,
+            skill_service=skills,
+            stale_generating_seconds=0.001,
+        )
+        await asyncio.sleep(0.01)
+        if crash_stage == "validation":
+            summaries = await recovery_design.list_incomplete(context)
+            assert len(summaries) == 1
+            assert summaries[0].status is SkillDesignStatus.VALIDATED
+        recovered = await recovery_design.get(context, opened.id)
+        assert recovered.status is SkillDesignStatus.VALIDATED
+        activities = await recovery_design.list_activities(context, opened.id)
+        commit_activities = [item for item in activities if item.kind.value.startswith("commit_")]
+        expected = [
+            SkillDesignActivityKind.COMMIT_ACCEPTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+        ]
+        if crash_stage == "persistence":
+            expected.extend(
+                [
+                    SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
+                    SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+                ]
+            )
+        expected.append(SkillDesignActivityKind.COMMIT_TERMINAL)
+        assert [item.kind for item in commit_activities] == expected
+        assert commit_activities[-1].payload == {
+            "status": "failed",
+            "code": "SKILL_DESIGN_COMMIT_INTERRUPTED",
+        }
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.session_id == opened.id,
+                        SkillDesignOperationRow.operation_kind == "commit",
+                    )
+                )
+            ).scalar_one()
+            assert operation.status == "failed"
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_commit_stages_are_visible_while_work_is_in_progress(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    preview_entered = asyncio.Event()
+    preview_release = asyncio.Event()
+    persistence_entered = asyncio.Event()
+    persistence_release = asyncio.Event()
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug="live-commit-activity",
+                display_name="Live Commit Activity",
+                idempotency_key="create-live-commit-activity",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (_skill_md("live-commit-activity", "Expose real Commit stages."),),
+        )
+        validated = await _validate_session(
+            design,
+            context,
+            drafted,
+            "validate-live-commit-activity",
+        )
+        original_preview = skills.preview_archive
+        original_create = skills.create_project_from_preview_in_session
+
+        async def blocked_preview(*args, **kwargs):
+            preview_entered.set()
+            await preview_release.wait()
+            return await original_preview(*args, **kwargs)
+
+        async def blocked_create(*args, **kwargs):
+            persistence_entered.set()
+            await persistence_release.wait()
+            return await original_create(*args, **kwargs)
+
+        monkeypatch.setattr(skills, "preview_archive", blocked_preview)
+        monkeypatch.setattr(
+            skills,
+            "create_project_from_preview_in_session",
+            blocked_create,
+        )
+        commit_task = asyncio.create_task(
+            _commit_session(
+                design,
+                context,
+                validated,
+                "commit-live-activity",
+            )
+        )
+        await asyncio.wait_for(preview_entered.wait(), timeout=5)
+        during_validation = await design.list_activities(context, opened.id)
+        assert [item.kind for item in during_validation if item.kind.value.startswith("commit_")] == [
+            SkillDesignActivityKind.COMMIT_ACCEPTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+        ]
+
+        preview_release.set()
+        await asyncio.wait_for(persistence_entered.wait(), timeout=5)
+        during_persistence = await design.list_activities(context, opened.id)
+        assert [item.kind for item in during_persistence if item.kind.value.startswith("commit_")] == [
+            SkillDesignActivityKind.COMMIT_ACCEPTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
+            SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+        ]
+
+        persistence_release.set()
+        result = await asyncio.wait_for(commit_task, timeout=5)
+        assert result.session.status is SkillDesignStatus.COMPLETED
+    finally:
+        preview_release.set()
+        persistence_release.set()
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_commit_revalidation_failure_has_durable_terminal(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug="commit-revalidation-failure",
+                display_name="Commit Revalidation Failure",
+                idempotency_key="create-commit-revalidation-failure",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (
+                _skill_md(
+                    "commit-revalidation-failure",
+                    "Reject a stale Commit after admission.",
+                ),
+            ),
+        )
+        validated = await _validate_session(
+            design,
+            context,
+            drafted,
+            "validate-before-stale-commit",
+        )
+        assert validated.draft_checksum is not None
+
+        with pytest.raises(AssetConflict):
+            await design.commit(
+                context,
+                opened.id,
+                CommitSkillDesignSession(
+                    expected_revision=validated.revision - 1,
+                    expected_draft_checksum=validated.draft_checksum,
+                    acknowledge_warnings=True,
+                    idempotency_key="stale-commit-with-terminal",
+                ),
+            )
+
+        activities = await design.list_activities(context, opened.id)
+        commit_activities = [item for item in activities if item.kind.value.startswith("commit_")]
+        assert [item.kind for item in commit_activities] == [
+            SkillDesignActivityKind.COMMIT_ACCEPTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+            SkillDesignActivityKind.COMMIT_TERMINAL,
+        ]
+        assert commit_activities[-1].payload == {
+            "status": "failed",
+            "code": "asset_conflict",
+        }
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_commit_failure_keeps_failed_operation_and_terminal_activity(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, context, skills, design, _quota = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        opened = await design.create(
+            context,
+            CreateSkillDesignSession(
+                slug="commit-failure-activity",
+                display_name="Commit Failure Activity",
+                idempotency_key="create-commit-failure-activity",
+            ),
+        )
+        drafted, _preview = await _seed_create_draft(
+            seed,
+            context,
+            skills,
+            design,
+            opened.id,
+            (
+                _skill_md(
+                    "commit-failure-activity",
+                    "Fail only after deterministic validation.",
+                ),
+            ),
+        )
+        validated = await _validate_session(
+            design,
+            context,
+            drafted,
+            "validate-before-commit-failure",
+        )
+
+        async def fail_persistence(*_args, **_kwargs):
+            raise RuntimeError("unexpected persistence failure")
+
+        monkeypatch.setattr(
+            skills,
+            "create_project_from_preview_in_session",
+            fail_persistence,
+        )
+        with pytest.raises(RuntimeError, match="unexpected persistence failure"):
+            await _commit_session(
+                design,
+                context,
+                validated,
+                "commit-persistence-failure",
+            )
+
+        current = await design.get(context, opened.id)
+        assert current.status is SkillDesignStatus.VALIDATED
+        activities = await design.list_activities(context, opened.id)
+        commit_activities = [item for item in activities if item.kind.value.startswith("commit_")]
+        assert [item.kind for item in commit_activities] == [
+            SkillDesignActivityKind.COMMIT_ACCEPTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+            SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
+            SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+            SkillDesignActivityKind.COMMIT_TERMINAL,
+        ]
+        assert commit_activities[-1].payload == {
+            "status": "failed",
+            "code": "asset_storage_unavailable",
+        }
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.session_id == opened.id,
+                        SkillDesignOperationRow.operation_kind == "commit",
+                    )
+                )
+            ).scalar_one()
+            assert operation.status == "failed"
+            assert operation.public_error_code == "asset_storage_unavailable"
+            assert (
+                await session.scalar(
+                    sa.select(sa.func.count())
+                    .select_from(SkillRow)
+                    .where(
+                        SkillRow.project_id == context.project_id,
+                        SkillRow.slug == "commit-failure-activity",
+                    )
+                )
+                == 0
+            )
+    finally:
+        await seed.engine.dispose()
+
+
 async def _insert_current_skill(
     seed: PrivateThreadSeed,
     context: ProjectContext,
@@ -670,10 +1159,14 @@ async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
         assert validated.base_files == opened.base_files
         activities = await design.list_activities(context, opened.id)
         assert [item.kind.value for item in activities] == [
+            "request_accepted",
+            "validation_started",
             "validation_started",
             "validation_passed",
             "run_terminal",
         ]
+        assert activities[1].payload == {"stage": "package_files"}
+        assert activities[2].payload == {"stage": "safety_scan"}
         assert activities[-1].payload == {"status": "completed"}
     finally:
         await seed.engine.dispose()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -70,6 +71,7 @@ from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
+    SkillDesignActivityRow,
     SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
@@ -882,6 +884,129 @@ async def test_stop_current_builder_run_restores_baseline_and_keeps_session(
             assert operation.status == "stopped"
             assert operation.stop_requested_at is not None
     finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_cancel_waits_for_active_builder_settlement_before_clearing(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed, context, service, _quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    settlement_task: asyncio.Task[None] | None = None
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="cancel-after-settlement",
+                display_name="Cancel After Settlement",
+                idempotency_key="create-cancel-after-settlement",
+            ),
+        )
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="运行中取消整个设计会话",
+                revision=design.revision,
+                key="turn-before-session-cancel",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+        _worker_id, claim = await _claim_and_begin(
+            seed,
+            now=datetime.now(UTC),
+        )
+        assert claim.run_id == admission.run_id
+
+        cleared_after_terminal = False
+        original_clear = SkillDesignActivityRepository.clear_session
+
+        async def assert_terminal_then_clear(
+            repository: SkillDesignActivityRepository,
+            project_context: ProjectContext,
+            *,
+            session_id: uuid.UUID,
+        ) -> None:
+            nonlocal cleared_after_terminal
+            terminal_count = await repository.session.scalar(
+                sa.select(sa.func.count())
+                .select_from(SkillDesignActivityRow)
+                .where(
+                    SkillDesignActivityRow.session_id == session_id,
+                    SkillDesignActivityRow.kind == "run_terminal",
+                )
+            )
+            turn = (
+                await repository.session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.session_id == session_id,
+                        SkillDesignOperationRow.operation_kind == "turn",
+                    )
+                )
+            ).scalar_one()
+            assert terminal_count == 1
+            assert turn.status == "stopped"
+            cleared_after_terminal = True
+            await original_clear(
+                repository,
+                project_context,
+                session_id=session_id,
+            )
+
+        monkeypatch.setattr(
+            SkillDesignActivityRepository,
+            "clear_session",
+            assert_terminal_then_clear,
+        )
+        handler = PrivateRunJobHandler(
+            seed.factory,
+            executor=object(),  # type: ignore[arg-type]
+            quota=_quota,
+            audit=_audit,
+        )
+
+        async def settle_after_cancel_request() -> None:
+            for _ in range(200):
+                async with seed.factory() as session:
+                    requested_at = await session.scalar(
+                        sa.select(JobRow.cancel_requested_at).where(
+                            JobRow.id == claim.job_id,
+                        )
+                    )
+                if requested_at is not None:
+                    settlement = handler._settlement(
+                        claim,
+                        AgentExecutionResult.cancelled(),
+                        scope=seed.owner_a.resource_scope,
+                    )
+                    await settlement.commit()
+                    return
+                await asyncio.sleep(0.01)
+            raise AssertionError("cancel request was not persisted")
+
+        settlement_task = asyncio.create_task(settle_after_cancel_request())
+        generating = await service.get(context, design.id)
+        cancelled = await service.cancel(
+            context,
+            design.id,
+            CancelSkillDesignSession(
+                expected_revision=generating.revision,
+                idempotency_key="cancel-after-running-settlement",
+            ),
+        )
+        await settlement_task
+
+        assert cancelled.status is SkillDesignStatus.CANCELLED
+        assert cleared_after_terminal
+        assert await service.list_activities(context, design.id) == ()
+    finally:
+        if settlement_task is not None and not settlement_task.done():
+            settlement_task.cancel()
+            await asyncio.gather(settlement_task, return_exceptions=True)
         await seed.engine.dispose()
 
 

@@ -192,10 +192,6 @@ def _started_tool_details(
     arguments: Mapping[str, Any],
 ) -> dict[str, object]:
     result: dict[str, object] = {}
-    if tool_name in {"read_skill_version", "inspect_mcp_tool"}:
-        resource_name = _safe_resource_name(arguments.get("reference"))
-        if resource_name is not None:
-            result["resource_name"] = resource_name
     if tool_name in {
         "read_candidate_file",
         "upsert_candidate_file",
@@ -245,6 +241,12 @@ def _completed_tool_details(
                 details["path"] = path
             if size_bytes is not None:
                 details["size_bytes"] = size_bytes
+    elif tool_name == "inspect_mcp_tool":
+        server_name = _safe_resource_name(result.get("server_name"))
+        tool_public_name = _safe_resource_name(result.get("tool_name"))
+        details = {}
+        if server_name is not None and tool_public_name is not None:
+            details["resource_name"] = f"{server_name} / {tool_public_name}"
     return details
 
 

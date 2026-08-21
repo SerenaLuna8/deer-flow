@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import hashlib
-import json
 import logging
 import re
 import uuid
@@ -70,9 +68,11 @@ from app.reliability.run_execution.ports import (
 from app.reliability.run_execution.projections import (
     checkpoint_progress_cursor as _checkpoint_progress_cursor,
 )
+from app.shared_assets.skill_design_activity import SkillDesignActivityRepository
 from app.shared_assets.skill_design_generation import (
     SkillBuilderDependencySnapshot,
 )
+from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -83,9 +83,6 @@ from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
-    SkillDesignActivityRow,
-    SkillDesignDraftFileRow,
-    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
@@ -204,62 +201,13 @@ class PrivateRunJobHandler:
         operation, design = pair
         if operation.status != "in_progress":
             return
-        baseline_rows = tuple(
-            (
-                await session.execute(
-                    sa.select(SkillDesignOperationBaselineFileRow)
-                    .where(
-                        SkillDesignOperationBaselineFileRow.project_id == operation.project_id,
-                        SkillDesignOperationBaselineFileRow.owner_user_id == operation.owner_user_id,
-                        SkillDesignOperationBaselineFileRow.session_id == operation.session_id,
-                        SkillDesignOperationBaselineFileRow.operation_id == operation.id,
-                    )
-                    .order_by(SkillDesignOperationBaselineFileRow.path)
-                    .with_for_update(
-                        of=SkillDesignOperationBaselineFileRow,
-                    )
-                )
-            ).scalars()
+        repository = SkillDesignRepository(session)
+        baseline = await repository.restore_locked_operation_baseline(
+            operation,
+            design,
+            request_id=normalize_trace_id(claim.origin_trace_id) or "unknown",
         )
-        await session.execute(
-            sa.delete(SkillDesignDraftFileRow).where(
-                SkillDesignDraftFileRow.project_id == operation.project_id,
-                SkillDesignDraftFileRow.owner_user_id == operation.owner_user_id,
-                SkillDesignDraftFileRow.session_id == operation.session_id,
-            )
-        )
-        for baseline in baseline_rows:
-            session.add(
-                SkillDesignDraftFileRow(
-                    project_id=baseline.project_id,
-                    owner_user_id=baseline.owner_user_id,
-                    session_id=baseline.session_id,
-                    path=baseline.path,
-                    media_type=baseline.media_type,
-                    size_bytes=baseline.size_bytes,
-                    sha256=baseline.sha256,
-                    content=baseline.content,
-                )
-            )
-        baseline_checksum = (
-            hashlib.sha256(
-                json.dumps(
-                    [
-                        {
-                            "path": item.path,
-                            "sha256": item.sha256,
-                            "size_bytes": item.size_bytes,
-                        }
-                        for item in baseline_rows
-                    ],
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
-            if baseline_rows
-            else None
-        )
+        baseline_checksum = baseline.draft_checksum
         design.draft_checksum = baseline_checksum
         design.authoring_dependencies_json = None
         stopped = settled_status == "interrupted" and operation.stop_requested_at is not None
@@ -317,39 +265,14 @@ class PrivateRunJobHandler:
             operation.public_error_code = code
             terminal_status = "failed"
             terminal_code = code
-        terminal_exists = await session.scalar(
-            sa.select(SkillDesignActivityRow.seq).where(
-                SkillDesignActivityRow.operation_id == operation.id,
-                SkillDesignActivityRow.kind == "run_terminal",
-            )
+        await SkillDesignActivityRepository(
+            session,
+        ).append_locked_settlement_terminal(
+            operation,
+            status=terminal_status,
+            code=terminal_code,
         )
-        if terminal_exists is None:
-            attempt = await session.scalar(
-                sa.select(sa.func.max(SkillDesignActivityRow.attempt)).where(
-                    SkillDesignActivityRow.operation_id == operation.id,
-                )
-            )
-            payload: dict[str, object] = {"status": terminal_status}
-            if terminal_code is not None:
-                payload["code"] = terminal_code
-            session.add(
-                SkillDesignActivityRow(
-                    project_id=operation.project_id,
-                    owner_user_id=operation.owner_user_id,
-                    session_id=operation.session_id,
-                    operation_id=operation.id,
-                    run_id=operation.run_id,
-                    attempt=int(attempt) if attempt is not None else None,
-                    source_event_id="run-terminal",
-                    kind="run_terminal",
-                    payload_json=payload,
-                )
-            )
-        await session.execute(
-            sa.delete(SkillDesignOperationBaselineFileRow).where(
-                SkillDesignOperationBaselineFileRow.operation_id == operation.id,
-            )
-        )
+        await repository.clear_locked_operation_baseline(operation)
         await session.flush()
 
     @staticmethod
