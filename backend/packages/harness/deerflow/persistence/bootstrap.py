@@ -38,6 +38,7 @@ KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
     "agent_design_activity",
     "agent_design_activity_retry",
     "agent_design_activity_terminal",
+    "skill_design_activity",
 )
 
 # The migration-chain head revision id. ``full_schema.sql`` stamps exactly

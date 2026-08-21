@@ -40,6 +40,26 @@ export const skillBuilderStatusSchema = z.enum([
 
 export const skillBuilderSessionKindSchema = z.enum(["create", "revise"]);
 
+export const skillBuilderReasoningEffortSchema = z.enum([
+  "none",
+  "low",
+  "medium",
+  "high",
+]);
+
+const skillBuilderExecutionModelNameSchema = z
+  .string()
+  .regex(/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u);
+
+export const skillBuilderExecutionPreferenceSchema = z
+  .object({
+    model_name: skillBuilderExecutionModelNameSchema,
+    mode: z.enum(["flash", "thinking", "pro", "ultra"]),
+    thinking_enabled: z.boolean(),
+    reasoning_effort: skillBuilderReasoningEffortSchema.nullable(),
+  })
+  .strict();
+
 export const skillBuilderProgressStatusSchema = z.enum([
   "pending",
   "running",
@@ -61,6 +81,82 @@ export const skillBuilderMessageSchema = z
     role: z.enum(["user", "assistant"]),
     content: z.string(),
     created_at: timestampSchema,
+    operation_id: uuidSchema.nullish(),
+  })
+  .strict();
+
+const skillBuilderActivityBaseSchema = z.object({
+  seq: z.string().regex(/^(0|[1-9][0-9]*)$/u),
+  operation_id: uuidSchema,
+  run_id: z.string().trim().min(1).max(64).nullable(),
+  attempt: z.number().int().positive().nullable(),
+  created_at: timestampSchema,
+});
+
+const skillBuilderEmptyActivityKinds = [
+  "request_accepted",
+  "attempt_started",
+  "candidate_generated",
+  "validation_started",
+  "validation_passed",
+  "validation_failed",
+  "repair_started",
+  "commit_accepted",
+  "commit_validation_started",
+  "commit_validation_passed",
+  "commit_persistence_started",
+  "commit_persistence_completed",
+] as const;
+
+const skillBuilderEmptyActivitySchema = skillBuilderActivityBaseSchema
+  .extend({
+    kind: z.enum(skillBuilderEmptyActivityKinds),
+    payload: z.object({}).strict(),
+  })
+  .strict();
+
+const skillBuilderReasoningActivitySchema = skillBuilderActivityBaseSchema
+  .extend({
+    kind: z.literal("reasoning"),
+    payload: z.object({ text: z.string().min(1).max(65_536) }).strict(),
+  })
+  .strict();
+
+const skillBuilderToolActivitySchema = skillBuilderActivityBaseSchema
+  .extend({
+    kind: z.enum(["tool_started", "tool_completed", "tool_failed"]),
+    payload: z
+      .object({
+        tool_call_id: z.string().trim().min(1).max(512),
+        tool_name: z.string().trim().min(1).max(255),
+      })
+      .strict(),
+  })
+  .strict();
+
+const skillBuilderTerminalActivitySchema = skillBuilderActivityBaseSchema
+  .extend({
+    kind: z.enum(["run_terminal", "commit_terminal"]),
+    payload: z
+      .object({
+        status: z.enum(["completed", "failed", "stopped"]),
+        code: z.string().trim().min(1).max(64).optional(),
+      })
+      .strict(),
+  })
+  .strict();
+
+export const skillBuilderActivitySchema = z.union([
+  skillBuilderEmptyActivitySchema,
+  skillBuilderReasoningActivitySchema,
+  skillBuilderToolActivitySchema,
+  skillBuilderTerminalActivitySchema,
+]);
+
+export const skillBuilderActivityListResponseSchema = z
+  .object({
+    data: z.array(skillBuilderActivitySchema),
+    request_id: z.string().trim().min(1),
   })
   .strict();
 
@@ -373,6 +469,7 @@ export const skillBuilderSessionSchema = z
     // Rolling-compatible durable Builder extension. Legacy Gateway responses
     // omit this property; an active asynchronous Run supplies it.
     activeRun: skillBuilderRunAdmissionSchema.nullish(),
+    execution_preference: skillBuilderExecutionPreferenceSchema.nullish(),
     created_at: timestampSchema,
     updated_at: timestampSchema,
   })
@@ -427,13 +524,6 @@ export const createSkillBuilderRevisionInputSchema = z
   })
   .strict();
 
-export const skillBuilderReasoningEffortSchema = z.enum([
-  "none",
-  "low",
-  "medium",
-  "high",
-]);
-
 // Mirrors the Gateway attachment rules: display-only name (no control chars
 // or path separators) plus bounded UTF-8 text content.
 export const skillBuilderAttachmentSchema = z
@@ -484,16 +574,14 @@ const skillBuilderAttachmentsSchema = z
     }
   });
 
-const skillBuilderExecutionModelNameSchema = z
-  .string()
-  .regex(/^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/u);
-
 export const skillBuilderMessageTurnSchema = z
   .object({
     kind: z.literal("message"),
     message: z.string().trim().min(1).max(SKILL_BUILDER_MAX_MESSAGE_CHARS),
     model_name: skillBuilderExecutionModelNameSchema.optional(),
-    reasoning_effort: skillBuilderReasoningEffortSchema.optional(),
+    mode: z.enum(["flash", "thinking", "pro", "ultra"]).optional(),
+    thinking_enabled: z.boolean().optional(),
+    reasoning_effort: skillBuilderReasoningEffortSchema.nullable().optional(),
     attachments: skillBuilderAttachmentsSchema.optional(),
   })
   .strict();
@@ -515,7 +603,9 @@ export const skillBuilderClarificationTurnSchema = z
     kind: z.literal("clarification"),
     response: skillBuilderClarificationResponseSchema,
     model_name: skillBuilderExecutionModelNameSchema.optional(),
-    reasoning_effort: skillBuilderReasoningEffortSchema.optional(),
+    mode: z.enum(["flash", "thinking", "pro", "ultra"]).optional(),
+    thinking_enabled: z.boolean().optional(),
+    reasoning_effort: skillBuilderReasoningEffortSchema.nullable().optional(),
   })
   .strict();
 
@@ -620,6 +710,9 @@ export const cancelSkillBuilderSessionInputSchema = z
   })
   .strict();
 
+export const setSkillBuilderExecutionPreferenceInputSchema =
+  skillBuilderExecutionPreferenceSchema;
+
 export const skillBuilderCommitResponseSchema = z
   .object({
     data: z
@@ -650,6 +743,9 @@ export type SkillBuilderRunStreamProjection = z.infer<
 export type SkillBuilderReasoningEffort = z.infer<
   typeof skillBuilderReasoningEffortSchema
 >;
+export type SkillBuilderExecutionPreference = z.infer<
+  typeof skillBuilderExecutionPreferenceSchema
+>;
 export type SkillBuilderAttachment = z.infer<
   typeof skillBuilderAttachmentSchema
 >;
@@ -657,6 +753,7 @@ export type SkillBuilderProgressItem = z.infer<
   typeof skillBuilderProgressItemSchema
 >;
 export type SkillBuilderMessage = z.infer<typeof skillBuilderMessageSchema>;
+export type SkillBuilderActivity = z.infer<typeof skillBuilderActivitySchema>;
 export type SkillBuilderFile = z.infer<typeof skillBuilderFileSchema>;
 export type SkillBuilderFileChange = z.infer<
   typeof skillBuilderFileChangeSchema
@@ -699,6 +796,9 @@ export type SkillBuilderCommitResponse = z.infer<
 >;
 export type CancelSkillBuilderSessionInput = z.input<
   typeof cancelSkillBuilderSessionInputSchema
+>;
+export type SetSkillBuilderExecutionPreferenceInput = z.input<
+  typeof setSkillBuilderExecutionPreferenceInputSchema
 >;
 
 export function isSkillBuilderRunAdmission(

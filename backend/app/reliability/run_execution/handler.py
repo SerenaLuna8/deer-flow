@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
+import json
 import logging
 import re
 import uuid
@@ -81,6 +83,9 @@ from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
+    SkillDesignActivityRow,
+    SkillDesignDraftFileRow,
+    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
@@ -199,34 +204,152 @@ class PrivateRunJobHandler:
         operation, design = pair
         if operation.status != "in_progress":
             return
-        code = "SKILL_DESIGN_INVALID_MODEL_OUTPUT" if settled_status == "success" else public_error_code or "SKILL_DESIGN_GENERATION_UNAVAILABLE"
-        if not is_public_error_code(code):
-            code = "SKILL_DESIGN_GENERATION_UNAVAILABLE"
-        message = "生成结果不是有效的 Skill 文件包，请调整描述后重试。" if code == "SKILL_DESIGN_INVALID_MODEL_OUTPUT" else "Skill 生成暂时不可用，请稍后重试。"
-        design.status = "failed"
-        design.active_clarification_json = None
-        design.validation_json = None
-        design.validated_draft_checksum = None
-        design.error_code = code
-        design.error_message = message
-        design.progress_json = [
-            {"id": "interview", "label": "确认需求", "status": "completed"},
-            {"id": "package", "label": "生成候选文件", "status": "failed"},
-            {"id": "validate", "label": "检查 Skill", "status": "pending"},
-        ]
-        design.messages_json = [
-            *design.messages_json,
-            {
-                "id": uuid.uuid4().hex,
-                "role": "assistant",
-                "content": message,
-                "created_at": datetime.now(UTC).isoformat(),
-            },
-        ]
-        design.revision += 1
-        operation.status = "failed"
-        operation.result_revision = design.revision
-        operation.public_error_code = code
+        baseline_rows = tuple(
+            (
+                await session.execute(
+                    sa.select(SkillDesignOperationBaselineFileRow)
+                    .where(
+                        SkillDesignOperationBaselineFileRow.project_id == operation.project_id,
+                        SkillDesignOperationBaselineFileRow.owner_user_id == operation.owner_user_id,
+                        SkillDesignOperationBaselineFileRow.session_id == operation.session_id,
+                        SkillDesignOperationBaselineFileRow.operation_id == operation.id,
+                    )
+                    .order_by(SkillDesignOperationBaselineFileRow.path)
+                    .with_for_update(
+                        of=SkillDesignOperationBaselineFileRow,
+                    )
+                )
+            ).scalars()
+        )
+        await session.execute(
+            sa.delete(SkillDesignDraftFileRow).where(
+                SkillDesignDraftFileRow.project_id == operation.project_id,
+                SkillDesignDraftFileRow.owner_user_id == operation.owner_user_id,
+                SkillDesignDraftFileRow.session_id == operation.session_id,
+            )
+        )
+        for baseline in baseline_rows:
+            session.add(
+                SkillDesignDraftFileRow(
+                    project_id=baseline.project_id,
+                    owner_user_id=baseline.owner_user_id,
+                    session_id=baseline.session_id,
+                    path=baseline.path,
+                    media_type=baseline.media_type,
+                    size_bytes=baseline.size_bytes,
+                    sha256=baseline.sha256,
+                    content=baseline.content,
+                )
+            )
+        baseline_checksum = (
+            hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "path": item.path,
+                            "sha256": item.sha256,
+                            "size_bytes": item.size_bytes,
+                        }
+                        for item in baseline_rows
+                    ],
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode()
+            ).hexdigest()
+            if baseline_rows
+            else None
+        )
+        design.draft_checksum = baseline_checksum
+        design.authoring_dependencies_json = None
+        stopped = settled_status == "interrupted" and operation.stop_requested_at is not None
+        if stopped:
+            design.status = "draft_ready" if baseline_checksum is not None else "interviewing"
+            design.active_clarification_json = None
+            design.validation_json = None
+            design.validated_draft_checksum = None
+            design.error_code = None
+            design.error_message = None
+            design.progress_json = [
+                {"id": "interview", "label": "确认需求", "status": "completed"},
+                {
+                    "id": "package",
+                    "label": "生成候选文件",
+                    "status": "completed" if baseline_checksum else "pending",
+                },
+                {"id": "validate", "label": "检查 Skill", "status": "pending"},
+            ]
+            design.revision += 1
+            operation.status = "stopped"
+            operation.result_revision = design.revision
+            operation.public_error_code = None
+            terminal_status = "stopped"
+            terminal_code = None
+        else:
+            code = "SKILL_DESIGN_INVALID_MODEL_OUTPUT" if settled_status == "success" else public_error_code or "SKILL_DESIGN_GENERATION_UNAVAILABLE"
+            if not is_public_error_code(code):
+                code = "SKILL_DESIGN_GENERATION_UNAVAILABLE"
+            message = "生成结果不是有效的 Skill 文件包，请调整描述后重试。" if code == "SKILL_DESIGN_INVALID_MODEL_OUTPUT" else "Skill 生成暂时不可用，请稍后重试。"
+            design.status = "failed"
+            design.active_clarification_json = None
+            design.validation_json = None
+            design.validated_draft_checksum = None
+            design.error_code = code
+            design.error_message = message
+            design.progress_json = [
+                {"id": "interview", "label": "确认需求", "status": "completed"},
+                {"id": "package", "label": "生成候选文件", "status": "failed"},
+                {"id": "validate", "label": "检查 Skill", "status": "pending"},
+            ]
+            design.messages_json = [
+                *design.messages_json,
+                {
+                    "id": uuid.uuid4().hex,
+                    "role": "assistant",
+                    "content": message,
+                    "created_at": datetime.now(UTC).isoformat(),
+                    "operation_id": str(operation.id),
+                },
+            ]
+            design.revision += 1
+            operation.status = "failed"
+            operation.result_revision = design.revision
+            operation.public_error_code = code
+            terminal_status = "failed"
+            terminal_code = code
+        terminal_exists = await session.scalar(
+            sa.select(SkillDesignActivityRow.seq).where(
+                SkillDesignActivityRow.operation_id == operation.id,
+                SkillDesignActivityRow.kind == "run_terminal",
+            )
+        )
+        if terminal_exists is None:
+            attempt = await session.scalar(
+                sa.select(sa.func.max(SkillDesignActivityRow.attempt)).where(
+                    SkillDesignActivityRow.operation_id == operation.id,
+                )
+            )
+            payload: dict[str, object] = {"status": terminal_status}
+            if terminal_code is not None:
+                payload["code"] = terminal_code
+            session.add(
+                SkillDesignActivityRow(
+                    project_id=operation.project_id,
+                    owner_user_id=operation.owner_user_id,
+                    session_id=operation.session_id,
+                    operation_id=operation.id,
+                    run_id=operation.run_id,
+                    attempt=int(attempt) if attempt is not None else None,
+                    source_event_id="run-terminal",
+                    kind="run_terminal",
+                    payload_json=payload,
+                )
+            )
+        await session.execute(
+            sa.delete(SkillDesignOperationBaselineFileRow).where(
+                SkillDesignOperationBaselineFileRow.operation_id == operation.id,
+            )
+        )
         await session.flush()
 
     @staticmethod

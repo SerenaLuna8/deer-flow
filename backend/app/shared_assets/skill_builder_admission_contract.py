@@ -33,6 +33,7 @@ class SkillBuilderRunAdmissionPort(Protocol):
         *,
         turn_message: str,
         model_name: str | None,
+        thinking_enabled: bool | None,
         reasoning_effort: str | None,
     ) -> SkillBuilderRunAdmission: ...
 

@@ -9,16 +9,21 @@ import {
   createSkillBuilderRevisionInputSchema,
   createSkillBuilderSessionInputSchema,
   skillBuilderCommitResponseSchema,
+  skillBuilderActivityListResponseSchema,
+  skillBuilderActivitySchema,
   skillBuilderSessionListResponseSchema,
   skillBuilderSessionResponseSchema,
   skillBuilderTurnInputSchema,
   skillBuilderTurnResponseSchema,
+  setSkillBuilderExecutionPreferenceInputSchema,
   validateSkillBuilderSessionInputSchema,
   type CancelSkillBuilderSessionInput,
   type CommitSkillBuilderSessionInput,
   type CreateSkillBuilderRevisionInput,
   type CreateSkillBuilderSessionInput,
   type SkillBuilderTurnInput,
+  type SkillBuilderActivity,
+  type SetSkillBuilderExecutionPreferenceInput,
   type ValidateSkillBuilderSessionInput,
 } from "./types";
 
@@ -69,6 +74,20 @@ function baseURL(projectId: string) {
 
 function sessionURL(projectId: string, sessionId: string) {
   return `${baseURL(projectId)}/${uuidSchema.parse(sessionId)}`;
+}
+
+export function skillBuilderActivityStreamURL(
+  projectId: string,
+  sessionId: string,
+) {
+  const query = new URLSearchParams({ after_seq: "0" });
+  return `${sessionURL(projectId, sessionId)}/activities/stream?${query.toString()}`;
+}
+
+export function parseSkillBuilderActivity(
+  value: unknown,
+): SkillBuilderActivity {
+  return skillBuilderActivitySchema.parse(value);
 }
 
 function safeCode(status: number): SkillBuilderApiErrorCode {
@@ -201,6 +220,20 @@ export function getSkillBuilderSession(
   );
 }
 
+export function listSkillBuilderActivities(
+  projectId: string,
+  sessionId: string,
+  afterSeq = "0",
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ after_seq: afterSeq });
+  return request(
+    `${sessionURL(projectId, sessionId)}/activities?${query.toString()}`,
+    skillBuilderActivityListResponseSchema,
+    { signal },
+  );
+}
+
 export function submitSkillBuilderTurn(
   projectId: string,
   sessionId: string,
@@ -217,6 +250,37 @@ export function submitSkillBuilderTurn(
       body: JSON.stringify(body),
       signal,
     },
+  );
+}
+
+export function setSkillBuilderExecutionPreference(
+  projectId: string,
+  sessionId: string,
+  input: SetSkillBuilderExecutionPreferenceInput,
+  signal?: AbortSignal,
+) {
+  const body = setSkillBuilderExecutionPreferenceInputSchema.parse(input);
+  return request(
+    `${sessionURL(projectId, sessionId)}/execution-preference`,
+    skillBuilderSessionResponseSchema,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+}
+
+export function stopSkillBuilderTurn(
+  projectId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+) {
+  return request(
+    `${sessionURL(projectId, sessionId)}/turns/stop`,
+    skillBuilderSessionResponseSchema,
+    { method: "POST", signal },
   );
 }
 

@@ -53,8 +53,8 @@ def test_static_comments_exactly_cover_metadata_and_alembic() -> None:
         comments,
         re.MULTILINE,
     )
-    assert len(table_comments) == 91
-    assert len(column_comments) == 1121
+    assert len(table_comments) == 93
+    assert len(column_comments) == 1147
     assert {name for name, _comment in table_comments} == set(definitions)
     assert {(table, column) for table, column, _comment in column_comments} == {(table, column) for table, columns in definitions.items() for column in columns}
     assert all(CHINESE_TEXT_PATTERN.search(comment) for _name, comment in table_comments)
@@ -82,6 +82,7 @@ def test_privacy_and_storage_sensitive_columns_use_table_specific_comments() -> 
         ("skill_version_files", "content"),
         ("file_chunks", "content"),
         ("skill_design_draft_files", "content"),
+        ("skill_design_operation_baseline_files", "content"),
         ("memory_documents", "content"),
         ("memory_document_versions", "content"),
         ("run_memory_context_snapshots", "content"),

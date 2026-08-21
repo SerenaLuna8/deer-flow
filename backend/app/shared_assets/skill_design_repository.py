@@ -21,6 +21,7 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import (
     SkillDesignDraftFileRow,
+    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
     SkillRow,
@@ -504,6 +505,104 @@ class SkillDesignRepository:
                 )
             )
         await self.session.flush()
+
+    async def capture_operation_baseline(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+    ) -> None:
+        """Capture the exact pre-Run candidate in the admission transaction."""
+
+        files = await self.load_draft_files(
+            context,
+            session_id,
+            for_update=True,
+        )
+        if sum(len(item.content) for item in files) > 2 * 1024 * 1024:
+            raise AssetValidationFailed(context.request_id)
+        await self.session.execute(
+            delete(SkillDesignOperationBaselineFileRow).where(
+                SkillDesignOperationBaselineFileRow.project_id == context.project_id,
+                SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
+                SkillDesignOperationBaselineFileRow.session_id == session_id,
+                SkillDesignOperationBaselineFileRow.operation_id == operation_id,
+            )
+        )
+        for item in files:
+            self.session.add(
+                SkillDesignOperationBaselineFileRow(
+                    project_id=context.project_id,
+                    owner_user_id=str(context.user_id),
+                    session_id=session_id,
+                    operation_id=operation_id,
+                    path=item.path,
+                    media_type=item.media_type,
+                    size_bytes=len(item.content),
+                    sha256=hashlib.sha256(item.content).hexdigest(),
+                    content=item.content,
+                )
+            )
+        await self.session.flush()
+
+    async def restore_operation_baseline(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+    ) -> tuple[SkillArchiveFile, ...]:
+        """Replace the candidate with the immutable operation baseline."""
+
+        await self.get(context, session_id, for_update=True)
+        rows = tuple(
+            (
+                await self.session.execute(
+                    select(SkillDesignOperationBaselineFileRow)
+                    .where(
+                        SkillDesignOperationBaselineFileRow.project_id == context.project_id,
+                        SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
+                        SkillDesignOperationBaselineFileRow.session_id == session_id,
+                        SkillDesignOperationBaselineFileRow.operation_id == operation_id,
+                    )
+                    .order_by(SkillDesignOperationBaselineFileRow.path)
+                    .with_for_update(
+                        of=SkillDesignOperationBaselineFileRow,
+                    )
+                )
+            ).scalars()
+        )
+        files: list[SkillArchiveFile] = []
+        for row in rows:
+            if len(row.content) != row.size_bytes or hashlib.sha256(row.content).hexdigest() != row.sha256:
+                raise AssetValidationFailed(context.request_id)
+            files.append(
+                SkillArchiveFile(
+                    path=row.path,
+                    content=row.content,
+                    media_type=row.media_type,
+                )
+            )
+        await self.replace_draft_files(context, session_id, tuple(files))
+        return tuple(files)
+
+    async def clear_operation_baseline(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+    ) -> None:
+        self._require_context(context)
+        await self.session.execute(
+            delete(SkillDesignOperationBaselineFileRow).where(
+                SkillDesignOperationBaselineFileRow.project_id == context.project_id,
+                SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
+                SkillDesignOperationBaselineFileRow.session_id == session_id,
+                SkillDesignOperationBaselineFileRow.operation_id == operation_id,
+            )
+        )
 
     async def clear_draft_files(
         self,

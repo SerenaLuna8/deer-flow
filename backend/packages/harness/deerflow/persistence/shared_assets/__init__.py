@@ -34,7 +34,9 @@ from deerflow.persistence.shared_assets.skill_credential_model import (
     ProjectSkillCredentialConfigRow,
 )
 from deerflow.persistence.shared_assets.skill_design_model import (
+    SkillDesignActivityRow,
     SkillDesignDraftFileRow,
+    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
@@ -69,7 +71,9 @@ __all__ = [
     "ProjectSkillCredentialBindingRow",
     "ProjectSkillCredentialConfigRow",
     "SkillRow",
+    "SkillDesignActivityRow",
     "SkillDesignDraftFileRow",
+    "SkillDesignOperationBaselineFileRow",
     "SkillDesignOperationRow",
     "SkillDesignSessionRow",
     "SkillVersionFileRow",

@@ -6,7 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -21,12 +21,18 @@ import {
   createSkillBuilderRevisionSession,
   createSkillBuilderSession,
   getSkillBuilderSession,
+  listSkillBuilderActivities,
   listSkillBuilderSessions,
   submitSkillBuilderTurn,
+  setSkillBuilderExecutionPreference,
+  skillBuilderActivityStreamURL,
+  parseSkillBuilderActivity,
+  stopSkillBuilderTurn,
   validateSkillBuilderSession,
 } from "./api";
 import {
   skillBuilderMutationKey,
+  skillBuilderActivitiesKey,
   skillBuilderSessionKey,
   skillBuilderSessionsInvalidation,
   skillBuilderSessionsKey,
@@ -44,9 +50,27 @@ import type {
   SkillBuilderSession,
   SkillBuilderSessionSummary,
   SkillBuilderRunStreamProjection,
+  SkillBuilderActivity,
   SkillBuilderTurnInput,
+  SetSkillBuilderExecutionPreferenceInput,
   ValidateSkillBuilderSessionInput,
 } from "./types";
+
+function compareActivitySeq(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left.localeCompare(right);
+}
+
+export function mergeSkillBuilderActivities(
+  current: readonly SkillBuilderActivity[],
+  incoming: readonly SkillBuilderActivity[],
+): SkillBuilderActivity[] {
+  const bySeq = new Map(current.map((activity) => [activity.seq, activity]));
+  for (const activity of incoming) bySeq.set(activity.seq, activity);
+  return [...bySeq.values()].sort((left, right) =>
+    compareActivitySeq(left.seq, right.seq),
+  );
+}
 
 export function useSkillBuilderRunStream({
   threadId,
@@ -176,6 +200,56 @@ export function useSkillBuilderSessions(
       ),
     enabled,
   });
+}
+
+export function useSkillBuilderActivities(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+  enabled = true,
+) {
+  const queryClient = useQueryClient();
+  const access = usePrivateWorkAccess();
+  const key = useMemo(
+    () => skillBuilderActivitiesKey(accountId, projectId, sessionId),
+    [accountId, projectId, sessionId],
+  );
+  const query = useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) =>
+      listSkillBuilderActivities(projectId, sessionId, "0", signal).then(
+        (response) => response.data,
+      ),
+    enabled,
+  });
+
+  useEffect(() => {
+    if (
+      !enabled ||
+      access.scope.accountId !== accountId ||
+      access.scope.projectId !== projectId ||
+      !access.subscribeEventStream
+    ) {
+      return;
+    }
+    return access.subscribeEventStream(
+      skillBuilderActivityStreamURL(projectId, sessionId),
+      "activity",
+      (data) => {
+        if (!isPrivateWorkAccessActive(access)) return;
+        try {
+          const activity = parseSkillBuilderActivity(JSON.parse(data));
+          queryClient.setQueryData<SkillBuilderActivity[]>(key, (current) =>
+            mergeSkillBuilderActivities(current ?? [], [activity]),
+          );
+        } catch {
+          // Strict-invalid frames never enter the Builder-owned query cache.
+        }
+      },
+    );
+  }, [access, accountId, enabled, key, projectId, queryClient, sessionId]);
+
+  return query;
 }
 
 export function useSkillBuilderSession(
@@ -317,6 +391,51 @@ export function useSubmitSkillBuilderTurn(
           () => response.data,
         );
       }
+      void queryClient.invalidateQueries(
+        skillBuilderSessionsInvalidation(accountId, projectId),
+      );
+    },
+  });
+}
+
+export function useSetSkillBuilderExecutionPreference(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  return useSessionMutation<
+    SetSkillBuilderExecutionPreferenceInput,
+    Awaited<ReturnType<typeof setSkillBuilderExecutionPreference>>
+  >(
+    accountId,
+    projectId,
+    sessionId,
+    "set-execution-preference",
+    setSkillBuilderExecutionPreference,
+  );
+}
+
+export function useStopSkillBuilderTurn(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useSkillBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: skillBuilderMutationKey(accountId, projectId, "stop-turn"),
+    mutationFn: () =>
+      runMutation((signal) =>
+        stopSkillBuilderTurn(projectId, sessionId, signal),
+      ),
+    onSuccess: async (response) => {
+      await updateSkillBuilderSessionCacheAfterMutation(
+        queryClient,
+        accountId,
+        projectId,
+        sessionId,
+        () => response.data,
+      );
       void queryClient.invalidateQueries(
         skillBuilderSessionsInvalidation(accountId, projectId),
       );

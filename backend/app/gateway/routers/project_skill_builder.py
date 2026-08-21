@@ -2,12 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from dataclasses import replace
 from datetime import datetime
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from app.gateway.deps import get_system_model_catalog
@@ -23,7 +34,7 @@ from app.private_work.skill_builder_run_admission import (
     SkillBuilderRunAdmissionService,
 )
 from app.projects.context import ProjectContext
-from app.shared_assets.errors import AssetStorageUnavailable
+from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFailed
 from app.shared_assets.skill_builder_admission_contract import (
     SkillBuilderRunAdmission,
 )
@@ -35,6 +46,8 @@ from app.shared_assets.skill_design_service import (
     CommitSkillDesignSession,
     CreateSkillDesignRevisionSession,
     CreateSkillDesignSession,
+    SetSkillDesignExecutionPreference,
+    SkillDesignActivity,
     SkillDesignClarificationResponse,
     SkillDesignClarificationTurn,
     SkillDesignCommitResult,
@@ -128,11 +141,18 @@ class SkillDesignMessageTurnRequest(_StrictModel):
             r"[0-9a-f]{4}-[0-9a-f]{12}$"
         ),
     )
+    mode: Literal["flash", "thinking", "pro", "ultra"] | None = None
+    thinking_enabled: bool | None = None
     reasoning_effort: SkillDesignReasoningEffort | None = None
     attachments: list[SkillDesignAttachmentRequest] = Field(
         default_factory=list,
         max_length=MAX_SKILL_DESIGN_ATTACHMENTS,
     )
+
+    @model_validator(mode="after")
+    def validate_profile(self) -> SkillDesignMessageTurnRequest:
+        _validate_turn_profile(self)
+        return self
 
 
 class SkillDesignClarificationResponseRequest(_StrictModel):
@@ -157,7 +177,14 @@ class SkillDesignClarificationTurnRequest(_StrictModel):
             r"[0-9a-f]{4}-[0-9a-f]{12}$"
         ),
     )
+    mode: Literal["flash", "thinking", "pro", "ultra"] | None = None
+    thinking_enabled: bool | None = None
     reasoning_effort: SkillDesignReasoningEffort | None = None
+
+    @model_validator(mode="after")
+    def validate_profile(self) -> SkillDesignClarificationTurnRequest:
+        _validate_turn_profile(self)
+        return self
 
 
 class SkillDesignFileChangeRequest(_StrictModel):
@@ -209,10 +236,60 @@ class SkillDesignCancelRequest(_StrictModel):
     idempotency_key: str
 
 
+class SkillDesignExecutionPreferenceRequest(_StrictModel):
+    model_name: str = Field(
+        min_length=36,
+        max_length=36,
+        pattern=(
+            r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        ),
+    )
+    mode: Literal["flash", "thinking", "pro", "ultra"]
+    thinking_enabled: bool
+    reasoning_effort: SkillDesignReasoningEffort | None
+
+    @model_validator(mode="after")
+    def validate_profile(self) -> SkillDesignExecutionPreferenceRequest:
+        expected = {
+            "flash": (False, {None, "none"}),
+            "thinking": (True, {None, "low"}),
+            "pro": (True, {"medium"}),
+            "ultra": (True, {"high"}),
+        }[self.mode]
+        if self.thinking_enabled is not expected[0] or self.reasoning_effort not in expected[1]:
+            raise ValueError("mode and reasoning profile are inconsistent")
+        return self
+
+
+def _validate_turn_profile(
+    value: SkillDesignMessageTurnRequest | SkillDesignClarificationTurnRequest,
+) -> None:
+    if value.mode is None and value.thinking_enabled is None:
+        return
+    if value.model_name is None or value.mode is None or value.thinking_enabled is None:
+        raise ValueError("a turn execution profile must be complete")
+    expected = {
+        "flash": (False, {None, "none"}),
+        "thinking": (True, {None, "low"}),
+        "pro": (True, {"medium"}),
+        "ultra": (True, {"high"}),
+    }[value.mode]
+    if value.thinking_enabled is not expected[0] or value.reasoning_effort not in expected[1]:
+        raise ValueError("turn mode and reasoning profile are inconsistent")
+
+
 class SkillDesignProgressItemResponse(_StrictModel):
     id: str
     label: str
     status: Literal["pending", "running", "completed", "failed"]
+
+
+class SkillDesignExecutionPreferenceResponse(_StrictModel):
+    model_name: str
+    mode: Literal["flash", "thinking", "pro", "ultra"]
+    thinking_enabled: bool
+    reasoning_effort: SkillDesignReasoningEffort | None
 
 
 class SkillDesignMessageResponse(_StrictModel):
@@ -220,6 +297,41 @@ class SkillDesignMessageResponse(_StrictModel):
     role: Literal["user", "assistant"]
     content: str
     created_at: datetime
+    operation_id: uuid.UUID | None = None
+
+
+class SkillDesignActivityResponse(_StrictModel):
+    seq: str
+    operation_id: uuid.UUID
+    run_id: str | None
+    kind: Literal[
+        "request_accepted",
+        "attempt_started",
+        "reasoning",
+        "tool_started",
+        "tool_completed",
+        "tool_failed",
+        "candidate_generated",
+        "validation_started",
+        "validation_passed",
+        "validation_failed",
+        "repair_started",
+        "run_terminal",
+        "commit_accepted",
+        "commit_validation_started",
+        "commit_validation_passed",
+        "commit_persistence_started",
+        "commit_persistence_completed",
+        "commit_terminal",
+    ]
+    attempt: int | None
+    payload: dict[str, object]
+    created_at: datetime
+
+
+class SkillDesignActivityListResponse(_StrictModel):
+    data: tuple[SkillDesignActivityResponse, ...]
+    request_id: str
 
 
 class SkillDesignClarificationOptionResponse(_StrictModel):
@@ -371,6 +483,7 @@ class SkillDesignSessionItemResponse(_StrictModel):
         default=None,
         validation_alias="active_run",
     )
+    execution_preference: SkillDesignExecutionPreferenceResponse | None
     created_at: datetime
     updated_at: datetime
 
@@ -496,6 +609,8 @@ def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
             kind="message",
             message=turn.message,
             model_name=turn.model_name,
+            mode=turn.mode,
+            thinking_enabled=turn.thinking_enabled,
             reasoning_effort=turn.reasoning_effort,
             attachments=tuple(
                 SkillDesignTurnAttachment(
@@ -519,6 +634,8 @@ def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
                 option_id=response.option_id,
             ),
             model_name=turn.model_name,
+            mode=turn.mode,
+            thinking_enabled=turn.thinking_enabled,
             reasoning_effort=turn.reasoning_effort,
         )
     else:
@@ -539,6 +656,17 @@ def _turn(body: SkillDesignTurnRequest) -> SubmitSkillDesignTurn:
         input=value,
         expected_revision=body.expected_revision,
         idempotency_key=body.idempotency_key,
+    )
+
+
+def _execution_preference(
+    body: SkillDesignExecutionPreferenceRequest,
+) -> SetSkillDesignExecutionPreference:
+    return SetSkillDesignExecutionPreference(
+        model_name=body.model_name,
+        mode=body.mode,
+        thinking_enabled=body.thinking_enabled,
+        reasoning_effort=body.reasoning_effort,
     )
 
 
@@ -605,6 +733,31 @@ def _commit_response(
     )
 
 
+def _activity_cursor(value: str | None, request_id: str) -> int:
+    if value is None:
+        return 0
+    if not value.isascii() or not value.isdigit():
+        raise_asset_domain(AssetValidationFailed(request_id))
+    cursor = int(value)
+    if cursor < 0 or cursor > 9_223_372_036_854_775_807:
+        raise_asset_domain(AssetValidationFailed(request_id))
+    return cursor
+
+
+def _activity_response(
+    activity: SkillDesignActivity,
+) -> SkillDesignActivityResponse:
+    return SkillDesignActivityResponse(
+        seq=str(activity.seq),
+        operation_id=activity.operation_id,
+        run_id=activity.run_id,
+        kind=activity.kind.value,
+        attempt=activity.attempt,
+        payload=activity.payload,
+        created_at=activity.created_at,
+    )
+
+
 @router.post(
     "",
     response_model=SkillDesignSessionResponse,
@@ -668,6 +821,98 @@ async def get_skill_design_session(
         raise_asset_domain(exc)
 
 
+@router.get(
+    "/{session_id}/activities",
+    response_model=SkillDesignActivityListResponse,
+)
+async def list_skill_design_activities(
+    session_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
+    after_seq: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=2_000)] = 500,
+) -> SkillDesignActivityListResponse:
+    try:
+        activities = await service.list_activities(
+            context,
+            session_id,
+            after_seq=_activity_cursor(after_seq, context.request_id),
+            limit=limit,
+        )
+        return SkillDesignActivityListResponse(
+            data=tuple(_activity_response(item) for item in activities),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.get("/{session_id}/activities/stream")
+async def stream_skill_design_activities(
+    session_id: uuid.UUID,
+    request: Request,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
+    after_seq: Annotated[str | None, Query()] = None,
+) -> StreamingResponse:
+    cursor = _activity_cursor(
+        request.headers.get("Last-Event-ID") or after_seq,
+        context.request_id,
+    )
+    try:
+        await service.list_activities(
+            context,
+            session_id,
+            after_seq=cursor,
+            limit=1,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+    async def events():
+        nonlocal cursor
+        idle_ticks = 0
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                activities = await service.list_activities(
+                    context,
+                    session_id,
+                    after_seq=cursor,
+                    limit=500,
+                )
+            except ASSET_ERRORS:
+                return
+            if activities:
+                idle_ticks = 0
+                for activity in activities:
+                    response = _activity_response(activity)
+                    cursor = activity.seq
+                    payload = json.dumps(
+                        response.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    yield (f"id: {response.seq}\nevent: activity\ndata: {payload}\n\n")
+                continue
+            idle_ticks += 1
+            if idle_ticks >= 60:
+                idle_ticks = 0
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 def _execution_options_error(
     code: str,
     message: str,
@@ -720,6 +965,52 @@ def require_admissible_execution_options(
             )
 
 
+def require_admissible_execution_preference(
+    models: list[PublicSystemModelView],
+    body: SkillDesignExecutionPreferenceRequest,
+    *,
+    request_id: str,
+) -> None:
+    selected = next(
+        (model for model in models if model.model_ref == body.model_name),
+        None,
+    )
+    if selected is None:
+        raise _execution_options_error(
+            "SKILL_BUILDER_MODEL_UNAVAILABLE",
+            "所选模型当前不可用，请重新选择模型。",
+            request_id,
+        )
+    if body.mode != "flash" and not selected.supports_thinking:
+        raise _execution_options_error(
+            "SKILL_BUILDER_EFFORT_UNSUPPORTED",
+            "所选模型不支持扩展思考，请调整思考强度。",
+            request_id,
+        )
+    if body.mode in {"pro", "ultra"} and not selected.supports_reasoning_effort:
+        raise _execution_options_error(
+            "SKILL_BUILDER_EFFORT_UNSUPPORTED",
+            "所选模型不支持该思考强度，请调整思考强度。",
+            request_id,
+        )
+    expected_effort = (
+        {
+            "flash": "none",
+            "thinking": "low",
+            "pro": "medium",
+            "ultra": "high",
+        }[body.mode]
+        if selected.supports_reasoning_effort
+        else None
+    )
+    if body.reasoning_effort != expected_effort:
+        raise _execution_options_error(
+            "SKILL_BUILDER_EFFORT_UNSUPPORTED",
+            "所选模型无法使用该思考强度，请刷新模型目录。",
+            request_id,
+        )
+
+
 @router.post(
     "/{session_id}/turns",
     response_model=SkillDesignSessionResponse | SkillDesignRunAdmissionResponse,
@@ -739,17 +1030,29 @@ async def submit_skill_design_turn(
     if isinstance(
         turn,
         SkillDesignMessageTurnRequest | SkillDesignClarificationTurnRequest,
-    ) and (turn.model_name is not None or turn.reasoning_effort is not None):
+    ) and (turn.model_name is not None or turn.mode is not None or turn.thinking_enabled is not None or turn.reasoning_effort is not None):
         try:
             models = await model_catalog.list_available_models()
         except SystemModelStorageUnavailable:
             raise_asset_domain(AssetStorageUnavailable(context.request_id))
-        require_admissible_execution_options(
-            list(models),
-            model_name=turn.model_name,
-            reasoning_effort=turn.reasoning_effort,
-            request_id=context.request_id,
-        )
+        if turn.model_name is not None and turn.mode is not None and turn.thinking_enabled is not None:
+            require_admissible_execution_preference(
+                list(models),
+                SkillDesignExecutionPreferenceRequest(
+                    model_name=turn.model_name,
+                    mode=turn.mode,
+                    thinking_enabled=turn.thinking_enabled,
+                    reasoning_effort=turn.reasoning_effort,
+                ),
+                request_id=context.request_id,
+            )
+        else:
+            require_admissible_execution_options(
+                list(models),
+                model_name=turn.model_name,
+                reasoning_effort=turn.reasoning_effort,
+                request_id=context.request_id,
+            )
     try:
         result = await service.submit_turn(
             context,
@@ -764,6 +1067,58 @@ async def submit_skill_design_turn(
                 streamUrl=(f"/api/projects/{context.project_id}/private-work/threads/{result.thread_id}/runs/{result.run_id}/stream"),
             )
         return _session_response(result, context)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.put(
+    "/{session_id}/execution-preference",
+    response_model=SkillDesignSessionResponse,
+)
+async def set_skill_design_execution_preference(
+    session_id: uuid.UUID,
+    body: SkillDesignExecutionPreferenceRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
+    model_catalog: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+) -> SkillDesignSessionResponse:
+    try:
+        models = list(await model_catalog.list_available_models())
+    except SystemModelStorageUnavailable:
+        raise_asset_domain(AssetStorageUnavailable(context.request_id))
+    require_admissible_execution_preference(
+        models,
+        body,
+        request_id=context.request_id,
+    )
+    try:
+        view = await service.set_execution_preference(
+            context,
+            session_id,
+            _execution_preference(body),
+        )
+        return _session_response(view, context)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.post(
+    "/{session_id}/turns/stop",
+    response_model=SkillDesignSessionResponse,
+)
+async def stop_skill_design_turn(
+    session_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
+) -> SkillDesignSessionResponse:
+    try:
+        return _session_response(
+            await service.stop_current_run(context, session_id),
+            context,
+        )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 

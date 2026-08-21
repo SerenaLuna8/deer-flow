@@ -103,7 +103,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `agent_design_activity_terminal`. Fresh setup runs that schema directly
+the current marker is `skill_design_activity`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 

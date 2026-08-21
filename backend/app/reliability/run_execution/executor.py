@@ -89,6 +89,11 @@ from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
 from app.shared_assets.model_refs import resolve_model_ref
+from app.shared_assets.skill_builder_activity_stream import (
+    SkillBuilderActivityEmitter,
+    SkillBuilderActivityStreamBridge,
+    SkillDesignActivityLimitExceeded,
+)
 from app.shared_assets.skill_builder_agent_runtime import (
     SkillBuilderAgentFactory,
     WorkerSkillBuilderAuthoringCatalog,
@@ -221,6 +226,7 @@ class RunAgentPrivateExecutor:
         quota: PrivateRunAgentQuotaPort | None = None,
         audit: PrivateFileFinalizationAuditPort | None = None,
         host_execution_domain: HostExecutionDomainSnapshot | None = None,
+        skill_builder_activity_emitter_factory: Any = (SkillBuilderActivityEmitter.create),
     ) -> None:
         self._factory = session_factory
         self._app_config = app_config
@@ -258,6 +264,9 @@ class RunAgentPrivateExecutor:
             self._asset_runtime = asset_runtime
         self._agent_factory = agent_factory or self._default_agent_factory()
         self._runner = runner
+        if not callable(skill_builder_activity_emitter_factory):
+            raise TypeError("skill_builder_activity_emitter_factory must be callable")
+        self._skill_builder_activity_emitter_factory = skill_builder_activity_emitter_factory
         self._quota = quota or _NoopPrivateRunAgentQuota()
         self._file_finalization_audit = audit
         if (
@@ -863,7 +872,24 @@ class RunAgentPrivateExecutor:
             )
             try:
                 agent_factory = self._agent_factory
+                stream_bridge: Any = LeaseAuthorizedStreamBridge(
+                    self._bridge,
+                    boundary,
+                    scope=execution.context.resource_scope,
+                    thread_id=execution.run.thread_id,
+                    terminal_status=lambda: str(record.status),
+                    terminal_error_code=lambda: record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None,
+                )
                 if execution.runtime_kind == "skill_builder":
+                    activity_emitter = await self._skill_builder_activity_emitter_factory(
+                        self._factory,
+                        execution.context,
+                        claim,
+                    )
+                    stream_bridge = SkillBuilderActivityStreamBridge(
+                        stream_bridge,
+                        activity_emitter,
+                    )
                     agent_factory = SkillBuilderAgentFactory(
                         catalog=WorkerSkillBuilderAuthoringCatalog(
                             self._factory,
@@ -877,14 +903,7 @@ class RunAgentPrivateExecutor:
                         ),
                     )
                 await self._runner(
-                    LeaseAuthorizedStreamBridge(
-                        self._bridge,
-                        boundary,
-                        scope=execution.context.resource_scope,
-                        thread_id=execution.run.thread_id,
-                        terminal_status=lambda: str(record.status),
-                        terminal_error_code=lambda: record.error if record.error in STREAM_TERMINAL_ERROR_CODES else None,
-                    ),
+                    stream_bridge,
                     run_manager,
                     record,
                     ctx=run_context,
@@ -949,6 +968,11 @@ class RunAgentPrivateExecutor:
         except AgentModelSettingsUnsupported:
             raise PermanentExecutionError(
                 "RUN_EXECUTION_PROFILE_UNSUPPORTED",
+            ) from None
+        except SkillDesignActivityLimitExceeded:
+            raise PermanentExecutionError(
+                PRIVATE_RUN_EXECUTION_FAILED_ERROR_CODE,
+                attempt_usage=(self._usage_snapshot(record) if record is not None and not boundary.lease_lost else None),
             ) from None
         except TransientExecutionError as error:
             if error.attempt_usage is None and record is not None and not boundary.lease_lost:

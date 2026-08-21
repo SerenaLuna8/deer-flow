@@ -96,7 +96,6 @@ describe("SkillBuilderComposerControls", () => {
     expect(html).toContain('aria-label="添加参考文件"');
     expect(html).toContain('aria-label="选择模型"');
     expect(html).toContain("Doubao Seed 2.0");
-    expect(html).toContain('aria-label="选择思考强度"');
     expect(html).toContain("闪速");
   });
 

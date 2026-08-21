@@ -2092,6 +2092,38 @@ export interface Translations {
         commitRevise: string;
       };
       activity: {
+        title: string;
+        terminal: {
+          completed: string;
+          failed: string;
+          stopped: string;
+        };
+        duration: (milliseconds: number) => string;
+        attempt: (attempt: number) => string;
+        reasoning: (attempt: number) => string;
+        stop: string;
+        stopping: string;
+        stages: Record<
+          | "request_accepted"
+          | "attempt_started"
+          | "reasoning"
+          | "tool_started"
+          | "tool_completed"
+          | "tool_failed"
+          | "candidate_generated"
+          | "validation_started"
+          | "validation_passed"
+          | "validation_failed"
+          | "repair_started"
+          | "run_terminal"
+          | "commit_accepted"
+          | "commit_validation_started"
+          | "commit_validation_passed"
+          | "commit_persistence_started"
+          | "commit_persistence_completed"
+          | "commit_terminal",
+          string
+        >;
         run: {
           pending: string;
           running: string;
@@ -2165,6 +2197,7 @@ export interface Translations {
         discardAndLeave: string;
       };
       success: {
+        created: string;
         withVersion: (version: number) => string;
         withoutVersion: string;
         goActivate: string;

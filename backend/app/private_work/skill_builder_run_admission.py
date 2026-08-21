@@ -120,6 +120,7 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
         *,
         turn_message: str,
         model_name: str | None,
+        thinking_enabled: bool | None,
         reasoning_effort: str | None,
     ) -> SkillBuilderRunAdmission:
         if not session.in_transaction():
@@ -175,7 +176,8 @@ class SkillBuilderRunAdmissionService(SkillBuilderRunAdmissionPort):
         if thread.agent_asset_id != resolved.lead_agent.asset_id or thread.agent_scope != resolved.lead_agent.scope.value:
             raise AssetConflict(context.request_id)
 
-        thinking_enabled = None if reasoning_effort is None else reasoning_effort != "none"
+        if thinking_enabled is None and reasoning_effort is not None:
+            thinking_enabled = reasoning_effort != "none"
         try:
             execution_profile = RequestedRunExecutionProfile(
                 model_name=model_name,

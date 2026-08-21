@@ -269,7 +269,7 @@ describe("SkillBuilderConversationView", () => {
     expect(html.split(failure)).toHaveLength(2);
   });
 
-  test("does not repeat processing while an active Run status is visible", () => {
+  test("uses a generic status until the isolated Activity stream arrives", () => {
     const activeRun = renderUi(
       <SkillBuilderConversationView
         session={session({
@@ -291,8 +291,8 @@ describe("SkillBuilderConversationView", () => {
       />,
     );
 
-    expect(activeRun).toContain("正在执行");
-    expect(activeRun).not.toContain("Builder Agent 正在处理");
+    expect(activeRun).toContain("Builder Agent 正在处理");
+    expect(activeRun).not.toContain("正在执行");
 
     const beforeAdmission = renderUi(
       <SkillBuilderConversationView
@@ -310,6 +310,102 @@ describe("SkillBuilderConversationView", () => {
     );
 
     expect(beforeAdmission).toContain("Builder Agent 正在处理");
+  });
+
+  test("renders each operation as user message, process, then assistant result", () => {
+    const operationId = "88888888-8888-4888-8888-888888888888";
+    const html = renderUi(
+      <SkillBuilderConversationView
+        session={session({
+          messages: [
+            {
+              id: "user-turn",
+              role: "user",
+              content: "生成一个巡检 Skill",
+              created_at: NOW,
+              operation_id: operationId,
+            },
+            {
+              id: "assistant-turn",
+              role: "assistant",
+              content: "候选文件已准备好",
+              created_at: NOW,
+              operation_id: operationId,
+            },
+          ],
+        })}
+        composerText=""
+        canAuthor
+        dirty={false}
+        pending={false}
+        errorMessage={null}
+        activities={[
+          {
+            seq: "1",
+            operation_id: operationId,
+            run_id: "99999999-9999-4999-8999-999999999999",
+            attempt: null,
+            kind: "request_accepted",
+            payload: {},
+            created_at: NOW,
+          },
+          {
+            seq: "2",
+            operation_id: operationId,
+            run_id: "99999999-9999-4999-8999-999999999999",
+            attempt: 1,
+            kind: "reasoning",
+            payload: { text: "先确认输入和输出。" },
+            created_at: NOW,
+          },
+          {
+            seq: "3",
+            operation_id: operationId,
+            run_id: "99999999-9999-4999-8999-999999999999",
+            attempt: 1,
+            kind: "run_terminal",
+            payload: { status: "completed" },
+            created_at: NOW,
+          },
+        ]}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+      />,
+    );
+
+    expect(html.indexOf("生成一个巡检 Skill")).toBeLessThan(
+      html.indexOf("思考与执行过程"),
+    );
+    expect(html.indexOf("思考与执行过程")).toBeLessThan(
+      html.indexOf("候选文件已准备好"),
+    );
+    expect(html).toContain("先确认输入和输出。");
+  });
+
+  test("keeps the completed Builder readable with a target-version link", () => {
+    const html = renderUi(
+      <SkillBuilderConversationView
+        session={session({ status: "completed" })}
+        composerText=""
+        canAuthor
+        dirty={false}
+        pending={false}
+        errorMessage={null}
+        completion={{
+          message: "Skill 已创建并默认停用，可前往查看并激活。",
+          href: "/projects/example/skills?skill_id=1",
+          action: "前往激活",
+        }}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("Skill 已创建并默认停用");
+    expect(html).toContain('href="/projects/example/skills?skill_id=1"');
+    expect(html).not.toContain("<textarea");
   });
 });
 

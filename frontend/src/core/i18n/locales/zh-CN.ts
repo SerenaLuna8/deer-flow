@@ -2349,6 +2349,39 @@ export const zhCN: Translations = {
         commitRevise: "保存候选版本",
       },
       activity: {
+        title: "思考与执行过程",
+        terminal: {
+          completed: "已完成",
+          failed: "失败",
+          stopped: "已停止",
+        },
+        duration: (milliseconds) => `· ${(milliseconds / 1000).toFixed(1)} 秒`,
+        attempt: (attempt) =>
+          attempt === 1 ? "首次生成" : `修复重试 ${attempt - 1}`,
+        reasoning: (attempt) =>
+          attempt === 1 ? "模型思考" : `修复重试 ${attempt - 1} 的模型思考`,
+        stop: "停止本轮生成",
+        stopping: "正在停止…",
+        stages: {
+          request_accepted: "已接收请求",
+          attempt_started: "模型开始生成",
+          reasoning: "模型思考",
+          tool_started: "开始执行工具",
+          tool_completed: "工具执行完成",
+          tool_failed: "工具执行失败",
+          candidate_generated: "已生成候选",
+          validation_started: "开始确定性校验",
+          validation_passed: "确定性校验通过",
+          validation_failed: "确定性校验失败",
+          repair_started: "开始安全修复重试",
+          run_terminal: "本轮生成结束",
+          commit_accepted: "已接收创建请求",
+          commit_validation_started: "开始校验候选",
+          commit_validation_passed: "候选校验通过",
+          commit_persistence_started: "开始保存 Skill 与候选版本",
+          commit_persistence_completed: "已保存 Skill 与候选版本",
+          commit_terminal: "创建操作结束",
+        },
         run: {
           pending: "已排队，等待执行",
           running: "正在执行",
@@ -2429,6 +2462,7 @@ export const zhCN: Translations = {
         discardAndLeave: "放弃修改并离开",
       },
       success: {
+        created: "Skill 已创建并默认停用，可前往查看并激活。",
         withVersion: (version) => `已保存候选版本 v${version}，前往激活`,
         withoutVersion: "已保存候选版本，前往激活",
         goActivate: "前往激活",

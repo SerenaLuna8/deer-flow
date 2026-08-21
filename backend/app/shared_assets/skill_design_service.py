@@ -15,7 +15,7 @@ from enum import StrEnum
 from typing import Literal, Protocol
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +70,12 @@ from app.shared_assets.skill_builder_contract import (
     SkillBuilderTerminalReceipt,
     _canonical_candidate_path,
 )
+from app.shared_assets.skill_design_activity import (
+    SkillDesignActivity,
+    SkillDesignActivityKind,
+    SkillDesignActivityRepository,
+    activity_view,
+)
 from app.shared_assets.skill_design_generation import (
     DEFAULT_SKILL_DESIGN_TIMEOUT_SECONDS,
     MAX_SKILL_DESIGN_ATTACHMENTS,
@@ -102,6 +108,7 @@ from app.shared_assets.skill_service import (
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.shared_assets import (
+    SkillDesignOperationBaselineFileRow,
     SkillDesignOperationRow,
     SkillDesignSessionRow,
 )
@@ -193,6 +200,7 @@ class SkillDesignMessage:
     role: str
     content: str
     created_at: datetime
+    operation_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +255,8 @@ class SkillDesignMessageTurn:
     kind: str
     message: str
     model_name: str | None = None
+    mode: str | None = None
+    thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
     attachments: tuple[SkillDesignTurnAttachment, ...] = ()
 
@@ -256,6 +266,8 @@ class SkillDesignClarificationTurn:
     kind: str
     response: SkillDesignClarificationResponse
     model_name: str | None = None
+    mode: str | None = None
+    thinking_enabled: bool | None = None
     reasoning_effort: str | None = None
 
 
@@ -295,6 +307,22 @@ class CommitSkillDesignSession:
 class CancelSkillDesignSession:
     expected_revision: int
     idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class SetSkillDesignExecutionPreference:
+    model_name: str
+    mode: str
+    thinking_enabled: bool
+    reasoning_effort: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class SkillDesignExecutionPreference:
+    model_name: str
+    mode: str
+    thinking_enabled: bool
+    reasoning_effort: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,6 +395,7 @@ class SkillDesignSessionView:
     base_payload_checksum: str | None = None
     target_skill_deleted: bool = False
     base_files: tuple[SkillDesignBaseFile, ...] = ()
+    execution_preference: SkillDesignExecutionPreference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,6 +669,46 @@ class SkillDesignService:
             self._raise_integrity(context, exc)
         except DBAPIError:
             raise AssetStorageUnavailable(context.request_id) from None
+
+    async def _record_validation_failure(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_hash: str,
+        request_checksum: str,
+        public_error_code: str,
+    ) -> None:
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="validate",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                if operation is None or operation.status != "in_progress":
+                    return
+                self._require_matching_operation(
+                    context,
+                    operation,
+                    session_id=session_id,
+                    request_checksum=request_checksum,
+                )
+                row = await repository.get(context, session_id, for_update=True)
+                operation.status = "failed"
+                operation.result_revision = row.revision
+                operation.public_error_code = public_error_code[:64]
+                await SkillDesignActivityRepository(session).append(
+                    context,
+                    session_id=row.id,
+                    operation_id=operation.id,
+                    kind=SkillDesignActivityKind.VALIDATION_FAILED,
+                    source_event_id="validation-failed",
+                )
+        except (SharedAssetError, DBAPIError):
+            return
 
     async def create_revision(
         self,
@@ -1045,6 +1114,189 @@ class SkillDesignService:
             error_code=code,
             error_message=self._stable_generation_error_message(code),
         )
+
+    async def set_execution_preference(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        command: SetSkillDesignExecutionPreference,
+    ) -> SkillDesignSessionView:
+        command = self._validate_execution_preference(context, command)
+        self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
+        session_id = self._validate_uuid(context, session_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                row = await repository.get(context, session_id, for_update=True)
+                self._require_revise_target_live(context, row)
+                if row.status in {
+                    SkillDesignStatus.GENERATING.value,
+                    SkillDesignStatus.COMMITTING.value,
+                    SkillDesignStatus.COMPLETED.value,
+                    SkillDesignStatus.CANCELLED.value,
+                }:
+                    raise AssetConflict(context.request_id)
+                row.execution_model_ref = command.model_name
+                row.execution_mode = command.mode
+                row.execution_thinking_enabled = command.thinking_enabled
+                row.execution_reasoning_effort = command.reasoning_effort
+                row.revision += 1
+                await session.flush()
+                files = await repository.load_draft_files(context, row.id)
+                return await self._session_view_for_row(
+                    repository,
+                    context,
+                    row,
+                    files,
+                )
+        except SharedAssetError:
+            raise
+        except IntegrityError as exc:
+            self._raise_integrity(context, exc)
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def list_activities(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        *,
+        after_seq: int = 0,
+        limit: int = 500,
+    ) -> tuple[SkillDesignActivity, ...]:
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_READ)
+        session_id = self._validate_uuid(context, session_id)
+        if not isinstance(after_seq, int) or isinstance(after_seq, bool) or after_seq < 0 or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 2_000:
+            raise AssetValidationFailed(context.request_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                rows = await SkillDesignActivityRepository(session).list_after(
+                    context,
+                    session_id=session_id,
+                    after_seq=after_seq,
+                    limit=limit,
+                )
+                return tuple(activity_view(row) for row in rows)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def stop_current_run(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> SkillDesignSessionView:
+        """Request cancellation for only the current Builder Run."""
+
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
+        session_id = self._validate_uuid(context, session_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                row = await repository.get(context, session_id, for_update=True)
+                linked_run = await repository.latest_linked_run(
+                    context,
+                    row.id,
+                    lock=True,
+                )
+                if linked_run is None:
+                    files = await repository.load_draft_files(context, row.id)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
+                operation = await repository.operation_by_run(
+                    context,
+                    linked_run.run_id,
+                    for_update=True,
+                )
+                if operation is None or operation.status != "in_progress" or row.status != SkillDesignStatus.GENERATING.value or linked_run.status not in {"pending", "running"} or linked_run.job_id is None:
+                    files = await repository.load_draft_files(context, row.id)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
+                operation.stop_requested_at = operation.stop_requested_at or self._now()
+                private_context = PrivateWorkContext.from_project(context)
+                cancel_result = await PrivateRunRepository(session).request_cancel(
+                    scope=private_context.resource_scope,
+                    thread_id=linked_run.thread_id,
+                    run_id=linked_run.run_id,
+                    job_id=linked_run.job_id,
+                    reason="skill_builder_turn_stopped",
+                )
+                if cancel_result != "terminal":
+                    await self._audit.run_cancel_requested(
+                        session,
+                        private_context,
+                        run_id=linked_run.run_id,
+                        job_id=linked_run.job_id,
+                    )
+                if cancel_result in {"cancelled", "terminal"}:
+                    await self._quota.release_concurrent_run(
+                        session,
+                        private_context.resource_scope,
+                        run_id=linked_run.run_id,
+                        request_id=context.request_id,
+                    )
+                if cancel_result == "cancelled":
+                    files = await repository.restore_operation_baseline(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                    )
+                    snapshot = self._draft_snapshot(context, files)
+                    row.draft_checksum = snapshot.draft_checksum
+                    row.authoring_dependencies_json = None
+                    row.validation_json = None
+                    row.validated_draft_checksum = None
+                    row.active_clarification_json = None
+                    row.error_code = None
+                    row.error_message = None
+                    row.status = SkillDesignStatus.DRAFT_READY.value if snapshot.draft_checksum is not None else SkillDesignStatus.INTERVIEWING.value
+                    row.progress_json = self._progress_json(SkillDesignStatus.DRAFT_READY if snapshot.draft_checksum is not None else SkillDesignStatus.INTERVIEWING)
+                    row.revision += 1
+                    operation.status = "stopped"
+                    operation.result_revision = row.revision
+                    operation.public_error_code = None
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        run_id=operation.run_id,
+                        kind=SkillDesignActivityKind.RUN_TERMINAL,
+                        payload={"status": "stopped"},
+                        source_event_id="run-terminal",
+                    )
+                    await repository.clear_operation_baseline(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                    )
+                    await session.flush()
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
+            for _ in range(40):
+                await asyncio.sleep(0.25)
+                view = await self.get(context, session_id)
+                if view.status != SkillDesignStatus.GENERATING:
+                    return view
+            return await self.get(context, session_id)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
 
     @asynccontextmanager
     async def _builder_tool_transaction(
@@ -1539,6 +1791,7 @@ class SkillDesignService:
                 row,
                 "assistant",
                 clarification.question,
+                operation_id=operation.id,
             )
             row.error_code = None
             row.error_message = None
@@ -1548,6 +1801,23 @@ class SkillDesignService:
             operation.public_error_code = None
             operation.terminal_kind = "clarification"
             operation.terminal_request_checksum = terminal_checksum
+            activity_repository = SkillDesignActivityRepository(
+                transaction.repository.session,
+            )
+            await activity_repository.append(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+                run_id=operation.run_id,
+                kind=SkillDesignActivityKind.RUN_TERMINAL,
+                payload={"status": "completed"},
+                source_event_id="run-terminal",
+            )
+            await transaction.repository.clear_operation_baseline(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+            )
             return SkillBuilderTerminalReceipt(terminal="clarification")
 
     async def finalize_agent_candidate(
@@ -1649,6 +1919,7 @@ class SkillDesignService:
                 row,
                 "assistant",
                 request.summary,
+                operation_id=operation.id,
             )
             row.revision += 1
             operation.status = "completed"
@@ -1656,6 +1927,47 @@ class SkillDesignService:
             operation.public_error_code = None
             operation.terminal_kind = "candidate"
             operation.terminal_request_checksum = terminal_checksum
+            activity_repository = SkillDesignActivityRepository(
+                transaction.repository.session,
+            )
+            await activity_repository.append(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+                run_id=operation.run_id,
+                kind=SkillDesignActivityKind.CANDIDATE_GENERATED,
+                source_event_id="candidate-generated",
+            )
+            await activity_repository.append(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+                run_id=operation.run_id,
+                kind=SkillDesignActivityKind.VALIDATION_STARTED,
+                source_event_id="candidate-validation-started",
+            )
+            await activity_repository.append(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+                run_id=operation.run_id,
+                kind=SkillDesignActivityKind.VALIDATION_PASSED,
+                source_event_id="candidate-validation-passed",
+            )
+            await activity_repository.append(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+                run_id=operation.run_id,
+                kind=SkillDesignActivityKind.RUN_TERMINAL,
+                payload={"status": "completed"},
+                source_event_id="run-terminal",
+            )
+            await transaction.repository.clear_operation_baseline(
+                transaction.context,
+                session_id=row.id,
+                operation_id=operation.id,
+            )
             return SkillBuilderTerminalReceipt(terminal="candidate")
 
     @staticmethod
@@ -1771,6 +2083,21 @@ class SkillDesignService:
                         context,
                         row.id,
                     )
+                    operation = self._new_operation(
+                        context,
+                        session_id,
+                        kind="validate",
+                        idempotency_hash=operation_hash,
+                        request_checksum=request_checksum,
+                    )
+                    await repository.create_operation(context, operation)
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.VALIDATION_STARTED,
+                        source_event_id="validation-started",
+                    )
             files = self._validate_builder_files(context, files)
             preview = await self._skill_service.preview_archive(context, files)
             self._require_preview_name(context, preview, row.slug)
@@ -1793,24 +2120,26 @@ class SkillDesignService:
                         session_id,
                         for_update=True,
                     )
-                    if operation is not None:
-                        self._require_matching_operation(
+                    if operation is None:
+                        raise AssetConflict(context.request_id)
+                    self._require_matching_operation(
+                        context,
+                        operation,
+                        session_id=session_id,
+                        request_checksum=request_checksum,
+                    )
+                    if operation.status == "completed":
+                        current_files = await repository.load_draft_files(
                             context,
-                            operation,
-                            session_id=session_id,
-                            request_checksum=request_checksum,
+                            row.id,
                         )
-                        if operation.status == "completed":
-                            current_files = await repository.load_draft_files(
-                                context,
-                                row.id,
-                            )
-                            return await self._session_view_for_row(
-                                repository,
-                                context,
-                                row,
-                                current_files,
-                            )
+                        return await self._session_view_for_row(
+                            repository,
+                            context,
+                            row,
+                            current_files,
+                        )
+                    if operation.status != "in_progress":
                         raise AssetConflict(context.request_id)
                     self._require_revise_target_live(context, row)
                     self._require_expected_revision(
@@ -1827,16 +2156,15 @@ class SkillDesignService:
                     row.error_code = None
                     row.error_message = None
                     row.revision += 1
-                    operation = self._new_operation(
-                        context,
-                        session_id,
-                        kind="validate",
-                        idempotency_hash=operation_hash,
-                        request_checksum=request_checksum,
-                    )
                     operation.status = "completed"
                     operation.result_revision = row.revision
-                    await repository.create_operation(context, operation)
+                    await SkillDesignActivityRepository(session).append(
+                        context,
+                        session_id=row.id,
+                        operation_id=operation.id,
+                        kind=SkillDesignActivityKind.VALIDATION_PASSED,
+                        source_event_id="validation-passed",
+                    )
                     await session.flush()
                     current_files = await repository.load_draft_files(
                         context,
@@ -1848,7 +2176,14 @@ class SkillDesignService:
                         row,
                         current_files,
                     )
-        except SharedAssetError:
+        except SharedAssetError as exc:
+            await self._record_validation_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                public_error_code=exc.code,
+            )
             raise
         except IntegrityError as exc:
             self._raise_integrity(context, exc)
@@ -1993,6 +2328,34 @@ class SkillDesignService:
                             request_checksum=request_checksum,
                         )
                         await repository.create_operation(context, operation)
+                        activity_repository = SkillDesignActivityRepository(
+                            session,
+                        )
+                        for kind, source_event_id in (
+                            (
+                                SkillDesignActivityKind.COMMIT_ACCEPTED,
+                                "commit-accepted",
+                            ),
+                            (
+                                SkillDesignActivityKind.COMMIT_VALIDATION_STARTED,
+                                "commit-validation-started",
+                            ),
+                            (
+                                SkillDesignActivityKind.COMMIT_VALIDATION_PASSED,
+                                "commit-validation-passed",
+                            ),
+                            (
+                                SkillDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+                                "commit-persistence-started",
+                            ),
+                        ):
+                            await activity_repository.append(
+                                context,
+                                session_id=row.id,
+                                operation_id=operation.id,
+                                kind=kind,
+                                source_event_id=source_event_id,
+                            )
                         row.status = SkillDesignStatus.COMMITTING.value
                         await session.flush()
                         if row.session_kind == "revise":
@@ -2025,6 +2388,21 @@ class SkillDesignService:
                         row.progress_json = self._progress_json(SkillDesignStatus.COMPLETED)
                         operation.status = "completed"
                         operation.result_revision = row.revision
+                        await activity_repository.append(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                            kind=(SkillDesignActivityKind.COMMIT_PERSISTENCE_COMPLETED),
+                            source_event_id="commit-persistence-completed",
+                        )
+                        await activity_repository.append(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                            kind=SkillDesignActivityKind.COMMIT_TERMINAL,
+                            payload={"status": "completed"},
+                            source_event_id="commit-terminal",
+                        )
                         await repository.clear_draft_files(context, row.id)
                         await session.flush()
                         repeated_session = await self._session_view_for_row(
@@ -2199,13 +2577,30 @@ class SkillDesignService:
                                 request_id=context.request_id,
                             )
                     await repository.clear_draft_files(context, row.id)
+                    await SkillDesignActivityRepository(session).clear_session(
+                        context,
+                        session_id=row.id,
+                    )
+                    await session.execute(
+                        delete(SkillDesignOperationBaselineFileRow).where(
+                            SkillDesignOperationBaselineFileRow.project_id == context.project_id,
+                            SkillDesignOperationBaselineFileRow.owner_user_id == str(context.user_id),
+                            SkillDesignOperationBaselineFileRow.session_id == row.id,
+                        )
+                    )
                     row.status = SkillDesignStatus.CANCELLED.value
+                    row.messages_json = []
                     row.draft_checksum = None
+                    row.authoring_dependencies_json = None
                     row.validation_json = None
                     row.validated_draft_checksum = None
                     row.active_clarification_json = None
                     row.error_code = None
                     row.error_message = None
+                    row.execution_model_ref = None
+                    row.execution_mode = None
+                    row.execution_thinking_enabled = None
+                    row.execution_reasoning_effort = None
                     row.progress_json = self._progress_json(SkillDesignStatus.CANCELLED)
                     row.revision += 1
                     await session.execute(
@@ -2218,9 +2613,10 @@ class SkillDesignService:
                             SkillDesignOperationRow.status == "in_progress",
                         )
                         .values(
-                            status="failed",
+                            status="stopped",
                             result_revision=row.revision,
-                            public_error_code=(SkillDesignServiceErrorCode.GENERATION_INTERRUPTED.value),
+                            public_error_code=None,
+                            stop_requested_at=self._now(),
                         )
                     )
                     operation.status = "completed"
@@ -2536,6 +2932,7 @@ class SkillDesignService:
                         context,
                         row,
                         command.input,
+                        operation_id=operation.id,
                     )
                     row.status = SkillDesignStatus.GENERATING.value
                     row.active_clarification_json = None
@@ -2582,6 +2979,31 @@ class SkillDesignService:
                         ),
                     )
                     if self._run_admission is not None:
+                        await repository.capture_operation_baseline(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                        )
+                        explicit_model = getattr(command.input, "model_name", None)
+                        explicit_thinking = getattr(
+                            command.input,
+                            "thinking_enabled",
+                            None,
+                        )
+                        explicit_effort = getattr(
+                            command.input,
+                            "reasoning_effort",
+                            None,
+                        )
+                        explicit_profile = any(
+                            value is not None
+                            for value in (
+                                explicit_model,
+                                getattr(command.input, "mode", None),
+                                explicit_thinking,
+                                explicit_effort,
+                            )
+                        )
                         admission = await self._run_admission.admit_in_session(
                             session,
                             context,
@@ -2589,16 +3011,17 @@ class SkillDesignService:
                             operation,
                             request,
                             turn_message=turn_message,
-                            model_name=getattr(
-                                command.input,
-                                "model_name",
-                                None,
-                            ),
-                            reasoning_effort=getattr(
-                                command.input,
-                                "reasoning_effort",
-                                None,
-                            ),
+                            model_name=(explicit_model or row.execution_model_ref),
+                            thinking_enabled=(explicit_thinking if explicit_profile else row.execution_thinking_enabled),
+                            reasoning_effort=(explicit_effort if explicit_profile else row.execution_reasoning_effort),
+                        )
+                        await SkillDesignActivityRepository(session).append(
+                            context,
+                            session_id=row.id,
+                            operation_id=operation.id,
+                            run_id=admission.run_id,
+                            kind=SkillDesignActivityKind.REQUEST_ACCEPTED,
+                            source_event_id="request-accepted",
                         )
                         await session.flush()
                         return admission
@@ -2892,6 +3315,8 @@ class SkillDesignService:
                     context,
                     turn.model_name,
                 ),
+                mode=turn.mode,
+                thinking_enabled=turn.thinking_enabled,
                 reasoning_effort=SkillDesignService._validate_turn_reasoning_effort(
                     context,
                     turn.reasoning_effort,
@@ -2927,6 +3352,8 @@ class SkillDesignService:
                     context,
                     turn.model_name,
                 ),
+                mode=turn.mode,
+                thinking_enabled=turn.thinking_enabled,
                 reasoning_effort=SkillDesignService._validate_turn_reasoning_effort(
                     context,
                     turn.reasoning_effort,
@@ -2950,10 +3377,62 @@ class SkillDesignService:
             )
         else:
             raise AssetValidationFailed(context.request_id)
+        if isinstance(
+            normalized,
+            SkillDesignMessageTurn | SkillDesignClarificationTurn,
+        ) and (normalized.mode is not None or normalized.thinking_enabled is not None):
+            if normalized.model_name is None or normalized.mode is None:
+                raise AssetValidationFailed(context.request_id)
+            SkillDesignService._validate_execution_preference(
+                context,
+                SetSkillDesignExecutionPreference(
+                    model_name=normalized.model_name,
+                    mode=normalized.mode,
+                    thinking_enabled=normalized.thinking_enabled,
+                    reasoning_effort=normalized.reasoning_effort,
+                ),
+            )
         return SubmitSkillDesignTurn(
             input=normalized,
             expected_revision=command.expected_revision,
             idempotency_key=key,
+        )
+
+    @staticmethod
+    def _validate_execution_preference(
+        context: ProjectContext,
+        command: SetSkillDesignExecutionPreference,
+    ) -> SetSkillDesignExecutionPreference:
+        SkillDesignService._require_context(context)
+        if not isinstance(command, SetSkillDesignExecutionPreference):
+            raise AssetValidationFailed(context.request_id)
+        model_name = SkillDesignService._validate_turn_model_name(
+            context,
+            command.model_name,
+        )
+        if model_name is None:
+            raise AssetValidationFailed(context.request_id)
+        if command.mode not in {"flash", "thinking", "pro", "ultra"}:
+            raise AssetValidationFailed(context.request_id)
+        if type(command.thinking_enabled) is not bool:
+            raise AssetValidationFailed(context.request_id)
+        effort = SkillDesignService._validate_turn_reasoning_effort(
+            context,
+            command.reasoning_effort,
+        )
+        expected = {
+            "flash": (False, {None, "none"}),
+            "thinking": (True, {None, "low"}),
+            "pro": (True, {"medium"}),
+            "ultra": (True, {"high"}),
+        }[command.mode]
+        if command.thinking_enabled is not expected[0] or effort not in expected[1]:
+            raise AssetValidationFailed(context.request_id)
+        return SetSkillDesignExecutionPreference(
+            model_name=model_name,
+            mode=command.mode,
+            thinking_enabled=command.thinking_enabled,
+            reasoning_effort=effort,
         )
 
     @staticmethod
@@ -3169,6 +3648,8 @@ class SkillDesignService:
         context: ProjectContext,
         row: SkillDesignSessionRow,
         turn: SkillDesignTurn,
+        *,
+        operation_id: uuid.UUID,
     ) -> str:
         SkillDesignService._require_message_capacity(
             context,
@@ -3194,6 +3675,7 @@ class SkillDesignService:
             row,
             "user",
             content,
+            operation_id=operation_id,
         )
         row.active_clarification_json = None
         return content
@@ -3215,6 +3697,8 @@ class SkillDesignService:
         row: SkillDesignSessionRow,
         role: str,
         content: str,
+        *,
+        operation_id: uuid.UUID | None = None,
     ) -> None:
         if contains_secret_like_material(content):
             raise AssetValidationFailed(context.request_id)
@@ -3229,6 +3713,7 @@ class SkillDesignService:
                 role,
                 content,
                 now=SkillDesignService._now(),
+                operation_id=operation_id,
             ),
         ]
 
@@ -3490,13 +3975,17 @@ class SkillDesignService:
         content: str,
         *,
         now: datetime,
+        operation_id: uuid.UUID | None = None,
     ) -> dict[str, object]:
-        return {
+        message: dict[str, object] = {
             "id": uuid.uuid4().hex,
             "role": role,
             "content": content,
             "created_at": now.isoformat(),
         }
+        if operation_id is not None:
+            message["operation_id"] = str(operation_id)
+        return message
 
     @staticmethod
     def _progress_json(
@@ -3630,6 +4119,7 @@ class SkillDesignService:
                     role=item["role"],
                     content=item["content"],
                     created_at=datetime.fromisoformat(item["created_at"]),
+                    operation_id=(uuid.UUID(item["operation_id"]) if item.get("operation_id") is not None else None),
                 )
                 for item in row.messages_json
             )
@@ -3701,6 +4191,16 @@ class SkillDesignService:
                 base_payload_checksum=row.base_payload_checksum,
                 target_skill_deleted=row.target_skill_deleted,
                 base_files=base_files,
+                execution_preference=(
+                    SkillDesignExecutionPreference(
+                        model_name=row.execution_model_ref,
+                        mode=row.execution_mode,
+                        thinking_enabled=row.execution_thinking_enabled,
+                        reasoning_effort=row.execution_reasoning_effort,
+                    )
+                    if row.execution_model_ref is not None and row.execution_mode is not None and row.execution_thinking_enabled is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError, ValidationError):
             raise AssetValidationFailed(context.request_id) from None

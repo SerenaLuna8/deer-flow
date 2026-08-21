@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 91
-_EXPECTED_COLUMN_COUNT = 1121
+_EXPECTED_TABLE_COUNT = 93
+_EXPECTED_COLUMN_COUNT = 1147
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -138,6 +138,11 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "run_mcp_grant_snapshots": ("运行 MCP 授权快照", "冻结运行使用 MCP 服务时的凭据授权闭包。"),
     "skill_design_sessions": ("技能设计会话", "保存技能设计向导的私有会话状态与产物引用。"),
     "skill_design_operations": ("技能设计操作", "保存技能设计会话中的幂等操作及其结果。"),
+    "skill_design_activities": ("技能设计活动", "保存技能设计会话中可回放的公开思考与执行过程。"),
+    "skill_design_operation_baseline_files": (
+        "技能设计操作基线文件",
+        "保存技能生成轮次开始前用于停止或失败回滚的草稿快照。",
+    ),
     "skill_design_draft_files": ("技能设计草稿文件", "保存技能设计会话当前草稿中的文件内容。"),
     "project_channel_credential_bindings": ("渠道凭据绑定", "保存项目渠道实例使用的受管凭据版本绑定。"),
     "project_skill_credential_configs": ("技能凭据配置", "保存项目技能版本凭据配置的修订状态。"),
@@ -389,6 +394,7 @@ _TABLE_COLUMN_PHRASES: dict[tuple[str, str], str] = {
     ("skill_version_files", "content"): "技能版本文件的原始字节内容",
     ("file_chunks", "content"): "文件分块的原始字节内容",
     ("skill_design_draft_files", "content"): "技能设计草稿文件的原始字节内容",
+    ("skill_design_operation_baseline_files", "content"): "技能设计操作基线文件的原始字节内容",
     ("memory_documents", "content"): "当前结构化记忆文档正文（属于私有内容）",
     ("memory_document_versions", "content"): "该版本的结构化记忆文档正文（属于私有内容）",
     ("run_memory_context_snapshots", "content"): "运行时冻结的记忆文档正文（属于私有内容）",

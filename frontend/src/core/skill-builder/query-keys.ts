@@ -38,6 +38,17 @@ export function skillBuilderSessionKey(
   ] as const;
 }
 
+export function skillBuilderActivitiesKey(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  return [
+    ...skillBuilderSessionKey(accountId, projectId, sessionId),
+    "activities",
+  ] as const;
+}
+
 export function skillBuilderMutationKey(
   accountId: string,
   projectId: string,

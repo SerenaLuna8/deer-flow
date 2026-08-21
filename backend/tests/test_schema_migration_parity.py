@@ -88,6 +88,7 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
             "agent_design_activity",
             "agent_design_activity_retry",
             "agent_design_activity_terminal",
+            "skill_design_activity",
         )
     )
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
@@ -103,7 +104,7 @@ def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
-    assert CURRENT_SCHEMA_REVISION == "agent_design_activity_terminal"
+    assert CURRENT_SCHEMA_REVISION == "skill_design_activity"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -122,6 +123,7 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
         "initial_schema.py",
         "model_catalog_simplify.py",
         "skill_credential_source_field.py",
+        "skill_design_activity.py",
     ]
 
 
@@ -163,6 +165,7 @@ async def _catalog_signature(database_url: str):
 
 
 async def _restore_pre_agent_design_activity_schema(connection) -> None:
+    await _restore_pre_skill_design_activity_schema(connection)
     await connection.execute(text("DROP TABLE agent_design_activities"))
     await connection.execute(
         text(
@@ -191,6 +194,66 @@ async def _restore_pre_agent_design_activity_schema(connection) -> None:
                )""",
         ),
     )
+
+
+async def _restore_pre_skill_design_activity_schema(connection) -> None:
+    await connection.execute(text("DROP TABLE skill_design_operation_baseline_files"))
+    await connection.execute(text("DROP TABLE skill_design_activities"))
+    await connection.execute(
+        text(
+            """ALTER TABLE skill_design_sessions
+               DROP CONSTRAINT ck_skill_design_sessions_execution_preference,
+               DROP COLUMN execution_model_ref,
+               DROP COLUMN execution_mode,
+               DROP COLUMN execution_thinking_enabled,
+               DROP COLUMN execution_reasoning_effort""",
+        ),
+    )
+    await connection.execute(
+        text(
+            """ALTER TABLE skill_design_operations
+               DROP CONSTRAINT uq_skill_design_operations_private_scope,
+               DROP CONSTRAINT ck_skill_design_operations_status,
+               DROP CONSTRAINT ck_skill_design_operations_completion,
+               DROP COLUMN stop_requested_at,
+               ADD CONSTRAINT ck_skill_design_operations_status
+                   CHECK (status IN ('in_progress', 'completed', 'failed')),
+               ADD CONSTRAINT ck_skill_design_operations_completion CHECK (
+                   (status = 'in_progress' AND result_revision IS NULL
+                    AND public_error_code IS NULL)
+                   OR (status = 'completed' AND result_revision IS NOT NULL
+                       AND public_error_code IS NULL)
+                   OR (status = 'failed' AND result_revision IS NOT NULL
+                       AND public_error_code IS NOT NULL)
+               )""",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_skill_design_activity_migration_matches_fresh_schema(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await _restore_pre_skill_design_activity_schema(connection)
+            await connection.execute(
+                text(
+                    "UPDATE alembic_version SET version_num = 'agent_design_activity_terminal'",
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url)
+    assert result.applied is True
+    assert result.from_revision == "agent_design_activity_terminal"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION
+    state, signature = await _catalog_signature(postgres_database_url)
+    assert state == "current"
+    assert signature == FINAL_M7_CATALOG_SIGNATURE
 
 
 @pytest.mark.asyncio

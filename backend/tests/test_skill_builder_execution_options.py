@@ -10,8 +10,10 @@ from fastapi import HTTPException
 
 from app.gateway.routers.project_skill_builder import (
     SkillDesignAttachmentRequest,
+    SkillDesignExecutionPreferenceRequest,
     SkillDesignMessageTurnRequest,
     SkillDesignTurnRequest,
+    _execution_preference,
     _turn,
     require_admissible_execution_options,
 )
@@ -30,6 +32,7 @@ from app.shared_assets.skill_design_generation import (
     SkillDesignGenerationService,
 )
 from app.shared_assets.skill_design_service import (
+    SetSkillDesignExecutionPreference,
     SkillDesignMessageTurn,
     SkillDesignService,
     SkillDesignTurnAttachment,
@@ -337,6 +340,49 @@ class TestDurableRunInput:
 
 
 class TestRouterAdmission:
+    def test_maps_the_session_execution_preference(self) -> None:
+        body = SkillDesignExecutionPreferenceRequest.model_validate(
+            {
+                "model_name": _MODEL_REF,
+                "mode": "pro",
+                "thinking_enabled": True,
+                "reasoning_effort": "medium",
+            }
+        )
+
+        command = _execution_preference(body)
+
+        assert command == SetSkillDesignExecutionPreference(
+            model_name=_MODEL_REF,
+            mode="pro",
+            thinking_enabled=True,
+            reasoning_effort="medium",
+        )
+
+    @pytest.mark.parametrize(
+        ("mode", "thinking_enabled", "reasoning_effort"),
+        [
+            ("flash", True, "none"),
+            ("thinking", False, "low"),
+            ("pro", True, "high"),
+        ],
+    )
+    def test_rejects_inconsistent_session_execution_preference(
+        self,
+        mode: str,
+        thinking_enabled: bool,
+        reasoning_effort: str,
+    ) -> None:
+        with pytest.raises(ValueError):
+            SkillDesignExecutionPreferenceRequest.model_validate(
+                {
+                    "model_name": _MODEL_REF,
+                    "mode": mode,
+                    "thinking_enabled": thinking_enabled,
+                    "reasoning_effort": reasoning_effort,
+                }
+            )
+
     def test_turn_conversion_carries_execution_options(self) -> None:
         body = SkillDesignTurnRequest(
             input=SkillDesignMessageTurnRequest(

@@ -51,6 +51,33 @@ _Avoid_: Version Activation
 **Skill**:
 A governed reusable capability used by an Agent during a Run.
 
+**Skill Builder**:
+The product surface for creating or revising a Project Skill through an owner-private Skill Design Session.
+
+**Skill Design Session**:
+An owner-private authoring conversation for one prospective or existing Project Skill. It may contain multiple Skill Builder Runs but has at most one active Run.
+_Avoid_: Builder chat, Thread
+
+**Skill Builder Run**:
+A Run admitted within a Skill Design Session to advance its candidate package through model reasoning and governed authoring tools.
+_Avoid_: Skill Generation Turn, one-shot generation
+
+**Skill Design Activity**:
+A durable, ordered, user-visible projection of real Skill Builder Run, validation, or commit work. It contains only explicitly safe observations and remains distinct from the Run Events that own execution and recovery facts.
+_Avoid_: Raw Run Event, simulated progress
+
+**Skill Builder Execution Preference**:
+The owner's current model and thinking-intensity choice for future Skill Builder Runs in one Skill Design Session. Changing it never rewrites a prior Run Snapshot or the authored Skill.
+_Avoid_: Skill model settings, global model preference
+
+**Skill Builder Run Stop**:
+An owner-requested terminal outcome that ends the active Skill Builder Run without cancelling its Skill Design Session. The candidate package returns to its pre-Run baseline while already recorded activities remain visible.
+_Avoid_: Skill Design Session cancellation
+
+**Skill Design Commit**:
+The final operation that validates a candidate package and saves a Project Skill plus Candidate Version. Its real validation and persistence stages may emit Skill Design Activities, but manual file edits never represent model reasoning.
+_Avoid_: Version Activation
+
 **Project Skill**:
 A Skill authored and governed within one Project.
 

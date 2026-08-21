@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import {
   useCallback,
   useEffect,
+  Fragment,
   useMemo,
   useRef,
   useState,
@@ -60,14 +61,15 @@ import {
   skillBuilderComposerDisabled,
   skillBuilderFileDraftContent,
   skillBuilderMergeAttachment,
-  skillBuilderRunPresentation,
   skillBuilderSemanticSignature,
   skillBuilderValidationCurrent,
   updateSkillBuilderFileDraft,
   useCancelSkillBuilderSession,
   useCommitSkillBuilderSession,
   useSkillBuilderSession,
-  useSkillBuilderRunStream,
+  useSkillBuilderActivities,
+  useSetSkillBuilderExecutionPreference,
+  useStopSkillBuilderTurn,
   useSubmitSkillBuilderTurn,
   useValidateSkillBuilderSession,
   type SkillBuilderAttachment,
@@ -76,13 +78,15 @@ import {
   type SkillBuilderFile,
   type SkillBuilderIdempotencyChannel,
   type SkillBuilderReasoningEffort,
-  type SkillBuilderRunPresentation,
-  type SkillBuilderRunPresentationStatus,
-  type SkillBuilderRunStreamProjection,
+  type SkillBuilderActivity,
   type SkillBuilderSession,
 } from "@/core/skill-builder";
 import { SafeStreamdown } from "@/core/streamdown/components";
-import { resolveAgentMode, type AgentMode } from "@/core/threads/agent-mode";
+import {
+  getAgentModeExecutionProfile,
+  resolveAgentMode,
+  type AgentMode,
+} from "@/core/threads/agent-mode";
 import { isIMEComposing } from "@/lib/ime";
 import { cn } from "@/lib/utils";
 
@@ -94,18 +98,8 @@ import {
   SkillBuilderComposerControls,
 } from "./skill-builder-composer-controls";
 import { SkillBuilderFilesTrigger } from "./skill-builder-files-trigger";
-import {
-  SkillBuilderRunActivity,
-  skillBuilderRunIsActive,
-} from "./skill-builder-run-activity";
+import { SkillBuilderActivityBlock } from "./skill-builder-run-activity";
 import { skillBuilderErrorMessage } from "./skill-builder-start";
-
-const SKILL_BUILDER_EFFORT_BY_MODE = {
-  flash: "none",
-  thinking: "low",
-  pro: "medium",
-  ultra: "high",
-} as const satisfies Record<AgentMode, SkillBuilderReasoningEffort>;
 
 export function skillBuilderWorkspaceErrorMessage(
   error: unknown,
@@ -181,6 +175,32 @@ export type SkillBuilderCreatedSecretSetup = {
   skillVersionId: string;
   requirementNames: string[];
 };
+
+export function skillBuilderExecutionPreferenceFor(
+  model: Pick<
+    Model,
+    "name" | "supports_thinking" | "supports_reasoning_effort"
+  >,
+  mode: unknown,
+) {
+  const resolvedMode = resolveAgentMode(
+    mode,
+    model.supports_thinking,
+    model.supports_reasoning_effort,
+  );
+  const profile = getAgentModeExecutionProfile(
+    resolvedMode,
+    model.supports_thinking,
+    model.supports_reasoning_effort,
+  );
+  return {
+    model_name: model.name,
+    mode: resolvedMode,
+    thinking_enabled: profile.thinking_enabled === true,
+    reasoning_effort:
+      profile.reasoning_effort as SkillBuilderReasoningEffort | null,
+  };
+}
 
 export function skillBuilderCreatedSecretSetupFromSession(
   session: SkillBuilderSession,
@@ -411,8 +431,9 @@ export function SkillBuilderConversationView({
   models = [],
   executionModel,
   thinkingMode = "flash",
-  runProjection = null,
-  runPresentation = null,
+  activities = [],
+  stopPending = false,
+  completion,
   onComposerTextChange,
   onSubmitMessage,
   onSubmitClarification,
@@ -420,6 +441,7 @@ export function SkillBuilderConversationView({
   onRemoveAttachment,
   onSelectModel,
   onSelectThinkingMode,
+  onStopRun,
 }: {
   session: SkillBuilderSession;
   composerText: string;
@@ -432,8 +454,13 @@ export function SkillBuilderConversationView({
   models?: Model[];
   executionModel?: Model;
   thinkingMode?: AgentMode;
-  runProjection?: SkillBuilderRunStreamProjection | null;
-  runPresentation?: SkillBuilderRunPresentation | null;
+  activities?: readonly SkillBuilderActivity[];
+  stopPending?: boolean;
+  completion?: {
+    message: string;
+    href: string;
+    action: string;
+  };
   onComposerTextChange: (value: string) => void;
   onSubmitMessage: () => void;
   onSubmitClarification: (
@@ -443,21 +470,34 @@ export function SkillBuilderConversationView({
   onRemoveAttachment?: (name: string) => void;
   onSelectModel?: (name: string) => void;
   onSelectThinkingMode?: (mode: AgentMode) => void;
+  onStopRun?: () => void;
 }) {
   const { t } = useI18n();
   const copy = t.skills.builder.conversation;
   const errors = t.skills.builder.errors;
   const composerDisabled =
     skillBuilderComposerDisabled(session, pending, dirty) || !canAuthor;
-  const projectedMessageIds = new Set(
-    session.messages.map((message) => message.id),
+  const activeClarification = session.active_clarification;
+  const activitiesByOperation = new Map<string, SkillBuilderActivity[]>();
+  for (const activity of activities) {
+    const current = activitiesByOperation.get(activity.operation_id) ?? [];
+    current.push(activity);
+    activitiesByOperation.set(activity.operation_id, current);
+  }
+  const messageOperationIds = new Set(
+    session.messages.flatMap((message) =>
+      message.operation_id ? [message.operation_id] : [],
+    ),
   );
-  const projectedMessages =
-    runProjection?.messages.filter(
-      (message) => !projectedMessageIds.has(message.id),
-    ) ?? [];
-  const activeClarification =
-    runProjection?.clarification ?? session.active_clarification;
+  const orphanActivityGroups = [...activitiesByOperation.entries()].filter(
+    ([operationId]) => !messageOperationIds.has(operationId),
+  );
+  const hasActiveActivity = [...activitiesByOperation.values()].some(
+    (items) =>
+      !items.some((item) =>
+        ["run_terminal", "commit_terminal"].includes(item.kind),
+      ),
+  );
   const lastAssistantMessage = [...session.messages]
     .reverse()
     .find((message) => message.role === "assistant");
@@ -468,16 +508,9 @@ export function SkillBuilderConversationView({
   const generating =
     Boolean(pendingUserMessage) ||
     Boolean(session.activeRun) ||
-    Boolean(runProjection && skillBuilderRunIsActive(runProjection.status)) ||
     session.status === "generating" ||
     session.status === "committing";
-  const activeRunActivityVisible =
-    Boolean(session.activeRun) ||
-    Boolean(runProjection && skillBuilderRunIsActive(runProjection.status)) ||
-    Boolean(runPresentation && skillBuilderRunIsActive(runPresentation.status));
-  const showStandaloneGeneratingStatus =
-    session.status === "committing" ||
-    (generating && !activeRunActivityVisible);
+  const showStandaloneGeneratingStatus = generating && !hasActiveActivity;
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -509,9 +542,7 @@ export function SkillBuilderConversationView({
           </p>
         ) : null}
 
-        {session.messages.length === 0 &&
-        projectedMessages.length === 0 &&
-        !session.target_skill_deleted ? (
+        {session.messages.length === 0 && !session.target_skill_deleted ? (
           <div className="flex justify-end">
             <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
               {session.session_kind === "revise" ? (
@@ -534,32 +565,58 @@ export function SkillBuilderConversationView({
           </div>
         ) : null}
 
-        {session.messages.map((message) => (
-          <SkillBuilderMessageBubble
-            key={message.id}
-            role={message.role}
-            content={message.content}
-          />
-        ))}
-
-        {projectedMessages.map((message) => (
-          <SkillBuilderMessageBubble
-            key={message.id}
-            role={message.role}
-            content={message.content}
-          />
-        ))}
+        {session.messages.map((message) => {
+          const operationActivities = message.operation_id
+            ? activitiesByOperation.get(message.operation_id)
+            : undefined;
+          return (
+            <Fragment key={message.id}>
+              <SkillBuilderMessageBubble
+                role={message.role}
+                content={message.content}
+              />
+              {message.role === "user" && operationActivities?.length ? (
+                <SkillBuilderActivityBlock
+                  activities={operationActivities}
+                  onStop={
+                    operationActivities.some(
+                      (activity) => activity.run_id !== null,
+                    )
+                      ? onStopRun
+                      : undefined
+                  }
+                  stopPending={stopPending}
+                />
+              ) : null}
+            </Fragment>
+          );
+        })}
 
         {pendingUserMessage ? (
           <SkillBuilderMessageBubble role="user" content={pendingUserMessage} />
         ) : null}
 
-        <SkillBuilderRunActivity
-          activeRun={session.activeRun}
-          projection={runProjection}
-          presentation={runPresentation}
-          failureCode={session.error_code}
-        />
+        {orphanActivityGroups.map(([operationId, operationActivities]) => (
+          <SkillBuilderActivityBlock
+            key={operationId}
+            activities={operationActivities}
+            onStop={
+              operationActivities.some((activity) => activity.run_id !== null)
+                ? onStopRun
+                : undefined
+            }
+            stopPending={stopPending}
+          />
+        ))}
+
+        {completion ? (
+          <section className="border-border/70 bg-muted/20 rounded-2xl border p-4">
+            <p className="text-sm leading-6">{completion.message}</p>
+            <Button asChild type="button" className="mt-4 min-h-10">
+              <Link href={completion.href}>{completion.action}</Link>
+            </Button>
+          </section>
+        ) : null}
 
         {activeClarification ? (
           <section className="border-border/70 rounded-2xl border px-4">
@@ -570,10 +627,7 @@ export function SkillBuilderConversationView({
                 !canAuthor ||
                 dirty ||
                 Boolean(session.activeRun) ||
-                Boolean(
-                  runProjection &&
-                  skillBuilderRunIsActive(runProjection.status),
-                )
+                hasActiveActivity
               }
               pending={pending}
               onSubmit={(response) => onSubmitClarification(response)}
@@ -615,7 +669,9 @@ export function SkillBuilderConversationView({
         ) : null}
       </div>
 
-      {canAuthor && !session.target_skill_deleted ? (
+      {canAuthor &&
+      !session.target_skill_deleted &&
+      !["completed", "cancelled"].includes(session.status) ? (
         <form
           className="bg-background/95 border-border/70 sticky bottom-0 mx-auto mt-8 mb-3 w-[calc(100%-1.5rem)] max-w-(--chat-content-width) rounded-2xl border p-2 shadow-lg backdrop-blur"
           onSubmit={submit}
@@ -742,15 +798,6 @@ type SkillBuilderAdmittedUserMessage = {
   expectedRevision: number;
 };
 
-type SkillBuilderTrackedRun = {
-  sessionId: string;
-  runId: string;
-  terminalStatus?: Exclude<
-    SkillBuilderRunPresentationStatus,
-    "pending" | "running"
-  >;
-};
-
 function skillBuilderAttachmentError(
   code: SkillBuilderMergeAttachmentError,
   copy: Translations["skills"]["builder"]["errors"],
@@ -834,6 +881,12 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const router = useRouter();
   const accountId = user?.id ?? "";
   const sessionQuery = useSkillBuilderSession(accountId, project.id, sessionId);
+  const activitiesQuery = useSkillBuilderActivities(
+    accountId,
+    project.id,
+    sessionId,
+    Boolean(user),
+  );
   const submitTurn = useSubmitSkillBuilderTurn(
     accountId,
     project.id,
@@ -846,12 +899,15 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   );
   const commit = useCommitSkillBuilderSession(accountId, project.id, sessionId);
   const cancel = useCancelSkillBuilderSession(accountId, project.id, sessionId);
+  const setExecutionPreference = useSetSkillBuilderExecutionPreference(
+    accountId,
+    project.id,
+    sessionId,
+  );
+  const stopRun = useStopSkillBuilderTurn(accountId, project.id, sessionId);
   const [composerText, setComposerText] = useState("");
   const [admittedUserMessage, setAdmittedUserMessage] =
     useState<SkillBuilderAdmittedUserMessage | null>(null);
-  const [trackedRun, setTrackedRun] = useState<SkillBuilderTrackedRun | null>(
-    null,
-  );
   const [composerAttachments, setComposerAttachments] = useState<
     SkillBuilderAttachment[]
   >([]);
@@ -896,24 +952,8 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const previousFilesRef = useRef<SkillBuilderFile[]>([]);
   const previousChecksumRef = useRef<string | null>(null);
   const allowLeaveRef = useRef(false);
+  const defaultPreferenceRequestedRef = useRef<string | null>(null);
   const session = sessionQuery.data;
-  const trackedRunId =
-    trackedRun?.sessionId === sessionId ? trackedRun.runId : null;
-  const runProjection = useSkillBuilderRunStream({
-    threadId: session?.thread_id ?? null,
-    runId: session?.activeRun?.runId ?? trackedRunId,
-    initialStatus: session?.activeRun?.status ?? "running",
-    enabled: Boolean(session?.activeRun),
-  });
-  const runPresentation =
-    trackedRun?.sessionId === sessionId && trackedRun.terminalStatus
-      ? {
-          runId: trackedRun.runId,
-          status: trackedRun.terminalStatus,
-        }
-      : session
-        ? skillBuilderRunPresentation(session, trackedRunId)
-        : null;
   const optimisticUserMessage =
     submitTurn.isPending &&
     submitTurn.variables?.input.kind === "message" &&
@@ -932,10 +972,13 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const executionModels = modelsQuery.models;
   const executionModel =
     executionModels.find((model) => model.name === selectedModelName) ??
+    executionModels.find(
+      (model) => model.name === session?.execution_preference?.model_name,
+    ) ??
     executionModels.find((model) => model.is_default) ??
     executionModels[0];
   const thinkingMode = resolveAgentMode(
-    requestedThinkingMode ?? "flash",
+    requestedThinkingMode ?? session?.execution_preference?.mode,
     executionModel?.supports_thinking ?? false,
     executionModel?.supports_reasoning_effort ?? false,
   );
@@ -950,7 +993,65 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     validate.isPending ||
     commit.isPending ||
     cancel.isPending ||
+    setExecutionPreference.isPending ||
+    stopRun.isPending ||
     attachmentIngestions > 0;
+  useEffect(() => {
+    if (
+      !session ||
+      executionModels.length === 0 ||
+      setExecutionPreference.isPending
+    ) {
+      return;
+    }
+    const persistedModel = session.execution_preference
+      ? executionModels.find(
+          (model) => model.name === session.execution_preference?.model_name,
+        )
+      : undefined;
+    const model =
+      persistedModel ??
+      executionModels.find((candidate) => candidate.is_default) ??
+      executionModels[0];
+    if (!model) return;
+    const next = skillBuilderExecutionPreferenceFor(
+      model,
+      persistedModel ? session.execution_preference?.mode : undefined,
+    );
+    setSelectedModelName(next.model_name);
+    setRequestedThinkingMode(next.mode);
+    const current = session.execution_preference;
+    const matches =
+      current?.model_name === next.model_name &&
+      current.mode === next.mode &&
+      current.thinking_enabled === next.thinking_enabled &&
+      current.reasoning_effort === next.reasoning_effort;
+    if (
+      matches ||
+      !canAuthor ||
+      ["generating", "committing", "completed", "cancelled"].includes(
+        session.status,
+      )
+    ) {
+      return;
+    }
+    const requestKey = `${session.id}:${JSON.stringify(next)}`;
+    if (defaultPreferenceRequestedRef.current === requestKey) return;
+    defaultPreferenceRequestedRef.current = requestKey;
+    setExecutionPreference.mutate(next, {
+      onError: () => {
+        defaultPreferenceRequestedRef.current = null;
+        void modelsQuery.refetch();
+      },
+    });
+  }, [
+    canAuthor,
+    executionModels,
+    modelsQuery,
+    session,
+    setExecutionPreference,
+    setExecutionPreference.isPending,
+  ]);
   const selectedFile =
     session?.files.find((file) => file.path === selectedPath) ?? null;
   const draftContent = session
@@ -1032,6 +1133,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       observedFilesSessionRef.current = session.id;
       setWorkbenchOpen(session.files.length > 0);
       setMobileSurface("conversation");
+    } else if (
+      session.files.length === 0 &&
+      (session.status === "completed" || session.status === "cancelled")
+    ) {
+      setWorkbenchOpen(false);
     } else if (previousFiles.length === 0 && session.files.length > 0) {
       setWorkbenchOpen(true);
     }
@@ -1044,36 +1150,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       setAcknowledgedValidationToken(null);
     }
   }, [session]);
-
-  useEffect(() => {
-    const activeRun = session?.activeRun;
-    if (!activeRun) return;
-    setTrackedRun((current) =>
-      current?.sessionId === sessionId && current.runId === activeRun.runId
-        ? current
-        : { sessionId, runId: activeRun.runId },
-    );
-  }, [session?.activeRun, sessionId]);
-
-  useEffect(() => {
-    if (
-      !session ||
-      session.activeRun ||
-      trackedRun?.sessionId !== sessionId ||
-      trackedRun.terminalStatus
-    ) {
-      return;
-    }
-    const settled = skillBuilderRunPresentation(session, trackedRun.runId);
-    if (
-      !settled ||
-      settled.status === "pending" ||
-      settled.status === "running"
-    ) {
-      return;
-    }
-    setTrackedRun({ ...trackedRun, terminalStatus: settled.status });
-  }, [session, sessionId, trackedRun]);
 
   useEffect(() => {
     if (
@@ -1157,27 +1233,30 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     validate.reset();
     commit.reset();
     cancel.reset();
+    setExecutionPreference.reset();
+    stopRun.reset();
   }
 
   function composerExecutionOptions(): {
     model_name?: string;
-    reasoning_effort?: SkillBuilderReasoningEffort;
+    mode?: AgentMode;
+    thinking_enabled?: boolean;
+    reasoning_effort?: SkillBuilderReasoningEffort | null;
   } {
-    const options: {
-      model_name?: string;
-      reasoning_effort?: SkillBuilderReasoningEffort;
-    } = {};
-    if (
-      selectedModelName &&
-      executionModels.some((model) => model.name === selectedModelName)
-    ) {
-      options.model_name = selectedModelName;
-    }
-    const effort = SKILL_BUILDER_EFFORT_BY_MODE[thinkingMode];
-    if (effort !== "none") {
-      options.reasoning_effort = effort;
-    }
-    return options;
+    return executionModel
+      ? skillBuilderExecutionPreferenceFor(executionModel, thinkingMode)
+      : {};
+  }
+
+  function updateExecutionPreference(model: Model, mode: unknown) {
+    if (!session || mutationPending) return;
+    const next = skillBuilderExecutionPreferenceFor(model, mode);
+    setSelectedModelName(next.model_name);
+    setRequestedThinkingMode(next.mode);
+    resetErrors();
+    setExecutionPreference.mutate(next, {
+      onError: () => void modelsQuery.refetch(),
+    });
   }
 
   function updateComposerAttachments(
@@ -1276,7 +1355,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
     submitTurn.mutate(command, {
       onSuccess: (response) => {
         if (isSkillBuilderRunAdmission(response)) {
-          setTrackedRun({ sessionId, runId: response.runId });
           setAdmittedUserMessage({
             runId: response.runId,
             message,
@@ -1481,7 +1559,15 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           setLocalError(errors.commitUncertain);
           return;
         }
-        router.replace(createdHref);
+        const createdVersion = response.data.version;
+        setCreatedCandidateVersion(
+          createdVersion
+            ? {
+                id: createdVersion.id,
+                versionNumber: createdVersion.version_number,
+              }
+            : null,
+        );
       },
       onError: (error) => {
         refreshAfterConflict("commit", signature, error);
@@ -1520,7 +1606,14 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           ? skillBuilderWorkspaceErrorMessage(commit.error, errors, true)
           : cancel.error
             ? skillBuilderWorkspaceErrorMessage(cancel.error, errors)
-            : null);
+            : setExecutionPreference.error
+              ? skillBuilderWorkspaceErrorMessage(
+                  setExecutionPreference.error,
+                  errors,
+                )
+              : stopRun.error
+                ? skillBuilderWorkspaceErrorMessage(stopRun.error, errors)
+                : null);
 
   if (!user) return null;
 
@@ -1565,6 +1658,45 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           false,
         )
       : null);
+  const completionSecretSetup =
+    effectiveSecretSetup?.skillId === session?.created_skill_id &&
+    effectiveSecretSetup?.skillVersionId === exactCreatedVersionId
+      ? effectiveSecretSetup
+      : null;
+  const completionSecretCount =
+    completionSecretSetup?.requirementNames.length ?? 0;
+  const completionHref =
+    session?.status === "completed"
+      ? completionSecretCount > 0
+        ? createSecretHref
+        : revisionHref
+      : null;
+  const completion =
+    session?.status === "completed" && completionHref
+      ? {
+          message:
+            completionSecretCount > 0
+              ? session.session_kind === "revise"
+                ? t.skills.builder.success.revisionWithSecrets(
+                    createdCandidateVersion?.versionNumber ?? null,
+                    completionSecretCount,
+                  )
+                : t.skills.builder.success.createdWithSecrets(
+                    completionSecretCount,
+                  )
+              : session.session_kind === "revise"
+                ? skillBuilderRevisionCommitSuccessCopy(
+                    createdCandidateVersion?.versionNumber ?? null,
+                    t.skills.builder.success,
+                  )
+                : t.skills.builder.success.created,
+          href: completionHref,
+          action:
+            completionSecretCount > 0
+              ? t.skills.builder.success.configureCredentials
+              : t.skills.builder.success.goActivate,
+        }
+      : undefined;
 
   return (
     <>
@@ -1669,30 +1801,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : conversation.retry}
             </Button>
           </div>
-        ) : effectiveSecretSetup &&
-          createSecretHref &&
-          session.session_kind === "create" &&
-          session.status === "completed" &&
-          session.created_skill_id === effectiveSecretSetup.skillId ? (
-          <SkillBuilderCreateSecretSuccess
-            key={effectiveSecretSetup.skillVersionId}
-            requirementCount={effectiveSecretSetup.requirementNames.length}
-            href={createSecretHref}
-          />
-        ) : revising &&
-          session.status === "completed" &&
-          session.created_skill_id &&
-          revisionHref ? (
-          <SkillBuilderRevisionCommitSuccess
-            versionNumber={createdCandidateVersion?.versionNumber ?? null}
-            href={revisionHref}
-            credentialRequirementCount={
-              effectiveSecretSetup?.skillId === session.created_skill_id &&
-              effectiveSecretSetup.skillVersionId === exactCreatedVersionId
-                ? effectiveSecretSetup.requirementNames.length
-                : 0
-            }
-          />
         ) : (
           <div
             className={cn(
@@ -1720,8 +1828,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 models={executionModels}
                 executionModel={executionModel}
                 thinkingMode={thinkingMode}
-                runProjection={runProjection}
-                runPresentation={runPresentation}
+                activities={activitiesQuery.data ?? []}
+                stopPending={stopRun.isPending}
+                completion={completion}
                 onComposerTextChange={(value) => {
                   setComposerText(value);
                   if (requestError) resetErrors();
@@ -1734,8 +1843,21 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                     current.filter((item) => item.name !== name),
                   );
                 }}
-                onSelectModel={(name) => setSelectedModelName(name)}
-                onSelectThinkingMode={(mode) => setRequestedThinkingMode(mode)}
+                onSelectModel={(name) => {
+                  const model = executionModels.find(
+                    (candidate) => candidate.name === name,
+                  );
+                  if (model) updateExecutionPreference(model, undefined);
+                }}
+                onSelectThinkingMode={(mode) => {
+                  if (executionModel) {
+                    updateExecutionPreference(executionModel, mode);
+                  }
+                }}
+                onStopRun={() => {
+                  resetErrors();
+                  stopRun.mutate();
+                }}
               />
             </section>
             {workbenchOpen ? (

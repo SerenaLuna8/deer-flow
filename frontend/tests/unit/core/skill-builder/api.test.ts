@@ -2,6 +2,9 @@ import { afterEach, describe, expect, test, rs } from "@rstest/core";
 
 import {
   SkillBuilderApiError,
+  listSkillBuilderActivities,
+  stopSkillBuilderTurn,
+  setSkillBuilderExecutionPreference,
   submitSkillBuilderTurn,
 } from "@/core/skill-builder";
 
@@ -131,5 +134,108 @@ describe("submitSkillBuilderTurn", () => {
       status: 200,
       code: "SKILL_BUILDER_RESPONSE_INVALID",
     });
+  });
+});
+
+describe("setSkillBuilderExecutionPreference", () => {
+  test("persists one complete capability-normalized session preference", async () => {
+    const response = legacyResponse();
+    response.data.revision = 3;
+    Object.assign(response.data, {
+      execution_preference: {
+        model_name: "00000000-0000-4000-8000-000000000205",
+        mode: "pro",
+        thinking_enabled: true,
+        reasoning_effort: "medium",
+      },
+    });
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json(response),
+    );
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", fetcher);
+
+    await expect(
+      setSkillBuilderExecutionPreference(PROJECT_ID, SESSION_ID, {
+        model_name: "00000000-0000-4000-8000-000000000205",
+        mode: "pro",
+        thinking_enabled: true,
+        reasoning_effort: "medium",
+      }),
+    ).resolves.toEqual(response);
+    expect(jsonBody(fetcher.mock.calls[0]?.[1])).toEqual({
+      model_name: "00000000-0000-4000-8000-000000000205",
+      mode: "pro",
+      thinking_enabled: true,
+      reasoning_effort: "medium",
+    });
+  });
+});
+
+describe("Skill Builder Activity API", () => {
+  test("parses only the isolated public-safe Activity contract", async () => {
+    const response = {
+      data: [
+        {
+          seq: "9007199254740993",
+          operation_id: "55555555-5555-4555-8555-555555555555",
+          run_id: RUN_ID,
+          kind: "reasoning",
+          attempt: 1,
+          payload: { text: "真实思考" },
+          created_at: NOW,
+        },
+      ],
+      request_id: "request-activity",
+    };
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", async () => Response.json(response));
+
+    await expect(
+      listSkillBuilderActivities(PROJECT_ID, SESSION_ID),
+    ).resolves.toEqual(response);
+  });
+
+  test("rejects tool arguments and results from a successful Activity response", async () => {
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", async () =>
+      Response.json({
+        data: [
+          {
+            seq: "1",
+            operation_id: "55555555-5555-4555-8555-555555555555",
+            run_id: RUN_ID,
+            kind: "tool_started",
+            attempt: 1,
+            payload: {
+              tool_call_id: "call-1",
+              tool_name: "read_candidate_file",
+              args: { secret: "must-not-enter-cache" },
+            },
+            created_at: NOW,
+          },
+        ],
+        request_id: "request-activity",
+      }),
+    );
+
+    await expect(
+      listSkillBuilderActivities(PROJECT_ID, SESSION_ID),
+    ).rejects.toMatchObject({ code: "SKILL_BUILDER_RESPONSE_INVALID" });
+  });
+
+  test("stops only the current turn without a request body", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json(legacyResponse()),
+    );
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", fetcher);
+
+    await stopSkillBuilderTurn(PROJECT_ID, SESSION_ID);
+
+    expect(fetcher.mock.calls[0]?.[1]).toMatchObject({ method: "POST" });
+    expect(fetcher.mock.calls[0]?.[1]?.body).toBeUndefined();
   });
 });

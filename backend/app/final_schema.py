@@ -22,6 +22,8 @@ FINAL_REQUIRED_RELATIONS = (
     "skill_versions",
     "skill_design_sessions",
     "skill_design_operations",
+    "skill_design_activities",
+    "skill_design_operation_baseline_files",
     "skill_design_draft_files",
     "project_skill_credential_configs",
     "project_skill_credential_bindings",

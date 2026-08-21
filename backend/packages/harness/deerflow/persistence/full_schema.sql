@@ -2774,6 +2774,10 @@ CREATE TABLE skill_design_sessions (
     base_version_number BIGINT,
     base_payload_checksum CHAR(64),
     target_skill_deleted BOOLEAN DEFAULT false NOT NULL,
+    execution_model_ref VARCHAR(36),
+    execution_mode VARCHAR(16),
+    execution_thinking_enabled BOOLEAN,
+    execution_reasoning_effort VARCHAR(16),
     CONSTRAINT pk_skill_design_sessions PRIMARY KEY (id),
     CONSTRAINT ck_skill_design_sessions_status CHECK (status IN ('interviewing', 'generating', 'awaiting_clarification', 'draft_ready', 'validated', 'committing', 'completed', 'failed', 'cancelled')),
     CONSTRAINT ck_skill_design_sessions_revision CHECK (revision >= 1),
@@ -2790,6 +2794,7 @@ CREATE TABLE skill_design_sessions (
     CONSTRAINT ck_skill_design_sessions_kind CHECK (session_kind IN ('create', 'revise')),
     CONSTRAINT ck_skill_design_sessions_base_checksum CHECK (base_payload_checksum IS NULL OR base_payload_checksum ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_skill_design_sessions_base_version_number CHECK (base_version_number IS NULL OR base_version_number >= 1),
+    CONSTRAINT ck_skill_design_sessions_execution_preference CHECK ((execution_model_ref IS NULL AND execution_mode IS NULL AND execution_thinking_enabled IS NULL AND execution_reasoning_effort IS NULL) OR (execution_model_ref IS NOT NULL AND execution_mode IN ('flash', 'thinking', 'pro', 'ultra') AND execution_thinking_enabled IS NOT NULL AND (execution_reasoning_effort IS NULL OR execution_reasoning_effort IN ('none', 'low', 'medium', 'high')))),
     CONSTRAINT ck_skill_design_sessions_revision_target CHECK ((session_kind = 'create' AND target_skill_id IS NULL AND base_version_id IS NULL AND base_version_number IS NULL AND base_payload_checksum IS NULL AND target_skill_deleted IS FALSE) OR (session_kind = 'revise' AND ((target_skill_deleted IS FALSE AND target_skill_id IS NOT NULL AND base_version_id IS NOT NULL AND base_version_number IS NOT NULL AND base_payload_checksum IS NOT NULL) OR (target_skill_deleted IS TRUE AND target_skill_id IS NULL AND base_version_id IS NULL AND base_version_number IS NULL AND base_payload_checksum IS NULL)))),
     CONSTRAINT fk_skill_design_sessions_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_sessions_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
@@ -2824,23 +2829,69 @@ CREATE TABLE skill_design_operations (
     run_id VARCHAR(64),
     terminal_kind VARCHAR(16),
     terminal_request_checksum CHAR(64),
+    stop_requested_at TIMESTAMP WITH TIME ZONE,
     CONSTRAINT pk_skill_design_operations PRIMARY KEY (id),
     CONSTRAINT ck_skill_design_operations_kind CHECK (operation_kind IN ('turn', 'validate', 'commit', 'cancel')),
-    CONSTRAINT ck_skill_design_operations_status CHECK (status IN ('in_progress', 'completed', 'failed')),
+    CONSTRAINT ck_skill_design_operations_status CHECK (status IN ('in_progress', 'completed', 'failed', 'stopped')),
     CONSTRAINT ck_skill_design_operations_result_revision CHECK (result_revision IS NULL OR result_revision >= 1),
     CONSTRAINT ck_skill_design_operations_terminal_kind CHECK (terminal_kind IS NULL OR terminal_kind IN ('clarification', 'candidate')),
     CONSTRAINT ck_skill_design_operations_terminal_checksum CHECK (terminal_request_checksum IS NULL OR terminal_request_checksum ~ '^[0-9a-f]{64}$'),
     CONSTRAINT ck_skill_design_operations_terminal_pair CHECK ((terminal_kind IS NULL AND terminal_request_checksum IS NULL) OR (terminal_kind IS NOT NULL AND terminal_request_checksum IS NOT NULL)),
-    CONSTRAINT ck_skill_design_operations_completion CHECK ((status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL) OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL) OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL)),
+    CONSTRAINT ck_skill_design_operations_completion CHECK ((status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL) OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL) OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL) OR (status = 'stopped' AND result_revision IS NOT NULL AND public_error_code IS NULL)),
     CONSTRAINT fk_skill_design_operations_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_operations_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_skill_design_operations_session FOREIGN KEY(project_id, owner_user_id, session_id) REFERENCES skill_design_sessions (project_id, owner_user_id, id) ON DELETE CASCADE,
     CONSTRAINT fk_skill_design_operations_run FOREIGN KEY(project_id,owner_user_id,run_id) REFERENCES runs(project_id,owner_user_id,run_id) ON DELETE RESTRICT,
+    CONSTRAINT uq_skill_design_operations_private_scope UNIQUE (project_id, owner_user_id, session_id, id),
     CONSTRAINT uq_skill_design_operations_idempotency UNIQUE (project_id, owner_user_id, operation_kind, idempotency_key_hash),
     CONSTRAINT uq_skill_design_operations_run UNIQUE(project_id,owner_user_id,run_id)
 );
 
 CREATE INDEX ix_skill_design_operations_session ON skill_design_operations (project_id, owner_user_id, session_id, created_at DESC);
+
+CREATE TABLE skill_design_activities (
+    seq BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    session_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    run_id VARCHAR(64),
+    attempt BIGINT,
+    source_event_id VARCHAR(255),
+    kind VARCHAR(40) NOT NULL,
+    payload_json JSONB DEFAULT '{}'::jsonb NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_skill_design_activities PRIMARY KEY (seq),
+    CONSTRAINT ck_skill_design_activities_attempt CHECK (attempt IS NULL OR attempt >= 1),
+    CONSTRAINT ck_skill_design_activities_kind CHECK (kind IN ('request_accepted', 'attempt_started', 'reasoning', 'tool_started', 'tool_completed', 'tool_failed', 'candidate_generated', 'validation_started', 'validation_passed', 'validation_failed', 'repair_started', 'run_terminal', 'commit_accepted', 'commit_validation_started', 'commit_validation_passed', 'commit_persistence_started', 'commit_persistence_completed', 'commit_terminal')),
+    CONSTRAINT fk_skill_design_activities_session FOREIGN KEY(project_id, owner_user_id, session_id) REFERENCES skill_design_sessions (project_id, owner_user_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_skill_design_activities_operation FOREIGN KEY(project_id, owner_user_id, session_id, operation_id) REFERENCES skill_design_operations (project_id, owner_user_id, session_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_skill_design_activities_session_seq ON skill_design_activities (project_id, owner_user_id, session_id, seq);
+
+CREATE UNIQUE INDEX uq_skill_design_activities_source_event ON skill_design_activities (operation_id, source_event_id) WHERE source_event_id IS NOT NULL;
+
+CREATE UNIQUE INDEX uq_skill_design_activities_terminal ON skill_design_activities (operation_id) WHERE kind IN ('run_terminal', 'commit_terminal');
+
+CREATE TABLE skill_design_operation_baseline_files (
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    session_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    path VARCHAR(1024) NOT NULL,
+    media_type VARCHAR(255) NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    sha256 CHAR(64) NOT NULL,
+    content BYTEA NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_skill_design_operation_baseline_files PRIMARY KEY (project_id, owner_user_id, session_id, operation_id, path),
+    CONSTRAINT fk_skill_design_operation_baseline_files_operation FOREIGN KEY(project_id, owner_user_id, session_id, operation_id) REFERENCES skill_design_operations (project_id, owner_user_id, session_id, id) ON DELETE CASCADE,
+    CONSTRAINT ck_skill_design_operation_baseline_files_safe_path CHECK (path <> '' AND path !~ '(^/|(^|/)\.\.(/|$))'),
+    CONSTRAINT ck_skill_design_operation_baseline_files_size CHECK (size_bytes >= 0 AND size_bytes <= 2097152),
+    CONSTRAINT ck_skill_design_operation_baseline_files_content_size CHECK (size_bytes = octet_length(content)),
+    CONSTRAINT ck_skill_design_operation_baseline_files_sha256 CHECK (sha256 ~ '^[0-9a-f]{64}$')
+);
 
 CREATE TABLE skill_design_draft_files (
     project_id UUID NOT NULL,
@@ -3626,7 +3677,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 91 static tables and 1121 columns.
+-- Coverage: 93 static tables and 1147 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -4642,6 +4693,10 @@ COMMENT ON COLUMN skill_design_sessions.base_version_id IS '技能设计会话�
 COMMENT ON COLUMN skill_design_sessions.base_version_number IS '技能设计会话：基线版本编号。';
 COMMENT ON COLUMN skill_design_sessions.base_payload_checksum IS '技能设计会话：基线载荷校验和。';
 COMMENT ON COLUMN skill_design_sessions.target_skill_deleted IS '技能设计会话：目标技能已删除。';
+COMMENT ON COLUMN skill_design_sessions.execution_model_ref IS '技能设计会话：执行模型引用。';
+COMMENT ON COLUMN skill_design_sessions.execution_mode IS '技能设计会话：执行模式。';
+COMMENT ON COLUMN skill_design_sessions.execution_thinking_enabled IS '技能设计会话：执行思考启用。';
+COMMENT ON COLUMN skill_design_sessions.execution_reasoning_effort IS '技能设计会话：执行推理强度。';
 
 COMMENT ON TABLE skill_design_operations IS '保存技能设计会话中的幂等操作及其结果。';
 COMMENT ON COLUMN skill_design_operations.id IS '技能设计操作：主键标识。';
@@ -4659,6 +4714,32 @@ COMMENT ON COLUMN skill_design_operations.updated_at IS '技能设计操作：�
 COMMENT ON COLUMN skill_design_operations.run_id IS '技能设计操作：运行标识。';
 COMMENT ON COLUMN skill_design_operations.terminal_kind IS '技能设计操作：终态类型。';
 COMMENT ON COLUMN skill_design_operations.terminal_request_checksum IS '技能设计操作：终态请求校验和。';
+COMMENT ON COLUMN skill_design_operations.stop_requested_at IS '技能设计操作：停止请求时间。';
+
+COMMENT ON TABLE skill_design_activities IS '保存技能设计会话中可回放的公开思考与执行过程。';
+COMMENT ON COLUMN skill_design_activities.seq IS '技能设计活动：单调序号。';
+COMMENT ON COLUMN skill_design_activities.project_id IS '技能设计活动：所属项目标识。';
+COMMENT ON COLUMN skill_design_activities.owner_user_id IS '技能设计活动：私有数据所有者的用户标识。';
+COMMENT ON COLUMN skill_design_activities.session_id IS '技能设计活动：会话标识。';
+COMMENT ON COLUMN skill_design_activities.operation_id IS '技能设计活动：操作标识。';
+COMMENT ON COLUMN skill_design_activities.run_id IS '技能设计活动：运行标识。';
+COMMENT ON COLUMN skill_design_activities.attempt IS '技能设计活动：尝试。';
+COMMENT ON COLUMN skill_design_activities.source_event_id IS '技能设计活动：来源事件标识。';
+COMMENT ON COLUMN skill_design_activities.kind IS '技能设计活动：业务类型。';
+COMMENT ON COLUMN skill_design_activities.payload_json IS '技能设计活动：公开载荷 JSON 数据。';
+COMMENT ON COLUMN skill_design_activities.created_at IS '技能设计活动：记录创建时间。';
+
+COMMENT ON TABLE skill_design_operation_baseline_files IS '保存技能生成轮次开始前用于停止或失败回滚的草稿快照。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.project_id IS '技能设计操作基线文件：所属项目标识。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.owner_user_id IS '技能设计操作基线文件：私有数据所有者的用户标识。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.session_id IS '技能设计操作基线文件：会话标识。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.operation_id IS '技能设计操作基线文件：操作标识。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.path IS '技能设计操作基线文件：路径。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.media_type IS '技能设计操作基线文件：媒体类型。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.size_bytes IS '技能设计操作基线文件：大小字节数。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.sha256 IS '技能设计操作基线文件：内容的 SHA-256 摘要。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.content IS '技能设计操作基线文件：技能设计操作基线文件的原始字节内容。';
+COMMENT ON COLUMN skill_design_operation_baseline_files.created_at IS '技能设计操作基线文件：记录创建时间。';
 
 COMMENT ON TABLE skill_design_draft_files IS '保存技能设计会话当前草稿中的文件内容。';
 COMMENT ON COLUMN skill_design_draft_files.project_id IS '技能设计草稿文件：所属项目标识。';
@@ -4941,6 +5022,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('agent_design_activity_terminal');
+INSERT INTO alembic_version (version_num) VALUES ('skill_design_activity');
 
 COMMIT;

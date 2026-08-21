@@ -29,6 +29,10 @@ from app.reliability.execution import (
 )
 from app.shared_assets.bootstrap import service as bootstrap_service
 from app.shared_assets.errors import AssetConflict, AssetRunQuotaExceeded
+from app.shared_assets.models import SkillArchiveFile
+from app.shared_assets.skill_builder_activity_stream import (
+    SkillBuilderActivityEmitter,
+)
 from app.shared_assets.skill_builder_contract import (
     SkillBuilderCandidateFileList,
     SkillBuilderCandidateFileUpsert,
@@ -38,12 +42,20 @@ from app.shared_assets.skill_builder_run_admission import (
     SkillBuilderRunAdmission,
     SkillBuilderRunAdmissionService,
 )
+from app.shared_assets.skill_design_activity import (
+    MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION,
+    SkillDesignActivityKind,
+    SkillDesignActivityLimitExceeded,
+    SkillDesignActivityRepository,
+)
 from app.shared_assets.skill_design_generation import SkillBuilderDependencySnapshot
+from app.shared_assets.skill_design_repository import SkillDesignRepository
 from app.shared_assets.skill_design_service import (
     CancelSkillDesignSession,
     CreateSkillDesignSession,
     SkillDesignMessageTurn,
     SkillDesignService,
+    SkillDesignStatus,
     SubmitSkillDesignTurn,
 )
 from app.system_runtime_settings import SystemRuntimePolicyService
@@ -525,6 +537,19 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
             now=started_at + timedelta(seconds=5),
         )
         assert second_claim.run_id == first.run_id
+        await SkillBuilderActivityEmitter.create(
+            seed.factory,
+            seed.owner_a,
+            second_claim,
+        )
+        retry_activities = await service.list_activities(context, design.id)
+        assert [item.kind.value for item in retry_activities] == [
+            "request_accepted",
+            "attempt_started",
+            "repair_started",
+        ]
+        assert retry_activities[-2].attempt == 2
+        assert retry_activities[-1].attempt == 2
         draft_sink = service.terminal_sink(seed.owner_a, second_claim)
         empty_draft = await draft_sink.list_candidate_files(
             SkillBuilderCandidateFileList(),
@@ -765,6 +790,170 @@ async def test_builder_admission_quota_failure_rolls_back_the_whole_turn(
             assert await session.scalar(sa.select(sa.func.count()).select_from(RunRow).where(RunRow.thread_id == str(design.thread_id))) == 0
             assert await session.scalar(sa.select(sa.func.count()).select_from(JobRow).where(JobRow.project_id == context.project_id)) == 0
         assert audit.admitted == []
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_stop_current_builder_run_restores_baseline_and_keeps_session(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, service, quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="stop-rollback-skill",
+                display_name="Stop Rollback Skill",
+                idempotency_key="create-stop-rollback",
+            ),
+        )
+        baseline_content = b"---\nname: stop-rollback-skill\ndescription: baseline\n---\n"
+        baseline_file = SkillArchiveFile(
+            path="SKILL.md",
+            media_type="text/markdown",
+            content=baseline_content,
+        )
+        async with seed.factory() as session, session.begin():
+            repository = SkillDesignRepository(session)
+            row = await repository.get(context, design.id, for_update=True)
+            await repository.replace_draft_files(
+                context,
+                row.id,
+                (baseline_file,),
+            )
+            snapshot = service._draft_snapshot(context, (baseline_file,))
+            row.draft_checksum = snapshot.draft_checksum
+            row.status = "draft_ready"
+            row.progress_json = service._progress_json(
+                SkillDesignStatus.DRAFT_READY,
+            )
+            row.revision += 1
+
+        ready = await service.get(context, design.id)
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="生成期间会停止并回滚",
+                revision=ready.revision,
+                key="stop-this-turn",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+
+        unverified = SkillArchiveFile(
+            path="SKILL.md",
+            media_type="text/markdown",
+            content=b"unverified partial candidate",
+        )
+        async with seed.factory() as session, session.begin():
+            repository = SkillDesignRepository(session)
+            await repository.replace_draft_files(
+                context,
+                design.id,
+                (unverified,),
+            )
+
+        stopped = await service.stop_current_run(context, design.id)
+        assert stopped.status.value == "draft_ready"
+        assert stopped.files[0].content == baseline_content.decode()
+        assert stopped.draft_checksum == ready.draft_checksum
+        assert quota.released.count(admission.run_id) == 1
+
+        activities = await service.list_activities(context, design.id)
+        assert [item.kind.value for item in activities] == [
+            "request_accepted",
+            "run_terminal",
+        ]
+        assert activities[-1].payload == {"status": "stopped"}
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admission.run_id,
+                    )
+                )
+            ).scalar_one()
+            assert operation.status == "stopped"
+            assert operation.stop_requested_at is not None
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_skill_builder_activity_cap_still_allows_stopped_terminal(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, service, _quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="activity-cap-skill",
+                display_name="Activity Cap Skill",
+                idempotency_key="create-activity-cap",
+            ),
+        )
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="生成足够长的真实思考",
+                revision=design.revision,
+                key="activity-cap-turn",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+        async with seed.factory() as session:
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admission.run_id,
+                    )
+                )
+            ).scalar_one()
+
+        chunk = "x" * 65_536
+        appended = 0
+        async with seed.factory() as session, session.begin():
+            activity_repository = SkillDesignActivityRepository(session)
+            for index in range(
+                MAX_SKILL_DESIGN_ACTIVITY_BYTES_PER_OPERATION // len(chunk) + 2,
+            ):
+                try:
+                    await activity_repository.append(
+                        context,
+                        session_id=design.id,
+                        operation_id=operation.id,
+                        run_id=admission.run_id,
+                        attempt=1,
+                        kind=SkillDesignActivityKind.REASONING,
+                        payload={"text": chunk},
+                        source_event_id=f"cap-reasoning-{index}",
+                    )
+                    appended += 1
+                except SkillDesignActivityLimitExceeded:
+                    break
+        assert appended > 0
+        assert appended < 66
+
+        stopped = await service.stop_current_run(context, design.id)
+        assert stopped.status.value == "interviewing"
+        activities = await service.list_activities(
+            context,
+            design.id,
+            after_seq=0,
+            limit=2_000,
+        )
+        assert activities[-1].kind is SkillDesignActivityKind.RUN_TERMINAL
+        assert activities[-1].payload == {"status": "stopped"}
     finally:
         await seed.engine.dispose()
 

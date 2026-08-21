@@ -22,9 +22,13 @@ from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.run_execution.contracts import PrivateRunExecution
-from app.reliability.run_execution.errors import TransientExecutionError
+from app.reliability.run_execution.errors import (
+    PermanentExecutionError,
+    TransientExecutionError,
+)
 from app.reliability.run_execution.executor import RunAgentPrivateExecutor
 from app.shared_assets.skill_builder_agent_runtime import SkillBuilderAgentFactory
+from app.shared_assets.skill_design_activity import SkillDesignActivityLimitExceeded
 from app.worker.service import JobLeaseAuthority
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
@@ -89,6 +93,7 @@ def _execution_bundle(
     *,
     runner,
     events: list[str] | None = None,
+    activity_emitter_factory=None,
 ) -> tuple[
     RunAgentPrivateExecutor,
     PrivateRunExecution,
@@ -147,6 +152,12 @@ def _execution_bundle(
         publish_end=AsyncMock(),
         cleanup=AsyncMock(),
     )
+
+    if activity_emitter_factory is None:
+
+        async def activity_emitter_factory(*_args, **_kwargs):
+            return SimpleNamespace(append=AsyncMock())
+
     executor = RunAgentPrivateExecutor(
         lambda: None,
         app_config=app_config,
@@ -157,6 +168,7 @@ def _execution_bundle(
         asset_runtime=_Assets(runtime),
         agent_factory=object(),
         runner=runner,
+        skill_builder_activity_emitter_factory=activity_emitter_factory,
     )
     execution = PrivateRunExecution(
         context=context,
@@ -190,6 +202,24 @@ def _execution_bundle(
     )
     authority = JobLeaseAuthority(lambda: None, claim, lease_seconds=30)
     return executor, execution, authority, runtime
+
+
+@pytest.mark.asyncio
+async def test_skill_builder_activity_limit_is_not_retried(tmp_path: Path) -> None:
+    async def activity_emitter_factory(*_args, **_kwargs):
+        raise SkillDesignActivityLimitExceeded
+
+    runner = AsyncMock(side_effect=AssertionError("runner must not start"))
+
+    executor, execution, authority, _runtime = _execution_bundle(
+        tmp_path,
+        runner=runner,
+        activity_emitter_factory=activity_emitter_factory,
+    )
+
+    with pytest.raises(PermanentExecutionError):
+        await executor.execute(execution, authority)
+    runner.assert_not_awaited()
 
 
 def _named_tool(name: str) -> StructuredTool:

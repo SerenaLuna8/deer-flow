@@ -148,7 +148,7 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `agent_design_activity_terminal`。
+  `skill_design_activity`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本先运行 `make preflight-upgrade` 获取只读 Agent/Skill 生命周期清单并排除阻断异常，再通过 `make upgrade-db` 显式升级；升级命令会在同一维护流程内再次执行该 preflight。

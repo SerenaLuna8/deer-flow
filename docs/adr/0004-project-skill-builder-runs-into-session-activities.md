@@ -1,0 +1,3 @@
+# Project Skill Builder Runs into session-scoped activities
+
+Skill Builder continues to execute each model-backed advancement as a durable Run, with Run Events remaining the authority for execution and recovery. The Worker writes a separate append-only Skill Design Activity projection containing only closed, sanitized reasoning, tool, validation, and commit observations linked to their Skill Design Operation; the Builder UI consumes only this session-scoped Activity stream because dynamically rebuilding multiple Runs plus non-Run operations from retained Run Events cannot guarantee ordered, session-long replay. This deliberately duplicates a small display projection without creating another execution engine or sharing ordinary Thread UI state.

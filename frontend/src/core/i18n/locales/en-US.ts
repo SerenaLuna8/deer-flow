@@ -2506,6 +2506,39 @@ export const enUS: Translations = {
         commitRevise: "Save Candidate Version",
       },
       activity: {
+        title: "Thinking and execution",
+        terminal: {
+          completed: "Completed",
+          failed: "Failed",
+          stopped: "Stopped",
+        },
+        duration: (milliseconds) => `· ${(milliseconds / 1000).toFixed(1)}s`,
+        attempt: (attempt) =>
+          attempt === 1 ? "Initial generation" : `Retry ${attempt - 1}`,
+        reasoning: (attempt) =>
+          attempt === 1 ? "Model reasoning" : `Retry ${attempt - 1} reasoning`,
+        stop: "Stop this turn",
+        stopping: "Stopping…",
+        stages: {
+          request_accepted: "Request received",
+          attempt_started: "Model generation started",
+          reasoning: "Model reasoning",
+          tool_started: "Tool started",
+          tool_completed: "Tool completed",
+          tool_failed: "Tool failed",
+          candidate_generated: "Candidate generated",
+          validation_started: "Deterministic validation started",
+          validation_passed: "Deterministic validation passed",
+          validation_failed: "Deterministic validation failed",
+          repair_started: "Safe retry started",
+          run_terminal: "Generation turn finished",
+          commit_accepted: "Create request received",
+          commit_validation_started: "Candidate validation started",
+          commit_validation_passed: "Candidate validation passed",
+          commit_persistence_started: "Saving Skill and candidate version",
+          commit_persistence_completed: "Skill and candidate version saved",
+          commit_terminal: "Create operation finished",
+        },
         run: {
           pending: "Queued, waiting to run",
           running: "Running",
@@ -2586,6 +2619,8 @@ export const enUS: Translations = {
         discardAndLeave: "Discard changes and leave",
       },
       success: {
+        created:
+          "The Skill was created in a suspended state. Review and activate it when ready.",
         withVersion: (version) =>
           `Saved Candidate Version v${version}. Go activate it`,
         withoutVersion: "Saved a Candidate Version. Go activate it",

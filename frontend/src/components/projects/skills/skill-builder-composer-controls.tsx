@@ -4,14 +4,10 @@ import {
   CheckIcon,
   ChevronDownIcon,
   FileTextIcon,
-  LightbulbIcon,
   PaperclipIcon,
-  RocketIcon,
-  TargetIcon,
   XIcon,
-  ZapIcon,
 } from "lucide-react";
-import { useRef, type ComponentType } from "react";
+import { useRef } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -20,6 +16,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { InputBoxModeChooser } from "@/components/workspace/input-box-mode-chooser";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Model } from "@/core/models/types";
 import type { SkillBuilderAttachment } from "@/core/skill-builder";
@@ -52,16 +49,6 @@ const ATTACHMENT_ACCEPT = [
   ".conf",
   ".log",
 ].join(",");
-
-const THINKING_MODE_ICONS: Record<
-  AgentMode,
-  ComponentType<{ className?: string }>
-> = {
-  flash: ZapIcon,
-  thinking: LightbulbIcon,
-  pro: TargetIcon,
-  ultra: RocketIcon,
-};
 
 export function skillBuilderAvailableThinkingModes(
   model:
@@ -132,8 +119,6 @@ export function SkillBuilderComposerControls({
   const { t } = useI18n();
   const copy = t.skills.builder.composer;
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const thinkingModes = skillBuilderAvailableThinkingModes(selectedModel);
-  const ThinkingModeIcon = THINKING_MODE_ICONS[thinkingMode];
 
   return (
     <div className="flex min-w-0 flex-wrap items-center gap-0.5">
@@ -203,45 +188,16 @@ export function SkillBuilderComposerControls({
         </DropdownMenu>
       ) : null}
 
-      {thinkingModes.length > 1 ? (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              type="button"
-              variant="ghost"
-              className="text-muted-foreground hover:text-foreground h-8 gap-1 px-2 text-xs"
-              aria-label={copy.selectThinking}
-              disabled={pickersDisabled}
-            >
-              <ThinkingModeIcon aria-hidden className="size-3.5" />
-              {copy.mode[thinkingMode]}
-              <ChevronDownIcon aria-hidden className="size-3.5" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start">
-            {thinkingModes.map((mode) => {
-              const ModeIcon = THINKING_MODE_ICONS[mode];
-              return (
-                <DropdownMenuItem
-                  key={mode}
-                  onSelect={() => onSelectThinkingMode(mode)}
-                >
-                  <ModeIcon aria-hidden className="size-4" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block text-sm">{copy.mode[mode]}</span>
-                    <span className="text-muted-foreground block text-xs">
-                      {copy.modeDescription[mode]}
-                    </span>
-                  </span>
-                  {mode === thinkingMode ? (
-                    <CheckIcon aria-hidden className="size-3.5" />
-                  ) : null}
-                </DropdownMenuItem>
-              );
-            })}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      ) : null}
+      <InputBoxModeChooser
+        mode={thinkingMode}
+        disabled={pickersDisabled}
+        supportThinking={selectedModel?.supports_thinking ?? false}
+        supportReasoningEffort={
+          selectedModel?.supports_reasoning_effort ?? false
+        }
+        labels={t.inputBox}
+        onSelect={onSelectThinkingMode}
+      />
     </div>
   );
 }
