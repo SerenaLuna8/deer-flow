@@ -117,6 +117,7 @@ from deerflow.runtime.events.stream import (
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS
 from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellation
 from deerflow.runtime.runs.store import RunStore
+from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import coerce_iso
 
 router = APIRouter(
@@ -957,6 +958,53 @@ _PRIVATE_STREAM_HEARTBEAT_SECONDS = 15.0
 _PRIVATE_RUN_TERMINAL_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
 
 
+async def _normalize_prepared_edit_replay(
+    body: PrivateRunCreateRequest,
+    *,
+    thread_id: str,
+    context: PrivateWorkContext,
+    service: ProjectChatControlService | None,
+    app_config: AppConfig,
+) -> PrivateRunCreateRequest:
+    """Restore a server-validated RemoveMessage for an edited replay."""
+
+    if body.metadata.get("replay_kind") != "edit":
+        return body
+    if service is None:
+        raise PrivateWorkUnavailable(context.request_id)
+    graph_input = body.input
+    messages = graph_input.get("messages") if isinstance(graph_input, Mapping) else None
+    if not isinstance(messages, list) or len(messages) != 1:
+        raise PrivateWorkConflict(context.request_id)
+    replacement = messages[0]
+    if not isinstance(replacement, Mapping):
+        raise PrivateWorkConflict(context.request_id)
+    replacement_base_id = replacement.get("id")
+    source_message_id = body.metadata.get("edit_from_message_id")
+    replacement_text = message_to_text(replacement).strip()
+    if not isinstance(replacement_base_id, str) or not replacement_base_id or not isinstance(source_message_id, str) or not source_message_id or not replacement_text:
+        raise PrivateWorkConflict(context.request_id)
+
+    prepared = await service.prepare_edit_regenerate(
+        context,
+        thread_id,
+        human_message_id=source_message_id,
+        replacement_text=replacement_text,
+        replacement_base_id=replacement_base_id,
+        app_config=app_config,
+    )
+    checkpoint = body.checkpoint
+    prepared_checkpoint = prepared.get("checkpoint")
+    if checkpoint is None or not isinstance(prepared_checkpoint, Mapping) or checkpoint.checkpoint_id != prepared_checkpoint.get("checkpoint_id") or dict(body.metadata) != prepared.get("metadata"):
+        raise PrivateWorkConflict(context.request_id)
+    return body.model_copy(
+        update={
+            "input": copy.deepcopy(prepared["input"]),
+            "metadata": copy.deepcopy(prepared["metadata"]),
+        }
+    )
+
+
 def _run_event_wakeup(request: Request) -> RunEventWakeup | None:
     """Return the per-process wakeup dispatcher; absence degrades to polling."""
     wakeup = getattr(request.app.state, "run_event_wakeup", None)
@@ -1711,9 +1759,23 @@ async def create_private_run(
     body: PrivateRunCreateRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> PrivateRunResponse:
     try:
-        record = await start_private_run(body, str(thread_id), request, context)
+        thread_id_value = str(thread_id)
+        normalized_body = await _normalize_prepared_edit_replay(
+            body,
+            thread_id=thread_id_value,
+            context=context,
+            service=(_chat_control_service(request, context.request_id) if body.metadata.get("replay_kind") == "edit" else None),
+            app_config=config,
+        )
+        record = await start_private_run(
+            normalized_body,
+            thread_id_value,
+            request,
+            context,
+        )
     except PrivateWorkError as error:
         _raise_http(error)
     except ReliabilityError as error:
@@ -1727,11 +1789,25 @@ async def stream_private_run(
     body: PrivateRunCreateRequest,
     request: Request,
     context: PrivateWorkContext = Depends(private_work_context),
+    config: AppConfig = Depends(get_config),
 ) -> StreamingResponse:
     try:
         bridge = _private_stream_bridge(request, context.request_id)
         cursor = _private_stream_cursor(request, context.request_id)
-        record = await start_private_run(body, str(thread_id), request, context)
+        thread_id_value = str(thread_id)
+        normalized_body = await _normalize_prepared_edit_replay(
+            body,
+            thread_id=thread_id_value,
+            context=context,
+            service=(_chat_control_service(request, context.request_id) if body.metadata.get("replay_kind") == "edit" else None),
+            app_config=config,
+        )
+        record = await start_private_run(
+            normalized_body,
+            thread_id_value,
+            request,
+            context,
+        )
         service = _run_service(request, context.request_id)
     except PrivateWorkError as error:
         _raise_http(error)
@@ -1827,7 +1903,20 @@ async def wait_private_run(
 ) -> dict[str, Any]:
     try:
         _require_run_runtime(request, context.request_id)
-        record = await start_private_run(body, str(thread_id), request, context)
+        thread_id_value = str(thread_id)
+        normalized_body = await _normalize_prepared_edit_replay(
+            body,
+            thread_id=thread_id_value,
+            context=context,
+            service=(_chat_control_service(request, context.request_id) if body.metadata.get("replay_kind") == "edit" else None),
+            app_config=config,
+        )
+        record = await start_private_run(
+            normalized_body,
+            thread_id_value,
+            request,
+            context,
+        )
         completed, durable_record = await _wait_for_durable_private_run(
             service=_run_service(request, context.request_id),
             context=context,

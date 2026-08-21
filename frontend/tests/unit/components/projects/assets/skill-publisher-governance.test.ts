@@ -14,7 +14,10 @@ import {
   projectSkillVersionCanActivate,
 } from "@/components/projects/assets/project-asset-view-model";
 import { projectAssetDeleteDescription } from "@/components/projects/assets/project-skill-delete-dialog";
-import { projectSkillImportErrorMessage } from "@/components/projects/assets/project-skill-import-dialog";
+import {
+  PROJECT_SKILL_IMPORT_DESCRIPTION,
+  projectSkillImportErrorMessage,
+} from "@/components/projects/assets/project-skill-import-dialog";
 import {
   skillCredentialBindingCanUnbind,
   skillCredentialBindingValidation,
@@ -168,6 +171,12 @@ describe("Skill activation governance", () => {
         ),
       ),
     ).toContain("压缩包无效或格式不受支持");
+  });
+
+  test("describes archive import as a Candidate Version without publication terms", () => {
+    expect(PROJECT_SKILL_IMPORT_DESCRIPTION).toContain("候选版本");
+    expect(PROJECT_SKILL_IMPORT_DESCRIPTION).toContain("激活");
+    expect(PROJECT_SKILL_IMPORT_DESCRIPTION).not.toMatch(/发布|草稿/u);
   });
 
   test("does not let an active Skill remove a required binding", () => {

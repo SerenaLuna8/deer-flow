@@ -1269,6 +1269,18 @@ export async function listProjectAssetVersions(
   return parseResponse(response, versionHistorySchema(kind));
 }
 
+export async function listSystemAssetVersions(
+  kind: Exclude<AssetListKind, "credentials" | "mcp-servers">,
+  assetId: string,
+  signal?: AbortSignal,
+): Promise<VersionHistoryResponse> {
+  const id = parseInput(assetIdSchema, assetId);
+  const response = await request(`${systemCatalogUrl(kind)}/${id}/versions`, {
+    signal,
+  });
+  return parseResponse(response, versionHistorySchema(kind));
+}
+
 export async function assessProjectAgentRuntime(
   projectId: string,
   agentIds: readonly string[],

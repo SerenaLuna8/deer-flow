@@ -827,8 +827,17 @@ export function SkillVersionWorkbench({
       <div>
         <h3 className="text-sm font-semibold">版本内容</h3>
         <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-          文件来自版本 {version.version_number}{" "}
-          的不可变快照。修改会另存为新的候选版本，当前版本不会被覆盖。
+          {item.scope === "system" ? (
+            <>
+              文件来自 System Skill 的 Current Version v
+              {version.version_number}，由软件包统一管理，当前为只读。
+            </>
+          ) : (
+            <>
+              文件来自版本 {version.version_number}{" "}
+              的不可变快照。修改会另存为新的候选版本，当前版本不会被覆盖。
+            </>
+          )}
         </p>
       </div>
 

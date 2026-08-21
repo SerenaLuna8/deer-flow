@@ -1266,6 +1266,42 @@ async def list_system_catalog_skills(
     return await _list_system_current_version_catalog(actor, service)
 
 
+@catalog_router.get(
+    "/agents/{asset_id}/versions",
+    response_model=AgentVersionHistoryResponse,
+)
+async def list_system_catalog_agent_versions(
+    asset_id: uuid.UUID,
+    actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
+    service: Annotated[AgentService, Depends(get_agent_service)],
+):
+    """Return the immutable Current Version definition for a visible System Agent."""
+
+    return await _version_history(
+        actor,
+        lambda: service.get_version_history(actor, asset_id),
+        AgentVersionHistoryResponse,
+    )
+
+
+@catalog_router.get(
+    "/skills/{asset_id}/versions",
+    response_model=SkillVersionHistoryResponse,
+)
+async def list_system_catalog_skill_versions(
+    asset_id: uuid.UUID,
+    actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],
+    service: Annotated[SkillService, Depends(get_skill_service)],
+):
+    """Return the immutable Current Version definition for a visible System Skill."""
+
+    return await _version_history(
+        actor,
+        lambda: service.get_version_history(actor, asset_id),
+        SkillVersionHistoryResponse,
+    )
+
+
 @catalog_router.get("/mcp-servers", response_model=SystemAssetCatalogResponse)
 async def list_system_catalog_mcp_servers(
     actor: Annotated[SystemAssetReadContext, Depends(system_asset_catalog_actor)],

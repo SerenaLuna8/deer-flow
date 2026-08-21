@@ -184,6 +184,7 @@ export function useThreadAgentModelRef(
     "agents",
     agent?.id ?? "",
     enabled && Boolean(agent && !isMain && !agentSuspended && versionId),
+    agent?.scope ?? "project",
   );
   const modelRef = resolveThreadAgentModelRef(
     catalog,
@@ -253,6 +254,7 @@ export function useProjectRuntimeSlashSkills(
     "agents",
     agent?.id ?? "",
     Boolean(agent && !main && versionId),
+    agent?.scope ?? "project",
   );
   const version = currentAgentVersion(versionQuery.data, agent);
   const error = skillQuery.error ?? agentQuery.error ?? versionQuery.error;

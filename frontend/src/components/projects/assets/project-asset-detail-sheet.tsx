@@ -825,7 +825,14 @@ export function ProjectAssetDetailSheet({
   onSkillCredentialSetupRequired?: (versionId: string | null) => void;
 }) {
   const { models } = useModels({ enabled: open && kind === "agents" });
-  const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
+  const history = useProjectAssetVersions(
+    accountId,
+    projectId,
+    kind,
+    item.id,
+    true,
+    item.scope,
+  );
   const editableMcpConfigurationEnabled =
     projectMcpEditableConfigurationEnabled(open, kind, item);
   const editableMcpConfiguration = useProjectMcpEditableConfiguration(

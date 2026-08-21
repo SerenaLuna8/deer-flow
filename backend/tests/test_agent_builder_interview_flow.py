@@ -313,6 +313,64 @@ async def test_composition_phase_returns_complete_documents_after_three_answers(
 
 
 @pytest.mark.asyncio
+async def test_composition_treats_backticked_output_tokens_as_data_not_capabilities() -> None:
+    output = json.dumps(
+        {
+            "decision": "candidate",
+            "description": "为版本生命周期验收提供固定且可验证的响应。",
+            "documents": {
+                "agents_instructions": "收到任何消息时，只回复精确字符串 `BROWSER_AGENT_V1`。",
+                "soul": "保持确定、简洁和可验证。",
+                "identity": "版本生命周期浏览器验收 Agent。",
+                "user_context": "仅用于项目内部自动化验收。",
+            },
+            "assumptions": [],
+            "conflicts": [],
+            "capability_claims": [],
+        },
+        ensure_ascii=False,
+    )
+    service = AgentDesignGenerationService(model_caller=_StaticCaller(output))
+
+    result = await service.generate(
+        AgentDesignGenerationRequest(
+            agent_name="browser-current-agent",
+            brief="创建固定输出的浏览器验收 Agent",
+            phase="composition",
+            answers={
+                "output": "固定输出 BROWSER_AGENT_V1",
+                "boundary": "保留安全边界",
+                "audience": "项目内部",
+            },
+            interview_history=(
+                AgentDesignInterviewAnswer(
+                    id="output",
+                    question="输出契约？",
+                    answer="固定输出 BROWSER_AGENT_V1",
+                ),
+                AgentDesignInterviewAnswer(
+                    id="boundary",
+                    question="行为边界？",
+                    answer="保留安全边界",
+                ),
+                AgentDesignInterviewAnswer(
+                    id="audience",
+                    question="使用范围？",
+                    answer="项目内部",
+                ),
+            ),
+        ),
+        context=AgentDesignGenerationContext(
+            allowed_capabilities=("web", "file:read", "file:write", "bash", "task"),
+        ),
+    )
+
+    assert isinstance(result, CandidateResult)
+    assert "`BROWSER_AGENT_V1`" in result.documents.agents_instructions
+    assert result.capability_claims == ()
+
+
+@pytest.mark.asyncio
 async def test_composition_repairs_unsafe_model_output_without_weakening_validation() -> None:
     caller = _SequenceCaller(
         [

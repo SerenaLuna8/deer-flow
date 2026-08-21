@@ -326,14 +326,14 @@ class AgentRepository:
 
     async def get_system_asset(
         self,
-        context: SystemAssetGovernanceContext,
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
         asset_id: uuid.UUID,
         *,
         for_update: bool = False,
     ) -> AgentRow:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetNotFound(context.request_id)
+        self._require_system_catalog_reader(context)
+        if for_update and isinstance(context, SystemAssetReadContext):
+            raise AssetForbidden(context.request_id)
         statement = select(AgentRow).where(
             AgentRow.id == asset_id,
             AgentRow.scope == "system",
@@ -809,10 +809,10 @@ class AgentRepository:
 
     async def get_system_version_history(
         self,
-        context: SystemAssetGovernanceContext,
+        context: SystemAssetGovernanceContext | SystemAssetReadContext,
         asset_id: uuid.UUID,
     ) -> tuple[AgentVersionRecord, ...]:
-        self._require_system_actor(context)
+        self._require_system_catalog_reader(context)
         await self.get_system_asset(context, asset_id)
         statement = (
             select(AgentVersionRow)

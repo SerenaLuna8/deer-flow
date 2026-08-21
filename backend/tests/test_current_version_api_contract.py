@@ -5,6 +5,11 @@ from dataclasses import fields
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import httpx
+import pytest
+from fastapi import FastAPI
+
+from app.gateway.routers import project_assets
 from app.gateway.routers.project_assets import (
     AgentCapabilityBindingsRequest,
     AgentCreateRequest,
@@ -141,3 +146,37 @@ def test_project_skill_list_serializes_system_binding_with_current_version() -> 
     binding_payload = payload["system_items"][0]["binding"]
     assert binding_payload["current_version_id"] == str(current_version_id)
     assert "version_id" not in binding_payload
+
+
+class _EmptySystemVersionService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[object, uuid.UUID]] = []
+
+    async def get_version_history(self, actor, asset_id):
+        self.calls.append((actor, asset_id))
+        return ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["agents", "skills"])
+async def test_system_catalog_exposes_read_only_current_version_detail(kind: str) -> None:
+    actor = SimpleNamespace(request_id="system-current-detail")
+    asset_id = uuid.uuid4()
+    service = _EmptySystemVersionService()
+    application = FastAPI()
+    application.include_router(project_assets.catalog_router)
+    application.dependency_overrides[project_assets.system_asset_catalog_actor] = lambda: actor
+    dependency = project_assets.get_agent_service if kind == "agents" else project_assets.get_skill_service
+    application.dependency_overrides[dependency] = lambda: service
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=application),
+        base_url="http://test",
+    ) as client:
+        response = await client.get(
+            f"/api/assets/catalog/{kind}/{asset_id}/versions",
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"data": [], "request_id": actor.request_id}
+    assert service.calls == [(actor, asset_id)]

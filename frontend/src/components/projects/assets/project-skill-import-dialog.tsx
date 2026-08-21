@@ -19,6 +19,9 @@ import { SharedAssetApiError } from "@/core/shared-assets";
 export const PROJECT_SKILL_ARCHIVE_ACCEPT =
   ".zip,.skill,.tar,.tar.gz,.tgz,application/zip,application/x-tar,application/gzip";
 
+export const PROJECT_SKILL_IMPORT_DESCRIPTION =
+  "导入完整目录与文件并保存为首个候选版本。新 Skill 默认停用，检查后可激活该版本。";
+
 const SUPPORTED_ARCHIVE_SUFFIXES = [
   ".tar.gz",
   ".skill",
@@ -242,8 +245,7 @@ export function ProjectSkillImportDialog({
         <DialogHeader>
           <DialogTitle>上传压缩包创建 Skill</DialogTitle>
           <DialogDescription>
-            导入完整目录与文件并直接发布首个版本。新 Skill
-            默认停用，可在检查后启用。
+            {PROJECT_SKILL_IMPORT_DESCRIPTION}
           </DialogDescription>
         </DialogHeader>
         <ProjectSkillImportForm

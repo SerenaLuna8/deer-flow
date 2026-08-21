@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, RemoveMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -470,6 +470,12 @@ class RunAgentPrivateExecutor:
                     continue
                 if not isinstance(message, Mapping):
                     converted.append(message)
+                    continue
+                if message.get("type") == "remove":
+                    message_id = message.get("id")
+                    if set(message) != {"type", "id"} or not isinstance(message_id, str) or not message_id:
+                        raise TransientExecutionError("INVALID_RUN_PAYLOAD")
+                    converted.append(RemoveMessage(id=message_id))
                     continue
                 try:
                     converted.extend(convert_to_messages([dict(message)]))

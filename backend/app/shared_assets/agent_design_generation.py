@@ -984,7 +984,8 @@ class AgentDesignGenerationService:
             return
         segments = tuple(segment for segment in re.split(r"[._:]", key) if segment)
         capability_shaped = bool(_CAPABILITY_ACTION_SEGMENTS.intersection(segments))
-        if key in allowed or key in claimed or capability_shaped or (broad and len(segments) > 1):
+        explicitly_namespaced = "." in key or ":" in key
+        if key in allowed or key in claimed or capability_shaped or (broad and explicitly_namespaced):
             references.add(key)
 
     @staticmethod

@@ -49,6 +49,7 @@ import {
   listProjectAssetVersions,
   listProjectAssets,
   listSystemAssetCatalog,
+  listSystemAssetVersions,
   publishProjectMcpVersion,
   publishAdminProjectMcpVersion,
   requestProjectMcpToolDiscovery,
@@ -487,6 +488,7 @@ export function useProjectAssetVersions(
   kind: AssetListKind,
   assetId: string,
   enabled = true,
+  scope: "project" | "system" = "project",
 ) {
   const hasAssetId = assetId.trim() !== "";
   return useQuery<VersionHistoryResponse>({
@@ -497,7 +499,9 @@ export function useProjectAssetVersions(
       hasAssetId ? assetId : "__unselected__",
     ),
     queryFn: ({ signal }) =>
-      listProjectAssetVersions(projectId, kind, assetId, signal),
+      scope === "system" && (kind === "agents" || kind === "skills")
+        ? listSystemAssetVersions(kind, assetId, signal)
+        : listProjectAssetVersions(projectId, kind, assetId, signal),
     enabled: enabled && hasAssetId,
   });
 }

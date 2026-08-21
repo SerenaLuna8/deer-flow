@@ -146,7 +146,14 @@ export function SystemBindingDialog({
 }) {
   const assetKind = BINDING_KIND[kind];
   const isMcp = kind === "mcp-servers";
-  const history = useProjectAssetVersions(accountId, projectId, kind, item.id);
+  const history = useProjectAssetVersions(
+    accountId,
+    projectId,
+    kind,
+    item.id,
+    true,
+    item.scope,
+  );
   const enable = useEnableProjectSystemBinding(accountId, projectId, assetKind);
   const disable = useDisableProjectSystemBinding(
     accountId,

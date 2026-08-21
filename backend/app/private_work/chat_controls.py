@@ -612,7 +612,9 @@ class ProjectChatControlService:
             message_id,
         )
         checkpoint = self._checkpoint_response(base, context.request_id)
-        regenerate_input: dict[str, Any] = {"messages": [self._clean_human_message(human)]}
+        replay_human = self._clean_human_message(human)
+        replay_human["id"] = self._replay_input_message_id(base, human_id)
+        regenerate_input: dict[str, Any] = {"messages": [replay_human]}
         latest_title = self._channel_values(latest).get("title")
         if isinstance(latest_title, str) and latest_title:
             regenerate_input["title"] = latest_title
@@ -634,6 +636,7 @@ class ProjectChatControlService:
         *,
         human_message_id: str,
         replacement_text: str,
+        replacement_base_id: str | None = None,
         app_config: AppConfig | None = None,
     ) -> dict[str, Any]:
         """Prepare one strict edit replay without accepting client authority."""
@@ -694,20 +697,17 @@ class ProjectChatControlService:
             target_run_id,
         )
         checkpoint = self._checkpoint_response(base, context.request_id)
-        replacement_human_message_id = str(uuid.uuid4())
+        edit_messages, replacement_human_message_id = self._edit_replay_message_plan(
+            base,
+            source_human,
+            replacement_text=normalized_text,
+            replacement_base_id=(replacement_base_id or str(uuid.uuid4())),
+        )
         edit_version_group_id = source_run.metadata.get("edit_version_group_id")
         if not isinstance(edit_version_group_id, str) or not edit_version_group_id:
             edit_version_group_id = source_human_id
 
-        edit_input: dict[str, Any] = {
-            "messages": [
-                self._clean_human_message_for_edit(
-                    source_human,
-                    replacement_id=replacement_human_message_id,
-                    replacement_text=normalized_text,
-                )
-            ]
-        }
+        edit_input: dict[str, Any] = {"messages": edit_messages}
         base_title = self._channel_values(base).get("title")
         latest_title = latest_values.get("title")
         if isinstance(base_title, str) and base_title and isinstance(latest_title, str) and latest_title:
@@ -1055,6 +1055,60 @@ class ProjectChatControlService:
     def _messages(cls, item: object) -> list[Any]:
         messages = cls._channel_values(item).get("messages", [])
         return list(messages) if isinstance(messages, list) else []
+
+    @classmethod
+    def _replay_input_message_id(
+        cls,
+        base: object,
+        visible_message_id: str,
+    ) -> str:
+        """Reuse the pre-injection ID already present in a replay checkpoint.
+
+        Dynamic context replaces the first user message with a hidden reminder
+        plus a visible ``<id>__user`` copy. The replay base is the settled input
+        checkpoint immediately before that replacement, so it already contains
+        the original ``<id>`` message. Reusing that ID lets the messages reducer
+        replace the checkpointed input instead of appending the same turn twice.
+        """
+
+        suffix = "__user"
+        if not visible_message_id.endswith(suffix):
+            return visible_message_id
+        pre_injection_id = visible_message_id[: -len(suffix)]
+        if any(cls._is_visible_human(message) and cls._message_id(message) == pre_injection_id for message in cls._messages(base)):
+            return pre_injection_id
+        return visible_message_id
+
+    @classmethod
+    def _edit_replay_message_plan(
+        cls,
+        base: object,
+        source_human: object,
+        *,
+        replacement_text: str,
+        replacement_base_id: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        source_message_id = cls._message_id(source_human)
+        if source_message_id is None:
+            raise ValueError("source human message requires a stable id")
+        pre_injection_id = cls._replay_input_message_id(
+            base,
+            source_message_id,
+        )
+        replacement = cls._clean_human_message_for_edit(
+            source_human,
+            replacement_id=replacement_base_id,
+            replacement_text=replacement_text,
+        )
+        if pre_injection_id == source_message_id:
+            return [replacement], replacement_base_id
+        return (
+            [
+                {"type": "remove", "id": pre_injection_id},
+                replacement,
+            ],
+            f"{replacement_base_id}__user",
+        )
 
     @staticmethod
     def _message_id(message: object | None) -> str | None:

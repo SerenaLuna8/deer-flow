@@ -940,7 +940,7 @@ class AgentService:
             return await repository.get_project_asset(actor, asset_id, for_update=for_update)
         if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
             return await repository.get_override_asset(actor, asset_id, for_update=for_update)
-        if isinstance(actor, SystemAssetGovernanceContext):
+        if isinstance(actor, (SystemAssetGovernanceContext, SystemAssetReadContext)):
             return await repository.get_system_asset(actor, asset_id, for_update=for_update)
         raise AssetForbidden("unknown")
 
@@ -986,7 +986,7 @@ class AgentService:
             return await repository.get_project_version_history(actor, asset_id)
         if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
             return await repository.get_override_version_history(actor, asset_id)
-        if isinstance(actor, SystemAssetGovernanceContext):
+        if isinstance(actor, (SystemAssetGovernanceContext, SystemAssetReadContext)):
             return await repository.get_system_version_history(actor, asset_id)
         raise AssetForbidden("unknown")
 
