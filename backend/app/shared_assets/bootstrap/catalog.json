@@ -171,7 +171,7 @@
       "version": 1,
       "payload_path": "content/public-skills/skill-creator-v1.skill.json",
       "payload_format": "skill_archive_v1",
-      "sha256": "068793e0cf7488504c2d8ac9a3386d7fc8b6fd8ab431e2229a6846b38b16726f",
+      "sha256": "f3e76d13cdb0dfedc40fb8a272f7908080972845663eb443284bacf222f69a85",
       "scan_decision": "warn",
       "scan_summary": {
         "rule_ids": [

@@ -65,7 +65,8 @@ and create only resource directories the skill actually needs.
 ### Respect the staging boundary
 
 - Modify candidate files only. Do not directly create or update a persisted Skill or
-  version, publish it, enable it, bind it to an Agent, suspend it, or delete it.
+  Skill Version, activate a Candidate Version, enable the asset, bind it to an Agent,
+  suspend it, or delete it.
 - Do not write to installed Skill directories or `/mnt/skills`, and do not treat ordinary
   sandbox output as an installed Skill.
 - Do not run `scripts/init_skill.py`, `scripts/quick_validate.py`, or
@@ -83,7 +84,8 @@ Do not emulate validation with bundled scripts.
 
 **Builder commit** is the only import boundary. It must require explicit user confirmation
 after validation succeeds. Never commit automatically or claim that a candidate is already
-installed, published, or enabled; let Builder report the persisted result.
+saved as a Candidate Version, activated as the Current Version, or enabled; let Builder
+report the persisted result.
 
 Outside the dedicated ActWeave Skill Builder, ignore this section and follow the
 environment-appropriate generic workflow below.

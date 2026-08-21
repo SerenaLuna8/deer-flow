@@ -60,7 +60,7 @@ help:
 	@echo "  make upgrade-db                       显式升级存量库到迁移链头"
 	@echo "  make preflight-upgrade                只读检查并输出 Agent/Skill 生命周期升级清单"
 	@echo "  make check-db                         只读检查 revision 与数据库状态"
-	@echo "  make upgrade-system-assets            在维护窗口应用新增 System Asset release"
+	@echo "  make upgrade-system-assets            在维护窗口原地升级 System Agent/Skill Current v1"
 	@echo "  make prepare-run-event-partitions     幂等预创建 run_events 当前月至 N+2 月分区"
 	@echo "  make prune-run-events ARGS=...        预览/执行 run_events 全局月分区保留"
 	@echo "  make reconcile-usage ARGS=...         校准配额用量"

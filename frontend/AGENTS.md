@@ -166,8 +166,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
   preserving two distinct authorities: declarations edit the current
   `SKILL.md` buffer, and project Credential mappings target one exact immutable
   Skill version. After a new Candidate Version is saved, the workbench focuses
-  that version's mapping editor before activation. Project Candidate and Current
-  Versions are writable; Historical Versions are read-only, and a current System
+  that version's mapping editor before activation. Credential mappings for
+  Project Candidate and Current Versions are writable; the version bytes remain
+  immutable. Historical Version mappings are read-only, and a current System
   Skill may still receive project Credential mappings. Each mapping selects both
   an exact Credential version and one safe `env` field name, while values remain
   server-only. Hiding the surface must not discard an unsaved mapping, and a
