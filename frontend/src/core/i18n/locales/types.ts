@@ -1596,6 +1596,7 @@ export interface Translations {
       title: string;
       draftDescription: string;
       blueprintDescription: string;
+      readOnlyDescription: string;
       edit: string;
       fixedFiles: string;
       displayMode: string;

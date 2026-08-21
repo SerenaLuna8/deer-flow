@@ -19,7 +19,7 @@ const assets = [
   {
     key: "agent",
     label: "共享 Agent",
-    description: "选择、发布或启用项目可执行 Agent",
+    description: "查看和维护项目可执行 Agent",
     path: "agents",
     countKey: "agent_count",
     icon: BotIcon,

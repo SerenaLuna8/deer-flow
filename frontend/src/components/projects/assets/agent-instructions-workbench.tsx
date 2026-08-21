@@ -146,6 +146,7 @@ export function AgentInstructionWorkspace({
   displayMode,
   editing,
   canEdit = true,
+  readOnly = false,
   pending,
   inputDisabled = false,
   dirty,
@@ -164,6 +165,7 @@ export function AgentInstructionWorkspace({
   displayMode: "source" | "preview";
   editing: boolean;
   canEdit?: boolean;
+  readOnly?: boolean;
   pending: boolean;
   inputDisabled?: boolean;
   dirty: boolean;
@@ -188,9 +190,11 @@ export function AgentInstructionWorkspace({
         <div>
           <h3 className="text-sm font-semibold">{copy.title}</h3>
           <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            {saveTarget === "draft"
-              ? copy.draftDescription
-              : copy.blueprintDescription}
+            {readOnly
+              ? copy.readOnlyDescription
+              : saveTarget === "draft"
+                ? copy.draftDescription
+                : copy.blueprintDescription}
           </p>
         </div>
         {canEdit && !editing ? (
@@ -661,6 +665,7 @@ export function AgentInstructionsWorkbench({
         displayMode={displayMode}
         editing={isEditing}
         canEdit={canAuthor}
+        readOnly={item.scope !== "project"}
         inputDisabled={
           update.isPending ||
           authoringPreparationPending ||

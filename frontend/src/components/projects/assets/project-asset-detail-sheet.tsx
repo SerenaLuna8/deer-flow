@@ -77,6 +77,7 @@ import {
   ProjectSkillDeleteDialog,
 } from "./project-skill-delete-dialog";
 import { SkillActivationDialog } from "./skill-activation-dialog";
+import { isMainProjectAgent } from "./use-mcp-dependency-runtime";
 type MutableAssetKind = Exclude<AssetListKind, "credentials">;
 
 export function projectAssetDetailShowsVersionHistory(
@@ -234,6 +235,23 @@ export function projectMcpSystemUsageLabel(
     item.binding.current_version_id !== item.current_version_id
     ? "有配置更新"
     : "已启用";
+}
+
+export function projectCurrentVersionSystemUsageLabel(
+  kind: MutableAssetKind,
+  item: Pick<
+    ProjectAssetItem,
+    "binding" | "current_version_id" | "scope" | "slug" | "status"
+  >,
+): string {
+  if (kind === "mcp-servers") return projectMcpSystemUsageLabel(item);
+  if (kind === "agents" && isMainProjectAgent(item)) {
+    return item.status === "active" && item.current_version_id
+      ? "可用"
+      : "不可用";
+  }
+  if (!item.binding) return "未启用";
+  return item.binding.enabled ? "已启用" : "已从项目停用";
 }
 
 export function projectAssetDetailSummaryGridColumns(
@@ -1384,19 +1402,7 @@ export function ProjectAssetDetailSheet({
                     <div className="bg-muted/35 rounded-xl p-4">
                       <p className="text-muted-foreground text-xs">项目使用</p>
                       <p className="mt-2 text-sm font-medium">
-                        {kind === "mcp-servers"
-                          ? projectMcpSystemUsageLabel(item)
-                          : !item.binding
-                            ? "未启用"
-                            : !item.binding.enabled
-                              ? "已从项目停用"
-                              : pinnedVersion
-                                ? `${revisionCopy.label(pinnedVersion.version_number)}${
-                                    item.current_version_id !== pinnedVersion.id
-                                      ? ` · ${revisionCopy.updateAvailable}`
-                                      : ""
-                                  }`
-                                : revisionCopy.pinnedFallback}
+                        {projectCurrentVersionSystemUsageLabel(kind, item)}
                       </p>
                     </div>
                   ) : null}

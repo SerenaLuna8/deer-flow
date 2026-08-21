@@ -1877,6 +1877,8 @@ export const enUS: Translations = {
         "Edit the four fixed Markdown documents and save an immutable Agent Candidate Version.",
       blueprintDescription:
         "Review and edit the four fixed Markdown documents.",
+      readOnlyDescription:
+        "Read-only instruction documents for the System Agent's sole v1.",
       edit: "Edit",
       fixedFiles: "Fixed files",
       displayMode: "Display mode",

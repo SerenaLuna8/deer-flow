@@ -187,6 +187,19 @@ class BindingItemResponse(_StrictModel):
     updated_at: datetime
 
 
+class CurrentBindingItemResponse(_StrictModel):
+    project_id: uuid.UUID
+    kind: AssetKind
+    asset_id: uuid.UUID
+    current_version_id: uuid.UUID
+    enabled: bool
+    version: int
+    created_by_user_id: str
+    updated_by_user_id: str
+    created_at: datetime
+    updated_at: datetime
+
+
 class ProjectAssetItemResponse(AssetItemResponse):
     capabilities: list[Capability]
     binding: BindingItemResponse | None
@@ -199,7 +212,7 @@ class ProjectSkillItemResponse(ProjectAssetItemResponse):
 
 class ProjectCurrentVersionAssetItemResponse(CurrentVersionAssetItemResponse):
     capabilities: list[Capability]
-    binding: BindingItemResponse | None
+    binding: CurrentBindingItemResponse | None
     description: str = ""
 
 
@@ -256,6 +269,18 @@ class ScopedCredentialListResponse(_StrictModel):
     system_items: list[ProjectCredentialItemResponse]
     project_items: list[ProjectCredentialItemResponse]
     request_id: str
+
+
+def _binding_item_response(
+    view,
+) -> BindingItemResponse | CurrentBindingItemResponse:
+    values = vars(view)
+    if view.kind is AssetKind.MCP:
+        return BindingItemResponse(**values)
+    return CurrentBindingItemResponse(
+        **{key: value for key, value in values.items() if key != "version_id"},
+        current_version_id=view.version_id,
+    )
 
 
 class SystemAssetCatalogResponse(_StrictModel):
@@ -1296,7 +1321,7 @@ def _scoped_assets(
         item_model(
             **vars(view),
             capabilities=_asset_item_capabilities(context, view.scope, kind),
-            binding=(BindingItemResponse(**vars(by_asset_id[view.id])) if view.scope is AssetScope.SYSTEM and view.id in by_asset_id else None),
+            binding=(_binding_item_response(by_asset_id[view.id]) if view.scope is AssetScope.SYSTEM and view.id in by_asset_id else None),
         )
         for view in views
     ]

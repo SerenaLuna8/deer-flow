@@ -179,6 +179,8 @@ describe("project shell navigation", () => {
     );
     expect(runnerHome).toContain("共享 Agent");
     expect(viewerHome).toContain("共享 Agent");
+    expect(runnerHome).toContain("查看和维护项目可执行 Agent");
+    expect(runnerHome).not.toContain("发布");
     expect(runnerHome).not.toContain("共享 Skill");
     expect(runnerHome).not.toContain("共享 MCP");
     expect(

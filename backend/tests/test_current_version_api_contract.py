@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import fields
+from datetime import UTC, datetime
+from types import SimpleNamespace
 
 from app.gateway.routers.project_assets import (
     AgentCapabilityBindingsRequest,
@@ -9,9 +12,13 @@ from app.gateway.routers.project_assets import (
     CurrentVersionAssetItemResponse,
     McpVersionItemResponse,
     SkillVersionItemResponse,
+    _scoped_assets,
     project_router,
 )
+from app.projects.capabilities import Capability
 from app.shared_assets.agent_service import AgentAssetView
+from app.shared_assets.binding_service import SystemAssetBinding
+from app.shared_assets.models import AssetKind, AssetScope
 from app.shared_assets.skill_service import SkillAssetView
 from deerflow.persistence.shared_assets import (
     AgentRow,
@@ -89,3 +96,48 @@ def test_agent_and_skill_persistence_uses_current_version_without_workflow_state
 
     assert "agent_version_id" not in ProjectSystemAgentBindingRow.__table__.columns
     assert "skill_version_id" not in ProjectSystemSkillBindingRow.__table__.columns
+
+
+def test_project_skill_list_serializes_system_binding_with_current_version() -> None:
+    project_id = uuid.uuid4()
+    skill_id = uuid.uuid4()
+    current_version_id = uuid.uuid4()
+    user_id = str(uuid.uuid4())
+    now = datetime.now(UTC)
+    skill = SkillAssetView(
+        id=skill_id,
+        scope=AssetScope.SYSTEM,
+        project_id=None,
+        slug="system-skill",
+        display_name="System Skill",
+        status="active",
+        current_version_id=current_version_id,
+        revision=1,
+        created_by_user_id=user_id,
+        created_at=now,
+        updated_at=now,
+        description="System Skill",
+    )
+    binding = SystemAssetBinding(
+        project_id=project_id,
+        kind=AssetKind.SKILL,
+        asset_id=skill_id,
+        version_id=current_version_id,
+        enabled=True,
+        version=1,
+        created_by_user_id=user_id,
+        updated_by_user_id=user_id,
+        created_at=now,
+        updated_at=now,
+    )
+    context = SimpleNamespace(
+        capabilities=frozenset({Capability.SHARED_ASSETS_READ}),
+        request_id="current-binding-contract",
+    )
+
+    response = _scoped_assets((skill,), (binding,), context, AssetKind.SKILL)
+    payload = response.model_dump(mode="json")
+
+    binding_payload = payload["system_items"][0]["binding"]
+    assert binding_payload["current_version_id"] == str(current_version_id)
+    assert "version_id" not in binding_payload

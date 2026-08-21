@@ -4,9 +4,22 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   ProjectAgentVersionWorkbenchSlot,
   projectAgentVersionWorkbenchSelection,
+  projectCurrentVersionSystemUsageLabel,
 } from "@/components/projects/assets/project-asset-detail-sheet";
 
 describe("Agent version selection", () => {
+  test("shows Main as available without pretending it needs a project binding", () => {
+    expect(
+      projectCurrentVersionSystemUsageLabel("agents", {
+        scope: "system",
+        slug: "project-assistant",
+        status: "active",
+        current_version_id: "00000000-0000-4000-8000-000000000001",
+        binding: null,
+      }),
+    ).toBe("可用");
+  });
+
   test("shows the selected stale version in the workbench without allowing edits", () => {
     const currentAuthoringVersion = {
       id: "00000000-0000-4000-8000-000000000005",

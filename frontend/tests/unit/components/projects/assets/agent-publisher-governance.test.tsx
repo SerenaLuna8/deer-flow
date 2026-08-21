@@ -164,6 +164,37 @@ describe("Agent author and activation governance", () => {
     expect(html).not.toContain("保存后将用于后续运行");
   });
 
+  test("describes System Agent instructions as an immutable read-only v1", () => {
+    const html = renderAgentUi(
+      <AgentInstructionWorkspace
+        draft={{
+          agents_instructions: "# AGENTS",
+          soul: "# SOUL",
+          identity: "# IDENTITY",
+          user_context: "# USER",
+        }}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        editing={false}
+        canEdit={false}
+        readOnly
+        pending={false}
+        dirty={false}
+        errorMessage={null}
+        saveDisabledReason={null}
+        onSelect={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onChange={() => undefined}
+        onEdit={() => undefined}
+        onSave={() => undefined}
+        onDiscard={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("系统 Agent 的唯一 v1 指令文档，只读展示");
+    expect(html).not.toContain("保存后创建不可变的候选版本");
+  });
+
   test("freezes instruction edits while a save is pending", () => {
     const html = renderAgentUi(
       <AgentInstructionWorkspace
