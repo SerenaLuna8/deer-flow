@@ -25,6 +25,11 @@ export type ProjectPrivateWorkScope = {
   queryKeyPrefix: readonly unknown[];
   reconnectOnMount: boolean | (() => RunMetadataStorage);
   runAbortable?<T>(operation: (signal: AbortSignal) => Promise<T>): Promise<T>;
+  subscribeEventStream?(
+    url: string,
+    eventName: string,
+    onMessage: (data: string) => void,
+  ): () => void;
   isActive?(): boolean;
 };
 

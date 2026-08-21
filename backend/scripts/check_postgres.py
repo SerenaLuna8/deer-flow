@@ -26,6 +26,7 @@ except ModuleNotFoundError:  # Direct ``python scripts/check_postgres.py`` execu
     from setup_postgres import parse_target
 
 REQUIRED_TABLES: tuple[str, ...] = (
+    "agent_design_activities",
     "agent_design_operations",
     "agent_design_sessions",
     "agent_version_mcp_refs",

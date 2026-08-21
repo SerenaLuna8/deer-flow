@@ -28,8 +28,8 @@ _BLOCK_END = "-- END GENERATED SCHEMA COMMENTS"
 # These counts deliberately describe static CREATE TABLE statements only.  The
 # monthly run_events child partitions are created dynamically and therefore are
 # outside this static-schema artifact.
-_EXPECTED_TABLE_COUNT = 90
-_EXPECTED_COLUMN_COUNT = 1107
+_EXPECTED_TABLE_COUNT = 91
+_EXPECTED_COLUMN_COUNT = 1121
 
 _CREATE_TABLE_RE = re.compile(r"^CREATE TABLE ([a-z][a-z0-9_]*) \($")
 _COLUMN_RE = re.compile(r"^ {4}([a-z][a-z0-9_]*)\s+")
@@ -104,6 +104,7 @@ _TABLE_METADATA: dict[str, tuple[str, str]] = {
     "agent_versions": ("智能体版本", "保存不可变的项目智能体版本内容与运行配置。"),
     "agent_design_sessions": ("智能体设计会话", "保存智能体设计向导的私有会话状态与产物引用。"),
     "agent_design_operations": ("智能体设计操作", "保存智能体设计会话中的幂等操作及其结果。"),
+    "agent_design_activities": ("智能体设计活动", "保存智能体设计会话中可回放的公开过程事件。"),
     "channel_connections": ("渠道连接", "保存用户授权的外部渠道账户连接。"),
     "channel_oauth_states": ("渠道 OAuth 状态", "保存渠道 OAuth 流程的一次性校验状态。"),
     "credential_versions": ("凭据版本", "保存受管凭据的不可变版本元数据。"),
@@ -295,6 +296,12 @@ _COLUMN_PHRASES: dict[str, str] = {
     "memory_enabled": "是否启用用户记忆功能",
     "draining": "是否处于排空状态",
     "created_agent_deleted": "已创建的智能体是否随后删除",
+    "generation_model_ref": "生成模型引用",
+    "generation_mode": "生成模式",
+    "stop_requested_at": "停止请求时间",
+    "requested_generation_profile_json": "请求生成配置 JSON 数据",
+    "effective_generation_profile_json": "生效生成配置 JSON 数据",
+    "payload_json": "公开载荷 JSON 数据",
     "created_skill_deleted": "已创建的技能是否随后删除",
     "required": "该凭据槽位是否必需",
     "reserved": "预留计量数量",

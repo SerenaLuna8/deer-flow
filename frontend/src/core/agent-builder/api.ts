@@ -4,7 +4,10 @@ import { AuthRequiredError, fetch as fetchWithAuth } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
 import {
+  agentBuilderActivityListResponseSchema,
+  agentBuilderActivitySchema,
   agentBuilderCommitResponseSchema,
+  agentBuilderGenerationPreferenceInputSchema,
   agentBuilderSessionListResponseSchema,
   agentBuilderSessionListInputSchema,
   agentBuilderSessionResponseSchema,
@@ -13,16 +16,18 @@ import {
   commitAgentBuilderSessionInputSchema,
   createAgentBuilderSessionInputSchema,
   type AgentBuilderTurnInput,
+  type AgentBuilderGenerationPreferenceInput,
   type CancelAgentBuilderSessionInput,
   type CommitAgentBuilderSessionInput,
   type CreateAgentBuilderSessionInput,
   type AgentBuilderSessionListInput,
   type AgentBuilderSessionSummary,
+  type AgentBuilderActivity,
 } from "./types";
 
 const uuidSchema = z.string().uuid();
 const MAX_AGENT_BUILDER_SESSION_PAGES = 100;
-const AGENT_BUILDER_CONTRACT_VERSION = "2";
+const AGENT_BUILDER_CONTRACT_VERSION = "3";
 
 function sortAgentBuilderSessionsForResume(
   sessions: AgentBuilderSessionSummary[],
@@ -61,7 +66,8 @@ export type AgentBuilderApiErrorCode =
   | "AGENT_DESIGN_SLUG_CONFLICT"
   | "AGENT_DESIGN_CONFLICT_UNRESOLVED"
   | "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED"
-  | "AGENT_DESIGN_SECRET_DETECTED";
+  | "AGENT_DESIGN_SECRET_DETECTED"
+  | "AGENT_DESIGN_GENERATION_PROFILE_STALE";
 
 export class AgentBuilderApiError extends Error {
   constructor(
@@ -82,6 +88,20 @@ function sessionURL(projectId: string, sessionId: string) {
   return `${baseURL(projectId)}/${uuidSchema.parse(sessionId)}`;
 }
 
+export function agentBuilderActivityStreamURL(
+  projectId: string,
+  sessionId: string,
+) {
+  const query = new URLSearchParams({ after_seq: "0" });
+  return `${sessionURL(projectId, sessionId)}/activities/stream?${query.toString()}`;
+}
+
+export function parseAgentBuilderActivity(
+  value: unknown,
+): AgentBuilderActivity {
+  return agentBuilderActivitySchema.parse(value);
+}
+
 function contractURL(url: string, input?: URLSearchParams) {
   const query = new URLSearchParams(input);
   query.set("contract_version", AGENT_BUILDER_CONTRACT_VERSION);
@@ -96,7 +116,8 @@ function safeCode(
     serverCode === "AGENT_DESIGN_SLUG_CONFLICT" ||
     serverCode === "AGENT_DESIGN_CONFLICT_UNRESOLVED" ||
     serverCode === "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED" ||
-    serverCode === "AGENT_DESIGN_SECRET_DETECTED"
+    serverCode === "AGENT_DESIGN_SECRET_DETECTED" ||
+    serverCode === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
   ) {
     return serverCode;
   }
@@ -106,6 +127,18 @@ function safeCode(
   if (status === 409) return "AGENT_BUILDER_CONFLICT";
   if (status === 422) return "AGENT_BUILDER_VALIDATION_FAILED";
   return "AGENT_BUILDER_UNAVAILABLE";
+}
+
+export function stopAgentBuilderTurn(
+  projectId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+) {
+  return request(
+    contractURL(`${sessionURL(projectId, sessionId)}/turns/stop`),
+    agentBuilderSessionResponseSchema,
+    { method: "POST", signal },
+  );
 }
 
 async function request<TSchema extends z.ZodType>(
@@ -271,6 +304,32 @@ export function getAgentBuilderSession(
   );
 }
 
+export function getAgentBuilderSessionByAgent(
+  projectId: string,
+  agentId: string,
+  signal?: AbortSignal,
+) {
+  return request(
+    contractURL(`${baseURL(projectId)}/by-agent/${uuidSchema.parse(agentId)}`),
+    agentBuilderSessionResponseSchema,
+    { signal },
+  );
+}
+
+export function listAgentBuilderActivities(
+  projectId: string,
+  sessionId: string,
+  afterSeq = "0",
+  signal?: AbortSignal,
+) {
+  const query = new URLSearchParams({ after_seq: afterSeq });
+  return request(
+    `${sessionURL(projectId, sessionId)}/activities?${query.toString()}`,
+    agentBuilderActivityListResponseSchema,
+    { signal },
+  );
+}
+
 export function submitAgentBuilderTurn(
   projectId: string,
   sessionId: string,
@@ -283,6 +342,25 @@ export function submitAgentBuilderTurn(
     agentBuilderSessionResponseSchema,
     {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal,
+    },
+  );
+}
+
+export function setAgentBuilderGenerationPreference(
+  projectId: string,
+  sessionId: string,
+  input: AgentBuilderGenerationPreferenceInput,
+  signal?: AbortSignal,
+) {
+  const body = agentBuilderGenerationPreferenceInputSchema.parse(input);
+  return request(
+    contractURL(`${sessionURL(projectId, sessionId)}/generation-preference`),
+    agentBuilderSessionResponseSchema,
+    {
+      method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal,

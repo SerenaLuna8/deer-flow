@@ -1719,7 +1719,7 @@ export const zhCN: Translations = {
           "请继续对话，让 Agent 重新生成设计稿；红色冲突消失后才能创建 Agent。",
         createHint: "保存后生成不可变的 v1 候选版本；激活后才会用于运行",
         creating: "正在创建…",
-        createDraft: "创建 Agent",
+        createAgent: "创建 Agent",
         validation: {
           descriptionRequired: "Agent 简介不能为空",
           modelRequired: "Agent 模型不能为空",
@@ -1763,6 +1763,37 @@ export const zhCN: Translations = {
           "Agent 设计会话会继续保留，但本次对四项设置的本地修改不会保存。",
         continueEditing: "继续编辑",
         discardAndLeave: "放弃修改并离开",
+        stopGeneration: "停止本轮生成",
+        stoppingGeneration: "正在停止…",
+        viewAgent: "查看智能体",
+        activity: {
+          title: "思考与执行过程",
+          attempt: (value) => (value === 1 ? "首次生成" : "修复重试"),
+          reasoning: (value) => (value === 1 ? "模型思考" : "修复重试思考"),
+          duration: (value) => `用时 ${(value / 1000).toFixed(1)} 秒`,
+          terminal: {
+            completed: "已完成",
+            failed: "失败",
+            stopped: "已停止",
+            cancelled: "已取消",
+          },
+          stages: {
+            turn_accepted: "已接收请求",
+            attempt_started: "模型开始思考",
+            candidate_generated: "已生成候选",
+            validation_started: "正在进行确定性校验",
+            validation_passed: "候选校验通过",
+            validation_failed: "候选校验未通过",
+            repair_started: "开始修复重试",
+            turn_terminal: "本轮生成结束",
+            commit_accepted: "已接收创建请求",
+            commit_validation_started: "正在校验候选",
+            commit_validation_passed: "候选校验通过",
+            commit_persistence_started: "正在保存 Agent 与候选版本",
+            commit_persistence_completed: "Agent 与候选版本已保存",
+            commit_terminal: "创建过程结束",
+          },
+        },
       },
     },
     instructions: {
@@ -1774,7 +1805,7 @@ export const zhCN: Translations = {
       },
       sectionAria: "Agent 指令文档",
       title: "指令文档",
-      draftDescription:
+      editDescription:
         "四个固定文档映射到当前 Agent 设置。保存后创建不可变的候选版本，激活后才会用于后续运行。",
       blueprintDescription: "四个固定文档会写入待创建 Agent 的设计稿。",
       readOnlyDescription: "系统 Agent 的唯一 v1 指令文档，只读展示。",
@@ -1787,7 +1818,7 @@ export const zhCN: Translations = {
       preview: "预览",
       empty: "暂无内容",
       editFile: (name) => `编辑 ${name}`,
-      draftSaveHint:
+      candidateSaveHint:
         "保存会同时把四项 Agent 设置写入一个新的候选版本，不会直接激活。",
       blueprintSaveHint: "保存后会更新当前设计稿，然后才能创建 Agent。",
       discard: "放弃修改",
@@ -1813,12 +1844,12 @@ export const zhCN: Translations = {
         inactive: "资产未激活",
         bindingDisabled: "当前项目的系统绑定已停用",
         bindingMissing: "当前项目的系统绑定未启用",
-        noPublishedVersion: "资产尚无当前版本",
+        noCurrentVersion: "资产尚无当前版本",
       },
       remediation: {
         restoreSystemAsset: "请联系管理员恢复系统资产",
         enableSystemBinding: "请联系管理员启用系统绑定",
-        publishVersion: "请先激活该项目资产的候选版本",
+        activateCandidateVersion: "请先激活该项目资产的候选版本",
         activateProjectAsset: "请先启用该项目资产",
       },
       explanationSeparator: "；",
@@ -1837,7 +1868,7 @@ export const zhCN: Translations = {
       reloadRequired: "请重新加载最新版本后再编辑。",
       reloading: "正在重新加载…",
       permissionBlocked: "当前账号没有编辑 Agent 能力的权限。",
-      preparingDraft: "正在准备候选版本…",
+      preparingCandidate: "正在准备候选版本…",
       catalogLoading: "正在加载能力目录…",
       catalogLoadFailed: "能力目录加载失败。",
       validatingMcp: "正在校验 MCP 依赖…",
@@ -1845,7 +1876,7 @@ export const zhCN: Translations = {
       title: "能力绑定",
       description: "选择 Agent 可以使用的工具组、Skill 和 MCP。",
       saving: "正在保存…",
-      saveDraft: "保存候选版本",
+      saveCandidate: "保存候选版本",
       edit: "编辑",
       builtinGroups: "内置工具组",
       unchanged: "未修改",
@@ -1862,6 +1893,7 @@ export const zhCN: Translations = {
       authoringLoadFailed: "无法加载 Agent 编辑基线。",
       authoringLoading: "正在加载 Agent 编辑基线…",
       detailTabsAria: "Agent 详情标签页",
+      viewDesignRecord: "查看设计记录",
       instructionsTab: "指令",
       capabilitiesTab: "能力",
       viewModeAria: "Agent 目录显示方式",
@@ -1870,7 +1902,7 @@ export const zhCN: Translations = {
       chatForbidden: "当前账号没有在该项目创建对话的权限。",
       unavailable: "该 Agent 当前不可用。",
       executeForbidden: "当前账号没有运行 Agent 的权限。",
-      publishRequired: "Agent 需要先激活一个版本并启用资产。",
+      currentVersionRequired: "Agent 需要先激活一个版本并启用资产。",
       defaultAdminOnly: "只有管理员可以设置默认 Agent。",
       defaultUnavailable: "该 Agent 当前不能设为默认。",
       systemDefaultUnavailable: "系统 Agent 必须先在项目中启用。",
@@ -1991,7 +2023,7 @@ export const zhCN: Translations = {
       unsaved: "请先保存或放弃当前修改",
       loading: "正在加载当前版本，请稍候",
       revoked: "已撤销的 System Skill 版本不可导出",
-      unpublished: "System Skill 只有 Current Version 可以导出",
+      notCurrent: "System Skill 只有 Current Version 可以导出",
       noVersion: "请选择一个已持久化的版本",
     },
     secrets: {
@@ -2251,7 +2283,7 @@ export const zhCN: Translations = {
         createIntroAfter:
           "。请描述用途、触发条件、输入输出和需要的参考资料或脚本。",
         creatingSkill: "正在创建 Skill…",
-        creatingDraft: "正在创建候选版本…",
+        creatingCandidate: "正在创建候选版本…",
         processing: "Builder Agent 正在处理…",
         composerAriaCreate: "描述想要的 Skill",
         composerAriaRevise: "描述要修改的内容",
@@ -2399,14 +2431,14 @@ export const zhCN: Translations = {
       success: {
         withVersion: (version) => `已保存候选版本 v${version}，前往激活`,
         withoutVersion: "已保存候选版本，前往激活",
-        goPublish: "前往激活",
+        goActivate: "前往激活",
         revisionWithSecrets: (version, count) =>
           `已保存${version === null ? "候选版本" : `候选版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再激活。`,
         createdWithSecrets: (count) =>
           `Skill 已创建并默认停用，检测到 ${count} 项环境变量声明。请先配置运行凭证。`,
         configureCredentials: "配置凭证",
       },
-      publish: {
+      versionConflict: {
         staleTitle: "Current Version 已变化",
         staleNamed: (live, base) =>
           `Current Version 已是 v${live}，本次修订基于 v${base}，不能保存或激活。请从 v${live} 创建新修订会话。`,

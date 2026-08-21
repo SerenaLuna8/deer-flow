@@ -10,6 +10,7 @@ import {
   PowerIcon,
   StarIcon,
 } from "lucide-react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -34,6 +35,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   agentBuilderCanAuthor,
   agentBuilderCanRead,
+  useAgentBuilderSessionByAgent,
   useAgentBuilderSessions,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -54,6 +56,8 @@ import {
 } from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 import { cn } from "@/lib/utils";
+
+import { useCurrentProject } from "../project-context";
 
 import {
   cacheProjectAgentAuthoringReload,
@@ -95,9 +99,16 @@ function AgentDetailWorkbench({
   onVersionCreated: (versionId: string) => void;
 }) {
   const { t } = useI18n();
+  const project = useCurrentProject();
   const copy = t.agents.catalog;
   const queryClient = useQueryClient();
   const privateWork = usePrivateWorkAccess();
+  const designSessionQuery = useAgentBuilderSessionByAgent(
+    accountId,
+    projectId,
+    item.id,
+    item.scope === "project",
+  );
   const [instructionDirty, setInstructionDirty] = useState(false);
   const [capabilityDirty, setCapabilityDirty] = useState(false);
   const [authoringSnapshot, setAuthoringSnapshot] = useState<{
@@ -295,6 +306,17 @@ function AgentDetailWorkbench({
   return (
     <Tabs defaultValue="instructions" className="gap-5">
       {preparationStatus}
+      {designSessionQuery.data ? (
+        <div>
+          <Button asChild size="sm" variant="outline">
+            <Link
+              href={`/projects/${encodeURIComponent(project.slug)}/agents/new/${encodeURIComponent(designSessionQuery.data.id)}`}
+            >
+              {copy.viewDesignRecord}
+            </Link>
+          </Button>
+        </div>
+      ) : null}
       <TabsList aria-label={copy.detailTabsAria}>
         <TabsTrigger value="instructions">{copy.instructionsTab}</TabsTrigger>
         <TabsTrigger value="capabilities">{copy.capabilitiesTab}</TabsTrigger>
@@ -422,7 +444,7 @@ export function projectAgentChatAvailability(
     return { enabled: false, reason: copy.executeForbidden };
   }
   if (!item.current_version_id) {
-    return { enabled: false, reason: copy.publishRequired };
+    return { enabled: false, reason: copy.currentVersionRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };
@@ -461,7 +483,7 @@ export function projectAgentDefaultAvailability(
     return { enabled: false, reason: copy.executeForbidden };
   }
   if (!item.current_version_id) {
-    return { enabled: false, reason: copy.publishRequired };
+    return { enabled: false, reason: copy.currentVersionRequired };
   }
   if (mcpDependencyReason) {
     return { enabled: false, reason: mcpDependencyReason };

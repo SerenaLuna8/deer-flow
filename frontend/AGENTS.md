@@ -149,6 +149,11 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Builder sessions are account/project/owner scoped. Candidate edits remain
   revision/checksum-bound; final confirmation is one server transaction and does
   not imply activation or binding unless the response says so.
+- Agent Builder Activity has its own account/project/session query and SSE cursor;
+  it never shares Thread/Run history, reconnect state, or cache keys. Render only
+  the strict public Activity contract, preserve replayed real reasoning, and do
+  not invent reasoning for a stage-only generation. The Builder model/mode chooser
+  reuses the ordinary chat resolver while its preference remains session-local.
 - An error-severity Builder conflict blocks commit until a later AI turn
   regenerates the candidate; editing a document alone does not resolve it. Commit
   includes `slug` only when the normalized review name differs from

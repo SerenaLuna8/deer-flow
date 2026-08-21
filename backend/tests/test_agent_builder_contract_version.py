@@ -76,6 +76,7 @@ def _session_view() -> AgentDesignSessionView:
         created_agent_id=None,
         created_at=_NOW,
         updated_at=_NOW,
+        generation_preference={"model_ref": "default", "mode": "pro"},
     )
 
 
@@ -304,11 +305,28 @@ async def test_explicit_contract_v1_matches_the_default_shape() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_contract_v3_exposes_builder_generation_preference() -> None:
+    response = await _request(
+        _app(),
+        "GET",
+        (f"/api/projects/{_PROJECT_ID}/agent-builder/sessions/{_SESSION_ID}?contract_version=3"),
+        None,
+    )
+
+    assert response.status_code == 200
+    session = _session_document(response.json(), "session")
+    assert session["generation_preference"] == {
+        "model_ref": "default",
+        "mode": "pro",
+    }
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "contract_version",
-    ("0", "3", "latest", "1.0", "01", "2.0"),
+    ("0", "4", "latest", "1.0", "01", "2.0"),
 )
-async def test_contract_version_rejects_values_other_than_one_or_two(
+async def test_contract_version_rejects_values_other_than_supported_versions(
     contract_version: str,
 ) -> None:
     response = await _request(

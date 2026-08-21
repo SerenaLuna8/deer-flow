@@ -48,7 +48,7 @@ _MODEL_EXECUTION_METHODS = {
 _ALLOWED_RAW_MODEL_EXECUTION: dict[Path, frozenset[str]] = {
     # Runtime dynamically resolves Runnable.invoke/ainvoke and is the canonical
     # governed invocation boundary for models and tool-bound Runnables.
-    Path("packages/harness/deerflow/models/runtime.py"): frozenset({"ainvoke", "invoke"}),
+    Path("packages/harness/deerflow/models/runtime.py"): frozenset({"ainvoke", "astream", "invoke"}),
     # Dream is a bounded stateful tool loop. Tool binding must remain raw, but
     # every bound-Runnable invocation is governed by ModelRuntime.
     Path("packages/harness/deerflow/agents/memory/dream.py"): frozenset({"bind_tools"}),

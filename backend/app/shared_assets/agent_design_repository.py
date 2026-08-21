@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from sqlalchemy import and_, exists, func, literal, or_, select, text, union_all
+from sqlalchemy import and_, exists, func, literal, or_, select, text, union_all, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
@@ -184,6 +184,27 @@ class AgentDesignRepository:
         )
         if for_update:
             statement = statement.with_for_update(of=AgentDesignSessionRow).execution_options(populate_existing=True)
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return row
+
+    async def get_by_created_agent(
+        self,
+        context: ProjectContext,
+        agent_id: uuid.UUID,
+    ) -> AgentDesignSessionRow:
+        """Resolve an owner's completed design record without disclosing others."""
+
+        self._require_context(context)
+        statement = select(AgentDesignSessionRow).where(
+            AgentDesignSessionRow.project_id == context.project_id,
+            AgentDesignSessionRow.owner_user_id == str(context.user_id),
+            AgentDesignSessionRow.created_agent_id == agent_id,
+            AgentDesignSessionRow.status == "completed",
+            AgentDesignSessionRow.created_agent_deleted.is_(False),
+            self._context_exists(context),
+        )
         row = (await self.session.execute(statement)).scalar_one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
@@ -486,6 +507,65 @@ class AgentDesignRepository:
             .with_for_update(of=AgentDesignOperationRow)
         )
         return tuple((await self.session.execute(statement)).scalars())
+
+    async def lock_in_progress_cancel_operations(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> tuple[AgentDesignOperationRow, ...]:
+        """Fence new work while a session cancellation is converging."""
+
+        self._require_context(context)
+        await self.lock_context(context)
+        await self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {
+                "lock_key": self._session_fence_lock_key(
+                    context.project_id,
+                    session_id,
+                )
+            },
+        )
+        statement = (
+            select(AgentDesignOperationRow)
+            .where(
+                AgentDesignOperationRow.project_id == context.project_id,
+                AgentDesignOperationRow.owner_user_id == str(context.user_id),
+                AgentDesignOperationRow.session_id == session_id,
+                AgentDesignOperationRow.operation_kind == "cancel",
+                AgentDesignOperationRow.status == "in_progress",
+                self._context_exists(context),
+            )
+            .order_by(
+                AgentDesignOperationRow.created_at,
+                AgentDesignOperationRow.id,
+            )
+            .with_for_update(of=AgentDesignOperationRow)
+        )
+        return tuple((await self.session.execute(statement)).scalars())
+
+    async def clear_turn_generation_profiles(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> None:
+        """Remove per-turn model preferences when the private design is cancelled."""
+
+        self._require_context(context)
+        await self.session.execute(
+            update(AgentDesignOperationRow)
+            .where(
+                AgentDesignOperationRow.project_id == context.project_id,
+                AgentDesignOperationRow.owner_user_id == str(context.user_id),
+                AgentDesignOperationRow.session_id == session_id,
+                AgentDesignOperationRow.operation_kind == "turn",
+                self._context_exists(context),
+            )
+            .values(
+                requested_generation_profile_json=None,
+                effective_generation_profile_json=None,
+            )
+        )
 
     @staticmethod
     def _session_fence_lock_key(

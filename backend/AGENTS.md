@@ -76,7 +76,8 @@ import `app.*`.
 - Agent Builder prepare, settlement, stale recovery, and cancellation use
   Project -> Membership -> session advisory fence -> turn operation -> design
   session. Locked rereads refresh ORM identity state, and cancellation
-  terminalizes active turn operations in the same transaction.
+  terminalizes active turn operations and clears their generation profiles in
+  the same transaction.
 - PostgreSQL RLS is not used. Isolation therefore depends on immutable contexts,
   scoped repositories, composite constraints, and a non-superuser app role.
 - Public request/response models reject unknown authority fields. Copy the error
@@ -102,7 +103,7 @@ import `app.*`.
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `current_asset_version_lifecycle`. Fresh setup runs that schema directly
+the current marker is `agent_design_activity_terminal`. Fresh setup runs that schema directly
 and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
@@ -268,7 +269,11 @@ or downgrade an application database.
   conflicts; `AGENT_DESIGN_SESSION_LIMIT_EXCEEDED` (429) instructs the owner to
   resume or cancel an existing design. Builder HTTP responses default to the
   strict v1 shape for already-open clients; the current frontend explicitly
-  requests `contract_version=2` for assumptions, conflicts, and pagination.
+  requests `contract_version=3` for assumptions, conflicts, pagination, and the
+  session-local generation preference. Agent Design Activity is a dedicated
+  owner-private append-only table and SSE cursor, never a Thread/Run event; its
+  payload is a closed public projection and cancellation removes it with the
+  session's private draft content.
 - Project Agent DELETE is a soft archive. It retains immutable versions and all
   Thread/Run/Automation/Channel/OAuth references, atomically clears a matching
   project-default pointer, hides the Agent from project catalogs, and rejects new

@@ -18,6 +18,34 @@ A platform-governed Agent with one Current Version numbered v1 whose definition 
 An immutable snapshot of a Project Agent's complete authored definition at one point in its history.
 _Avoid_: Editable Agent version
 
+**Agent Design Session**:
+An owner-private design conversation that progressively defines one prospective Project Agent and has at most one active Agent Design Generation Turn. It is distinct from a Thread and does not become part of the created Agent's execution history.
+_Avoid_: Builder chat, Thread
+
+**Agent Design Activity**:
+A durable, ordered, user-visible observation of real work performed while advancing an Agent Design Session, such as model reasoning or a verified design stage. Activities are appended as work happens and remain replayable; they never represent simulated progress.
+_Avoid_: Fake progress, Run Event
+
+**Agent Design Generation Turn**:
+One model-backed advancement of an Agent Design Session from an owner input through a validated design outcome. It is not a Run or part of the prospective Agent's execution history.
+_Avoid_: Run, Graph Turn
+
+**Agent Design Generation Preference**:
+The owner's current model and thinking-intensity choice for future Agent Design Generation Turns in one Agent Design Session. Changing it never rewrites an earlier turn's effective configuration.
+_Avoid_: Agent model settings, global model preference
+
+**Agent Design Generation Profile**:
+The immutable requested and effective model plus thinking intensity recorded for one Agent Design Generation Turn. It affects design generation only and is not part of the prospective Agent's authored definition.
+_Avoid_: Agent model settings, Run Execution Profile
+
+**Agent Design Turn Stop**:
+An owner-requested terminal outcome that stops the active Agent Design Generation Turn without cancelling its Agent Design Session. Earlier activities remain part of the session history.
+_Avoid_: Agent Design Session cancellation
+
+**Agent Design Commit**:
+The final operation that validates a ready design and creates its suspended Project Agent plus Candidate Version. Its real validation and persistence stages may emit Agent Design Activities, but a manual blueprint edit never represents model reasoning.
+_Avoid_: Version Activation
+
 ## Skill assets
 
 **Skill**:

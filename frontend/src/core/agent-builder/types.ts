@@ -55,6 +55,7 @@ export const agentBuilderMessageSchema = z
     role: z.enum(["user", "assistant"]),
     content: z.string(),
     created_at: timestampSchema,
+    operation_id: uuidSchema.nullable().default(null),
   })
   .strict();
 
@@ -148,6 +149,14 @@ export const agentBuilderSessionSchema = z
     error_code: z.string().trim().min(1).nullable(),
     error_message: z.string().trim().min(1).nullable(),
     created_agent_id: uuidSchema.nullable(),
+    generation_preference: z
+      .object({
+        model_ref: z.union([z.literal("default"), exactModelUuidSchema]),
+        mode: z.enum(["flash", "thinking", "pro", "ultra"]),
+      })
+      .strict()
+      .nullable()
+      .default(null),
     created_at: timestampSchema,
     updated_at: timestampSchema,
   })
@@ -161,6 +170,52 @@ export const agentBuilderSessionSummarySchema = z
     status: agentBuilderStatusSchema,
     revision: z.number().int().positive(),
     updated_at: timestampSchema,
+  })
+  .strict();
+
+export const agentBuilderActivityKindSchema = z.enum([
+  "turn_accepted",
+  "attempt_started",
+  "reasoning",
+  "candidate_generated",
+  "validation_started",
+  "validation_passed",
+  "validation_failed",
+  "repair_started",
+  "turn_terminal",
+  "commit_accepted",
+  "commit_validation_started",
+  "commit_validation_passed",
+  "commit_persistence_started",
+  "commit_persistence_completed",
+  "commit_terminal",
+]);
+
+export const agentBuilderActivitySchema = z
+  .object({
+    seq: z.string().regex(/^(?:0|[1-9][0-9]*)$/u),
+    operation_id: uuidSchema,
+    kind: agentBuilderActivityKindSchema,
+    attempt: z.union([z.literal(1), z.literal(2)]).nullable(),
+    payload: z
+      .object({
+        text: z.string().nullable().optional(),
+        status: z
+          .enum(["completed", "failed", "stopped", "cancelled"])
+          .nullable()
+          .optional(),
+        duration_ms: z.number().int().nonnegative().nullable().optional(),
+        error_code: z.string().trim().min(1).nullable().optional(),
+      })
+      .strict(),
+    created_at: timestampSchema,
+  })
+  .strict();
+
+export const agentBuilderActivityListResponseSchema = z
+  .object({
+    data: z.array(agentBuilderActivitySchema).max(2000),
+    request_id: z.string().trim().min(1),
   })
   .strict();
 
@@ -235,8 +290,40 @@ export const agentBuilderTurnInputSchema = z
     generation_model_ref: z
       .union([z.literal("default"), exactModelUuidSchema])
       .optional(),
+    generation_mode: z.enum(["flash", "thinking", "pro", "ultra"]).optional(),
+    thinking_enabled: z.boolean().optional(),
+    reasoning_effort: z
+      .enum(["none", "low", "medium", "high"])
+      .nullable()
+      .optional(),
     expected_revision: z.number().int().positive(),
     idempotency_key: z.string().trim().min(1),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    const executionFields = [
+      value.generation_mode,
+      value.thinking_enabled,
+      value.reasoning_effort,
+    ];
+    if (
+      executionFields.some((field) => field !== undefined) &&
+      (value.generation_model_ref === undefined ||
+        executionFields.some((field) => field === undefined))
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Generation profile fields must be provided together",
+      });
+    }
+  });
+
+export const agentBuilderGenerationPreferenceInputSchema = z
+  .object({
+    generation_model_ref: z.union([z.literal("default"), exactModelUuidSchema]),
+    generation_mode: z.enum(["flash", "thinking", "pro", "ultra"]),
+    thinking_enabled: z.boolean(),
+    reasoning_effort: z.enum(["none", "low", "medium", "high"]).nullable(),
   })
   .strict();
 
@@ -273,6 +360,7 @@ export type AgentBuilderProgressItem = z.infer<
   typeof agentBuilderProgressItemSchema
 >;
 export type AgentBuilderMessage = z.infer<typeof agentBuilderMessageSchema>;
+export type AgentBuilderActivity = z.infer<typeof agentBuilderActivitySchema>;
 export type AgentBuilderConflictField = z.infer<
   typeof agentBuilderConflictFieldSchema
 >;
@@ -292,6 +380,9 @@ export type CreateAgentBuilderSessionInput = z.input<
   typeof createAgentBuilderSessionInputSchema
 >;
 export type AgentBuilderTurnInput = z.input<typeof agentBuilderTurnInputSchema>;
+export type AgentBuilderGenerationPreferenceInput = z.input<
+  typeof agentBuilderGenerationPreferenceInputSchema
+>;
 export type CommitAgentBuilderSessionInput = z.input<
   typeof commitAgentBuilderSessionInputSchema
 >;

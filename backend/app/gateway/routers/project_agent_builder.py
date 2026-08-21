@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import re
 import uuid
 from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from app.gateway.deps import get_config
@@ -23,6 +27,7 @@ from app.shared_assets.agent_catalog import (
     AgentCatalogValidator,
     StaticToolGroupCatalog,
 )
+from app.shared_assets.agent_design_activity import AgentDesignActivity
 from app.shared_assets.agent_design_service import (
     AGENT_DESIGN_SLUG_MAX_LENGTH,
     AGENT_DESIGN_SLUG_MIN_LENGTH,
@@ -39,10 +44,11 @@ from app.shared_assets.agent_design_service import (
     CancelAgentDesignSession,
     CommitAgentDesignSession,
     CreateAgentDesignSession,
+    SetAgentDesignGenerationPreference,
     SubmitAgentDesignTurn,
 )
 from app.shared_assets.agent_service import AgentService
-from app.shared_assets.errors import AssetStorageUnavailable
+from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFailed
 from app.shared_assets.models import AgentModelSettings, SkillAssetRef
 from deerflow.config.app_config import AppConfig
 from deerflow.persistence.engine import get_session_factory
@@ -137,6 +143,23 @@ class AgentDesignTurnRequest(_StrictModel):
             r"[0-9a-f]{4}-[0-9a-f]{12})$"
         ),
     )
+    generation_mode: Literal["flash", "thinking", "pro", "ultra"] | None = None
+    thinking_enabled: bool | None = None
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None = None
+
+
+class AgentDesignGenerationPreferenceRequest(_StrictModel):
+    generation_model_ref: str = Field(
+        min_length=7,
+        max_length=36,
+        pattern=(
+            r"^(?:default|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12})$"
+        ),
+    )
+    generation_mode: Literal["flash", "thinking", "pro", "ultra"]
+    thinking_enabled: bool
+    reasoning_effort: Literal["none", "low", "medium", "high"] | None
 
 
 class AgentDesignCommitRequest(_StrictModel):
@@ -157,11 +180,52 @@ class AgentDesignProgressItemResponse(_StrictModel):
     status: Literal["pending", "running", "completed", "failed"]
 
 
+class AgentDesignActivityPayloadResponse(_StrictModel):
+    text: str | None = None
+    status: Literal["completed", "failed", "stopped", "cancelled"] | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    error_code: str | None = None
+
+
+class AgentDesignActivityResponse(_StrictModel):
+    seq: str
+    operation_id: uuid.UUID
+    kind: Literal[
+        "turn_accepted",
+        "attempt_started",
+        "reasoning",
+        "candidate_generated",
+        "validation_started",
+        "validation_passed",
+        "validation_failed",
+        "repair_started",
+        "turn_terminal",
+        "commit_accepted",
+        "commit_validation_started",
+        "commit_validation_passed",
+        "commit_persistence_started",
+        "commit_persistence_completed",
+        "commit_terminal",
+    ]
+    attempt: Literal[1, 2] | None
+    payload: AgentDesignActivityPayloadResponse
+    created_at: datetime
+
+
+class AgentDesignActivityListResponse(_StrictModel):
+    data: tuple[AgentDesignActivityResponse, ...]
+    request_id: str
+
+
 class AgentDesignMessageResponse(_StrictModel):
     id: str
     role: Literal["user", "assistant"]
     content: str
     created_at: datetime
+
+
+class AgentDesignMessageV3Response(AgentDesignMessageResponse):
+    operation_id: uuid.UUID | None
 
 
 class AgentDesignConflictResponse(_StrictModel):
@@ -247,6 +311,16 @@ class AgentDesignSessionItemV2Response(AgentDesignSessionItemV1Response):
     conflicts: tuple[AgentDesignConflictResponse, ...]
 
 
+class AgentDesignGenerationPreferenceResponse(_StrictModel):
+    model_ref: str
+    mode: Literal["flash", "thinking", "pro", "ultra"]
+
+
+class AgentDesignSessionItemV3Response(AgentDesignSessionItemV2Response):
+    generation_preference: AgentDesignGenerationPreferenceResponse | None
+    messages: tuple[AgentDesignMessageV3Response, ...]
+
+
 class AgentDesignSessionSummaryResponse(_StrictModel):
     id: uuid.UUID
     slug: str
@@ -275,6 +349,11 @@ class AgentDesignSessionV2Response(_StrictModel):
     request_id: str
 
 
+class AgentDesignSessionV3Response(_StrictModel):
+    data: AgentDesignSessionItemV3Response
+    request_id: str
+
+
 class AgentDesignSessionListV1Response(_StrictModel):
     data: list[AgentDesignSessionSummaryResponse]
     request_id: str
@@ -296,6 +375,11 @@ class AgentDesignCommitDataV2Response(_StrictModel):
     agent: CurrentVersionAssetItemResponse
 
 
+class AgentDesignCommitDataV3Response(_StrictModel):
+    session: AgentDesignSessionItemV3Response
+    agent: CurrentVersionAssetItemResponse
+
+
 class AgentDesignCommitV1Response(_StrictModel):
     data: AgentDesignCommitDataV1Response
     request_id: str
@@ -306,18 +390,52 @@ class AgentDesignCommitV2Response(_StrictModel):
     request_id: str
 
 
-AgentDesignSessionItemResponse = AgentDesignSessionItemV2Response
-AgentDesignSessionResponse = AgentDesignSessionV2Response
+class AgentDesignCommitV3Response(_StrictModel):
+    data: AgentDesignCommitDataV3Response
+    request_id: str
+
+
+AgentDesignSessionItemResponse = AgentDesignSessionItemV3Response
+AgentDesignSessionResponse = AgentDesignSessionV3Response
 AgentDesignSessionListResponse = AgentDesignSessionListV2Response
-AgentDesignCommitResponse = AgentDesignCommitV2Response
-AgentDesignSessionNegotiatedResponse = AgentDesignSessionV1Response | AgentDesignSessionV2Response
+AgentDesignCommitResponse = AgentDesignCommitV3Response
+AgentDesignSessionNegotiatedResponse = AgentDesignSessionV1Response | AgentDesignSessionV2Response | AgentDesignSessionV3Response
 AgentDesignSessionListNegotiatedResponse = AgentDesignSessionListV1Response | AgentDesignSessionListV2Response
-AgentDesignCommitNegotiatedResponse = AgentDesignCommitV1Response | AgentDesignCommitV2Response
-AgentBuilderContractVersion = Annotated[Literal["1", "2"], Query()]
+AgentDesignCommitNegotiatedResponse = AgentDesignCommitV1Response | AgentDesignCommitV2Response | AgentDesignCommitV3Response
+AgentBuilderContractVersion = Annotated[Literal["1", "2", "3"], Query()]
 
 
 def _request_id() -> str:
     return get_current_trace_id() or generate_trace_id()
+
+
+_ACTIVITY_CURSOR = re.compile(r"(?:0|[1-9][0-9]{0,18})\Z")
+
+
+def _activity_cursor(value: str | None, request_id: str) -> int:
+    if value in {None, ""}:
+        return 0
+    if not isinstance(value, str) or _ACTIVITY_CURSOR.fullmatch(value) is None:
+        raise_asset_domain(AssetValidationFailed(request_id))
+    parsed = int(value)
+    if parsed > 9_223_372_036_854_775_807:
+        raise_asset_domain(AssetValidationFailed(request_id))
+    return parsed
+
+
+def _activity_response(
+    activity: AgentDesignActivity,
+) -> AgentDesignActivityResponse:
+    return AgentDesignActivityResponse(
+        seq=str(activity.seq),
+        operation_id=activity.operation_id,
+        kind=activity.kind.value,
+        attempt=activity.attempt,
+        payload=AgentDesignActivityPayloadResponse.model_validate(
+            activity.payload,
+        ),
+        created_at=activity.created_at,
+    )
 
 
 def _all_internal_tool_groups(config: AppConfig) -> tuple[str, ...]:
@@ -364,6 +482,11 @@ def get_agent_design_service(request: Request) -> AgentDesignService:
             catalog_validator=_agent_catalog_validator(config),
         ),
         default_tool_groups_provider=lambda: _all_internal_tool_groups(get_config()),
+        generation_control=getattr(
+            request.app.state,
+            "agent_design_generation_control",
+            None,
+        ),
     )
     return service
 
@@ -414,11 +537,34 @@ def _turn(body: AgentDesignTurnRequest):
         expected_revision=body.expected_revision,
         idempotency_key=body.idempotency_key,
         generation_model_ref=body.generation_model_ref,
+        generation_mode=body.generation_mode,
+        thinking_enabled=body.thinking_enabled,
+        reasoning_effort=body.reasoning_effort,
+    )
+
+
+def _generation_preference(
+    body: AgentDesignGenerationPreferenceRequest,
+) -> SetAgentDesignGenerationPreference:
+    return SetAgentDesignGenerationPreference(
+        generation_model_ref=body.generation_model_ref,
+        generation_mode=body.generation_mode,
+        thinking_enabled=body.thinking_enabled,
+        reasoning_effort=body.reasoning_effort,
     )
 
 
 def _session_item(view: AgentDesignSessionView) -> AgentDesignSessionItemResponse:
     return AgentDesignSessionItemResponse.model_validate(
+        view,
+        from_attributes=True,
+    )
+
+
+def _session_item_v2(
+    view: AgentDesignSessionView,
+) -> AgentDesignSessionItemV2Response:
+    return AgentDesignSessionItemV2Response.model_validate(
         view,
         from_attributes=True,
     )
@@ -446,7 +592,7 @@ def _session_response(
     view: AgentDesignSessionView,
     context: ProjectContext,
     *,
-    contract_version: Literal["1", "2"],
+    contract_version: Literal["1", "2", "3"],
 ) -> AgentDesignSessionNegotiatedResponse:
     if contract_version == "1":
         return AgentDesignSessionV1Response(
@@ -455,6 +601,11 @@ def _session_response(
         )
     if contract_version == "2":
         return AgentDesignSessionV2Response(
+            data=_session_item_v2(view),
+            request_id=context.request_id,
+        )
+    if contract_version == "3":
+        return AgentDesignSessionV3Response(
             data=_session_item(view),
             request_id=context.request_id,
         )
@@ -465,7 +616,7 @@ def _commit_response(
     result: AgentDesignCommitResult,
     context: ProjectContext,
     *,
-    contract_version: Literal["1", "2"],
+    contract_version: Literal["1", "2", "3"],
 ) -> AgentDesignCommitNegotiatedResponse:
     agent = CurrentVersionAssetItemResponse.model_validate(
         result.agent,
@@ -482,6 +633,14 @@ def _commit_response(
     if contract_version == "2":
         return AgentDesignCommitV2Response(
             data=AgentDesignCommitDataV2Response(
+                session=_session_item_v2(result.session),
+                agent=agent,
+            ),
+            request_id=context.request_id,
+        )
+    if contract_version == "3":
+        return AgentDesignCommitV3Response(
+            data=AgentDesignCommitDataV3Response(
                 session=_session_item(result.session),
                 agent=agent,
             ),
@@ -539,13 +698,33 @@ async def list_agent_design_sessions(
                 data=data,
                 request_id=context.request_id,
             )
-        if contract_version == "2":
+        if contract_version in {"2", "3"}:
             return AgentDesignSessionListV2Response(
                 data=data,
                 next_cursor=page.next_cursor,
                 request_id=context.request_id,
             )
         raise ValueError("unsupported Agent Builder contract version")
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.get(
+    "/by-agent/{agent_id}",
+    response_model=AgentDesignSessionNegotiatedResponse,
+)
+async def get_agent_design_session_by_agent(
+    agent_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[AgentDesignService, Depends(get_agent_design_service)],
+    contract_version: AgentBuilderContractVersion = "1",
+) -> AgentDesignSessionNegotiatedResponse:
+    try:
+        return _session_response(
+            await service.get_by_created_agent(context, agent_id),
+            context,
+            contract_version=contract_version,
+        )
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -584,6 +763,143 @@ async def submit_agent_design_turn(
     try:
         return _session_response(
             await service.submit_turn(context, session_id, _turn(body)),
+            context,
+            contract_version=contract_version,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.put(
+    "/{session_id}/generation-preference",
+    response_model=AgentDesignSessionNegotiatedResponse,
+)
+async def set_agent_design_generation_preference(
+    session_id: uuid.UUID,
+    body: AgentDesignGenerationPreferenceRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[AgentDesignService, Depends(get_agent_design_service)],
+    contract_version: AgentBuilderContractVersion = "1",
+) -> AgentDesignSessionNegotiatedResponse:
+    try:
+        return _session_response(
+            await service.set_generation_preference(
+                context,
+                session_id,
+                _generation_preference(body),
+            ),
+            context,
+            contract_version=contract_version,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.get(
+    "/{session_id}/activities",
+    response_model=AgentDesignActivityListResponse,
+)
+async def list_agent_design_activities(
+    session_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[AgentDesignService, Depends(get_agent_design_service)],
+    after_seq: Annotated[str | None, Query()] = None,
+    limit: Annotated[int, Query(ge=1, le=2_000)] = 500,
+) -> AgentDesignActivityListResponse:
+    try:
+        activities = await service.list_activities(
+            context,
+            session_id,
+            after_seq=_activity_cursor(after_seq, context.request_id),
+            limit=limit,
+        )
+        return AgentDesignActivityListResponse(
+            data=tuple(_activity_response(activity) for activity in activities),
+            request_id=context.request_id,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.get("/{session_id}/activities/stream")
+async def stream_agent_design_activities(
+    session_id: uuid.UUID,
+    request: Request,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[AgentDesignService, Depends(get_agent_design_service)],
+    after_seq: Annotated[str | None, Query()] = None,
+) -> StreamingResponse:
+    cursor = _activity_cursor(
+        request.headers.get("Last-Event-ID") or after_seq,
+        context.request_id,
+    )
+    try:
+        await service.list_activities(
+            context,
+            session_id,
+            after_seq=cursor,
+            limit=1,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+    async def events():
+        nonlocal cursor
+        idle_ticks = 0
+        while True:
+            if await request.is_disconnected():
+                return
+            try:
+                activities = await service.list_activities(
+                    context,
+                    session_id,
+                    after_seq=cursor,
+                    limit=500,
+                )
+            except ASSET_ERRORS:
+                return
+            if activities:
+                idle_ticks = 0
+                for activity in activities:
+                    response = _activity_response(activity)
+                    cursor = activity.seq
+                    payload = json.dumps(
+                        response.model_dump(mode="json"),
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+                    yield f"id: {response.seq}\nevent: activity\ndata: {payload}\n\n"
+                continue
+            idle_ticks += 1
+            if idle_ticks >= 60:
+                idle_ticks = 0
+                yield ": keep-alive\n\n"
+            await asyncio.sleep(0.25)
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post(
+    "/{session_id}/turns/stop",
+    response_model=AgentDesignSessionNegotiatedResponse,
+)
+async def stop_agent_design_turn(
+    session_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[AgentDesignService, Depends(get_agent_design_service)],
+    contract_version: AgentBuilderContractVersion = "1",
+) -> AgentDesignSessionNegotiatedResponse:
+    try:
+        return _session_response(
+            await service.stop_turn(context, session_id),
             context,
             contract_version=contract_version,
         )
@@ -653,15 +969,19 @@ async def cancel_agent_design_session(
 __all__ = [
     "AgentDesignCancelRequest",
     "AgentDesignCommitRequest",
+    "AgentDesignActivityListResponse",
+    "AgentDesignActivityResponse",
     "AgentDesignCommitResponse",
     "AgentDesignCommitV1Response",
     "AgentDesignCommitV2Response",
+    "AgentDesignCommitV3Response",
     "AgentDesignSessionListResponse",
     "AgentDesignSessionListV1Response",
     "AgentDesignSessionListV2Response",
     "AgentDesignSessionResponse",
     "AgentDesignSessionV1Response",
     "AgentDesignSessionV2Response",
+    "AgentDesignSessionV3Response",
     "AgentDesignTurnRequest",
     "CreateAgentDesignSessionRequest",
     "get_agent_design_service",

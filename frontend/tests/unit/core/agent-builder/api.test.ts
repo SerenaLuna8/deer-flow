@@ -8,6 +8,8 @@ import {
   getAgentBuilderSession,
   listAllAgentBuilderSessions,
   listAgentBuilderSessions,
+  mergeAgentBuilderActivities,
+  setAgentBuilderGenerationPreference,
   submitAgentBuilderTurn,
 } from "@/core/agent-builder";
 
@@ -45,6 +47,10 @@ function sessionResponse() {
       error_code: null,
       error_message: null,
       created_agent_id: null,
+      generation_preference: {
+        model_ref: "00000000-0000-4000-8000-000000000204",
+        mode: "pro",
+      },
       created_at: NOW,
       updated_at: NOW,
     },
@@ -79,7 +85,26 @@ afterEach(() => {
 });
 
 describe("Agent Builder API", () => {
-  test("requests contract version 2 on every Agent Builder endpoint", async () => {
+  test("deduplicates and orders Activity cursors without JavaScript number coercion", () => {
+    const shared = {
+      operation_id: "44444444-4444-4444-8444-444444444444",
+      attempt: null,
+      payload: {},
+      created_at: NOW,
+    } as const;
+
+    expect(
+      mergeAgentBuilderActivities(
+        [{ ...shared, seq: "9007199254740993", kind: "turn_accepted" }],
+        [
+          { ...shared, seq: "9007199254740994", kind: "attempt_started" },
+          { ...shared, seq: "9007199254740993", kind: "turn_accepted" },
+        ],
+      ).map((activity) => activity.seq),
+    ).toEqual(["9007199254740993", "9007199254740994"]);
+  });
+
+  test("requests contract version 3 on every Agent Builder endpoint", async () => {
     const fetcher = rs.fn(
       async (input: RequestInfo | URL, init?: RequestInit) => {
         const rawUrl =
@@ -121,8 +146,17 @@ describe("Agent Builder API", () => {
     await submitAgentBuilderTurn(PROJECT_ID, SESSION_ID, {
       input: { kind: "message", message: "Design an Agent" },
       generation_model_ref: "00000000-0000-4000-8000-000000000204",
+      generation_mode: "pro",
+      thinking_enabled: true,
+      reasoning_effort: "medium",
       expected_revision: 2,
       idempotency_key: "turn-key",
+    });
+    await setAgentBuilderGenerationPreference(PROJECT_ID, SESSION_ID, {
+      generation_model_ref: "00000000-0000-4000-8000-000000000204",
+      generation_mode: "ultra",
+      thinking_enabled: true,
+      reasoning_effort: "high",
     });
     await finalizeAgentBuilderSession(PROJECT_ID, SESSION_ID, {
       expected_revision: 2,
@@ -134,7 +168,7 @@ describe("Agent Builder API", () => {
       idempotency_key: "cancel-key",
     });
 
-    expect(fetcher).toHaveBeenCalledTimes(6);
+    expect(fetcher).toHaveBeenCalledTimes(7);
     for (const [input] of fetcher.mock.calls) {
       const rawUrl =
         typeof input === "string"
@@ -146,8 +180,37 @@ describe("Agent Builder API", () => {
         new URL(rawUrl, "http://frontend.test").searchParams.get(
           "contract_version",
         ),
-      ).toBe("2");
+      ).toBe("3");
     }
+  });
+
+  test("sends the complete Builder generation profile", async () => {
+    const fetcher = rs.fn(
+      async (_input: RequestInfo | URL, _init?: RequestInit) =>
+        Response.json(sessionResponse()),
+    );
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", fetcher);
+
+    await submitAgentBuilderTurn(PROJECT_ID, SESSION_ID, {
+      input: { kind: "message", message: "Design an Agent" },
+      generation_model_ref: "00000000-0000-4000-8000-000000000204",
+      generation_mode: "ultra",
+      thinking_enabled: true,
+      reasoning_effort: "high",
+      expected_revision: 2,
+      idempotency_key: "turn-profile-key",
+    });
+
+    const body = fetcher.mock.calls[0]?.[1]?.body;
+    expect(typeof body).toBe("string");
+    if (typeof body !== "string") throw new Error("expected JSON body");
+    expect(JSON.parse(body)).toMatchObject({
+      generation_model_ref: "00000000-0000-4000-8000-000000000204",
+      generation_mode: "ultra",
+      thinking_enabled: true,
+      reasoning_effort: "high",
+    });
   });
 
   test("sends the selected normalized slug with the commit command", async () => {

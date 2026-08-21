@@ -53,6 +53,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   Current Version 的运行映射仍可独立轮换。明文只在
   授权命令执行边界从选定来源字段解密，并以 Skill 声明的目标变量名注入；Local Provider
   与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
+- Agent Builder 以独立于普通会话的设计会话展示真实模型思考和校验、保存阶段，支持按模型
+  能力选择思考强度、停止当前生成并继续设计，以及断线后完整回放过程。它不调用工具，也不
+  展示 Provider 原始响应、系统提示或最终 JSON；最终确认只创建 suspended Agent 和
+  Candidate Version，不会自动激活。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选文件只能经受管工具、检查和
@@ -144,7 +148,7 @@ make check-db
 ```
 
 - `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `current_asset_version_lifecycle`。
+  `agent_design_activity_terminal`。
 - 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
 - 已知旧版本先运行 `make preflight-upgrade` 获取只读 Agent/Skill 生命周期清单并排除阻断异常，再通过 `make upgrade-db` 显式升级；升级命令会在同一维护流程内再次执行该 preflight。

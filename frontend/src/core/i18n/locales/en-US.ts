@@ -1817,7 +1817,7 @@ export const enUS: Translations = {
         createHint:
           "Saves immutable candidate version v1. Activate it before it can run.",
         creating: "Creating…",
-        createDraft: "Create Agent",
+        createAgent: "Create Agent",
         validation: {
           descriptionRequired: "Agent description is required",
           modelRequired: "Agent model is required",
@@ -1862,6 +1862,39 @@ export const enUS: Translations = {
           "The Agent design session remains available, but local changes to the four settings will be discarded.",
         continueEditing: "Continue editing",
         discardAndLeave: "Discard changes and leave",
+        stopGeneration: "Stop this generation",
+        stoppingGeneration: "Stopping…",
+        viewAgent: "View Agent",
+        activity: {
+          title: "Thinking and execution",
+          attempt: (value) =>
+            value === 1 ? "Initial generation" : "Repair retry",
+          reasoning: (value) =>
+            value === 1 ? "Model reasoning" : "Repair reasoning",
+          duration: (value) => `${(value / 1000).toFixed(1)}s`,
+          terminal: {
+            completed: "Completed",
+            failed: "Failed",
+            stopped: "Stopped",
+            cancelled: "Cancelled",
+          },
+          stages: {
+            turn_accepted: "Request received",
+            attempt_started: "Model reasoning started",
+            candidate_generated: "Candidate generated",
+            validation_started: "Deterministic validation started",
+            validation_passed: "Candidate validation passed",
+            validation_failed: "Candidate validation failed",
+            repair_started: "Repair retry started",
+            turn_terminal: "Generation turn ended",
+            commit_accepted: "Creation request received",
+            commit_validation_started: "Candidate validation started",
+            commit_validation_passed: "Candidate validation passed",
+            commit_persistence_started: "Saving Agent and Candidate Version",
+            commit_persistence_completed: "Agent and Candidate Version saved",
+            commit_terminal: "Creation ended",
+          },
+        },
       },
     },
     instructions: {
@@ -1873,7 +1906,7 @@ export const enUS: Translations = {
       },
       sectionAria: "Agent instruction documents",
       title: "Instruction documents",
-      draftDescription:
+      editDescription:
         "Edit the four fixed Markdown documents and save an immutable Agent Candidate Version.",
       blueprintDescription:
         "Review and edit the four fixed Markdown documents.",
@@ -1888,7 +1921,7 @@ export const enUS: Translations = {
       preview: "Preview",
       empty: "No content",
       editFile: (name) => `Edit ${name}`,
-      draftSaveHint:
+      candidateSaveHint:
         "Saving creates a new Agent Candidate Version without activating it.",
       blueprintSaveHint:
         "Saving updates the current blueprint before the Agent can be created.",
@@ -1920,13 +1953,13 @@ export const enUS: Translations = {
         inactive: "Asset is inactive",
         bindingDisabled: "System binding is disabled",
         bindingMissing: "System binding is missing",
-        noPublishedVersion: "No Current Version",
+        noCurrentVersion: "No Current Version",
       },
       remediation: {
         restoreSystemAsset: "Ask an administrator to restore the system asset",
         enableSystemBinding:
           "Ask an administrator to enable the system binding",
-        publishVersion:
+        activateCandidateVersion:
           "Activate a Candidate Version of this project asset first",
         activateProjectAsset: "Activate this project asset first",
       },
@@ -1952,7 +1985,7 @@ export const enUS: Translations = {
       reloadRequired: "Reload the latest version before editing.",
       reloading: "Reloading…",
       permissionBlocked: "Your account cannot edit Agent capabilities.",
-      preparingDraft: "Preparing the Candidate Version…",
+      preparingCandidate: "Preparing the Candidate Version…",
       catalogLoading: "Loading capability catalog…",
       catalogLoadFailed: "Capability catalog could not be loaded.",
       validatingMcp: "Validating MCP dependencies…",
@@ -1961,7 +1994,7 @@ export const enUS: Translations = {
       description:
         "Choose the tool groups, Skills, and MCPs this Agent can use.",
       saving: "Saving…",
-      saveDraft: "Save Candidate Version",
+      saveCandidate: "Save Candidate Version",
       edit: "Edit",
       builtinGroups: "Built-in tool groups",
       unchanged: "Unchanged",
@@ -1978,6 +2011,7 @@ export const enUS: Translations = {
       authoringLoadFailed: "The Agent authoring base could not be loaded.",
       authoringLoading: "Loading the Agent authoring base…",
       detailTabsAria: "Agent detail tabs",
+      viewDesignRecord: "View design record",
       instructionsTab: "Instructions",
       capabilitiesTab: "Capabilities",
       viewModeAria: "Agent catalog view",
@@ -1986,7 +2020,7 @@ export const enUS: Translations = {
       chatForbidden: "Your account cannot create chats in this project.",
       unavailable: "This Agent is unavailable.",
       executeForbidden: "Your account cannot run Agents.",
-      publishRequired:
+      currentVersionRequired:
         "The Agent needs a Current Version and the asset must be active.",
       defaultAdminOnly: "Only administrators can set the default Agent.",
       defaultUnavailable: "This Agent cannot be set as default.",
@@ -2113,7 +2147,7 @@ export const enUS: Translations = {
       unsaved: "Save or discard the current changes first",
       loading: "The selected version is still loading",
       revoked: "Revoked System Skill versions cannot be exported",
-      unpublished: "Only the System Skill Current Version can be exported",
+      notCurrent: "Only the System Skill Current Version can be exported",
       noVersion: "Select a persisted version first",
     },
     secrets: {
@@ -2400,7 +2434,7 @@ export const enUS: Translations = {
         createIntroAfter:
           ". Describe its purpose, triggers, inputs and outputs, and any references or scripts it needs.",
         creatingSkill: "Creating Skill…",
-        creatingDraft: "Creating a Candidate Version…",
+        creatingCandidate: "Creating a Candidate Version…",
         processing: "The Builder Agent is working…",
         composerAriaCreate: "Describe the Skill you want",
         composerAriaRevise: "Describe what to change",
@@ -2555,14 +2589,14 @@ export const enUS: Translations = {
         withVersion: (version) =>
           `Saved Candidate Version v${version}. Go activate it`,
         withoutVersion: "Saved a Candidate Version. Go activate it",
-        goPublish: "Go activate",
+        goActivate: "Go activate",
         revisionWithSecrets: (version, count) =>
           `Saved ${version === null ? "a Candidate Version" : `Candidate Version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before activation.`,
         createdWithSecrets: (count) =>
           `Skill created and suspended with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before enabling it.`,
         configureCredentials: "Configure credentials",
       },
-      publish: {
+      versionConflict: {
         staleTitle: "The Current Version changed",
         staleNamed: (live, base) =>
           `The Current Version is v${live}. This revision is based on v${base} and cannot be saved or activated. Start a new revision from v${live}.`,

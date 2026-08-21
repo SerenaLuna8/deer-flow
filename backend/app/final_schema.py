@@ -17,6 +17,7 @@ FINAL_REQUIRED_RELATIONS = (
     "project_memberships",
     "project_default_agents",
     "agents",
+    "agent_design_activities",
     "skills",
     "skill_versions",
     "skill_design_sessions",

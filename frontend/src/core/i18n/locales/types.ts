@@ -1543,7 +1543,7 @@ export interface Translations {
         blockingConflictHint: string;
         createHint: string;
         creating: string;
-        createDraft: string;
+        createAgent: string;
         validation: {
           descriptionRequired: string;
           modelRequired: string;
@@ -1583,6 +1583,22 @@ export interface Translations {
         discardDescription: string;
         continueEditing: string;
         discardAndLeave: string;
+        stopGeneration: string;
+        stoppingGeneration: string;
+        viewAgent: string;
+        activity: {
+          title: string;
+          attempt: (value: number) => string;
+          reasoning: (value: number) => string;
+          duration: (value: number) => string;
+          terminal: {
+            completed: string;
+            failed: string;
+            stopped: string;
+            cancelled: string;
+          };
+          stages: Record<string, string>;
+        };
       };
     };
     instructions: {
@@ -1594,7 +1610,7 @@ export interface Translations {
       };
       sectionAria: string;
       title: string;
-      draftDescription: string;
+      editDescription: string;
       blueprintDescription: string;
       readOnlyDescription: string;
       historicalDescription: string;
@@ -1605,7 +1621,7 @@ export interface Translations {
       preview: string;
       empty: string;
       editFile: (name: string) => string;
-      draftSaveHint: string;
+      candidateSaveHint: string;
       blueprintSaveHint: string;
       discard: string;
       saving: string;
@@ -1630,12 +1646,12 @@ export interface Translations {
         inactive: string;
         bindingDisabled: string;
         bindingMissing: string;
-        noPublishedVersion: string;
+        noCurrentVersion: string;
       };
       remediation: {
         restoreSystemAsset: string;
         enableSystemBinding: string;
-        publishVersion: string;
+        activateCandidateVersion: string;
         activateProjectAsset: string;
       };
       explanationSeparator: string;
@@ -1654,7 +1670,7 @@ export interface Translations {
       reloadRequired: string;
       reloading: string;
       permissionBlocked: string;
-      preparingDraft: string;
+      preparingCandidate: string;
       catalogLoading: string;
       catalogLoadFailed: string;
       validatingMcp: string;
@@ -1662,7 +1678,7 @@ export interface Translations {
       title: string;
       description: string;
       saving: string;
-      saveDraft: string;
+      saveCandidate: string;
       edit: string;
       builtinGroups: string;
       unchanged: string;
@@ -1679,6 +1695,7 @@ export interface Translations {
       authoringLoadFailed: string;
       authoringLoading: string;
       detailTabsAria: string;
+      viewDesignRecord: string;
       instructionsTab: string;
       capabilitiesTab: string;
       viewModeAria: string;
@@ -1687,7 +1704,7 @@ export interface Translations {
       chatForbidden: string;
       unavailable: string;
       executeForbidden: string;
-      publishRequired: string;
+      currentVersionRequired: string;
       defaultAdminOnly: string;
       defaultUnavailable: string;
       systemDefaultUnavailable: string;
@@ -1791,7 +1808,7 @@ export interface Translations {
       unsaved: string;
       loading: string;
       revoked: string;
-      unpublished: string;
+      notCurrent: string;
       noVersion: string;
     };
     secrets: {
@@ -2007,7 +2024,7 @@ export interface Translations {
         createIntroBefore: string;
         createIntroAfter: string;
         creatingSkill: string;
-        creatingDraft: string;
+        creatingCandidate: string;
         processing: string;
         composerAriaCreate: string;
         composerAriaRevise: string;
@@ -2150,12 +2167,12 @@ export interface Translations {
       success: {
         withVersion: (version: number) => string;
         withoutVersion: string;
-        goPublish: string;
+        goActivate: string;
         revisionWithSecrets: (version: number | null, count: number) => string;
         createdWithSecrets: (count: number) => string;
         configureCredentials: string;
       };
-      publish: {
+      versionConflict: {
         staleTitle: string;
         staleNamed: (live: number, base: number) => string;
         staleGeneric: string;

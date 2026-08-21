@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import base64
 import time
+import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -12,6 +14,7 @@ from app.system_settings import SystemModelMaterializer
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
+from deerflow.models.runtime import AsyncAbortEvent
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
 # Platform-generated 64x64 blue-square PNG. It contains no user/project data
@@ -25,7 +28,7 @@ _VISION_CONNECTION_PROBE_PNG = base64.b64decode(
 
 @dataclass(frozen=True, slots=True)
 class DatabaseOneshotModelCaller:
-    """Materialize the current default model immediately before one call."""
+    """Materialize an admitted exact model version, or Current when unfrozen."""
 
     app_config: AppConfig
     materializer: SystemModelMaterializer
@@ -38,10 +41,24 @@ class DatabaseOneshotModelCaller:
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
+        model_version_id: str | None = None,
+        model_payload_checksum: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        abort_event: AsyncAbortEvent | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
-        model = await self.materializer.materialize_active(
-            model_ref if model_ref is not None else self.model_ref,
-        )
+        effective_ref = model_ref if model_ref is not None else self.model_ref
+        if model_version_id is not None and model_payload_checksum is not None:
+            if effective_ref is None:
+                raise ValueError("exact model materialization requires a model reference")
+            model = await self.materializer.materialize_exact(
+                model_config_id=uuid.UUID(effective_ref),
+                model_config_version_id=uuid.UUID(model_version_id),
+                payload_checksum=model_payload_checksum,
+            )
+        else:
+            model = await self.materializer.materialize_active(effective_ref)
         runtime_config = self.app_config.with_runtime_models((model,))
         return await run_oneshot_llm(
             system_instruction=system_instruction,
@@ -49,6 +66,10 @@ class DatabaseOneshotModelCaller:
             run_name=self.run_name,
             app_config=runtime_config,
             model_name=model.name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            abort_event=abort_event,
+            on_reasoning_delta=on_reasoning_delta,
             profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
         )
 

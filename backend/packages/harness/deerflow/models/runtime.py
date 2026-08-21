@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol, cast
@@ -185,6 +185,94 @@ class ModelRuntime:
                 abort_event=abort_event,
             ),
         )
+
+    async def astream(
+        self,
+        input_: LanguageModelInput,
+        *,
+        profile: ModelRuntimeProfile,
+        model_name: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        model_overrides: Mapping[str, object] | None = None,
+        config: RunnableConfig | None = None,
+        deadline_monotonic: float | None = None,
+        abort_event: AsyncAbortEvent | None = None,
+    ) -> AsyncIterator[BaseMessage]:
+        """Stream one governed model call with the same privacy and abort policy."""
+
+        policy = _profile_policy(profile)
+        effective_deadline = deadline_monotonic
+        if effective_deadline is None and policy.default_timeout_seconds is not None:
+            effective_deadline = time.monotonic() + policy.default_timeout_seconds
+        if effective_deadline is not None and effective_deadline <= time.monotonic():
+            raise TimeoutError
+        if abort_event is not None and abort_event.is_set():
+            raise asyncio.CancelledError
+
+        model = self.build_chat_model(
+            profile=profile,
+            model_name=model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            model_overrides=model_overrides,
+        )
+        effective_config = dict(config or {})
+        if policy.suppress_inherited_callbacks:
+            effective_config["callbacks"] = []
+        queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+
+        async def produce() -> None:
+            try:
+                async for chunk in model.astream(input_, config=effective_config):
+                    await queue.put(("chunk", chunk))
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:  # noqa: BLE001 - relayed to consumer
+                await queue.put(("error", exc))
+            else:
+                await queue.put(("done", None))
+
+        if policy.suppress_inherited_callbacks:
+            with tracing_context(enabled=False):
+                producer_task = asyncio.create_task(produce())
+        else:
+            producer_task = asyncio.create_task(produce())
+        abort_task = asyncio.create_task(abort_event.wait()) if abort_event is not None else None
+        try:
+            while True:
+                next_task = asyncio.create_task(queue.get())
+                waiters: set[asyncio.Future[object]] = {next_task}
+                if abort_task is not None:
+                    waiters.add(abort_task)
+                timeout = None
+                if effective_deadline is not None:
+                    timeout = max(0.0, effective_deadline - time.monotonic())
+                done, _ = await asyncio.wait(
+                    waiters,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if not done:
+                    await _cancel_task(next_task)
+                    raise TimeoutError
+                if abort_task is not None and (abort_task in done or (abort_event is not None and abort_event.is_set())):
+                    await _cancel_task(next_task)
+                    raise asyncio.CancelledError
+                kind, value = next_task.result()
+                if kind == "done":
+                    return
+                if kind == "error":
+                    if isinstance(value, BaseException):
+                        raise value
+                    raise RuntimeError("stream failed without an exception")
+                if not isinstance(value, BaseMessage):
+                    raise TypeError("model stream must yield BaseMessage chunks")
+                yield value
+        finally:
+            await _cancel_task(producer_task)
+            if abort_task is not None:
+                await _cancel_task(abort_task)
 
     @staticmethod
     async def ainvoke_runnable(

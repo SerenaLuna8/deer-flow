@@ -120,6 +120,13 @@ async def test_prepare_turn_injects_only_server_loaded_exact_asset_versions() ->
         ) -> tuple[object, ...]:
             return ()
 
+        async def lock_in_progress_cancel_operations(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[object, ...]:
+            return ()
+
         async def get_operation(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -241,6 +248,13 @@ async def test_prepare_clarification_enters_generating_before_catalog_query() ->
         session = fake_session
 
         async def lock_in_progress_turn_operations(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[object, ...]:
+            return ()
+
+        async def lock_in_progress_cancel_operations(
             self,
             *_args: object,
             **_kwargs: object,

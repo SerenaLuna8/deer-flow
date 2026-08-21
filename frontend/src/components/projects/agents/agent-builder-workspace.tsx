@@ -7,12 +7,14 @@ import {
   Loader2Icon,
   MoreHorizontalIcon,
   SendIcon,
+  SquareIcon,
   Trash2Icon,
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   useEffect,
+  Fragment,
   useMemo,
   useRef,
   useState,
@@ -20,6 +22,7 @@ import {
   type Ref,
 } from "react";
 
+import { AgentBuilderActivityBlock } from "@/components/projects/agents/agent-builder-activity";
 import type { AgentInstructionField } from "@/components/projects/assets/agent-instructions-workbench";
 import { Button } from "@/components/ui/button";
 import {
@@ -38,6 +41,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
+import { InputBoxModeChooser } from "@/components/workspace/input-box-mode-chooser";
 import { HumanInputCard } from "@/components/workspace/messages/human-input-card";
 import {
   ModelSelector,
@@ -61,11 +65,15 @@ import {
   normalizeAgentBuilderSlug,
   prepareAgentBuilderCancelSession,
   useAgentBuilderSession,
+  useAgentBuilderActivities,
   useCancelAgentBuilderSession,
   useCommitAgentBuilderSession,
+  useSetAgentBuilderGenerationPreference,
   useSubmitAgentBuilderTurn,
+  useStopAgentBuilderTurn,
   type AgentBuilderBlueprint,
   type AgentBuilderSession,
+  type AgentBuilderActivity,
 } from "@/core/agent-builder";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
@@ -75,6 +83,11 @@ import { useModels } from "@/core/models/hooks";
 import { resolveModelDisplayName } from "@/core/models/presentation";
 import type { Model } from "@/core/models/types";
 import { SafeStreamdown } from "@/core/streamdown/components";
+import {
+  getAgentModeExecutionProfile,
+  resolveAgentMode,
+  type AgentMode,
+} from "@/core/threads/agent-mode";
 import { isIMEComposing } from "@/lib/ime";
 
 import { useMcpDependencyRuntime } from "../assets/use-mcp-dependency-runtime";
@@ -190,6 +203,7 @@ export async function submitAgentBuilderClarificationMutation(
       "status" in response.data &&
       response.data.status === "failed"
     ) {
+      onResolved();
       return false;
     }
     onResolved();
@@ -235,6 +249,7 @@ export function AgentBuilderConversationView({
   agentSlug = session.slug,
   agentSlugError = null,
   pendingUserMessage = null,
+  activities = [],
   canAuthor,
   mutationPending,
   commitPending,
@@ -245,6 +260,7 @@ export function AgentBuilderConversationView({
   modelsLoading = false,
   modelsError = null,
   selectedGenerationModelName = null,
+  selectedGenerationMode = "pro",
   scrollContainerRef,
   mcpDependencyLoading = false,
   mcpDependencyBlockReason = null,
@@ -253,8 +269,12 @@ export function AgentBuilderConversationView({
   errorMessage,
   onModelsRetry = () => undefined,
   onGenerationModelChange = () => undefined,
+  onGenerationModeChange = () => undefined,
   onComposerTextChange,
   onSubmitMessage,
+  onStopGeneration = () => undefined,
+  stopPending = false,
+  createdAgentHref = null,
   onSubmitClarification,
   onSelectedFieldChange,
   onDisplayModeChange,
@@ -271,6 +291,7 @@ export function AgentBuilderConversationView({
   agentSlug?: string;
   agentSlugError?: string | null;
   pendingUserMessage?: string | null;
+  activities?: AgentBuilderActivity[];
   canAuthor: boolean;
   mutationPending: boolean;
   commitPending: boolean;
@@ -281,6 +302,7 @@ export function AgentBuilderConversationView({
   modelsLoading?: boolean;
   modelsError?: unknown;
   selectedGenerationModelName?: string | null;
+  selectedGenerationMode?: AgentMode;
   scrollContainerRef?: Ref<HTMLDivElement>;
   mcpDependencyLoading?: boolean;
   mcpDependencyBlockReason?: string | null;
@@ -289,8 +311,12 @@ export function AgentBuilderConversationView({
   errorMessage: string | null;
   onModelsRetry?: () => void;
   onGenerationModelChange?: (modelName: string) => void;
+  onGenerationModeChange?: (mode: AgentMode) => void;
   onComposerTextChange: (value: string) => void;
   onSubmitMessage: () => void;
+  onStopGeneration?: () => void;
+  stopPending?: boolean;
+  createdAgentHref?: string | null;
   onSubmitClarification: (
     response: HumanInputResponse,
   ) => boolean | void | Promise<boolean | void>;
@@ -309,6 +335,9 @@ export function AgentBuilderConversationView({
   const selectedGenerationModel = models.find(
     (model) => model.name === selectedGenerationModelName,
   );
+  const generating =
+    Boolean(pendingUserMessage) || session.status === "generating";
+  const processing = generating || session.status === "committing";
   const modelUnavailable =
     modelsLoading || Boolean(modelsError) || !selectedGenerationModel;
   const composerDisabled =
@@ -316,12 +345,25 @@ export function AgentBuilderConversationView({
     !canAuthor ||
     modelUnavailable;
   const modelSelectorDisabled =
-    !canAuthor || mutationPending || localDraftLocked || modelUnavailable;
+    !canAuthor ||
+    processing ||
+    session.status === "completed" ||
+    mutationPending ||
+    localDraftLocked ||
+    modelUnavailable;
   const clarificationOpen = session.active_clarifications.length > 0;
-  const generating =
-    Boolean(pendingUserMessage) ||
-    session.status === "generating" ||
-    session.status === "committing";
+  const activitiesByOperation = new Map<string, AgentBuilderActivity[]>();
+  for (const activity of activities) {
+    const operationActivities =
+      activitiesByOperation.get(activity.operation_id) ?? [];
+    operationActivities.push(activity);
+    activitiesByOperation.set(activity.operation_id, operationActivities);
+  }
+  const messageOperationIds = new Set(
+    session.messages.flatMap((message) =>
+      message.operation_id ? [message.operation_id] : [],
+    ),
+  );
 
   function submitMessage(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -339,7 +381,7 @@ export function AgentBuilderConversationView({
           <div className="space-y-7">
             <AgentBuilderProgress
               items={session.progress}
-              generating={generating}
+              generating={processing}
               documentsReady={Boolean(session.blueprint)}
             />
 
@@ -361,11 +403,21 @@ export function AgentBuilderConversationView({
             ) : null}
 
             {session.messages.map((message) => (
-              <AgentBuilderMessageBubble
-                key={message.id}
-                role={message.role}
-                content={message.content}
-              />
+              <Fragment key={message.id}>
+                <AgentBuilderMessageBubble
+                  role={message.role}
+                  content={message.content}
+                />
+                {message.role === "user" &&
+                message.operation_id &&
+                activitiesByOperation.has(message.operation_id) ? (
+                  <AgentBuilderActivityBlock
+                    activities={
+                      activitiesByOperation.get(message.operation_id) ?? []
+                    }
+                  />
+                ) : null}
+              </Fragment>
             ))}
 
             {pendingUserMessage ? (
@@ -375,7 +427,16 @@ export function AgentBuilderConversationView({
               />
             ) : null}
 
-            {generating ? (
+            {[...activitiesByOperation.entries()]
+              .filter(([operationId]) => !messageOperationIds.has(operationId))
+              .map(([operationId, operationActivities]) => (
+                <AgentBuilderActivityBlock
+                  key={operationId}
+                  activities={operationActivities}
+                />
+              ))}
+
+            {processing ? (
               <p
                 role="status"
                 className="text-muted-foreground flex items-center gap-2 text-xs"
@@ -385,6 +446,14 @@ export function AgentBuilderConversationView({
                   ? copy.creatingAgent
                   : copy.designingAgent}
               </p>
+            ) : null}
+
+            {session.status === "completed" && createdAgentHref ? (
+              <div className="flex justify-start sm:pl-13">
+                <Button asChild variant="outline">
+                  <Link href={createdAgentHref}>{copy.viewAgent}</Link>
+                </Button>
+              </div>
             ) : null}
 
             {session.active_clarification ? (
@@ -468,7 +537,7 @@ export function AgentBuilderConversationView({
                     ? copy.saveLocalChangesFirst
                     : clarificationOpen
                       ? copy.answerQuestionFirst
-                      : generating
+                      : processing
                         ? copy.generatingBlueprint
                         : copy.composerPlaceholder
                 }
@@ -512,61 +581,86 @@ export function AgentBuilderConversationView({
                 </p>
               ) : null}
               <div className="flex items-center justify-between gap-2 p-1">
-                <ModelSelector>
-                  <ModelSelectorTrigger asChild>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="ghost"
-                      className="max-w-56 min-w-0 justify-start"
-                      aria-label={copy.selectModelAria}
-                      disabled={modelSelectorDisabled}
-                    >
-                      <ModelSelectorName className="text-xs font-normal">
-                        {selectedGenerationModel?.display_name ??
-                          copy.selectModel}
-                      </ModelSelectorName>
-                    </Button>
-                  </ModelSelectorTrigger>
-                  <ModelSelectorContent>
-                    <ModelSelectorLabel>{copy.modelLabel}</ModelSelectorLabel>
-                    <ModelSelectorList>
-                      {models.map((model) => (
-                        <ModelSelectorItem
-                          key={model.name}
-                          onSelect={() => onGenerationModelChange(model.name)}
-                        >
-                          <div className="flex min-w-0 flex-1 flex-col">
-                            <ModelSelectorName>
-                              {model.display_name}
-                            </ModelSelectorName>
-                            {model.is_default ? (
-                              <span className="text-muted-foreground truncate text-xs">
-                                {t.agents.common.defaultSuffix}
-                              </span>
-                            ) : null}
-                          </div>
-                          {model.name === selectedGenerationModelName ? (
-                            <CheckIcon aria-hidden className="ml-auto size-4" />
-                          ) : (
-                            <span aria-hidden className="ml-auto size-4" />
-                          )}
-                        </ModelSelectorItem>
-                      ))}
-                    </ModelSelectorList>
-                  </ModelSelectorContent>
-                </ModelSelector>
+                <div className="flex min-w-0 items-center gap-1">
+                  <ModelSelector>
+                    <ModelSelectorTrigger asChild>
+                      <Button
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        className="max-w-56 min-w-0 justify-start"
+                        aria-label={copy.selectModelAria}
+                        disabled={modelSelectorDisabled}
+                      >
+                        <ModelSelectorName className="text-xs font-normal">
+                          {selectedGenerationModel?.display_name ??
+                            copy.selectModel}
+                        </ModelSelectorName>
+                      </Button>
+                    </ModelSelectorTrigger>
+                    <ModelSelectorContent>
+                      <ModelSelectorLabel>{copy.modelLabel}</ModelSelectorLabel>
+                      <ModelSelectorList>
+                        {models.map((model) => (
+                          <ModelSelectorItem
+                            key={model.name}
+                            onSelect={() => onGenerationModelChange(model.name)}
+                          >
+                            <div className="flex min-w-0 flex-1 flex-col">
+                              <ModelSelectorName>
+                                {model.display_name}
+                              </ModelSelectorName>
+                              {model.is_default ? (
+                                <span className="text-muted-foreground truncate text-xs">
+                                  {t.agents.common.defaultSuffix}
+                                </span>
+                              ) : null}
+                            </div>
+                            {model.name === selectedGenerationModelName ? (
+                              <CheckIcon
+                                aria-hidden
+                                className="ml-auto size-4"
+                              />
+                            ) : (
+                              <span aria-hidden className="ml-auto size-4" />
+                            )}
+                          </ModelSelectorItem>
+                        ))}
+                      </ModelSelectorList>
+                    </ModelSelectorContent>
+                  </ModelSelector>
+                  <InputBoxModeChooser
+                    mode={selectedGenerationMode}
+                    disabled={modelSelectorDisabled}
+                    supportThinking={
+                      selectedGenerationModel?.supports_thinking ?? false
+                    }
+                    supportReasoningEffort={
+                      selectedGenerationModel?.supports_reasoning_effort ??
+                      false
+                    }
+                    labels={t.inputBox}
+                    onSelect={onGenerationModeChange}
+                  />
+                </div>
                 <Button
-                  type="submit"
+                  type={generating ? "button" : "submit"}
                   size="icon"
                   className="size-11 rounded-xl"
-                  aria-label={t.agents.common.send}
-                  disabled={
-                    composerDisabled || composerText.trim().length === 0
+                  aria-label={
+                    generating ? copy.stopGeneration : t.agents.common.send
                   }
+                  disabled={
+                    generating
+                      ? stopPending
+                      : composerDisabled || composerText.trim().length === 0
+                  }
+                  onClick={generating ? onStopGeneration : undefined}
                 >
-                  {mutationPending ? (
+                  {stopPending || mutationPending ? (
                     <Loader2Icon aria-hidden className="size-4 animate-spin" />
+                  ) : generating ? (
+                    <SquareIcon aria-hidden className="size-4 fill-current" />
                   ) : (
                     <SendIcon aria-hidden className="size-4" />
                   )}
@@ -603,6 +697,12 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     project.id,
     sessionId,
   );
+  const stopTurn = useStopAgentBuilderTurn(accountId, project.id, sessionId);
+  const generationPreference = useSetAgentBuilderGenerationPreference(
+    accountId,
+    project.id,
+    sessionId,
+  );
   const commit = useCommitAgentBuilderSession(accountId, project.id, sessionId);
   const cancel = useCancelAgentBuilderSession(accountId, project.id, sessionId);
   const sessionQuery = useAgentBuilderSession(
@@ -611,12 +711,21 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     sessionId,
     {
       canAuthor,
-      pollWhileRequestPending: submitTurn.isPending || commit.isPending,
+      pollWhileRequestPending:
+        submitTurn.isPending || stopTurn.isPending || commit.isPending,
     },
+  );
+  const activitiesQuery = useAgentBuilderActivities(
+    accountId,
+    project.id,
+    sessionId,
+    Boolean(user) && sessionQuery.data?.status !== "cancelled",
   );
   const [composerText, setComposerText] = useState("");
   const [selectedGenerationModelName, setSelectedGenerationModelName] =
     useState<string | null>(null);
+  const [selectedGenerationMode, setSelectedGenerationMode] =
+    useState<AgentMode | null>(null);
   const [blueprintBaseline, setBlueprintBaseline] =
     useState<AgentBuilderBlueprint | null>(null);
   const [blueprintDraft, setBlueprintDraft] =
@@ -642,12 +751,38 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const session = sessionQuery.data;
   const selectedGenerationModel =
     modelsQuery.models.find(
-      (model) => model.name === selectedGenerationModelName,
+      (model) =>
+        model.name ===
+        (selectedGenerationModelName ??
+          session?.generation_preference?.model_ref),
     ) ??
     modelsQuery.models.find((model) => model.is_default) ??
     modelsQuery.models[0] ??
     null;
   const effectiveGenerationModelName = selectedGenerationModel?.name ?? null;
+  const effectiveGenerationMode = resolveAgentMode(
+    selectedGenerationMode ??
+      (session?.generation_preference?.model_ref ===
+      effectiveGenerationModelName
+        ? session.generation_preference.mode
+        : undefined),
+    selectedGenerationModel?.supports_thinking ?? false,
+    selectedGenerationModel?.supports_reasoning_effort ?? false,
+  );
+  const generationExecutionProfile = getAgentModeExecutionProfile(
+    effectiveGenerationMode,
+    selectedGenerationModel?.supports_thinking ?? false,
+    selectedGenerationModel?.supports_reasoning_effort ?? false,
+  );
+  const generationProfileRequest = {
+    thinking_enabled: generationExecutionProfile.thinking_enabled === true,
+    reasoning_effort: generationExecutionProfile.reasoning_effort as
+      | "none"
+      | "low"
+      | "medium"
+      | "high"
+      | null,
+  };
   const pendingUserMessage =
     submitTurn.isPending &&
     submitTurn.variables?.input.kind === "message" &&
@@ -676,6 +811,8 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   })();
   const mutationPending =
     submitTurn.isPending ||
+    generationPreference.isPending ||
+    stopTurn.isPending ||
     commit.isPending ||
     cancel.isPending ||
     cancelPreparing;
@@ -789,6 +926,64 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     submitTurn.reset();
     commit.reset();
     cancel.reset();
+    stopTurn.reset();
+    generationPreference.reset();
+  }
+
+  function persistGenerationPreference(model: Model, mode: AgentMode) {
+    const executionProfile = getAgentModeExecutionProfile(
+      mode,
+      model.supports_thinking,
+      model.supports_reasoning_effort,
+    );
+    generationPreference.mutate(
+      {
+        generation_model_ref: model.name,
+        generation_mode: mode,
+        thinking_enabled: executionProfile.thinking_enabled === true,
+        reasoning_effort: executionProfile.reasoning_effort as
+          | "none"
+          | "low"
+          | "medium"
+          | "high"
+          | null,
+      },
+      {
+        onSuccess: () => {
+          setSelectedGenerationModelName(null);
+          setSelectedGenerationMode(null);
+        },
+        onError: (error) => {
+          setSelectedGenerationModelName(null);
+          setSelectedGenerationMode(null);
+          if (
+            error instanceof AgentBuilderApiError &&
+            error.code === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+          ) {
+            void Promise.all([modelsQuery.refetch(), sessionQuery.refetch()]);
+          }
+        },
+      },
+    );
+  }
+
+  function selectGenerationModel(modelName: string) {
+    const model = modelsQuery.models.find((item) => item.name === modelName);
+    if (!model) return;
+    const mode = resolveAgentMode(
+      undefined,
+      model.supports_thinking,
+      model.supports_reasoning_effort,
+    );
+    setSelectedGenerationModelName(modelName);
+    setSelectedGenerationMode(mode);
+    persistGenerationPreference(model, mode);
+  }
+
+  function selectGenerationMode(mode: AgentMode) {
+    if (!selectedGenerationModel) return;
+    setSelectedGenerationMode(mode);
+    persistGenerationPreference(selectedGenerationModel, mode);
   }
 
   function sendMessage() {
@@ -809,24 +1004,39 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       kind: "message",
       message,
       generation_model_ref: effectiveGenerationModelName,
+      generation_mode: effectiveGenerationMode,
+      ...generationProfileRequest,
     });
     const command = idempotency.acquire("message-turn", signature, (key) => ({
       input: { kind: "message" as const, message },
       generation_model_ref: effectiveGenerationModelName,
+      generation_mode: effectiveGenerationMode,
+      ...generationProfileRequest,
       idempotency_key: key,
       expected_revision: session.revision,
     }));
     setComposerText("");
     submitTurn.mutate(command, {
       onSuccess: (response) => {
+        idempotency.complete("message-turn", signature);
         if (response.data.status === "failed") {
+          if (
+            response.data.error_code === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+          ) {
+            void modelsQuery.refetch();
+          }
           setComposerText((current) => current || message);
           return;
         }
-        idempotency.complete("message-turn", signature);
       },
       onError: (error) => {
         setComposerText((current) => current || message);
+        if (
+          error instanceof AgentBuilderApiError &&
+          error.code === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+        ) {
+          void modelsQuery.refetch();
+        }
         void recoverAgentBuilderConflict(
           error,
           () => idempotency.complete("message-turn", signature),
@@ -854,6 +1064,8 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       kind: "clarification",
       response,
       generation_model_ref: effectiveGenerationModelName,
+      generation_mode: effectiveGenerationMode,
+      ...generationProfileRequest,
     });
     const command = idempotency.acquire(
       "clarification-turn",
@@ -861,21 +1073,39 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       (key) => ({
         input: { kind: "clarification" as const, response },
         generation_model_ref: effectiveGenerationModelName,
+        generation_mode: effectiveGenerationMode,
+        ...generationProfileRequest,
         idempotency_key: key,
         expected_revision: session.revision,
       }),
     );
     return submitAgentBuilderClarificationMutation(
-      () => submitTurn.mutateAsync(command),
+      () =>
+        submitTurn.mutateAsync(command).then((result) => {
+          if (
+            result.data.status === "failed" &&
+            result.data.error_code === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+          ) {
+            void modelsQuery.refetch();
+          }
+          return result;
+        }),
       () => {
         idempotency.complete("clarification-turn", signature);
       },
       (error) =>
-        recoverAgentBuilderConflict(
-          error,
-          () => idempotency.complete("clarification-turn", signature),
-          () => sessionQuery.refetch(),
+        (error instanceof AgentBuilderApiError &&
+        error.code === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+          ? modelsQuery.refetch().then(() => false)
+          : Promise.resolve(false)
         )
+          .then(() =>
+            recoverAgentBuilderConflict(
+              error,
+              () => idempotency.complete("clarification-turn", signature),
+              () => sessionQuery.refetch(),
+            ),
+          )
           .then(() => undefined)
           .catch(() => undefined),
     );
@@ -965,11 +1195,8 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
       expected_blueprint_checksum: blueprintChecksum,
     }));
     commit.mutate(command, {
-      onSuccess: (response) => {
+      onSuccess: () => {
         idempotency.complete("commit", signature);
-        router.replace(
-          `/projects/${encodeURIComponent(project.slug)}/agents?agent_id=${encodeURIComponent(response.data.agent.id)}`,
-        );
       },
       onError: (error) => {
         void recoverAgentBuilderConflict(
@@ -1054,12 +1281,17 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
             t.agents.builder.errors,
             true,
           )
-        : cancel.error
+        : generationPreference.error
           ? agentBuilderWorkspaceErrorMessage(
-              cancel.error,
+              generationPreference.error,
               t.agents.builder.errors,
             )
-          : null);
+          : cancel.error
+            ? agentBuilderWorkspaceErrorMessage(
+                cancel.error,
+                t.agents.builder.errors,
+              )
+            : null);
 
   if (!user) return null;
 
@@ -1146,7 +1378,8 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               agentSlug={normalizedAgentSlug}
               agentSlugError={agentSlugError}
               pendingUserMessage={pendingUserMessage}
-              canAuthor={canAuthor}
+              activities={activitiesQuery.data ?? []}
+              canAuthor={canAuthor && session.status !== "completed"}
               mutationPending={mutationPending}
               commitPending={commit.isPending}
               blueprintEditing={blueprintEditing}
@@ -1156,6 +1389,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               modelsLoading={modelsQuery.isLoading}
               modelsError={modelsQuery.error}
               selectedGenerationModelName={effectiveGenerationModelName}
+              selectedGenerationMode={effectiveGenerationMode}
               scrollContainerRef={scrollRef}
               mcpDependencyLoading={mcpDependencyRuntime.isLoading}
               mcpDependencyBlockReason={mcpDependencyRuntime.blockReason}
@@ -1163,12 +1397,20 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               displayMode={displayMode}
               errorMessage={requestError}
               onModelsRetry={() => void modelsQuery.refetch()}
-              onGenerationModelChange={setSelectedGenerationModelName}
+              onGenerationModelChange={selectGenerationModel}
+              onGenerationModeChange={selectGenerationMode}
               onComposerTextChange={(value) => {
                 setComposerText(value);
                 if (requestError) resetErrors();
               }}
               onSubmitMessage={sendMessage}
+              onStopGeneration={() => stopTurn.mutate()}
+              stopPending={stopTurn.isPending}
+              createdAgentHref={
+                session.created_agent_id
+                  ? `/projects/${encodeURIComponent(project.slug)}/agents?agent_id=${encodeURIComponent(session.created_agent_id)}`
+                  : null
+              }
               onSubmitClarification={submitClarification}
               onSelectedFieldChange={setSelectedField}
               onDisplayModeChange={setDisplayMode}

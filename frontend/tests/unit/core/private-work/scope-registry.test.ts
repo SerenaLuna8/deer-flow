@@ -37,6 +37,62 @@ function makeSessionStorage() {
 }
 
 describe("project private-work scope registry", () => {
+  test("owns project event streams and rejects late frames after disposal", async () => {
+    class FakeEventSource {
+      static instances: FakeEventSource[] = [];
+      readonly listeners = new Map<string, Set<EventListener>>();
+      closed = false;
+
+      constructor(
+        readonly url: string,
+        readonly options: EventSourceInit,
+      ) {
+        FakeEventSource.instances.push(this);
+      }
+
+      addEventListener(name: string, listener: EventListener) {
+        const listeners = this.listeners.get(name) ?? new Set<EventListener>();
+        listeners.add(listener);
+        this.listeners.set(name, listeners);
+      }
+
+      removeEventListener(name: string, listener: EventListener) {
+        this.listeners.get(name)?.delete(listener);
+      }
+
+      close() {
+        this.closed = true;
+      }
+
+      emit(name: string, data: string) {
+        for (const listener of this.listeners.get(name) ?? []) {
+          listener({ data } as MessageEvent<string>);
+        }
+      }
+    }
+
+    rs.stubGlobal("EventSource", FakeEventSource);
+    const registry = createPrivateWorkScopeRegistry();
+    const queryClient = new QueryClient();
+    const access = registry.acquire(A_P1);
+    const received: string[] = [];
+    access.subscribeEventStream?.(
+      "/api/projects/p1/agent-builder/activities/stream",
+      "activity",
+      (data) => received.push(data),
+    );
+    const source = FakeEventSource.instances[0];
+    expect(source?.options.withCredentials).toBe(true);
+    source?.emit("activity", "first");
+
+    await transitionPrivateWorkScope(registry, queryClient, A_P1, A_P2);
+    source?.emit("activity", "late");
+
+    expect(received).toEqual(["first"]);
+    expect(source?.closed).toBe(true);
+    rs.unstubAllGlobals();
+  });
+
   test("aborts and removes in-flight governance queries and mutations on project switch", async () => {
     const registry = createPrivateWorkScopeRegistry();
     const access = registry.acquire(A_P1);

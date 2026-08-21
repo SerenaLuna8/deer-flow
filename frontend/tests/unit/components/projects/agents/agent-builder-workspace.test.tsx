@@ -17,6 +17,7 @@ import {
 import {
   AgentBuilderApiError,
   type AgentBuilderBlueprint,
+  type AgentBuilderActivity,
   type AgentBuilderSession,
   type AgentBuilderSessionSummary,
 } from "@/core/agent-builder";
@@ -68,6 +69,7 @@ function session(): AgentBuilderSession {
     error_code: null,
     error_message: null,
     created_agent_id: null,
+    generation_preference: null,
     created_at: TIMESTAMP,
     updated_at: TIMESTAMP,
   };
@@ -145,6 +147,7 @@ describe("Agent Builder workspace", () => {
         composerText=""
         models={MODELS}
         selectedGenerationModelName={MODEL_ID}
+        selectedGenerationMode="pro"
         canAuthor
         mutationPending={false}
         commitPending={false}
@@ -210,6 +213,180 @@ describe("Agent Builder workspace", () => {
     expect(html).toContain("正在设计 Agent");
   });
 
+  test("renders user, real process, then AI result and collapses a terminal turn", () => {
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const completed = {
+      ...session(),
+      status: "proposal_ready" as const,
+      messages: [
+        {
+          id: "user-1",
+          role: "user" as const,
+          content: "请设计审查助手",
+          operation_id: operationId,
+          created_at: TIMESTAMP,
+        },
+        {
+          id: "assistant-1",
+          role: "assistant" as const,
+          content: "候选已经就绪",
+          operation_id: operationId,
+          created_at: TIMESTAMP,
+        },
+      ],
+    };
+    const activities: AgentBuilderActivity[] = [
+      {
+        seq: "9007199254740993",
+        operation_id: operationId,
+        kind: "turn_accepted",
+        attempt: null,
+        payload: {},
+        created_at: TIMESTAMP,
+      },
+      {
+        seq: "9007199254740994",
+        operation_id: operationId,
+        kind: "reasoning",
+        attempt: 1,
+        payload: { text: "首次真实思考" },
+        created_at: TIMESTAMP,
+      },
+      {
+        seq: "9007199254740995",
+        operation_id: operationId,
+        kind: "reasoning",
+        attempt: 2,
+        payload: { text: "修复真实思考" },
+        created_at: TIMESTAMP,
+      },
+      {
+        seq: "9007199254740996",
+        operation_id: operationId,
+        kind: "turn_terminal",
+        attempt: null,
+        payload: { status: "completed", duration_ms: 1234 },
+        created_at: TIMESTAMP,
+      },
+    ];
+
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={completed}
+        activities={activities}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        canAuthor
+        mutationPending={false}
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    expect(html.indexOf("请设计审查助手")).toBeLessThan(
+      html.indexOf("思考与执行过程"),
+    );
+    expect(html.indexOf("思考与执行过程")).toBeLessThan(
+      html.indexOf("候选已经就绪"),
+    );
+    expect(html).toContain("首次真实思考");
+    expect(html).toContain("修复真实思考");
+    expect(html).not.toMatch(/<details[^>]* open/);
+  });
+
+  test("keeps an active process open without inventing reasoning", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={{ ...session(), status: "generating" }}
+        activities={[
+          {
+            seq: "1",
+            operation_id: "44444444-4444-4444-8444-444444444444",
+            kind: "turn_accepted",
+            attempt: null,
+            payload: {},
+            created_at: TIMESTAMP,
+          },
+        ]}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        canAuthor
+        mutationPending
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    expect(html).toMatch(/<details[^>]* open=""/);
+    expect(html).not.toContain("首次真实思考");
+    expect(html).toContain("停止本轮生成");
+  });
+
+  test("does not offer generation stop while the final Agent commit is running", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={{ ...session(), status: "committing" }}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        canAuthor
+        mutationPending
+        commitPending
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("正在创建 Agent");
+    expect(html).not.toContain("停止本轮生成");
+  });
+
   test("offers a model picker for the Builder conversation", () => {
     const html = renderAgentUi(
       <AgentBuilderConversationView
@@ -219,6 +396,7 @@ describe("Agent Builder workspace", () => {
         modelsLoading={false}
         modelsError={null}
         selectedGenerationModelName={MODEL_ID}
+        selectedGenerationMode="pro"
         canAuthor
         mutationPending={false}
         commitPending={false}
@@ -245,7 +423,92 @@ describe("Agent Builder workspace", () => {
 
     expect(html).toContain('aria-label="选择创建 Agent 的对话模型"');
     expect(html).toContain("GPT-5.6 Luna");
+    expect(html).toContain("Pro");
     expect(html).not.toContain(MODEL_ID);
+  });
+
+  test("locks the model picker from another page while generation is active", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={{ ...session(), status: "generating" }}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        selectedGenerationMode="pro"
+        canAuthor
+        mutationPending={false}
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onGenerationModelChange={() => undefined}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+    const labelIndex = html.indexOf('aria-label="选择创建 Agent 的对话模型"');
+    const buttonStart = html.lastIndexOf("<button", labelIndex);
+    const buttonEnd = html.indexOf(">", labelIndex);
+
+    expect(labelIndex).toBeGreaterThanOrEqual(0);
+    expect(html.slice(buttonStart, buttonEnd)).toContain("disabled");
+  });
+
+  test("renders a completed design record as read-only", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={{
+          ...session(),
+          status: "completed",
+          blueprint: blueprint(),
+          blueprint_checksum: "a".repeat(64),
+          created_agent_id: "44444444-4444-4444-8444-444444444444",
+        }}
+        composerText=""
+        agentName="Code Review"
+        agentSlug="code-review"
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        selectedGenerationMode="pro"
+        canAuthor={false}
+        mutationPending={false}
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={blueprint()}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+    const inputId = html.indexOf('id="agent-builder-commit-name"');
+    const inputStart = html.lastIndexOf("<input", inputId);
+    const inputEnd = html.indexOf(">", inputId);
+
+    expect(inputId).toBeGreaterThanOrEqual(0);
+    expect(html.slice(inputStart, inputEnd)).toContain("disabled");
+    expect(html).not.toContain(">编辑<");
   });
 
   test("keeps the created Agent runtime model read-only in the blueprint", () => {

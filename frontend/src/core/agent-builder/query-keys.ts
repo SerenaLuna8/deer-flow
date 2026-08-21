@@ -38,6 +38,29 @@ export function agentBuilderSessionKey(
   ] as const;
 }
 
+export function agentBuilderActivitiesKey(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  return [
+    ...agentBuilderSessionKey(accountId, projectId, sessionId),
+    "activities",
+  ] as const;
+}
+
+export function agentBuilderSessionByAgentKey(
+  accountId: string,
+  projectId: string,
+  agentId: string,
+) {
+  return [
+    ...agentBuilderRootKey(accountId, projectId),
+    "by-agent",
+    requirePart(agentId, "Agent ID"),
+  ] as const;
+}
+
 export function agentBuilderMutationKey(
   accountId: string,
   projectId: string,

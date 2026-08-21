@@ -201,6 +201,62 @@ async def test_discovery_repairs_a_response_that_skips_the_next_question() -> No
 
 
 @pytest.mark.asyncio
+async def test_repair_activity_keeps_real_reasoning_for_each_attempt() -> None:
+    outputs = iter(
+        [
+            _candidate_output(capability_claims=["file.read"]),
+            _clarification_output(
+                (_question("scope", "主要审查哪些语言和代码类型？"),),
+            ),
+        ],
+    )
+
+    async def caller(**kwargs: object) -> str:
+        callback = kwargs.get("on_reasoning_delta")
+        assert callable(callback)
+        value = next(outputs)
+        await callback("首次真实思考" if "REPAIR REQUIREMENT" not in str(kwargs["user_content"]) else "修复真实思考")
+        return value
+
+    activities: list[tuple[str, int | None, dict[str, object]]] = []
+
+    async def record_activity(
+        kind: str,
+        attempt: int | None,
+        payload: dict[str, object],
+    ) -> None:
+        activities.append((kind, attempt, payload))
+
+    result = await AgentDesignGenerationService(model_caller=caller).generate(
+        AgentDesignGenerationRequest(
+            agent_name="代码审查",
+            brief="代码审查、代码质量、bug、安全审查",
+            phase="discovery",
+        ),
+        context=AgentDesignGenerationContext(
+            allowed_capabilities=("file.read",),
+        ),
+        activity_callback=record_activity,
+    )
+
+    assert isinstance(result, NeedsClarificationResult)
+    assert [(kind, attempt) for kind, attempt, _payload in activities] == [
+        ("attempt_started", 1),
+        ("reasoning", 1),
+        ("candidate_generated", 1),
+        ("validation_started", 1),
+        ("validation_failed", 1),
+        ("repair_started", 2),
+        ("attempt_started", 2),
+        ("reasoning", 2),
+        ("candidate_generated", 2),
+        ("validation_started", 2),
+        ("validation_passed", 2),
+    ]
+    assert [payload["text"] for kind, _attempt, payload in activities if kind == "reasoning"] == ["首次真实思考", "修复真实思考"]
+
+
+@pytest.mark.asyncio
 async def test_next_discovery_question_receives_the_previous_question_and_answer() -> None:
     class _RecordingCaller(_StaticCaller):
         user_content = ""

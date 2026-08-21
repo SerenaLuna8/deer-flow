@@ -10,6 +10,8 @@ from sqlalchemy import select
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
 
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_design_activity import AgentDesignActivityKind
+from app.shared_assets.agent_design_control import AgentDesignGenerationControl
 from app.shared_assets.agent_design_generation import (
     AgentDesignDraft,
     AgentDesignGenerationContext,
@@ -35,7 +37,6 @@ from app.shared_assets.agent_service import AgentService, CreateAgent
 from app.shared_assets.errors import (
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
-    AssetConflict,
 )
 from app.shared_assets.models import AgentPayload
 from deerflow.persistence.shared_assets import (
@@ -55,6 +56,7 @@ class _QuestionGenerator:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
+        **_kwargs: object,
     ) -> NeedsClarificationResult:
         del request, context, model_ref
         self.calls += 1
@@ -85,10 +87,25 @@ class _PausingQuestionGenerator:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
+        **_kwargs: object,
     ) -> NeedsClarificationResult:
         del request, context, model_ref
         self.started.set()
-        await self.resume.wait()
+        abort_event = _kwargs.get("abort_event")
+        if isinstance(abort_event, asyncio.Event):
+            resume_task = asyncio.create_task(self.resume.wait())
+            abort_task = asyncio.create_task(abort_event.wait())
+            done, pending = await asyncio.wait(
+                {resume_task, abort_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if abort_task in done:
+                raise asyncio.CancelledError
+        else:
+            await self.resume.wait()
         return NeedsClarificationResult(
             questions=(
                 ClarificationQuestion(
@@ -111,6 +128,7 @@ class _FailingGenerator:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
+        **_kwargs: object,
     ) -> NeedsClarificationResult:
         del request, context, model_ref
         raise RuntimeError("synthetic generation failure")
@@ -123,6 +141,7 @@ class _CandidateGenerator:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
+        **_kwargs: object,
     ) -> CandidateResult:
         del request, context, model_ref
         return CandidateResult(
@@ -627,6 +646,28 @@ async def test_commit_recovers_from_original_slug_conflict_with_an_override(
                     idempotency_key="commit-conflicting-original-slug",
                 ),
             )
+        failed_commit = await service.get(context, created.id)
+        assert failed_commit.status is AgentDesignStatus.PROPOSAL_READY
+        assert failed_commit.blueprint_checksum == proposal.blueprint_checksum
+        failed_activities = await service.list_activities(context, created.id)
+        assert [
+            activity.kind
+            for activity in failed_activities
+            if activity.kind
+            in {
+                AgentDesignActivityKind.COMMIT_ACCEPTED,
+                AgentDesignActivityKind.COMMIT_VALIDATION_STARTED,
+                AgentDesignActivityKind.COMMIT_TERMINAL,
+            }
+        ][-3:] == [
+            AgentDesignActivityKind.COMMIT_ACCEPTED,
+            AgentDesignActivityKind.COMMIT_VALIDATION_STARTED,
+            AgentDesignActivityKind.COMMIT_TERMINAL,
+        ]
+        assert failed_activities[-1].payload == {
+            "status": "failed",
+            "error_code": "AGENT_DESIGN_COMMIT_FAILED",
+        }
 
         committed = await service.commit(
             context,
@@ -671,6 +712,7 @@ async def test_cancel_fences_failed_turn_retry_before_terminalizing_generation(
         seed.factory,
         generator=_FailingGenerator(),  # type: ignore[arg-type]
     )
+    generation_control = AgentDesignGenerationControl()
     retry_generator = _PausingQuestionGenerator()
     retry_prepared = asyncio.Event()
     resume_retry_prepare = asyncio.Event()
@@ -682,6 +724,7 @@ async def test_cancel_fences_failed_turn_retry_before_terminalizing_generation(
             prepared=retry_prepared,
             resume=resume_retry_prepare,
         ),
+        generation_control=generation_control,
     )
     cancel_attempted = asyncio.Event()
     cancel_scanned = asyncio.Event()
@@ -692,6 +735,7 @@ async def test_cancel_fences_failed_turn_retry_before_terminalizing_generation(
             attempted=cancel_attempted,
             scanned=cancel_scanned,
         ),
+        generation_control=AgentDesignGenerationControl(),
     )
     retry_task: asyncio.Task | None = None
     cancel_task: asyncio.Task | None = None
@@ -719,7 +763,12 @@ async def test_cancel_fences_failed_turn_retry_before_terminalizing_generation(
         )
         assert failed.status is AgentDesignStatus.FAILED
 
-        retry_task = asyncio.create_task(retry_service.submit_turn(context, created.id, command))
+        retry_command = SubmitAgentDesignTurn(
+            input=command.input,
+            expected_revision=failed.revision,
+            idempotency_key="cancel-retry-turn-2",
+        )
+        retry_task = asyncio.create_task(retry_service.submit_turn(context, created.id, retry_command))
         await asyncio.wait_for(retry_prepared.wait(), timeout=5)
         cancel_task = asyncio.create_task(
             cancel_service.cancel(
@@ -736,25 +785,27 @@ async def test_cancel_fences_failed_turn_retry_before_terminalizing_generation(
         assert not cancel_scanned.is_set()
 
         resume_retry_prepare.set()
-        await asyncio.wait_for(retry_generator.started.wait(), timeout=5)
         await asyncio.wait_for(cancel_scanned.wait(), timeout=5)
         cancelled = await asyncio.wait_for(cancel_task, timeout=5)
         assert cancelled.status is AgentDesignStatus.CANCELLED
 
-        retry_generator.resume.set()
-        with pytest.raises(AssetConflict):
-            await asyncio.wait_for(retry_task, timeout=5)
+        stopped = await asyncio.wait_for(retry_task, timeout=5)
+        assert stopped.status is AgentDesignStatus.INTERVIEWING
+        assert not retry_generator.started.is_set()
 
         async with seed.factory() as session:
             operation = await session.scalar(
                 select(AgentDesignOperationRow).where(
                     AgentDesignOperationRow.session_id == created.id,
                     AgentDesignOperationRow.operation_kind == "turn",
+                    AgentDesignOperationRow.status == "stopped",
                 )
             )
         assert operation is not None
-        assert operation.status == "failed"
-        assert operation.public_error_code == "AGENT_DESIGN_SESSION_CANCELLED"
+        assert operation.status == "stopped"
+        assert operation.public_error_code is None
+        assert operation.requested_generation_profile_json is None
+        assert operation.effective_generation_profile_json is None
     finally:
         resume_retry_prepare.set()
         retry_generator.resume.set()

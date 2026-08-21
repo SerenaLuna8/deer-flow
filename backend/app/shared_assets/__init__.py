@@ -27,6 +27,7 @@ from app.shared_assets.default_agent_service import (
 from app.shared_assets.errors import (
     AgentArchived,
     AgentDesignConflictUnresolved,
+    AgentDesignGenerationProfileStale,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
@@ -110,6 +111,7 @@ from app.shared_assets.skill_service import (
 __all__ = [
     "AGENT_INSTRUCTION_FIELDS",
     "AgentDesignConflictUnresolved",
+    "AgentDesignGenerationProfileStale",
     "AgentDesignSecretDetected",
     "AgentDesignSessionLimitExceeded",
     "AgentDesignSlugConflict",

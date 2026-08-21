@@ -107,6 +107,13 @@ class AgentDesignConflictUnresolved(AssetConflict):
     public_message = "Agent design has unresolved error conflicts"
 
 
+class AgentDesignGenerationProfileStale(AssetConflict):
+    """The selected model can no longer honor the requested Builder mode."""
+
+    code = "AGENT_DESIGN_GENERATION_PROFILE_STALE"
+    public_message = "Agent design generation profile is no longer available"
+
+
 class AgentDesignSessionLimitExceeded(SharedAssetError):
     """An owner already has the maximum incomplete Builder sessions."""
 

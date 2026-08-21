@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
+    Identity,
     Index,
     PrimaryKeyConstraint,
     String,
@@ -89,6 +90,8 @@ class AgentDesignSessionRow(Base):
         default=False,
         server_default=text("false"),
     )
+    generation_model_ref: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    generation_mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_agent_design_sessions"),
@@ -122,6 +125,10 @@ class AgentDesignSessionRow(Base):
         CheckConstraint(
             "(status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)",
             name="ck_agent_design_sessions_error",
+        ),
+        CheckConstraint(
+            "(generation_model_ref IS NULL AND generation_mode IS NULL) OR (generation_model_ref IS NOT NULL AND generation_mode IN ('flash', 'thinking', 'pro', 'ultra'))",
+            name="ck_agent_design_sessions_generation_preference",
         ),
         UniqueConstraint("project_id", "owner_user_id", "id", name="uq_agent_design_sessions_private_scope"),
         UniqueConstraint("project_id", "owner_user_id", "thread_id", name="uq_agent_design_sessions_thread_scope"),
@@ -200,17 +207,34 @@ class AgentDesignOperationRow(Base):
         onupdate=_now,
         server_default=text("now()"),
     )
+    stop_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    requested_generation_profile_json: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
+    effective_generation_profile_json: Mapped[dict[str, object] | None] = mapped_column(
+        JSONB(none_as_null=True),
+        nullable=True,
+    )
 
     __table_args__ = (
         PrimaryKeyConstraint("id", name="pk_agent_design_operations"),
         CheckConstraint("operation_kind IN ('turn', 'commit', 'cancel')", name="ck_agent_design_operations_kind"),
-        CheckConstraint("status IN ('in_progress', 'completed', 'failed')", name="ck_agent_design_operations_status"),
+        CheckConstraint("status IN ('in_progress', 'completed', 'failed', 'stopped')", name="ck_agent_design_operations_status"),
         CheckConstraint("result_revision IS NULL OR result_revision >= 1", name="ck_agent_design_operations_result_revision"),
         CheckConstraint(
             "(status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL) "
             "OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL) "
-            "OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL)",
+            "OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL) "
+            "OR (status = 'stopped' AND result_revision IS NOT NULL AND public_error_code IS NULL)",
             name="ck_agent_design_operations_completion",
+        ),
+        CheckConstraint(
+            "(requested_generation_profile_json IS NULL AND effective_generation_profile_json IS NULL) OR (operation_kind = 'turn' AND requested_generation_profile_json IS NOT NULL AND effective_generation_profile_json IS NOT NULL)",
+            name="ck_agent_design_operations_generation_profile",
         ),
         ForeignKeyConstraint(
             ["project_id", "owner_user_id", "session_id"],
@@ -221,6 +245,13 @@ class AgentDesignOperationRow(Base):
             ],
             name="fk_agent_design_operations_session",
             ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "owner_user_id",
+            "session_id",
+            "id",
+            name="uq_agent_design_operations_private_scope",
         ),
         UniqueConstraint(
             "project_id",
@@ -239,4 +270,89 @@ class AgentDesignOperationRow(Base):
     )
 
 
-__all__ = ["AgentDesignOperationRow", "AgentDesignSessionRow"]
+class AgentDesignActivityRow(Base):
+    """Append-only, public-safe Builder activity event."""
+
+    __tablename__ = "agent_design_activities"
+
+    seq: Mapped[int] = mapped_column(
+        BigInteger,
+        Identity(always=True),
+        primary_key=True,
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    session_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    operation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    attempt: Mapped[int | None] = mapped_column(nullable=True)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    payload_json: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint("seq", name="pk_agent_design_activities"),
+        CheckConstraint(
+            "attempt IS NULL OR attempt IN (1, 2)",
+            name="ck_agent_design_activities_attempt",
+        ),
+        CheckConstraint(
+            "kind IN ('turn_accepted', 'attempt_started', 'reasoning', "
+            "'candidate_generated', 'validation_started', 'validation_passed', "
+            "'validation_failed', 'repair_started', 'turn_terminal', "
+            "'commit_accepted', 'commit_validation_started', "
+            "'commit_validation_passed', 'commit_persistence_started', "
+            "'commit_persistence_completed', 'commit_terminal')",
+            name="ck_agent_design_activities_kind",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "session_id"],
+            [
+                "agent_design_sessions.project_id",
+                "agent_design_sessions.owner_user_id",
+                "agent_design_sessions.id",
+            ],
+            name="fk_agent_design_activities_session",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "owner_user_id", "session_id", "operation_id"],
+            [
+                "agent_design_operations.project_id",
+                "agent_design_operations.owner_user_id",
+                "agent_design_operations.session_id",
+                "agent_design_operations.id",
+            ],
+            name="fk_agent_design_activities_operation",
+            ondelete="CASCADE",
+        ),
+        Index(
+            "ix_agent_design_activities_session_seq",
+            "project_id",
+            "owner_user_id",
+            "session_id",
+            "seq",
+        ),
+        Index(
+            "uq_agent_design_activities_terminal",
+            "operation_id",
+            unique=True,
+            postgresql_where=text("kind IN ('turn_terminal', 'commit_terminal')"),
+        ),
+    )
+
+
+__all__ = [
+    "AgentDesignActivityRow",
+    "AgentDesignOperationRow",
+    "AgentDesignSessionRow",
+]

@@ -6,7 +6,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langsmith.run_helpers import get_tracing_context, tracing_context
 
 import deerflow.models.runtime as model_runtime_module
@@ -655,3 +655,141 @@ async def test_oneshot_llm_defaults_to_private_runtime_profile(
         "deadline_monotonic": None,
         "abort_event": None,
     }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("chunks", "expected_reasoning", "expected_output"),
+    [
+        (
+            [
+                AIMessageChunk(
+                    content="",
+                    additional_kwargs={"reasoning_content": "结构化思考"},
+                ),
+                AIMessageChunk(content='{"decision":"candidate"}'),
+            ],
+            "结构化思考",
+            '{"decision":"candidate"}',
+        ),
+        (
+            [
+                AIMessageChunk(
+                    content=[{"type": "thinking", "thinking": "内容块思考"}],
+                ),
+                AIMessageChunk(content='{"decision":"candidate"}'),
+            ],
+            "内容块思考",
+            '{"decision":"candidate"}',
+        ),
+        (
+            [
+                AIMessageChunk(content="<thi"),
+                AIMessageChunk(content="nk>行内思考</think>"),
+                AIMessageChunk(content='{"decision":"candidate"}'),
+            ],
+            "行内思考",
+            '<think>行内思考</think>{"decision":"candidate"}',
+        ),
+    ],
+)
+async def test_oneshot_llm_streams_only_real_provider_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+    chunks: list[AIMessageChunk],
+    expected_reasoning: str,
+    expected_output: str,
+) -> None:
+    class FakeRuntime:
+        def __init__(self, *, app_config: object) -> None:
+            del app_config
+
+        async def astream(self, *_args: object, **_kwargs: object):
+            for chunk in chunks:
+                yield chunk
+
+    monkeypatch.setattr("deerflow.utils.oneshot_llm.ModelRuntime", FakeRuntime)
+    observed: list[str] = []
+
+    async def record_reasoning(value: str) -> None:
+        observed.append(value)
+
+    result = await run_oneshot_llm(
+        system_instruction="system",
+        user_content="user",
+        run_name="builder-stream",
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        on_reasoning_delta=record_reasoning,
+    )
+
+    assert "".join(observed) == expected_reasoning
+    assert result == expected_output
+
+
+@pytest.mark.anyio
+async def test_oneshot_llm_does_not_invent_reasoning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeRuntime:
+        def __init__(self, *, app_config: object) -> None:
+            del app_config
+
+        async def astream(self, *_args: object, **_kwargs: object):
+            yield AIMessageChunk(content='{"decision":"candidate"}')
+
+    monkeypatch.setattr("deerflow.utils.oneshot_llm.ModelRuntime", FakeRuntime)
+    observed: list[str] = []
+
+    async def record_reasoning(value: str) -> None:
+        observed.append(value)
+
+    await run_oneshot_llm(
+        system_instruction="system",
+        user_content="user",
+        run_name="builder-no-reasoning",
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        on_reasoning_delta=record_reasoning,
+    )
+
+    assert observed == []
+
+
+@pytest.mark.anyio
+async def test_oneshot_llm_flushes_a_short_reasoning_delta_while_provider_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release_response = asyncio.Event()
+    reasoning_flushed = asyncio.Event()
+
+    class FakeRuntime:
+        def __init__(self, *, app_config: object) -> None:
+            del app_config
+
+        async def astream(self, *_args: object, **_kwargs: object):
+            yield AIMessageChunk(
+                content="",
+                additional_kwargs={"reasoning_content": "短思考"},
+            )
+            await release_response.wait()
+            yield AIMessageChunk(content='{"decision":"candidate"}')
+
+    monkeypatch.setattr("deerflow.utils.oneshot_llm.ModelRuntime", FakeRuntime)
+    observed: list[str] = []
+
+    async def record_reasoning(value: str) -> None:
+        observed.append(value)
+        reasoning_flushed.set()
+
+    task = asyncio.create_task(
+        run_oneshot_llm(
+            system_instruction="system",
+            user_content="user",
+            run_name="builder-short-reasoning",
+            app_config=SimpleNamespace(),  # type: ignore[arg-type]
+            on_reasoning_delta=record_reasoning,
+        )
+    )
+    await asyncio.wait_for(reasoning_flushed.wait(), timeout=0.5)
+    assert observed == ["短思考"]
+    assert not task.done()
+    release_response.set()
+    assert await task == '{"decision":"candidate"}'

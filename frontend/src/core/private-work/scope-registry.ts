@@ -40,6 +40,7 @@ function sameScope(
 export class PrivateWorkScopeRegistry {
   private readonly entries = new Map<string, PrivateWorkAccess>();
   private readonly abortControllers = new Map<string, Set<AbortController>>();
+  private readonly eventSources = new Map<string, Set<EventSource>>();
 
   acquire(scope: ProjectClientScope): PrivateWorkAccess {
     const parsed = projectClientScopeSchema.parse(scope);
@@ -66,6 +67,34 @@ export class PrivateWorkScopeRegistry {
           } finally {
             this.releaseAbortController(parsed, controller);
           }
+        },
+        subscribeEventStream: (url, eventName, onMessage) => {
+          if (
+            this.entries.get(key) !== nextAccess ||
+            typeof EventSource === "undefined"
+          ) {
+            return () => undefined;
+          }
+          const source = new EventSource(url, { withCredentials: true });
+          const sources = this.eventSources.get(key) ?? new Set<EventSource>();
+          sources.add(source);
+          this.eventSources.set(key, sources);
+          const receive = (event: MessageEvent<string>) => {
+            if (
+              this.entries.get(key) === nextAccess &&
+              this.eventSources.get(key)?.has(source)
+            ) {
+              onMessage(event.data);
+            }
+          };
+          source.addEventListener(eventName, receive as EventListener);
+          return () => {
+            source.removeEventListener(eventName, receive as EventListener);
+            source.close();
+            const current = this.eventSources.get(key);
+            current?.delete(source);
+            if (current?.size === 0) this.eventSources.delete(key);
+          };
         },
         isActive: () => this.entries.get(key) === nextAccess,
       };
@@ -105,6 +134,8 @@ export class PrivateWorkScopeRegistry {
     const key = scopeKey(parsed);
     this.abortControllers.get(key)?.forEach((controller) => controller.abort());
     this.abortControllers.delete(key);
+    this.eventSources.get(key)?.forEach((source) => source.close());
+    this.eventSources.delete(key);
     disposeProjectAPIClient(parsed);
     this.entries.delete(key);
   }

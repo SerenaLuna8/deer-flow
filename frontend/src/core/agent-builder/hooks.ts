@@ -6,6 +6,7 @@ import {
   useQueryClient,
   type QueryClient,
 } from "@tanstack/react-query";
+import { useEffect, useMemo } from "react";
 
 import { usePrivateWorkAccess } from "@/core/private-work/provider";
 import {
@@ -16,27 +17,53 @@ import { projectAssetKey } from "@/core/shared-assets/query-keys";
 
 import {
   AgentBuilderApiError,
+  agentBuilderActivityStreamURL,
   cancelAgentBuilderSession,
   finalizeAgentBuilderSession,
   createAgentBuilderSession,
   getAgentBuilderSession,
+  getAgentBuilderSessionByAgent,
   listAllAgentBuilderSessions,
+  listAgentBuilderActivities,
+  parseAgentBuilderActivity,
+  setAgentBuilderGenerationPreference,
   submitAgentBuilderTurn,
+  stopAgentBuilderTurn,
 } from "./api";
 import {
   agentBuilderMutationKey,
+  agentBuilderActivitiesKey,
   agentBuilderSessionKey,
+  agentBuilderSessionByAgentKey,
   agentBuilderSessionsInvalidation,
   agentBuilderSessionsKey,
 } from "./query-keys";
 import type {
   AgentBuilderSession,
+  AgentBuilderActivity,
   AgentBuilderSessionSummary,
   AgentBuilderTurnInput,
+  AgentBuilderGenerationPreferenceInput,
   CancelAgentBuilderSessionInput,
   CommitAgentBuilderSessionInput,
   CreateAgentBuilderSessionInput,
 } from "./types";
+
+function compareActivitySeq(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left.localeCompare(right);
+}
+
+export function mergeAgentBuilderActivities(
+  current: readonly AgentBuilderActivity[],
+  incoming: readonly AgentBuilderActivity[],
+): AgentBuilderActivity[] {
+  const bySeq = new Map(current.map((activity) => [activity.seq, activity]));
+  for (const activity of incoming) bySeq.set(activity.seq, activity);
+  return [...bySeq.values()].sort((left, right) =>
+    compareActivitySeq(left.seq, right.seq),
+  );
+}
 
 export type CancelAgentBuilderSessionFromListInput =
   CancelAgentBuilderSessionInput & {
@@ -167,6 +194,84 @@ export function useAgentBuilderSession(
   });
 }
 
+export function useAgentBuilderSessionByAgent(
+  accountId: string,
+  projectId: string,
+  agentId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: agentBuilderSessionByAgentKey(accountId, projectId, agentId),
+    queryFn: async ({ signal }) => {
+      try {
+        return (await getAgentBuilderSessionByAgent(projectId, agentId, signal))
+          .data;
+      } catch (error) {
+        if (
+          error instanceof AgentBuilderApiError &&
+          error.code === "AGENT_BUILDER_NOT_FOUND"
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    enabled,
+    retry: false,
+  });
+}
+
+export function useAgentBuilderActivities(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+  enabled = true,
+) {
+  const queryClient = useQueryClient();
+  const access = usePrivateWorkAccess();
+  const key = useMemo(
+    () => agentBuilderActivitiesKey(accountId, projectId, sessionId),
+    [accountId, projectId, sessionId],
+  );
+  const query = useQuery({
+    queryKey: key,
+    queryFn: ({ signal }) =>
+      listAgentBuilderActivities(projectId, sessionId, "0", signal).then(
+        (response) => response.data,
+      ),
+    enabled,
+  });
+
+  useEffect(() => {
+    if (
+      !enabled ||
+      access.scope.accountId !== accountId ||
+      access.scope.projectId !== projectId ||
+      !access.subscribeEventStream
+    ) {
+      return;
+    }
+    return access.subscribeEventStream(
+      agentBuilderActivityStreamURL(projectId, sessionId),
+      "activity",
+      (data) => {
+        if (!isPrivateWorkAccessActive(access)) return;
+        try {
+          const activity = parseAgentBuilderActivity(JSON.parse(data));
+          queryClient.setQueryData<AgentBuilderActivity[]>(key, (current) =>
+            mergeAgentBuilderActivities(current ?? [], [activity]),
+          );
+        } catch {
+          // A strict-invalid public frame is ignored; the durable replay query
+          // remains authoritative and no raw payload enters cache state.
+        }
+      },
+    );
+  }, [access, accountId, enabled, key, projectId, queryClient, sessionId]);
+
+  return query;
+}
+
 export function useCreateAgentBuilderSession(
   accountId: string,
   projectId: string,
@@ -224,6 +329,59 @@ export function useSubmitAgentBuilderTurn(
         accountId,
         projectId,
         sessionId,
+      );
+    },
+  });
+}
+
+export function useStopAgentBuilderTurn(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useAgentBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: agentBuilderMutationKey(accountId, projectId, "stop-turn"),
+    mutationFn: () =>
+      runMutation((signal) =>
+        stopAgentBuilderTurn(projectId, sessionId, signal),
+      ),
+    onSuccess: (response) => {
+      queryClient.setQueryData<AgentBuilderSession>(
+        agentBuilderSessionKey(accountId, projectId, sessionId),
+        (current) => newestAgentBuilderSession(current, response.data),
+      );
+    },
+  });
+}
+
+export function useSetAgentBuilderGenerationPreference(
+  accountId: string,
+  projectId: string,
+  sessionId: string,
+) {
+  const queryClient = useQueryClient();
+  const { runMutation } = useAgentBuilderMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: agentBuilderMutationKey(
+      accountId,
+      projectId,
+      "set-generation-preference",
+    ),
+    mutationFn: (input: AgentBuilderGenerationPreferenceInput) =>
+      runMutation((signal) =>
+        setAgentBuilderGenerationPreference(
+          projectId,
+          sessionId,
+          input,
+          signal,
+        ),
+      ),
+    onSuccess: (response) => {
+      queryClient.setQueryData<AgentBuilderSession>(
+        agentBuilderSessionKey(accountId, projectId, sessionId),
+        (current) => newestAgentBuilderSession(current, response.data),
       );
     },
   });
@@ -294,6 +452,10 @@ export function useCancelAgentBuilderSession(
         agentBuilderSessionKey(accountId, projectId, sessionId),
         (current) => newestAgentBuilderSession(current, response.data),
       );
+      queryClient.removeQueries({
+        queryKey: agentBuilderActivitiesKey(accountId, projectId, sessionId),
+        exact: true,
+      });
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),
       );
@@ -339,6 +501,14 @@ export function useCancelAgentBuilderSessionFromList(
         (current) =>
           current?.filter((session) => session.id !== input.session_id),
       );
+      queryClient.removeQueries({
+        queryKey: agentBuilderActivitiesKey(
+          accountId,
+          projectId,
+          input.session_id,
+        ),
+        exact: true,
+      });
       void queryClient.invalidateQueries(
         agentBuilderSessionsInvalidation(accountId, projectId),
       );

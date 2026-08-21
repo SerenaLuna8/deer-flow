@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -16,11 +17,13 @@ from app.gateway.routers.project_agent_builder import (
     CreateAgentDesignSessionRequest,
     _session_item,
     commit_agent_design_session,
+    stream_agent_design_activities,
 )
 from app.gateway.routers.project_assets import raise_asset_domain
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.agent_design_activity import AgentDesignActivityRepository
 from app.shared_assets.agent_design_generation import AgentDesignConflict
 from app.shared_assets.agent_design_repository import AgentDesignRepository
 from app.shared_assets.agent_design_service import (
@@ -42,6 +45,7 @@ from app.shared_assets.errors import (
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
     AssetConflict,
+    AssetNotFound,
     AssetValidationFailed,
     SharedAssetError,
 )
@@ -91,6 +95,60 @@ class _TransactionSession:
 
     async def execute(self, _statement: object) -> None:
         return None
+
+
+class _NoActiveBuilderOperations:
+    async def lock_in_progress_turn_operations(
+        self,
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[AgentDesignOperationRow, ...]:
+        return ()
+
+    async def lock_in_progress_cancel_operations(
+        self,
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[AgentDesignOperationRow, ...]:
+        return ()
+
+    async def clear_turn_generation_profiles(
+        self,
+        *_args: object,
+        **_kwargs: object,
+    ) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_activity_stream_rejects_a_hidden_session_before_returning_sse() -> None:
+    context = _context()
+
+    class _Service:
+        async def list_activities(self, *_args: object, **_kwargs: object) -> None:
+            raise AssetNotFound(context.request_id)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await stream_agent_design_activities(
+            uuid.uuid4(),
+            SimpleNamespace(headers={}),  # type: ignore[arg-type]
+            context,
+            _Service(),  # type: ignore[arg-type]
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.fixture(autouse=True)
+def _stub_activity_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _append(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    async def _clear(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(AgentDesignActivityRepository, "append", _append)
+    monkeypatch.setattr(AgentDesignActivityRepository, "clear_session", _clear)
 
 
 def _blueprint(service: AgentDesignService) -> AgentDesignBlueprint:
@@ -362,8 +420,12 @@ async def test_commit_rejects_unresolved_error_conflict() -> None:
         blueprint_checksum=service.blueprint_checksum(blueprint),
     )
 
-    class _Repository:
-        async def get_operation(self, *_args: object, **_kwargs: object) -> None:
+    class _Repository(_NoActiveBuilderOperations):
+        async def get_operation(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
             return None
 
         async def get(self, *_args: object, **_kwargs: object) -> AgentDesignSessionRow:
@@ -451,7 +513,7 @@ async def test_commit_replays_a_legacy_checksum_that_omitted_optional_slug() -> 
         updated_at=datetime.now(UTC),
     )
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(
             self,
             *_args: object,
@@ -645,7 +707,7 @@ async def test_commit_rechecks_a_legacy_session_slug_for_secrets() -> None:
     )
     row.slug = "sk-abcdefghijklmnopqrst"
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -689,7 +751,7 @@ async def test_commit_rejects_a_legacy_secret_blueprint_before_operation_write()
         blueprint_checksum=base_service.blueprint_checksum(blueprint),
     )
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -725,7 +787,9 @@ async def test_commit_rejects_a_legacy_secret_blueprint_before_operation_write()
 
 
 @pytest.mark.asyncio
-async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_identity() -> None:
+async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = _context()
     fake_session = _TransactionSession()
     base_service = AgentDesignService(lambda: fake_session)  # type: ignore[arg-type]
@@ -744,9 +808,13 @@ async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_ide
     created_agent_id = uuid.uuid4()
     created_version_id = uuid.uuid4()
 
-    class _Repository:
-        async def get_operation(self, *_args: object, **_kwargs: object) -> None:
-            return None
+    class _Repository(_NoActiveBuilderOperations):
+        async def get_operation(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> AgentDesignOperationRow | None:
+            return commit_operations[-1] if commit_operations else None
 
         async def get(self, *_args: object, **_kwargs: object) -> AgentDesignSessionRow:
             return row
@@ -791,6 +859,15 @@ async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_ide
         agent_service=_AgentService(),  # type: ignore[arg-type]
     )
 
+    async def _append_activity(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        AgentDesignActivityRepository,
+        "append",
+        _append_activity,
+    )
+
     result = await service.commit(
         context,
         row.id,
@@ -802,7 +879,7 @@ async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_ide
         ),
     )
 
-    assert preflight_slugs == ["recovered-reviewer"]
+    assert preflight_slugs == ["recovered-reviewer", "recovered-reviewer"]
     assert len(create_commands) == 1
     assert getattr(create_commands[0], "slug") == "recovered-reviewer"
     assert getattr(create_commands[0], "display_name") == "recovered-reviewer"
@@ -824,7 +901,7 @@ async def test_create_preflights_duplicate_project_agent_slug() -> None:
     context = _context()
     fake_session = _TransactionSession()
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def lock_session_create_scope(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -864,7 +941,7 @@ async def test_create_locks_and_rejects_a_ninth_incomplete_session() -> None:
     fake_session = _TransactionSession()
     calls: list[str] = []
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def lock_session_create_scope(self, *_args: object, **_kwargs: object) -> None:
             calls.append("lock_create_scope")
 
@@ -922,7 +999,7 @@ async def test_create_idempotent_replay_precedes_incomplete_session_limit() -> N
     )
     calls: list[str] = []
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def lock_session_create_scope(self, *_args: object, **_kwargs: object) -> None:
             calls.append("lock_create_scope")
 
@@ -973,7 +1050,7 @@ async def test_cancel_clears_private_draft_content_and_remains_idempotent() -> N
     row.progress_json = [{"id": "soul", "label": "SOUL.md", "status": "completed"}]
     operation: AgentDesignOperationRow | None = None
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(self, *_args: object, **_kwargs: object) -> AgentDesignOperationRow | None:
             return operation
 
@@ -1040,12 +1117,20 @@ async def test_cancel_terminalizes_an_in_progress_generation_operation() -> None
         status="in_progress",
         result_revision=None,
         public_error_code=None,
+        requested_generation_profile_json={
+            "model_ref": "test-model",
+            "mode": "pro",
+        },
+        effective_generation_profile_json={
+            "model_ref": "test-model",
+            "mode": "pro",
+        },
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
     cancel_operation: AgentDesignOperationRow | None = None
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(
             self,
             *_args: object,
@@ -1058,7 +1143,15 @@ async def test_cancel_terminalizes_an_in_progress_generation_operation() -> None
             *_args: object,
             **_kwargs: object,
         ) -> tuple[AgentDesignOperationRow, ...]:
-            return (active_turn,)
+            return (active_turn,) if active_turn.status == "in_progress" else ()
+
+        async def clear_turn_generation_profiles(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> None:
+            active_turn.requested_generation_profile_json = None
+            active_turn.effective_generation_profile_json = None
 
         async def get(
             self,
@@ -1080,19 +1173,32 @@ async def test_cancel_terminalizes_an_in_progress_generation_operation() -> None
         repository_factory=lambda _session: _Repository(),  # type: ignore[arg-type]
     )
 
-    result = await service.cancel(
-        context,
-        row.id,
-        CancelAgentDesignSession(
-            expected_revision=row.revision,
-            idempotency_key="cancel-in-progress-generation",
-        ),
+    cancel_task = asyncio.create_task(
+        service.cancel(
+            context,
+            row.id,
+            CancelAgentDesignSession(
+                expected_revision=row.revision,
+                idempotency_key="cancel-in-progress-generation",
+            ),
+        )
     )
+    while active_turn.stop_requested_at is None:
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert not cancel_task.done()
+    row.status = AgentDesignStatus.INTERVIEWING.value
+    row.revision += 1
+    active_turn.status = "stopped"
+    active_turn.result_revision = row.revision
+    result = await cancel_task
 
     assert result.status == AgentDesignStatus.CANCELLED
-    assert active_turn.status == "failed"
-    assert active_turn.result_revision == result.revision
-    assert active_turn.public_error_code == "AGENT_DESIGN_SESSION_CANCELLED"
+    assert active_turn.status == "stopped"
+    assert active_turn.result_revision == result.revision - 1
+    assert active_turn.public_error_code is None
+    assert active_turn.requested_generation_profile_json is None
+    assert active_turn.effective_generation_profile_json is None
 
 
 @pytest.mark.asyncio
@@ -1105,7 +1211,7 @@ async def test_cancelled_session_rejects_an_unrecorded_cancel_key() -> None:
         revision=7,
     )
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def get_operation(self, *_args: object, **_kwargs: object) -> None:
             return None
 
@@ -1151,7 +1257,7 @@ async def test_stale_get_locks_turn_operation_before_session() -> None:
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
     calls: list[str] = []
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         session = fake_session
 
         async def get(
@@ -1205,7 +1311,7 @@ async def test_read_only_stale_get_returns_a_snapshot_without_recovery_writes() 
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
     calls: list[str] = []
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         session = fake_session
 
         async def get(
@@ -1248,7 +1354,7 @@ async def test_read_only_stale_list_returns_a_snapshot_without_recovery_writes()
     )
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         session = fake_session
 
         async def list_incomplete(
@@ -1293,7 +1399,7 @@ async def test_editor_stale_list_still_recovers_the_generation() -> None:
     row.updated_at = datetime.now(UTC) - timedelta(minutes=10)
     calls: list[str] = []
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         session = fake_session
 
         async def list_incomplete(
@@ -1342,7 +1448,7 @@ async def test_incomplete_session_list_exposes_a_next_cursor_without_truncation(
         row.created_at = datetime.now(UTC) - timedelta(minutes=index)
         row.updated_at = datetime.now(UTC) - timedelta(minutes=index)
 
-    class _Repository:
+    class _Repository(_NoActiveBuilderOperations):
         async def list_incomplete(
             self,
             _context: ProjectContext,

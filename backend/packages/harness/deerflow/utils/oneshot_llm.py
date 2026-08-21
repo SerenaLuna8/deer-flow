@@ -13,9 +13,11 @@ helper stops at the extracted raw text.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Mapping
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from deerflow.config.app_config import AppConfig
 from deerflow.models.runtime import (
@@ -24,6 +26,76 @@ from deerflow.models.runtime import (
     ModelRuntimeProfile,
 )
 from deerflow.utils.llm_text import extract_response_text
+
+_REASONING_FLUSH_SECONDS = 0.075
+_REASONING_FLUSH_BYTES = 4096
+
+
+class _InlineReasoningExtractor:
+    def __init__(self) -> None:
+        self._buffer = ""
+        self._inside = False
+
+    @staticmethod
+    def _partial_suffix(value: str, marker: str) -> str:
+        lowered = value.lower()
+        for length in range(min(len(value), len(marker) - 1), 0, -1):
+            if lowered.endswith(marker[:length]):
+                return value[-length:]
+        return ""
+
+    def push(self, text: str) -> str:
+        data = f"{self._buffer}{text}"
+        self._buffer = ""
+        output: list[str] = []
+        while data:
+            lowered = data.lower()
+            if self._inside:
+                close_index = lowered.find("</think>")
+                if close_index >= 0:
+                    output.append(data[:close_index])
+                    data = data[close_index + len("</think>") :]
+                    self._inside = False
+                    continue
+                suffix = self._partial_suffix(data, "</think>")
+                if suffix:
+                    output.append(data[: -len(suffix)])
+                    self._buffer = suffix
+                else:
+                    output.append(data)
+                break
+            open_index = lowered.find("<think>")
+            if open_index >= 0:
+                data = data[open_index + len("<think>") :]
+                self._inside = True
+                continue
+            self._buffer = self._partial_suffix(data, "<think>")
+            break
+        return "".join(output)
+
+
+def _structured_reasoning(message: BaseMessage) -> str:
+    additional = getattr(message, "additional_kwargs", None)
+    if isinstance(additional, Mapping):
+        value = additional.get("reasoning_content")
+        if isinstance(value, str):
+            return value
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return ""
+    result: list[str] = []
+    for block in content:
+        if not isinstance(block, Mapping) or block.get("type") not in {
+            "thinking",
+            "reasoning",
+        }:
+            continue
+        for key in ("thinking", "reasoning", "text", "content"):
+            value = block.get(key)
+            if isinstance(value, str):
+                result.append(value)
+                break
+    return "".join(result)
 
 
 async def run_oneshot_llm(
@@ -39,6 +111,7 @@ async def run_oneshot_llm(
     profile: ModelRuntimeProfile = ModelRuntimeProfile.PRIVATE_ONESHOT,
     deadline_monotonic: float | None = None,
     abort_event: AsyncAbortEvent | None = None,
+    on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
 ) -> str:
     """Run a single non-graph system+user LLM turn and return the raw text.
 
@@ -65,11 +138,42 @@ async def run_oneshot_llm(
     # One-shot prompts are private by default and never export raw content to
     # model-level tracing.
     invoke_config: dict = {"run_name": run_name}
-    response = await runtime.ainvoke(
-        [
-            SystemMessage(content=system_instruction),
-            HumanMessage(content=user_content),
-        ],
+    messages = [
+        SystemMessage(content=system_instruction),
+        HumanMessage(content=user_content),
+    ]
+    if on_reasoning_delta is None:
+        response = await runtime.ainvoke(
+            messages,
+            profile=profile,
+            model_name=model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            model_overrides=model_overrides,
+            config=invoke_config,
+            deadline_monotonic=deadline_monotonic,
+            abort_event=abort_event,
+        )
+        return extract_response_text(response.content)
+
+    response: BaseMessage | None = None
+    inline = _InlineReasoningExtractor()
+    pending_reasoning: list[str] = []
+    pending_bytes = 0
+    last_flush = time.monotonic()
+
+    async def flush_reasoning() -> None:
+        nonlocal pending_bytes, last_flush
+        if not pending_reasoning:
+            return
+        delta = "".join(pending_reasoning)
+        pending_reasoning.clear()
+        pending_bytes = 0
+        last_flush = time.monotonic()
+        await on_reasoning_delta(delta)
+
+    stream = runtime.astream(
+        messages,
         profile=profile,
         model_name=model_name,
         thinking_enabled=thinking_enabled,
@@ -78,5 +182,44 @@ async def run_oneshot_llm(
         config=invoke_config,
         deadline_monotonic=deadline_monotonic,
         abort_event=abort_event,
-    )
+    ).__aiter__()
+    next_chunk = asyncio.create_task(anext(stream))
+    try:
+        while True:
+            timeout = None
+            if pending_reasoning:
+                timeout = max(
+                    0.0,
+                    _REASONING_FLUSH_SECONDS - (time.monotonic() - last_flush),
+                )
+            ready, _ = await asyncio.wait({next_chunk}, timeout=timeout)
+            if not ready:
+                await flush_reasoning()
+                continue
+            try:
+                chunk = next_chunk.result()
+            except StopAsyncIteration:
+                break
+            next_chunk = asyncio.create_task(anext(stream))
+            response = chunk if response is None else response + chunk  # type: ignore[operator]
+            reasoning = _structured_reasoning(chunk)
+            if not reasoning:
+                content = getattr(chunk, "content", None)
+                if isinstance(content, str):
+                    reasoning = inline.push(content)
+            if reasoning:
+                pending_reasoning.append(reasoning)
+                pending_bytes += len(reasoning.encode("utf-8"))
+            if pending_reasoning and pending_bytes >= _REASONING_FLUSH_BYTES:
+                await flush_reasoning()
+    finally:
+        if not next_chunk.done():
+            next_chunk.cancel()
+            try:
+                await next_chunk
+            except asyncio.CancelledError:
+                pass
+    await flush_reasoning()
+    if response is None:
+        raise RuntimeError("model stream returned no response")
     return extract_response_text(response.content)

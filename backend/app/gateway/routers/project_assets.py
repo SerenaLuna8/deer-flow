@@ -44,6 +44,7 @@ from app.shared_assets import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     AgentCapabilityBindings,
     AgentDesignConflictUnresolved,
+    AgentDesignGenerationProfileStale,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
@@ -1008,6 +1009,7 @@ ASSET_ERRORS = (
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
     AgentDesignConflictUnresolved,
+    AgentDesignGenerationProfileStale,
     SkillArchiveLimitExceeded,
 )
 
@@ -1034,6 +1036,7 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         AgentDesignSessionLimitExceeded: 429,
         AgentDesignSlugConflict: 409,
         AgentDesignConflictUnresolved: 409,
+        AgentDesignGenerationProfileStale: 409,
         SkillArchiveLimitExceeded: 413,
     }
     status_code = known.get(type(exc))

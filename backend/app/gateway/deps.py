@@ -323,6 +323,9 @@ async def gateway_platform_runtime(
         from app.gateway.system_model_callers import (
             DatabaseOneshotModelCaller,
         )
+        from app.shared_assets.agent_design_control import (
+            AgentDesignGenerationControl,
+        )
         from app.shared_assets.agent_design_generation import (
             AgentDesignGenerationService,
         )
@@ -334,6 +337,7 @@ async def gateway_platform_runtime(
                 run_name="agent_design_generation",
             ),
         )
+        app.state.agent_design_generation_control = AgentDesignGenerationControl()
         raw_mcp_security = getattr(config, "mcp_security", None)
         if isinstance(raw_mcp_security, McpSecurityConfig):
             mcp_security = raw_mcp_security

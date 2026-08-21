@@ -8,11 +8,13 @@ transaction, and the second transaction applies only the validated result.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import hashlib
 import json
 import re
+import time
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
@@ -21,12 +23,19 @@ from enum import StrEnum
 from typing import Protocol
 
 from pydantic import BaseModel, ValidationError
-from sqlalchemy import update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
+from app.shared_assets.agent_design_activity import (
+    AgentDesignActivity,
+    AgentDesignActivityKind,
+    AgentDesignActivityLimitExceeded,
+    AgentDesignActivityRepository,
+    activity_view,
+)
+from app.shared_assets.agent_design_control import AgentDesignGenerationControl
 from app.shared_assets.agent_design_generation import (
     DEFAULT_GENERATION_TIMEOUT_SECONDS,
     MAX_AGENT_DESIGN_CONTEXT_ASSETS,
@@ -45,6 +54,12 @@ from app.shared_assets.agent_design_generation import (
     NeedsClarificationResult,
     contains_agent_design_secret,
 )
+from app.shared_assets.agent_design_profile import (
+    AgentDesignGenerationProfile,
+    AgentDesignGenerationProfileUnsupported,
+    agent_design_mode_profile,
+    resolve_agent_design_generation_profile,
+)
 from app.shared_assets.agent_design_repository import (
     AgentDesignAllowedAssetRecord,
     AgentDesignRepository,
@@ -58,6 +73,7 @@ from app.shared_assets.agent_service import (
 )
 from app.shared_assets.errors import (
     AgentDesignConflictUnresolved,
+    AgentDesignGenerationProfileStale,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
@@ -73,6 +89,10 @@ from app.shared_assets.models import (
     AgentPayload,
     AssetScope,
     SkillAssetRef,
+)
+from app.system_settings.repository import (
+    SystemModelRepository,
+    SystemModelRepositoryInvariant,
 )
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
@@ -92,6 +112,7 @@ _MAX_DESCRIPTION_CHARS = 4_000
 _MAX_TOOL_GROUPS = 50
 _CLARIFICATION_SET_KIND = "agent_design_clarification_set"
 _DEFAULT_STALE_GENERATING_SECONDS = DEFAULT_GENERATION_TIMEOUT_SECONDS + 60.0
+_GENERATION_STOP_POLL_SECONDS = 0.1
 _CONFLICT_CONSTRAINTS = frozenset(
     {
         "uq_agent_design_operations_idempotency",
@@ -152,6 +173,7 @@ class AgentDesignServiceErrorCode(StrEnum):
     GENERATION_UNAVAILABLE = "AGENT_DESIGN_GENERATION_UNAVAILABLE"
     INVALID_MODEL_OUTPUT = "AGENT_DESIGN_INVALID_MODEL_OUTPUT"
     SESSION_CANCELLED = "AGENT_DESIGN_SESSION_CANCELLED"
+    COMMIT_FAILED = "AGENT_DESIGN_COMMIT_FAILED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,6 +203,7 @@ class AgentDesignMessage:
     role: str
     content: str
     created_at: datetime
+    operation_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +272,17 @@ class SubmitAgentDesignTurn:
     expected_revision: int
     idempotency_key: str
     generation_model_ref: str | None = None
+    generation_mode: str | None = None
+    thinking_enabled: bool | None = None
+    reasoning_effort: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SetAgentDesignGenerationPreference:
+    generation_model_ref: str
+    generation_mode: str
+    thinking_enabled: bool
+    reasoning_effort: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +322,7 @@ class AgentDesignSessionView:
     created_agent_id: uuid.UUID | None
     created_at: datetime
     updated_at: datetime
+    generation_preference: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,6 +364,7 @@ class AgentDesignService:
         repository_factory: _RepositoryFactory = AgentDesignRepository,
         default_tool_groups_provider: Callable[[], tuple[str, ...]] | None = None,
         stale_generating_seconds: float = _DEFAULT_STALE_GENERATING_SECONDS,
+        generation_control: AgentDesignGenerationControl | None = None,
     ) -> None:
         if not isinstance(stale_generating_seconds, int | float) or isinstance(stale_generating_seconds, bool) or stale_generating_seconds <= 0:
             raise ValueError("stale_generating_seconds must be positive")
@@ -338,6 +374,7 @@ class AgentDesignService:
         self._repository_factory = repository_factory
         self._default_tool_groups_provider = default_tool_groups_provider or (lambda: DEFAULT_AGENT_TOOL_GROUPS)
         self._stale_after = timedelta(seconds=float(stale_generating_seconds))
+        self._generation_control = generation_control or AgentDesignGenerationControl()
 
     async def create(
         self,
@@ -367,8 +404,9 @@ class AgentDesignService:
                     if existing is not None:
                         if existing.create_request_checksum != request_checksum:
                             raise AssetConflict(context.request_id)
+                        active_operations: tuple[AgentDesignOperationRow, ...] = ()
                         if self._is_stale_generating(existing, now=now):
-                            await repository.lock_in_progress_turn_operations(
+                            active_operations = await repository.lock_in_progress_turn_operations(
                                 context,
                                 existing.id,
                             )
@@ -384,6 +422,7 @@ class AgentDesignService:
                             context,
                             existing,
                             now=now,
+                            active_operations=active_operations,
                         )
                         return self._session_view(existing)
                     if await repository.count_incomplete(context) >= MAX_INCOMPLETE_AGENT_DESIGN_SESSIONS_PER_OWNER_PROJECT:
@@ -470,7 +509,7 @@ class AgentDesignService:
                     for listed in selected:
                         row = listed
                         if can_recover and self._is_stale_generating(row, now=now):
-                            await repository.lock_in_progress_turn_operations(
+                            active_operations = await repository.lock_in_progress_turn_operations(
                                 context,
                                 row.id,
                             )
@@ -484,6 +523,7 @@ class AgentDesignService:
                                 context,
                                 row,
                                 now=now,
+                                active_operations=active_operations,
                             )
                         if row.status in (
                             AgentDesignStatus.COMPLETED.value,
@@ -522,8 +562,9 @@ class AgentDesignService:
                     )
                     now = self._now()
                     can_recover = Capability.SHARED_ASSETS_EDIT in context.capabilities
+                    active_operations: tuple[AgentDesignOperationRow, ...] = ()
                     if can_recover and self._is_stale_generating(row, now=now):
-                        await repository.lock_in_progress_turn_operations(
+                        active_operations = await repository.lock_in_progress_turn_operations(
                             context,
                             session_id,
                         )
@@ -538,8 +579,29 @@ class AgentDesignService:
                             context,
                             row,
                             now=now,
+                            active_operations=active_operations,
                         )
                     return self._session_view(row)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def get_by_created_agent(
+        self,
+        context: ProjectContext,
+        agent_id: uuid.UUID,
+    ) -> AgentDesignSessionView:
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_READ)
+        agent_id = self._validate_uuid(context, agent_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                row = await self._repository_factory(session).get_by_created_agent(
+                    context,
+                    agent_id,
+                )
+                return self._session_view(row)
         except SharedAssetError:
             raise
         except DBAPIError:
@@ -562,6 +624,9 @@ class AgentDesignService:
                 "expected_revision": command.expected_revision,
                 "input": command.input,
                 "generation_model_ref": command.generation_model_ref,
+                "generation_mode": command.generation_mode,
+                "thinking_enabled": command.thinking_enabled,
+                "reasoning_effort": command.reasoning_effort,
             }
         )
 
@@ -574,12 +639,100 @@ class AgentDesignService:
         )
         if isinstance(prepared, AgentDesignSessionView):
             return prepared
-        generation_revision, request, generation_context = prepared
+        generation_revision, request, generation_context, operation_id, generation_profile = prepared
+        started_at = time.monotonic()
+        await self._append_activity(
+            context,
+            session_id=session_id,
+            operation_id=operation_id,
+            kind=AgentDesignActivityKind.TURN_ACCEPTED,
+        )
+        control_key = self._generation_control.key(
+            context.project_id,
+            str(context.user_id),
+            session_id,
+            operation_id,
+        )
+        abort_event = await self._generation_control.register(control_key)
+        stop_monitor: asyncio.Task[None] | None = None
         try:
-            result = await self._generator.generate(
-                request,
-                context=generation_context,
-                model_ref=command.generation_model_ref,
+            if not abort_event.is_set() and await self._generation_should_stop(
+                context,
+                session_id,
+                operation_id,
+            ):
+                abort_event.set()
+            if abort_event.is_set():
+                return await self._finish_generation_stopped(
+                    context,
+                    session_id,
+                    operation_hash=operation_hash,
+                    generation_revision=generation_revision,
+                    duration_ms=max(
+                        0,
+                        round((time.monotonic() - started_at) * 1000),
+                    ),
+                )
+            stop_monitor = asyncio.create_task(
+                self._monitor_generation_stop(
+                    context,
+                    session_id,
+                    operation_id,
+                    abort_event,
+                )
+            )
+
+            async def record_generation_activity(
+                kind: str,
+                attempt: int | None,
+                payload: dict[str, object],
+            ) -> None:
+                if contains_agent_design_secret(payload):
+                    raise AgentDesignGenerationError(
+                        "AGENT_DESIGN_UNSAFE_MODEL_OUTPUT",
+                        "Agent design reasoning contains unsafe content.",
+                    )
+                try:
+                    activity_kind = AgentDesignActivityKind(kind)
+                    await self._append_activity(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation_id,
+                        kind=activity_kind,
+                        payload=payload,
+                        attempt=attempt,
+                    )
+                except AgentDesignActivityLimitExceeded:
+                    raise AgentDesignGenerationError(
+                        "AGENT_DESIGN_ACTIVITY_LIMIT_EXCEEDED",
+                        "Agent design activity exceeded the safety limit.",
+                    ) from None
+
+            generation_kwargs: dict[str, object] = {
+                "context": generation_context,
+                "activity_callback": record_generation_activity,
+                "abort_event": abort_event,
+            }
+            if generation_profile is not None:
+                generation_kwargs.update(
+                    model_ref=generation_profile.model_ref,
+                    model_version_id=generation_profile.model_version_id,
+                    model_payload_checksum=generation_profile.payload_checksum,
+                    thinking_enabled=generation_profile.thinking_enabled,
+                    reasoning_effort=generation_profile.reasoning_effort,
+                )
+            elif command.generation_model_ref is not None:
+                generation_kwargs["model_ref"] = command.generation_model_ref
+            result = await self._generator.generate(request, **generation_kwargs)
+        except asyncio.CancelledError:
+            if not abort_event.is_set():
+                raise
+            return await self._finish_generation_stopped(
+                context,
+                session_id,
+                operation_hash=operation_hash,
+                generation_revision=generation_revision,
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
             )
         except AgentDesignGenerationError as exc:
             code = exc.code if isinstance(exc.code, str) and _PUBLIC_ERROR_PATTERN.fullmatch(exc.code) else AgentDesignServiceErrorCode.GENERATION_UNAVAILABLE.value
@@ -590,6 +743,7 @@ class AgentDesignService:
                 generation_revision=generation_revision,
                 error_code=code,
                 error_message=self._stable_generation_error_message(code),
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
             )
         except Exception:
             return await self._finish_generation_failure(
@@ -599,14 +753,140 @@ class AgentDesignService:
                 generation_revision=generation_revision,
                 error_code=AgentDesignServiceErrorCode.GENERATION_UNAVAILABLE.value,
                 error_message="Agent 设定生成暂时不可用，请稍后重试。",
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
             )
-        return await self._finish_generation_success(
-            context,
-            session_id,
-            operation_hash=operation_hash,
-            generation_revision=generation_revision,
-            result=result,
-        )
+        else:
+            return await self._finish_generation_success(
+                context,
+                session_id,
+                operation_hash=operation_hash,
+                generation_revision=generation_revision,
+                result=result,
+                duration_ms=max(0, round((time.monotonic() - started_at) * 1000)),
+            )
+        finally:
+            if stop_monitor is not None:
+                stop_monitor.cancel()
+                try:
+                    await stop_monitor
+                except asyncio.CancelledError:
+                    pass
+            await self._generation_control.complete(control_key)
+
+    async def stop_turn(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> AgentDesignSessionView:
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
+        session_id = self._validate_uuid(context, session_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                row = await repository.get(context, session_id, for_update=True)
+                if not active or row.status != AgentDesignStatus.GENERATING.value:
+                    return self._session_view(row)
+                operation = active[0]
+                operation.stop_requested_at = self._now()
+                operation_id = uuid.UUID(str(operation.id))
+                await session.flush()
+            control_key = self._generation_control.key(
+                context.project_id,
+                str(context.user_id),
+                session_id,
+                operation_id,
+            )
+            done = await self._generation_control.request_stop(control_key)
+            if done is None:
+                return await self._wait_for_generation_completion(
+                    context,
+                    session_id,
+                    operation_id,
+                )
+            await done.wait()
+            return await self.get(context, session_id)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def set_generation_preference(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        command: SetAgentDesignGenerationPreference,
+    ) -> AgentDesignSessionView:
+        command = self._validate_generation_preference(context, command)
+        self._require_capability(context, Capability.SHARED_ASSETS_EDIT)
+        session_id = self._validate_uuid(context, session_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active_turns = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                await self._require_no_cancel_in_progress(
+                    repository,
+                    context,
+                    session_id,
+                )
+                row = await repository.get(context, session_id, for_update=True)
+                if active_turns or row.status in {
+                    AgentDesignStatus.GENERATING.value,
+                    AgentDesignStatus.COMMITTING.value,
+                    AgentDesignStatus.COMPLETED.value,
+                    AgentDesignStatus.CANCELLED.value,
+                }:
+                    raise AssetConflict(context.request_id)
+                profile = await self._resolve_generation_profile_values(
+                    session,
+                    context,
+                    requested_model_ref=command.generation_model_ref,
+                    requested_mode=command.generation_mode,
+                    thinking_enabled=command.thinking_enabled,
+                    reasoning_effort=command.reasoning_effort,
+                )
+                row.generation_model_ref = command.generation_model_ref
+                row.generation_mode = profile.mode
+                await session.flush()
+                return self._session_view(row)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def list_activities(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        *,
+        after_seq: int = 0,
+        limit: int = 500,
+    ) -> tuple[AgentDesignActivity, ...]:
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_READ)
+        session_id = self._validate_uuid(context, session_id)
+        if not isinstance(after_seq, int) or isinstance(after_seq, bool) or after_seq < 0 or not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 2_000:
+            raise AssetValidationFailed(context.request_id)
+        try:
+            async with self._session_factory() as session, session.begin():
+                rows = await AgentDesignActivityRepository(session).list_after(
+                    context,
+                    session_id=session_id,
+                    after_seq=after_seq,
+                    limit=limit,
+                )
+                return tuple(activity_view(row) for row in rows)
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
 
     async def commit(
         self,
@@ -626,10 +906,44 @@ class AgentDesignService:
         if command.slug is not None:
             checksum_payload["slug"] = command.slug
         request_checksum = self._request_checksum(checksum_payload)
+        prepared_operation_id: uuid.UUID | None = None
         try:
+            prepared = await self._prepare_commit(
+                context,
+                session_id,
+                command,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+            )
+            if not isinstance(prepared, uuid.UUID):
+                return prepared
+            prepared_operation_id = prepared
+            for kind in (
+                AgentDesignActivityKind.COMMIT_ACCEPTED,
+                AgentDesignActivityKind.COMMIT_VALIDATION_STARTED,
+                AgentDesignActivityKind.COMMIT_VALIDATION_PASSED,
+                AgentDesignActivityKind.COMMIT_PERSISTENCE_STARTED,
+            ):
+                await self._append_activity(
+                    context,
+                    session_id=session_id,
+                    operation_id=prepared_operation_id,
+                    kind=kind,
+                )
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
+                    active_turn_operations = await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
+                    if active_turn_operations:
+                        raise AssetConflict(context.request_id)
+                    await self._require_no_cancel_in_progress(
+                        repository,
+                        context,
+                        session_id,
+                    )
                     operation = await repository.get_operation(
                         context,
                         operation_kind="commit",
@@ -641,35 +955,24 @@ class AgentDesignService:
                         session_id,
                         for_update=True,
                     )
-                    if operation is not None:
-                        self._require_matching_operation(
-                            context,
-                            operation,
-                            session_id=session_id,
-                            request_checksum=request_checksum,
-                        )
-                        if operation.status == "completed" and row.status == AgentDesignStatus.COMPLETED.value:
-                            return await self._committed_result(
-                                session,
-                                context,
-                                row,
-                            )
-                        if operation.status == "in_progress":
-                            raise AssetConflict(context.request_id)
-                    if row.status == AgentDesignStatus.COMPLETED.value:
-                        if row.blueprint_checksum != command.expected_blueprint_checksum or (command.slug is not None and command.slug != row.slug):
-                            raise AssetConflict(context.request_id)
-                        return await self._committed_result(
-                            session,
-                            context,
-                            row,
-                        )
-                    self._require_expected_revision(
+                    if operation is None:
+                        raise AssetConflict(context.request_id)
+                    self._require_matching_operation(
                         context,
-                        row,
-                        command.expected_revision,
+                        operation,
+                        session_id=session_id,
+                        request_checksum=request_checksum,
                     )
-                    if row.status != AgentDesignStatus.PROPOSAL_READY.value or row.blueprint_json is None or row.blueprint_checksum != command.expected_blueprint_checksum:
+                    if operation.status == "completed" and row.status == AgentDesignStatus.COMPLETED.value:
+                        return await self._committed_result(session, context, row)
+                    if (
+                        operation.status != "in_progress"
+                        or operation.id != prepared_operation_id
+                        or row.status != AgentDesignStatus.COMMITTING.value
+                        or row.revision != command.expected_revision
+                        or row.blueprint_json is None
+                        or row.blueprint_checksum != command.expected_blueprint_checksum
+                    ):
                         raise AssetConflict(context.request_id)
                     if self._has_blocking_conflicts(row.blueprint_json):
                         raise AgentDesignConflictUnresolved(context.request_id)
@@ -687,21 +990,7 @@ class AgentDesignService:
                         for_update=True,
                     ):
                         raise AgentDesignSlugConflict(context.request_id)
-                    if operation is None:
-                        operation = self._new_operation(
-                            context,
-                            session_id,
-                            kind="commit",
-                            idempotency_hash=operation_hash,
-                            request_checksum=request_checksum,
-                        )
-                        await repository.create_operation(context, operation)
-                    else:
-                        self._reset_operation(operation)
-                    row.status = AgentDesignStatus.COMMITTING.value
-                    row.error_code = None
-                    row.error_message = None
-                    await session.flush()
+                    activity_repository = AgentDesignActivityRepository(session)
                     created = await self._agent_service.create_project_from_design_in_session(
                         session,
                         context,
@@ -721,6 +1010,19 @@ class AgentDesignService:
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     operation.public_error_code = None
+                    await activity_repository.append(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation.id,
+                        kind=AgentDesignActivityKind.COMMIT_PERSISTENCE_COMPLETED,
+                    )
+                    await activity_repository.append(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation.id,
+                        kind=AgentDesignActivityKind.COMMIT_TERMINAL,
+                        payload={"status": "completed"},
+                    )
                     await session.flush()
                     return AgentDesignCommitResult(
                         session=self._session_view(row),
@@ -728,16 +1030,182 @@ class AgentDesignService:
                         version=created.version,
                     )
         except SharedAssetError:
+            await self._record_commit_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                operation_id=prepared_operation_id,
+            )
             raise
         except IntegrityError as exc:
             constraint = _constraint_name(exc)
             if constraint == "uq_agents_project_slug":
-                raise AgentDesignSlugConflict(context.request_id) from None
-            if constraint in _CONFLICT_CONSTRAINTS:
-                raise AssetConflict(context.request_id) from None
-            raise AssetStorageUnavailable(context.request_id) from None
+                public_error: SharedAssetError = AgentDesignSlugConflict(context.request_id)
+            elif constraint in _CONFLICT_CONSTRAINTS:
+                public_error = AssetConflict(context.request_id)
+            else:
+                public_error = AssetStorageUnavailable(context.request_id)
+            await self._record_commit_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                operation_id=prepared_operation_id,
+            )
+            raise public_error from None
         except DBAPIError:
+            await self._record_commit_failure(
+                context,
+                session_id=session_id,
+                operation_hash=operation_hash,
+                request_checksum=request_checksum,
+                operation_id=prepared_operation_id,
+            )
             raise AssetStorageUnavailable(context.request_id) from None
+
+    async def _prepare_commit(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        command: CommitAgentDesignSession,
+        *,
+        operation_hash: str,
+        request_checksum: str,
+    ) -> uuid.UUID | AgentDesignCommitResult:
+        async with self._session_factory() as session, session.begin():
+            repository = self._repository_factory(session)
+            if await repository.lock_in_progress_turn_operations(
+                context,
+                session_id,
+            ):
+                raise AssetConflict(context.request_id)
+            await self._require_no_cancel_in_progress(
+                repository,
+                context,
+                session_id,
+            )
+            operation = await repository.get_operation(
+                context,
+                operation_kind="commit",
+                idempotency_key_hash=operation_hash,
+                for_update=True,
+            )
+            row = await repository.get(context, session_id, for_update=True)
+            if operation is not None:
+                self._require_matching_operation(
+                    context,
+                    operation,
+                    session_id=session_id,
+                    request_checksum=request_checksum,
+                )
+                if operation.status == "completed" and row.status == AgentDesignStatus.COMPLETED.value:
+                    return await self._committed_result(session, context, row)
+                raise AssetConflict(context.request_id)
+            if row.status == AgentDesignStatus.COMPLETED.value:
+                if row.blueprint_checksum != command.expected_blueprint_checksum or (command.slug is not None and command.slug != row.slug):
+                    raise AssetConflict(context.request_id)
+                return await self._committed_result(session, context, row)
+            self._require_expected_revision(context, row, command.expected_revision)
+            if row.status != AgentDesignStatus.PROPOSAL_READY.value or row.blueprint_json is None or row.blueprint_checksum != command.expected_blueprint_checksum:
+                raise AssetConflict(context.request_id)
+            if self._has_blocking_conflicts(row.blueprint_json):
+                raise AgentDesignConflictUnresolved(context.request_id)
+            effective_slug = command.slug or row.slug
+            if not _valid_agent_design_slug(effective_slug):
+                raise AssetValidationFailed(context.request_id)
+            if contains_agent_design_secret(effective_slug):
+                raise AgentDesignSecretDetected(context.request_id)
+            blueprint = self._blueprint_from_json(row.blueprint_json)
+            if contains_agent_design_secret(self._jsonable(blueprint)):
+                raise AgentDesignSecretDetected(context.request_id)
+            if await repository.project_agent_slug_exists(
+                context,
+                effective_slug,
+                for_update=True,
+            ):
+                raise AgentDesignSlugConflict(context.request_id)
+            operation = self._new_operation(
+                context,
+                session_id,
+                kind="commit",
+                idempotency_hash=operation_hash,
+                request_checksum=request_checksum,
+            )
+            await repository.create_operation(context, operation)
+            row.status = AgentDesignStatus.COMMITTING.value
+            row.error_code = None
+            row.error_message = None
+            await session.flush()
+            return uuid.UUID(str(operation.id))
+
+    async def _record_commit_failure(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_hash: str,
+        request_checksum: str,
+        operation_id: uuid.UUID | None,
+    ) -> None:
+        """Persist a public failure terminal after the atomic commit rolls back."""
+
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="commit",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                row = await repository.get(context, session_id, for_update=True)
+                if operation is not None:
+                    if operation_id is None or operation.id != operation_id or operation.status != "in_progress":
+                        return
+                else:
+                    operation = self._new_operation(
+                        context,
+                        session_id,
+                        kind="commit",
+                        idempotency_hash=operation_hash,
+                        request_checksum=request_checksum,
+                    )
+                    await repository.create_operation(context, operation)
+                activity_repository = AgentDesignActivityRepository(session)
+                if operation_id is None:
+                    await activity_repository.append(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation.id,
+                        kind=AgentDesignActivityKind.COMMIT_ACCEPTED,
+                    )
+                    await activity_repository.append(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation.id,
+                        kind=AgentDesignActivityKind.COMMIT_VALIDATION_STARTED,
+                    )
+                if row.status == AgentDesignStatus.COMMITTING.value:
+                    row.status = AgentDesignStatus.PROPOSAL_READY.value
+                    row.error_code = AgentDesignServiceErrorCode.COMMIT_FAILED.value
+                    row.error_message = "Agent 创建失败，请重试。"
+                operation.status = "failed"
+                operation.result_revision = row.revision
+                operation.public_error_code = AgentDesignServiceErrorCode.COMMIT_FAILED.value
+                await activity_repository.append(
+                    context,
+                    session_id=session_id,
+                    operation_id=operation.id,
+                    kind=AgentDesignActivityKind.COMMIT_TERMINAL,
+                    payload={
+                        "status": "failed",
+                        "error_code": AgentDesignServiceErrorCode.COMMIT_FAILED.value,
+                    },
+                )
+                await session.flush()
+        except Exception:  # noqa: BLE001 - preserve the primary commit failure
+            return
 
     async def cancel(
         self,
@@ -756,66 +1224,127 @@ class AgentDesignService:
             }
         )
         try:
-            async with self._session_factory() as session:
-                async with session.begin():
-                    repository = self._repository_factory(session)
-                    active_turn_operations = await repository.lock_in_progress_turn_operations(
+            active_operation_id: uuid.UUID | None = None
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active_turn_operations = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="cancel",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                row = await repository.get(
+                    context,
+                    session_id,
+                    for_update=True,
+                )
+                if operation is not None:
+                    self._require_matching_operation(
+                        context,
+                        operation,
+                        session_id=session_id,
+                        request_checksum=request_checksum,
+                    )
+                    if operation.status == "completed":
+                        return self._session_view(row)
+                    if operation.status == "in_progress":
+                        raise AssetConflict(context.request_id)
+                if row.status in {
+                    AgentDesignStatus.CANCELLED.value,
+                    AgentDesignStatus.COMPLETED.value,
+                }:
+                    raise AssetConflict(context.request_id)
+                self._require_expected_revision(
+                    context,
+                    row,
+                    command.expected_revision,
+                )
+                if operation is None:
+                    operation = self._new_operation(
                         context,
                         session_id,
+                        kind="cancel",
+                        idempotency_hash=operation_hash,
+                        request_checksum=request_checksum,
                     )
-                    operation = await repository.get_operation(
-                        context,
-                        operation_kind="cancel",
-                        idempotency_key_hash=operation_hash,
-                        for_update=True,
-                    )
-                    row = await repository.get(
+                    await repository.create_operation(context, operation)
+                else:
+                    self._reset_operation(operation)
+                if active_turn_operations:
+                    active_turn = active_turn_operations[0]
+                    active_turn.stop_requested_at = self._now()
+                    active_operation_id = uuid.UUID(str(active_turn.id))
+                await session.flush()
+
+            if active_operation_id is not None:
+                control_key = self._generation_control.key(
+                    context.project_id,
+                    str(context.user_id),
+                    session_id,
+                    active_operation_id,
+                )
+                done = await self._generation_control.request_stop(control_key)
+                if done is None:
+                    await self._wait_for_generation_completion(
                         context,
                         session_id,
-                        for_update=True,
+                        active_operation_id,
                     )
-                    if operation is not None:
-                        self._require_matching_operation(
-                            context,
-                            operation,
-                            session_id=session_id,
-                            request_checksum=request_checksum,
-                        )
-                        if operation.status == "completed":
-                            return self._session_view(row)
-                        if operation.status == "in_progress":
-                            raise AssetConflict(context.request_id)
-                    if row.status == AgentDesignStatus.CANCELLED.value:
-                        raise AssetConflict(context.request_id)
-                    if row.status == AgentDesignStatus.COMPLETED.value:
-                        raise AssetConflict(context.request_id)
-                    self._require_expected_revision(
-                        context,
-                        row,
-                        command.expected_revision,
-                    )
-                    if operation is None:
-                        operation = self._new_operation(
-                            context,
-                            session_id,
-                            kind="cancel",
-                            idempotency_hash=operation_hash,
-                            request_checksum=request_checksum,
-                        )
-                        await repository.create_operation(context, operation)
-                    else:
-                        self._reset_operation(operation)
-                    self._clear_cancelled_session(row)
-                    row.revision += 1
-                    self._terminalize_cancelled_turn_operations(
-                        active_turn_operations,
-                        result_revision=row.revision,
-                    )
-                    operation.status = "completed"
-                    operation.result_revision = row.revision
-                    operation.public_error_code = None
-                    await session.flush()
+                else:
+                    await done.wait()
+
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active_turn_operations = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="cancel",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                row = await repository.get(
+                    context,
+                    session_id,
+                    for_update=True,
+                )
+                if operation is None:
+                    raise AssetConflict(context.request_id)
+                self._require_matching_operation(
+                    context,
+                    operation,
+                    session_id=session_id,
+                    request_checksum=request_checksum,
+                )
+                if operation.status == "completed":
                     return self._session_view(row)
+                if operation.status != "in_progress":
+                    raise AssetConflict(context.request_id)
+                self._clear_cancelled_session(row)
+                row.revision += 1
+                self._terminalize_cancelled_turn_operations(
+                    active_turn_operations,
+                    result_revision=row.revision,
+                )
+                await repository.clear_turn_generation_profiles(
+                    context,
+                    session_id,
+                )
+                await AgentDesignActivityRepository(session).clear_session(
+                    context,
+                    session_id=session_id,
+                )
+                operation.status = "completed"
+                operation.result_revision = row.revision
+                operation.public_error_code = None
+                await session.flush()
+                return self._session_view(row)
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -851,6 +1380,8 @@ class AgentDesignService:
         row.blueprint_checksum = None
         row.error_code = None
         row.error_message = None
+        row.generation_model_ref = None
+        row.generation_mode = None
 
     @staticmethod
     def _terminalize_cancelled_turn_operations(
@@ -862,6 +1393,8 @@ class AgentDesignService:
             operation.status = "failed"
             operation.result_revision = result_revision
             operation.public_error_code = AgentDesignServiceErrorCode.SESSION_CANCELLED.value
+            operation.requested_generation_profile_json = None
+            operation.effective_generation_profile_json = None
 
     async def _prepare_turn(
         self,
@@ -877,13 +1410,20 @@ class AgentDesignService:
             int,
             AgentDesignGenerationRequest,
             AgentDesignGenerationContext,
+            uuid.UUID,
+            AgentDesignGenerationProfile | None,
         ]
     ):
         try:
             async with self._session_factory() as session:
                 async with session.begin():
                     repository = self._repository_factory(session)
-                    await repository.lock_in_progress_turn_operations(
+                    active_operations = await repository.lock_in_progress_turn_operations(
+                        context,
+                        session_id,
+                    )
+                    await self._require_no_cancel_in_progress(
+                        repository,
                         context,
                         session_id,
                     )
@@ -898,7 +1438,6 @@ class AgentDesignService:
                         session_id,
                         for_update=True,
                     )
-                    retry_existing = False
                     if operation is not None:
                         self._require_matching_operation(
                             context,
@@ -906,7 +1445,7 @@ class AgentDesignService:
                             session_id=session_id,
                             request_checksum=request_checksum,
                         )
-                        if operation.status == "completed":
+                        if operation.status in {"completed", "failed", "stopped"}:
                             return self._session_view(row)
                         if operation.status == "in_progress":
                             if not self._is_stale_generating(
@@ -919,13 +1458,10 @@ class AgentDesignService:
                                 context,
                                 row,
                                 now=self._now(),
+                                active_operations=active_operations,
                             )
-                            operation.status = "failed"
-                            operation.result_revision = row.revision
-                            operation.public_error_code = AgentDesignServiceErrorCode.GENERATION_INTERRUPTED.value
-                        if operation.status != "failed" or row.status != AgentDesignStatus.FAILED.value or operation.result_revision != row.revision:
-                            raise AssetConflict(context.request_id)
-                        retry_existing = True
+                            return self._session_view(row)
+                        raise AssetConflict(context.request_id)
                     else:
                         self._require_expected_revision(
                             context,
@@ -943,6 +1479,7 @@ class AgentDesignService:
                                 context,
                                 row,
                                 now=self._now(),
+                                active_operations=active_operations,
                             )
                         self._require_nonterminal(context, row)
                         operation = self._new_operation(
@@ -955,8 +1492,6 @@ class AgentDesignService:
                         await repository.create_operation(context, operation)
 
                     if isinstance(command.input, AgentDesignBlueprintTurn):
-                        if retry_existing and operation.status == "completed":
-                            return self._session_view(row)
                         current_blueprint = self._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else None
                         blueprint = self._validate_blueprint(
                             context,
@@ -980,15 +1515,14 @@ class AgentDesignService:
                         row.error_code = None
                         row.error_message = None
                         row.progress_json = self._progress_json(AgentDesignProgressStatus.COMPLETED)
-                        if not retry_existing:
-                            row.messages_json = [
-                                *row.messages_json,
-                                self._message_json(
-                                    "user",
-                                    "已手动更新 Agent 设定。",
-                                    now=self._now(),
-                                ),
-                            ]
+                        row.messages_json = [
+                            *row.messages_json,
+                            self._message_json(
+                                "user",
+                                "已手动更新 Agent 设定。",
+                                now=self._now(),
+                            ),
+                        ]
                         row.revision += 1
                         operation.status = "completed"
                         operation.result_revision = row.revision
@@ -996,25 +1530,25 @@ class AgentDesignService:
                         await session.flush()
                         return self._session_view(row)
 
-                    if not retry_existing:
-                        ready_to_generate = self._append_turn_input(
-                            context,
-                            row,
-                            command.input,
+                    ready_to_generate = self._append_turn_input(
+                        context,
+                        row,
+                        command.input,
+                        operation_id=operation.id,
+                    )
+                    if not ready_to_generate:
+                        row.status = AgentDesignStatus.AWAITING_CLARIFICATION.value
+                        row.error_code = None
+                        row.error_message = None
+                        row.progress_json = self._progress_json(
+                            AgentDesignProgressStatus.PENDING,
                         )
-                        if not ready_to_generate:
-                            row.status = AgentDesignStatus.AWAITING_CLARIFICATION.value
-                            row.error_code = None
-                            row.error_message = None
-                            row.progress_json = self._progress_json(
-                                AgentDesignProgressStatus.PENDING,
-                            )
-                            row.revision += 1
-                            operation.status = "completed"
-                            operation.result_revision = row.revision
-                            operation.public_error_code = None
-                            await session.flush()
-                            return self._session_view(row)
+                        row.revision += 1
+                        operation.status = "completed"
+                        operation.result_revision = row.revision
+                        operation.public_error_code = None
+                        await session.flush()
+                        return self._session_view(row)
                     blueprint = self._blueprint_from_json(row.blueprint_json) if row.blueprint_json is not None else self._default_blueprint(self._first_user_message(row))
                     generation_request = self._generation_request(
                         row,
@@ -1039,11 +1573,39 @@ class AgentDesignService:
                         allowed_assets=allowed_assets,
                         allowed_capabilities=blueprint.tool_groups,
                     )
+                    generation_profile = await self._resolve_generation_profile(
+                        session,
+                        context,
+                        row,
+                        command,
+                    )
+                    if generation_profile is not None:
+                        requested_model_ref = command.generation_model_ref or row.generation_model_ref
+                        requested_mode = command.generation_mode or row.generation_mode
+                        if requested_model_ref is None or requested_mode is None:
+                            raise AssetStorageUnavailable(context.request_id)
+                        requested_thinking, requested_effort = agent_design_mode_profile(
+                            requested_mode,
+                            supports_thinking=generation_profile.thinking_enabled,
+                            supports_reasoning_effort=(generation_profile.reasoning_effort is not None),
+                        )
+                        requested_profile = {
+                            "model_ref": requested_model_ref,
+                            "mode": requested_mode,
+                            "thinking_enabled": requested_thinking,
+                            "reasoning_effort": requested_effort,
+                        }
+                        operation.requested_generation_profile_json = requested_profile
+                        operation.effective_generation_profile_json = generation_profile.as_dict()
+                        row.generation_model_ref = requested_model_ref
+                        row.generation_mode = requested_mode
                     await session.flush()
                     return (
                         row.revision,
                         generation_request,
                         generation_context,
+                        operation.id,
+                        generation_profile,
                     )
         except SharedAssetError:
             raise
@@ -1053,6 +1615,115 @@ class AgentDesignService:
             raise AssetStorageUnavailable(context.request_id) from None
         except DBAPIError:
             raise AssetStorageUnavailable(context.request_id) from None
+
+    @staticmethod
+    async def _require_no_cancel_in_progress(
+        repository: AgentDesignRepository,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+    ) -> None:
+        if await repository.lock_in_progress_cancel_operations(
+            context,
+            session_id,
+        ):
+            raise AssetConflict(context.request_id)
+
+    async def _append_activity(
+        self,
+        context: ProjectContext,
+        *,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+        kind: AgentDesignActivityKind,
+        payload: dict[str, object] | None = None,
+        attempt: int | None = None,
+    ) -> None:
+        try:
+            async with self._session_factory() as session, session.begin():
+                await AgentDesignActivityRepository(session).append(
+                    context,
+                    session_id=session_id,
+                    operation_id=operation_id,
+                    kind=kind,
+                    payload=payload,
+                    attempt=attempt,
+                )
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    @staticmethod
+    async def _resolve_generation_profile(
+        session: AsyncSession,
+        context: ProjectContext,
+        row: AgentDesignSessionRow,
+        command: SubmitAgentDesignTurn,
+    ) -> AgentDesignGenerationProfile | None:
+        requested_model_ref = command.generation_model_ref or row.generation_model_ref
+        requested_mode = command.generation_mode or row.generation_mode
+        if requested_model_ref is None or requested_mode is None:
+            return None
+        if command.generation_mode is None:
+            thinking_enabled = None
+            reasoning_effort = None
+        else:
+            thinking_enabled = command.thinking_enabled
+            reasoning_effort = command.reasoning_effort
+        return await AgentDesignService._resolve_generation_profile_values(
+            session,
+            context,
+            requested_model_ref=requested_model_ref,
+            requested_mode=requested_mode,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+        )
+
+    @staticmethod
+    async def _resolve_generation_profile_values(
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        requested_model_ref: str,
+        requested_mode: str,
+        thinking_enabled: bool | None,
+        reasoning_effort: str | None,
+    ) -> AgentDesignGenerationProfile:
+        try:
+            material = await SystemModelRepository(session).resolve_active_model(
+                requested_model_ref,
+                load_envelope=False,
+            )
+        except SystemModelRepositoryInvariant:
+            raise AssetStorageUnavailable(context.request_id) from None
+        if material is None:
+            raise AgentDesignGenerationProfileStale(context.request_id)
+        if thinking_enabled is None:
+            try:
+                thinking_enabled, reasoning_effort = agent_design_mode_profile(
+                    requested_mode,
+                    supports_thinking=material.version.supports_thinking,
+                    supports_reasoning_effort=material.version.supports_reasoning_effort,
+                )
+            except AgentDesignGenerationProfileUnsupported:
+                raise AgentDesignGenerationProfileStale(context.request_id) from None
+        try:
+            profile = resolve_agent_design_generation_profile(
+                requested_model_ref=requested_model_ref,
+                effective_model_ref=str(uuid.UUID(str(material.model.id))),
+                mode=requested_mode,
+                thinking_enabled=thinking_enabled,
+                reasoning_effort=reasoning_effort,
+                supports_thinking=material.version.supports_thinking,
+                supports_reasoning_effort=(material.version.supports_reasoning_effort),
+            )
+            return replace(
+                profile,
+                model_version_id=str(uuid.UUID(str(material.version.id))),
+                payload_checksum=material.version.payload_checksum,
+            )
+        except AgentDesignGenerationProfileUnsupported:
+            raise AgentDesignGenerationProfileStale(context.request_id) from None
 
     @staticmethod
     async def _generation_allowed_assets(
@@ -1101,6 +1772,7 @@ class AgentDesignService:
         operation_hash: str,
         generation_revision: int,
         result: AgentDesignGenerationResult,
+        duration_ms: int = 0,
     ) -> AgentDesignSessionView:
         try:
             async with self._session_factory() as session:
@@ -1123,6 +1795,28 @@ class AgentDesignService:
                     )
                     if operation is None or operation.status != "in_progress" or row.status != AgentDesignStatus.GENERATING.value or row.revision != generation_revision:
                         raise AssetConflict(context.request_id)
+                    if operation.stop_requested_at is not None:
+                        return await self._settle_generation_stopped(
+                            session,
+                            context,
+                            row,
+                            operation,
+                            duration_ms=duration_ms,
+                        )
+                    if not await self._generation_profile_is_current(
+                        session,
+                        operation,
+                    ):
+                        code = AgentDesignGenerationProfileStale.code
+                        return await self._settle_generation_failed(
+                            session,
+                            context,
+                            row,
+                            operation,
+                            error_code=code,
+                            error_message=self._stable_generation_error_message(code),
+                            duration_ms=duration_ms,
+                        )
                     if isinstance(result, NeedsClarificationResult):
                         if len(result.questions) != 1:
                             raise AssetValidationFailed(context.request_id)
@@ -1170,6 +1864,7 @@ class AgentDesignService:
                                 "assistant",
                                 summary,
                                 now=self._now(),
+                                operation_id=operation.id,
                             ),
                         ]
                     else:
@@ -1180,6 +1875,16 @@ class AgentDesignService:
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     operation.public_error_code = None
+                    await AgentDesignActivityRepository(session).append(
+                        context,
+                        session_id=session_id,
+                        operation_id=operation.id,
+                        kind=AgentDesignActivityKind.TURN_TERMINAL,
+                        payload={
+                            "status": "completed",
+                            "duration_ms": duration_ms,
+                        },
+                    )
                     await session.flush()
                     return self._session_view(row)
         except SharedAssetError:
@@ -1196,6 +1901,7 @@ class AgentDesignService:
         generation_revision: int,
         error_code: str,
         error_message: str,
+        duration_ms: int = 0,
     ) -> AgentDesignSessionView:
         try:
             async with self._session_factory() as session:
@@ -1218,28 +1924,242 @@ class AgentDesignService:
                     )
                     if operation is None or operation.status != "in_progress" or row.status != AgentDesignStatus.GENERATING.value or row.revision != generation_revision:
                         return self._session_view(row)
-                    row.status = AgentDesignStatus.FAILED.value
-                    row.error_code = error_code
-                    row.error_message = error_message
-                    row.progress_json = self._progress_json(AgentDesignProgressStatus.FAILED)
-                    row.messages_json = [
-                        *row.messages_json,
-                        self._message_json(
-                            "assistant",
-                            error_message,
-                            now=self._now(),
-                        ),
-                    ]
-                    row.revision += 1
-                    operation.status = "failed"
-                    operation.result_revision = row.revision
-                    operation.public_error_code = error_code
-                    await session.flush()
-                    return self._session_view(row)
+                    if operation.stop_requested_at is not None:
+                        return await self._settle_generation_stopped(
+                            session,
+                            context,
+                            row,
+                            operation,
+                            duration_ms=duration_ms,
+                        )
+                    return await self._settle_generation_failed(
+                        session,
+                        context,
+                        row,
+                        operation,
+                        error_code=error_code,
+                        error_message=error_message,
+                        duration_ms=duration_ms,
+                    )
         except SharedAssetError:
             raise
         except DBAPIError:
             raise AssetStorageUnavailable(context.request_id) from None
+
+    @staticmethod
+    async def _generation_profile_is_current(
+        session: AsyncSession,
+        operation: AgentDesignOperationRow,
+    ) -> bool:
+        requested = operation.requested_generation_profile_json
+        effective = operation.effective_generation_profile_json
+        if requested is None and effective is None:
+            return True
+        if not isinstance(requested, dict) or not isinstance(effective, dict):
+            return False
+        try:
+            requested_model_ref = str(requested["model_ref"])
+            material = await SystemModelRepository(session).resolve_active_model(
+                requested_model_ref,
+                load_envelope=False,
+            )
+            if material is None:
+                return False
+            resolved = resolve_agent_design_generation_profile(
+                requested_model_ref=requested_model_ref,
+                effective_model_ref=str(uuid.UUID(str(material.model.id))),
+                mode=requested.get("mode"),
+                thinking_enabled=requested.get("thinking_enabled"),
+                reasoning_effort=requested.get("reasoning_effort"),
+                supports_thinking=material.version.supports_thinking,
+                supports_reasoning_effort=material.version.supports_reasoning_effort,
+            )
+            resolved = replace(
+                resolved,
+                model_version_id=str(uuid.UUID(str(material.version.id))),
+                payload_checksum=material.version.payload_checksum,
+            )
+        except (
+            AgentDesignGenerationProfileUnsupported,
+            KeyError,
+            SystemModelRepositoryInvariant,
+            TypeError,
+            ValueError,
+        ):
+            return False
+        return resolved.as_dict() == effective
+
+    async def _settle_generation_failed(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        row: AgentDesignSessionRow,
+        operation: AgentDesignOperationRow,
+        *,
+        error_code: str,
+        error_message: str,
+        duration_ms: int,
+    ) -> AgentDesignSessionView:
+        row.status = AgentDesignStatus.FAILED.value
+        row.error_code = error_code
+        row.error_message = error_message
+        row.progress_json = self._progress_json(AgentDesignProgressStatus.FAILED)
+        row.messages_json = [
+            *row.messages_json,
+            self._message_json(
+                "assistant",
+                error_message,
+                now=self._now(),
+                operation_id=operation.id,
+            ),
+        ]
+        row.revision += 1
+        operation.status = "failed"
+        operation.result_revision = row.revision
+        operation.public_error_code = error_code
+        await AgentDesignActivityRepository(session).append(
+            context,
+            session_id=uuid.UUID(str(row.id)),
+            operation_id=uuid.UUID(str(operation.id)),
+            kind=AgentDesignActivityKind.TURN_TERMINAL,
+            payload={
+                "status": "failed",
+                "duration_ms": duration_ms,
+                "error_code": error_code,
+            },
+        )
+        await session.flush()
+        return self._session_view(row)
+
+    async def _finish_generation_stopped(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        *,
+        operation_hash: str,
+        generation_revision: int,
+        duration_ms: int = 0,
+    ) -> AgentDesignSessionView:
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                operation = await repository.get_operation(
+                    context,
+                    operation_kind="turn",
+                    idempotency_key_hash=operation_hash,
+                    for_update=True,
+                )
+                row = await repository.get(
+                    context,
+                    session_id,
+                    for_update=True,
+                )
+                if operation is None or operation.status != "in_progress" or row.status != AgentDesignStatus.GENERATING.value or row.revision != generation_revision:
+                    return self._session_view(row)
+                return await self._settle_generation_stopped(
+                    session,
+                    context,
+                    row,
+                    operation,
+                    duration_ms=duration_ms,
+                )
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
+    async def _generation_should_stop(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+    ) -> bool:
+        try:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                operation = next(
+                    (item for item in active if uuid.UUID(str(item.id)) == operation_id),
+                    None,
+                )
+                return operation is None or operation.stop_requested_at is not None
+        except (SharedAssetError, DBAPIError):
+            return True
+
+    async def _monitor_generation_stop(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+        abort_event: asyncio.Event,
+    ) -> None:
+        while not abort_event.is_set():
+            await asyncio.sleep(_GENERATION_STOP_POLL_SECONDS)
+            if await self._generation_should_stop(
+                context,
+                session_id,
+                operation_id,
+            ):
+                abort_event.set()
+                return
+
+    async def _wait_for_generation_completion(
+        self,
+        context: ProjectContext,
+        session_id: uuid.UUID,
+        operation_id: uuid.UUID,
+    ) -> AgentDesignSessionView:
+        while True:
+            async with self._session_factory() as session, session.begin():
+                repository = self._repository_factory(session)
+                active = await repository.lock_in_progress_turn_operations(
+                    context,
+                    session_id,
+                )
+                row = await repository.get(context, session_id, for_update=True)
+                if all(uuid.UUID(str(item.id)) != operation_id for item in active):
+                    return self._session_view(row)
+            await asyncio.sleep(_GENERATION_STOP_POLL_SECONDS)
+
+    async def _settle_generation_stopped(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        row: AgentDesignSessionRow,
+        operation: AgentDesignOperationRow,
+        *,
+        duration_ms: int,
+    ) -> AgentDesignSessionView:
+        row.status = AgentDesignStatus.PROPOSAL_READY.value if row.blueprint_json is not None else AgentDesignStatus.INTERVIEWING.value
+        row.active_clarification_json = None
+        row.error_code = None
+        row.error_message = None
+        row.progress_json = self._progress_json(
+            AgentDesignProgressStatus.COMPLETED if row.blueprint_json is not None else AgentDesignProgressStatus.PENDING,
+        )
+        row.revision += 1
+        operation.status = "stopped"
+        operation.result_revision = row.revision
+        operation.public_error_code = None
+        await AgentDesignActivityRepository(session).append(
+            context,
+            session_id=uuid.UUID(str(row.id)),
+            operation_id=uuid.UUID(str(operation.id)),
+            kind=AgentDesignActivityKind.TURN_TERMINAL,
+            payload={
+                "status": "stopped",
+                "duration_ms": duration_ms,
+            },
+        )
+        await session.flush()
+        return self._session_view(row)
 
     async def _recover_stale_generating(
         self,
@@ -1248,6 +2168,7 @@ class AgentDesignService:
         row: AgentDesignSessionRow,
         *,
         now: datetime,
+        active_operations: tuple[AgentDesignOperationRow, ...],
     ) -> bool:
         if not self._is_stale_generating(row, now=now):
             return False
@@ -1258,20 +2179,18 @@ class AgentDesignService:
         row.progress_json = self._progress_json(AgentDesignProgressStatus.FAILED)
         row.active_clarification_json = None
         row.revision += 1
-        await repository.session.execute(
-            update(AgentDesignOperationRow)
-            .where(
-                AgentDesignOperationRow.project_id == context.project_id,
-                AgentDesignOperationRow.owner_user_id == str(context.user_id),
-                AgentDesignOperationRow.session_id == row.id,
-                AgentDesignOperationRow.status == "in_progress",
+        activity_repository = AgentDesignActivityRepository(repository.session)
+        for operation in active_operations:
+            operation.status = "failed"
+            operation.result_revision = row.revision
+            operation.public_error_code = code
+            await activity_repository.append(
+                context,
+                session_id=uuid.UUID(str(row.id)),
+                operation_id=uuid.UUID(str(operation.id)),
+                kind=AgentDesignActivityKind.TURN_TERMINAL,
+                payload={"status": "failed", "error_code": code},
             )
-            .values(
-                status="failed",
-                result_revision=row.revision,
-                public_error_code=code,
-            )
-        )
         await repository.session.flush()
         return True
 
@@ -1317,6 +2236,8 @@ class AgentDesignService:
         context: ProjectContext,
         row: AgentDesignSessionRow,
         turn: AgentDesignMessageTurn | AgentDesignClarificationTurn,
+        *,
+        operation_id: uuid.UUID | None = None,
     ) -> bool:
         if isinstance(turn, AgentDesignMessageTurn):
             if row.active_clarification_json is not None:
@@ -1328,6 +2249,7 @@ class AgentDesignService:
                     content,
                     now=self._now(),
                     authoritative_brief=(row.blueprint_json is None and not self._clarification_answers(row)),
+                    operation_id=operation_id,
                 )
             ]
             ready_to_generate = True
@@ -1353,6 +2275,7 @@ class AgentDesignService:
                     "assistant",
                     matching.question,
                     now=self._now(),
+                    operation_id=operation_id,
                 ),
                 self._message_json(
                     "user",
@@ -1360,6 +2283,7 @@ class AgentDesignService:
                     now=self._now(),
                     clarification_request_id=turn.response.request_id,
                     clarification_question=matching.question,
+                    operation_id=operation_id,
                 ),
             ]
             answered[turn.response.request_id] = content
@@ -1536,6 +2460,17 @@ class AgentDesignService:
         generation_model_ref = command.generation_model_ref
         if generation_model_ref is not None and generation_model_ref != DEFAULT_AGENT_MODEL_REF and exact_model_ref(generation_model_ref) is None:
             raise AssetValidationFailed(context.request_id)
+        generation_mode = command.generation_mode
+        thinking_enabled = command.thinking_enabled
+        reasoning_effort = command.reasoning_effort
+        profile_values = (
+            generation_mode,
+            thinking_enabled,
+            reasoning_effort,
+        )
+        if any(value is not None for value in profile_values):
+            if generation_model_ref is None or generation_mode not in {"flash", "thinking", "pro", "ultra"} or type(thinking_enabled) is not bool or reasoning_effort not in {None, "none", "low", "medium", "high"}:
+                raise AssetValidationFailed(context.request_id)
         turn = command.input
         if isinstance(turn, AgentDesignMessageTurn):
             if turn.kind != "message":
@@ -1604,6 +2539,37 @@ class AgentDesignService:
             expected_revision=command.expected_revision,
             idempotency_key=idempotency_key,
             generation_model_ref=generation_model_ref,
+            generation_mode=generation_mode,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+        )
+
+    @classmethod
+    def _validate_generation_preference(
+        cls,
+        context: ProjectContext,
+        command: SetAgentDesignGenerationPreference,
+    ) -> SetAgentDesignGenerationPreference:
+        cls._require_context(context)
+        if not isinstance(command, SetAgentDesignGenerationPreference):
+            raise AssetValidationFailed(context.request_id)
+        model_ref = command.generation_model_ref
+        mode = command.generation_mode
+        thinking_enabled = command.thinking_enabled
+        reasoning_effort = command.reasoning_effort
+        if (
+            not isinstance(model_ref, str)
+            or (model_ref != DEFAULT_AGENT_MODEL_REF and exact_model_ref(model_ref) is None)
+            or mode not in {"flash", "thinking", "pro", "ultra"}
+            or type(thinking_enabled) is not bool
+            or reasoning_effort not in {None, "none", "low", "medium", "high"}
+        ):
+            raise AssetValidationFailed(context.request_id)
+        return SetAgentDesignGenerationPreference(
+            generation_model_ref=model_ref,
+            generation_mode=mode,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
         )
 
     @classmethod
@@ -1996,6 +2962,7 @@ class AgentDesignService:
         clarification_request_id: str | None = None,
         clarification_question: str | None = None,
         authoritative_brief: bool = False,
+        operation_id: uuid.UUID | None = None,
     ) -> dict[str, object]:
         message: dict[str, object] = {
             "id": str(uuid.uuid4()),
@@ -2009,6 +2976,8 @@ class AgentDesignService:
             message["clarification_question"] = clarification_question
         if authoritative_brief:
             message["authoritative_brief"] = True
+        if operation_id is not None:
+            message["operation_id"] = str(operation_id)
         return message
 
     @staticmethod
@@ -2299,6 +3268,7 @@ class AgentDesignService:
                 role=str(item["role"]),
                 content=str(item["content"]),
                 created_at=datetime.fromisoformat(str(item["created_at"])),
+                operation_id=(uuid.UUID(str(item["operation_id"])) if item.get("operation_id") is not None else None),
             )
             for item in row.messages_json
         )
@@ -2338,6 +3308,14 @@ class AgentDesignService:
             created_agent_id=row.created_agent_id,
             created_at=row.created_at,
             updated_at=row.updated_at,
+            generation_preference=(
+                {
+                    "model_ref": row.generation_model_ref,
+                    "mode": row.generation_mode,
+                }
+                if row.generation_model_ref is not None and row.generation_mode is not None
+                else None
+            ),
         )
 
     @staticmethod
@@ -2355,6 +3333,8 @@ class AgentDesignService:
 
     @staticmethod
     def _stable_generation_error_message(code: str) -> str:
+        if code == AgentDesignGenerationProfileStale.code:
+            return "所选模型或思考强度已不可用，请刷新模型列表后重试。"
         if code == "AGENT_DESIGN_GENERATION_TIMEOUT":
             return "Agent 设定生成超时，请稍后重试。"
         if code in {
@@ -2402,5 +3382,6 @@ __all__ = [
     "CreateAgentDesignSession",
     "DEFAULT_AGENT_MODEL_REF",
     "DEFAULT_AGENT_TOOL_GROUPS",
+    "SetAgentDesignGenerationPreference",
     "SubmitAgentDesignTurn",
 ]

@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol, Self
 
@@ -27,7 +28,7 @@ from app.shared_assets.agent_service import (
 from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
-from deerflow.models.runtime import ModelRuntimeProfile
+from deerflow.models.runtime import AsyncAbortEvent, ModelRuntimeProfile
 from deerflow.utils import llm_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
 
@@ -608,6 +609,12 @@ class AgentDesignModelCaller(Protocol):
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
+        model_version_id: str | None = None,
+        model_payload_checksum: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        abort_event: AsyncAbortEvent | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str: ...
 
 
@@ -624,6 +631,12 @@ class RunOneshotAgentDesignModelCaller:
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
+        model_version_id: str | None = None,
+        model_payload_checksum: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        abort_event: AsyncAbortEvent | None = None,
+        on_reasoning_delta: Callable[[str], Awaitable[None]] | None = None,
     ) -> str:
         return await run_oneshot_llm(
             system_instruction=system_instruction,
@@ -631,6 +644,10 @@ class RunOneshotAgentDesignModelCaller:
             run_name="agent_design_generation",
             app_config=self.app_config,
             model_name=model_ref if model_ref is not None else self.model_name,
+            thinking_enabled=thinking_enabled,
+            reasoning_effort=reasoning_effort,
+            abort_event=abort_event,
+            on_reasoning_delta=on_reasoning_delta,
             profile=ModelRuntimeProfile.PRIVATE_ONESHOT,
         )
 
@@ -660,6 +677,16 @@ class AgentDesignGenerationService:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
+        model_version_id: str | None = None,
+        model_payload_checksum: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
+        abort_event: AsyncAbortEvent | None = None,
+        activity_callback: Callable[
+            [str, int | None, dict[str, object]],
+            Awaitable[None],
+        ]
+        | None = None,
     ) -> AgentDesignGenerationResult:
         if not isinstance(request, AgentDesignGenerationRequest) or not isinstance(context, AgentDesignGenerationContext):
             raise AgentDesignGenerationInvalid(
@@ -671,6 +698,25 @@ class AgentDesignGenerationService:
                 "AGENT_DESIGN_INVALID_INPUT",
                 "Agent design model selection is invalid.",
             )
+        exact_profile = model_version_id is not None or model_payload_checksum is not None
+        if exact_profile and (model_ref is None or exact_model_ref(model_ref) is None or model_version_id is None or model_payload_checksum is None):
+            raise AgentDesignGenerationInvalid(
+                "AGENT_DESIGN_INVALID_INPUT",
+                "Agent design model selection is invalid.",
+            )
+        if exact_profile:
+            try:
+                uuid.UUID(model_version_id)
+            except (TypeError, ValueError):
+                raise AgentDesignGenerationInvalid(
+                    "AGENT_DESIGN_INVALID_INPUT",
+                    "Agent design model selection is invalid.",
+                ) from None
+            if not isinstance(model_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", model_payload_checksum) is None:
+                raise AgentDesignGenerationInvalid(
+                    "AGENT_DESIGN_INVALID_INPUT",
+                    "Agent design model selection is invalid.",
+                )
         input_document = self._input_document(request, context)
         if self._contains_secret(input_document):
             raise AgentDesignGenerationUnsafe(
@@ -681,6 +727,13 @@ class AgentDesignGenerationService:
         try:
             async with asyncio.timeout(self._timeout_seconds):
                 for attempt in range(2):
+                    attempt_number = attempt + 1
+                    if activity_callback is not None:
+                        await activity_callback(
+                            "attempt_started",
+                            attempt_number,
+                            {},
+                        )
                     current_content = user_content
                     if attempt == 1:
                         current_content = (
@@ -693,29 +746,77 @@ class AgentDesignGenerationService:
                             "or confidentiality. Never request or reveal credentials or secrets.\n"
                             "--- END REPAIR REQUIREMENT ---"
                         )
-                    if model_ref is None:
-                        raw = await self._model_caller(
-                            system_instruction=_SYSTEM_INSTRUCTION,
-                            user_content=current_content,
+                    caller_kwargs: dict[str, object] = {
+                        "system_instruction": _SYSTEM_INSTRUCTION,
+                        "user_content": current_content,
+                    }
+                    if model_ref is not None:
+                        caller_kwargs["model_ref"] = model_ref
+                    if exact_profile:
+                        caller_kwargs["model_version_id"] = model_version_id
+                        caller_kwargs["model_payload_checksum"] = model_payload_checksum
+                    if thinking_enabled or reasoning_effort is not None:
+                        caller_kwargs["thinking_enabled"] = thinking_enabled
+                        caller_kwargs["reasoning_effort"] = reasoning_effort
+                    if abort_event is not None:
+                        caller_kwargs["abort_event"] = abort_event
+                    if activity_callback is not None:
+
+                        async def reasoning_delta(
+                            text: str,
+                            *,
+                            current_attempt: int = attempt_number,
+                        ) -> None:
+                            await activity_callback(
+                                "reasoning",
+                                current_attempt,
+                                {"text": text},
+                            )
+
+                        caller_kwargs["on_reasoning_delta"] = reasoning_delta
+                    raw = await self._model_caller(**caller_kwargs)
+                    if activity_callback is not None:
+                        await activity_callback(
+                            "candidate_generated",
+                            attempt_number,
+                            {},
                         )
-                    else:
-                        raw = await self._model_caller(
-                            system_instruction=_SYSTEM_INSTRUCTION,
-                            user_content=current_content,
-                            model_ref=model_ref,
+                        await activity_callback(
+                            "validation_started",
+                            attempt_number,
+                            {},
                         )
                     try:
-                        return self._result_from_model_output(
+                        result = self._result_from_model_output(
                             request,
                             context,
                             raw,
                         )
+                        if activity_callback is not None:
+                            await activity_callback(
+                                "validation_passed",
+                                attempt_number,
+                                {},
+                            )
+                        return result
                     except (
                         AgentDesignGenerationInvalid,
                         AgentDesignGenerationUnsafe,
                     ):
+                        if activity_callback is not None:
+                            await activity_callback(
+                                "validation_failed",
+                                attempt_number,
+                                {},
+                            )
                         if attempt == 1:
                             raise
+                        if activity_callback is not None:
+                            await activity_callback(
+                                "repair_started",
+                                2,
+                                {},
+                            )
         except TimeoutError:
             raise AgentDesignGenerationUnavailable(
                 "AGENT_DESIGN_GENERATION_TIMEOUT",

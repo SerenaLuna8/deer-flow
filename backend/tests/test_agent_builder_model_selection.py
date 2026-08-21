@@ -8,8 +8,10 @@ import pytest
 from pydantic import ValidationError
 
 from app.gateway.routers.project_agent_builder import (
+    AgentDesignGenerationPreferenceRequest,
     AgentDesignSessionSummaryResponse,
     AgentDesignTurnRequest,
+    _generation_preference,
     _turn,
 )
 from app.gateway.system_model_callers import DatabaseOneshotModelCaller
@@ -21,12 +23,15 @@ from app.shared_assets.agent_design_generation import (
     NeedsClarificationResult,
 )
 from app.shared_assets.agent_design_service import (
+    AgentDesignService,
     AgentDesignSessionSummary,
     AgentDesignStatus,
 )
 from deerflow.models import ModelRuntimeProfile
 
 GENERATION_MODEL_REF = "00000000-0000-4000-8000-000000000308"
+GENERATION_MODEL_VERSION_ID = "00000000-0000-4000-8000-000000000309"
+GENERATION_MODEL_CHECKSUM = "a" * 64
 
 
 def test_agent_builder_session_summary_exposes_revision_for_safe_deletion() -> None:
@@ -50,6 +55,10 @@ def test_agent_builder_session_summary_exposes_revision_for_safe_deletion() -> N
 class _RecordingAgentDesignCaller:
     def __init__(self) -> None:
         self.model_ref: str | None = None
+        self.model_version_id: str | None = None
+        self.model_payload_checksum: str | None = None
+        self.thinking_enabled: bool | None = None
+        self.reasoning_effort: str | None = None
 
     async def __call__(
         self,
@@ -57,9 +66,17 @@ class _RecordingAgentDesignCaller:
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
+        model_version_id: str | None = None,
+        model_payload_checksum: str | None = None,
+        thinking_enabled: bool = False,
+        reasoning_effort: str | None = None,
     ) -> str:
         del system_instruction, user_content
         self.model_ref = model_ref
+        self.model_version_id = model_version_id
+        self.model_payload_checksum = model_payload_checksum
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
         return (
             '{"decision":"needs_clarification","questions":['
             '{"id":"scope","targets":["agents_instructions"],"prompt":"需要覆盖哪些任务？","reason":"明确职责边界","kind":"single_select","required":true,"options":["全面覆盖","关键任务","指定范围"]}]}'
@@ -79,10 +96,34 @@ async def test_agent_design_generation_uses_the_selected_conversation_model() ->
         ),
         context=AgentDesignGenerationContext(),
         model_ref=GENERATION_MODEL_REF,
+        thinking_enabled=True,
+        reasoning_effort="high",
     )
 
     assert isinstance(result, NeedsClarificationResult)
     assert caller.model_ref == GENERATION_MODEL_REF
+    assert caller.thinking_enabled is True
+    assert caller.reasoning_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_agent_design_generation_forwards_the_frozen_model_version() -> None:
+    caller = _RecordingAgentDesignCaller()
+
+    await AgentDesignGenerationService(model_caller=caller).generate(
+        AgentDesignGenerationRequest(
+            agent_name="代码审查",
+            brief="审查代码并给出建议",
+            phase="discovery",
+        ),
+        context=AgentDesignGenerationContext(),
+        model_ref=GENERATION_MODEL_REF,
+        model_version_id=GENERATION_MODEL_VERSION_ID,
+        model_payload_checksum=GENERATION_MODEL_CHECKSUM,
+    )
+
+    assert caller.model_version_id == GENERATION_MODEL_VERSION_ID
+    assert caller.model_payload_checksum == GENERATION_MODEL_CHECKSUM
 
 
 @pytest.mark.asyncio
@@ -108,6 +149,9 @@ def test_agent_builder_turn_maps_the_selected_generation_model() -> None:
         {
             "input": {"kind": "message", "message": "创建一个代码审查 Agent"},
             "generation_model_ref": GENERATION_MODEL_REF,
+            "generation_mode": "pro",
+            "thinking_enabled": True,
+            "reasoning_effort": "medium",
             "expected_revision": 1,
             "idempotency_key": "builder-model-selection",
         }
@@ -116,6 +160,9 @@ def test_agent_builder_turn_maps_the_selected_generation_model() -> None:
     command = _turn(request)
 
     assert command.generation_model_ref == GENERATION_MODEL_REF
+    assert command.generation_mode == "pro"
+    assert command.thinking_enabled is True
+    assert command.reasoning_effort == "medium"
 
 
 def test_agent_builder_turn_rejects_an_invalid_generation_model_ref() -> None:
@@ -128,6 +175,24 @@ def test_agent_builder_turn_rejects_an_invalid_generation_model_ref() -> None:
                 "idempotency_key": "builder-invalid-model-selection",
             }
         )
+
+
+def test_agent_builder_maps_the_session_generation_preference() -> None:
+    request = AgentDesignGenerationPreferenceRequest.model_validate(
+        {
+            "generation_model_ref": GENERATION_MODEL_REF,
+            "generation_mode": "ultra",
+            "thinking_enabled": True,
+            "reasoning_effort": "high",
+        }
+    )
+
+    command = _generation_preference(request)
+
+    assert command.generation_model_ref == GENERATION_MODEL_REF
+    assert command.generation_mode == "ultra"
+    assert command.thinking_enabled is True
+    assert command.reasoning_effort == "high"
 
 
 @pytest.mark.asyncio
@@ -172,4 +237,145 @@ async def test_database_oneshot_caller_materializes_the_selected_model(
     assert materialized_refs == [GENERATION_MODEL_REF]
     assert invocation["model_name"] == GENERATION_MODEL_REF
     assert invocation["profile"] is ModelRuntimeProfile.PRIVATE_ONESHOT
+    assert invocation["thinking_enabled"] is False
+    assert invocation["reasoning_effort"] is None
     assert "attach_tracing" not in invocation
+
+
+@pytest.mark.asyncio
+async def test_database_oneshot_caller_forwards_builder_reasoning_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invocation: dict[str, object] = {}
+
+    class _Materializer:
+        async def materialize_active(self, model_ref: str | None = None):
+            del model_ref
+            return SimpleNamespace(name=GENERATION_MODEL_REF)
+
+    class _Config:
+        def with_runtime_models(self, models):
+            del models
+            return self
+
+    async def _run_oneshot_llm(**kwargs):
+        invocation.update(kwargs)
+        return "ok"
+
+    monkeypatch.setattr(
+        "app.gateway.system_model_callers.run_oneshot_llm",
+        _run_oneshot_llm,
+    )
+    caller = DatabaseOneshotModelCaller(
+        app_config=_Config(),
+        materializer=_Materializer(),
+        run_name="agent_design_generation",
+    )
+
+    await caller(
+        system_instruction="system",
+        user_content="user",
+        model_ref=GENERATION_MODEL_REF,
+        thinking_enabled=True,
+        reasoning_effort="medium",
+    )
+
+    assert invocation["thinking_enabled"] is True
+    assert invocation["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_database_oneshot_caller_materializes_the_frozen_model_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exact_materialization: dict[str, object] = {}
+
+    class _Materializer:
+        async def materialize_exact(self, **kwargs):
+            exact_materialization.update(kwargs)
+            return SimpleNamespace(name=GENERATION_MODEL_REF)
+
+        async def materialize_active(self, _model_ref: str | None = None):
+            raise AssertionError("a frozen Builder turn must not resolve Current Version")
+
+    class _Config:
+        def with_runtime_models(self, models):
+            del models
+            return self
+
+    async def _run_oneshot_llm(**_kwargs):
+        return "ok"
+
+    monkeypatch.setattr(
+        "app.gateway.system_model_callers.run_oneshot_llm",
+        _run_oneshot_llm,
+    )
+    caller = DatabaseOneshotModelCaller(
+        app_config=_Config(),
+        materializer=_Materializer(),
+        run_name="agent_design_generation",
+    )
+
+    assert (
+        await caller(
+            system_instruction="system",
+            user_content="user",
+            model_ref=GENERATION_MODEL_REF,
+            model_version_id=GENERATION_MODEL_VERSION_ID,
+            model_payload_checksum=GENERATION_MODEL_CHECKSUM,
+        )
+        == "ok"
+    )
+    assert exact_materialization == {
+        "model_config_id": uuid.UUID(GENERATION_MODEL_REF),
+        "model_config_version_id": uuid.UUID(GENERATION_MODEL_VERSION_ID),
+        "payload_checksum": GENERATION_MODEL_CHECKSUM,
+    }
+
+
+@pytest.mark.asyncio
+async def test_builder_settlement_rejects_a_changed_model_current_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    changed_version_id = uuid.UUID("00000000-0000-4000-8000-000000000310")
+
+    class _Repository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def resolve_active_model(self, *_args: object, **_kwargs: object):
+            return SimpleNamespace(
+                model=SimpleNamespace(id=uuid.UUID(GENERATION_MODEL_REF)),
+                version=SimpleNamespace(
+                    id=changed_version_id,
+                    payload_checksum="b" * 64,
+                    supports_thinking=True,
+                    supports_reasoning_effort=True,
+                ),
+            )
+
+    monkeypatch.setattr(
+        "app.shared_assets.agent_design_service.SystemModelRepository",
+        _Repository,
+    )
+    operation = SimpleNamespace(
+        requested_generation_profile_json={
+            "model_ref": GENERATION_MODEL_REF,
+            "mode": "pro",
+            "thinking_enabled": True,
+            "reasoning_effort": "medium",
+        },
+        effective_generation_profile_json={
+            "model_ref": GENERATION_MODEL_REF,
+            "mode": "pro",
+            "thinking_enabled": True,
+            "reasoning_effort": "medium",
+            "model_version_id": GENERATION_MODEL_VERSION_ID,
+            "payload_checksum": GENERATION_MODEL_CHECKSUM,
+        },
+    )
+
+    assert not await AgentDesignService._generation_profile_is_current(  # noqa: SLF001
+        SimpleNamespace(),  # type: ignore[arg-type]
+        operation,  # type: ignore[arg-type]
+    )

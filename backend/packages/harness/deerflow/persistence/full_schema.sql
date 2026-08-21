@@ -877,12 +877,15 @@ CREATE TABLE agent_design_sessions (
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     created_agent_deleted BOOLEAN DEFAULT false NOT NULL,
+    generation_model_ref VARCHAR(36),
+    generation_mode VARCHAR(16),
     CONSTRAINT pk_agent_design_sessions PRIMARY KEY (id),
     CONSTRAINT ck_agent_design_sessions_blueprint CHECK ((blueprint_json IS NULL AND blueprint_checksum IS NULL) OR (blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL)),
     CONSTRAINT ck_agent_design_sessions_completion CHECK ((status = 'completed' AND ((created_agent_deleted IS FALSE AND created_agent_id IS NOT NULL AND created_agent_version_id IS NOT NULL) OR (created_agent_deleted IS TRUE AND created_agent_id IS NULL AND created_agent_version_id IS NULL))) OR (status <> 'completed' AND created_agent_deleted IS FALSE AND created_agent_id IS NULL AND created_agent_version_id IS NULL)),
     CONSTRAINT ck_agent_design_sessions_ready_blueprint CHECK ((status IN ('proposal_ready', 'committing', 'completed') AND blueprint_json IS NOT NULL AND blueprint_checksum IS NOT NULL) OR status NOT IN ('proposal_ready', 'committing', 'completed')),
     CONSTRAINT ck_agent_design_sessions_clarification CHECK ((status = 'awaiting_clarification' AND active_clarification_json IS NOT NULL) OR (status <> 'awaiting_clarification' AND active_clarification_json IS NULL)),
     CONSTRAINT ck_agent_design_sessions_error CHECK ((status = 'failed' AND error_code IS NOT NULL AND error_message IS NOT NULL) OR (status <> 'failed' AND error_code IS NULL AND error_message IS NULL)),
+    CONSTRAINT ck_agent_design_sessions_generation_preference CHECK ((generation_model_ref IS NULL AND generation_mode IS NULL) OR (generation_model_ref IS NOT NULL AND generation_mode IN ('flash', 'thinking', 'pro', 'ultra'))),
     CONSTRAINT ck_agent_design_sessions_revision CHECK (revision >= 1),
     CONSTRAINT ck_agent_design_sessions_status CHECK (status IN ('interviewing', 'generating', 'awaiting_clarification', 'proposal_ready', 'committing', 'completed', 'failed', 'cancelled')),
     CONSTRAINT fk_agent_design_sessions_created_agent_project FOREIGN KEY(project_id, created_agent_id) REFERENCES agents (project_id, id) ON DELETE RESTRICT,
@@ -910,18 +913,45 @@ CREATE TABLE agent_design_operations (
     public_error_code VARCHAR(64),
     created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    stop_requested_at TIMESTAMP WITH TIME ZONE,
+    requested_generation_profile_json JSONB,
+    effective_generation_profile_json JSONB,
     CONSTRAINT pk_agent_design_operations PRIMARY KEY (id),
     CONSTRAINT ck_agent_design_operations_kind CHECK (operation_kind IN ('turn', 'commit', 'cancel')),
     CONSTRAINT ck_agent_design_operations_result_revision CHECK (result_revision IS NULL OR result_revision >= 1),
-    CONSTRAINT ck_agent_design_operations_status CHECK (status IN ('in_progress', 'completed', 'failed')),
-    CONSTRAINT ck_agent_design_operations_completion CHECK ((status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL) OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL) OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL)),
+    CONSTRAINT ck_agent_design_operations_status CHECK (status IN ('in_progress', 'completed', 'failed', 'stopped')),
+    CONSTRAINT ck_agent_design_operations_completion CHECK ((status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL) OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL) OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL) OR (status = 'stopped' AND result_revision IS NOT NULL AND public_error_code IS NULL)),
+    CONSTRAINT ck_agent_design_operations_generation_profile CHECK ((requested_generation_profile_json IS NULL AND effective_generation_profile_json IS NULL) OR (operation_kind = 'turn' AND requested_generation_profile_json IS NOT NULL AND effective_generation_profile_json IS NOT NULL)),
     CONSTRAINT fk_agent_design_operations_session FOREIGN KEY(project_id, owner_user_id, session_id) REFERENCES agent_design_sessions (project_id, owner_user_id, id) ON DELETE CASCADE,
     CONSTRAINT fk_agent_design_operations_owner FOREIGN KEY(owner_user_id) REFERENCES users (id) ON DELETE RESTRICT,
     CONSTRAINT fk_agent_design_operations_project FOREIGN KEY(project_id) REFERENCES projects (id) ON DELETE RESTRICT,
-    CONSTRAINT uq_agent_design_operations_idempotency UNIQUE (project_id, owner_user_id, operation_kind, idempotency_key_hash)
+    CONSTRAINT uq_agent_design_operations_idempotency UNIQUE (project_id, owner_user_id, operation_kind, idempotency_key_hash),
+    CONSTRAINT uq_agent_design_operations_private_scope UNIQUE (project_id, owner_user_id, session_id, id)
 );
 
 CREATE INDEX ix_agent_design_operations_session ON agent_design_operations (project_id, owner_user_id, session_id, created_at DESC);
+
+CREATE TABLE agent_design_activities (
+    seq BIGINT GENERATED ALWAYS AS IDENTITY NOT NULL,
+    project_id UUID NOT NULL,
+    owner_user_id VARCHAR(36) NOT NULL,
+    session_id UUID NOT NULL,
+    operation_id UUID NOT NULL,
+    attempt INTEGER,
+    kind VARCHAR(40) NOT NULL,
+    payload_json JSONB DEFAULT '{}'::jsonb NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT now() NOT NULL,
+    CONSTRAINT pk_agent_design_activities PRIMARY KEY (seq),
+    CONSTRAINT ck_agent_design_activities_attempt CHECK (attempt IS NULL OR attempt IN (1, 2)),
+    CONSTRAINT ck_agent_design_activities_kind CHECK (kind IN ('turn_accepted', 'attempt_started', 'reasoning', 'candidate_generated', 'validation_started', 'validation_passed', 'validation_failed', 'repair_started', 'turn_terminal', 'commit_accepted', 'commit_validation_started', 'commit_validation_passed', 'commit_persistence_started', 'commit_persistence_completed', 'commit_terminal')),
+    CONSTRAINT fk_agent_design_activities_session FOREIGN KEY(project_id, owner_user_id, session_id) REFERENCES agent_design_sessions (project_id, owner_user_id, id) ON DELETE CASCADE,
+    CONSTRAINT fk_agent_design_activities_operation FOREIGN KEY(project_id, owner_user_id, session_id, operation_id) REFERENCES agent_design_operations (project_id, owner_user_id, session_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX ix_agent_design_activities_session_seq ON agent_design_activities (project_id, owner_user_id, session_id, seq);
+
+CREATE UNIQUE INDEX uq_agent_design_activities_terminal ON agent_design_activities (operation_id) WHERE kind IN ('turn_terminal', 'commit_terminal');
+
 
 CREATE TABLE channel_connections (
     id VARCHAR(64) NOT NULL,
@@ -3596,7 +3626,7 @@ FOR EACH ROW EXECUTE FUNCTION prevent_run_memory_snapshot_sections_mutation();
 -- BEGIN GENERATED SCHEMA COMMENTS
 -- Generated by backend/scripts/generate_schema_comments.py; DO NOT EDIT.
 -- Source: full_schema.sql
--- Coverage: 90 static tables and 1107 columns.
+-- Coverage: 91 static tables and 1121 columns.
 -- Comments describe schema purpose only; they contain no runtime or secret values.
 
 COMMENT ON TABLE alembic_version IS '记录当前数据库采用的 Alembic 架构版本。';
@@ -4072,6 +4102,8 @@ COMMENT ON COLUMN agent_design_sessions.create_request_checksum IS '智能体设
 COMMENT ON COLUMN agent_design_sessions.created_at IS '智能体设计会话：记录创建时间。';
 COMMENT ON COLUMN agent_design_sessions.updated_at IS '智能体设计会话：记录最近更新时间。';
 COMMENT ON COLUMN agent_design_sessions.created_agent_deleted IS '智能体设计会话：已创建的智能体是否随后删除。';
+COMMENT ON COLUMN agent_design_sessions.generation_model_ref IS '智能体设计会话：生成模型引用。';
+COMMENT ON COLUMN agent_design_sessions.generation_mode IS '智能体设计会话：生成模式。';
 
 COMMENT ON TABLE agent_design_operations IS '保存智能体设计会话中的幂等操作及其结果。';
 COMMENT ON COLUMN agent_design_operations.id IS '智能体设计操作：主键标识。';
@@ -4086,6 +4118,20 @@ COMMENT ON COLUMN agent_design_operations.result_revision IS '智能体设计操
 COMMENT ON COLUMN agent_design_operations.public_error_code IS '智能体设计操作：可公开的稳定错误代码。';
 COMMENT ON COLUMN agent_design_operations.created_at IS '智能体设计操作：记录创建时间。';
 COMMENT ON COLUMN agent_design_operations.updated_at IS '智能体设计操作：记录最近更新时间。';
+COMMENT ON COLUMN agent_design_operations.stop_requested_at IS '智能体设计操作：停止请求时间。';
+COMMENT ON COLUMN agent_design_operations.requested_generation_profile_json IS '智能体设计操作：请求生成配置 JSON 数据。';
+COMMENT ON COLUMN agent_design_operations.effective_generation_profile_json IS '智能体设计操作：生效生成配置 JSON 数据。';
+
+COMMENT ON TABLE agent_design_activities IS '保存智能体设计会话中可回放的公开过程事件。';
+COMMENT ON COLUMN agent_design_activities.seq IS '智能体设计活动：单调序号。';
+COMMENT ON COLUMN agent_design_activities.project_id IS '智能体设计活动：所属项目标识。';
+COMMENT ON COLUMN agent_design_activities.owner_user_id IS '智能体设计活动：私有数据所有者的用户标识。';
+COMMENT ON COLUMN agent_design_activities.session_id IS '智能体设计活动：会话标识。';
+COMMENT ON COLUMN agent_design_activities.operation_id IS '智能体设计活动：操作标识。';
+COMMENT ON COLUMN agent_design_activities.attempt IS '智能体设计活动：尝试。';
+COMMENT ON COLUMN agent_design_activities.kind IS '智能体设计活动：业务类型。';
+COMMENT ON COLUMN agent_design_activities.payload_json IS '智能体设计活动：公开载荷 JSON 数据。';
+COMMENT ON COLUMN agent_design_activities.created_at IS '智能体设计活动：记录创建时间。';
 
 COMMENT ON TABLE channel_connections IS '保存用户授权的外部渠道账户连接。';
 COMMENT ON COLUMN channel_connections.id IS '渠道连接：主键标识。';
@@ -4895,6 +4941,6 @@ SELECT ensure_run_events_month_partition(now() + INTERVAL '1 month');
 
 INSERT INTO system_runtime_policy_catalog_state (id, revision) VALUES (1, 1);
 
-INSERT INTO alembic_version (version_num) VALUES ('current_asset_version_lifecycle');
+INSERT INTO alembic_version (version_num) VALUES ('agent_design_activity_terminal');
 
 COMMIT;

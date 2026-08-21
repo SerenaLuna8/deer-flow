@@ -29,6 +29,7 @@ LANGGRAPH_TABLES = frozenset(
 )
 FINAL_APP_SEQUENCES = frozenset(
     {
+        ("agent_design_activities_seq_seq", "agent_design_activities"),
         ("memory_history_entries_sequence_seq", "memory_history_entries"),
         ("run_events_id_seq", "run_events"),
     }
@@ -105,32 +106,32 @@ class CatalogInvariant:
 # from PostgreSQL after installing the snapshot in an empty database.
 FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=89,
-        digest="a4fd0b13c4575c86f7c31a7bf9d7b93b2d393402eca4bcc93b17ca3d6435ee3e",
+        count=90,
+        digest="d12c3d731516bfeee12e3c6f7cf9d8b1082ac073c0d6b21c76d6933155a52b08",
     ),
     "columns": CatalogInvariant(
-        count=1106,
-        digest="d8f3978c704ce43abdad4cb3bdbe6619b0fd8cafbcf1896c036b02550db75868",
+        count=1120,
+        digest="d4a4e73121e02545d63da8437eaf2f3769d2544a580f145fc57a252a6115dfc4",
     ),
     "table_comments": CatalogInvariant(
-        count=90,
-        digest="edf9dbb3da65d53941fdfe712027714e085529a9fc423d1a423524139fff9892",
+        count=91,
+        digest="c5abcab3ae984ae78d51f157e88954bd3f9ca7afc464ffd04b62c2dc08e254be",
     ),
     "column_comments": CatalogInvariant(
-        count=1107,
-        digest="f7eadea1b2217f47a34f5d5e56127767e05ce88d94caf5a8da0832c6a640d9bd",
+        count=1121,
+        digest="a88a6e799519bede240f29ef3c3fdc80a69a97a093dd04c4f207b53c7a33b750",
     ),
     "sequences": CatalogInvariant(
-        count=2,
-        digest="fce385d8c1dc9ee6f747d70a8f301fd78f6976767baa90c8fbead6caba2b614f",
+        count=3,
+        digest="eb7637d99b4f4e9215340d79218ff539d3bda100c1159871c64d6c0307890e83",
     ),
     "constraints": CatalogInvariant(
-        count=831,
-        digest="02dd6b8b52bfa60d7e0c27e88cef5f47fed7c2f169935d27dff25e5e512f3117",
+        count=839,
+        digest="061c9d5e4a4d44dc973aa8cd9fc8415dabc7810f5bf14bd61f2a185bfee1f76c",
     ),
     "indexes": CatalogInvariant(
-        count=312,
-        digest="e4c306bababc1691a3fc4b98990b9e144a1bfb595eb07319b1201ac8fc6bd830",
+        count=316,
+        digest="6fea1f0ba978fb4ed1c9727ef25758dcb4a171d187b5abcf2d03a1399d1235de",
     ),
     "functions": CatalogInvariant(
         count=23,

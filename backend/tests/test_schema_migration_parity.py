@@ -85,6 +85,9 @@ def test_known_chain_revisions_pin_the_actual_migration_scripts() -> None:
             "agent_archived_slug_reuse",
             "skill_credential_source_field",
             "current_asset_version_lifecycle",
+            "agent_design_activity",
+            "agent_design_activity_retry",
+            "agent_design_activity_terminal",
         )
     )
     assert script.get_heads() == [CURRENT_SCHEMA_REVISION]
@@ -100,7 +103,7 @@ def test_initial_chain_root_is_a_noop_and_fresh_schema_stamps_the_head() -> None
     assert root.down_revision is None
     payload = FULL_SCHEMA_PATH.read_text(encoding="utf-8")
     assert payload.count(f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');") == 1
-    assert CURRENT_SCHEMA_REVISION == "current_asset_version_lifecycle"
+    assert CURRENT_SCHEMA_REVISION == "agent_design_activity_terminal"
 
 
 def test_full_schema_is_the_only_install_snapshot() -> None:
@@ -110,6 +113,9 @@ def test_full_schema_is_the_only_install_snapshot() -> None:
     assert not list((MIGRATIONS_PATH / "baseline").glob("*.sql"))
     assert sorted(path.name for path in (MIGRATIONS_PATH / "versions").glob("*.py")) == [
         "agent_archived_slug_reuse.py",
+        "agent_design_activity.py",
+        "agent_design_activity_retry.py",
+        "agent_design_activity_terminal.py",
         "agent_design_resume_index.py",
         "approval_output_delivery.py",
         "current_asset_version_lifecycle.py",
@@ -154,6 +160,63 @@ async def _catalog_signature(database_url: str):
         return state, signature
     finally:
         await engine.dispose()
+
+
+async def _restore_pre_agent_design_activity_schema(connection) -> None:
+    await connection.execute(text("DROP TABLE agent_design_activities"))
+    await connection.execute(
+        text(
+            """ALTER TABLE agent_design_sessions
+               DROP CONSTRAINT ck_agent_design_sessions_generation_preference,
+               DROP COLUMN generation_model_ref,
+               DROP COLUMN generation_mode""",
+        ),
+    )
+    await connection.execute(
+        text(
+            """ALTER TABLE agent_design_operations
+               DROP CONSTRAINT ck_agent_design_operations_generation_profile,
+               DROP CONSTRAINT uq_agent_design_operations_private_scope,
+               DROP CONSTRAINT ck_agent_design_operations_status,
+               DROP CONSTRAINT ck_agent_design_operations_completion,
+               DROP COLUMN stop_requested_at,
+               DROP COLUMN requested_generation_profile_json,
+               DROP COLUMN effective_generation_profile_json,
+               ADD CONSTRAINT ck_agent_design_operations_status
+                   CHECK (status IN ('in_progress', 'completed', 'failed')),
+               ADD CONSTRAINT ck_agent_design_operations_completion CHECK (
+                   (status = 'in_progress' AND result_revision IS NULL AND public_error_code IS NULL)
+                   OR (status = 'completed' AND result_revision IS NOT NULL AND public_error_code IS NULL)
+                   OR (status = 'failed' AND result_revision IS NOT NULL AND public_error_code IS NOT NULL)
+               )""",
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_design_activity_migration_matches_fresh_schema(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
+    try:
+        await bootstrap_schema(engine)
+        async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
+            await connection.execute(
+                text(
+                    "UPDATE alembic_version SET version_num = 'current_asset_version_lifecycle'",
+                ),
+            )
+    finally:
+        await engine.dispose()
+
+    result = await upgrade_postgres(postgres_database_url)
+    assert result.applied is True
+    assert result.from_revision == "current_asset_version_lifecycle"
+    assert result.to_revision == CURRENT_SCHEMA_REVISION
+    state, signature = await _catalog_signature(postgres_database_url)
+    assert state == "current"
+    assert signature == FINAL_M7_CATALOG_SIGNATURE
 
 
 async def _restore_pre_model_catalog_schema(connection) -> None:
@@ -817,6 +880,7 @@ async def test_output_delivery_migration_upgrades_initial_schema_catalog(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             await connection.execute(text("DROP TABLE execution_approval_output_delivery_candidates"))
@@ -847,6 +911,7 @@ async def test_agent_design_resume_index_migration_supports_incomplete_keyset(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await connection.execute(
                 text("DROP INDEX ix_agent_design_sessions_resume"),
@@ -914,6 +979,7 @@ async def test_agent_archived_slug_reuse_migration_rebuilds_project_index(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await connection.execute(text("DROP INDEX uq_agents_project_slug"))
             await connection.execute(
@@ -1008,6 +1074,7 @@ async def test_skill_credential_source_field_migration_backfills_existing_rows(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_current_asset_lifecycle_schema(connection)
             await connection.execute(
                 text(
@@ -1411,6 +1478,7 @@ async def test_current_lifecycle_migration_normalizes_system_skill_v1_and_preser
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_current_asset_lifecycle_schema(connection)
             await connection.execute(
                 text(
@@ -1747,6 +1815,7 @@ async def test_model_catalog_migration_removes_obsolete_fields(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             await connection.execute(
@@ -1807,6 +1876,7 @@ async def test_model_catalog_migration_rewrites_durable_model_references(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(connection)
@@ -1966,6 +2036,7 @@ async def test_model_catalog_migration_rejects_unknown_durable_reference(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(connection)
@@ -2050,6 +2121,7 @@ async def test_model_catalog_migration_rejects_invalid_runtime_policy_reference(
     try:
         await bootstrap_schema(engine)
         async with engine.begin() as connection:
+            await _restore_pre_agent_design_activity_schema(connection)
             await _restore_pre_skill_credential_source_schema(connection)
             await _restore_pre_model_catalog_schema(connection)
             seeded = await _seed_pre_model_catalog_references(
