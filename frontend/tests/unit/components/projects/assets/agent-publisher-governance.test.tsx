@@ -195,6 +195,38 @@ describe("Agent author and activation governance", () => {
     expect(html).not.toContain("保存后创建不可变的候选版本");
   });
 
+  test("describes historical Agent instructions as view-only and not an editing baseline", () => {
+    const html = renderAgentUi(
+      <AgentInstructionWorkspace
+        draft={{
+          agents_instructions: "# AGENTS",
+          soul: "# SOUL",
+          identity: "# IDENTITY",
+          user_context: "# USER",
+        }}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        editing={false}
+        canEdit={false}
+        historical
+        pending={false}
+        dirty={false}
+        errorMessage={null}
+        saveDisabledReason={null}
+        onSelect={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onChange={() => undefined}
+        onEdit={() => undefined}
+        onSave={() => undefined}
+        onDiscard={() => undefined}
+      />,
+    );
+
+    expect(html).toContain("历史版本中的不可变指令文档");
+    expect(html).toContain("不能修改或作为新版本的编辑基线");
+    expect(html).not.toContain("保存后创建不可变的候选版本");
+  });
+
   test("freezes instruction edits while a save is pending", () => {
     const html = renderAgentUi(
       <AgentInstructionWorkspace

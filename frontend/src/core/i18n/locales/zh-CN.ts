@@ -1778,6 +1778,8 @@ export const zhCN: Translations = {
         "四个固定文档映射到当前 Agent 设置。保存后创建不可变的候选版本，激活后才会用于后续运行。",
       blueprintDescription: "四个固定文档会写入待创建 Agent 的设计稿。",
       readOnlyDescription: "系统 Agent 的唯一 v1 指令文档，只读展示。",
+      historicalDescription:
+        "历史版本中的不可变指令文档，仅供查看，不能修改或作为新版本的编辑基线。",
       edit: "编辑",
       fixedFiles: "固定文件",
       displayMode: "显示模式",

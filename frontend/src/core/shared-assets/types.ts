@@ -1146,13 +1146,14 @@ const legacyProjectAssetItemSchema = assetSummarySchema
   })
   .strict();
 
-export const currentVersionProjectAssetItemSchema = currentVersionAssetSummarySchema
-  .extend({
-    capabilities: assetCapabilitiesSchema,
-    binding: currentSystemBindingItemSchema.nullable(),
-    description: z.string().nullable().optional(),
-  })
-  .strict();
+export const currentVersionProjectAssetItemSchema =
+  currentVersionAssetSummarySchema
+    .extend({
+      capabilities: assetCapabilitiesSchema,
+      binding: currentSystemBindingItemSchema.nullable(),
+      description: z.string().nullable().optional(),
+    })
+    .strict();
 
 export const legacyCompatibleProjectAssetItemSchema = z
   .union([currentVersionProjectAssetItemSchema, legacyProjectAssetItemSchema])

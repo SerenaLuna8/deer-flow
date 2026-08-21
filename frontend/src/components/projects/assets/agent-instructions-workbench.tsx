@@ -147,6 +147,7 @@ export function AgentInstructionWorkspace({
   editing,
   canEdit = true,
   readOnly = false,
+  historical = false,
   pending,
   inputDisabled = false,
   dirty,
@@ -166,6 +167,7 @@ export function AgentInstructionWorkspace({
   editing: boolean;
   canEdit?: boolean;
   readOnly?: boolean;
+  historical?: boolean;
   pending: boolean;
   inputDisabled?: boolean;
   dirty: boolean;
@@ -190,11 +192,13 @@ export function AgentInstructionWorkspace({
         <div>
           <h3 className="text-sm font-semibold">{copy.title}</h3>
           <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            {readOnly
-              ? copy.readOnlyDescription
-              : saveTarget === "draft"
-                ? copy.draftDescription
-                : copy.blueprintDescription}
+            {historical
+              ? copy.historicalDescription
+              : readOnly
+                ? copy.readOnlyDescription
+                : saveTarget === "draft"
+                  ? copy.draftDescription
+                  : copy.blueprintDescription}
           </p>
         </div>
         {canEdit && !editing ? (
@@ -666,6 +670,7 @@ export function AgentInstructionsWorkbench({
         editing={isEditing}
         canEdit={canAuthor}
         readOnly={item.scope !== "project"}
+        historical={version?.relation === "historical"}
         inputDisabled={
           update.isPending ||
           authoringPreparationPending ||

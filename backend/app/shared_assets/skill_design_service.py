@@ -846,6 +846,26 @@ class SkillDesignService:
             for item in metadata
         )
 
+    @staticmethod
+    async def _session_view_for_row(
+        repository: SkillDesignRepository,
+        context: ProjectContext,
+        row: SkillDesignSessionRow,
+        files: tuple[SkillArchiveFile, ...],
+    ) -> SkillDesignSessionView:
+        """Keep a revision session's immutable comparison baseline on mutations."""
+
+        return SkillDesignService._session_view(
+            context,
+            row,
+            files,
+            base_files=await SkillDesignService._base_files_for_row(
+                repository,
+                context,
+                row,
+            ),
+        )
+
     async def list_incomplete(
         self,
         context: ProjectContext,
@@ -1724,7 +1744,12 @@ class SkillDesignService:
                                 context,
                                 row.id,
                             )
-                            return self._session_view(context, row, files)
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                files,
+                            )
                         raise AssetConflict(context.request_id)
                     self._require_revise_target_live(context, row)
                     self._require_expected_revision(
@@ -1780,7 +1805,8 @@ class SkillDesignService:
                                 context,
                                 row.id,
                             )
-                            return self._session_view(
+                            return await self._session_view_for_row(
+                                repository,
                                 context,
                                 row,
                                 current_files,
@@ -1816,7 +1842,12 @@ class SkillDesignService:
                         context,
                         row.id,
                     )
-                    return self._session_view(context, row, current_files)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        current_files,
+                    )
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -1884,7 +1915,8 @@ class SkillDesignService:
                             request_checksum=request_checksum,
                         )
                         if operation.status == "completed" and row.status == SkillDesignStatus.COMPLETED.value:
-                            repeated_session = self._session_view(
+                            repeated_session = await self._session_view_for_row(
+                                repository,
                                 context,
                                 row,
                                 (),
@@ -1899,7 +1931,8 @@ class SkillDesignService:
                         )
                         if row.draft_checksum != command.expected_draft_checksum:
                             raise AssetConflict(context.request_id)
-                        repeated_session = self._session_view(
+                        repeated_session = await self._session_view_for_row(
+                            repository,
                             context,
                             row,
                             (),
@@ -1994,7 +2027,8 @@ class SkillDesignService:
                         operation.result_revision = row.revision
                         await repository.clear_draft_files(context, row.id)
                         await session.flush()
-                        repeated_session = self._session_view(
+                        repeated_session = await self._session_view_for_row(
+                            repository,
                             context,
                             row,
                             (),
@@ -2081,7 +2115,12 @@ class SkillDesignService:
                             request_checksum=request_checksum,
                         )
                         if operation.status == "completed":
-                            return self._session_view(context, row, ())
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                (),
+                            )
                         raise AssetConflict(context.request_id)
                     if row.status == SkillDesignStatus.CANCELLED.value:
                         self._require_expected_revision(
@@ -2089,7 +2128,12 @@ class SkillDesignService:
                             row,
                             command.expected_revision,
                         )
-                        return self._session_view(context, row, ())
+                        return await self._session_view_for_row(
+                            repository,
+                            context,
+                            row,
+                            (),
+                        )
                     if row.status == SkillDesignStatus.COMPLETED.value:
                         raise AssetConflict(context.request_id)
                     self._require_expected_revision(
@@ -2188,7 +2232,12 @@ class SkillDesignService:
                     refresh = getattr(session, "refresh", None)
                     if refresh is not None:
                         await refresh(row)
-                    return self._session_view(context, row, ())
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        (),
+                    )
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -2235,7 +2284,12 @@ class SkillDesignService:
                                 context,
                                 row.id,
                             )
-                            return self._session_view(context, row, files)
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                files,
+                            )
                         raise AssetConflict(context.request_id)
                     self._require_revise_target_live(context, row)
                     self._require_expected_revision(
@@ -2305,7 +2359,12 @@ class SkillDesignService:
                     operation.status = "completed"
                     operation.result_revision = row.revision
                     await session.flush()
-                    return self._session_view(context, row, files)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
         except SharedAssetError:
             raise
         except IntegrityError as exc:
@@ -2349,7 +2408,12 @@ class SkillDesignService:
                                 context,
                                 row.id,
                             )
-                            return self._session_view(context, row, files)
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                files,
+                            )
                         if operation.status == "in_progress":
                             linked_run = await repository.linked_run_for_operation(
                                 context,
@@ -2394,7 +2458,12 @@ class SkillDesignService:
                                     context,
                                     row.id,
                                 )
-                                return self._session_view(context, row, files)
+                                return await self._session_view_for_row(
+                                    repository,
+                                    context,
+                                    row,
+                                    files,
+                                )
                             if not self._is_stale_generating(
                                 row,
                                 now=self._now(),
@@ -2412,13 +2481,23 @@ class SkillDesignService:
                                 context,
                                 row.id,
                             )
-                            return self._session_view(context, row, files)
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                files,
+                            )
                         if operation.status == "failed":
                             files = await repository.load_draft_files(
                                 context,
                                 row.id,
                             )
-                            return self._session_view(context, row, files)
+                            return await self._session_view_for_row(
+                                repository,
+                                context,
+                                row,
+                                files,
+                            )
                         raise AssetConflict(context.request_id)
                     else:
                         self._require_revise_target_live(context, row)
@@ -2611,7 +2690,12 @@ class SkillDesignService:
                     operation.result_revision = row.revision
                     operation.public_error_code = None
                     await session.flush()
-                    return self._session_view(context, row, files)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
         except SharedAssetError:
             raise
         except DBAPIError:
@@ -2647,7 +2731,12 @@ class SkillDesignService:
                             context,
                             row.id,
                         )
-                        return self._session_view(context, row, files)
+                        return await self._session_view_for_row(
+                            repository,
+                            context,
+                            row,
+                            files,
+                        )
                     row.status = SkillDesignStatus.FAILED.value
                     row.active_clarification_json = None
                     row.error_code = error_code
@@ -2668,7 +2757,12 @@ class SkillDesignService:
                         context,
                         row.id,
                     )
-                    return self._session_view(context, row, files)
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
         except SharedAssetError:
             raise
         except DBAPIError:

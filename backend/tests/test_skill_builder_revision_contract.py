@@ -10,9 +10,12 @@ from pydantic import ValidationError
 from app.gateway.routers.project_assets import raise_asset_domain
 from app.gateway.routers.project_skill_builder import (
     CreateSkillDesignSessionRequest,
+    _commit_response,
     _session_item,
 )
 from app.private_work.skill_builder_run_admission import SkillBuilderRunAdmissionService
+from app.projects.context import ProjectContext
+from app.projects.models import ProjectRole
 from app.shared_assets.errors import (
     AssetValidationFailed,
     SkillDesignNoChanges,
@@ -20,45 +23,78 @@ from app.shared_assets.errors import (
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
 )
+from app.shared_assets.models import AssetScope
 from app.shared_assets.skill_builder_agent_runtime import _SYSTEM_PROMPT
 from app.shared_assets.skill_design_service import (
+    SkillDesignCommitResult,
     SkillDesignGenerationRequest,
     SkillDesignSessionView,
     SkillDesignStatus,
 )
+from app.shared_assets.skill_service import SkillAssetView
 
 
 def test_session_response_exposes_durable_exact_created_version() -> None:
     skill_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
     version_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
     now = datetime(2026, 8, 19, tzinfo=UTC)
-    response = _session_item(
-        SkillDesignSessionView(
-            id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
-            project_id=uuid.UUID("44444444-4444-4444-8444-444444444444"),
-            owner_user_id="owner-1",
-            thread_id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
-            slug="catalog-auditor",
-            display_name="Catalog auditor",
-            status=SkillDesignStatus.COMPLETED,
-            revision=7,
-            messages=(),
-            active_clarification=None,
-            progress=(),
-            files=(),
-            draft_checksum="a" * 64,
-            validation=None,
-            error_code=None,
-            error_message=None,
-            created_skill_id=skill_id,
-            created_skill_version_id=version_id,
-            created_at=now,
-            updated_at=now,
-        )
+    session_view = SkillDesignSessionView(
+        id=uuid.UUID("33333333-3333-4333-8333-333333333333"),
+        project_id=uuid.UUID("44444444-4444-4444-8444-444444444444"),
+        owner_user_id="owner-1",
+        thread_id=uuid.UUID("55555555-5555-4555-8555-555555555555"),
+        slug="catalog-auditor",
+        display_name="Catalog auditor",
+        status=SkillDesignStatus.COMPLETED,
+        revision=7,
+        messages=(),
+        active_clarification=None,
+        progress=(),
+        files=(),
+        draft_checksum="a" * 64,
+        validation=None,
+        error_code=None,
+        error_message=None,
+        created_skill_id=skill_id,
+        created_skill_version_id=version_id,
+        created_at=now,
+        updated_at=now,
     )
+    response = _session_item(session_view)
 
     assert response.created_skill_id == skill_id
     assert response.created_skill_version_id == version_id
+
+    context = ProjectContext(
+        user_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
+        project_id=session_view.project_id,
+        membership_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
+        role=ProjectRole.EDITOR,
+        capabilities=frozenset(),
+        membership_version=1,
+        request_id="req-commit-current-version",
+    )
+    commit = _commit_response(
+        SkillDesignCommitResult(
+            session=session_view,
+            skill=SkillAssetView(
+                id=skill_id,
+                scope=AssetScope.PROJECT,
+                project_id=session_view.project_id,
+                slug="catalog-auditor",
+                display_name="Catalog auditor",
+                status="active",
+                current_version_id=version_id,
+                revision=4,
+                created_by_user_id=str(context.user_id),
+                created_at=now,
+                updated_at=now,
+            ),
+        ),
+        context,
+    )
+    assert commit.data.skill.current_version_id == version_id
+    assert commit.data.skill.revision == 4
 
 
 def test_create_session_request_defaults_to_create_and_rejects_mixed_fields() -> None:
@@ -76,7 +112,7 @@ def test_create_session_request_defaults_to_create_and_rejects_mixed_fields() ->
     revised = CreateSkillDesignSessionRequest.model_validate(
         {
             "kind": "revise",
-            "skill_id": skill_id,
+            "skill_id": str(skill_id),
             "idempotency_key": "revise-1",
         }
     )

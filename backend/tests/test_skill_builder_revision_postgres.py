@@ -662,10 +662,12 @@ async def test_revision_seed_matches_published_bytes_and_allows_manual_validate(
         )
         assert edited.status is SkillDesignStatus.DRAFT_READY
         assert edited.draft_checksum != opened.draft_checksum
+        assert edited.base_files == opened.base_files
 
         validated = await _validate_session(design, context, edited, "seed-validate")
         assert validated.status is SkillDesignStatus.VALIDATED
         assert validated.validation is not None
+        assert validated.base_files == opened.base_files
     finally:
         await seed.engine.dispose()
 

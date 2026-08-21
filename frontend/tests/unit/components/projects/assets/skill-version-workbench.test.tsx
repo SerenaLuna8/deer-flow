@@ -6,6 +6,7 @@ import {
   skillVersionConflictHasLatestServerState,
   skillVersionDraftMatchesSubmittedChanges,
   skillVersionSaveIsPending,
+  skillVersionSnapshotCopy,
   skillVersionWorkbenchTabForKey,
 } from "@/components/projects/assets/skill-version-workbench";
 import { skillWorkbenchTabVariant } from "@/components/projects/assets/skill-workbench-tabs";
@@ -18,7 +19,7 @@ const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("Skill version conflict recovery", () => {
-  test("focuses Runtime credentials after saving a Draft with declarations", () => {
+  test("focuses Runtime credentials after saving a Candidate with declarations", () => {
     const events: unknown[][] = [];
     notifySkillDraftVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
@@ -27,7 +28,7 @@ describe("Skill version conflict recovery", () => {
     expect(events).toEqual([[SOURCE_VERSION_ID, { focusCredentials: true }]]);
   });
 
-  test("does not force Runtime credentials after saving a Draft without declarations", () => {
+  test("does not force Runtime credentials after saving a Candidate without declarations", () => {
     const events: unknown[][] = [];
     notifySkillDraftVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
@@ -51,6 +52,18 @@ describe("Skill version conflict recovery", () => {
     expect(skillVersionWorkbenchTabForKey("secrets", "Home")).toBe("files");
     expect(skillVersionWorkbenchTabForKey("files", "End")).toBe("secrets");
     expect(skillVersionWorkbenchTabForKey("files", "Enter")).toBeNull();
+  });
+
+  test("describes Historical Skill versions as read-only and unusable as edit bases", () => {
+    expect(skillVersionSnapshotCopy("project", "historical", 3)).toBe(
+      "文件来自历史版本 3 的不可变快照。历史版本仅供查看和导出，不能修改或作为新版本的编辑基线。",
+    );
+    expect(skillVersionSnapshotCopy("project", "candidate", 5)).toContain(
+      "修改会另存为新的候选版本",
+    );
+    expect(skillVersionSnapshotCopy("system", "current", 1)).toContain(
+      "当前为只读",
+    );
   });
 
   test("accepts only a newer authoritative revision for the same asset and immutable source version", () => {

@@ -30,7 +30,9 @@ import {
 
 import type { SkillAssetVersion } from "./skill-asset-detail";
 
-function readinessIdentity(readiness: SkillActivationReadinessResponse): string {
+function readinessIdentity(
+  readiness: SkillActivationReadinessResponse,
+): string {
   return `${readiness.skill_version_id}:${readiness.revision}:${readiness.payload_checksum}:${readiness.binding_revision}`;
 }
 
@@ -94,7 +96,10 @@ export function SkillActivationDialog({
         versionId: version.id,
         input: buildSkillActivationInput({ readiness: plan }),
       });
-      if (identity !== readinessIdentity(plan) || !("skill_id" in response.data)) {
+      if (
+        identity !== readinessIdentity(plan) ||
+        !("skill_id" in response.data)
+      ) {
         return;
       }
       onActivated(response.data.id);
@@ -121,7 +126,10 @@ export function SkillActivationDialog({
         </DialogHeader>
 
         {readiness.isLoading || (!plan && readiness.isFetching) ? (
-          <div role="status" className="text-muted-foreground flex items-center gap-2 rounded-lg border border-dashed p-5 text-sm">
+          <div
+            role="status"
+            className="text-muted-foreground flex items-center gap-2 rounded-lg border border-dashed p-5 text-sm"
+          >
             <Loader2Icon aria-hidden className="size-4 animate-spin" />
             {copy.loading}
           </div>
@@ -135,9 +143,15 @@ export function SkillActivationDialog({
               }`}
             >
               {plan.ready ? (
-                <CheckCircle2Icon aria-hidden className="text-success mt-0.5 size-4 shrink-0" />
+                <CheckCircle2Icon
+                  aria-hidden
+                  className="text-success mt-0.5 size-4 shrink-0"
+                />
               ) : (
-                <AlertCircleIcon aria-hidden className="text-destructive mt-0.5 size-4 shrink-0" />
+                <AlertCircleIcon
+                  aria-hidden
+                  className="text-destructive mt-0.5 size-4 shrink-0"
+                />
               )}
               <div>
                 <p className="font-medium">
@@ -157,18 +171,29 @@ export function SkillActivationDialog({
               <section className="space-y-3" aria-label={copy.bindingsTitle}>
                 <div className="flex items-center gap-2">
                   <KeyRoundIcon aria-hidden className="size-4" />
-                  <h3 className="text-sm font-semibold">{copy.bindingsTitle}</h3>
+                  <h3 className="text-sm font-semibold">
+                    {copy.bindingsTitle}
+                  </h3>
                 </div>
                 <div className="space-y-2">
                   {plan.requirements.map((requirement) => (
-                    <div key={requirement.name} className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2">
+                    <div
+                      key={requirement.name}
+                      className="flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2"
+                    >
                       <code className="min-w-0 flex-1 text-sm break-all">
                         {requirement.name}
                       </code>
                       <Badge variant="secondary">
                         {requirement.optional ? copy.optional : copy.required}
                       </Badge>
-                      <Badge variant={requirement.mapping_status === "configured" ? "default" : "secondary"}>
+                      <Badge
+                        variant={
+                          requirement.mapping_status === "configured"
+                            ? "default"
+                            : "secondary"
+                        }
+                      >
                         {mappingStatusLabel(requirement.mapping_status, copy)}
                       </Badge>
                     </div>
@@ -196,11 +221,21 @@ export function SkillActivationDialog({
         ) : null}
 
         <DialogFooter>
-          <Button type="button" variant="outline" disabled={activate.isPending} onClick={() => onOpenChange(false)}>
+          <Button
+            type="button"
+            variant="outline"
+            disabled={activate.isPending}
+            onClick={() => onOpenChange(false)}
+          >
             {copy.cancel}
           </Button>
           {readiness.error ? (
-            <Button type="button" variant="outline" disabled={readiness.isFetching} onClick={() => void readiness.refetch()}>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={readiness.isFetching}
+              onClick={() => void readiness.refetch()}
+            >
               <RefreshCwIcon aria-hidden className="size-4" />
               {copy.retry}
             </Button>
@@ -210,8 +245,16 @@ export function SkillActivationDialog({
               {copy.configureCredentials}
             </Button>
           ) : null}
-          <Button type="button" disabled={!plan?.ready || readiness.isFetching || activate.isPending} onClick={() => void activateVersion()}>
-            {activate.isPending ? <Loader2Icon aria-hidden className="size-4 animate-spin" /> : null}
+          <Button
+            type="button"
+            disabled={
+              !plan?.ready || readiness.isFetching || activate.isPending
+            }
+            onClick={() => void activateVersion()}
+          >
+            {activate.isPending ? (
+              <Loader2Icon aria-hidden className="size-4 animate-spin" />
+            ) : null}
             {activate.isPending ? copy.activating : copy.activate}
           </Button>
         </DialogFooter>

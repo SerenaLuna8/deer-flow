@@ -1879,6 +1879,8 @@ export const enUS: Translations = {
         "Review and edit the four fixed Markdown documents.",
       readOnlyDescription:
         "Read-only instruction documents for the System Agent's sole v1.",
+      historicalDescription:
+        "Immutable instruction documents from a Historical Version. Historical content is view-only and cannot be used as an editing baseline.",
       edit: "Edit",
       fixedFiles: "Fixed files",
       displayMode: "Display mode",

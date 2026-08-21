@@ -8,13 +8,13 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
 from app.gateway.deps import get_system_model_catalog
 from app.gateway.routers.project_assets import (
     ASSET_ERRORS,
-    AssetItemResponse,
     AssetRoute,
+    CurrentVersionAssetItemResponse,
     SkillVersionItemResponse,
     project_asset_context,
     raise_asset_domain,
@@ -67,6 +67,22 @@ class _StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
 
+def _parse_json_uuid(value: object) -> object:
+    """Parse the JSON UUID representation without relaxing other fields."""
+
+    if isinstance(value, uuid.UUID):
+        return value
+    if type(value) is str:
+        try:
+            return uuid.UUID(value)
+        except ValueError:
+            return value
+    return value
+
+
+_JsonUuid = Annotated[uuid.UUID, BeforeValidator(_parse_json_uuid)]
+
+
 class CreateSkillDesignSessionRequest(_StrictModel):
     """Single strict model with kind cross-validation.
 
@@ -79,7 +95,7 @@ class CreateSkillDesignSessionRequest(_StrictModel):
     kind: Literal["create", "revise"] = "create"
     slug: str | None = None
     display_name: str | None = None
-    skill_id: uuid.UUID | None = None
+    skill_id: _JsonUuid | None = None
     idempotency_key: str
 
     @model_validator(mode="after")
@@ -397,7 +413,7 @@ class SkillDesignSessionListResponse(_StrictModel):
 
 class SkillDesignCommitDataResponse(_StrictModel):
     session: SkillDesignSessionItemResponse
-    skill: AssetItemResponse
+    skill: CurrentVersionAssetItemResponse
     version: SkillVersionItemResponse | None = None
 
 
@@ -572,7 +588,7 @@ def _commit_response(
     return SkillDesignCommitResponse(
         data=SkillDesignCommitDataResponse(
             session=_session_item(result.session),
-            skill=AssetItemResponse.model_validate(
+            skill=CurrentVersionAssetItemResponse.model_validate(
                 result.skill,
                 from_attributes=True,
             ),

@@ -228,6 +228,20 @@ export function skillVersionDraftMatchesSubmittedChanges(
   });
 }
 
+export function skillVersionSnapshotCopy(
+  scope: ProjectAssetItem["scope"],
+  relation: SkillAssetVersion["relation"],
+  versionNumber: number,
+): string {
+  if (scope === "system") {
+    return `文件来自 System Skill 的 Current Version v${versionNumber}，由软件包统一管理，当前为只读。`;
+  }
+  if (relation === "historical") {
+    return `文件来自历史版本 ${versionNumber} 的不可变快照。历史版本仅供查看和导出，不能修改或作为新版本的编辑基线。`;
+  }
+  return `文件来自版本 ${versionNumber} 的不可变快照。修改会另存为新的候选版本，当前版本不会被覆盖。`;
+}
+
 export function SkillVersionWorkbench({
   accountId,
   projectId,
@@ -827,16 +841,10 @@ export function SkillVersionWorkbench({
       <div>
         <h3 className="text-sm font-semibold">版本内容</h3>
         <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-          {item.scope === "system" ? (
-            <>
-              文件来自 System Skill 的 Current Version v
-              {version.version_number}，由软件包统一管理，当前为只读。
-            </>
-          ) : (
-            <>
-              文件来自版本 {version.version_number}{" "}
-              的不可变快照。修改会另存为新的候选版本，当前版本不会被覆盖。
-            </>
+          {skillVersionSnapshotCopy(
+            item.scope,
+            version.relation,
+            version.version_number,
           )}
         </p>
       </div>
