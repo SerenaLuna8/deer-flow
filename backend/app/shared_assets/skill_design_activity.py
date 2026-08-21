@@ -350,13 +350,15 @@ class SkillDesignActivityRepository:
 
 
 def activity_view(row: SkillDesignActivityRow) -> SkillDesignActivity:
+    kind = SkillDesignActivityKind(row.kind)
+    payload = _public_payload(kind, dict(row.payload_json))
     return SkillDesignActivity(
         seq=int(row.seq),
         operation_id=uuid.UUID(str(row.operation_id)),
         run_id=row.run_id,
-        kind=SkillDesignActivityKind(row.kind),
+        kind=kind,
         attempt=row.attempt,
-        payload=dict(row.payload_json),
+        payload=payload,
         created_at=row.created_at,
     )
 

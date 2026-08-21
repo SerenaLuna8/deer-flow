@@ -135,6 +135,15 @@ export function skillBuilderWorkspaceErrorMessage(
   return skillBuilderErrorMessage(error, copy);
 }
 
+export function skillBuilderShouldRestoreConversationSurface(
+  session: Pick<SkillBuilderSession, "status" | "files">,
+): boolean {
+  return (
+    session.files.length === 0 &&
+    (session.status === "completed" || session.status === "cancelled")
+  );
+}
+
 export function skillBuilderRevisionCommitSuccessCopy(
   versionNumber: number | null,
   copy: Translations["skills"]["builder"]["success"],
@@ -385,16 +394,19 @@ function SkillBuilderMessageBubble({
 function SkillBuilderProgress({ session }: { session: SkillBuilderSession }) {
   const { t } = useI18n();
   const copy = t.skills.builder.conversation;
-  if (session.progress.length === 0) return null;
+  if (
+    session.progress.length === 0 ||
+    session.status === "completed" ||
+    session.status === "cancelled"
+  ) {
+    return null;
+  }
   const revising = session.session_kind === "revise";
   return (
     <section
       aria-label={revising ? copy.progressAriaRevise : copy.progressAriaCreate}
       className="border-border/70 bg-muted/20 rounded-2xl border p-4"
     >
-      <p className="mb-3 text-xs font-semibold">
-        {revising ? copy.progressRevise : copy.progressCreate}
-      </p>
       <ol className="space-y-2">
         {session.progress.map((item) => (
           <li key={item.id} className="flex items-center gap-2 text-xs">
@@ -463,7 +475,7 @@ export function SkillBuilderConversationView({
   activities?: readonly SkillBuilderActivity[];
   stopPending?: boolean;
   completion?: {
-    message: string;
+    message: string | null;
     skillHref: string;
     versionHref: string;
     credentialHref: string | null;
@@ -535,7 +547,7 @@ export function SkillBuilderConversationView({
           </p>
         ) : null}
 
-        {!canAuthor ? (
+        {!canAuthor && session.status !== "completed" ? (
           <p
             role="alert"
             className="border-border/70 bg-muted/20 text-muted-foreground rounded-xl border px-4 py-3 text-sm"
@@ -544,29 +556,6 @@ export function SkillBuilderConversationView({
               ? copy.permissionReadOnlyRevise
               : copy.permissionReadOnlyCreate}
           </p>
-        ) : null}
-
-        {session.messages.length === 0 && !session.target_skill_deleted ? (
-          <div className="flex justify-end">
-            <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
-              {session.session_kind === "revise" ? (
-                <>
-                  {copy.reviseIntroBefore}{" "}
-                  <span className="font-semibold">{session.slug}</span>
-                  {session.base_version_number
-                    ? ` v${session.base_version_number}`
-                    : ""}{" "}
-                  {copy.reviseIntroAfter}
-                </>
-              ) : (
-                <>
-                  {copy.createIntroBefore}{" "}
-                  <span className="font-semibold">{session.display_name}</span>
-                  {copy.createIntroAfter}
-                </>
-              )}
-            </p>
-          </div>
         ) : null}
 
         {session.messages.map((message) => {
@@ -615,8 +604,15 @@ export function SkillBuilderConversationView({
 
         {completion ? (
           <section className="border-border/70 bg-muted/20 rounded-2xl border p-4">
-            <p className="text-sm leading-6">{completion.message}</p>
-            <div className="mt-4 flex flex-wrap gap-2">
+            {completion.message ? (
+              <p className="text-sm leading-6">{completion.message}</p>
+            ) : null}
+            <div
+              className={cn(
+                "flex flex-wrap gap-2",
+                completion.message && "mt-4",
+              )}
+            >
               {completion.credentialHref ? (
                 <Button asChild type="button" className="min-h-10">
                   <Link href={completion.credentialHref}>
@@ -1163,11 +1159,9 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
       observedFilesSessionRef.current = session.id;
       setWorkbenchOpen(session.files.length > 0);
       setMobileSurface("conversation");
-    } else if (
-      session.files.length === 0 &&
-      (session.status === "completed" || session.status === "cancelled")
-    ) {
+    } else if (skillBuilderShouldRestoreConversationSurface(session)) {
       setWorkbenchOpen(false);
+      setMobileSurface("conversation");
     } else if (previousFiles.length === 0 && session.files.length > 0) {
       setWorkbenchOpen(true);
     }
@@ -1708,17 +1702,29 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
                 : t.skills.builder.success.createdWithSecrets(
                     completionSecretCount,
                   )
-              : session.session_kind === "revise"
-                ? skillBuilderRevisionCommitSuccessCopy(
-                    createdCandidateVersion?.versionNumber ?? null,
-                    t.skills.builder.success,
-                  )
-                : t.skills.builder.success.created,
+              : null,
           skillHref: completionSkillHref,
           versionHref,
           credentialHref: completionSecretCount > 0 ? createSecretHref : null,
         }
       : undefined;
+  const headerStatus = session?.target_skill_deleted
+    ? errors.targetDeletedStatus
+    : session?.status === "completed"
+      ? conversation.completedRecord(
+          createdCandidateVersion?.versionNumber ?? null,
+        )
+      : revising && session?.base_version_number
+        ? conversation.revisingBanner(session.slug, session.base_version_number)
+        : dirty
+          ? conversation.unsavedChanges
+          : session?.activeRun || session?.status === "generating"
+            ? conversation.agentRunning
+            : validationCurrent
+              ? revising
+                ? conversation.checkedRevise
+                : conversation.checkedCreate
+              : null;
 
   return (
     <>
@@ -1747,24 +1753,11 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
             <p className="truncate text-sm font-semibold">
               {session?.display_name ?? conversation.fallbackTitle}
             </p>
-            <p className="text-muted-foreground truncate text-xs">
-              {session?.target_skill_deleted
-                ? errors.targetDeletedStatus
-                : revising && session?.base_version_number
-                  ? conversation.revisingBanner(
-                      session.slug,
-                      session.base_version_number,
-                    )
-                  : dirty
-                    ? conversation.unsavedChanges
-                    : session?.activeRun || session?.status === "generating"
-                      ? conversation.agentRunning
-                      : validationCurrent
-                        ? revising
-                          ? conversation.checkedRevise
-                          : conversation.checkedCreate
-                        : conversation.autosave}
-            </p>
+            {headerStatus ? (
+              <p className="text-muted-foreground truncate text-xs">
+                {headerStatus}
+              </p>
+            ) : null}
           </div>
           <SkillBuilderFilesTrigger
             fileCount={session?.files.length ?? 0}
@@ -1773,7 +1766,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               setMobileSurface("workbench");
             }}
           />
-          {canAuthor ? (
+          {canAuthor && session?.status !== "completed" ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button
@@ -1973,11 +1966,6 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
           </DialogHeader>
           <div className="bg-muted/35 rounded-xl p-4 text-sm">
             <p className="font-medium">{session?.display_name}</p>
-            <p className="text-muted-foreground mt-1 text-xs">
-              {revising
-                ? dialogs.fileMetaRevise(session?.files.length ?? 0)
-                : dialogs.fileMetaCreate(session?.files.length ?? 0)}
-            </p>
           </div>
           <SkillBuilderDialogError
             message={

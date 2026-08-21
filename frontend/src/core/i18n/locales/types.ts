@@ -1507,7 +1507,6 @@ export interface Translations {
         stepsAria: string;
         designing: string;
         steps: string;
-        settingsProgressAria: string;
       };
       resume: {
         title: string;
@@ -1519,13 +1518,10 @@ export interface Translations {
         confirmDelete: string;
       };
       blueprint: {
-        result: string;
         title: string;
-        description: string;
         runtime: string;
         noDescription: string;
         nameLabel: string;
-        nameHint: string;
         savedAs: (value: string) => string;
         model: string;
         capabilities: string;
@@ -1553,7 +1549,6 @@ export interface Translations {
       };
       conversation: {
         permissionReadOnly: string;
-        newAgentIntro: (name: string) => string;
         creatingAgent: string;
         designingAgent: string;
         composerAria: string;
@@ -1569,7 +1564,7 @@ export interface Translations {
         modelLabel: string;
         backToAgents: string;
         designAgent: string;
-        autosave: string;
+        completedRecord: string;
         more: string;
         abandon: string;
         conversationAria: string;
@@ -1588,7 +1583,6 @@ export interface Translations {
         viewAgent: string;
         activity: {
           title: string;
-          attempt: (value: number) => string;
           reasoning: (value: number) => string;
           duration: (value: number) => string;
           terminal: {
@@ -1597,7 +1591,6 @@ export interface Translations {
             stopped: string;
             cancelled: string;
           };
-          stages: Record<string, string>;
         };
       };
     };
@@ -1611,7 +1604,6 @@ export interface Translations {
       sectionAria: string;
       title: string;
       editDescription: string;
-      blueprintDescription: string;
       readOnlyDescription: string;
       historicalDescription: string;
       edit: string;
@@ -1622,7 +1614,6 @@ export interface Translations {
       empty: string;
       editFile: (name: string) => string;
       candidateSaveHint: string;
-      blueprintSaveHint: string;
       discard: string;
       saving: string;
       save: string;
@@ -1800,6 +1791,9 @@ export interface Translations {
   };
 
   skills: {
+    catalog: {
+      viewDesignRecord: string;
+    };
     export: {
       label: string;
       preparing: string;
@@ -1980,7 +1974,6 @@ export interface Translations {
       };
       start: {
         title: string;
-        hint: string;
         nameLabel: string;
         placeholder: string;
         savedAs: (value: string) => string;
@@ -2015,14 +2008,8 @@ export interface Translations {
       conversation: {
         progressAriaCreate: string;
         progressAriaRevise: string;
-        progressCreate: string;
-        progressRevise: string;
         permissionReadOnlyCreate: string;
         permissionReadOnlyRevise: string;
-        reviseIntroBefore: string;
-        reviseIntroAfter: string;
-        createIntroBefore: string;
-        createIntroAfter: string;
         creatingSkill: string;
         creatingCandidate: string;
         processing: string;
@@ -2036,11 +2023,11 @@ export interface Translations {
         send: string;
         fallbackTitle: string;
         revisingBanner: (slug: string, version: number) => string;
+        completedRecord: (version: number | null) => string;
         unsavedChanges: string;
         agentRunning: string;
         checkedCreate: string;
         checkedRevise: string;
-        autosave: string;
         more: string;
         abandonCreate: string;
         abandonRevise: string;
@@ -2085,7 +2072,6 @@ export interface Translations {
         checkPassed: string;
         checkPassedWithWarnings: string;
         requiredCredentials: string;
-        recheckHint: string;
         acknowledgeWarnings: string;
         checkSkill: string;
         commitCreate: string;
@@ -2179,8 +2165,6 @@ export interface Translations {
         commitTitleRevise: string;
         commitDescriptionCreate: (project: string) => string;
         commitDescriptionRevise: (slug: string, version: string) => string;
-        fileMetaCreate: (count: number) => string;
-        fileMetaRevise: (count: number) => string;
         backToReview: string;
         creating: string;
         creatingVersion: string;

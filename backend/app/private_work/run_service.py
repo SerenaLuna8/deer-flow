@@ -174,8 +174,9 @@ class PrivateRunService:
         )
         if thread is None:
             # Hidden Builder threads are never returned by the chat directory,
-            # but their owner may consume the same durable Run/SSE substrate
-            # through a server-issued exact thread/run link.
+            # but internal Builder orchestration still consumes the same
+            # durable Run/Event substrate. Browser routes must pass through
+            # require_browser_chat_thread before calling this fallback.
             thread = await PrivateThreadRepository(session).get(
                 scope=context.resource_scope,
                 thread_id=thread_id,
@@ -184,6 +185,39 @@ class PrivateRunService:
             )
         if thread is None:
             raise PrivateWorkNotFound(context.request_id)
+
+    async def require_browser_chat_thread(
+        self,
+        context: PrivateWorkContext,
+        thread_id: str,
+    ) -> None:
+        """Authorize generic browser Run access for a visible chat thread only.
+
+        Hidden Skill Builder threads keep using the internal Run/Event substrate,
+        but their browser projection is the Skill Design Activity API rather than
+        the generic private-work Run feeds.
+        """
+
+        context = require_issued_private_work_context(context)
+        try:
+            async with self._session_factory() as session, session.begin():
+                await self._revalidator.require(
+                    session,
+                    context,
+                    Capability.PRIVATE_WORK_READ_OWN,
+                )
+                thread = await PrivateThreadRepository(session).get(
+                    scope=context.resource_scope,
+                    thread_id=thread_id,
+                )
+                if thread is None:
+                    raise PrivateWorkNotFound(context.request_id)
+        except PrivateWorkError:
+            raise
+        except DBAPIError:
+            raise PrivateWorkUnavailable(context.request_id) from None
+        except PrivateRunConflict:
+            raise PrivateWorkConflict(context.request_id) from None
 
     async def list(
         self,

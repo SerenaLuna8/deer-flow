@@ -419,7 +419,7 @@ describe("Skill Builder create Credential setup", () => {
       </I18nProvider>,
     );
 
-    expect(html).toContain("Skill 已创建并默认停用");
+    expect(html).toContain("1 项环境变量需要配置运行凭证");
     expect(html).toContain("配置凭证");
     expect(html).toContain(`skill_id=${SKILL_ID}`);
     expect(html).toContain(`skill_version_id=${VERSION_ID}`);
@@ -437,7 +437,7 @@ describe("Skill Builder create Credential setup", () => {
       </I18nProvider>,
     );
 
-    expect(html).toContain("候选版本 v2");
+    expect(html).toContain("1 项环境变量需要配置运行凭证");
     expect(html).toContain("配置凭证");
     expect(html).toContain("configure_credentials=1");
   });

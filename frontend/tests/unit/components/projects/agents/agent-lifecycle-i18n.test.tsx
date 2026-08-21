@@ -131,7 +131,7 @@ describe("Agent lifecycle translations", () => {
     expect(html).toContain("Name your new Agent");
     expect(html).toContain("Agent blueprint");
     expect(html).toContain("Agent name");
-    expect(html).toContain("both its name and slug");
+    expect(html).not.toContain("both its name and slug");
     expect(html).toContain("Project Agents");
     expect(html).toContain("Choose an Agent");
     expect(html).toContain("Waiting for the service");

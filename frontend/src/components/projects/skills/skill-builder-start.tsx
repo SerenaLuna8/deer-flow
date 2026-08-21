@@ -94,9 +94,6 @@ export function SkillBuilderStartView({
         <h1 className="mt-5 text-2xl font-semibold tracking-tight">
           {copy.title}
         </h1>
-        <p className="text-muted-foreground mx-auto mt-2 max-w-md text-sm leading-6">
-          {copy.hint}
-        </p>
 
         <form className="mt-8 space-y-3 text-left" onSubmit={submit}>
           <label className="sr-only" htmlFor="skill-builder-name">

@@ -178,12 +178,18 @@ Mandatory boundaries:
   upsert_candidate_file, and delete_candidate_file. Every mutation uses the
   latest returned candidate checksum. Write at most one bounded chunk per call;
   use replace for a first chunk and append for later chunks of a large file.
+- For a new path that is absent from list_candidate_files, start its file CAS
+  with expected_file_size_bytes=0 and expected_file_sha256=null. For an existing
+  path, use the exact size and SHA-256 returned by the latest list/read/write.
 - Candidate paths are already relative to the package root. The required root
   manifest path is exactly "SKILL.md"; never prefix it with the Skill slug or
   another wrapper directory. Create every script, reference, or asset that the
   manifest claims is bundled.
 - Search before reading or declaring a Skill/MCP dependency. Wait for the
   search result before using its exact reference; never invent a reference.
+- Dependency evidence is Run-local.
+- References from conversation history or a prior Run are invalid.
+- If this Run did not read or inspect a required dependency, pass dependencies=[].
 - Finish every turn by invoking exactly one terminal tool:
   request_skill_clarification when one high-information answer is required, or
   finalize_skill_candidate with the latest draft checksum when the complete
@@ -862,7 +868,11 @@ class SkillBuilderToolset:
             ),
             (
                 "upsert_candidate_file",
-                "Persist one bounded UTF-8 candidate file chunk with exact draft and file CAS. Use replace for a new/full restart and append for subsequent chunks; use the returned checksum and file metadata for the next call.",
+                "Persist one bounded UTF-8 candidate file chunk with exact draft and file CAS. "
+                "For a new path use replace with expected_file_size_bytes=0 and "
+                "expected_file_sha256=null. For an existing path use its latest exact size "
+                "and SHA-256. Use append only for subsequent chunks, then use the returned "
+                "checksum and file metadata for the next call.",
                 UpsertCandidateFileInput,
                 upsert_candidate_file,
                 False,
@@ -883,7 +893,11 @@ class SkillBuilderToolset:
             ),
             (
                 "finalize_skill_candidate",
-                "Terminal tool: finalize the persisted candidate package by its latest draft checksum and declare only exact Skill/MCP references read or inspected in this Run. It does not carry file content.",
+                "Terminal tool: finalize the persisted candidate package by its latest draft checksum. "
+                "Dependency evidence is Run-local: declare only exact Skill/MCP references read or "
+                "inspected in this exact Run, never references from conversation history or a prior "
+                "Run. If this Run did not read or inspect a required dependency, pass dependencies=[]. "
+                "It does not carry file content.",
                 FinalizeSkillCandidateInput,
                 finalize_skill_candidate,
                 True,

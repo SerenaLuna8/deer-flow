@@ -707,6 +707,23 @@ def _run_service(request: Request, request_id: str) -> PrivateRunService:
     return service
 
 
+async def _browser_chat_run_service(
+    request: Request,
+    context: PrivateWorkContext,
+    thread_id: str,
+) -> PrivateRunService:
+    """Return the Run service after rejecting hidden Builder threads.
+
+    The generic browser Run API is a projection of visible chat threads only.
+    Builder orchestration keeps using the same internal Run substrate through
+    its dedicated services, never through these public routes.
+    """
+
+    service = _run_service(request, context.request_id)
+    await service.require_browser_chat_thread(context, thread_id)
+    return service
+
+
 def _run_event_store(request: Request, request_id: str) -> RunEventStore:
     store = getattr(request.app.state, "private_run_event_store", None)
     if not isinstance(store, RunEventStore):
@@ -1530,6 +1547,7 @@ async def upload_private_file(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateFileResponse:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         record = await _file_service(request, context.request_id).upload(
             context,
             thread_id=str(thread_id),
@@ -1570,6 +1588,7 @@ async def get_private_upload_limits(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateUploadLimitsResponse:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         limits = await _file_service(
             request,
             context.request_id,
@@ -1603,6 +1622,7 @@ async def list_private_files(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[PrivateFileResponse]:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         records = await _file_service(request, context.request_id).list_ready(
             context,
             thread_id=str(thread_id),
@@ -1628,6 +1648,7 @@ async def delete_private_file(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateFileDeleteResponse:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         deleted = await _file_service(request, context.request_id).delete_ready(
             context,
             thread_id=str(thread_id),
@@ -1647,6 +1668,7 @@ async def download_private_file(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> StreamingResponse:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         stream = await _file_streamer(
             request,
             context.request_id,
@@ -1668,6 +1690,7 @@ async def download_private_artifact(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> StreamingResponse:
     try:
+        await _browser_chat_run_service(request, context, str(thread_id))
         stream = await _file_streamer(
             request,
             context.request_id,
@@ -1763,6 +1786,11 @@ async def create_private_run(
 ) -> PrivateRunResponse:
     try:
         thread_id_value = str(thread_id)
+        await _browser_chat_run_service(
+            request,
+            context,
+            thread_id_value,
+        )
         normalized_body = await _normalize_prepared_edit_replay(
             body,
             thread_id=thread_id_value,
@@ -1792,9 +1820,14 @@ async def stream_private_run(
     config: AppConfig = Depends(get_config),
 ) -> StreamingResponse:
     try:
+        thread_id_value = str(thread_id)
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            thread_id_value,
+        )
         bridge = _private_stream_bridge(request, context.request_id)
         cursor = _private_stream_cursor(request, context.request_id)
-        thread_id_value = str(thread_id)
         normalized_body = await _normalize_prepared_edit_replay(
             body,
             thread_id=thread_id_value,
@@ -1808,7 +1841,6 @@ async def stream_private_run(
             request,
             context,
         )
-        service = _run_service(request, context.request_id)
     except PrivateWorkError as error:
         _raise_http(error)
     except ReliabilityError as error:
@@ -1846,9 +1878,13 @@ async def reconnect_private_run_stream(
     selected_thread_id = str(thread_id)
     selected_run_id = str(run_id)
     try:
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            selected_thread_id,
+        )
         bridge = _private_stream_bridge(request, context.request_id)
         cursor = _private_stream_cursor(request, context.request_id)
-        service = _run_service(request, context.request_id)
         await _await_stream_database_operation(
             service.get(
                 context,
@@ -1902,8 +1938,13 @@ async def wait_private_run(
     config: AppConfig = Depends(get_config),
 ) -> dict[str, Any]:
     try:
-        _require_run_runtime(request, context.request_id)
         thread_id_value = str(thread_id)
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            thread_id_value,
+        )
+        _require_run_runtime(request, context.request_id)
         normalized_body = await _normalize_prepared_edit_replay(
             body,
             thread_id=thread_id_value,
@@ -1918,7 +1959,7 @@ async def wait_private_run(
             context,
         )
         completed, durable_record = await _wait_for_durable_private_run(
-            service=_run_service(request, context.request_id),
+            service=service,
             context=context,
             thread_id=str(thread_id),
             run_id=record.run_id,
@@ -1966,7 +2007,12 @@ async def list_private_runs(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> list[PrivateRunResponse]:
     try:
-        records = await _run_service(request, context.request_id).list(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        records = await service.list(
             context,
             str(thread_id),
             limit=limit,
@@ -1988,7 +2034,12 @@ async def get_private_run(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateRunResponse:
     try:
-        record = await _run_service(request, context.request_id).get(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        record = await service.get(
             context,
             str(thread_id),
             str(run_id),
@@ -2010,11 +2061,15 @@ async def cancel_private_run(
     """Persist cooperative cancellation for the durable private Run job."""
 
     try:
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
         if action != "interrupt":
             # Durable rollback requires an explicit checkpoint restore job;
             # silently treating it as interrupt would violate the SDK contract.
             raise PrivateWorkConflict(context.request_id)
-        service = _run_service(request, context.request_id)
         await service.cancel(
             context,
             str(thread_id),
@@ -2055,7 +2110,12 @@ async def delete_private_run(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateRunDeleteResponse:
     try:
-        await _run_service(request, context.request_id).delete(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        await service.delete(
             context,
             str(thread_id),
             str(run_id),
@@ -2089,7 +2149,12 @@ async def list_private_run_messages(
         )
         if before_sequence is not None and after_sequence is not None:
             raise PrivateWorkInvalid(context.request_id)
-        run = await _run_service(request, context.request_id).get(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        run = await service.get(
             context,
             str(thread_id),
             str(run_id),
@@ -2164,7 +2229,12 @@ async def list_private_thread_messages(
         )
         if before_sequence is not None and after_sequence is not None:
             raise PrivateWorkInvalid(context.request_id)
-        await _run_service(request, context.request_id).list(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        await service.list(
             context,
             str(thread_id),
             limit=1,
@@ -2202,7 +2272,12 @@ async def _private_run_events(
     limit: int,
     after_seq: int | None,
 ) -> list[dict[str, Any]]:
-    await _run_service(request, context.request_id).get(
+    service = await _browser_chat_run_service(
+        request,
+        context,
+        str(thread_id),
+    )
+    await service.get(
         context,
         str(thread_id),
         str(run_id),
@@ -2297,7 +2372,12 @@ async def private_thread_token_usage(
     context: PrivateWorkContext = Depends(private_work_context),
 ) -> PrivateThreadTokenUsageResponse:
     try:
-        await _run_service(request, context.request_id).list(
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        await service.list(
             context,
             str(thread_id),
             limit=1,
@@ -2548,6 +2628,11 @@ async def get_thread_state(
     config: AppConfig = Depends(get_config),
 ) -> PrivateThreadStateResponse:
     try:
+        await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
         snapshot = await bind_scoped_checkpoint_state(
             _scoped_checkpointer(request, context.request_id),
             context,

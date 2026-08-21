@@ -30,6 +30,13 @@ export function AgentBuilderActivityBlock({
       );
     }
   }
+  if (
+    !active &&
+    terminal?.payload.status === "completed" &&
+    reasoningByAttempt.size === 0
+  ) {
+    return null;
+  }
 
   return (
     <details
@@ -50,30 +57,20 @@ export function AgentBuilderActivityBlock({
           <span>{copy.duration(terminal.payload.duration_ms)}</span>
         ) : null}
       </summary>
-      <div className="mt-3 space-y-3 pl-5">
-        <ol className="text-muted-foreground space-y-1 text-xs">
-          {activities
-            .filter((activity) => activity.kind !== "reasoning")
-            .map((activity) => (
-              <li key={activity.seq}>
-                {copy.stages[activity.kind]}
-                {activity.attempt !== null
-                  ? ` · ${copy.attempt(activity.attempt)}`
-                  : ""}
-              </li>
-            ))}
-        </ol>
-        {[...reasoningByAttempt.entries()].map(([attempt, reasoning]) => (
-          <section key={attempt} className="space-y-1.5">
-            <p className="text-muted-foreground text-xs font-medium">
-              {copy.reasoning(attempt)}
-            </p>
-            <div className="text-sm leading-6">
-              <SafeStreamdown>{reasoning}</SafeStreamdown>
-            </div>
-          </section>
-        ))}
-      </div>
+      {reasoningByAttempt.size > 0 ? (
+        <div className="mt-3 space-y-3 pl-5">
+          {[...reasoningByAttempt.entries()].map(([attempt, reasoning]) => (
+            <section key={attempt} className="space-y-1.5">
+              <p className="text-muted-foreground text-xs font-medium">
+                {copy.reasoning(attempt)}
+              </p>
+              <div className="text-sm leading-6">
+                <SafeStreamdown>{reasoning}</SafeStreamdown>
+              </div>
+            </section>
+          ))}
+        </div>
+      ) : null}
     </details>
   );
 }

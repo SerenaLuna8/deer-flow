@@ -483,14 +483,14 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
             ),
             headers={},
         )
-        stream_response = await reconnect_private_run_stream(
-            uuid.UUID(first.thread_id),
-            uuid.UUID(first.run_id),
-            stream_request,  # type: ignore[arg-type]
-            seed.owner_a,
-        )
-        assert stream_response.status_code == 200
-        await stream_response.body_iterator.aclose()
+        with pytest.raises(HTTPException) as hidden_builder_stream:
+            await reconnect_private_run_stream(
+                uuid.UUID(first.thread_id),
+                uuid.UUID(first.run_id),
+                stream_request,  # type: ignore[arg-type]
+                seed.owner_a,
+            )
+        assert hidden_builder_stream.value.status_code == 404
         with pytest.raises(HTTPException) as wrong_owner_stream:
             await reconnect_private_run_stream(
                 uuid.UUID(first.thread_id),
@@ -1181,6 +1181,126 @@ async def test_skill_builder_activity_cap_still_allows_stopped_terminal(
         )
         assert activities[-1].kind is SkillDesignActivityKind.RUN_TERMINAL
         assert activities[-1].payload == {"status": "stopped"}
+    finally:
+        await seed.engine.dispose()
+
+
+@pytest.mark.postgres
+@pytest.mark.anyio
+async def test_skill_activity_replay_keeps_all_legacy_reasoning_content(
+    migrated_postgres_database_url: str,
+) -> None:
+    seed, context, service, _quota, _audit = await _environment(
+        migrated_postgres_database_url,
+    )
+    try:
+        design = await service.create(
+            context,
+            CreateSkillDesignSession(
+                slug="legacy-activity-skill",
+                display_name="Legacy Activity Skill",
+                idempotency_key="create-legacy-activity",
+            ),
+        )
+        admission = await service.submit_turn(
+            context,
+            design.id,
+            _message_turn(
+                message="生成候选 Skill",
+                revision=design.revision,
+                key="legacy-activity-turn",
+            ),
+        )
+        assert isinstance(admission, SkillBuilderRunAdmission)
+
+        async with seed.factory() as session, session.begin():
+            operation = (
+                await session.execute(
+                    sa.select(SkillDesignOperationRow).where(
+                        SkillDesignOperationRow.run_id == admission.run_id,
+                    )
+                )
+            ).scalar_one()
+            before_seq = int(
+                await session.scalar(
+                    sa.select(sa.func.coalesce(sa.func.max(SkillDesignActivityRow.seq), 0)).where(
+                        SkillDesignActivityRow.session_id == design.id,
+                    )
+                )
+                or 0
+            )
+            common = {
+                "project_id": operation.project_id,
+                "owner_user_id": operation.owner_user_id,
+                "session_id": operation.session_id,
+                "operation_id": operation.id,
+                "run_id": operation.run_id,
+            }
+            session.add_all(
+                [
+                    SkillDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        source_event_id="legacy-reasoning-1",
+                        kind=SkillDesignActivityKind.REASONING.value,
+                        payload_json={"text": "system pro"},
+                    ),
+                    SkillDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        source_event_id="legacy-reasoning-2",
+                        kind=SkillDesignActivityKind.REASONING.value,
+                        payload_json={"text": "mpt: P0_LEGACY_SKILL_SPLIT_CANARY"},
+                    ),
+                    SkillDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        source_event_id="legacy-reasoning-3",
+                        kind=SkillDesignActivityKind.REASONING.value,
+                        payload_json={
+                            "text": '{"phase":"composition","plan":"P0_LEGACY_SKILL_JSON_CANARY"}',
+                        },
+                    ),
+                    SkillDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        source_event_id="legacy-validation",
+                        kind=SkillDesignActivityKind.VALIDATION_STARTED.value,
+                        payload_json={"stage": "package_files"},
+                    ),
+                    SkillDesignActivityRow(
+                        **common,
+                        attempt=2,
+                        source_event_id="legacy-safe-reasoning",
+                        kind=SkillDesignActivityKind.REASONING.value,
+                        payload_json={"text": "普通修复思考"},
+                    ),
+                ]
+            )
+
+        replay = await service.list_activities(
+            context,
+            design.id,
+            after_seq=before_seq,
+            limit=5,
+        )
+
+        assert [activity.kind for activity in replay] == [
+            SkillDesignActivityKind.REASONING,
+            SkillDesignActivityKind.REASONING,
+            SkillDesignActivityKind.REASONING,
+            SkillDesignActivityKind.VALIDATION_STARTED,
+            SkillDesignActivityKind.REASONING,
+        ]
+        assert [activity.payload for activity in replay] == [
+            {"text": "system pro"},
+            {"text": "mpt: P0_LEGACY_SKILL_SPLIT_CANARY"},
+            {
+                "text": '{"phase":"composition","plan":"P0_LEGACY_SKILL_JSON_CANARY"}',
+            },
+            {"stage": "package_files"},
+            {"text": "普通修复思考"},
+        ]
     finally:
         await seed.engine.dispose()
 

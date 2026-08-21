@@ -17,7 +17,12 @@ import asyncio
 import time
 from collections.abc import Awaitable, Callable, Mapping
 
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 
 from deerflow.config.app_config import AppConfig
 from deerflow.models.runtime import (
@@ -75,6 +80,8 @@ class _InlineReasoningExtractor:
 
 
 def _structured_reasoning(message: BaseMessage) -> str:
+    if not isinstance(message, AIMessage):
+        return ""
     additional = getattr(message, "additional_kwargs", None)
     if isinstance(additional, Mapping):
         value = additional.get("reasoning_content")
@@ -203,7 +210,7 @@ async def run_oneshot_llm(
             next_chunk = asyncio.create_task(anext(stream))
             response = chunk if response is None else response + chunk  # type: ignore[operator]
             reasoning = _structured_reasoning(chunk)
-            if not reasoning:
+            if isinstance(chunk, AIMessage) and not reasoning:
                 content = getattr(chunk, "content", None)
                 if isinstance(content, str):
                     reasoning = inline.push(content)

@@ -191,9 +191,12 @@ export function SkillBuilderActivityBlock({
           text: activity.payload.text,
         });
       }
-    } else {
+    } else if (activity.kind.startsWith("tool_")) {
       timeline.push({ kind: "activity", activity });
     }
+  }
+  if (!active && terminalStatus === "completed" && timeline.length === 0) {
+    return null;
   }
 
   return (
@@ -229,60 +232,56 @@ export function SkillBuilderActivityBlock({
           </Button>
         ) : null}
       </summary>
-      <div className="mt-3 space-y-3 pl-5">
-        {timeline.map((item) => {
-          if (item.kind === "reasoning") {
-            return (
-              <section key={item.seq} className="space-y-1.5">
-                <p className="text-muted-foreground text-xs font-medium">
-                  {item.attempt === null
-                    ? copy.title
-                    : copy.reasoning(item.attempt)}
-                </p>
-                <div className="text-sm leading-6">
-                  <SafeStreamdown>{item.text}</SafeStreamdown>
-                </div>
-              </section>
-            );
-          }
-          const { activity } = item;
-          const stageLabel =
-            activity.kind === "validation_started" &&
-            "stage" in activity.payload
-              ? copy.validationStages[activity.payload.stage]
-              : copy.stages[activity.kind];
-          const toolDetails =
-            activity.kind.startsWith("tool_") && "tool_name" in activity.payload
-              ? [
-                  typeof activity.payload.resource_name === "string"
-                    ? activity.payload.resource_name
-                    : undefined,
-                  typeof activity.payload.path === "string"
-                    ? activity.payload.path
-                    : undefined,
-                  typeof activity.payload.result_count === "number"
-                    ? copy.resultCount(activity.payload.result_count)
-                    : undefined,
-                  typeof activity.payload.size_bytes === "number"
-                    ? copy.sizeBytes(activity.payload.size_bytes)
-                    : undefined,
-                ].filter((value): value is string => Boolean(value))
-              : [];
-          return (
-            <p key={activity.seq} className="text-muted-foreground text-xs">
-              {stageLabel}
-              {activity.kind.startsWith("tool_") &&
+      {timeline.length > 0 ? (
+        <div className="mt-3 space-y-3 pl-5">
+          {timeline.map((item) => {
+            if (item.kind === "reasoning") {
+              return (
+                <section key={item.seq} className="space-y-1.5">
+                  <p className="text-muted-foreground text-xs font-medium">
+                    {item.attempt === null
+                      ? copy.title
+                      : copy.reasoning(item.attempt)}
+                  </p>
+                  <div className="text-sm leading-6">
+                    <SafeStreamdown>{item.text}</SafeStreamdown>
+                  </div>
+                </section>
+              );
+            }
+            const { activity } = item;
+            const stageLabel = copy.stages[activity.kind];
+            const toolDetails =
+              activity.kind.startsWith("tool_") &&
               "tool_name" in activity.payload
-                ? ` · ${activity.payload.tool_name}`
-                : ""}
-              {toolDetails.length > 0 ? ` · ${toolDetails.join(" · ")}` : ""}
-              {activity.attempt !== null
-                ? ` · ${copy.attempt(activity.attempt)}`
-                : ""}
-            </p>
-          );
-        })}
-      </div>
+                ? [
+                    typeof activity.payload.resource_name === "string"
+                      ? activity.payload.resource_name
+                      : undefined,
+                    typeof activity.payload.path === "string"
+                      ? activity.payload.path
+                      : undefined,
+                    typeof activity.payload.result_count === "number"
+                      ? copy.resultCount(activity.payload.result_count)
+                      : undefined,
+                    typeof activity.payload.size_bytes === "number"
+                      ? copy.sizeBytes(activity.payload.size_bytes)
+                      : undefined,
+                  ].filter((value): value is string => Boolean(value))
+                : [];
+            return (
+              <p key={activity.seq} className="text-muted-foreground text-xs">
+                {stageLabel}
+                {activity.kind.startsWith("tool_") &&
+                "tool_name" in activity.payload
+                  ? ` · ${activity.payload.tool_name}`
+                  : ""}
+                {toolDetails.length > 0 ? ` · ${toolDetails.join(" · ")}` : ""}
+              </p>
+            );
+          })}
+        </div>
+      ) : null}
     </details>
   );
 }

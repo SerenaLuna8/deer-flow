@@ -6,13 +6,62 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import type { Project } from "@/core/projects/types";
 import {
   skillBuilderCanAuthor,
+  useSkillBuilderSessionByVersion,
   useSkillBuilderSessions,
 } from "@/core/skill-builder";
 
 import { useCurrentProject } from "../project-context";
 
+import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import { ProjectAssetPageShell } from "./project-asset-page-shell";
-import { SkillAssetDetail } from "./skill-asset-detail";
+import { SkillAssetDetail, type SkillAssetVersion } from "./skill-asset-detail";
+
+function ProjectSkillDetail({
+  project,
+  version,
+  context,
+}: {
+  project: Project;
+  version: SkillAssetVersion;
+  context: ProjectAssetVersionRenderContext;
+}) {
+  const designSession = useSkillBuilderSessionByVersion(
+    context.accountId,
+    context.projectId,
+    version.id,
+    context.item.scope === "project",
+  );
+  const designRecordHref = designSession.data
+    ? `/projects/${encodeURIComponent(project.slug)}/skills/new/${encodeURIComponent(designSession.data.id)}`
+    : null;
+
+  return (
+    <SkillAssetDetail
+      version={version}
+      designRecordHref={designRecordHref}
+      workspace={{
+        accountId: context.accountId,
+        projectId: context.projectId,
+        item: context.item,
+        canAuthor: context.canAuthor,
+        editing: context.editing,
+        credentialBindingsDirty: context.credentialBindingsDirty,
+        onEditingChange: context.onEditingChange,
+        onDirtyChange: context.onDirtyChange,
+        onCredentialBindingsDirtyChange:
+          context.onCredentialBindingsDirtyChange,
+        onActivationValidityChange: context.onActivationValidityChange,
+        onVersionCreated: context.onVersionCreated,
+        canManageCredentials: project.capabilities.includes(
+          "mcp.credentials.approve",
+        ),
+        credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
+        focusCredentials: context.focusSkillCredentials,
+        onCredentialsFocused: context.onSkillCredentialsFocused,
+      }}
+    />
+  );
+}
 
 function ProjectSkillBuilderLead({ project }: { project: Project }) {
   const { user } = useAuth();
@@ -63,28 +112,10 @@ export function ProjectSkillsPage({
       )}
       renderVersion={(version, context) =>
         "skill_id" in version ? (
-          <SkillAssetDetail
+          <ProjectSkillDetail
+            project={project}
             version={version}
-            workspace={{
-              accountId: context.accountId,
-              projectId: context.projectId,
-              item: context.item,
-              canAuthor: context.canAuthor,
-              editing: context.editing,
-              credentialBindingsDirty: context.credentialBindingsDirty,
-              onEditingChange: context.onEditingChange,
-              onDirtyChange: context.onDirtyChange,
-              onCredentialBindingsDirtyChange:
-                context.onCredentialBindingsDirtyChange,
-              onActivationValidityChange: context.onActivationValidityChange,
-              onVersionCreated: context.onVersionCreated,
-              canManageCredentials: project.capabilities.includes(
-                "mcp.credentials.approve",
-              ),
-              credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
-              focusCredentials: context.focusSkillCredentials,
-              onCredentialsFocused: context.onSkillCredentialsFocused,
-            }}
+            context={context}
           />
         ) : (
           <p role="alert" className="text-destructive text-sm">

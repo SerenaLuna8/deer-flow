@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -35,12 +36,18 @@ async def test_delete_upload_reports_conditional_discard_outcome(
     app.include_router(private_work_router.router)
     context = SimpleNamespace(request_id="upload-discard-api")
     service = _FileService(deleted=deleted)
+    run_service = SimpleNamespace(require_browser_chat_thread=AsyncMock())
     app.dependency_overrides[private_work_context] = lambda: context
     app.dependency_overrides[require_project_private_open] = lambda: None
     monkeypatch.setattr(
         private_work_router,
         "_file_service",
         lambda _request, _request_id: service,
+    )
+    monkeypatch.setattr(
+        private_work_router,
+        "_run_service",
+        lambda _request, _request_id: run_service,
     )
 
     project_id = uuid.uuid4()
@@ -60,6 +67,10 @@ async def test_delete_upload_reports_conditional_discard_outcome(
 
     assert response.status_code == 200
     assert response.json() == {"success": True, "deleted": deleted}
+    run_service.require_browser_chat_thread.assert_awaited_once_with(
+        context,
+        str(thread_id),
+    )
     assert service.calls == [
         {
             "context": context,

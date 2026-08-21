@@ -882,6 +882,24 @@ async def list_skill_design_sessions(
 
 
 @router.get(
+    "/by-version/{version_id}",
+    response_model=SkillDesignSessionResponse,
+)
+async def get_skill_design_session_by_version(
+    version_id: uuid.UUID,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillDesignService, Depends(get_skill_design_service)],
+) -> SkillDesignSessionResponse:
+    try:
+        return _session_response(
+            await service.get_by_created_version(context, version_id),
+            context,
+        )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@router.get(
     "/{session_id}",
     response_model=SkillDesignSessionResponse,
 )

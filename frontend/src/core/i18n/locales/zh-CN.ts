@@ -1683,7 +1683,6 @@ export const zhCN: Translations = {
         stepsAria: "设计步骤",
         designing: "正在设计 Agent…",
         steps: "设计步骤",
-        settingsProgressAria: "四项 Agent 设置进度",
       },
       resume: {
         title: "继续设计未完成的 Agent",
@@ -1696,14 +1695,10 @@ export const zhCN: Translations = {
         confirmDelete: "确认删除",
       },
       blueprint: {
-        result: "生成结果",
         title: "Agent 设计稿",
-        description:
-          "请检查模型生成的设置和 Agent 名称。确认无误后再创建 Agent。",
         runtime: "运行配置",
         noDescription: "暂未生成 Agent 简介。",
         nameLabel: "Agent 名称",
-        nameHint: "创建成功后，显示名称与 slug 均使用此值。",
         savedAs: (value) => `规范化后：${value}`,
         model: "模型",
         capabilities: "能力与依赖",
@@ -1730,8 +1725,6 @@ export const zhCN: Translations = {
       conversation: {
         permissionReadOnly:
           "当前账号没有继续设计 Agent 的权限。你仍可查看已保存的会话内容。",
-        newAgentIntro: (name) =>
-          `新 Agent 的名称是 ${name}。请通过下面的对话描述它的用途、行为方式和协作边界。`,
         creatingAgent: "正在创建 Agent…",
         designingAgent: "正在设计 Agent…",
         composerAria: "描述想要的 Agent",
@@ -1747,7 +1740,7 @@ export const zhCN: Translations = {
         modelLabel: "用于创建 Agent 的对话模型",
         backToAgents: "稍后继续，返回 Agent 列表",
         designAgent: "设计 Agent",
-        autosave: "自动保存，可稍后继续",
+        completedRecord: "候选版本 v1 · 只读",
         more: "更多操作",
         abandon: "放弃本次设计",
         conversationAria: "Agent 设计对话",
@@ -1768,7 +1761,6 @@ export const zhCN: Translations = {
         viewAgent: "查看智能体",
         activity: {
           title: "思考与执行过程",
-          attempt: (value) => (value === 1 ? "首次生成" : "修复重试"),
           reasoning: (value) => (value === 1 ? "模型思考" : "修复重试思考"),
           duration: (value) => `用时 ${(value / 1000).toFixed(1)} 秒`,
           terminal: {
@@ -1776,22 +1768,6 @@ export const zhCN: Translations = {
             failed: "失败",
             stopped: "已停止",
             cancelled: "已取消",
-          },
-          stages: {
-            turn_accepted: "已接收请求",
-            attempt_started: "模型开始思考",
-            candidate_generated: "已生成候选",
-            validation_started: "正在进行确定性校验",
-            validation_passed: "候选校验通过",
-            validation_failed: "候选校验未通过",
-            repair_started: "开始修复重试",
-            turn_terminal: "本轮生成结束",
-            commit_accepted: "已接收创建请求",
-            commit_validation_started: "正在校验候选",
-            commit_validation_passed: "候选校验通过",
-            commit_persistence_started: "正在保存 Agent 与候选版本",
-            commit_persistence_completed: "Agent 与候选版本已保存",
-            commit_terminal: "创建过程结束",
           },
         },
       },
@@ -1807,7 +1783,6 @@ export const zhCN: Translations = {
       title: "指令文档",
       editDescription:
         "四个固定文档映射到当前 Agent 设置。保存后创建不可变的候选版本，激活后才会用于后续运行。",
-      blueprintDescription: "四个固定文档会写入待创建 Agent 的设计稿。",
       readOnlyDescription: "系统 Agent 的唯一 v1 指令文档，只读展示。",
       historicalDescription:
         "历史版本中的不可变指令文档，仅供查看，不能修改或作为新版本的编辑基线。",
@@ -1820,7 +1795,6 @@ export const zhCN: Translations = {
       editFile: (name) => `编辑 ${name}`,
       candidateSaveHint:
         "保存会同时把四项 Agent 设置写入一个新的候选版本，不会直接激活。",
-      blueprintSaveHint: "保存后会更新当前设计稿，然后才能创建 Agent。",
       discard: "放弃修改",
       saving: "保存中…",
       save: "保存候选版本",
@@ -2015,6 +1989,9 @@ export const zhCN: Translations = {
   },
 
   skills: {
+    catalog: {
+      viewDesignRecord: "查看设计记录",
+    },
     export: {
       label: "导出 ZIP",
       preparing: "正在准备…",
@@ -2233,7 +2210,6 @@ export const zhCN: Translations = {
       },
       start: {
         title: "给新 Skill 起个名字",
-        hint: "名称会成为 SKILL.md frontmatter 中不可变的 name，并自动转为小写连字符格式。",
         nameLabel: "Skill 名称",
         placeholder: "例如 paper-review",
         savedAs: (value) => `将保存为 ${value}`,
@@ -2270,18 +2246,10 @@ export const zhCN: Translations = {
       conversation: {
         progressAriaCreate: "Skill 创建进度",
         progressAriaRevise: "Skill 修订进度",
-        progressCreate: "创建进度",
-        progressRevise: "修订进度",
         permissionReadOnlyCreate:
           "当前账号没有继续创建 Skill 的权限。你仍可查看已保存的会话和候选文件。",
         permissionReadOnlyRevise:
           "当前账号没有继续修订 Skill 的权限。你仍可查看已保存的会话和候选文件。",
-        reviseIntroBefore: "已加载",
-        reviseIntroAfter:
-          "的 Current Version。请描述要修改的内容，或直接编辑右侧候选文件。",
-        createIntroBefore: "新 Skill 的名称是",
-        createIntroAfter:
-          "。请描述用途、触发条件、输入输出和需要的参考资料或脚本。",
         creatingSkill: "正在创建 Skill…",
         creatingCandidate: "正在创建候选版本…",
         processing: "Builder Agent 正在处理…",
@@ -2295,11 +2263,12 @@ export const zhCN: Translations = {
         send: "发送",
         fallbackTitle: "创建 Skill",
         revisingBanner: (slug, version) => `基于 ${slug} v${version} 修订`,
+        completedRecord: (version) =>
+          `${version === null ? "候选版本" : `候选版本 v${version}`} · 只读`,
         unsavedChanges: "有未保存修改",
         agentRunning: "Builder Agent 正在执行",
         checkedCreate: "已检查，可创建",
         checkedRevise: "已检查，可保存候选版本",
-        autosave: "已自动保存，可稍后继续",
         more: "更多操作",
         abandonCreate: "放弃本次创建",
         abandonRevise: "放弃本次修订",
@@ -2341,8 +2310,6 @@ export const zhCN: Translations = {
         checkPassed: "检查通过",
         checkPassedWithWarnings: "检查通过，但有警告",
         requiredCredentials: "所需凭据：",
-        recheckHint:
-          "每次候选文件变化后都需要重新检查路径、frontmatter、安全规则和配额。",
         acknowledgeWarnings: "确认并接受上述警告",
         checkSkill: "检查 Skill",
         commitCreate: "创建 Skill（默认停用）",
@@ -2440,8 +2407,6 @@ export const zhCN: Translations = {
           `将在项目 ${project} 中保存不可变的 v1 候选版本。Skill 创建后保持停用，不会自动加入任何 Agent。`,
         commitDescriptionRevise: (slug, version) =>
           `将基于 ${slug} v${version} 保存新的候选版本。激活后才会成为 Current Version，当前运行不受本次保存影响。`,
-        fileMetaCreate: (count) => `${count} 个文件 · 默认停用`,
-        fileMetaRevise: (count) => `${count} 个文件 · 候选版本`,
         backToReview: "返回检查",
         creating: "正在创建…",
         creatingVersion: "正在创建新版本…",
@@ -2474,10 +2439,9 @@ export const zhCN: Translations = {
         goActivate: "前往激活",
         viewSkill: "查看 Skill",
         viewCandidateVersion: "查看候选版本",
-        revisionWithSecrets: (version, count) =>
-          `已保存${version === null ? "候选版本" : `候选版本 v${version}`}，检测到 ${count} 项环境变量声明。请先配置运行凭证再激活。`,
-        createdWithSecrets: (count) =>
-          `Skill 已创建并默认停用，检测到 ${count} 项环境变量声明。请先配置运行凭证。`,
+        revisionWithSecrets: (_version, count) =>
+          `${count} 项环境变量需要配置运行凭证。`,
+        createdWithSecrets: (count) => `${count} 项环境变量需要配置运行凭证。`,
         configureCredentials: "配置凭证",
       },
       versionConflict: {

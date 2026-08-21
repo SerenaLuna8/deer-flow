@@ -17,6 +17,7 @@ from app.shared_assets.agent_design_activity import (
     AgentDesignActivityKind,
     AgentDesignActivityLimitExceeded,
     AgentDesignActivityRepository,
+    activity_view,
 )
 from app.shared_assets.agent_design_control import AgentDesignGenerationControl
 from app.shared_assets.agent_design_service import (
@@ -27,6 +28,7 @@ from app.shared_assets.agent_design_service import (
 )
 from app.shared_assets.errors import AssetNotFound
 from deerflow.persistence.shared_assets import (
+    AgentDesignActivityRow,
     AgentDesignOperationRow,
     AgentDesignSessionRow,
 )
@@ -209,6 +211,87 @@ async def test_activity_replay_is_monotonic_private_and_clearable(
 
 
 @pytest.mark.asyncio
+async def test_activity_replay_keeps_all_legacy_reasoning_content(
+    migrated_postgres_database_url: str,
+) -> None:
+    engine, sessions, context, session_id, operation_id = await _seed_activity_scope(
+        migrated_postgres_database_url,
+    )
+    try:
+        async with sessions() as session, session.begin():
+            common = {
+                "project_id": context.project_id,
+                "owner_user_id": str(context.user_id),
+                "session_id": session_id,
+                "operation_id": operation_id,
+            }
+            session.add_all(
+                [
+                    AgentDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        kind=AgentDesignActivityKind.REASONING.value,
+                        payload_json={"text": "system pro"},
+                    ),
+                    AgentDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        kind=AgentDesignActivityKind.REASONING.value,
+                        payload_json={"text": "mpt: P0_LEGACY_AGENT_SPLIT_CANARY"},
+                    ),
+                    AgentDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        kind=AgentDesignActivityKind.REASONING.value,
+                        payload_json={
+                            "text": '{"phase":"composition","plan":"P0_LEGACY_AGENT_JSON_CANARY"}',
+                        },
+                    ),
+                    AgentDesignActivityRow(
+                        **common,
+                        attempt=1,
+                        kind=AgentDesignActivityKind.VALIDATION_STARTED.value,
+                        payload_json={},
+                    ),
+                    AgentDesignActivityRow(
+                        **common,
+                        attempt=2,
+                        kind=AgentDesignActivityKind.REASONING.value,
+                        payload_json={"text": "普通修复思考"},
+                    ),
+                ]
+            )
+
+        async with sessions() as session, session.begin():
+            rows = await AgentDesignActivityRepository(session).list_after(
+                context,
+                session_id=session_id,
+                after_seq=0,
+                limit=5,
+            )
+            replay = tuple(activity_view(row) for row in rows)
+
+        assert [activity.kind for activity in replay] == [
+            AgentDesignActivityKind.REASONING,
+            AgentDesignActivityKind.REASONING,
+            AgentDesignActivityKind.REASONING,
+            AgentDesignActivityKind.VALIDATION_STARTED,
+            AgentDesignActivityKind.REASONING,
+        ]
+        assert [activity.payload for activity in replay] == [
+            {"text": "system pro"},
+            {"text": "mpt: P0_LEGACY_AGENT_SPLIT_CANARY"},
+            {
+                "text": '{"phase":"composition","plan":"P0_LEGACY_AGENT_JSON_CANARY"}',
+            },
+            {},
+            {"text": "普通修复思考"},
+        ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_activity_has_one_terminal_and_reserves_space_for_it(
     migrated_postgres_database_url: str,
 ) -> None:
@@ -275,7 +358,7 @@ async def test_stop_then_cancel_converges_and_clears_private_activity(
             await activity_callback(
                 "reasoning",
                 1,
-                {"text": "停止前已经发生的真实思考"},
+                {"text": "api_key=p0ReasoningContentMustRemainVisible12345"},
             )
             self.started.set()
             await abort_event.wait()
@@ -321,7 +404,7 @@ async def test_stop_then_cancel_converges_and_clears_private_activity(
         activities = await service.list_activities(context, session_id)
         assert activities[-1].kind is AgentDesignActivityKind.TURN_TERMINAL
         assert activities[-1].payload["status"] == "stopped"
-        assert any(activity.payload.get("text") == "停止前已经发生的真实思考" for activity in activities)
+        assert any(activity.payload.get("text") == "api_key=p0ReasoningContentMustRemainVisible12345" for activity in activities)
 
         generator.started.clear()
         second_task = asyncio.create_task(

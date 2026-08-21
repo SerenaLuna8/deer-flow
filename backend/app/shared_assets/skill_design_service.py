@@ -1143,6 +1143,37 @@ class SkillDesignService:
         except DBAPIError:
             raise AssetStorageUnavailable(context.request_id) from None
 
+    async def get_by_created_version(
+        self,
+        context: ProjectContext,
+        version_id: uuid.UUID,
+    ) -> SkillDesignSessionView:
+        self._require_context(context)
+        self._require_capability(context, Capability.SHARED_ASSETS_READ)
+        version_id = self._validate_uuid(context, version_id)
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    repository = self._repository_factory(session)
+                    row = await repository.get_by_created_version(
+                        context,
+                        version_id,
+                    )
+                    files = await repository.load_draft_files(
+                        context,
+                        row.id,
+                    )
+                    return await self._session_view_for_row(
+                        repository,
+                        context,
+                        row,
+                        files,
+                    )
+        except SharedAssetError:
+            raise
+        except DBAPIError:
+            raise AssetStorageUnavailable(context.request_id) from None
+
     async def submit_turn(
         self,
         context: ProjectContext,

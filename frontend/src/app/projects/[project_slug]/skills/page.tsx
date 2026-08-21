@@ -18,10 +18,7 @@ export default async function ProjectSkillsPage({
   }>;
 }) {
   const { project_slug: slug } = await params;
-  await requireServerProjectCapability(slug, [
-    "shared_assets.edit",
-    "shared_assets.manage_bindings",
-  ]);
+  await requireServerProjectCapability(slug, "shared_assets.read");
   const {
     skill_id: skillId,
     skill_version_id: skillVersionId,

@@ -379,27 +379,24 @@ export function AgentBuilderConversationView({
       >
         <div className="mx-auto w-full max-w-4xl px-4 pt-7 pb-6 sm:px-6 sm:pt-10">
           <div className="space-y-7">
-            <AgentBuilderProgress
-              items={session.progress}
-              generating={processing}
-              documentsReady={Boolean(session.blueprint)}
-            />
+            {session.progress.length > 0 &&
+            !(
+              session.blueprint &&
+              session.progress.every((item) => item.status === "completed")
+            ) ? (
+              <AgentBuilderProgress
+                items={session.progress}
+                generating={processing}
+              />
+            ) : null}
 
-            {!canAuthor ? (
+            {!canAuthor && session.status !== "completed" ? (
               <p
                 role="alert"
                 className="border-border/70 bg-muted/20 text-muted-foreground rounded-xl border px-4 py-3 text-sm"
               >
                 {copy.permissionReadOnly}
               </p>
-            ) : null}
-
-            {session.messages.length === 0 ? (
-              <div className="flex justify-end">
-                <p className="bg-muted max-w-[90%] rounded-2xl rounded-br-md px-4 py-3 text-sm leading-6">
-                  {copy.newAgentIntro(session.display_name)}
-                </p>
-              </div>
             ) : null}
 
             {session.messages.map((message) => (
@@ -527,7 +524,7 @@ export function AgentBuilderConversationView({
             className="bg-background border-border/70 mx-auto w-full max-w-4xl rounded-2xl border p-2 shadow-lg"
             onSubmit={submitMessage}
           >
-            <div aria-disabled={composerDisabled}>
+            <div>
               <Textarea
                 aria-label={copy.composerAria}
                 value={composerText}
@@ -657,10 +654,12 @@ export function AgentBuilderConversationView({
                   }
                   onClick={generating ? onStopGeneration : undefined}
                 >
-                  {stopPending || mutationPending ? (
+                  {stopPending ? (
                     <Loader2Icon aria-hidden className="size-4 animate-spin" />
                   ) : generating ? (
                     <SquareIcon aria-hidden className="size-4 fill-current" />
+                  ) : mutationPending ? (
+                    <Loader2Icon aria-hidden className="size-4 animate-spin" />
                   ) : (
                     <SendIcon aria-hidden className="size-4" />
                   )}
@@ -1312,11 +1311,13 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               {session?.display_name ??
                 t.agents.builder.conversation.designAgent}
             </p>
-            <p className="text-muted-foreground truncate text-xs">
-              {t.agents.builder.conversation.autosave}
-            </p>
+            {session?.status === "completed" ? (
+              <p className="text-muted-foreground truncate text-xs">
+                {t.agents.builder.conversation.completedRecord}
+              </p>
+            ) : null}
           </div>
-          {canAuthor ? (
+          {canAuthor && session?.status !== "completed" ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button

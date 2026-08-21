@@ -232,6 +232,12 @@ _SECRET_SEEKING_QUESTION_PATTERNS = (
     ),
     re.compile(r"(?:粘贴|提供|输入|发送|分享).{0,40}(?:密钥|密码|令牌|凭据|私钥)", re.DOTALL),
 )
+_PUBLIC_QUESTION_INTERNAL_CONTRACT_PATTERN = re.compile(
+    r"\b(?:agents_instructions|allowed_capabilities|allowed_project_assets|"
+    r"capability_claims|current_draft|interview_history|question_number|"
+    r"user_context)\b",
+    re.IGNORECASE,
+)
 
 _SYSTEM_INSTRUCTION = """You generate a concise catalog description and four logical Markdown documents for one project Agent.
 
@@ -262,7 +268,9 @@ Return exactly one JSON object with no Markdown fence or commentary. Follow the 
   responsibilities, priorities, workflow, boundaries, or output expectations. Never return a
   candidate in this phase. The question must be single_select with three to five concise,
   context-specific options; do not add an "Other" option because the UI always provides a
-  free-text alternative.
+  free-text alternative. The prompt, reason, and options are end-user UI copy: write them in
+  the requested locale and never mention JSON/schema keys or internal document field names.
+  Only the hidden targets metadata may contain document field identifiers.
 - composition: use all supplied answers and return the complete candidate. Never ask another clarification question in this phase.
 
 For discovery return:
@@ -866,6 +874,11 @@ class AgentDesignGenerationService:
                     "AGENT_DESIGN_INVALID_MODEL_OUTPUT",
                     "Agent design discovery repeated an earlier question.",
                 )
+            if self._question_exposes_internal_contract(question):
+                raise AgentDesignGenerationInvalid(
+                    "AGENT_DESIGN_INVALID_MODEL_OUTPUT",
+                    "Agent design discovery returned internal contract terms in public copy.",
+                )
             if self._question_seeks_secret(question):
                 raise AgentDesignGenerationUnsafe(
                     "AGENT_DESIGN_UNSAFE_MODEL_OUTPUT",
@@ -1151,6 +1164,13 @@ class AgentDesignGenerationService:
     def _question_seeks_secret(question: ClarificationQuestion) -> bool:
         content = "\n".join((question.prompt, question.reason, *question.options))
         return any(pattern.search(content) for pattern in _SECRET_SEEKING_QUESTION_PATTERNS)
+
+    @staticmethod
+    def _question_exposes_internal_contract(
+        question: ClarificationQuestion,
+    ) -> bool:
+        content = "\n".join((question.prompt, question.reason, *question.options))
+        return _PUBLIC_QUESTION_INTERNAL_CONTRACT_PATTERN.search(content) is not None
 
 
 __all__ = [

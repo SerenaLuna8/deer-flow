@@ -730,6 +730,37 @@ async def test_staged_chunks_finalize_checksum_and_resolved_dependencies_once() 
 
 
 @pytest.mark.asyncio
+async def test_new_candidate_file_cas_is_model_discoverable_and_executable() -> None:
+    sink = _DraftSink()
+    toolset = SkillBuilderToolset(_Catalog(), sink)
+    upsert = _tool(toolset, "upsert_candidate_file")
+
+    created = await upsert.ainvoke(
+        {
+            "path": "references/new-guide.md",
+            "media_type": "text/markdown",
+            "content": "# New guide\n",
+            "mode": "replace",
+            "expected_draft_checksum": None,
+            "expected_file_size_bytes": 0,
+            "expected_file_sha256": None,
+        }
+    )
+
+    assert created["file"]["path"] == "references/new-guide.md"
+    required_new_file_cas = {
+        "expected_file_size_bytes=0",
+        "expected_file_sha256=null",
+    }
+    model_surfaces = {
+        "system_prompt": runtime_module._SYSTEM_PROMPT,
+        "upsert_candidate_file": str(upsert.description),
+    }
+    missing = {f"{surface}:{rule}" for surface, text in model_surfaces.items() for rule in required_new_file_cas if rule not in text}
+    assert not missing, f"new-file CAS is not explicit to the model: {sorted(missing)}"
+
+
+@pytest.mark.asyncio
 async def test_candidate_read_delete_and_chunk_bounds_are_strict() -> None:
     sink = _DraftSink()
     toolset = SkillBuilderToolset(_Catalog(), sink)
@@ -1125,6 +1156,8 @@ def test_factory_delegates_to_canonical_private_agent_with_trusted_builder_exten
     assert isinstance(system_prompt, str)
     assert "Candidate Skill files remain governed" in system_prompt
     assert "Finish every turn by invoking exactly one terminal tool" in system_prompt
+    assert "References from conversation history or a prior Run are invalid" in system_prompt
+    assert "pass dependencies=[]" in system_prompt
     if "file:read" in tool_groups:
         assert "/runtime/exact-skills/public/skill-creator/SKILL.md" in system_prompt
         assert "Use read_file on that exact path" in system_prompt

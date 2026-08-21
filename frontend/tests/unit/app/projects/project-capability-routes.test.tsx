@@ -64,7 +64,7 @@ describe("project capability workspace routes", () => {
     [
       "Skill catalog",
       () => ProjectSkillsPage({ params, searchParams: Promise.resolve({}) }),
-      ["shared_assets.edit", "shared_assets.manage_bindings"],
+      "shared_assets.read",
     ],
     [
       "new Skill",
@@ -80,7 +80,7 @@ describe("project capability workspace routes", () => {
             session_id: "skill-session",
           }),
         }),
-      "shared_assets.edit",
+      "shared_assets.read",
     ],
     [
       "MCP catalog",

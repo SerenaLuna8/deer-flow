@@ -82,7 +82,7 @@ _Avoid_: Version Activation
 A Skill authored and governed within one Project.
 
 **System Skill**:
-A platform-governed Skill with one Current Version numbered v1. Projects can use it but cannot create, save, or activate its versions.
+A platform-governed Skill installed once as an immutable v1. Projects can use it but cannot create, save, activate, or replace its definition; changed content requires a different System Skill identity.
 
 **Project Skill Version**:
 An immutable snapshot of all files that comprise a Skill at one point in its history.
@@ -99,6 +99,36 @@ _Avoid_: Package cleanup
 **Skill Export**:
 The read-only creation of a Skill Distribution Package from one persisted Project Skill Version or a System Skill's Current Version; it may omit standard non-distribution files but does not otherwise change the Skill or its governance state.
 _Avoid_: Backup, lifecycle archive
+
+## Configuration secrets
+
+**Configuration Secret**:
+Secret material owned by exactly one model, Skill, MCP, or Channel configuration. It is protected at rest, cannot be managed or reused independently, and may be materialized only inside that configuration's authorized execution boundary or an authorized server-side re-encryption boundary.
+_Avoid_: Credential, shared secret asset
+
+**Configuration Secret Generation**:
+One immutable protected value for a Configuration Secret at a point in its replacement history. When its ciphertext is destroyed, only a Secret Tombstone remains.
+_Avoid_: Credential Version, latest secret
+
+**Secret Envelope**:
+The business-neutral authenticated-encryption representation stored inside a consuming domain's Configuration Secret Generation. It contains ciphertext and a random nonce bound to the exact recipient identity, but owns no catalog, permission, lifecycle, or reusable secret identity of its own.
+_Avoid_: Credential Envelope, shared secret record
+
+**Current Secret Generation**:
+The Configuration Secret Generation selected by a configuration for its next authorized resolution boundary. Run Admission selects and pins the exact Model, Skill, and MCP Generation reference without decrypting it; a Worker materializes it only at the authorized execution boundary. Channel delivery instead selects the Channel Instance's then-current Generation.
+_Avoid_: Latest Credential, active secret version
+
+**Secret Readiness**:
+Whether a configuration has every required Configuration Secret needed for new execution. It is the aggregate of per-slot `configured` status and is independent of higher-level runtime readiness such as MCP discovery and lifecycle state such as Current, active, default, or enabled.
+_Avoid_: Lifecycle enabled
+
+**Secret Tombstone**:
+The non-secret identity and integrity metadata retained after a Configuration Secret Generation's ciphertext is destroyed. It can explain an exact historical reference but cannot materialize the secret.
+_Avoid_: Deleted Credential, archived secret
+
+**System Model Configuration**:
+A platform-administered model endpoint and capability definition with a stable identity and no version history. It owns an independently replaceable API Key as its Configuration Secret.
+_Avoid_: System Model Version, model Credential
 
 ## Agent and Skill versions
 
@@ -123,7 +153,7 @@ The temporary prevention of new execution for a Project Agent or Project Skill w
 _Avoid_: Version deactivation
 
 **System Asset Upgrade**:
-The maintenance replacement of a System Agent or System Skill's sole v1 definition at the same deterministic version identity. It does not create another version and affects only Runs admitted after the replacement.
+The maintenance replacement of a System Agent's sole v1 definition at the same deterministic version identity. It does not create another version and affects only Runs admitted after the replacement; immutable System Skills are excluded.
 
 **System Governance Eligibility**:
 Whether a System Skill's current v1 definition is permitted for new Run Admission. Security revocation removes eligibility without becoming a version lifecycle state.
@@ -143,7 +173,7 @@ The acceptance boundary that fixes what a Run may execute and pairs the Run with
 _Avoid_: Harness Execution
 
 **Run Snapshot**:
-The immutable, self-contained set of exact Agent and Skill definitions plus model, MCP, Credential, and runtime policy authorized for a Run. Later Version Activation or System Asset Upgrade cannot change it.
+The immutable set of exact Agent and Skill definitions, a copied System Model Configuration, exact MCP configuration, their Configuration Secret Generation references, and runtime policy authorized for a Run. It does not preserve destroyed secret material, and Channel delivery secrets are resolved separately from the current Channel configuration.
 _Avoid_: Current configuration
 
 **Job**:

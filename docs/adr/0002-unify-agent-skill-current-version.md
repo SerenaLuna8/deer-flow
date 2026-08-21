@@ -3,6 +3,11 @@
 - Status: Accepted
 - Date: 2026-08-21
 
+> **Partially superseded:** ADR-0006 replaces this ADR's Credential ownership,
+> permission, and Skill-mapping inheritance rules. ADR-0007 replaces its
+> in-place System Skill v1 upgrade rule. The Agent and Project Skill version
+> lifecycle defined here remains accepted.
+
 ## Context
 
 Agent and Skill assets previously combined an asset lifecycle, a separate

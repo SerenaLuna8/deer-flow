@@ -49,6 +49,18 @@ export function skillBuilderActivitiesKey(
   ] as const;
 }
 
+export function skillBuilderSessionByVersionKey(
+  accountId: string,
+  projectId: string,
+  versionId: string,
+) {
+  return [
+    ...skillBuilderRootKey(accountId, projectId),
+    "by-version",
+    requirePart(versionId, "Skill Version ID"),
+  ] as const;
+}
+
 export function skillBuilderMutationKey(
   accountId: string,
   projectId: string,

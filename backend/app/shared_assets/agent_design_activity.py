@@ -90,6 +90,11 @@ class AgentDesignActivityRepository:
         if attempt not in {None, 1, 2}:
             raise TypeError("attempt must be 1, 2, or None")
         public_payload = dict(payload or {})
+        if kind is AgentDesignActivityKind.REASONING:
+            text = public_payload.get("text")
+            if set(public_payload) != {"text"} or not isinstance(text, str) or not text:
+                raise TypeError("reasoning payload requires text only")
+            public_payload = {"text": text}
         payload_bytes = len(
             json.dumps(
                 public_payload,
@@ -185,12 +190,19 @@ class AgentDesignActivityRepository:
 
 
 def activity_view(row: AgentDesignActivityRow) -> AgentDesignActivity:
+    kind = AgentDesignActivityKind(row.kind)
+    payload = dict(row.payload_json)
+    if kind is AgentDesignActivityKind.REASONING:
+        text = payload.get("text")
+        if set(payload) != {"text"} or not isinstance(text, str) or not text:
+            raise TypeError("persisted reasoning activity requires text only")
+        payload = {"text": text}
     return AgentDesignActivity(
         seq=int(row.seq),
         operation_id=uuid.UUID(str(row.operation_id)),
-        kind=AgentDesignActivityKind(row.kind),
+        kind=kind,
         attempt=row.attempt,
-        payload=dict(row.payload_json),
+        payload=payload,
         created_at=row.created_at,
     )
 

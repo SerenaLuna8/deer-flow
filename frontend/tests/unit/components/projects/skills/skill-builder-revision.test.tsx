@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ProjectSkillDetailActions } from "@/components/projects/assets/project-asset-detail-sheet";
+import { SkillBuilderStartView } from "@/components/projects/skills/skill-builder-start";
 import {
   SkillBuilderConversationView,
   SkillBuilderRevisionCommitSuccess,
@@ -190,9 +191,9 @@ describe("SkillBuilderConversationView", () => {
         onSubmitClarification={() => undefined}
       />,
     );
-    expect(revising).toContain("已加载");
-    expect(revising).toContain("catalog-auditor");
-    expect(revising).toContain("v3");
+    expect(revising).not.toContain("已加载");
+    expect(revising).not.toContain("catalog-auditor");
+    expect(revising).toContain('aria-label="描述要修改的内容"');
 
     const deleted = renderUi(
       <SkillBuilderConversationView
@@ -232,8 +233,8 @@ describe("SkillBuilderConversationView", () => {
       />,
       "en-US",
     );
-    expect(html).toContain("Loaded");
-    expect(html).toContain("catalog-auditor");
+    expect(html).not.toContain("Loaded");
+    expect(html).not.toContain("catalog-auditor");
     expect(html).toContain('aria-label="Describe what to change"');
   });
 
@@ -402,12 +403,53 @@ describe("SkillBuilderConversationView", () => {
       html.indexOf("候选文件已准备好"),
     );
     expect(html).toContain("先确认输入和输出。");
+    expect(html).not.toContain("已接收请求");
+    expect(html).not.toContain("本次操作结束");
     expect(html.indexOf("先确认输入和输出。")).toBeLessThan(
       html.indexOf("read_candidate_file"),
     );
     expect(html.indexOf("read_candidate_file")).toBeLessThan(
       html.indexOf("然后生成候选文件。"),
     );
+  });
+
+  test("omits optional start, intro, and progress explanations", () => {
+    const start = renderUi(
+      <SkillBuilderStartView
+        name="catalog-auditor"
+        normalizedName="catalog-auditor"
+        errorMessage={null}
+        pending={false}
+        onNameChange={() => undefined}
+        onSubmit={() => undefined}
+      />,
+    );
+    const conversation = renderUi(
+      <SkillBuilderConversationView
+        session={session({
+          messages: [],
+          status: "generating",
+          progress: [
+            { id: "requirements", label: "确认需求", status: "completed" },
+            { id: "candidate", label: "生成候选文件", status: "running" },
+          ],
+        })}
+        composerText=""
+        canAuthor
+        dirty={false}
+        pending
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+      />,
+    );
+
+    expect(start).not.toContain("frontmatter 中不可变的 name");
+    expect(conversation).not.toContain("创建进度");
+    expect(conversation).not.toContain("新 Skill 的名称是");
+    expect(conversation).toContain("确认需求");
+    expect(conversation).toContain("生成候选文件");
   });
 
   test("keeps the completed Builder readable with a target-version link", () => {

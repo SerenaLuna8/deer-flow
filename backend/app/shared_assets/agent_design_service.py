@@ -687,11 +687,6 @@ class AgentDesignService:
                 attempt: int | None,
                 payload: dict[str, object],
             ) -> None:
-                if contains_agent_design_secret(payload):
-                    raise AgentDesignGenerationError(
-                        "AGENT_DESIGN_UNSAFE_MODEL_OUTPUT",
-                        "Agent design reasoning contains unsafe content.",
-                    )
                 try:
                     activity_kind = AgentDesignActivityKind(kind)
                     await self._append_activity(

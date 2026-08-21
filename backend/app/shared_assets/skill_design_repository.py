@@ -293,6 +293,27 @@ class SkillDesignRepository:
             raise AssetNotFound(context.request_id)
         return row
 
+    async def get_by_created_version(
+        self,
+        context: ProjectContext,
+        version_id: uuid.UUID,
+    ) -> SkillDesignSessionRow:
+        """Resolve one owner's completed design record for an exact version."""
+
+        self._require_context(context)
+        statement = select(SkillDesignSessionRow).where(
+            SkillDesignSessionRow.project_id == context.project_id,
+            SkillDesignSessionRow.owner_user_id == str(context.user_id),
+            SkillDesignSessionRow.created_skill_version_id == version_id,
+            SkillDesignSessionRow.status == "completed",
+            SkillDesignSessionRow.created_skill_deleted.is_(False),
+            self._context_exists(context),
+        )
+        row = (await self.session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            raise AssetNotFound(context.request_id)
+        return row
+
     async def list_incomplete(
         self,
         context: ProjectContext,

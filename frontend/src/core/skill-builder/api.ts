@@ -220,6 +220,18 @@ export function getSkillBuilderSession(
   );
 }
 
+export function getSkillBuilderSessionByVersion(
+  projectId: string,
+  versionId: string,
+  signal?: AbortSignal,
+) {
+  return request(
+    `${baseURL(projectId)}/by-version/${uuidSchema.parse(versionId)}`,
+    skillBuilderSessionResponseSchema,
+    { signal },
+  );
+}
+
 export function listSkillBuilderActivities(
   projectId: string,
   sessionId: string,

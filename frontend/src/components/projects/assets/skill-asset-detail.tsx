@@ -1,6 +1,9 @@
+import Link from "next/link";
 import type { ComponentProps, ReactNode } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { useI18n } from "@/core/i18n/hooks";
 import type { AssetVersion } from "@/core/shared-assets";
 
 import { SkillCredentialBindings } from "./skill-credential-bindings";
@@ -166,10 +169,13 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
 export function SkillAssetDetail({
   version,
   workspace,
+  designRecordHref = null,
 }: {
   version: SkillAssetVersion;
   workspace?: SkillWorkspaceProps;
+  designRecordHref?: string | null;
 }) {
+  const { t } = useI18n();
   if (!workspace) return <SkillMetadata version={version} />;
 
   const {
@@ -209,6 +215,17 @@ export function SkillAssetDetail({
   }
   return (
     <div className="space-y-8">
+      {designRecordHref &&
+      !workspace.editing &&
+      !workspace.credentialBindingsDirty ? (
+        <div>
+          <Button asChild size="sm" variant="outline">
+            <Link href={designRecordHref}>
+              {t.skills.catalog.viewDesignRecord}
+            </Link>
+          </Button>
+        </div>
+      ) : null}
       <SkillVersionWorkbench
         {...workbench}
         version={version}

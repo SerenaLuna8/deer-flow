@@ -687,6 +687,9 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         observed["authority"] = ctx.vision_dispatch_authority
         record.status = RunStatus.success
 
+    async def activity_emitter_factory(*_args):
+        return SimpleNamespace()
+
     executor = RunAgentPrivateExecutor(
         lambda: None,
         app_config=app_config,
@@ -699,6 +702,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         runtime_policy_materializer=RuntimePolicy(),
         agent_factory=object(),
         runner=runner,
+        skill_builder_activity_emitter_factory=activity_emitter_factory,
     )
     requested = RequestedRunExecutionProfile(model_name=lead_model.name)
     effective = EffectiveRunExecutionProfile(

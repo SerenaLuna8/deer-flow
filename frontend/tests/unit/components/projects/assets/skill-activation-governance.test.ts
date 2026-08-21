@@ -376,4 +376,20 @@ describe("Skill activation governance", () => {
       ),
     ).toBe("available");
   });
+
+  test("keeps an exact Candidate Version request while refreshed history is still arriving", () => {
+    const current = "11111111-1111-4111-8111-111111111111";
+    const candidate = "22222222-2222-4222-8222-222222222222";
+    const resolve = projectAssetRequestedVersionResolution as (
+      versions: readonly { id: string }[],
+      requestedVersionId: string | null,
+      historyReady: boolean,
+      historyRefreshing: boolean,
+    ) => ReturnType<typeof projectAssetRequestedVersionResolution>;
+
+    expect(resolve([{ id: current }], candidate, true, true)).toBe("pending");
+    expect(
+      resolve([{ id: candidate }, { id: current }], candidate, true, false),
+    ).toBe("available");
+  });
 });

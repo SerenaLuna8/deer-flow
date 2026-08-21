@@ -185,21 +185,24 @@ export function AgentInstructionWorkspace({
   const copy = t.agents.instructions;
   const selectedFile = selectedInstructionFile(selectedField);
   const content = draft[selectedField];
+  const description = historical
+    ? copy.historicalDescription
+    : readOnly
+      ? copy.readOnlyDescription
+      : saveTarget === "draft"
+        ? copy.editDescription
+        : null;
 
   return (
     <section className="space-y-4" aria-label={copy.sectionAria}>
       <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div>
           <h3 className="text-sm font-semibold">{copy.title}</h3>
-          <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
-            {historical
-              ? copy.historicalDescription
-              : readOnly
-                ? copy.readOnlyDescription
-                : saveTarget === "draft"
-                  ? copy.editDescription
-                  : copy.blueprintDescription}
-          </p>
+          {description ? (
+            <p className="text-muted-foreground mt-1 max-w-2xl text-xs leading-5">
+              {description}
+            </p>
+          ) : null}
         </div>
         {canEdit && !editing ? (
           <Button type="button" size="sm" variant="outline" onClick={onEdit}>
@@ -211,10 +214,7 @@ export function AgentInstructionWorkspace({
 
       <div className="border-border/70 overflow-hidden rounded-2xl border md:grid md:grid-cols-[220px_minmax(0,1fr)]">
         <div className="bg-muted/20 border-border/70 border-b p-3 md:border-r md:border-b-0">
-          <p className="text-muted-foreground mb-2 px-2 text-xs font-medium">
-            {copy.fixedFiles}
-          </p>
-          <div className="space-y-1">
+          <div className="space-y-1" aria-label={copy.fixedFiles}>
             {AGENT_INSTRUCTION_FILES.map((file) => {
               const selected = file.field === selectedField;
               return (
@@ -310,12 +310,12 @@ export function AgentInstructionWorkspace({
 
       {editing ? (
         <div className="bg-background/95 sticky bottom-0 z-10 flex flex-col gap-3 rounded-xl border p-3 shadow-lg backdrop-blur sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-muted-foreground text-xs">
-            {saveTarget === "draft"
-              ? copy.candidateSaveHint
-              : copy.blueprintSaveHint}
-          </p>
-          <div className="flex gap-2">
+          {saveTarget === "draft" ? (
+            <p className="text-muted-foreground text-xs">
+              {copy.candidateSaveHint}
+            </p>
+          ) : null}
+          <div className="flex gap-2 sm:ml-auto">
             <Button
               type="button"
               variant="outline"

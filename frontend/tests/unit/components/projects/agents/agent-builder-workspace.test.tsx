@@ -307,7 +307,58 @@ describe("Agent Builder workspace", () => {
     );
     expect(html).toContain("首次真实思考");
     expect(html).toContain("修复真实思考");
+    expect(html).not.toContain("已接收请求");
+    expect(html).not.toContain("本轮生成结束");
     expect(html).not.toMatch(/<details[^>]* open/);
+  });
+
+  test("renders each Agent document once without duplicate progress copy", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={{
+          ...session(),
+          status: "generating",
+          progress: [
+            {
+              id: "agents_instructions",
+              label: "AGENTS.md",
+              status: "running",
+            },
+            { id: "soul", label: "SOUL.md", status: "pending" },
+            { id: "identity", label: "IDENTITY.md", status: "pending" },
+            { id: "user_context", label: "USER.md", status: "pending" },
+          ],
+        }}
+        composerText=""
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        canAuthor
+        mutationPending
+        commitPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        selectedField="agents_instructions"
+        displayMode="preview"
+        errorMessage={null}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+        onSelectedFieldChange={() => undefined}
+        onDisplayModeChange={() => undefined}
+        onBlueprintChange={() => undefined}
+        onBlueprintEdit={() => undefined}
+        onBlueprintSave={() => undefined}
+        onBlueprintDiscard={() => undefined}
+        onComplete={() => undefined}
+      />,
+    );
+
+    for (const name of ["AGENTS.md", "SOUL.md", "IDENTITY.md", "USER.md"]) {
+      expect(
+        html.match(new RegExp(name.replace(".", "\\."), "g")),
+      ).toHaveLength(1);
+    }
   });
 
   test("keeps an active process open without inventing reasoning", () => {
@@ -352,6 +403,62 @@ describe("Agent Builder workspace", () => {
     expect(html).toMatch(/<details[^>]* open=""/);
     expect(html).not.toContain("首次真实思考");
     expect(html).toContain("停止本轮生成");
+  });
+
+  test("keeps Stop this generation enabled while the generation request is pending", () => {
+    const html = renderToStaticMarkup(
+      <I18nProvider initialLocale="en-US">
+        <AgentBuilderConversationView
+          session={{ ...session(), status: "generating" }}
+          composerText=""
+          models={MODELS}
+          selectedGenerationModelName={MODEL_ID}
+          selectedGenerationMode="pro"
+          canAuthor
+          mutationPending
+          stopPending={false}
+          commitPending={false}
+          blueprintEditing={false}
+          blueprintDraft={null}
+          blueprintDirty={false}
+          selectedField="agents_instructions"
+          displayMode="preview"
+          errorMessage={null}
+          onComposerTextChange={() => undefined}
+          onSubmitMessage={() => undefined}
+          onStopGeneration={() => undefined}
+          onSubmitClarification={() => undefined}
+          onSelectedFieldChange={() => undefined}
+          onDisplayModeChange={() => undefined}
+          onBlueprintChange={() => undefined}
+          onBlueprintEdit={() => undefined}
+          onBlueprintSave={() => undefined}
+          onBlueprintDiscard={() => undefined}
+          onComplete={() => undefined}
+        />
+      </I18nProvider>,
+    );
+    const labelIndex = html.indexOf('aria-label="Stop this generation"');
+    const composerStart = html.lastIndexOf(
+      "data-agent-builder-composer-shell",
+      labelIndex,
+    );
+    const buttonStart = html.lastIndexOf("<button", labelIndex);
+    const buttonEnd = html.indexOf(">", labelIndex);
+    const buttonMarkup = html.slice(
+      buttonStart,
+      html.indexOf("</button>", buttonStart) + "</button>".length,
+    );
+
+    expect(labelIndex).toBeGreaterThanOrEqual(0);
+    expect(html.slice(buttonStart, buttonEnd)).not.toMatch(
+      /\sdisabled(?:=|\s|\/|>)/u,
+    );
+    expect(html.slice(composerStart, buttonEnd)).not.toContain(
+      'aria-disabled="true"',
+    );
+    expect(buttonMarkup).toContain("fill-current");
+    expect(buttonMarkup).not.toContain("animate-spin");
   });
 
   test("does not offer generation stop while the final Agent commit is running", () => {
@@ -542,6 +649,12 @@ describe("Agent Builder workspace", () => {
     expect(html).toContain("GPT-5.6 Luna");
     expect(html).toContain('value="Code Review"');
     expect(html).toContain("code-review");
+    expect(html).not.toContain("生成结果");
+    expect(html).not.toContain("请检查模型生成的设置和 Agent 名称");
+    expect(html).not.toContain("显示名称与 slug 均使用此值");
+    expect(html).not.toContain("查看并编辑四个固定 Markdown 文档");
+    expect(html).not.toContain(">固定文件<");
+    expect(html).toContain("不可变的 v1 候选版本");
     const inputId = html.indexOf('id="agent-builder-commit-name"');
     const inputStart = html.lastIndexOf("<input", inputId);
     expect(inputStart).toBeGreaterThanOrEqual(0);

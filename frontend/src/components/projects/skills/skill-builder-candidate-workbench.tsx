@@ -516,7 +516,6 @@ export function SkillBuilderCandidateWorkbench({
               )}
               {warning ? copy.checkPassedWithWarnings : copy.checkPassed}
             </p>
-            <p className="text-muted-foreground">{validation.description}</p>
             {validation.scan_rule_ids.length > 0 ? (
               <p className="font-mono break-all">
                 {validation.scan_rule_ids.join(" · ")}
@@ -531,11 +530,7 @@ export function SkillBuilderCandidateWorkbench({
               </p>
             ) : null}
           </div>
-        ) : (
-          <p className="text-muted-foreground text-xs leading-5">
-            {copy.recheckHint}
-          </p>
-        )}
+        ) : null}
 
         {warning ? (
           <label className="flex cursor-pointer items-start gap-2 text-xs">

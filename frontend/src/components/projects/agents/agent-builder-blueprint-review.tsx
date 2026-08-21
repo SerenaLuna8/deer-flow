@@ -117,6 +117,8 @@ export function AgentBuilderBlueprintReview({
   const modelDisplayName =
     resolvedModelDisplayName ?? t.conversation.agentModelUnavailableTitle;
   const effectiveEditing = editing && canAuthor;
+  const showNormalizedName =
+    Boolean(agentSlug) && agentName.trim() !== agentSlug;
   const hasBlockingConflict = conflicts.some(
     (conflict) => conflict.severity === "error",
   );
@@ -124,18 +126,12 @@ export function AgentBuilderBlueprintReview({
   return (
     <section className="space-y-6" aria-labelledby="agent-blueprint-title">
       <div>
-        <p className="text-muted-foreground text-xs font-medium">
-          {copy.result}
-        </p>
         <h2
           id="agent-blueprint-title"
-          className="mt-1 text-xl font-semibold tracking-tight"
+          className="text-xl font-semibold tracking-tight"
         >
           {copy.title}
         </h2>
-        <p className="text-muted-foreground mt-2 text-sm leading-6">
-          {copy.description}
-        </p>
       </div>
 
       <section
@@ -172,19 +168,24 @@ export function AgentBuilderBlueprintReview({
             aria-invalid={Boolean(agentSlugError)}
             aria-describedby={
               agentSlugError
-                ? "agent-builder-commit-name-help agent-builder-commit-name-error"
-                : "agent-builder-commit-name-help"
+                ? showNormalizedName
+                  ? "agent-builder-commit-name-help agent-builder-commit-name-error"
+                  : "agent-builder-commit-name-error"
+                : showNormalizedName
+                  ? "agent-builder-commit-name-help"
+                  : undefined
             }
             className="bg-background mt-2 h-11"
             onChange={(event) => onAgentNameChange(event.target.value)}
           />
-          <p
-            id="agent-builder-commit-name-help"
-            className="text-muted-foreground mt-2 text-xs leading-5"
-          >
-            {copy.nameHint}
-            {agentSlug ? ` ${copy.savedAs(agentSlug)}` : ""}
-          </p>
+          {showNormalizedName ? (
+            <p
+              id="agent-builder-commit-name-help"
+              className="text-muted-foreground mt-2 text-xs leading-5"
+            >
+              {copy.savedAs(agentSlug)}
+            </p>
+          ) : null}
           {agentSlugError ? (
             <p
               id="agent-builder-commit-name-error"

@@ -112,7 +112,7 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
     thread_id = uuid.uuid4()
     run_id = str(uuid.uuid4())
     bridge = object()
-    service = object()
+    service = SimpleNamespace(require_browser_chat_thread=AsyncMock())
     record = SimpleNamespace(
         run_id=run_id,
         on_disconnect=DisconnectMode.cancel,
@@ -196,6 +196,10 @@ async def test_stream_run_uses_private_launcher_and_durable_sse_consumer_once(
         "thinking_enabled": None,
         "reasoning_effort": None,
     }
+    service.require_browser_chat_thread.assert_awaited_once_with(
+        context,
+        str(thread_id),
+    )
     read_page.assert_not_awaited()
     assert len(consumer_calls) == 1
     assert consumer_calls[0] == {
@@ -583,7 +587,10 @@ async def test_reconnect_waits_for_initial_database_owner_before_propagating_can
     run_id = uuid.uuid4()
     probe = _CancellationProbe(SimpleNamespace(status="running", error=None) if operation == "get" else ())
     bridge = SimpleNamespace(read_after=(probe.run if operation == "read_after" else AsyncMock(return_value=())))
-    service = SimpleNamespace(get=(probe.run if operation == "get" else AsyncMock(return_value=SimpleNamespace(status="running", error=None))))
+    service = SimpleNamespace(
+        require_browser_chat_thread=AsyncMock(),
+        get=(probe.run if operation == "get" else AsyncMock(return_value=SimpleNamespace(status="running", error=None))),
+    )
     context = SimpleNamespace(
         request_id="reconnect-cancel-db",
         project_id=uuid.uuid4(),

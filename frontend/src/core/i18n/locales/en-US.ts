@@ -1778,7 +1778,6 @@ export const enUS: Translations = {
         stepsAria: "Design steps",
         designing: "Designing Agent…",
         steps: "Design steps",
-        settingsProgressAria: "Progress for the four Agent settings",
       },
       resume: {
         title: "Continue unfinished Agent designs",
@@ -1791,15 +1790,10 @@ export const enUS: Translations = {
         confirmDelete: "Delete session",
       },
       blueprint: {
-        result: "Generated result",
         title: "Agent blueprint",
-        description:
-          "Review the generated settings and Agent name before creating the Agent.",
         runtime: "Runtime configuration",
         noDescription: "No Agent description has been generated.",
         nameLabel: "Agent name",
-        nameHint:
-          "The created Agent uses this value for both its name and slug.",
         savedAs: (value) => `Normalized as: ${value}`,
         model: "Model",
         capabilities: "Capabilities and dependencies",
@@ -1828,8 +1822,6 @@ export const enUS: Translations = {
       conversation: {
         permissionReadOnly:
           "Your account cannot continue designing this Agent. Saved session content remains available to view.",
-        newAgentIntro: (name) =>
-          `The new Agent is named ${name}. Use the conversation below to describe its purpose, behavior, and collaboration boundaries.`,
         creatingAgent: "Creating Agent…",
         designingAgent: "Designing Agent…",
         composerAria: "Describe the Agent you want",
@@ -1846,7 +1838,7 @@ export const enUS: Translations = {
         modelLabel: "Conversation model used to design the Agent",
         backToAgents: "Continue later and return to Agents",
         designAgent: "Design Agent",
-        autosave: "Automatically saved; continue later",
+        completedRecord: "Candidate Version v1 · Read-only",
         more: "More actions",
         abandon: "Abandon this design",
         conversationAria: "Agent design conversation",
@@ -1867,8 +1859,6 @@ export const enUS: Translations = {
         viewAgent: "View Agent",
         activity: {
           title: "Thinking and execution",
-          attempt: (value) =>
-            value === 1 ? "Initial generation" : "Repair retry",
           reasoning: (value) =>
             value === 1 ? "Model reasoning" : "Repair reasoning",
           duration: (value) => `${(value / 1000).toFixed(1)}s`,
@@ -1877,22 +1867,6 @@ export const enUS: Translations = {
             failed: "Failed",
             stopped: "Stopped",
             cancelled: "Cancelled",
-          },
-          stages: {
-            turn_accepted: "Request received",
-            attempt_started: "Model reasoning started",
-            candidate_generated: "Candidate generated",
-            validation_started: "Deterministic validation started",
-            validation_passed: "Candidate validation passed",
-            validation_failed: "Candidate validation failed",
-            repair_started: "Repair retry started",
-            turn_terminal: "Generation turn ended",
-            commit_accepted: "Creation request received",
-            commit_validation_started: "Candidate validation started",
-            commit_validation_passed: "Candidate validation passed",
-            commit_persistence_started: "Saving Agent and Candidate Version",
-            commit_persistence_completed: "Agent and Candidate Version saved",
-            commit_terminal: "Creation ended",
           },
         },
       },
@@ -1908,8 +1882,6 @@ export const enUS: Translations = {
       title: "Instruction documents",
       editDescription:
         "Edit the four fixed Markdown documents and save an immutable Agent Candidate Version.",
-      blueprintDescription:
-        "Review and edit the four fixed Markdown documents.",
       readOnlyDescription:
         "Read-only instruction documents for the System Agent's sole v1.",
       historicalDescription:
@@ -1923,8 +1895,6 @@ export const enUS: Translations = {
       editFile: (name) => `Edit ${name}`,
       candidateSaveHint:
         "Saving creates a new Agent Candidate Version without activating it.",
-      blueprintSaveHint:
-        "Saving updates the current blueprint before the Agent can be created.",
       discard: "Discard changes",
       saving: "Saving…",
       save: "Save Candidate Version",
@@ -2139,6 +2109,9 @@ export const enUS: Translations = {
   },
 
   skills: {
+    catalog: {
+      viewDesignRecord: "View design record",
+    },
     export: {
       label: "Export ZIP",
       preparing: "Preparing…",
@@ -2384,7 +2357,6 @@ export const enUS: Translations = {
       },
       start: {
         title: "Name your new Skill",
-        hint: "The name becomes the immutable SKILL.md frontmatter name and is stored as lowercase hyphenated text.",
         nameLabel: "Skill name",
         placeholder: "For example, paper-review",
         savedAs: (value) => `Will be saved as ${value}`,
@@ -2421,18 +2393,10 @@ export const enUS: Translations = {
       conversation: {
         progressAriaCreate: "Skill creation progress",
         progressAriaRevise: "Skill revision progress",
-        progressCreate: "Creation progress",
-        progressRevise: "Revision progress",
         permissionReadOnlyCreate:
           "Your account cannot continue creating this Skill. Saved session content and candidate files remain available to view.",
         permissionReadOnlyRevise:
           "Your account cannot continue revising this Skill. Saved session content and candidate files remain available to view.",
-        reviseIntroBefore: "Loaded",
-        reviseIntroAfter:
-          "from the Current Version. Describe what to change, or edit the candidate files on the right.",
-        createIntroBefore: "The new Skill is named",
-        createIntroAfter:
-          ". Describe its purpose, triggers, inputs and outputs, and any references or scripts it needs.",
         creatingSkill: "Creating Skill…",
         creatingCandidate: "Creating a Candidate Version…",
         processing: "The Builder Agent is working…",
@@ -2449,11 +2413,12 @@ export const enUS: Translations = {
         send: "Send",
         fallbackTitle: "Create Skill",
         revisingBanner: (slug, version) => `Revising ${slug} v${version}`,
+        completedRecord: (version) =>
+          `${version === null ? "Candidate Version" : `Candidate Version v${version}`} · Read-only`,
         unsavedChanges: "Unsaved changes",
         agentRunning: "The Builder Agent is running",
         checkedCreate: "Checked; ready to create",
         checkedRevise: "Checked; ready to save a Candidate Version",
-        autosave: "Automatically saved; continue later",
         more: "More actions",
         abandonCreate: "Abandon this creation",
         abandonRevise: "Abandon this revision",
@@ -2498,8 +2463,6 @@ export const enUS: Translations = {
         checkPassed: "Checks passed",
         checkPassedWithWarnings: "Checks passed with warnings",
         requiredCredentials: "Required credentials:",
-        recheckHint:
-          "After every candidate-file change, paths, frontmatter, security rules, and quota must be checked again.",
         acknowledgeWarnings: "I understand and accept the warnings above",
         checkSkill: "Check Skill",
         commitCreate: "Create Skill (disabled by default)",
@@ -2597,8 +2560,6 @@ export const enUS: Translations = {
           `This saves immutable Candidate Version v1 in ${project}. The Skill stays disabled and is not added to any Agent automatically.`,
         commitDescriptionRevise: (slug, version) =>
           `This saves a new Candidate Version based on ${slug} v${version}. Activation makes it the Current Version; the running Skill is unchanged by saving.`,
-        fileMetaCreate: (count) => `${count} files · disabled by default`,
-        fileMetaRevise: (count) => `${count} files · Candidate Version`,
         backToReview: "Back to review",
         creating: "Creating…",
         creatingVersion: "Creating new version…",
@@ -2633,10 +2594,10 @@ export const enUS: Translations = {
         goActivate: "Go activate",
         viewSkill: "View Skill",
         viewCandidateVersion: "View Candidate Version",
-        revisionWithSecrets: (version, count) =>
-          `Saved ${version === null ? "a Candidate Version" : `Candidate Version v${version}`} with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before activation.`,
+        revisionWithSecrets: (_version, count) =>
+          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime credentials.`,
         createdWithSecrets: (count) =>
-          `Skill created and suspended with ${count} environment variable declaration${count === 1 ? "" : "s"}. Configure runtime credentials before enabling it.`,
+          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime credentials.`,
         configureCredentials: "Configure credentials",
       },
       versionConflict: {

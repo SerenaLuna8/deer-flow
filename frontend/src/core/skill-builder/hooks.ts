@@ -16,11 +16,13 @@ import {
 import { projectAssetKey } from "@/core/shared-assets/query-keys";
 
 import {
+  SkillBuilderApiError,
   cancelSkillBuilderSession,
   commitSkillBuilderSession,
   createSkillBuilderRevisionSession,
   createSkillBuilderSession,
   getSkillBuilderSession,
+  getSkillBuilderSessionByVersion,
   listSkillBuilderActivities,
   listSkillBuilderSessions,
   submitSkillBuilderTurn,
@@ -33,6 +35,7 @@ import {
 import {
   skillBuilderMutationKey,
   skillBuilderActivitiesKey,
+  skillBuilderSessionByVersionKey,
   skillBuilderSessionKey,
   skillBuilderSessionsInvalidation,
   skillBuilderSessionsKey,
@@ -289,6 +292,34 @@ export function useSkillBuilderSession(
         (response) => response.data,
       ),
     refetchInterval: (query) => skillBuilderPollingInterval(query.state.data),
+  });
+}
+
+export function useSkillBuilderSessionByVersion(
+  accountId: string,
+  projectId: string,
+  versionId: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: skillBuilderSessionByVersionKey(accountId, projectId, versionId),
+    queryFn: async ({ signal }) => {
+      try {
+        return (
+          await getSkillBuilderSessionByVersion(projectId, versionId, signal)
+        ).data;
+      } catch (error) {
+        if (
+          error instanceof SkillBuilderApiError &&
+          error.code === "SKILL_BUILDER_NOT_FOUND"
+        ) {
+          return null;
+        }
+        throw error;
+      }
+    },
+    enabled,
+    retry: false,
   });
 }
 

@@ -6,7 +6,13 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langsmith.run_helpers import get_tracing_context, tracing_context
 
 import deerflow.models.runtime as model_runtime_module
@@ -746,6 +752,50 @@ async def test_oneshot_llm_does_not_invent_reasoning(
         system_instruction="system",
         user_content="user",
         run_name="builder-no-reasoning",
+        app_config=SimpleNamespace(),  # type: ignore[arg-type]
+        on_reasoning_delta=record_reasoning,
+    )
+
+    assert observed == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "message",
+    [
+        SystemMessage(
+            content="<think>system inline content</think>system response",
+            additional_kwargs={"reasoning_content": "system structured content"},
+        ),
+        ToolMessage(
+            content="<think>tool inline content</think>tool response",
+            tool_call_id="tool-call-1",
+            additional_kwargs={"reasoning_content": "tool structured content"},
+        ),
+    ],
+    ids=("system-message", "tool-message"),
+)
+async def test_oneshot_llm_projects_reasoning_from_ai_messages_only(
+    monkeypatch: pytest.MonkeyPatch,
+    message: SystemMessage | ToolMessage,
+) -> None:
+    class FakeRuntime:
+        def __init__(self, *, app_config: object) -> None:
+            del app_config
+
+        async def astream(self, *_args: object, **_kwargs: object):
+            yield message
+
+    monkeypatch.setattr("deerflow.utils.oneshot_llm.ModelRuntime", FakeRuntime)
+    observed: list[str] = []
+
+    async def record_reasoning(value: str) -> None:
+        observed.append(value)
+
+    await run_oneshot_llm(
+        system_instruction="system",
+        user_content="user",
+        run_name="builder-non-ai-message",
         app_config=SimpleNamespace(),  # type: ignore[arg-type]
         on_reasoning_delta=record_reasoning,
     )

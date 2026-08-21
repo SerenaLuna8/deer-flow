@@ -156,12 +156,13 @@ export function projectAssetRequestedVersionResolution(
   versions: readonly Pick<AssetVersion, "id">[],
   requestedVersionId: string | null,
   historyReady: boolean,
+  historyRefreshing = false,
 ): "none" | "pending" | "available" | "missing" {
   if (!requestedVersionId) return "none";
-  if (!historyReady) return "pending";
-  return versions.some((version) => version.id === requestedVersionId)
-    ? "available"
-    : "missing";
+  if (versions.some((version) => version.id === requestedVersionId)) {
+    return "available";
+  }
+  return !historyReady || historyRefreshing ? "pending" : "missing";
 }
 
 export function projectSkillCredentialRepairVersionId(
@@ -982,6 +983,7 @@ export function ProjectAssetDetailSheet({
       versions,
       requestedVersionId,
       history.isSuccess,
+      history.isFetching,
     );
     if (requestedVersionResolution === "pending") return;
     if (requestedVersionResolution === "missing" && requestedVersionId) {
@@ -1022,6 +1024,7 @@ export function ProjectAssetDetailSheet({
     item.id,
     item.scope,
     history.isSuccess,
+    history.isFetching,
     kind,
     onRequestedVersionHandled,
     open,
