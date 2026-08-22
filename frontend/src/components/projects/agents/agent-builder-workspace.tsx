@@ -1,12 +1,12 @@
 "use client";
 
 import {
+  ArrowUpIcon,
   ArrowLeftIcon,
   BotIcon,
   CheckIcon,
   Loader2Icon,
   MoreHorizontalIcon,
-  SendIcon,
   SquareIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -23,6 +23,8 @@ import {
 } from "react";
 
 import { AgentBuilderActivityBlock } from "@/components/projects/agents/agent-builder-activity";
+import { AgentBuilderBlueprintSummaryCard } from "@/components/projects/agents/agent-builder-blueprint-summary";
+import { AgentBuilderBlueprintTrigger } from "@/components/projects/agents/agent-builder-blueprint-trigger";
 import type { AgentInstructionField } from "@/components/projects/assets/agent-instructions-workbench";
 import { Button } from "@/components/ui/button";
 import {
@@ -39,6 +41,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { InputGroup, InputGroupAddon } from "@/components/ui/input-group";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { InputBoxModeChooser } from "@/components/workspace/input-box-mode-chooser";
@@ -89,6 +92,7 @@ import {
   type AgentMode,
 } from "@/core/threads/agent-mode";
 import { isIMEComposing } from "@/lib/ime";
+import { cn } from "@/lib/utils";
 
 import { useMcpDependencyRuntime } from "../assets/use-mcp-dependency-runtime";
 import { useCurrentProject } from "../project-context";
@@ -245,14 +249,10 @@ function AgentBuilderMessageBubble({
 export function AgentBuilderConversationView({
   session,
   composerText,
-  agentName = session.slug,
-  agentSlug = session.slug,
-  agentSlugError = null,
   pendingUserMessage = null,
   activities = [],
   canAuthor,
   mutationPending,
-  commitPending,
   blueprintEditing,
   blueprintDraft,
   blueprintDirty,
@@ -262,10 +262,6 @@ export function AgentBuilderConversationView({
   selectedGenerationModelName = null,
   selectedGenerationMode = "pro",
   scrollContainerRef,
-  mcpDependencyLoading = false,
-  mcpDependencyBlockReason = null,
-  selectedField,
-  displayMode,
   errorMessage,
   onModelsRetry = () => undefined,
   onGenerationModelChange = () => undefined,
@@ -276,25 +272,14 @@ export function AgentBuilderConversationView({
   stopPending = false,
   createdAgentHref = null,
   onSubmitClarification,
-  onSelectedFieldChange,
-  onDisplayModeChange,
-  onBlueprintChange,
-  onAgentNameChange = () => undefined,
-  onBlueprintEdit,
-  onBlueprintSave,
-  onBlueprintDiscard,
-  onComplete,
+  onOpenBlueprint = () => undefined,
 }: {
   session: AgentBuilderSession;
   composerText: string;
-  agentName?: string;
-  agentSlug?: string;
-  agentSlugError?: string | null;
   pendingUserMessage?: string | null;
   activities?: AgentBuilderActivity[];
   canAuthor: boolean;
   mutationPending: boolean;
-  commitPending: boolean;
   blueprintEditing: boolean;
   blueprintDraft: AgentBuilderBlueprint | null;
   blueprintDirty: boolean;
@@ -304,10 +289,6 @@ export function AgentBuilderConversationView({
   selectedGenerationModelName?: string | null;
   selectedGenerationMode?: AgentMode;
   scrollContainerRef?: Ref<HTMLDivElement>;
-  mcpDependencyLoading?: boolean;
-  mcpDependencyBlockReason?: string | null;
-  selectedField: AgentInstructionField;
-  displayMode: "source" | "preview";
   errorMessage: string | null;
   onModelsRetry?: () => void;
   onGenerationModelChange?: (modelName: string) => void;
@@ -320,14 +301,7 @@ export function AgentBuilderConversationView({
   onSubmitClarification: (
     response: HumanInputResponse,
   ) => boolean | void | Promise<boolean | void>;
-  onSelectedFieldChange: (field: AgentInstructionField) => void;
-  onDisplayModeChange: (mode: "source" | "preview") => void;
-  onBlueprintChange: (blueprint: AgentBuilderBlueprint) => void;
-  onAgentNameChange?: (value: string) => void;
-  onBlueprintEdit: () => void;
-  onBlueprintSave: () => void;
-  onBlueprintDiscard: () => void;
-  onComplete: () => void;
+  onOpenBlueprint?: () => void;
 }) {
   const { t } = useI18n();
   const copy = t.agents.builder.conversation;
@@ -474,35 +448,9 @@ export function AgentBuilderConversationView({
             ) : null}
 
             {blueprintDraft ? (
-              <AgentBuilderBlueprintReview
-                blueprint={blueprintDraft}
-                agentName={agentName}
-                agentSlug={agentSlug}
-                agentSlugError={agentSlugError}
-                models={models}
-                assumptions={session.assumptions}
-                conflicts={session.conflicts}
-                modelsLoading={modelsLoading}
-                modelsError={modelsError}
-                canAuthor={canAuthor}
-                editing={blueprintEditing}
-                pending={mutationPending}
-                creating={commitPending}
-                dirty={blueprintDirty}
-                canCreate={agentBuilderCanComplete(session)}
-                mcpDependencyLoading={mcpDependencyLoading}
-                mcpDependencyBlockReason={mcpDependencyBlockReason}
-                selectedField={selectedField}
-                displayMode={displayMode}
-                errorMessage={errorMessage}
-                onSelectedFieldChange={onSelectedFieldChange}
-                onDisplayModeChange={onDisplayModeChange}
-                onBlueprintChange={onBlueprintChange}
-                onAgentNameChange={onAgentNameChange}
-                onEdit={onBlueprintEdit}
-                onSave={onBlueprintSave}
-                onDiscard={onBlueprintDiscard}
-                onCreate={onComplete}
+              <AgentBuilderBlueprintSummaryCard
+                conflictCount={session.conflicts.length}
+                onOpen={onOpenBlueprint}
               />
             ) : null}
 
@@ -518,47 +466,53 @@ export function AgentBuilderConversationView({
       {canAuthor ? (
         <div
           data-agent-builder-composer-shell
-          className="bg-background border-border/70 shrink-0 border-t px-4 py-3 sm:px-6"
+          className="bg-background shrink-0 px-4 pt-3 pb-4 sm:px-6"
         >
           <form
-            className="bg-background border-border/70 mx-auto w-full max-w-4xl rounded-2xl border p-2 shadow-lg"
+            data-agent-builder-composer
+            className="bg-background/85 relative z-10 mx-auto w-full max-w-4xl rounded-2xl backdrop-blur-sm transition-all duration-300 ease-out *:data-[slot='input-group']:rounded-2xl"
             onSubmit={submitMessage}
           >
-            <div>
-              <Textarea
-                aria-label={copy.composerAria}
-                value={composerText}
-                disabled={composerDisabled}
-                placeholder={
-                  localDraftLocked
-                    ? copy.saveLocalChangesFirst
-                    : clarificationOpen
-                      ? copy.answerQuestionFirst
-                      : processing
-                        ? copy.generatingBlueprint
-                        : copy.composerPlaceholder
-                }
-                className="min-h-24 resize-none rounded-xl border-0 px-3 py-3 text-sm shadow-none focus-visible:ring-0"
-                onChange={(event) => onComposerTextChange(event.target.value)}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Enter" &&
-                    !event.shiftKey &&
-                    !isIMEComposing(event)
-                  ) {
-                    event.preventDefault();
-                    if (!composerDisabled && composerText.trim()) {
-                      onSubmitMessage();
-                    }
+            <InputGroup>
+              <div className="min-h-16 w-full min-w-0 px-3 py-3">
+                <Textarea
+                  aria-label={copy.composerAria}
+                  value={composerText}
+                  disabled={composerDisabled}
+                  placeholder={
+                    localDraftLocked
+                      ? copy.saveLocalChangesFirst
+                      : clarificationOpen
+                        ? copy.answerQuestionFirst
+                        : processing
+                          ? copy.generatingBlueprint
+                          : copy.composerPlaceholder
                   }
-                }}
-              />
+                  className="field-sizing-content max-h-48 min-h-6! w-full min-w-0 resize-none rounded-none border-0 bg-transparent p-0! text-sm leading-6! shadow-none focus-visible:ring-0 dark:bg-transparent"
+                  onChange={(event) => onComposerTextChange(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !isIMEComposing(event)
+                    ) {
+                      event.preventDefault();
+                      if (!composerDisabled && composerText.trim()) {
+                        onSubmitMessage();
+                      }
+                    }
+                  }}
+                />
+              </div>
               {modelsLoading ? (
-                <p role="status" className="text-muted-foreground px-3 text-xs">
+                <p
+                  role="status"
+                  className="text-muted-foreground w-full px-3 pb-1 text-xs"
+                >
                   {copy.loadingModels}
                 </p>
               ) : modelsError ? (
-                <div className="flex items-center gap-2 px-3">
+                <div className="flex w-full items-center gap-2 px-3 pb-1">
                   <p role="alert" className="text-destructive text-xs">
                     {copy.modelLoadFailed}
                   </p>
@@ -573,19 +527,46 @@ export function AgentBuilderConversationView({
                   </Button>
                 </div>
               ) : models.length === 0 ? (
-                <p role="alert" className="text-destructive px-3 text-xs">
+                <p
+                  role="alert"
+                  className="text-destructive w-full px-3 pb-1 text-xs"
+                >
                   {copy.noModels}
                 </p>
               ) : null}
-              <div className="flex items-center justify-between gap-2 p-1">
-                <div className="flex min-w-0 items-center gap-1">
+              <InputGroupAddon
+                align="block-end"
+                className="flex flex-wrap gap-2 sm:flex-nowrap"
+              >
+                <div
+                  data-agent-builder-composer-leading
+                  className="flex min-w-0 flex-1 items-center gap-1"
+                >
+                  <InputBoxModeChooser
+                    mode={selectedGenerationMode}
+                    disabled={modelSelectorDisabled}
+                    supportThinking={
+                      selectedGenerationModel?.supports_thinking ?? false
+                    }
+                    supportReasoningEffort={
+                      selectedGenerationModel?.supports_reasoning_effort ??
+                      false
+                    }
+                    labels={t.inputBox}
+                    onSelect={onGenerationModeChange}
+                  />
+                </div>
+                <div
+                  data-agent-builder-composer-trailing
+                  className="flex min-w-0 items-center justify-end gap-1"
+                >
                   <ModelSelector>
                     <ModelSelectorTrigger asChild>
                       <Button
                         type="button"
                         size="sm"
                         variant="ghost"
-                        className="max-w-56 min-w-0 justify-start"
+                        className="max-w-40 min-w-0 justify-start sm:max-w-56"
                         aria-label={copy.selectModelAria}
                         disabled={modelSelectorDisabled}
                       >
@@ -626,46 +607,40 @@ export function AgentBuilderConversationView({
                       </ModelSelectorList>
                     </ModelSelectorContent>
                   </ModelSelector>
-                  <InputBoxModeChooser
-                    mode={selectedGenerationMode}
-                    disabled={modelSelectorDisabled}
-                    supportThinking={
-                      selectedGenerationModel?.supports_thinking ?? false
+                  <Button
+                    type={generating ? "button" : "submit"}
+                    size="icon-sm"
+                    variant="outline"
+                    className="rounded-full"
+                    aria-label={
+                      generating ? copy.stopGeneration : t.agents.common.send
                     }
-                    supportReasoningEffort={
-                      selectedGenerationModel?.supports_reasoning_effort ??
-                      false
+                    disabled={
+                      generating
+                        ? stopPending
+                        : composerDisabled || composerText.trim().length === 0
                     }
-                    labels={t.inputBox}
-                    onSelect={onGenerationModeChange}
-                  />
+                    onClick={generating ? onStopGeneration : undefined}
+                  >
+                    {stopPending ? (
+                      <Loader2Icon
+                        aria-hidden
+                        className="size-4 animate-spin"
+                      />
+                    ) : generating ? (
+                      <SquareIcon aria-hidden className="size-4 fill-current" />
+                    ) : mutationPending ? (
+                      <Loader2Icon
+                        aria-hidden
+                        className="size-4 animate-spin"
+                      />
+                    ) : (
+                      <ArrowUpIcon aria-hidden className="size-4" />
+                    )}
+                  </Button>
                 </div>
-                <Button
-                  type={generating ? "button" : "submit"}
-                  size="icon"
-                  className="size-11 rounded-xl"
-                  aria-label={
-                    generating ? copy.stopGeneration : t.agents.common.send
-                  }
-                  disabled={
-                    generating
-                      ? stopPending
-                      : composerDisabled || composerText.trim().length === 0
-                  }
-                  onClick={generating ? onStopGeneration : undefined}
-                >
-                  {stopPending ? (
-                    <Loader2Icon aria-hidden className="size-4 animate-spin" />
-                  ) : generating ? (
-                    <SquareIcon aria-hidden className="size-4 fill-current" />
-                  ) : mutationPending ? (
-                    <Loader2Icon aria-hidden className="size-4 animate-spin" />
-                  ) : (
-                    <SendIcon aria-hidden className="size-4" />
-                  )}
-                </Button>
-              </div>
-            </div>
+              </InputGroupAddon>
+            </InputGroup>
           </form>
         </div>
       ) : null}
@@ -740,12 +715,20 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const [displayMode, setDisplayMode] = useState<"source" | "preview">(
     "preview",
   );
+  const [workbenchOpen, setWorkbenchOpen] = useState(() =>
+    Boolean(sessionQuery.data?.blueprint),
+  );
+  const [mobileSurface, setMobileSurface] = useState<
+    "conversation" | "workbench"
+  >("conversation");
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelPreparing, setCancelPreparing] = useState(false);
   const [pendingLeaveHref, setPendingLeaveHref] = useState<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
   const [idempotency] = useState(() => createAgentBuilderIdempotencyRegistry());
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const observedBlueprintSessionRef = useRef<string | null>(null);
+  const previousBlueprintAvailableRef = useRef(false);
   const allowLeaveRef = useRef(false);
   const session = sessionQuery.data;
   const selectedGenerationModel =
@@ -845,6 +828,27 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
     setBlueprintBaseline(rebased.baseline);
     setBlueprintDraft(rebased.draft);
   }, [blueprintDirty, blueprintDraft, blueprintEditing, session?.blueprint]);
+
+  useEffect(() => {
+    if (!session) return;
+    const available = Boolean(session.blueprint);
+    const sameSession = observedBlueprintSessionRef.current === session.id;
+    const previouslyAvailable = sameSession
+      ? previousBlueprintAvailableRef.current
+      : false;
+
+    if (!sameSession) {
+      observedBlueprintSessionRef.current = session.id;
+      setWorkbenchOpen(available);
+      setMobileSurface("conversation");
+    } else if (!previouslyAvailable && available) {
+      setWorkbenchOpen(true);
+    } else if (previouslyAvailable && !available) {
+      setWorkbenchOpen(false);
+      setMobileSurface("conversation");
+    }
+    previousBlueprintAvailableRef.current = available;
+  }, [session]);
 
   useEffect(() => {
     if (!session) return;
@@ -1317,6 +1321,14 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               </p>
             ) : null}
           </div>
+          <AgentBuilderBlueprintTrigger
+            available={Boolean(effectiveBlueprint)}
+            conflictCount={session?.conflicts.length ?? 0}
+            onOpen={() => {
+              setWorkbenchOpen(true);
+              setMobileSurface("workbench");
+            }}
+          />
           {canAuthor && session?.status !== "completed" ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
@@ -1343,10 +1355,7 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
           ) : null}
         </header>
 
-        <section
-          className="min-h-0 flex-1 overflow-hidden"
-          aria-label={t.agents.builder.conversation.conversationAria}
-        >
+        <div className="min-h-0 flex-1 overflow-hidden">
           {sessionQuery.isLoading ? (
             <AgentBuilderLoading />
           ) : sessionQuery.error || !session ? (
@@ -1372,65 +1381,117 @@ export function AgentBuilderWorkspace({ sessionId }: { sessionId: string }) {
               </Button>
             </div>
           ) : (
-            <AgentBuilderConversationView
-              session={session}
-              composerText={composerText}
-              agentName={effectiveAgentName}
-              agentSlug={normalizedAgentSlug}
-              agentSlugError={agentSlugError}
-              pendingUserMessage={pendingUserMessage}
-              activities={activitiesQuery.data ?? []}
-              canAuthor={canAuthor && session.status !== "completed"}
-              mutationPending={mutationPending}
-              commitPending={commit.isPending}
-              blueprintEditing={blueprintEditing}
-              blueprintDraft={blueprintDraft ?? session.blueprint}
-              blueprintDirty={blueprintDirty}
-              models={modelsQuery.models}
-              modelsLoading={modelsQuery.isLoading}
-              modelsError={modelsQuery.error}
-              selectedGenerationModelName={effectiveGenerationModelName}
-              selectedGenerationMode={effectiveGenerationMode}
-              scrollContainerRef={scrollRef}
-              mcpDependencyLoading={mcpDependencyRuntime.isLoading}
-              mcpDependencyBlockReason={mcpDependencyRuntime.blockReason}
-              selectedField={selectedField}
-              displayMode={displayMode}
-              errorMessage={requestError}
-              onModelsRetry={() => void modelsQuery.refetch()}
-              onGenerationModelChange={selectGenerationModel}
-              onGenerationModeChange={selectGenerationMode}
-              onComposerTextChange={(value) => {
-                setComposerText(value);
-                if (requestError) resetErrors();
-              }}
-              onSubmitMessage={sendMessage}
-              onStopGeneration={() => stopTurn.mutate()}
-              stopPending={stopTurn.isPending}
-              createdAgentHref={
-                session.created_agent_id
-                  ? `/projects/${encodeURIComponent(project.slug)}/agents?agent_id=${encodeURIComponent(session.created_agent_id)}`
-                  : null
-              }
-              onSubmitClarification={submitClarification}
-              onSelectedFieldChange={setSelectedField}
-              onDisplayModeChange={setDisplayMode}
-              onBlueprintChange={setBlueprintDraft}
-              onAgentNameChange={(value) => {
-                setAgentNameDraft(value);
-                setLocalError(null);
-                commit.reset();
-              }}
-              onBlueprintEdit={() => {
-                setBlueprintEditing(true);
-                setDisplayMode("source");
-              }}
-              onBlueprintSave={saveBlueprint}
-              onBlueprintDiscard={discardBlueprint}
-              onComplete={complete}
-            />
+            <div
+              className={cn(
+                "grid h-full min-h-0",
+                workbenchOpen &&
+                  effectiveBlueprint &&
+                  "lg:grid-cols-[minmax(20rem,0.9fr)_minmax(28rem,1.1fr)]",
+              )}
+            >
+              <section
+                data-agent-builder-conversation-surface
+                aria-label={t.agents.builder.conversation.conversationAria}
+                className={cn(
+                  "min-h-0 overflow-hidden",
+                  mobileSurface === "workbench" && "hidden lg:block",
+                )}
+              >
+                <AgentBuilderConversationView
+                  session={session}
+                  composerText={composerText}
+                  pendingUserMessage={pendingUserMessage}
+                  activities={activitiesQuery.data ?? []}
+                  canAuthor={canAuthor && session.status !== "completed"}
+                  mutationPending={mutationPending}
+                  blueprintEditing={blueprintEditing}
+                  blueprintDraft={blueprintDraft ?? session.blueprint}
+                  blueprintDirty={blueprintDirty}
+                  models={modelsQuery.models}
+                  modelsLoading={modelsQuery.isLoading}
+                  modelsError={modelsQuery.error}
+                  selectedGenerationModelName={effectiveGenerationModelName}
+                  selectedGenerationMode={effectiveGenerationMode}
+                  scrollContainerRef={scrollRef}
+                  errorMessage={requestError}
+                  onModelsRetry={() => void modelsQuery.refetch()}
+                  onGenerationModelChange={selectGenerationModel}
+                  onGenerationModeChange={selectGenerationMode}
+                  onComposerTextChange={(value) => {
+                    setComposerText(value);
+                    if (requestError) resetErrors();
+                  }}
+                  onSubmitMessage={sendMessage}
+                  onStopGeneration={() => stopTurn.mutate()}
+                  stopPending={stopTurn.isPending}
+                  createdAgentHref={
+                    session.created_agent_id
+                      ? `/projects/${encodeURIComponent(project.slug)}/agents?agent_id=${encodeURIComponent(session.created_agent_id)}`
+                      : null
+                  }
+                  onSubmitClarification={submitClarification}
+                  onOpenBlueprint={() => {
+                    setWorkbenchOpen(true);
+                    setMobileSurface("workbench");
+                  }}
+                />
+              </section>
+
+              {workbenchOpen && effectiveBlueprint ? (
+                <section
+                  data-agent-builder-blueprint-surface
+                  aria-label={t.agents.builder.blueprint.title}
+                  className={cn(
+                    "border-border/70 min-h-0 lg:border-l",
+                    mobileSurface === "conversation" && "hidden lg:block",
+                  )}
+                >
+                  <AgentBuilderBlueprintReview
+                    blueprint={effectiveBlueprint}
+                    agentName={effectiveAgentName}
+                    agentSlug={normalizedAgentSlug}
+                    agentSlugError={agentSlugError}
+                    models={modelsQuery.models}
+                    assumptions={session.assumptions}
+                    conflicts={session.conflicts}
+                    modelsLoading={modelsQuery.isLoading}
+                    modelsError={modelsQuery.error}
+                    canAuthor={canAuthor && session.status !== "completed"}
+                    editing={blueprintEditing}
+                    pending={mutationPending}
+                    creating={commit.isPending}
+                    dirty={blueprintDirty}
+                    canCreate={agentBuilderCanComplete(session)}
+                    mcpDependencyLoading={mcpDependencyRuntime.isLoading}
+                    mcpDependencyBlockReason={mcpDependencyRuntime.blockReason}
+                    selectedField={selectedField}
+                    displayMode={displayMode}
+                    errorMessage={requestError}
+                    onSelectedFieldChange={setSelectedField}
+                    onDisplayModeChange={setDisplayMode}
+                    onBlueprintChange={setBlueprintDraft}
+                    onAgentNameChange={(value) => {
+                      setAgentNameDraft(value);
+                      setLocalError(null);
+                      commit.reset();
+                    }}
+                    onEdit={() => {
+                      setBlueprintEditing(true);
+                      setDisplayMode("source");
+                    }}
+                    onSave={saveBlueprint}
+                    onDiscard={discardBlueprint}
+                    onCreate={complete}
+                    onClose={() => {
+                      setWorkbenchOpen(false);
+                      setMobileSurface("conversation");
+                    }}
+                  />
+                </section>
+              ) : null}
+            </div>
           )}
-        </section>
+        </div>
       </main>
 
       <Dialog open={cancelOpen} onOpenChange={setCancelOpen}>

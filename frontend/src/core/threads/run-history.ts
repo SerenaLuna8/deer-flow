@@ -17,11 +17,33 @@ import {
 import type { RunMessage } from "./types";
 
 function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
-  const lastIndexByIdentity = new Map<string, number>();
+  const selectedIndexByIdentity = new Map<string, number>();
   messages.forEach((message, index) => {
     const identity = messageIdentity(message.content);
-    if (identity) {
-      lastIndexByIdentity.set(`${message.run_id}:${identity}`, index);
+    if (!identity) {
+      return;
+    }
+    const key = `${message.run_id}:${identity}`;
+    const selectedIndex = selectedIndexByIdentity.get(key);
+    if (selectedIndex === undefined) {
+      selectedIndexByIdentity.set(key, index);
+      return;
+    }
+    const selected = messages[selectedIndex];
+    if (!selected) {
+      selectedIndexByIdentity.set(key, index);
+      return;
+    }
+    const selectedSeq = selected.seq;
+    const candidateSeq = message.seq;
+    if (
+      (typeof selectedSeq === "string" &&
+        typeof candidateSeq === "string" &&
+        compareEventSequences(candidateSeq, selectedSeq) >= 0) ||
+      (typeof candidateSeq === "string" && typeof selectedSeq !== "string") ||
+      (typeof candidateSeq !== "string" && typeof selectedSeq !== "string")
+    ) {
+      selectedIndexByIdentity.set(key, index);
     }
   });
 
@@ -30,7 +52,9 @@ function dedupeRunMessagesByIdentity(messages: RunMessage[]): RunMessage[] {
     if (!identity) {
       return true;
     }
-    return lastIndexByIdentity.get(`${message.run_id}:${identity}`) === index;
+    return (
+      selectedIndexByIdentity.get(`${message.run_id}:${identity}`) === index
+    );
   });
 }
 

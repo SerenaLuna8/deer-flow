@@ -1,27 +1,21 @@
 """Subagent execution engine."""
 
 import asyncio
-import atexit
 import html
 import logging
 import os
 import re
 import threading
 import uuid
-from collections.abc import Callable, Coroutine, Mapping
-from concurrent.futures import Future
-from concurrent.futures import TimeoutError as FuturesTimeoutError
-from contextvars import Context, copy_context
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
@@ -32,10 +26,8 @@ from deerflow.error_codes import (
     SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR_CODE,
     SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
 )
-from deerflow.guardrails.provider import copy_guardrail_attribution
 from deerflow.models import ModelRuntime, ModelRuntimeProfile
 from deerflow.public_error_codes import llm_error_code_for_reason
-from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.runtime.context_keys import RuntimeContextKeys
 from deerflow.skills.tool_policy import (
     ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES,
@@ -44,6 +36,8 @@ from deerflow.skills.tool_policy import (
 from deerflow.skills.types import Skill
 from deerflow.subagents.change_signal import SubagentChangeSignal
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.delegated_context import DelegatedRuntimeContextProjection
+from deerflow.subagents.lifecycle import _SubagentGraphExecutionSnapshot
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -52,7 +46,7 @@ from deerflow.utils.messages import message_content_to_text
 if TYPE_CHECKING:
     # Imported lazily at runtime inside _build_initial_state: importing
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
-    # `from deerflow.subagents import SubagentExecutor`, which re-enters this
+    # the graph-runner import, which re-enters this
     # still-initializing package. Type-only here keeps the annotation precise.
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
@@ -168,13 +162,7 @@ def _render_inherited_agent_prompt_bundle(bundle: object) -> str:
     return render_agent_prompt_bundle(bundle)
 
 
-_previous_shutdown_isolated_subagent_loop = globals().get("_shutdown_isolated_subagent_loop")
-if callable(_previous_shutdown_isolated_subagent_loop):
-    atexit.unregister(_previous_shutdown_isolated_subagent_loop)
-    _previous_shutdown_isolated_subagent_loop()
-
-
-class SubagentStatus(Enum):
+class _SubagentGraphStatus(Enum):
     """Status of a subagent execution."""
 
     PENDING = "pending"
@@ -182,7 +170,6 @@ class SubagentStatus(Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
-    TIMED_OUT = "timed_out"
 
     @property
     def is_terminal(self) -> bool:
@@ -190,16 +177,15 @@ class SubagentStatus(Enum):
             type(self).COMPLETED,
             type(self).FAILED,
             type(self).CANCELLED,
-            type(self).TIMED_OUT,
         }
 
 
 @dataclass
-class SubagentResult:
-    """Result of a subagent execution.
+class _SubagentGraphResult:
+    """Mutable graph-side state for one lifecycle-owned execution.
 
     Attributes:
-        task_id: Unique identifier for this execution.
+        execution_id: Lifecycle-owned internal identifier for this execution.
         trace_id: Trace ID for distributed tracing (links parent and subagent logs).
         status: Current status of the execution.
         result: The final result message (if completed).
@@ -215,9 +201,9 @@ class SubagentResult:
         ai_messages: List of complete AI messages (as dicts) generated during execution.
     """
 
-    task_id: str
+    execution_id: uuid.UUID
     trace_id: str
-    status: SubagentStatus
+    status: _SubagentGraphStatus
     result: str | None = None
     error: str | None = None
     stop_reason: str | None = None
@@ -226,7 +212,6 @@ class SubagentResult:
     ai_messages: list[dict[str, Any]] | None = None
     token_usage_records: list[dict[str, int | str | None]] = field(default_factory=list)
     host_execution_approval_artifact: dict[str, object] | None = None
-    usage_reported: bool = False
     cancel_event: threading.Event = field(default_factory=threading.Event, repr=False)
     # Event-driven waiting (U8): writers on the isolated loop / scheduler
     # thread notify; the parent-loop task tool subscribes instead of polling.
@@ -259,13 +244,13 @@ class SubagentResult:
         with self._state_lock:
             if self.status.is_terminal:
                 return
-            self.status = SubagentStatus.RUNNING
+            self.status = _SubagentGraphStatus.RUNNING
             self.started_at = started_at or datetime.now()
         self.changes.notify()
 
     def try_set_terminal(
         self,
-        status: SubagentStatus,
+        status: _SubagentGraphStatus,
         *,
         result: str | None = None,
         error: str | None = None,
@@ -277,9 +262,9 @@ class SubagentResult:
     ) -> bool:
         """Set a terminal status exactly once.
 
-        Background timeout/cancellation and the execution worker can race on the
-        same result holder.  The first terminal transition wins; late terminal
-        writes must not change status or payload fields.
+        Graph completion and cooperative cancellation can race on the same
+        holder. The first graph terminal transition wins; lifecycle timeout
+        arbitration remains outside this class.
         """
         if not status.is_terminal:
             raise ValueError(f"Status {status} is not terminal")
@@ -307,6 +292,22 @@ class SubagentResult:
         # Outside the lock: waking waiters must not hold the state lock.
         self.changes.notify(terminal=True)
         return True
+
+    def _snapshot_for_lifecycle(self) -> _SubagentGraphExecutionSnapshot:
+        """Return one lock-consistent snapshot to the lifecycle Module."""
+
+        with self._state_lock:
+            return _SubagentGraphExecutionSnapshot(
+                trace_id=self.trace_id,
+                status=self.status.value,
+                status_is_terminal=self.status.is_terminal,
+                result=self.result,
+                error=self.error,
+                stop_reason=self.stop_reason,
+                ai_messages=tuple(dict(message) for message in self.ai_messages or ()),
+                token_usage_records=tuple(dict(record) for record in self.token_usage_records),
+                host_execution_approval_artifact=(dict(self.host_execution_approval_artifact) if self.host_execution_approval_artifact is not None else None),
+            )
 
 
 def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
@@ -410,286 +411,6 @@ def _extract_host_execution_approval(
     return None
 
 
-# Global storage for background task results
-_background_tasks: dict[str, SubagentResult] = {}
-_background_tasks_lock = threading.Lock()
-
-
-class _IsolatedSubagentSchedulerState(Enum):
-    ACCEPTING = "accepting"
-    SHUTTING_DOWN = "shutting_down"
-    STOPPED = "stopped"
-
-
-# Persistent event loop for isolated subagent executions triggered from an
-# already-running parent loop. Reusing one long-lived loop avoids creating a
-# fresh loop per execution and then closing async resources bound to it.
-#
-# Background executions are coroutines on this one loop, not one thread per
-# subagent. The explicit gate bounds process-wide graph/resource pressure while
-# still admitting the documented four parallel calls from one Run and the
-# default Worker's four concurrent Runs without scheduler-thread starvation.
-MAX_CONCURRENT_ISOLATED_SUBAGENTS = 16
-_isolated_subagent_loop: asyncio.AbstractEventLoop | None = None
-_isolated_subagent_loop_thread: threading.Thread | None = None
-_isolated_subagent_loop_started: threading.Event | None = None
-_isolated_subagent_loop_lock = threading.Lock()
-_isolated_subagent_submission_condition = threading.Condition(
-    _isolated_subagent_loop_lock,
-)
-_isolated_subagent_scheduler_state = _IsolatedSubagentSchedulerState.ACCEPTING
-_isolated_subagent_submissions_in_flight = 0
-_isolated_subagent_execution_gate: asyncio.Semaphore | None = None
-_isolated_subagent_execution_gate_loop: asyncio.AbstractEventLoop | None = None
-
-# Concurrent futures are retained only so cancellation and process shutdown can
-# preempt a running/queued coroutine. Result payloads remain in
-# ``_background_tasks`` until task_tool performs its existing terminal cleanup.
-_background_task_futures: dict[str, Future[SubagentResult]] = {}
-
-
-def _run_isolated_subagent_loop(
-    loop: asyncio.AbstractEventLoop,
-    started_event: threading.Event,
-) -> None:
-    """Run the persistent isolated subagent loop in a dedicated daemon thread."""
-    asyncio.set_event_loop(loop)
-    loop.call_soon(started_event.set)
-    try:
-        loop.run_forever()
-    finally:
-        started_event.clear()
-
-
-def _shutdown_isolated_subagent_loop() -> None:
-    """Cancel outstanding executions, then stop and close the isolated loop."""
-    global _isolated_subagent_execution_gate, _isolated_subagent_execution_gate_loop
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
-    global _isolated_subagent_scheduler_state
-
-    with _isolated_subagent_submission_condition:
-        if _isolated_subagent_scheduler_state is _IsolatedSubagentSchedulerState.STOPPED:
-            return
-        if _isolated_subagent_scheduler_state is _IsolatedSubagentSchedulerState.SHUTTING_DOWN:
-            _isolated_subagent_submission_condition.wait_for(
-                lambda: _isolated_subagent_scheduler_state is _IsolatedSubagentSchedulerState.STOPPED,
-            )
-            return
-
-        # This transition is the shutdown linearization point. Submissions that
-        # have not acquired admission fail closed; already-admitted submissions
-        # must finish registering their future (or terminal failure) before the
-        # loop and its bookkeeping are captured below.
-        _isolated_subagent_scheduler_state = _IsolatedSubagentSchedulerState.SHUTTING_DOWN
-        _isolated_subagent_submission_condition.wait_for(
-            lambda: _isolated_subagent_submissions_in_flight == 0,
-        )
-        loop = _isolated_subagent_loop
-        thread = _isolated_subagent_loop_thread
-        _isolated_subagent_loop = None
-        _isolated_subagent_loop_thread = None
-        _isolated_subagent_loop_started = None
-        _isolated_subagent_execution_gate = None
-        _isolated_subagent_execution_gate_loop = None
-
-    if loop is None:
-        with _isolated_subagent_submission_condition:
-            _isolated_subagent_scheduler_state = _IsolatedSubagentSchedulerState.STOPPED
-            _isolated_subagent_submission_condition.notify_all()
-        return
-
-    try:
-        with _background_tasks_lock:
-            pending_results = [_background_tasks[task_id] for task_id in _background_task_futures if task_id in _background_tasks]
-        for result in pending_results:
-            result.cancel_event.set()
-
-        if loop.is_running() and thread is not threading.current_thread():
-
-            async def cancel_pending_tasks() -> None:
-                current = asyncio.current_task()
-                tasks = [task for task in asyncio.all_tasks() if task is not current and not task.done()]
-                for task in tasks:
-                    task.cancel()
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-
-            try:
-                asyncio.run_coroutine_threadsafe(
-                    cancel_pending_tasks(),
-                    loop,
-                ).result(timeout=5)
-            except Exception:
-                logger.warning(
-                    "Timed out cancelling isolated subagent tasks during shutdown",
-                    exc_info=True,
-                )
-
-        for result in pending_results:
-            result.try_set_terminal(
-                SubagentStatus.CANCELLED,
-                error="Cancelled during subagent scheduler shutdown",
-            )
-
-        if loop.is_running():
-            loop.call_soon_threadsafe(loop.stop)
-
-        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
-            thread.join(timeout=1)
-
-        thread_stopped = thread is None or not thread.is_alive()
-        loop_stopped = not loop.is_running()
-
-        if not loop.is_closed():
-            if thread_stopped and loop_stopped:
-                loop.close()
-            else:
-                logger.warning(
-                    "Skipping close of isolated subagent loop because shutdown did not complete within timeout (thread_alive=%s, loop_running=%s)",
-                    thread is not None and thread.is_alive(),
-                    loop.is_running(),
-                )
-    finally:
-        with _background_tasks_lock:
-            _background_task_futures.clear()
-
-        with _isolated_subagent_submission_condition:
-            _isolated_subagent_scheduler_state = _IsolatedSubagentSchedulerState.STOPPED
-            _isolated_subagent_submission_condition.notify_all()
-
-
-atexit.register(_shutdown_isolated_subagent_loop)
-
-
-def _get_isolated_subagent_loop() -> asyncio.AbstractEventLoop:
-    """Return the persistent event loop used by isolated subagent executions."""
-    global _isolated_subagent_loop, _isolated_subagent_loop_thread, _isolated_subagent_loop_started
-    with _isolated_subagent_loop_lock:
-        if _isolated_subagent_scheduler_state is not _IsolatedSubagentSchedulerState.ACCEPTING:
-            raise RuntimeError("Isolated subagent scheduler is shutting down")
-        thread_is_alive = _isolated_subagent_loop_thread is not None and _isolated_subagent_loop_thread.is_alive()
-        loop_is_usable = _isolated_subagent_loop is not None and not _isolated_subagent_loop.is_closed() and _isolated_subagent_loop.is_running() and thread_is_alive
-
-        if not loop_is_usable:
-            loop = asyncio.new_event_loop()
-            started_event = threading.Event()
-            thread = threading.Thread(
-                target=_run_isolated_subagent_loop,
-                args=(loop, started_event),
-                name="subagent-persistent-loop",
-                daemon=True,
-            )
-            thread.start()
-            if not started_event.wait(timeout=5):
-                loop.call_soon_threadsafe(loop.stop)
-                thread.join(timeout=1)
-                loop.close()
-                raise RuntimeError("Timed out starting isolated subagent event loop")
-            _isolated_subagent_loop = loop
-            _isolated_subagent_loop_thread = thread
-            _isolated_subagent_loop_started = started_event
-
-        if _isolated_subagent_loop is None:
-            raise RuntimeError("Isolated subagent event loop is not initialized")
-        return _isolated_subagent_loop
-
-
-def _begin_isolated_subagent_submission() -> None:
-    """Admit one submission before it can allocate or schedule a coroutine."""
-
-    global _isolated_subagent_submissions_in_flight
-    with _isolated_subagent_submission_condition:
-        if _isolated_subagent_scheduler_state is not _IsolatedSubagentSchedulerState.ACCEPTING:
-            raise RuntimeError("Isolated subagent scheduler is shutting down")
-        _isolated_subagent_submissions_in_flight += 1
-
-
-def _finish_isolated_subagent_submission() -> None:
-    """Release one admission and wake a shutdown waiting to capture the loop."""
-
-    global _isolated_subagent_submissions_in_flight
-    with _isolated_subagent_submission_condition:
-        if _isolated_subagent_submissions_in_flight <= 0:
-            raise RuntimeError("Isolated subagent submission accounting underflow")
-        _isolated_subagent_submissions_in_flight -= 1
-        if _isolated_subagent_submissions_in_flight == 0:
-            _isolated_subagent_submission_condition.notify_all()
-
-
-def _submit_to_isolated_loop_in_context(
-    context: Context,
-    coro_factory: Callable[[], Coroutine[Any, Any, SubagentResult]],
-) -> Future[SubagentResult]:
-    """Submit a coroutine to the isolated loop while preserving ContextVar state."""
-
-    def submit() -> Future[SubagentResult]:
-        loop = _get_isolated_subagent_loop()
-        coroutine = coro_factory()
-        try:
-            return asyncio.run_coroutine_threadsafe(coroutine, loop)
-        except BaseException:
-            # Submission can race process shutdown. Close the never-scheduled
-            # coroutine so failure does not leak an un-awaited coroutine.
-            coroutine.close()
-            raise
-
-    return context.run(submit)
-
-
-def _get_isolated_subagent_execution_gate() -> asyncio.Semaphore:
-    """Return the process-wide coroutine gate owned by the isolated loop."""
-
-    global _isolated_subagent_execution_gate, _isolated_subagent_execution_gate_loop
-    loop = asyncio.get_running_loop()
-    if _isolated_subagent_execution_gate is None or _isolated_subagent_execution_gate_loop is not loop:
-        _isolated_subagent_execution_gate = asyncio.Semaphore(
-            MAX_CONCURRENT_ISOLATED_SUBAGENTS,
-        )
-        _isolated_subagent_execution_gate_loop = loop
-    return _isolated_subagent_execution_gate
-
-
-def _background_execution_done(
-    task_id: str,
-    result: SubagentResult,
-    future: Future[SubagentResult],
-) -> None:
-    """Drop scheduler bookkeeping and close unexpected submission failures."""
-
-    with _background_tasks_lock:
-        if _background_task_futures.get(task_id) is future:
-            _background_task_futures.pop(task_id, None)
-
-    if future.cancelled():
-        return
-    try:
-        future.result()
-    except Exception as exc:
-        _log_subagent_internal_exception(
-            event="background_future",
-            trace_id=result.trace_id,
-            subagent_name=None,
-            error=exc,
-        )
-        result.try_set_terminal(
-            SubagentStatus.FAILED,
-            error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
-        )
-
-
-def _copy_detached_subagent_context() -> Context:
-    """Copy request context without inheriting the lead graph stream runtime.
-
-    Detached subagents report progress through ``task_running`` custom events.
-    Keeping the parent RunnableConfig would additionally send their raw model
-    and tool frames through the lead stream writer. Clear only that ContextVar
-    so request identity, authorization, and tracing context still propagate.
-    """
-    context = copy_context()
-    context.run(var_child_runnable_config.set, None)
-    return context
-
-
 def _filter_tools(
     all_tools: list[BaseTool],
     allowed: list[str] | None,
@@ -720,149 +441,90 @@ def _filter_tools(
     return filtered
 
 
-class SubagentExecutor:
-    """Executor for running subagents."""
+class _SubagentGraphRunner:
+    """Internal Adapter that materializes and runs one delegated Agent Graph."""
 
     def __init__(
         self,
         config: SubagentConfig,
         tools: list[BaseTool],
-        app_config: AppConfig | None = None,
+        delegated_context: DelegatedRuntimeContextProjection,
         parent_model: str | None = None,
         sandbox_state: SandboxState | None = None,
         thread_data: ThreadDataState | None = None,
-        thread_id: str | None = None,
         trace_id: str | None = None,
-        user_id: str | None = None,
-        user_role: str | None = None,
-        oauth_provider: str | None = None,
-        oauth_id: str | None = None,
-        run_id: str | None = None,
-        guardrail_attribution: Mapping[str, object] | None = None,
-        private_scope: object | None = None,
-        file_authority: object | None = None,
-        authorization_boundary: object | None = None,
-        authorization_checker: object | None = None,
-        run_read_only_mounts: tuple[object, ...] = (),
-        channel_user_id: str | None = None,
-        channel_identity_present: bool = False,
-        deerflow_trace_id: str | None = None,
-        runtime_skills: tuple[Skill, ...] = (),
-        agent_prompt_bundle: object | None = None,
         agent_model_settings: AgentModelSettings | None = None,
-        skill_scoped_secrets: Mapping[
-            str,
-            Mapping[str, str],
-        ]
-        | None = None,
-        skill_secret_provider: Callable[..., object] | None = None,
-        host_execution_approval_port: object | None = None,
-        host_execution_agent_path: tuple[str, ...] = (),
+        model_override: object | None = None,
+        middleware_override: tuple[object, ...] | None = None,
+        sdk_feature_snapshot: object | None = None,
+        tool_search_enabled: bool | None = None,
     ):
-        """Initialize the executor.
+        """Initialize one lifecycle-owned graph runner.
 
         Args:
             config: Subagent configuration.
             tools: List of all available tools (will be filtered).
-            app_config: Resolved AppConfig. When None, ``_create_agent`` falls
-                back to ``get_app_config()`` (matches the lead-agent factory's
-                pattern).
+            delegated_context: Closed parent-to-child runtime projection. It is
+                the only source used to install the child ToolRuntime context.
             parent_model: The parent agent's model name for inheritance.
             sandbox_state: Sandbox state from parent agent.
             thread_data: Thread data from parent agent.
-            thread_id: Thread ID for sandbox operations.
             trace_id: Trace ID from parent for distributed tracing.
-            user_id: User ID captured from the parent tool's runtime context.
-                When None, the tracing layer falls back to DEFAULT_USER_ID.
-            user_role: Authenticated user's role, propagated so GuardrailMiddleware
-                on the subagent can apply role-aware policy to delegated calls.
-            oauth_provider: External identity provider, when authenticated via SSO.
-            oauth_id: Subject id at the external identity provider.
-            run_id: Parent run id, so delegated guardrail decisions attribute to
-                the same run as the lead agent.
-            guardrail_attribution: Closed Worker-issued private Run identity
-                carrier. Private subagents copy it and only change the
-                server-owned ``is_subagent`` bit.
-            private_scope: Opaque server-issued private resource scope inherited
-                from the parent Run.
-            file_authority: Exact parent Run file authority. Subagent middleware
-                uses it to retain the projected workspace and private sandbox.
-            authorization_boundary: Parent Run side-effect boundary used to
-                revalidate delegated tool calls.
-            authorization_checker: Legacy callable fallback for delegated
-                authorization checks.
-            run_read_only_mounts: Exact server-issued read-only mounts admitted
-                for the parent Run.
-            channel_identity_present: Whether the parent carried an explicit
-                server-owned channel identity state, including an explicit
-                clear represented by ``channel_user_id=None``.
-            deerflow_trace_id: ActWeave request-level correlation id propagated
-                from the parent run for Langfuse metadata correlation.
-            runtime_skills: Exact immutable Skill objects admitted for the
-                parent Run.
-            agent_prompt_bundle: Exact immutable Agent instruction fields
-                admitted for the parent Run. The object is never logged or
-                copied into trace metadata.
             agent_model_settings: Exact immutable model settings admitted for
                 a dynamic runtime Agent. Static subagents retain their current
                 fixed non-thinking behavior when this is ``None``.
-            skill_scoped_secrets: Exact Worker-admitted Skill-path environment
-                bindings. Values remain only in runtime context and are copied
-                so parent and child execution cannot mutate one another.
-            skill_secret_provider: Opaque owner-loop proxy that revalidates and
-                decrypts one short-lived Skill carrier for each sandbox command.
-            host_execution_approval_port: Opaque owner-loop proxy that stages
-                and completes one exact Local host command.
-            host_execution_agent_path: Stable delegated Agent path bound into
-                the exact execution digest.
+            model_override: Exact caller-owned SDK model used for ``inherit``.
+                This path never resolves a process-global AppConfig.
+            middleware_override: Exact SDK full-takeover middleware tuple.
+            sdk_feature_snapshot: SDK feature choices used to rebuild a fresh,
+                config-free delegated middleware chain after scheduler admission.
+            tool_search_enabled: Explicit delegated tool-search policy. SDK
+                callers pass ``False`` so graph construction never reads global
+                configuration.
         """
+        if type(delegated_context) is not DelegatedRuntimeContextProjection:
+            raise TypeError(
+                "delegated_context must be DelegatedRuntimeContextProjection",
+            )
         self.config = config
-        self.app_config = app_config
+        self._delegated_context = delegated_context
+        self.app_config = cast(AppConfig | None, delegated_context.app_config)
         self.parent_model = parent_model
         # Resolve eagerly only when it does not require loading config.yaml; otherwise defer
         # to _create_agent (which already loads app_config) so unit tests can construct
         # executors without a config file present.
-        if config.model != "inherit" or parent_model is not None or app_config is not None:
-            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=app_config)
+        if config.model != "inherit" or parent_model is not None or self.app_config is not None:
+            self.model_name: str | None = resolve_subagent_model_name(config, parent_model, app_config=self.app_config)
         else:
             self.model_name = None
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
-        self.thread_id = thread_id
+        self.thread_id = delegated_context.thread_id
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
-        self.user_id = user_id
-        # Guardrail attribution propagated from the parent runtime context.
-        self.user_role = user_role
-        self.oauth_provider = oauth_provider
-        self.oauth_id = oauth_id
-        self.run_id = run_id
-        self._guardrail_attribution = copy_guardrail_attribution(guardrail_attribution)
-        self.private_scope = private_scope
-        self.file_authority = file_authority
-        self.authorization_boundary = authorization_boundary
-        self.authorization_checker = authorization_checker
-        self.run_read_only_mounts = run_read_only_mounts if isinstance(run_read_only_mounts, tuple) else ()
-        if type(channel_identity_present) is not bool:
-            raise TypeError("channel_identity_present must be a boolean")
-        # IM-channel sender identity captured at task_tool dispatch: group
-        # chats share one thread across senders, so delegated bash commands
-        # must export the dispatching turn's id, not none at all.
-        self.channel_user_id = channel_user_id
-        self.channel_identity_present = channel_identity_present
-        self.deerflow_trace_id = deerflow_trace_id
-        self._runtime_skills = tuple(runtime_skills)
-        self._agent_prompt_bundle = agent_prompt_bundle
+        self.user_id = delegated_context.user_id
+        self.run_id = delegated_context.run_id
+        self.deerflow_trace_id = delegated_context.deerflow_trace_id
+        self._runtime_skills = cast(tuple[Skill, ...], delegated_context.runtime_skills)
+        self._agent_prompt_bundle = delegated_context.agent_prompt_bundle
         if agent_model_settings is not None and not isinstance(
             agent_model_settings,
             AgentModelSettings,
         ):
             raise TypeError("agent_model_settings must be AgentModelSettings")
         self._agent_model_settings = agent_model_settings
-        self._skill_scoped_secrets = {path: dict(values) for path, values in (skill_scoped_secrets or {}).items()}
-        self._skill_secret_provider = skill_secret_provider
-        self._host_execution_approval_port = host_execution_approval_port
-        self._host_execution_agent_path = host_execution_agent_path
+        if model_override is not None and config.model != "inherit":
+            raise ValueError("model_override requires an inherited subagent model")
+        if middleware_override is not None and sdk_feature_snapshot is not None:
+            raise ValueError(
+                "middleware_override and sdk_feature_snapshot are mutually exclusive",
+            )
+        if tool_search_enabled is not None and type(tool_search_enabled) is not bool:
+            raise TypeError("tool_search_enabled must be a boolean or None")
+        self._model_override = model_override
+        self._middleware_override = middleware_override
+        self._sdk_feature_snapshot = sdk_feature_snapshot
+        self._tool_search_enabled = tool_search_enabled
 
         self._base_tools = _filter_tools(
             tools,
@@ -879,7 +541,12 @@ class SubagentExecutor:
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
 
-        logger.info(f"[trace={self.trace_id}] SubagentExecutor initialized: {config.name} with {len(self.tools)} tools")
+        logger.info(
+            "[trace=%s] Subagent graph runner initialized: %s with %s tools",
+            self.trace_id,
+            config.name,
+            len(self.tools),
+        )
 
     def _create_agent(self, tools: list[BaseTool] | None = None, *, deferred_setup: "DeferredToolSetup | None" = None):
         """Create the agent instance.
@@ -888,51 +555,93 @@ class SubagentExecutor:
         deferred MCP tool names + catalog hash so the subagent gets the same
         DeferredToolFilterMiddleware the lead agent has. ``None`` is a no-op.
         """
-        app_config = self.app_config or get_app_config()
-        self.app_config = app_config
-        if self.model_name is None:
-            self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model_kwargs: dict[str, object] = {
-            "model_name": self.model_name,
-            "thinking_enabled": False,
-        }
-        if self._agent_model_settings is not None:
-            model_kwargs["thinking_enabled"] = bool(self._agent_model_settings.thinking_enabled)
-            if self._agent_model_settings.reasoning_effort is not None:
-                model_kwargs["reasoning_effort"] = self._agent_model_settings.reasoning_effort
-            sampling_overrides = self._agent_model_settings.sampling_overrides()
-            if sampling_overrides:
-                model_kwargs["model_overrides"] = sampling_overrides
-        model = ModelRuntime(app_config=app_config).build_chat_model(
-            profile=ModelRuntimeProfile.AGENT_GRAPH,
-            **model_kwargs,
-        )
+        if self._model_override is not None:
+            model = self._model_override
+            if self._middleware_override is not None:
+                middlewares = list(self._middleware_override)
+            elif self._sdk_feature_snapshot is not None:
+                from deerflow.agents.factory import _assemble_from_features
+                from deerflow.agents.features import RuntimeFeatures
 
-        from deerflow.agents.middlewares.assembly import (
-            build_subagent_runtime_middlewares,
-        )
-
-        # Reuse shared middleware composition with lead agent. ``agent_name``
-        # lets the builder resolve the per-agent token_budget override.
-        mcp_routing_middleware = None
-        if deferred_setup is not None and deferred_setup.deferred_names:
-            from deerflow.tools.builtins.tool_search import build_mcp_routing_middleware
-
-            mcp_routing_middleware = build_mcp_routing_middleware(
-                tools if tools is not None else self.tools,
-                deferred_setup,
-                top_k=app_config.tool_search.auto_promote_top_k,
+                snapshot = self._sdk_feature_snapshot
+                sdk_features = RuntimeFeatures(
+                    sandbox=getattr(snapshot, "sandbox"),
+                    memory=getattr(snapshot, "memory"),
+                    summarization=getattr(snapshot, "summarization"),
+                    subagent=False,
+                    vision=getattr(snapshot, "vision"),
+                    auto_title=False,
+                    guardrail=getattr(snapshot, "guardrail"),
+                    loop_detection=getattr(snapshot, "loop_detection"),
+                    token_budget=getattr(snapshot, "token_budget"),
+                )
+                middlewares, _ = _assemble_from_features(
+                    sdk_features,
+                    name=self.config.name,
+                    plan_mode=False,
+                    extra_middleware=list(
+                        getattr(snapshot, "extra_middleware", ()),
+                    ),
+                    delegated=True,
+                )
+            else:
+                raise RuntimeError(
+                    "SDK model override requires middleware inputs",
+                )
+        else:
+            app_config = self.app_config or get_app_config()
+            self.app_config = app_config
+            if self.model_name is None:
+                self.model_name = resolve_subagent_model_name(
+                    self.config,
+                    self.parent_model,
+                    app_config=app_config,
+                )
+            model_kwargs: dict[str, object] = {
+                "model_name": self.model_name,
+                "thinking_enabled": False,
+            }
+            if self._agent_model_settings is not None:
+                model_kwargs["thinking_enabled"] = bool(
+                    self._agent_model_settings.thinking_enabled,
+                )
+                if self._agent_model_settings.reasoning_effort is not None:
+                    model_kwargs["reasoning_effort"] = self._agent_model_settings.reasoning_effort
+                sampling_overrides = self._agent_model_settings.sampling_overrides()
+                if sampling_overrides:
+                    model_kwargs["model_overrides"] = sampling_overrides
+            model = ModelRuntime(app_config=app_config).build_chat_model(
+                profile=ModelRuntimeProfile.AGENT_GRAPH,
+                **model_kwargs,
             )
-        middleware_kwargs = {
-            "app_config": app_config,
-            "model_name": self.model_name,
-            "lazy_init": True,
-            "deferred_setup": deferred_setup,
-            "agent_name": self.config.name,
-        }
-        if mcp_routing_middleware is not None:
-            middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
-        middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
+
+            from deerflow.agents.middlewares.assembly import (
+                build_subagent_runtime_middlewares,
+            )
+
+            # Reuse shared middleware composition with lead agent. ``agent_name``
+            # lets the builder resolve the per-agent token_budget override.
+            mcp_routing_middleware = None
+            if deferred_setup is not None and deferred_setup.deferred_names:
+                from deerflow.tools.builtins.tool_search import (
+                    build_mcp_routing_middleware,
+                )
+
+                mcp_routing_middleware = build_mcp_routing_middleware(
+                    tools if tools is not None else self.tools,
+                    deferred_setup,
+                    top_k=app_config.tool_search.auto_promote_top_k,
+                )
+            middleware_kwargs = {
+                "app_config": app_config,
+                "model_name": self.model_name,
+                "lazy_init": True,
+                "deferred_setup": deferred_setup,
+                "agent_name": self.config.name,
+            }
+            if mcp_routing_middleware is not None:
+                middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
+            middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
         # Collect every guard middleware that exposes ``consume_stop_reason``
         # (TokenBudgetMiddleware, LoopDetectionMiddleware) so _aexecute can read
         # each after the run and surface whichever cap fired. Duck-typed
@@ -1059,7 +768,9 @@ class SubagentExecutor:
         # subagent's name-level allow/deny (config.tools / disallowed_tools):
         # its catalog is built from the already-filtered list, so it can never
         # surface a tool the policy denied. This matches the lead agent.
-        enabled = (self.app_config or get_app_config()).tool_search.enabled
+        enabled = self._tool_search_enabled
+        if enabled is None:
+            enabled = (self.app_config or get_app_config()).tool_search.enabled
         final_tools, deferred_setup = assemble_deferred_tools(filtered_tools, enabled=enabled)
         skill_messages = await self._load_skill_messages(skills)
 
@@ -1111,28 +822,49 @@ class SubagentExecutor:
 
         return state, final_tools, deferred_setup
 
-    async def _aexecute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
-        """Execute a task asynchronously.
+    def _create_lifecycle_result_holder(
+        self,
+        *,
+        execution_id: uuid.UUID,
+        changes: SubagentChangeSignal,
+    ) -> _SubagentGraphResult:
+        """Create graph-side mutable state for the lifecycle adapter.
+
+        The internal UUID is deliberately used here.  The caller's ``task_id``
+        remains correlation metadata and never keys graph scheduling state.
+        """
+
+        return _SubagentGraphResult(
+            execution_id=execution_id,
+            trace_id=self.trace_id,
+            status=_SubagentGraphStatus.PENDING,
+            changes=changes,
+        )
+
+    async def _run_lifecycle_graph(
+        self,
+        prompt: str,
+        result_holder: _SubagentGraphResult,
+    ) -> _SubagentGraphResult:
+        """Run only the Agent Graph; lifecycle ownership lives elsewhere."""
+
+        return await self._aexecute(prompt, result_holder)
+
+    async def _aexecute(
+        self,
+        task: str,
+        result_holder: _SubagentGraphResult,
+    ) -> _SubagentGraphResult:
+        """Execute only the graph inside lifecycle-owned mutable state.
 
         Args:
             task: The task description for the subagent.
-            result_holder: Optional pre-created result object to update during execution.
+            result_holder: Lifecycle-created mutable graph state.
 
         Returns:
-            SubagentResult with the execution result.
+            _SubagentGraphResult with the execution result.
         """
-        if result_holder is not None:
-            # Use the provided result holder (for async execution with real-time updates)
-            result = result_holder
-        else:
-            # Create a new result for synchronous execution
-            task_id = str(uuid.uuid4())[:8]
-            result = SubagentResult(
-                task_id=task_id,
-                trace_id=self.trace_id,
-                status=SubagentStatus.RUNNING,
-                started_at=datetime.now(),
-            )
+        result = result_holder
         ai_messages = result.ai_messages
         if ai_messages is None:
             ai_messages = []
@@ -1158,7 +890,7 @@ class SubagentExecutor:
                     self.config.name,
                 )
                 result.try_set_terminal(
-                    SubagentStatus.FAILED,
+                    _SubagentGraphStatus.FAILED,
                     error=SUBAGENT_COMMAND_EXECUTION_UNAVAILABLE_ERROR,
                 )
                 return result
@@ -1212,34 +944,11 @@ class SubagentExecutor:
                 run_config["configurable"] = {
                     RuntimeContextKeys.THREAD_ID: self.thread_id,
                 }
-            # Propagate guardrail attribution so delegated tool calls are
-            # evaluated with the parent run's identity (role-aware policy,
-            # audit). user_id reuses the resolved tracing id; on every
-            # authenticated/IM path this equals the parent context value.
-            context = RuntimeContextCarrier(
-                thread_id=self.thread_id or None,
-                run_id=self.run_id,
-                app_config=self.app_config,
-                user_id=self.user_id,
-                user_role=self.user_role,
-                oauth_provider=self.oauth_provider,
-                oauth_id=self.oauth_id,
-                channel_user_id=self.channel_user_id,
-                is_subagent=True,
-                private_scope=self.private_scope,
-                authorization_checker=self.authorization_checker,
-                authorization_boundary=self.authorization_boundary,
-                file_authority=self.file_authority,
-                guardrail_attribution=(self._guardrail_attribution if self.private_scope is not None else None),
-                run_read_only_mounts=self.run_read_only_mounts or None,
-                skill_scoped_secrets=self._skill_scoped_secrets or None,
-                skill_secret_provider=(self._skill_secret_provider if self.private_scope is not None and callable(self._skill_secret_provider) else None),
-                trace_id=self.deerflow_trace_id or None,
-                host_execution_approval_port=self._host_execution_approval_port,
-                host_execution_agent_path=(self._host_execution_agent_path or None),
-            ).build()
-            if self.private_scope is not None and self.channel_identity_present:
-                context[RuntimeContextKeys.CHANNEL_USER_ID] = self.channel_user_id
+            # Parent-to-child selection, copying, tri-state preservation, and
+            # owner-loop adaptation are closed before runner construction.
+            # The runner consumes that projection instead of rebuilding a
+            # second, independently evolving RuntimeContextCarrier.
+            context = self._delegated_context.build()
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1251,7 +960,7 @@ class SubagentExecutor:
             if result.cancel_event.is_set():
                 logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled before streaming")
                 result.try_set_terminal(
-                    SubagentStatus.CANCELLED,
+                    _SubagentGraphStatus.CANCELLED,
                     error="Cancelled by user",
                     token_usage_records=collector.snapshot_records(),
                 )
@@ -1265,7 +974,7 @@ class SubagentExecutor:
                 if result.cancel_event.is_set():
                     logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
                     result.try_set_terminal(
-                        SubagentStatus.CANCELLED,
+                        _SubagentGraphStatus.CANCELLED,
                         error="Cancelled by user",
                         token_usage_records=collector.snapshot_records(),
                     )
@@ -1296,14 +1005,14 @@ class SubagentExecutor:
             llm_error = _extract_llm_error_fallback(final_state)
             if host_execution_approval is not None:
                 result.try_set_terminal(
-                    SubagentStatus.COMPLETED,
+                    _SubagentGraphStatus.COMPLETED,
                     result="Host command execution requires approval.",
                     host_execution_approval_artifact=host_execution_approval,
                     token_usage_records=token_usage_records,
                 )
             elif llm_error is not None:
                 result.try_set_terminal(
-                    SubagentStatus.FAILED,
+                    _SubagentGraphStatus.FAILED,
                     error=llm_error,
                     token_usage_records=token_usage_records,
                 )
@@ -1316,11 +1025,20 @@ class SubagentExecutor:
                 # (token_capped / loop_capped) for the lead (#3875 Phase 2).
                 stop_reason = self._consume_guard_stop_reason()
                 result.try_set_terminal(
-                    SubagentStatus.COMPLETED,
+                    _SubagentGraphStatus.COMPLETED,
                     result=final_result,
                     stop_reason=stop_reason,
                     token_usage_records=token_usage_records,
                 )
+
+        except asyncio.CancelledError:
+            # Lifecycle cancellation must propagate until the actual graph
+            # coroutine has unwound.  Publish the collector's last cumulative
+            # snapshot first; the lifecycle marks it final only after its
+            # graph and inherited-operation quiescence receipts arrive.
+            if collector is not None:
+                result.update_token_usage_records(collector.snapshot_records())
+            raise
 
         except GraphRecursionError:
             # ``recursion_limit`` on run_config == ``self.config.max_turns``
@@ -1346,7 +1064,7 @@ class SubagentExecutor:
             llm_error = _extract_llm_error_fallback(final_state)
             if llm_error is not None:
                 result.try_set_terminal(
-                    SubagentStatus.FAILED,
+                    _SubagentGraphStatus.FAILED,
                     error=llm_error,
                     stop_reason=stop_reason,
                     token_usage_records=records,
@@ -1362,14 +1080,14 @@ class SubagentExecutor:
                             break
                 if usable_partial is not None:
                     result.try_set_terminal(
-                        SubagentStatus.COMPLETED,
+                        _SubagentGraphStatus.COMPLETED,
                         result=usable_partial,
                         stop_reason=stop_reason,
                         token_usage_records=records,
                     )
                 else:
                     result.try_set_terminal(
-                        SubagentStatus.FAILED,
+                        _SubagentGraphStatus.FAILED,
                         error=f"Reached max_turns={max_turns}",
                         stop_reason=stop_reason,
                         token_usage_records=records,
@@ -1383,312 +1101,9 @@ class SubagentExecutor:
                 error=exc,
             )
             result.try_set_terminal(
-                SubagentStatus.FAILED,
+                _SubagentGraphStatus.FAILED,
                 error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
                 token_usage_records=collector.snapshot_records() if collector is not None else None,
             )
 
         return result
-
-    def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
-        """Execute the subagent on the persistent isolated event loop.
-
-        This method is used by the sync ``execute()`` path when the caller is
-        already running inside an event loop. Because ``execute()`` is a sync
-        API, this path blocks the caller while the actual coroutine runs on the
-        long-lived isolated loop. Reusing that loop keeps shared async clients
-        from being tied to a short-lived loop that gets closed per execution.
-        """
-        future: Future[SubagentResult] | None = None
-        parent_context = _copy_detached_subagent_context()
-        try:
-            future = _submit_to_isolated_loop_in_context(
-                parent_context,
-                lambda: self._aexecute(task, result_holder),
-            )
-            return future.result(timeout=self.config.timeout_seconds)
-        except FuturesTimeoutError:
-            if result_holder is not None:
-                result_holder.cancel_event.set()
-            if future is not None:
-                future.cancel()
-            raise
-        except Exception:
-            if future is None:
-                logger.debug(
-                    "[trace=%s] Failed to submit subagent %s to the isolated event loop",
-                    self.trace_id,
-                    self.config.name,
-                )
-            else:
-                logger.debug(
-                    "[trace=%s] Subagent %s failed while executing on the isolated event loop",
-                    self.trace_id,
-                    self.config.name,
-                )
-            raise
-
-    def execute(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
-        """Execute a task synchronously (wrapper around async execution).
-
-        This method runs the async execution in a new event loop, allowing
-        asynchronous tools (like MCP tools) to be used within the thread pool.
-
-        When called from within an already-running event loop (e.g., when the
-        parent agent is async), this method synchronously waits on the
-        persistent isolated loop to avoid event loop conflicts with shared
-        async primitives like httpx clients.
-
-        Args:
-            task: The task description for the subagent.
-            result_holder: Optional pre-created result object to update during execution.
-
-        Returns:
-            SubagentResult with the execution result.
-        """
-        try:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                loop = None
-
-            if loop is not None and loop.is_running():
-                logger.debug(f"[trace={self.trace_id}] Subagent {self.config.name} detected running event loop, using isolated loop")
-                return self._execute_in_isolated_loop(task, result_holder)
-
-            # Standard path: no running event loop. Run in the same detached
-            # request context as the isolated-loop paths so a synchronous
-            # caller cannot leak raw child frames through the lead writer.
-            detached_context = _copy_detached_subagent_context()
-            return detached_context.run(lambda: asyncio.run(self._aexecute(task, result_holder)))
-        except Exception as exc:
-            _log_subagent_internal_exception(
-                event="sync_execution",
-                trace_id=self.trace_id,
-                subagent_name=self.config.name,
-                error=exc,
-            )
-            # Create a result with error if we don't have one
-            if result_holder is not None:
-                result = result_holder
-            else:
-                result = SubagentResult(
-                    task_id=str(uuid.uuid4())[:8],
-                    trace_id=self.trace_id,
-                    status=SubagentStatus.RUNNING,
-                )
-            result.try_set_terminal(
-                SubagentStatus.FAILED,
-                error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
-            )
-            return result
-
-    async def _run_background_execution(
-        self,
-        task: str,
-        result: SubagentResult,
-    ) -> SubagentResult:
-        """Run one background execution behind the isolated-loop backpressure gate.
-
-        Queue time is deliberately outside ``asyncio.timeout``: a task receives
-        its complete configured execution budget only after it acquires capacity
-        and transitions from PENDING to RUNNING.
-        """
-
-        gate = _get_isolated_subagent_execution_gate()
-        acquired = False
-        try:
-            await gate.acquire()
-            acquired = True
-            if result.cancel_event.is_set():
-                result.try_set_terminal(
-                    SubagentStatus.CANCELLED,
-                    error="Cancelled by user",
-                )
-                return result
-
-            result.mark_running()
-            try:
-                async with asyncio.timeout(self.config.timeout_seconds):
-                    return await self._aexecute(task, result)
-            except TimeoutError:
-                logger.error(
-                    "[trace=%s] Subagent %s execution timed out after %ss",
-                    self.trace_id,
-                    self.config.name,
-                    self.config.timeout_seconds,
-                )
-                result.cancel_event.set()
-                result.try_set_terminal(
-                    SubagentStatus.TIMED_OUT,
-                    error=f"Execution timed out after {self.config.timeout_seconds} seconds",
-                )
-                return result
-        except asyncio.CancelledError:
-            result.cancel_event.set()
-            result.try_set_terminal(
-                SubagentStatus.CANCELLED,
-                error="Cancelled by user",
-            )
-            return result
-        except Exception as exc:
-            _log_subagent_internal_exception(
-                event="background_execution",
-                trace_id=self.trace_id,
-                subagent_name=self.config.name,
-                error=exc,
-            )
-            result.try_set_terminal(
-                SubagentStatus.FAILED,
-                error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
-            )
-            return result
-        finally:
-            if acquired:
-                gate.release()
-
-    def execute_async(self, task: str, task_id: str | None = None) -> str:
-        """Start a task execution in the background.
-
-        Args:
-            task: The task description for the subagent.
-            task_id: Optional task ID to use. If not provided, a random UUID will be generated.
-
-        Returns:
-            Task ID that can be used to check status later.
-        """
-        # Use provided task_id or generate a new one
-        if task_id is None:
-            task_id = str(uuid.uuid4())[:8]
-
-        # Create initial pending result
-        result = SubagentResult(
-            task_id=task_id,
-            trace_id=self.trace_id,
-            status=SubagentStatus.PENDING,
-        )
-
-        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution, task_id={task_id}, timeout={self.config.timeout_seconds}s")
-
-        with _background_tasks_lock:
-            _background_tasks[task_id] = result
-
-        parent_context = _copy_detached_subagent_context()
-        submission_admitted = False
-        try:
-            try:
-                _begin_isolated_subagent_submission()
-                submission_admitted = True
-                execution_future = _submit_to_isolated_loop_in_context(
-                    parent_context,
-                    lambda: self._run_background_execution(task, result),
-                )
-            except Exception as exc:
-                _log_subagent_internal_exception(
-                    event="background_submission",
-                    trace_id=self.trace_id,
-                    subagent_name=self.config.name,
-                    error=exc,
-                )
-                result.try_set_terminal(
-                    SubagentStatus.FAILED,
-                    error=SUBAGENT_EXECUTION_FAILED_ERROR_CODE,
-                )
-                return task_id
-
-            with _background_tasks_lock:
-                _background_task_futures[task_id] = execution_future
-                cancel_requested_during_submission = result.cancel_event.is_set()
-            execution_future.add_done_callback(
-                lambda future: _background_execution_done(
-                    task_id,
-                    result,
-                    future,
-                )
-            )
-            if cancel_requested_during_submission:
-                execution_future.cancel()
-        finally:
-            if submission_admitted:
-                _finish_isolated_subagent_submission()
-        return task_id
-
-
-MAX_CONCURRENT_SUBAGENTS = 3
-
-
-def request_cancel_background_task(task_id: str) -> None:
-    """Signal a running background task to stop.
-
-    Sets the cooperative cancel event and cancels the isolated-loop future.
-    The direct future cancellation interrupts queue waits and long async tool
-    calls; the event remains the fallback for code at an iteration boundary.
-
-    Args:
-        task_id: The task ID to cancel.
-    """
-    future = None
-    with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
-        if result is not None:
-            result.cancel_event.set()
-            future = _background_task_futures.get(task_id)
-    if result is not None:
-        if future is not None:
-            future.cancel()
-        logger.info("Requested cancellation for background task %s", task_id)
-
-
-def get_background_task_result(task_id: str) -> SubagentResult | None:
-    """Get the result of a background task.
-
-    Args:
-        task_id: The task ID returned by execute_async.
-
-    Returns:
-        SubagentResult if found, None otherwise.
-    """
-    with _background_tasks_lock:
-        return _background_tasks.get(task_id)
-
-
-def list_background_tasks() -> list[SubagentResult]:
-    """List all background tasks.
-
-    Returns:
-        List of all SubagentResult instances.
-    """
-    with _background_tasks_lock:
-        return list(_background_tasks.values())
-
-
-def cleanup_background_task(task_id: str) -> None:
-    """Remove a completed task from background tasks.
-
-    Should be called by task_tool after it finishes polling and returns the result.
-    This prevents memory leaks from accumulated completed tasks.
-
-    Only removes tasks that are in a terminal state (COMPLETED/FAILED/TIMED_OUT)
-    to avoid race conditions with the background executor still updating the task entry.
-
-    Args:
-        task_id: The task ID to remove.
-    """
-    with _background_tasks_lock:
-        result = _background_tasks.get(task_id)
-        if result is None:
-            # Nothing to clean up; may have been removed already.
-            logger.debug("Requested cleanup for unknown background task %s", task_id)
-            return
-
-        # Only clean up tasks that are in a terminal state to avoid races with
-        # the background executor still updating the task entry.
-        if result.status.is_terminal or result.completed_at is not None:
-            del _background_tasks[task_id]
-            logger.debug("Cleaned up background task: %s", task_id)
-        else:
-            logger.debug(
-                "Skipping cleanup for non-terminal background task %s (status=%s)",
-                task_id,
-                result.status.value if hasattr(result.status, "value") else result.status,
-            )

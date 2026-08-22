@@ -6,6 +6,7 @@ import {
   createAgentBuilderSession,
   finalizeAgentBuilderSession,
   getAgentBuilderSession,
+  listAllAgentBuilderActivities,
   listAllAgentBuilderSessions,
   listAgentBuilderSessions,
   mergeAgentBuilderActivities,
@@ -102,6 +103,68 @@ describe("Agent Builder API", () => {
         ],
       ).map((activity) => activity.seq),
     ).toEqual(["9007199254740993", "9007199254740994"]);
+
+    const terminal = {
+      ...shared,
+      seq: "9007199254740995",
+      kind: "turn_terminal" as const,
+      payload: { status: "completed" as const },
+    };
+    expect(
+      mergeAgentBuilderActivities(
+        [
+          { ...shared, seq: "9007199254740993", kind: "turn_accepted" },
+          terminal,
+        ],
+        [{ ...shared, seq: "9007199254740994", kind: "attempt_started" }],
+      ).at(-1),
+    ).toEqual(terminal);
+  });
+
+  test("paginates durable Activity replay until the terminal event is included", async () => {
+    const operationId = "44444444-4444-4444-8444-444444444444";
+    const firstPage = Array.from({ length: 2_000 }, (_, index) => ({
+      seq: String(index + 1),
+      operation_id: operationId,
+      kind: index === 0 ? ("turn_accepted" as const) : ("reasoning" as const),
+      attempt: index === 0 ? null : (1 as const),
+      payload: index === 0 ? {} : { text: `delta-${index}` },
+      created_at: NOW,
+    }));
+    const terminal = {
+      seq: "2001",
+      operation_id: operationId,
+      kind: "turn_terminal" as const,
+      attempt: null,
+      payload: { status: "completed" as const, duration_ms: 80_000 },
+      created_at: NOW,
+    };
+    const requestedCursors: string[] = [];
+    rs.stubGlobal("document", { cookie: "csrf_token=builder-token" });
+    rs.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      const rawUrl =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      const url = new URL(rawUrl, "http://frontend.test");
+      const cursor = url.searchParams.get("after_seq") ?? "0";
+      requestedCursors.push(cursor);
+      return Response.json({
+        data: cursor === "0" ? firstPage : [terminal],
+        request_id: `activity-page-${cursor}`,
+      });
+    });
+
+    const activities = await listAllAgentBuilderActivities(
+      PROJECT_ID,
+      SESSION_ID,
+    );
+
+    expect(requestedCursors).toEqual(["0", "2000"]);
+    expect(activities).toHaveLength(2_001);
+    expect(activities.at(-1)).toEqual(terminal);
   });
 
   test("requests contract version 3 on every Agent Builder endpoint", async () => {

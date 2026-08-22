@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   AdminSystemSettingsStateView,
+  collectDirtySystemSettingsDestinations,
+  dirtySystemSettingsDestinations,
   formatSystemDefaultModelOption,
+  isSameDocumentNavigation,
   isSystemSettingsSaveDisabled,
   MemoryDocumentSectionsEditor,
   moveMemoryDocumentSection,
@@ -22,6 +25,12 @@ const MISSING_MODEL_ID = "00000000-0000-4000-8000-000000000207";
 function renderChinese(node: React.ReactNode): string {
   return renderToStaticMarkup(
     <I18nProvider initialLocale="zh-CN">{node}</I18nProvider>,
+  );
+}
+
+function renderEnglish(node: React.ReactNode): string {
+  return renderToStaticMarkup(
+    <I18nProvider initialLocale="en-US">{node}</I18nProvider>,
   );
 }
 
@@ -159,6 +168,56 @@ function catalog(): SystemSettingsCatalog {
 }
 
 describe("admin Memory document settings", () => {
+  test("treats a same-page hash target as navigation within the current document", () => {
+    expect(
+      isSameDocumentNavigation(
+        "https://actweave.test/admin/settings/system",
+        "https://actweave.test/admin/settings/system#admin-main",
+      ),
+    ).toBe(true);
+    expect(
+      isSameDocumentNavigation(
+        "https://actweave.test/admin/settings/system?group=memory",
+        "https://actweave.test/admin/settings/system?group=runtime#admin-main",
+      ),
+    ).toBe(false);
+    expect(
+      isSameDocumentNavigation(
+        "https://actweave.test/admin/settings/system",
+        "https://actweave.test/admin/settings/models",
+      ),
+    ).toBe(false);
+  });
+
+  test("identifies the exact navigation destinations with retained drafts", () => {
+    const data = catalog();
+    const runtimeBase = data.sections.agent_runtime.value;
+    const runtimeDraft = structuredClone(runtimeBase);
+    runtimeDraft.token_budget.max_tokens += 1_000;
+    runtimeDraft.title.max_chars += 1;
+
+    expect(
+      dirtySystemSettingsDestinations(
+        "agent_runtime",
+        runtimeBase,
+        runtimeDraft,
+      ),
+    ).toEqual(["run-limits", "assistant-experience"]);
+    expect(
+      dirtySystemSettingsDestinations(
+        "memory_document",
+        data.sections.memory_document.value,
+        { sections: ["用户偏好", "项目背景", "长期目标"] },
+      ),
+    ).toEqual(["memory"]);
+    expect(
+      collectDirtySystemSettingsDestinations({
+        agent_runtime: ["run-limits", "assistant-experience"],
+        memory_document: ["memory"],
+      }),
+    ).toEqual(new Set(["run-limits", "assistant-experience", "memory"]));
+  });
+
   test("renders accessible ordered controls and moves titles without mutating the source", () => {
     const value = { sections: ["用户偏好", "项目背景", "长期目标"] };
     const moved = moveMemoryDocumentSection(value, 1, -1);
@@ -231,6 +290,25 @@ describe("admin Memory document settings", () => {
     expect(html).toContain(
       "仅影响新建文档；已有文档继续使用创建时冻结的章节结构",
     );
+  });
+
+  test("localizes Memory minute units in English", () => {
+    const html = renderEnglish(
+      <AdminSystemSettingsStateView
+        activeModels={[]}
+        lastResults={{}}
+        modelsStatus="ready"
+        onRetry={rs.fn()}
+        onSave={rs.fn(async () => null)}
+        pendingSection={null}
+        retrying={false}
+        sectionErrors={{}}
+        state={{ status: "ready", data: catalog() }}
+      />,
+    );
+
+    expect(html).toContain("minutes");
+    expect(html).not.toContain("分钟");
   });
 
   test("offers every vision-capable model and ignores the legacy Bridge flag", () => {

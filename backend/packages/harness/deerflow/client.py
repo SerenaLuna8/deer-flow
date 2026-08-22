@@ -58,6 +58,12 @@ from deerflow.runtime.checkpoint_state import CheckpointStateAccessor
 from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_state, goal_thread_lock, read_thread_goal, write_thread_goal
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    EmbeddedParentExecutionProfile,
+    ParentExecutionBindingFactory,
+    bind_task_tool_in_tools,
+)
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
 from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
@@ -297,49 +303,74 @@ class DeerFlowClient:
         if skill_setup.describe_skill_tool:
             final_tools.append(skill_setup.describe_skill_tool)
 
-        kwargs: dict[str, Any] = {
-            # attach_tracing=False because ``stream()`` injects tracing
-            # callbacks at the graph invocation root so a single embedded run
-            # produces one trace with correct session_id / user_id propagation.
-            # Attaching them again on the model would emit duplicate spans.
-            "model": ModelRuntime(app_config=self._app_config).build_chat_model(
-                profile=ModelRuntimeProfile.AGENT_GRAPH,
+        # attach_tracing=False because ``stream()`` injects tracing callbacks
+        # at the graph invocation root. Attaching them again on the model would
+        # emit duplicate spans.
+        lead_model = ModelRuntime(app_config=self._app_config).build_chat_model(
+            profile=ModelRuntimeProfile.AGENT_GRAPH,
+            model_name=model_name,
+            thinking_enabled=thinking_enabled,
+        )
+        effective_middleware = normalize_middleware_state_schemas(
+            build_middlewares(
+                config,
                 model_name=model_name,
-                thinking_enabled=thinking_enabled,
-            ),
-            "tools": final_tools,
-            "middleware": normalize_middleware_state_schemas(
-                build_middlewares(
-                    config,
-                    model_name=model_name,
-                    agent_name=self._agent_name,
-                    available_skills=self._available_skills,
-                    custom_middlewares=self._middlewares,
-                    app_config=self._app_config,
-                    deferred_setup=deferred_setup,
-                    mcp_routing_middleware=mcp_routing_middleware,
-                    user_id=get_effective_user_id(),
-                ),
-                self._checkpoint_channel_mode,
-                self._checkpoint_snapshot_frequency,
-            ),
-            "system_prompt": apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
                 agent_name=self._agent_name,
                 available_skills=self._available_skills,
+                custom_middlewares=self._middlewares,
                 app_config=self._app_config,
-                deferred_names=deferred_setup.deferred_names,
-                mcp_routing_hints_section=mcp_routing_hints_section,
+                deferred_setup=deferred_setup,
+                mcp_routing_middleware=mcp_routing_middleware,
                 user_id=get_effective_user_id(),
-                skill_names=skill_setup.skill_names or None,
             ),
-            "state_schema": get_thread_state_schema(
-                self._checkpoint_channel_mode,
-                self._checkpoint_snapshot_frequency,
-            ),
-        }
+            self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
+        )
+        system_prompt = apply_prompt_template(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=self._agent_name,
+            available_skills=self._available_skills,
+            app_config=self._app_config,
+            deferred_names=deferred_setup.deferred_names,
+            mcp_routing_hints_section=mcp_routing_hints_section,
+            user_id=get_effective_user_id(),
+            skill_names=skill_setup.skill_names or None,
+        )
+        state_schema = get_thread_state_schema(
+            self._checkpoint_channel_mode,
+            self._checkpoint_snapshot_frequency,
+        )
         checkpointer = self._checkpointer
+        binding_factory = ParentExecutionBindingFactory(
+            EmbeddedParentExecutionProfile(
+                graph=AgentGraphExecutionInputs(
+                    model=lead_model,
+                    tools=tuple(final_tools),
+                    middleware=tuple(effective_middleware),
+                    system_prompt=system_prompt,
+                    state_schema=state_schema,
+                    checkpointer=checkpointer,
+                    name=self._agent_name,
+                ),
+                app_config=self._app_config,
+                asset_context=self._asset_context,
+                model_name=model_name,
+                thinking_enabled=bool(thinking_enabled),
+                subagent_enabled=bool(subagent_enabled),
+                plan_mode=bool(cfg.get("is_plan_mode", self._plan_mode)),
+                agent_name=self._agent_name,
+                available_skills=(tuple(sorted(self._available_skills)) if self._available_skills is not None else None),
+            )
+        )
+        final_tools = bind_task_tool_in_tools(final_tools, binding_factory)
+        kwargs: dict[str, Any] = {
+            "model": lead_model,
+            "tools": final_tools,
+            "middleware": effective_middleware,
+            "system_prompt": system_prompt,
+            "state_schema": state_schema,
+        }
         if checkpointer is not None:
             kwargs["checkpointer"] = checkpointer
 

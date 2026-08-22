@@ -10,6 +10,7 @@ import { I18nProvider } from "@/core/i18n/context";
 import {
   CURRENT_UPLOAD_UNAVAILABLE,
   LLM_PROVIDER_UNAVAILABLE,
+  LOOP_SAFETY_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   type ProjectRunFailureCode,
@@ -137,6 +138,27 @@ describe("RunFailureAlert", () => {
     expect(english).toContain(
       "Check the Worker network or proxy configuration",
     );
+  });
+
+  test("renders the loop safety limit as a partial-result failure and keeps input restore", () => {
+    const chinese = render(LOOP_SAFETY_LIMIT, "zh-CN", false, true);
+    const english = render(LOOP_SAFETY_LIMIT, "en-US", false, true);
+
+    expect(chinese).toContain(`data-run-failure-code="${LOOP_SAFETY_LIMIT}"`);
+    expect(chinese).toContain("重复操作触发安全上限");
+    expect(chinese).toContain("本次运行已停止");
+    expect(chinese).toContain("已有回答或文件属于部分结果");
+    expect(chinese).toContain("本次失败原因是循环安全限制");
+    expect(chinese).toContain("恢复到输入框");
+    expect(chinese).not.toContain("Agent 未能生成回复");
+    expect(english).toContain("Repeated operations triggered the safety limit");
+    expect(english).toContain("This Run has stopped");
+    expect(english).toContain(
+      "Any existing answer or files are partial results",
+    );
+    expect(english).toContain("the failure reason is the loop safety limit");
+    expect(english).toContain("Restore to composer");
+    expect(english).not.toContain("could not produce a response");
   });
 
   test("disables retry without Run authority or while a Run is active", () => {

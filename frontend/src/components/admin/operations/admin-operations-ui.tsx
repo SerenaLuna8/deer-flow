@@ -10,9 +10,20 @@ import { useState, type ComponentProps, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAdminProjects } from "@/core/admin-operations/api";
+import type { AdminProjectPage } from "@/core/admin-operations/types";
 import { cn } from "@/lib/utils";
 
 export type StatusTone = "danger" | "healthy" | "neutral" | "warning";
+
+export function shortAdminProjectId(projectId: string): string {
+  return projectId.slice(0, 8);
+}
+
+export function adminProjectOptionLabel(
+  project: AdminProjectPage["items"][number],
+): string {
+  return `${project.display_name} · ${project.slug} · ${shortAdminProjectId(project.project_id)}`;
+}
 
 const HEALTHY_STATUSES = new Set([
   "active",
@@ -378,7 +389,7 @@ export function AdminProjectFilterSelect({
         ) : null}
         {(projects.data?.items ?? []).map((project) => (
           <option key={project.project_id} value={project.project_id}>
-            {project.display_name}
+            {adminProjectOptionLabel(project)}
           </option>
         ))}
       </select>

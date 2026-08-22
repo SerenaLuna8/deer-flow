@@ -207,4 +207,32 @@ describe("completed Agent Builder workspace", () => {
 
     expect(header).not.toContain("Automatically saved; continue later");
   });
+
+  test("keeps the conversation compact while the blueprint opens in its side panel", () => {
+    const html = renderCompletedWorkspace();
+    const header = workspaceHeader(html);
+    const conversationStart = html.indexOf(
+      "data-agent-builder-conversation-surface",
+    );
+    const blueprintStart = html.indexOf("data-agent-builder-blueprint-surface");
+
+    expect(header).toContain('aria-label="Open Agent blueprint"');
+    expect(conversationStart).toBeGreaterThanOrEqual(0);
+    expect(blueprintStart).toBeGreaterThan(conversationStart);
+
+    const conversation = html.slice(conversationStart, blueprintStart);
+    const sidePanel = html.slice(blueprintStart);
+
+    expect(conversation).toContain(
+      'data-testid="agent-builder-blueprint-summary"',
+    );
+    expect(conversation).not.toContain("Runtime configuration");
+    expect(conversation).not.toContain('id="agent-builder-commit-name"');
+    expect(sidePanel).toContain('data-testid="agent-builder-blueprint-panel"');
+    expect(sidePanel).toContain("Runtime configuration");
+    expect(sidePanel).toContain('aria-label="Close Agent blueprint"');
+    expect(html).toContain(
+      "lg:grid-cols-[minmax(20rem,0.9fr)_minmax(28rem,1.1fr)]",
+    );
+  });
 });

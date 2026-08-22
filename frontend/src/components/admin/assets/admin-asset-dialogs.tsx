@@ -12,6 +12,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/core/i18n/hooks";
+import type { Translations } from "@/core/i18n/locales/types";
 import type {
   AssetSummary,
   McpVersionInput,
@@ -21,6 +23,25 @@ import type {
 type VersionedKind = "skills" | "mcp-servers";
 
 export type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
+
+export function createVersionDialogCopy(
+  t: Translations,
+  kind: VersionedKind,
+  assetName: string,
+) {
+  const copy = t.adminAssets.dialogs.authoring;
+  return {
+    title: copy.title(assetName),
+    description:
+      kind === "skills" ? copy.skillDescription : copy.mcpDescription,
+    fieldDescription: copy.description,
+    secretSlots: copy.secretSlots,
+    invalidSecretSlots: copy.invalidSecretSlots,
+    cancel: copy.cancel,
+    saving: copy.saving,
+    save: copy.save,
+  };
+}
 
 function encodeBase64(value: string): string {
   const bytes = new TextEncoder().encode(value);
@@ -53,6 +74,8 @@ export function CreateVersionDialog({
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: VersionAuthoringInput) => void;
 }) {
+  const { t } = useI18n();
+  const copy = createVersionDialogCopy(t, kind, asset.display_name);
   const [validationError, setValidationError] = useState<string | null>(null);
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
@@ -92,7 +115,7 @@ export function CreateVersionDialog({
         expected_asset_version: asset.revision,
       });
     } catch {
-      setValidationError("秘密槽位必须是有效的 JSON 数组。");
+      setValidationError(copy.invalidSecretSlots);
     }
   }
 
@@ -100,12 +123,8 @@ export function CreateVersionDialog({
     <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>为 {asset.display_name} 创建版本</DialogTitle>
-          <DialogDescription>
-            {kind === "skills"
-              ? "System Skill v1 不允许升级；Project Skill 可保存新的 Candidate。"
-              : "MCP 定义只声明秘密槽位，不在版本定义中保存秘密值。"}
-          </DialogDescription>
+          <DialogTitle>{copy.title}</DialogTitle>
+          <DialogDescription>{copy.description}</DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={submit}>
           {kind === "skills" ? (
@@ -121,13 +140,16 @@ export function CreateVersionDialog({
           ) : (
             <>
               <label className="grid gap-2 text-sm">
-                说明
+                {copy.fieldDescription}
                 <Input name="description" />
               </label>
               <div className="grid gap-4 sm:grid-cols-[10rem_1fr]">
                 <label className="grid gap-2 text-sm">
                   Transport
-                  <select name="transport" className="border-input bg-background h-9 rounded-md border px-3 text-sm">
+                  <select
+                    name="transport"
+                    className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+                  >
                     <option value="http">HTTP</option>
                     <option value="sse">SSE</option>
                   </select>
@@ -138,7 +160,7 @@ export function CreateVersionDialog({
                 </label>
               </div>
               <label className="grid gap-2 text-sm">
-                秘密槽位 JSON
+                {copy.secretSlots}
                 <textarea
                   name="secret_slots"
                   className="border-input bg-background min-h-36 rounded-md border p-3 font-mono text-sm"
@@ -153,11 +175,21 @@ export function CreateVersionDialog({
             </p>
           ) : null}
           <DialogFooter>
-            <Button type="button" variant="outline" disabled={pending} onClick={() => onOpenChange(false)}>
-              取消
+            <Button
+              type="button"
+              variant="outline"
+              disabled={pending}
+              onClick={() => onOpenChange(false)}
+            >
+              {copy.cancel}
             </Button>
-            <Button type="submit" disabled={pending || (kind === "skills" && asset.scope === "system")}>
-              {pending ? "正在保存…" : "保存版本"}
+            <Button
+              type="submit"
+              disabled={
+                pending || (kind === "skills" && asset.scope === "system")
+              }
+            >
+              {pending ? copy.saving : copy.save}
             </Button>
           </DialogFooter>
         </form>

@@ -406,7 +406,11 @@ export function PrivacyCenterPage({ accountId }: { accountId: string }) {
         </Button>
       </header>
       <WorkspaceBody className="overflow-y-auto">
-        <main className="mx-auto w-full max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
+        <main
+          id="workspace-main"
+          tabIndex={-1}
+          className="mx-auto w-full max-w-6xl px-4 py-8 outline-none sm:px-6 lg:px-8"
+        >
           <div className="mb-8 max-w-3xl">
             <div className="text-primary mb-2 flex items-center gap-2 text-sm font-medium">
               <FolderLockIcon aria-hidden className="size-5" />

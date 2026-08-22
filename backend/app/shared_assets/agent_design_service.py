@@ -52,7 +52,6 @@ from app.shared_assets.agent_design_generation import (
     CandidateResult,
     ClarificationQuestion,
     NeedsClarificationResult,
-    contains_agent_design_secret,
 )
 from app.shared_assets.agent_design_profile import (
     AgentDesignGenerationProfile,
@@ -74,7 +73,6 @@ from app.shared_assets.agent_service import (
 from app.shared_assets.errors import (
     AgentDesignConflictUnresolved,
     AgentDesignGenerationProfileStale,
-    AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
     AssetConflict,
@@ -975,11 +973,7 @@ class AgentDesignService:
                     effective_slug = command.slug or row.slug
                     if not _valid_agent_design_slug(effective_slug):
                         raise AssetValidationFailed(context.request_id)
-                    if contains_agent_design_secret(effective_slug):
-                        raise AgentDesignSecretDetected(context.request_id)
                     blueprint = self._blueprint_from_json(row.blueprint_json)
-                    if contains_agent_design_secret(self._jsonable(blueprint)):
-                        raise AgentDesignSecretDetected(context.request_id)
                     if await repository.project_agent_slug_exists(
                         context,
                         effective_slug,
@@ -1110,11 +1104,6 @@ class AgentDesignService:
             effective_slug = command.slug or row.slug
             if not _valid_agent_design_slug(effective_slug):
                 raise AssetValidationFailed(context.request_id)
-            if contains_agent_design_secret(effective_slug):
-                raise AgentDesignSecretDetected(context.request_id)
-            blueprint = self._blueprint_from_json(row.blueprint_json)
-            if contains_agent_design_secret(self._jsonable(blueprint)):
-                raise AgentDesignSecretDetected(context.request_id)
             if await repository.project_agent_slug_exists(
                 context,
                 effective_slug,
@@ -2436,8 +2425,6 @@ class AgentDesignService:
         )
         if not _valid_agent_design_slug(slug) or not display_name or len(display_name) > 120:
             raise AssetValidationFailed(context.request_id)
-        if contains_agent_design_secret((slug, display_name)):
-            raise AgentDesignSecretDetected(context.request_id)
         return CreateAgentDesignSession(
             slug=slug,
             display_name=display_name,
@@ -2532,8 +2519,6 @@ class AgentDesignService:
             )
         else:
             raise AssetValidationFailed(context.request_id)
-        if contains_agent_design_secret(cls._jsonable(normalized)):
-            raise AgentDesignSecretDetected(context.request_id)
         return SubmitAgentDesignTurn(
             input=normalized,
             expected_revision=command.expected_revision,
@@ -2597,8 +2582,6 @@ class AgentDesignService:
             slug = slug.strip()
             if not _valid_agent_design_slug(slug):
                 raise AssetValidationFailed(context.request_id)
-            if contains_agent_design_secret(slug):
-                raise AgentDesignSecretDetected(context.request_id)
         return CommitAgentDesignSession(
             expected_revision=command.expected_revision,
             expected_blueprint_checksum=command.expected_blueprint_checksum,
@@ -3343,11 +3326,6 @@ class AgentDesignService:
             "AGENT_DESIGN_UNDECLARED_CAPABILITY",
         }:
             return "模型返回的 Agent 设定无效，请调整描述后重试。"
-        if code in {
-            "AGENT_DESIGN_SECRET_DETECTED",
-            "AGENT_DESIGN_UNSAFE_MODEL_OUTPUT",
-        }:
-            return "Agent 设定包含不安全或敏感内容，请修改后重试。"
         return "Agent 设定生成暂时不可用，请稍后重试。"
 
     @staticmethod

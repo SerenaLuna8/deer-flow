@@ -2,6 +2,11 @@
 
 from importlib import import_module
 
+from .execution_contracts import (
+    RunAgentOutcome,
+    RunAgentResourceOwnership,
+    RunAgentUsageSnapshot,
+)
 from .manager import ConflictError, RunManager, RunRecord, UnsupportedStrategyError
 from .schemas import DisconnectMode, RunStatus
 
@@ -21,6 +26,9 @@ __all__ = [
     "RunContext",
     "RunManager",
     "RunRecord",
+    "RunAgentOutcome",
+    "RunAgentResourceOwnership",
+    "RunAgentUsageSnapshot",
     "RunStatus",
     "UnsupportedStrategyError",
     "run_agent",

@@ -7,6 +7,7 @@ import { useAgentMcpDependencyRuntime } from "@/components/projects/assets/use-m
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
 import { AutomationApiError } from "@/core/project-automations/api";
 import {
   useCreateProjectAutomation,
@@ -161,6 +162,7 @@ function AutomationUnavailableState({
 
 export function ProjectAutomationsPage({ project }: { project: Project }) {
   const { user } = useAuth();
+  const { t } = useI18n();
   const searchParams = useSearchParams();
   const rawThreadId = searchParams.get("thread_id");
   const threadId =
@@ -219,9 +221,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
       enabled: listEnabled && permissions.canExecute && Boolean(user),
     },
   );
-  const agentItems = executableProjectAgents(
-    agentsQuery.data,
-  );
+  const agentItems = executableProjectAgents(agentsQuery.data);
   const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
     accountId: user?.id ?? "",
     projectId: project.id,
@@ -286,7 +286,12 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
   }, [project.id]);
 
   if (!permissions.canRead) {
-    return <ProjectAccessDenied projectSlug={project.slug} area="自动化" />;
+    return (
+      <ProjectAccessDenied
+        projectSlug={project.slug}
+        area={t.project.automations}
+      />
+    );
   }
 
   const perform = async <T,>(

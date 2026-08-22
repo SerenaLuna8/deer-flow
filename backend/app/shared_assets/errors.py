@@ -86,13 +86,6 @@ class SkillFrontmatterSourceStale(AssetConflict):
     public_message = "Skill frontmatter source changed"
 
 
-class AgentDesignSecretDetected(AssetValidationFailed):
-    """Agent Builder input contained secret-like material."""
-
-    code = "AGENT_DESIGN_SECRET_DETECTED"
-    public_message = "Agent design input contains secret-like material"
-
-
 class AgentDesignSlugConflict(AssetConflict):
     """A project Agent already owns the requested Builder slug."""
 

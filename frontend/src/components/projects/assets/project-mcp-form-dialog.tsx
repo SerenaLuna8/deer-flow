@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { PlusIcon, Trash2Icon } from "lucide-react";
+import { useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -19,27 +20,47 @@ import type {
   ProjectMcpEditableConfigurationResponse,
   UpdateConfiguredMcpInput,
 } from "@/core/shared-assets";
+import {
+  isForbiddenProjectMcpHeaderName,
+  isValidProjectMcpCredentialName,
+} from "@/core/shared-assets/mcp-runtime";
 
-type AuthMode = "none" | "headers" | "query";
+type CredentialTarget = "headers" | "query";
 type ProjectMcpSecretSlot =
   ProjectMcpEditableConfigurationResponse["version"]["definition"]["secret_slots"][number];
 
-function projectMcpPayloadSchemasEqual(
-  left: ProjectMcpSecretSlot["payload_schema"],
-  right: ProjectMcpSecretSlot["payload_schema"],
-): boolean {
-  const groups = Object.keys(left);
-  return (
-    groups.length === Object.keys(right).length &&
-    groups.every((group) => {
-      const leftFields = left[group] ?? [];
-      const rightFields = right[group];
-      return (
-        rightFields?.length === leftFields.length &&
-        leftFields.every((field, index) => rightFields[index] === field)
-      );
-    })
-  );
+export function projectMcpCredentialCopy() {
+  return {
+    description:
+      "填写 MCP 服务地址；如服务需要 API Key 或 Token，可在下方配置访问凭证。凭证仅由当前 Project 加密保存。",
+    sectionTitle: "访问凭证（可选）",
+    listHelp: "每行对应一个请求参数，可同时配置请求头和 URL 查询参数。",
+    editValueHelp:
+      "仅当参数结构、Transport 和服务地址来源均未变化时，留空才会保留已有值；否则请重新填写全部凭证值。",
+    targetLabel: "发送位置",
+    targetOptions: {
+      headers: "请求头（Header）",
+      query: "URL 查询参数（Query）",
+    },
+    addLabel: "添加凭证参数",
+    fields: {
+      headers: {
+        itemLabel: "请求头",
+        nameLabel: "请求头名称",
+        namePlaceholder: "Authorization",
+        valueLabel: "凭证值",
+        help: "按 MCP 服务文档填写，例如 Authorization 或 X-API-Key。",
+      },
+      query: {
+        itemLabel: "查询参数",
+        nameLabel: "查询参数名称",
+        namePlaceholder: "api_key",
+        valueLabel: "凭证值",
+        help: "仅在 MCP 服务明确要求时使用，例如 api_key。请勿把凭证直接写入上方 URL。",
+      },
+    },
+    valueLabel: (field: string) => `${field} 的凭证值`,
+  } as const;
 }
 
 export function projectMcpSecretSlotsForSubmission(
@@ -49,12 +70,7 @@ export function projectMcpSecretSlotsForSubmission(
   const existingSingle = existing.length === 1 ? existing[0] : undefined;
   const editedSingle = edited.length === 1 ? edited[0] : undefined;
   const preservesHiddenSingleSlotFields =
-    existingSingle !== undefined &&
-    editedSingle?.name === existingSingle.name &&
-    projectMcpPayloadSchemasEqual(
-      existingSingle.payload_schema,
-      editedSingle.payload_schema,
-    );
+    existingSingle !== undefined && editedSingle?.name === existingSingle.name;
   const selected =
     existing.length > 1
       ? existing
@@ -88,61 +104,138 @@ export type ProjectMcpFormSubmission = {
   secret: { slotName: string; payload: McpSecretPayload } | null;
 };
 
+export type ProjectMcpCredentialFieldRow = {
+  id: number;
+  target: CredentialTarget;
+  name: string;
+};
+
 export function projectMcpSecretInputName(index: number): string {
   return `project_mcp_secret_${index}`;
+}
+
+function secretSlotSchemasMatch(
+  existing: readonly ProjectMcpSecretSlot[],
+  next: readonly ProjectMcpSecretSlot[],
+): boolean {
+  if (existing.length !== next.length) return false;
+  const nextByName = new Map(next.map((slot) => [slot.name, slot]));
+  return existing.every((slot) => {
+    const candidate = nextByName.get(slot.name);
+    if (candidate?.required !== slot.required) return false;
+    const groups = Object.keys(slot.payload_schema).sort();
+    if (
+      groups.length !== Object.keys(candidate.payload_schema).length ||
+      groups.some(
+        (group) =>
+          !Object.prototype.hasOwnProperty.call(
+            candidate.payload_schema,
+            group,
+          ) ||
+          (slot.payload_schema[group] ?? []).some(
+            (field, index) =>
+              field !== (candidate.payload_schema[group] ?? [])[index],
+          ) ||
+          (slot.payload_schema[group] ?? []).length !==
+            (candidate.payload_schema[group] ?? []).length,
+      )
+    ) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function endpointOrigin(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
 }
 
 export function buildProjectMcpFormSubmission({
   form,
   configuration,
-  mode,
-  slotName,
   fields,
   clearSecretValues,
 }: {
   form: FormData;
   configuration?: ProjectMcpEditableConfigurationResponse;
-  mode: AuthMode;
-  slotName: string;
-  fields: string[];
+  fields: readonly ProjectMcpCredentialFieldRow[];
   clearSecretValues: () => void;
 }): ProjectMcpFormSubmission {
-  const submittedSecretValues = consumeWriteOnlyInput(
-    Object.fromEntries(
-      fields.map((field, index) => [
-        field,
-        formString(form, projectMcpSecretInputName(index)),
-      ]),
-    ),
+  const preservesMultipleSecretSlots =
+    (configuration?.version.definition.secret_slots.length ?? 0) > 1;
+  const activeFields = preservesMultipleSecretSlots ? [] : fields;
+  const submittedFields = consumeWriteOnlyInput(
+    activeFields.map((field) => ({
+      target: field.target,
+      name: field.name.trim(),
+      value: formString(form, projectMcpSecretInputName(field.id)),
+    })),
     clearSecretValues,
   );
   const url = formString(form, "url").trim();
+  const slotName = configuration?.version.secret_slots[0]?.name ?? "auth";
   if (!url || url.includes("?") || url.includes("#")) {
     throw new Error("MCP URL 必须是没有 query 或 fragment 的有效地址。");
   }
-  if (mode !== "none" && (slotName.trim() === "" || fields.length === 0)) {
-    throw new Error("声明秘密时必须填写槽位名和至少一个字段名。");
+  if (submittedFields.some((field) => field.name === "")) {
+    throw new Error("请填写每一行的请求字段名称。");
   }
-  if (new Set(fields).size !== fields.length) {
-    throw new Error("秘密字段名不能重复。");
+  for (const field of submittedFields) {
+    if (isValidProjectMcpCredentialName(field.target, field.name)) continue;
+    if (
+      field.target === "headers" &&
+      isForbiddenProjectMcpHeaderName(field.name)
+    ) {
+      throw new Error(
+        "Host、Content-Length 等连接控制请求头不能用于凭证参数。",
+      );
+    }
+    throw new Error(
+      field.target === "headers"
+        ? "请求头名称格式无效，请按 MCP 服务文档填写（例如 Authorization 或 X-API-Key）。"
+        : "查询参数名称只能包含字母、数字、点、下划线、波浪线或连字符，且不超过 128 个字符。",
+    );
   }
-  const supplied = fields.filter(
-    (field) => (submittedSecretValues[field] ?? "") !== "",
-  );
-  if (supplied.length > 0 && supplied.length !== fields.length) {
-    throw new Error("替换一个槽位时必须填写该槽位的全部秘密字段。");
+  for (const target of ["headers", "query"] as const) {
+    const targetFieldNames = submittedFields
+      .filter((field) => field.target === target)
+      .map((field) => field.name);
+    const comparableFieldNames =
+      target === "headers"
+        ? targetFieldNames.map((field) => field.toLowerCase())
+        : targetFieldNames;
+    if (new Set(comparableFieldNames).size !== comparableFieldNames.length) {
+      throw new Error(
+        target === "headers"
+          ? "请求头名称不能重复。"
+          : "查询参数名称不能重复。",
+      );
+    }
+  }
+  const supplied = submittedFields.filter((field) => field.value !== "");
+  if (supplied.length > 0 && supplied.length !== submittedFields.length) {
+    throw new Error("请填写全部凭证值；若暂不配置，请全部留空。");
   }
   const editedSecretSlots: ProjectMcpSecretSlot[] =
-    mode === "none"
+    submittedFields.length === 0
       ? []
       : [
           {
-            name: slotName.trim(),
-            purpose:
-              mode === "headers"
-                ? "MCP request header secrets"
-                : "MCP query parameter secrets",
-            payload_schema: { [mode]: fields },
+            name: slotName,
+            purpose: "MCP request credentials",
+            payload_schema: Object.fromEntries(
+              (["headers", "query"] as const).flatMap((target) => {
+                const names = submittedFields
+                  .filter((field) => field.target === target)
+                  .map((field) => field.name);
+                return names.length > 0 ? [[target, names]] : [];
+              }),
+            ),
             required: true,
           },
         ];
@@ -150,9 +243,33 @@ export function buildProjectMcpFormSubmission({
     configuration?.version.definition.secret_slots ?? [],
     editedSecretSlots,
   );
+  const transport = formString(form, "transport", "http") as "http" | "sse";
+  if (
+    configuration &&
+    submittedFields.length > 0 &&
+    supplied.length === 0
+  ) {
+    if (
+      !secretSlotSchemasMatch(
+        configuration.version.definition.secret_slots,
+        secretSlots,
+      )
+    ) {
+      throw new Error("凭证参数已发生变化，请重新填写全部凭证值。");
+    }
+    if (
+      configuration.version.definition.transport !== transport ||
+      endpointOrigin(configuration.version.definition.url) !==
+        endpointOrigin(url)
+    ) {
+      throw new Error(
+        "MCP 服务地址或 Transport 已变化，请重新填写全部凭证值。",
+      );
+    }
+  }
   const definition = {
     description: formString(form, "description"),
-    transport: formString(form, "transport", "http") as "http" | "sse",
+    transport,
     command: null,
     args: [],
     url,
@@ -175,31 +292,33 @@ export function buildProjectMcpFormSubmission({
         slug: formString(form, "slug").trim(),
       };
   const secret =
-    mode !== "none" && supplied.length === fields.length
+    submittedFields.length > 0 && supplied.length === submittedFields.length
       ? {
-          slotName: slotName.trim(),
-          payload: {
-            [mode]: Object.fromEntries(
-              fields.map((field) => [field, submittedSecretValues[field]]),
-            ),
-          } as McpSecretPayload,
+          slotName,
+          payload: Object.fromEntries(
+            (["headers", "query"] as const).flatMap((target) => {
+              const values = submittedFields
+                .filter((field) => field.target === target)
+                .map((field) => [field.name, field.value]);
+              return values.length > 0
+                ? [[target, Object.fromEntries(values)]]
+                : [];
+            }),
+          ) as McpSecretPayload,
         }
       : null;
   return { input, secret };
 }
 
-function initialSecretShape(
+function initialCredentialFields(
   configuration?: ProjectMcpEditableConfigurationResponse,
-): { mode: AuthMode; slotName: string; fields: string[] } {
-  const slot = configuration?.version.secret_slots[0];
-  const group = Object.keys(slot?.payload_schema ?? {})[0];
-  const mode: AuthMode =
-    group === "headers" || group === "query" ? group : "none";
-  return {
-    mode,
-    slotName: slot?.name ?? "auth",
-    fields: mode === "none" ? [] : (slot?.payload_schema[mode] ?? []),
-  };
+): Omit<ProjectMcpCredentialFieldRow, "id">[] {
+  const slots = configuration?.version.secret_slots ?? [];
+  return (["headers", "query"] as const).flatMap((target) =>
+    slots.flatMap((slot) =>
+      (slot.payload_schema[target] ?? []).map((name) => ({ target, name })),
+    ),
+  );
 }
 
 export function ProjectMcpFormDialog({
@@ -218,19 +337,39 @@ export function ProjectMcpFormDialog({
   onSubmit: (submission: ProjectMcpFormSubmission) => void;
 }) {
   const initial = useMemo(
-    () => initialSecretShape(configuration),
+    () => initialCredentialFields(configuration),
     [configuration],
   );
-  const [mode, setMode] = useState<AuthMode>(initial.mode);
-  const [slotName, setSlotName] = useState(initial.slotName);
-  const [fieldsText, setFieldsText] = useState(initial.fields.join("\n"));
+  const credentialCopy = projectMcpCredentialCopy();
+  const formRef = useRef<HTMLFormElement>(null);
+  const nextFieldId = useRef(initial.length);
+  const [fields, setFields] = useState<ProjectMcpCredentialFieldRow[]>(() =>
+    initial.map((field, id) => ({ id, ...field })),
+  );
   const [validationError, setValidationError] = useState<string | null>(null);
   const preservesMultipleSecretSlots =
     (configuration?.version.definition.secret_slots.length ?? 0) > 1;
-  const fields = fieldsText
-    .split(/[\n,]/u)
-    .map((value) => value.trim())
-    .filter(Boolean);
+
+  function clearFieldValue(id: number) {
+    const control = formRef.current?.elements.namedItem(
+      projectMcpSecretInputName(id),
+    );
+    if (control instanceof HTMLInputElement) control.value = "";
+  }
+
+  function clearSecretValues() {
+    for (const input of formRef.current?.querySelectorAll<HTMLInputElement>(
+      "input[data-project-mcp-secret]",
+    ) ?? []) {
+      input.value = "";
+    }
+  }
+
+  function addField() {
+    const id = nextFieldId.current;
+    nextFieldId.current += 1;
+    setFields((current) => [...current, { id, target: "headers", name: "" }]);
+  }
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -240,16 +379,8 @@ export function ProjectMcpFormDialog({
       const submission = buildProjectMcpFormSubmission({
         form: new FormData(formElement),
         configuration,
-        mode,
-        slotName,
         fields,
-        clearSecretValues: () => {
-          for (const input of formElement.querySelectorAll<HTMLInputElement>(
-            "input[data-project-mcp-secret]",
-          )) {
-            input.value = "";
-          }
-        },
+        clearSecretValues,
       });
       onSubmit(submission);
     } catch (caught) {
@@ -261,16 +392,14 @@ export function ProjectMcpFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
-      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>
             {configuration ? "编辑 Project MCP" : "新增 Project MCP"}
           </DialogTitle>
-          <DialogDescription>
-            MCP 定义只声明秘密槽位；秘密值由当前 Project 独立加密保存。
-          </DialogDescription>
+          <DialogDescription>{credentialCopy.description}</DialogDescription>
         </DialogHeader>
-        <form className="space-y-5" onSubmit={submit}>
+        <form ref={formRef} className="space-y-5" onSubmit={submit}>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-2 text-sm">
               名称
@@ -329,62 +458,140 @@ export function ProjectMcpFormDialog({
             </label>
           </div>
           <fieldset className="space-y-4 rounded-xl border p-4">
-            <legend className="px-1 text-sm font-semibold">秘密槽位</legend>
-            <label className="grid gap-2 text-sm">
-              注入位置
-              <select
-                className="border-input bg-background h-9 rounded-md border px-3 text-sm"
-                value={mode}
-                disabled={preservesMultipleSecretSlots}
-                onChange={(event) => setMode(event.target.value as AuthMode)}
-              >
-                <option value="none">不需要秘密</option>
-                <option value="headers">HTTP Header</option>
-                <option value="query">Query 参数</option>
-              </select>
-            </label>
-            {mode !== "none" ? (
-              <>
-                <label className="grid gap-2 text-sm">
-                  槽位名
-                  <Input
-                    value={slotName}
-                    pattern="[a-z][a-z0-9._-]{0,62}"
-                    disabled={preservesMultipleSecretSlots}
-                    onChange={(event) => setSlotName(event.target.value)}
-                  />
-                </label>
-                <label className="grid gap-2 text-sm">
-                  字段名（每行一个）
-                  <textarea
-                    className="border-input bg-background min-h-20 rounded-md border px-3 py-2 font-mono text-sm"
-                    value={fieldsText}
-                    disabled={preservesMultipleSecretSlots}
-                    onChange={(event) => setFieldsText(event.target.value)}
-                  />
-                </label>
-                {preservesMultipleSecretSlots ? (
-                  <p className="text-muted-foreground text-xs">
-                    此配置包含多个秘密槽位；编辑普通字段时会原样保留全部槽位。各槽位的秘密值请在
-                    MCP 详情中分别管理。
-                  </p>
-                ) : null}
-                {fields.map((field, index) => (
-                  <label key={field} className="grid gap-2 text-sm">
-                    <code>
-                      {mode}.{field}
-                    </code>
-                    <Input
-                      name={projectMcpSecretInputName(index)}
-                      type="password"
-                      autoComplete="new-password"
-                      data-project-mcp-secret
-                      placeholder={configuration ? "留空以保留" : "输入秘密值"}
-                    />
-                  </label>
-                ))}
-              </>
+            <legend className="px-1 text-sm font-semibold">
+              {credentialCopy.sectionTitle}
+            </legend>
+            <p
+              id="project-mcp-credential-fields-help"
+              className="text-muted-foreground text-xs"
+            >
+              {credentialCopy.listHelp}
+            </p>
+            {configuration && fields.length > 0 ? (
+              <p className="text-muted-foreground text-xs">
+                {credentialCopy.editValueHelp}
+              </p>
             ) : null}
+            {preservesMultipleSecretSlots ? (
+              <p className="text-muted-foreground text-xs">
+                此历史配置包含多个独立凭证组；为避免改变已有凭证归属，这里只展示参数。请在
+                MCP 详情中分别管理凭证值。
+              </p>
+            ) : null}
+            <div className="space-y-3">
+              {fields.map((field, index) => {
+                const fieldCopy = credentialCopy.fields[field.target];
+                const fieldHelpId = `project-mcp-credential-field-${field.id}-help`;
+                return (
+                  <div
+                    key={field.id}
+                    className="grid gap-3 rounded-lg border border-dashed p-3 sm:grid-cols-[11rem_minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end"
+                  >
+                    <label className="space-y-1">
+                      <span className="text-muted-foreground text-xs">
+                        {credentialCopy.targetLabel}
+                      </span>
+                      <select
+                        className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+                        value={field.target}
+                        disabled={preservesMultipleSecretSlots}
+                        aria-label={`第 ${index + 1} 个凭证参数的发送位置`}
+                        onChange={(event) => {
+                          clearFieldValue(field.id);
+                          const target = event.target.value as CredentialTarget;
+                          setFields((current) =>
+                            current.map((candidate) =>
+                              candidate.id === field.id
+                                ? { ...candidate, target }
+                                : candidate,
+                            ),
+                          );
+                        }}
+                      >
+                        <option value="headers">
+                          {credentialCopy.targetOptions.headers}
+                        </option>
+                        <option value="query">
+                          {credentialCopy.targetOptions.query}
+                        </option>
+                      </select>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-muted-foreground text-xs">
+                        {fieldCopy.nameLabel}
+                      </span>
+                      <Input
+                        required
+                        value={field.name}
+                        disabled={preservesMultipleSecretSlots}
+                        placeholder={fieldCopy.namePlaceholder}
+                        maxLength={field.target === "headers" ? 255 : 128}
+                        aria-describedby={`project-mcp-credential-fields-help ${fieldHelpId}`}
+                        onChange={(event) => {
+                          setFields((current) =>
+                            current.map((candidate) =>
+                              candidate.id === field.id
+                                ? { ...candidate, name: event.target.value }
+                                : candidate,
+                            ),
+                          );
+                        }}
+                      />
+                      <span
+                        id={fieldHelpId}
+                        className="text-muted-foreground block text-xs"
+                      >
+                        {fieldCopy.help}
+                      </span>
+                    </label>
+                    <label className="space-y-1">
+                      <span className="text-muted-foreground text-xs">
+                        {fieldCopy.valueLabel}
+                      </span>
+                      <Input
+                        name={projectMcpSecretInputName(field.id)}
+                        type="password"
+                        autoComplete="new-password"
+                        disabled={preservesMultipleSecretSlots}
+                        data-project-mcp-secret
+                        aria-label={credentialCopy.valueLabel(
+                          field.name.trim() ||
+                            `${fieldCopy.itemLabel} ${index + 1}`,
+                        )}
+                        placeholder={
+                          configuration
+                            ? "结构不变可留空保留"
+                            : "输入凭证值"
+                        }
+                      />
+                    </label>
+                    <Button
+                      type="button"
+                      size="icon-sm"
+                      variant="ghost"
+                      disabled={preservesMultipleSecretSlots}
+                      aria-label={`删除第 ${index + 1} 个凭证参数`}
+                      onClick={() => {
+                        clearFieldValue(field.id);
+                        setFields((current) =>
+                          current.filter(
+                            (candidate) => candidate.id !== field.id,
+                          ),
+                        );
+                      }}
+                    >
+                      <Trash2Icon aria-hidden className="size-4" />
+                    </Button>
+                  </div>
+                );
+              })}
+              {!preservesMultipleSecretSlots ? (
+                <Button type="button" variant="outline" onClick={addField}>
+                  <PlusIcon aria-hidden className="size-4" />
+                  {credentialCopy.addLabel}
+                </Button>
+              ) : null}
+            </div>
           </fieldset>
           {validationError || errorMessage ? (
             <p role="alert" className="text-destructive text-sm">

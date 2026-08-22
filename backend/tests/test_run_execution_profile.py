@@ -71,11 +71,29 @@ from deerflow.config.model_config import ModelConfig
 from deerflow.models.factory import create_chat_model
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
-from deerflow.runtime import RunStatus
+from deerflow.runtime.runs.execution_contracts import (
+    RunAgentOutcome,
+    RunAgentUsageSnapshot,
+)
 
 PRIMARY_MODEL_REF = "00000000-0000-4000-8000-000000000301"
 OTHER_MODEL_REF = "00000000-0000-4000-8000-000000000302"
 SAMPLING_MODEL_REF = "00000000-0000-4000-8000-000000000303"
+
+
+def _runner_success() -> RunAgentOutcome:
+    return RunAgentOutcome.succeeded(
+        RunAgentUsageSnapshot(
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_tokens=0,
+            llm_call_count=0,
+            lead_agent_tokens=0,
+            subagent_tokens=0,
+            middleware_tokens=0,
+            token_usage_by_model={},
+        )
+    )
 
 
 def test_private_run_execution_profile_is_strict_and_separate_from_generic_context() -> None:
@@ -689,7 +707,8 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
 
     async def runner(_bridge, _run_manager, record, *, ctx, **_kwargs):
         observed["authority"] = ctx.vision_dispatch_authority
-        record.status = RunStatus.success
+        observed["record_status"] = str(record.status)
+        return _runner_success()
 
     async def activity_emitter_factory(*_args):
         return SimpleNamespace()
@@ -779,6 +798,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
     result = await executor.execute(execution, authority)
 
     assert result.status == "succeeded"
+    assert observed["record_status"] == "pending"
     assert materialized_purposes == ["lead", "vision"]
     assert isinstance(
         observed["authority"],

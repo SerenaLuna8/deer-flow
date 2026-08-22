@@ -3,10 +3,10 @@ Tracks cumulative token usage (input, output, total) across model calls within
 a single agent run and enforces configurable soft-warning and hard-stop
 thresholds.
 Detection strategy:
-  1. After each model response, sum the `usage_metadata` of all `AIMessage`s
-     in the current thread history. This automatically captures tokens from
-     subagents because `TokenUsageMiddleware` retroactively adds them to the
-     history.
+  1. After each model response, account for the parent model's immutable
+     usage baseline and read Sub-Agent Task receipts directly from ToolMessages.
+     This does not depend on middleware ordering: TokenUsageMiddleware may
+     persist those receipts onto the dispatch AIMessage later in the same hook.
   2. If the highest fraction (input, output, or total) >= warn_threshold,
      queue a warning.
   3. If the highest fraction >= hard_stop_threshold, strip tool_calls.
@@ -43,11 +43,16 @@ from langchain.agents.middleware.types import (
     ModelResponse,
     PrivateStateAttr,
 )
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
 from deerflow.config.token_budget_config import TokenBudgetConfig
+from deerflow.subagents.status_contract import (
+    SUBAGENT_USAGE_RECEIPT_STATE_KEY,
+    read_subagent_usage_receipt,
+    read_subagent_usage_receipt_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +107,8 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
         self._warned: BoundedDict[str, bool] = BoundedDict(1000)
         self._pending_warnings: BoundedDict[str, list[str]] = BoundedDict(1000)
         self._seen_messages: BoundedDict[str, dict[str, tuple[int, int]]] = BoundedDict(1000)
+        self._seen_subagent_receipts: BoundedDict[str, dict[str, tuple[int, int]]] = BoundedDict(1000)
+        self._seen_subagent_conflicts: BoundedDict[str, set[str]] = BoundedDict(1000)
         self._cumulative_usage: BoundedDict[str, TokenUsage] = BoundedDict(1000)
         # Stop reason set when the hard-stop fires. NOT cleared by
         # ``_clear_run_state``/``after_agent`` so the executor can consume it
@@ -117,6 +124,8 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
             self._warned.clear()
             self._pending_warnings.clear()
             self._seen_messages.clear()
+            self._seen_subagent_receipts.clear()
+            self._seen_subagent_conflicts.clear()
             self._cumulative_usage.clear()
             self._stop_reason.clear()
 
@@ -151,7 +160,116 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
             self._warned.pop(run_id, None)
             self._pending_warnings.pop(run_id, None)
             self._seen_messages.pop(run_id, None)
+            self._seen_subagent_receipts.pop(run_id, None)
+            self._seen_subagent_conflicts.pop(run_id, None)
             self._cumulative_usage.pop(run_id, None)
+
+    @staticmethod
+    def _model_usage(message: AIMessage) -> dict[str, int]:
+        receipt_state = read_subagent_usage_receipt_state(
+            message.additional_kwargs,
+        )
+        if receipt_state is not None:
+            baseline, _contributions, _conflicts = receipt_state
+            return baseline
+        return message.usage_metadata or {}
+
+    @staticmethod
+    def _subagent_receipts(
+        messages: list[Any],
+    ) -> tuple[dict[str, dict[str, int]], frozenset[str]]:
+        receipts: dict[str, dict[str, int]] = {}
+        conflicts: set[str] = set()
+
+        for message in messages:
+            candidates: list[tuple[str, dict[str, int]]] = []
+            if isinstance(message, ToolMessage):
+                receipt = read_subagent_usage_receipt(
+                    message.additional_kwargs,
+                )
+                if receipt is not None:
+                    candidates.append(receipt)
+            elif isinstance(message, AIMessage):
+                receipt_state = read_subagent_usage_receipt_state(
+                    message.additional_kwargs,
+                )
+                if receipt_state is not None:
+                    _baseline, contributions, persisted_conflicts = receipt_state
+                    conflicts.update(persisted_conflicts)
+                    for receipt_id in persisted_conflicts:
+                        receipts.pop(receipt_id, None)
+                    candidates.extend(contributions.items())
+                elif SUBAGENT_USAGE_RECEIPT_STATE_KEY in message.additional_kwargs:
+                    logger.warning(
+                        "Ignoring malformed persisted Sub-Agent Task budget receipt state: message_id=%s",
+                        message.id,
+                    )
+
+            for receipt_id, usage in candidates:
+                existing = receipts.get(receipt_id)
+                if existing is not None and existing != usage:
+                    receipts.pop(receipt_id, None)
+                    conflicts.add(receipt_id)
+                elif receipt_id not in conflicts:
+                    receipts[receipt_id] = usage
+
+        for receipt_id in sorted(conflicts):
+            logger.warning(
+                "Conflicting Sub-Agent Task budget receipt requires a hard stop: receipt_id=%s",
+                receipt_id,
+            )
+        return receipts, frozenset(conflicts)
+
+    def _capture_usage_locked(
+        self,
+        messages: list[Any],
+        *,
+        run_id: str,
+    ) -> tuple[TokenUsage, bool]:
+        seen = self._seen_messages.setdefault(run_id, {})
+        seen_receipts = self._seen_subagent_receipts.setdefault(run_id, {})
+        seen_conflicts = self._seen_subagent_conflicts.setdefault(run_id, set())
+        usage_accum = self._cumulative_usage.setdefault(run_id, TokenUsage())
+
+        for msg in messages:
+            if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
+                usage = self._model_usage(msg)
+                input_tokens = usage.get("input_tokens", 0)
+                output_tokens = usage.get("output_tokens", 0)
+                prev_input, prev_output = seen.get(msg.id, (0, 0))
+                diff_input = max(0, input_tokens - prev_input)
+                diff_output = max(0, output_tokens - prev_output)
+                if diff_input > 0 or diff_output > 0:
+                    usage_accum.input += diff_input
+                    usage_accum.output += diff_output
+                    usage_accum.total += diff_input + diff_output
+                    seen[msg.id] = (input_tokens, output_tokens)
+
+        receipts, observed_conflicts = self._subagent_receipts(messages)
+        new_conflicts = set(observed_conflicts) - seen_conflicts
+        for receipt_id, usage in receipts.items():
+            contribution = (
+                usage["input_tokens"],
+                usage["output_tokens"],
+            )
+            previous = seen_receipts.get(receipt_id)
+            if previous is not None:
+                if previous != contribution:
+                    logger.warning(
+                        "Ignoring conflicting replayed Sub-Agent Task budget receipt: receipt_id=%s",
+                        receipt_id,
+                    )
+                    if receipt_id not in seen_conflicts:
+                        new_conflicts.add(receipt_id)
+                continue
+            seen_receipts[receipt_id] = contribution
+            usage_accum.input += contribution[0]
+            usage_accum.output += contribution[1]
+            usage_accum.total += contribution[0] + contribution[1]
+
+        seen_conflicts.update(observed_conflicts)
+        seen_conflicts.update(new_conflicts)
+        return usage_accum, bool(new_conflicts)
 
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -166,14 +284,23 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
         run_id = self._get_run_id(runtime)
         with self._lock:
             seen = self._seen_messages.setdefault(run_id, {})
+            seen_receipts = self._seen_subagent_receipts.setdefault(run_id, {})
+            seen_conflicts = self._seen_subagent_conflicts.setdefault(run_id, set())
             self._cumulative_usage.setdefault(run_id, TokenUsage())
 
             for msg in messages:
                 if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
-                    usage = msg.usage_metadata or {}
+                    usage = self._model_usage(msg)
                     input_tokens = usage.get("input_tokens", 0)
                     output_tokens = usage.get("output_tokens", 0)
                     seen[msg.id] = (input_tokens, output_tokens)
+            receipts, conflicts = self._subagent_receipts(messages)
+            for receipt_id, usage in receipts.items():
+                seen_receipts[receipt_id] = (
+                    usage["input_tokens"],
+                    usage["output_tokens"],
+                )
+            seen_conflicts.update(conflicts)
 
     @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -183,7 +310,21 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
     def after_agent(self, state: AgentState, runtime: Runtime) -> None:
         if not self._config.enabled:
             return
-        self._clear_run_state(self._get_run_id(runtime))
+        run_id = self._get_run_id(runtime)
+        messages = state.get("messages", [])
+        if messages:
+            with self._lock:
+                _usage, receipt_conflict = self._capture_usage_locked(
+                    messages,
+                    run_id=run_id,
+                )
+                if receipt_conflict:
+                    logger.error(
+                        "Token budget recorded a terminal conflict for run %s: conflicting Sub-Agent Task usage receipt",
+                        run_id,
+                    )
+                    self._stop_reason[run_id] = "token_capped"
+        self._clear_run_state(run_id)
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> None:
@@ -224,28 +365,21 @@ class TokenBudgetMiddleware(AgentMiddleware[TokenBudgetState]):
         run_id = self._get_run_id(runtime)
 
         with self._lock:
-            seen = self._seen_messages.setdefault(run_id, {})
-            usage_accum = self._cumulative_usage.setdefault(run_id, TokenUsage())
+            usage_accum, receipt_conflict = self._capture_usage_locked(
+                messages,
+                run_id=run_id,
+            )
 
-            for msg in messages:
-                if isinstance(msg, AIMessage) and msg.id and hasattr(msg, "usage_metadata"):
-                    usage = msg.usage_metadata or {}
-
-                    input_tokens = usage.get("input_tokens", 0)
-                    output_tokens = usage.get("output_tokens", 0)
-
-                    # Check what previously recorded for this exact message
-                    prev_input, prev_output = seen.get(msg.id, (0, 0))
-
-                    # Calculate if any new tokens were added (handles retroactive subagent tokens)
-                    diff_input = max(0, input_tokens - prev_input)
-                    diff_output = max(0, output_tokens - prev_output)
-
-                    if diff_input > 0 or diff_output > 0:
-                        usage_accum.input += diff_input
-                        usage_accum.output += diff_output
-                        usage_accum.total += diff_input + diff_output
-                        seen[msg.id] = (input_tokens, output_tokens)
+            if receipt_conflict:
+                logger.error(
+                    "Token budget hard stop triggered for run %s: conflicting Sub-Agent Task usage receipt",
+                    run_id,
+                )
+                self._stop_reason[run_id] = "token_capped"
+                return {
+                    **self._build_hard_stop_update(last_msg, "total"),
+                    OUTPUT_LIMIT_BUDGET_HARD_STOP_STATE_KEY: {"run_id": run_id},
+                }
 
             if usage_accum.total <= 0:
                 return None

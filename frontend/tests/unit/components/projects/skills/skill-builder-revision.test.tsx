@@ -405,6 +405,9 @@ describe("SkillBuilderConversationView", () => {
     expect(html).toContain("先确认输入和输出。");
     expect(html).not.toContain("已接收请求");
     expect(html).not.toContain("本次操作结束");
+    const activityBlock = /<details[^>]*>/.exec(html)?.[0];
+    expect(activityBlock).toContain("ml-0");
+    expect(activityBlock).not.toMatch(/sm:ml-/);
     expect(html.indexOf("先确认输入和输出。")).toBeLessThan(
       html.indexOf("read_candidate_file"),
     );

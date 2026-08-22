@@ -44,6 +44,7 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { filterLeadAgentStreamMessages } from "@/core/messages/lead-stream-visibility";
+import { readLatestRecoveredLLMFailures } from "@/core/messages/recovered-llm-failures";
 import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
 import {
   projectTokenBudgetMessages,
@@ -158,6 +159,50 @@ function TokenBudgetNotice({ messages }: { messages: Message[] }) {
         <p className="text-muted-foreground text-sm leading-5">
           {t.conversation.tokenBudgetReachedDescription}
         </p>
+      </div>
+    </div>
+  );
+}
+
+function RecoveredModelFailureNotice({ messages }: { messages: Message[] }) {
+  const { t } = useI18n();
+  const failures = readLatestRecoveredLLMFailures(messages);
+  if (failures.length === 0) {
+    return null;
+  }
+  return (
+    <div
+      aria-live="polite"
+      className="text-foreground mt-3 flex gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-3"
+      data-testid="recovered-model-failure-notice"
+      role="status"
+    >
+      <TriangleAlertIcon
+        aria-hidden
+        className="mt-0.5 size-4 shrink-0 text-amber-600 dark:text-amber-400"
+      />
+      <div className="min-w-0 space-y-1">
+        <p className="text-sm font-medium">
+          {t.conversation.recoveredModelFailuresTitle}
+        </p>
+        <p className="text-muted-foreground text-sm leading-5">
+          {t.conversation.recoveredModelFailuresDescription(failures.length)}
+        </p>
+        <ol className="text-muted-foreground max-h-48 list-decimal space-y-1 overflow-y-auto pl-5 text-xs leading-5">
+          {failures.map((failure, index) => (
+            <li
+              key={`${index}/${failure.attempt}/${failure.maxAttempts}/${failure.errorCode}`}
+            >
+              {t.conversation.recoveredModelFailureAttempt(
+                index + 1,
+                failure.attempt,
+                failure.maxAttempts,
+                t.conversation.recoveredModelFailureReasons[failure.reason],
+                failure.errorCode,
+              )}
+            </li>
+          ))}
+        </ol>
       </div>
     </div>
   );
@@ -1444,6 +1489,9 @@ export function MessageList({
                     })}
                     {group.type === "assistant" && (
                       <TokenBudgetNotice messages={group.messages} />
+                    )}
+                    {group.type === "assistant" && (
+                      <RecoveredModelFailureNotice messages={group.messages} />
                     )}
                     {group.type === "assistant" &&
                       turnDisplay &&

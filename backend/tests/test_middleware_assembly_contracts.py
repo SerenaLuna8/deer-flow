@@ -237,6 +237,8 @@ def test_delta_schema_shallow_copy_shares_mutable_middleware_state() -> None:
     assert normalized is not original
     assert normalized._lock is original._lock
     assert normalized._seen_messages is original._seen_messages
+    assert normalized._seen_subagent_receipts is original._seen_subagent_receipts
+    assert normalized._seen_subagent_conflicts is original._seen_subagent_conflicts
     assert normalized._pending_warnings is original._pending_warnings
     assert normalized._cumulative_usage is original._cumulative_usage
 

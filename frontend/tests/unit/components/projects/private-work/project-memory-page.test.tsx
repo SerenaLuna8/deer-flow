@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { ProjectMemoryAccessBoundary } from "@/components/projects/private-work/project-memory-page";
+import { I18nProvider } from "@/core/i18n/context";
 import type { Project } from "@/core/projects/types";
 
 const projectWithoutMemoryRead: Project = {
@@ -35,13 +36,15 @@ describe("Project Memory access boundary", () => {
     // No QueryClient or private-work provider is present. Rendering succeeds
     // only when the denied branch stops before AuthorizedProjectMemoryPage.
     const html = renderToStaticMarkup(
-      <ProjectMemoryAccessBoundary project={projectWithoutMemoryRead} />,
+      <I18nProvider initialLocale="zh-CN">
+        <ProjectMemoryAccessBoundary project={projectWithoutMemoryRead} />
+      </I18nProvider>,
     );
 
     expect(html).toContain('role="alert"');
     expect(html).toContain('data-error-status="403"');
     expect(html).toContain("没有访问权限");
-    expect(html).toContain("无权访问项目记忆");
+    expect(html).toContain("无权访问记忆");
     expect(html).not.toContain("还没有历史版本");
   });
 });

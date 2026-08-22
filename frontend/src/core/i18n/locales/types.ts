@@ -8,6 +8,7 @@ export interface Translations {
 
   // Common
   common: {
+    skipToContent: string;
     home: string;
     settings: string;
     delete: string;
@@ -16,6 +17,7 @@ export interface Translations {
     share: string;
     openInNewWindow: string;
     close: string;
+    closeArtifacts: string;
     more: string;
     search: string;
     loadMore: string;
@@ -237,6 +239,138 @@ export interface Translations {
     mcp: string;
     memory: string;
     usage: string;
+    navigation: {
+      label: string;
+      menuLabel: string;
+      workspaceAria: string;
+      overview: string;
+      conversations: string;
+      automations: string;
+      agents: string;
+      skills: string;
+      mcp: string;
+      memory: string;
+      connections: string;
+      audit: string;
+      settings: string;
+      backToWorkspace: string;
+      sections: {
+        work: string;
+        capabilities: string;
+        management: string;
+      };
+      account: string;
+      platformAdministration: string;
+      systemSettings: string;
+      logout: string;
+      expand: string;
+      collapse: string;
+      open: string;
+      sheetTitle: string;
+      sheetDescription: string;
+    };
+    accessDenied: {
+      title: string;
+      description: (area: string) => string;
+      backToProject: string;
+    };
+    settings: {
+      accessArea: string;
+      governanceEyebrow: (projectName: string) => string;
+      title: string;
+      description: string;
+      navigationLabel: string;
+      navigation: {
+        general: { label: string; description: string };
+        members: { label: string; description: string };
+      };
+      general: {
+        title: string;
+        description: string;
+        displayName: string;
+        icon: string;
+        slug: string;
+        slugDescription: string;
+        projectDescription: string;
+        descriptionPlaceholder: string;
+        saved: string;
+        saving: string;
+        save: string;
+      };
+      lifecycle: {
+        title: string;
+        description: string;
+        requestDeletion: string;
+        confirmTitle: string;
+        confirmDescription: string;
+        cancel: string;
+        confirm: string;
+      };
+    };
+    members: {
+      managementEyebrow: (projectName: string) => string;
+      title: string;
+      description: string;
+      inviteMember: string;
+      membersTitle: string;
+      invitationsTitle: string;
+      emptyInvitations: string;
+      columns: {
+        account: string;
+        role: string;
+        status: string;
+        actions: string;
+      };
+      roles: {
+        admin: string;
+        editor: string;
+        runner: string;
+        viewer: string;
+      };
+      membershipStatuses: {
+        active: string;
+        left: string;
+        removed: string;
+      };
+      invitationStatuses: {
+        pending: string;
+        redeemed: string;
+        revoked: string;
+        expired: string;
+      };
+      actions: {
+        changeRole: string;
+        removeMember: string;
+        leaveProject: string;
+        revokeInvitation: string;
+      };
+      confirmations: {
+        removeTitle: string;
+        removeDescription: (email: string) => string;
+        removeConfirm: string;
+        leaveTitle: string;
+        leaveDescription: string;
+        leaveConfirm: string;
+        revokeTitle: string;
+        revokeDescription: (email: string) => string;
+        revokeConfirm: string;
+        cancel: string;
+      };
+      inviteDialog: {
+        title: string;
+        description: string;
+        inviteLink: string;
+        done: string;
+        email: string;
+        projectRole: string;
+        create: string;
+      };
+      roleDialog: {
+        title: string;
+        projectRole: string;
+        save: string;
+      };
+    };
     governance: {
       retry: string;
       tokenSeries: {
@@ -638,6 +772,8 @@ export interface Translations {
       backToProjects: string;
       projectGovernance: string;
       projectId: string;
+      shortProjectId: (projectId: string) => string;
+      projectIdentityUnavailable: string;
     };
     common: {
       assetVersion: string;
@@ -694,6 +830,10 @@ export interface Translations {
       };
     };
     catalog: {
+      assetCatalog: string;
+      projectAgentTitle: string;
+      projectSkillTitle: string;
+      projectMcpTitle: string;
       systemAssets: string;
       systemAssetsDescription: string;
       systemCurrentAssetsDescription: string;
@@ -733,6 +873,9 @@ export interface Translations {
       previousPage: string;
       nextPage: string;
       noResults: string;
+      catalogUnavailable: string;
+      versionHistoryUnavailable: string;
+      projectCatalogUnavailable: string;
       noSystemAssets: string;
       system: string;
       systemPublishStatus: string;
@@ -761,6 +904,11 @@ export interface Translations {
       suspend: string;
     };
     version: {
+      current: string;
+      candidate: string;
+      historical: string;
+      currentUnconfirmed: string;
+      activate: string;
       none: string;
       mcpNone: string;
       selectHint: string;
@@ -813,13 +961,24 @@ export interface Translations {
       missingProjectUrl: string;
       invalidProjectUrl: string;
       projectOAuth: string;
-      projectHeadersOnly: string;
+      projectCredentialTargetsOnly: string;
       missingSystemCommand: string;
       missingSystemUrl: string;
       systemEnvOnly: string;
       systemRemoteSecretsOnly: string;
     };
     dialogs: {
+      authoring: {
+        title: (name: string) => string;
+        skillDescription: string;
+        mcpDescription: string;
+        description: string;
+        secretSlots: string;
+        invalidSecretSlots: string;
+        cancel: string;
+        saving: string;
+        save: string;
+      };
       binding: {
         switchTitle: string;
         enableTitle: string;
@@ -835,6 +994,9 @@ export interface Translations {
         enable: string;
         rollback: string;
         switchVersion: string;
+        currentVersion: string;
+        currentVersionUnavailable: string;
+        currentVersionInUse: string;
       };
     };
     errors: {
@@ -1112,7 +1274,6 @@ export interface Translations {
         slugConflict: string;
         unresolvedConflict: string;
         sessionLimitExceeded: string;
-        secretDetected: string;
         commitUncertain: string;
         stale: string;
       };
@@ -1145,6 +1306,17 @@ export interface Translations {
       };
       blueprint: {
         title: string;
+        triggerLabel: string;
+        openAria: string;
+        conflictCount: (count: number) => string;
+        readyTitle: string;
+        summary: (conflictCount: number) => string;
+        viewBlueprint: string;
+        closeAria: string;
+        panelSummary: (conflictCount: number) => string;
+        tabsAria: string;
+        overviewTab: string;
+        documentsTab: string;
         runtime: string;
         noDescription: string;
         nameLabel: string;
@@ -1162,6 +1334,7 @@ export interface Translations {
         assumptionsTitle: string;
         conflictsTitle: string;
         conflictDocuments: string;
+        openConflictDocument: (name: string) => string;
         blockingConflictHint: string;
         createHint: string;
         creating: string;
@@ -1424,12 +1597,6 @@ export interface Translations {
       label: string;
       preparing: string;
       started: string;
-      tooltip: (version: number) => string;
-      unsaved: string;
-      loading: string;
-      revoked: string;
-      notCurrent: string;
-      noVersion: string;
     };
     secrets: {
       workbenchAria: string;
@@ -1929,6 +2096,26 @@ export interface Translations {
     modelOutputLimitDescription: string;
     modelOutputLimitRetry: string;
     modelOutputLimitRetrying: string;
+    loopSafetyLimitTitle: string;
+    loopSafetyLimitDescription: string;
+    recoveredModelFailuresTitle: string;
+    recoveredModelFailuresDescription: (count: number) => string;
+    recoveredModelFailureAttempt: (
+      index: number,
+      attempt: number,
+      maxAttempts: number,
+      reason: string,
+      errorCode: string,
+    ) => string;
+    recoveredModelFailureReasons: {
+      quota: string;
+      auth: string;
+      busy: string;
+      transient: string;
+      generic: string;
+      current_upload: string;
+      circuit_open: string;
+    };
     tokenBudgetReachedTitle: string;
     tokenBudgetReachedDescription: string;
     outputDeliveryIncompleteTitle: string;

@@ -178,3 +178,131 @@ Date: 2026-08-18
 final result: blocked
 
 ---
+
+# Agent Builder blueprint workbench and composer design QA
+
+Date: 2026-08-23
+
+## Visual truth and rendered evidence
+
+- Full-view source context:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-f6178fc8-687e-4689-97f3-fa29c5e9530a.png`
+  at `3576 × 2112` pixels. Its CSS size and density are unknown.
+- Composer source visual truth:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-93be51be-ac11-4f12-979a-e228de5e4a33.png`
+  at `1834 × 292` pixels. Its CSS size and density are unknown.
+- Desktop implementation:
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-desktop-final.png`
+  at a `1966 × 1009` CSS viewport and `1966 × 1009` output pixels. The browser
+  reported `devicePixelRatio=2`; the capture API normalized output to CSS-pixel
+  dimensions.
+- Focused composer implementation:
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-composer.png`
+  at `776 × 148` CSS/output pixels.
+- Mobile implementation:
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-mobile-workbench.png`
+  and
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-mobile-conversation.png`,
+  each at a `390 × 844` CSS viewport and `390 × 844` output pixels.
+- State: authenticated Chinese `code-reviewer` Builder session with four generated
+  documents, one displayed conflict, the blueprint workbench open, and every
+  durable Activity operation terminal.
+
+## Full-view and focused comparison
+
+The full-page source and implementation were opened together in
+`/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/full-view-comparison.png`.
+Both inputs were normalized to a `1966 × 1009` comparison canvas by proportional
+scaling and horizontal white padding. The source is interaction context rather
+than a pixel-identical viewport target: it excludes the project navigation,
+selects Documents, and still shows the former non-terminal Activity row. The
+implementation keeps the same conversation/workbench split, exposes Overview and
+Documents as dedicated surfaces, preserves the fixed create footer, and now shows
+the last Activity as completed.
+
+The ordinary-chat reference and Builder composer were opened together in
+`/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/composer-comparison.png`.
+The source remained `1834 × 292`; the implementation crop was proportionally
+scaled to `292` pixels high and centered on an `1834 × 292` white canvas. The
+Builder now matches the source hierarchy: quiet outlined rounded container,
+placeholder in the upper input area, mode at lower left, model and circular
+up-arrow submit control at lower right. Attachment, voice, polish, and context
+controls are intentionally absent because the Builder does not implement those
+functions and the request explicitly prohibited behavior changes.
+
+## Required fidelity surfaces
+
+- Fonts and typography: existing ActWeave font, muted placeholder, control sizes,
+  weights, line heights, truncation, and Chinese wrapping are preserved. No text
+  clips at desktop or mobile widths.
+- Spacing and layout rhythm: the composer was reduced from the oversized card to
+  the ordinary chat `min-h-16` input rhythm, `rounded-2xl` shell, compact footer,
+  and `32px` circular action. The desktop split and mobile single-surface layout
+  have no horizontal overflow or hidden persistent action.
+- Colors and tokens: the implementation reuses `background`, `border-input`,
+  `muted-foreground`, outline-button, shadow, and backdrop tokens. No new
+  hard-coded color was introduced.
+- Image quality and asset fidelity: these screens contain no raster product image
+  or decorative asset. Icons reuse the product's existing Lucide dependency; no
+  replacement SVG, CSS drawing, emoji, or placeholder asset was added.
+- Copy and content: Builder copy and user content are unchanged. The conversation
+  retains only a compact blueprint summary while the four documents live in the
+  workbench.
+
+## Interaction, accessibility, and console checks
+
+- Desktop: closed the workbench, confirmed the header/summary trigger remained,
+  reopened it, switched to Documents, and verified `AGENTS.md`, `SOUL.md`,
+  `IDENTITY.md`, `USER.md`, Edit, and Create Agent were present.
+- Mobile `390 × 844`: verified the Documents workbench, fixed create footer,
+  workbench close action, return to the conversation, and visible fixed composer.
+- Activity recovery: after reload, the former endless final row rendered
+  `已完成，用时 80.7 秒`; no generating status remained.
+- Accessibility: the workbench close/open controls, tabs, composer textbox, model
+  chooser, mode chooser, and send/stop control retain semantic labels and keyboard
+  behavior covered by focused tests.
+- Browser console: zero errors in the final desktop state.
+
+## Findings and comparison history
+
+- Pass 1, post-implementation: no actionable P0, P1, or P2 visual mismatch.
+  No visual repair loop was required after the combined full-view and focused
+  comparisons.
+- Accepted product constraint: the Builder composer has fewer left/right utility
+  controls than ordinary chat because adding inert or unsupported controls would
+  change or misrepresent functionality.
+
+final result: passed
+
+---
+
+# Agent Builder bottom spacing follow-up
+
+Date: 2026-08-23
+
+## Visual truth and rendered evidence
+
+- Source annotation:
+  `/var/folders/fd/s9_xw3qn0gdfb1ymjmg_md_c0000gn/T/codex-clipboard-0e123057-bf8e-4ec4-84d6-7ed0b222c262.png`
+  at `3438 × 632` pixels.
+- Final implementation crop:
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-bottom-spacing-after-1966x361.png`
+  at `1966 × 361` CSS/output pixels.
+- Combined reference-above, implementation-below comparison:
+  `/Users/jiangfeng/workspace/deer-flow/.codex-qa/agent-builder/agent-builder-bottom-spacing-reference-vs-after.png`.
+- State: the same authenticated `code-reviewer` Builder session with the
+  conversation and Agent blueprint workbench visible.
+
+## Result
+
+- Increased only the bottom padding of the conversation composer shell and the
+  blueprint creation footer from `12px` to `16px`; the shells grow by only `4px`,
+  while control dimensions, copy, and behavior are unchanged.
+- Runtime geometry confirmed a `16px` viewport gap below both the composer card
+  and the Create Agent button, preserving their shared baseline.
+- The combined comparison has no actionable P0, P1, or P2 mismatch. The added
+  space is visible but remains intentionally subtle.
+
+final result: passed
+
+---

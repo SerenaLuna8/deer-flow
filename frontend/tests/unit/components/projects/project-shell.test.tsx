@@ -134,39 +134,39 @@ describe("project shell navigation", () => {
     expect(
       runnerItems
         .filter((item) => item.section === "work")
-        .map((item) => item.label),
-    ).toEqual(["会话", "Automations", "Memory"]);
+        .map((item) => item.id),
+    ).toEqual(["conversations", "automations", "memory"]);
     expect(new Set(viewerItems.map((item) => item.section))).toEqual(
       new Set([null, "work", "capabilities"]),
     );
     expect(
       runnerItems
         .filter((item) => item.section === "capabilities")
-        .map((item) => item.label),
-    ).toEqual(["Agent"]);
+        .map((item) => item.id),
+    ).toEqual(["agents"]);
     expect(
       viewerItems
         .filter((item) => item.section === "capabilities")
-        .map((item) => item.label),
-    ).toEqual(["Agent"]);
+        .map((item) => item.id),
+    ).toEqual(["agents"]);
     expect(new Set(editorItems.map((item) => item.section))).toEqual(
       new Set([null, "work", "capabilities"]),
     );
     expect(
       editorItems
         .filter((item) => item.section === "capabilities")
-        .map((item) => item.label),
-    ).toEqual(["Agent", "Skill", "MCP"]);
+        .map((item) => item.id),
+    ).toEqual(["agents", "skills", "mcp"]);
     expect(new Set(adminItems.map((item) => item.section))).toEqual(
       new Set([null, "work", "capabilities", "management"]),
     );
     expect(
       adminItems
         .filter((item) => item.section === "management")
-        .map((item) => item.label),
-    ).toContain("渠道连接");
+        .map((item) => item.id),
+    ).toContain("connections");
     for (const items of [runnerItems, editorItems, viewerItems]) {
-      expect(items.map((item) => item.label)).not.toContain("渠道连接");
+      expect(items.map((item) => item.id)).not.toContain("connections");
     }
   });
 
@@ -197,33 +197,33 @@ describe("project shell navigation", () => {
       false,
     );
 
-    expect(items.find((item) => item.label === "项目概览")?.section).toBeNull();
-    expect(items.find((item) => item.label === "Memory")?.section).toBe("work");
+    expect(items.find((item) => item.id === "overview")?.section).toBeNull();
+    expect(items.find((item) => item.id === "memory")?.section).toBe("work");
     expect(
       items
         .filter((item) => item.section === "capabilities")
-        .map((item) => item.label),
-    ).toEqual(["Agent", "Skill", "MCP"]);
+        .map((item) => item.id),
+    ).toEqual(["agents", "skills", "mcp"]);
     expect(items).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           href: "/projects/alpha/connections",
-          label: "渠道连接",
+          id: "connections",
           section: "management",
         }),
         expect.objectContaining({
           href: "/projects/alpha/audit",
-          label: "审计日志",
+          id: "audit",
           section: "management",
         }),
         expect.objectContaining({
           href: "/projects/alpha/settings",
-          label: "项目设置",
+          id: "settings",
           section: "management",
         }),
       ]),
     );
-    expect(items.map((item) => item.label)).not.toContain("项目成员");
+    expect(items.map((item) => item.id)).not.toContain("members");
   });
 
   test("gates member work with readiness without hiding channel governance", () => {
@@ -235,14 +235,14 @@ describe("project shell navigation", () => {
       false,
     );
 
-    expect(readyItems.map((item) => item.label)).toEqual(
-      expect.arrayContaining(["会话", "渠道连接", "Memory"]),
+    expect(readyItems.map((item) => item.id)).toEqual(
+      expect.arrayContaining(["conversations", "connections", "memory"]),
     );
     expect(readyItems).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           href: "/projects/alpha/connections",
-          label: "渠道连接",
+          id: "connections",
           section: "management",
         }),
       ]),
@@ -253,20 +253,20 @@ describe("project shell navigation", () => {
       true,
       false,
       false,
-    ).map((item) => item.label);
+    ).map((item) => item.id);
     const featureDisabledLabels = projectNavigationItems(
       adminProject,
       true,
       false,
       false,
       false,
-    ).map((item) => item.label);
-    for (const label of ["会话", "Memory"]) {
-      expect(notReadyLabels).not.toContain(label);
-      expect(featureDisabledLabels).not.toContain(label);
+    ).map((item) => item.id);
+    for (const id of ["conversations", "memory"]) {
+      expect(notReadyLabels).not.toContain(id);
+      expect(featureDisabledLabels).not.toContain(id);
     }
-    expect(notReadyLabels).toContain("渠道连接");
-    expect(featureDisabledLabels).not.toContain("渠道连接");
+    expect(notReadyLabels).toContain("connections");
+    expect(featureDisabledLabels).not.toContain("connections");
   });
 
   test("renders implemented asset destinations from authoring authority", () => {
@@ -279,14 +279,14 @@ describe("project shell navigation", () => {
     expect(html).toContain('data-slot="project-brand-logo"');
     expect(html).not.toContain("项目空间");
     for (const label of [
-      "项目概览",
-      "审计日志",
-      "项目设置",
+      "Overview",
+      "Audit log",
+      "Project settings",
       "Agent",
       "Skill",
       "MCP",
-      "返回工作空间",
-      "账户",
+      "Back to workspace",
+      "Account",
     ]) {
       expect(html).toContain(label);
     }
@@ -295,6 +295,15 @@ describe("project shell navigation", () => {
       expect(html).not.toContain(unavailable);
     }
     expect(html).toContain("Project content");
+  });
+
+  test("renders an English-only shell with a keyboard skip target", () => {
+    const html = renderShell(adminProject);
+
+    expect(html).toContain('href="#project-main"');
+    expect(html).toContain('id="project-main"');
+    expect(html).toContain("Skip to main content");
+    expect(html).not.toMatch(/\p{Script=Han}/u);
   });
 
   test("announces the current route", () => {
@@ -384,19 +393,19 @@ describe("project shell navigation", () => {
       ] as Project["capabilities"],
     };
 
-    expect(renderShell(roleOnlyAdmin)).not.toContain("项目设置");
-    expect(renderShell(capabilityViewer)).toContain("项目设置");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("Project settings");
+    expect(renderShell(capabilityViewer)).toContain("Project settings");
     expect(renderShell(roleOnlyAdmin)).not.toContain("Agent");
-    expect(renderShell(roleOnlyAdmin)).not.toContain("渠道连接");
-    expect(renderShell(channelManager)).toContain("渠道连接");
+    expect(renderShell(roleOnlyAdmin)).not.toContain("Connections");
+    expect(renderShell(channelManager)).toContain("Connections");
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
     expect(renderShell(sharedAssetReader)).toContain("Agent");
     expect(renderShell(sharedAssetEditor)).toContain("Agent");
-    expect(renderShell(memberManager)).toContain("项目设置");
+    expect(renderShell(memberManager)).toContain("Project settings");
     expect(renderShell(memberManager)).not.toContain("项目成员");
     expect(
       projectNavigationItems(memberManager, false, true, false, false).find(
-        (item) => item.label === "项目设置",
+        (item) => item.id === "settings",
       )?.href,
     ).toBe("/projects/alpha/settings/members");
     expect(renderShell(secretManager)).not.toContain("项目秘密");

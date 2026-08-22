@@ -162,18 +162,23 @@ def validate_project_mcp_definition(
             keep_blank_values=True,
         )
     }
+    secret_header_names: set[str] = set()
     secret_query_names: set[str] = set()
     for schema in secret_slot_schemas:
-        if not isinstance(schema, Mapping) or len(schema) != 1 or not set(schema).issubset(_PROJECT_SECRET_SECTIONS):
+        if not isinstance(schema, Mapping) or not schema or not set(schema).issubset(_PROJECT_SECRET_SECTIONS):
             raise McpDefinitionPolicyError
         header_names = schema.get("headers")
-        if header_names is not None and (
-            not isinstance(header_names, (list, tuple))
-            or not header_names
-            or any(type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None or name.casefold() in _FORBIDDEN_PROJECT_SECRET_HEADERS for name in header_names)
-            or len({name.casefold() for name in header_names}) != len(header_names)
-        ):
-            raise McpDefinitionPolicyError
+        if header_names is not None:
+            normalized_header_names = {name.casefold() for name in header_names} if isinstance(header_names, (list, tuple)) and all(type(name) is str for name in header_names) else set()
+            if (
+                not isinstance(header_names, (list, tuple))
+                or not header_names
+                or any(type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None or name.casefold() in _FORBIDDEN_PROJECT_SECRET_HEADERS for name in header_names)
+                or len(normalized_header_names) != len(header_names)
+                or secret_header_names.intersection(normalized_header_names)
+            ):
+                raise McpDefinitionPolicyError
+            secret_header_names.update(normalized_header_names)
         query_names = schema.get("query")
         if query_names is not None:
             if (

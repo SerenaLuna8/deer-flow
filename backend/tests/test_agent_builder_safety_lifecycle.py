@@ -28,9 +28,6 @@ from app.shared_assets.agent_design_generation import AgentDesignConflict
 from app.shared_assets.agent_design_repository import AgentDesignRepository
 from app.shared_assets.agent_design_service import (
     AgentDesignBlueprint,
-    AgentDesignBlueprintTurn,
-    AgentDesignClarificationResponse,
-    AgentDesignClarificationTurn,
     AgentDesignMessageTurn,
     AgentDesignService,
     AgentDesignStatus,
@@ -41,7 +38,6 @@ from app.shared_assets.agent_design_service import (
 )
 from app.shared_assets.errors import (
     AgentDesignConflictUnresolved,
-    AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
     AgentDesignSlugConflict,
     AssetConflict,
@@ -68,7 +64,7 @@ def _context() -> ProjectContext:
             }
         ),
         membership_version=3,
-        request_id="request-agent-builder-safety",
+        request_id="request-agent-builder-lifecycle",
     )
 
 
@@ -199,77 +195,45 @@ def _row(
     )
 
 
-def _no_database() -> _TransactionSession:
-    raise AssertionError("secret-bearing input must be rejected before opening a database session")
+def _unexpected_database() -> _TransactionSession:
+    raise AssertionError("input must be rejected before opening a database session")
 
 
-@pytest.mark.asyncio
-async def test_secret_display_name_is_rejected_before_persistence() -> None:
+def test_builder_request_validation_does_not_classify_text_content() -> None:
     context = _context()
-    service = AgentDesignService(_no_database)  # type: ignore[arg-type]
-
-    with pytest.raises(AssetValidationFailed):
-        await service.create(
-            context,
-            CreateAgentDesignSession(
-                slug="safe-agent",
-                display_name="sk-abcdefghijklmnopqrst",
-                idempotency_key="create-secret-name",
-            ),
-        )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "turn",
-    [
-        AgentDesignMessageTurn(
-            kind="message",
-            message="Use Bearer abcdefghijklmnopqrstuvwxyz for the request",
+    created = AgentDesignService._validate_create(  # noqa: SLF001
+        context,
+        CreateAgentDesignSession(
+            slug="content-reviewer",
+            display_name="sk-abcdefghijklmnopqrst",
+            idempotency_key="create-unclassified-content",
         ),
-        AgentDesignClarificationTurn(
-            kind="clarification",
-            response=AgentDesignClarificationResponse(
-                version=1,
-                kind="human_input_response",
-                source="agent_builder",
-                request_id="credentials",
-                response_kind="text",
-                value="sk-abcdefghijklmnopqrst",
+    )
+    submitted = AgentDesignService._validate_turn(  # noqa: SLF001
+        context,
+        SubmitAgentDesignTurn(
+            input=AgentDesignMessageTurn(
+                kind="message",
+                message="Use Bearer abcdefghijklmnopqrstuvwxyz for the request",
             ),
+            expected_revision=1,
+            idempotency_key="turn-unclassified-content",
         ),
-        AgentDesignBlueprintTurn(
-            kind="blueprint_update",
-            blueprint=AgentDesignBlueprint(
-                description="审查代码并输出问题。",
-                model_ref="default",
-                tool_groups=("file:read",),
-                skill_refs=(),
-                mcp_version_ids=(),
-                agents_instructions="读取代码并给出证据。",
-                soul="Bearer abcdefghijklmnopqrstuvwxyz",
-                identity="代码审查 Agent。",
-                user_context="使用中文。",
-            ),
+    )
+    committed = AgentDesignService._validate_commit(  # noqa: SLF001
+        context,
+        CommitAgentDesignSession(
+            expected_revision=2,
+            expected_blueprint_checksum="a" * 64,
+            idempotency_key="commit-unclassified-content",
+            slug="sk-abcdefghijklmnopqrst",
         ),
-    ],
-)
-async def test_secret_in_any_turn_is_rejected_before_persistence(
-    turn: AgentDesignMessageTurn | AgentDesignClarificationTurn | AgentDesignBlueprintTurn,
-) -> None:
-    context = _context()
-    service = AgentDesignService(_no_database)  # type: ignore[arg-type]
+    )
 
-    with pytest.raises(AssetValidationFailed):
-        await service.submit_turn(
-            context,
-            uuid.uuid4(),
-            SubmitAgentDesignTurn(
-                input=turn,
-                expected_revision=1,
-                idempotency_key="turn-secret-input",
-            ),
-        )
+    assert created.display_name == "sk-abcdefghijklmnopqrst"
+    assert isinstance(submitted.input, AgentDesignMessageTurn)
+    assert submitted.input.message.startswith("Use Bearer")
+    assert committed.slug == "sk-abcdefghijklmnopqrst"
 
 
 def test_edited_retry_after_initial_failure_becomes_authoritative_brief() -> None:
@@ -613,7 +577,7 @@ async def test_builder_service_rejects_noncanonical_create_and_commit_slugs(
     slug: str,
 ) -> None:
     context = _context()
-    service = AgentDesignService(_no_database)  # type: ignore[arg-type]
+    service = AgentDesignService(_unexpected_database)  # type: ignore[arg-type]
 
     with pytest.raises(AssetValidationFailed):
         await service.create(
@@ -675,119 +639,7 @@ async def test_commit_route_forwards_optional_slug_to_the_domain_command() -> No
 
 
 @pytest.mark.asyncio
-async def test_commit_slug_secret_is_rejected_before_persistence() -> None:
-    context = _context()
-    service = AgentDesignService(_no_database)  # type: ignore[arg-type]
-
-    with pytest.raises(AgentDesignSecretDetected):
-        await service.commit(
-            context,
-            uuid.uuid4(),
-            CommitAgentDesignSession(
-                expected_revision=5,
-                expected_blueprint_checksum="a" * 64,
-                idempotency_key="commit-secret-slug",
-                slug="sk-abcdefghijklmnopqrst",
-            ),
-        )
-
-
-@pytest.mark.asyncio
-async def test_commit_rechecks_a_legacy_session_slug_for_secrets() -> None:
-    context = _context()
-    fake_session = _TransactionSession()
-    base_service = AgentDesignService(lambda: fake_session)  # type: ignore[arg-type]
-    blueprint = _blueprint(base_service)
-    row = _row(
-        context,
-        status=AgentDesignStatus.PROPOSAL_READY,
-        revision=5,
-        blueprint_json=base_service._blueprint_json(blueprint),  # noqa: SLF001
-        blueprint_checksum=base_service.blueprint_checksum(blueprint),
-    )
-    row.slug = "sk-abcdefghijklmnopqrst"
-
-    class _Repository(_NoActiveBuilderOperations):
-        async def get_operation(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-        async def get(self, *_args: object, **_kwargs: object) -> AgentDesignSessionRow:
-            return row
-
-        async def project_agent_slug_exists(self, *_args: object, **_kwargs: object) -> bool:
-            raise AssertionError("secret legacy slug must fail before Agent lookup")
-
-    service = AgentDesignService(
-        lambda: fake_session,  # type: ignore[arg-type]
-        repository_factory=lambda _session: _Repository(),  # type: ignore[arg-type]
-    )
-
-    with pytest.raises(AgentDesignSecretDetected):
-        await service.commit(
-            context,
-            row.id,
-            CommitAgentDesignSession(
-                expected_revision=row.revision,
-                expected_blueprint_checksum=row.blueprint_checksum or "",
-                idempotency_key="commit-legacy-secret-slug",
-            ),
-        )
-
-
-@pytest.mark.asyncio
-async def test_commit_rejects_a_legacy_secret_blueprint_before_operation_write() -> None:
-    context = _context()
-    fake_session = _TransactionSession()
-    base_service = AgentDesignService(lambda: fake_session)  # type: ignore[arg-type]
-    blueprint = replace(
-        _blueprint(base_service),
-        agents_instructions="Use Bearer abcdefghijklmnop when reviewing code.",
-    )
-    row = _row(
-        context,
-        status=AgentDesignStatus.PROPOSAL_READY,
-        revision=5,
-        blueprint_json=base_service._blueprint_json(blueprint),  # noqa: SLF001
-        blueprint_checksum=base_service.blueprint_checksum(blueprint),
-    )
-
-    class _Repository(_NoActiveBuilderOperations):
-        async def get_operation(self, *_args: object, **_kwargs: object) -> None:
-            return None
-
-        async def get(self, *_args: object, **_kwargs: object) -> AgentDesignSessionRow:
-            return row
-
-        async def project_agent_slug_exists(self, *_args: object, **_kwargs: object) -> bool:
-            return False
-
-        async def create_operation(self, *_args: object, **_kwargs: object) -> None:
-            raise AssertionError("legacy secret blueprint must fail before operation persistence")
-
-    class _AgentService:
-        async def create_project_from_design_in_session(self, *_args: object, **_kwargs: object) -> None:
-            raise AssertionError("legacy secret blueprint must never create an Agent version")
-
-    service = AgentDesignService(
-        lambda: fake_session,  # type: ignore[arg-type]
-        repository_factory=lambda _session: _Repository(),  # type: ignore[arg-type]
-        agent_service=_AgentService(),  # type: ignore[arg-type]
-    )
-
-    with pytest.raises(AgentDesignSecretDetected):
-        await service.commit(
-            context,
-            row.id,
-            CommitAgentDesignSession(
-                expected_revision=row.revision,
-                expected_blueprint_checksum=row.blueprint_checksum or "",
-                idempotency_key="commit-legacy-secret-blueprint",
-            ),
-        )
-
-
-@pytest.mark.asyncio
-async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_identity(
+async def test_commit_override_replaces_legacy_display_name_and_syncs_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context = _context()
@@ -801,7 +653,7 @@ async def test_commit_override_replaces_legacy_secret_display_name_and_syncs_ide
         blueprint_json=base_service._blueprint_json(blueprint),  # noqa: SLF001
         blueprint_checksum=base_service.blueprint_checksum(blueprint),
     )
-    row.display_name = "sk-abcdefghijklmnopqrst"
+    row.display_name = "legacy-reviewer"
     preflight_slugs: list[str] = []
     create_commands: list[object] = []
     commit_operations: list[AgentDesignOperationRow] = []
@@ -1485,7 +1337,7 @@ async def test_incomplete_session_list_exposes_a_next_cursor_without_truncation(
 @pytest.mark.asyncio
 async def test_incomplete_session_list_rejects_a_malformed_cursor_before_query() -> None:
     context = _context()
-    service = AgentDesignService(_no_database)  # type: ignore[arg-type]
+    service = AgentDesignService(_unexpected_database)  # type: ignore[arg-type]
 
     with pytest.raises(AssetValidationFailed):
         await service.list_incomplete(context, cursor="not-a-valid-cursor")
@@ -1619,7 +1471,6 @@ async def test_cancel_locks_in_progress_turn_operations_before_session_mutation(
 @pytest.mark.parametrize(
     ("error", "status_code"),
     [
-        (AgentDesignSecretDetected("request-secret"), 422),
         (AgentDesignSessionLimitExceeded("request-limit"), 429),
         (AgentDesignSlugConflict("request-slug"), 409),
         (AgentDesignConflictUnresolved("request-conflict"), 409),

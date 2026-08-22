@@ -56,6 +56,26 @@ def test_project_mcp_policy_accepts_query_secret_against_secret_free_base_url() 
     )
 
 
+def test_project_mcp_policy_accepts_header_and_query_in_one_slot() -> None:
+    assert (
+        validate_project_mcp_definition(
+            transport="http",
+            url=_BASE_ENDPOINT,
+            env={},
+            headers={},
+            oauth={},
+            secret_slot_schemas=(
+                {
+                    "headers": ("Authorization",),
+                    "query": ("api_key",),
+                },
+            ),
+            endpoint_policy=_endpoint_policy(),
+        )
+        == _BASE_ENDPOINT
+    )
+
+
 @pytest.mark.parametrize(
     ("url", "schemas"),
     [
@@ -64,11 +84,14 @@ def test_project_mcp_policy_accepts_query_secret_against_secret_free_base_url() 
         (_BASE_ENDPOINT, ({"query": ("key",)}, {"query": ("key",)})),
         (
             _BASE_ENDPOINT,
-            ({"headers": ("Authorization",), "query": ("key",)},),
+            (
+                {"headers": ("Authorization",)},
+                {"headers": ("authorization",)},
+            ),
         ),
     ],
 )
-def test_project_mcp_policy_rejects_ambiguous_or_unsafe_query_secret_names(
+def test_project_mcp_policy_rejects_ambiguous_or_unsafe_secret_names(
     url: str,
     schemas: tuple[dict[str, tuple[str, ...]], ...],
 ) -> None:
@@ -106,6 +129,32 @@ def test_project_mcp_service_accepts_query_slot_without_persisting_secret() -> N
     assert normalized.secret_slots[0].payload_schema == {"query": ("key",)}
 
 
+def test_project_mcp_service_accepts_combined_slot_without_persisting_secret() -> None:
+    normalized = McpService._validate_definition(
+        _context(),
+        McpDefinition(
+            transport="http",
+            url=_BASE_ENDPOINT,
+            secret_slots=(
+                McpSecretSlot(
+                    name="auth",
+                    purpose="Remote request credentials",
+                    payload_schema={
+                        "headers": ("Authorization",),
+                        "query": ("api_key",),
+                    },
+                ),
+            ),
+        ),
+        endpoint_policy=_endpoint_policy(),
+    )
+
+    assert normalized.secret_slots[0].payload_schema == {
+        "headers": ("Authorization",),
+        "query": ("api_key",),
+    }
+
+
 def test_runtime_merges_query_secret_into_url_only_in_materialized_config() -> None:
     secret = "query-secret-with symbols/+"
     server_config = {
@@ -125,6 +174,38 @@ def test_runtime_merges_query_secret_into_url_only_in_materialized_config() -> N
     ]
 
 
+def test_runtime_merges_header_and_query_from_one_materialized_slot() -> None:
+    server_config = {
+        "transport": "http",
+        "url": _BASE_ENDPOINT,
+        "headers": {"X-Public-Mode": "read"},
+    }
+
+    merged = _merge_catalog_mcp_secrets(
+        server_config,
+        {
+            "auth": {
+                "headers": {"Authorization": "Bearer secret"},
+                "query": {"api_key": "query secret"},
+            }
+        },
+    )
+
+    assert server_config == {
+        "transport": "http",
+        "url": _BASE_ENDPOINT,
+        "headers": {"X-Public-Mode": "read"},
+    }
+    assert merged["headers"] == {
+        "X-Public-Mode": "read",
+        "Authorization": "Bearer secret",
+    }
+    assert parse_qsl(
+        urlsplit(str(merged["url"])).query,
+        keep_blank_values=True,
+    ) == [("api_key", "query secret")]
+
+
 def test_runtime_rejects_query_secret_for_non_remote_or_duplicate_parameter() -> None:
     with pytest.raises(AssetCatalogUnavailable):
         _merge_catalog_mcp_secrets(
@@ -139,13 +220,15 @@ def test_runtime_rejects_query_secret_for_non_remote_or_duplicate_parameter() ->
 
 
 @pytest.mark.asyncio
-async def test_discovery_and_tool_call_receive_query_secret_only_in_one_shot_client(
+async def test_discovery_and_tool_call_receive_combined_credentials_in_one_shot_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from langchain_mcp_adapters import client as client_module
 
     secret = "one-shot-query-secret"
+    header_secret = "one-shot-header-secret"
     captured_urls: list[str] = []
+    captured_headers: list[dict[str, str]] = []
     close_count = 0
 
     class RemoteTool:
@@ -158,6 +241,7 @@ async def test_discovery_and_tool_call_receive_query_secret_only_in_one_shot_cli
         def __init__(self, servers, **_kwargs):
             server = next(iter(servers.values()))
             captured_urls.append(server["url"])
+            captured_headers.append(dict(server["headers"]))
 
         async def get_tools(self, *, server_name):
             del server_name
@@ -169,7 +253,12 @@ async def test_discovery_and_tool_call_receive_query_secret_only_in_one_shot_cli
 
     monkeypatch.setattr(client_module, "MultiServerMCPClient", OneShotClient)
     definition = {"transport": "http", "url": _BASE_ENDPOINT}
-    material = {"api-key": {"query": {"key": secret}}}
+    material = {
+        "auth": {
+            "headers": {"Authorization": header_secret},
+            "query": {"key": secret},
+        }
+    }
 
     async def discover(tools, _derived):
         return [tool.name for tool in tools]
@@ -192,6 +281,10 @@ async def test_discovery_and_tool_call_receive_query_secret_only_in_one_shot_cli
     assert definition["url"] == _BASE_ENDPOINT
     assert len(captured_urls) == 2
     assert all(parse_qsl(urlsplit(url).query, keep_blank_values=True) == [("key", secret)] for url in captured_urls)
+    assert captured_headers == [
+        {"Authorization": header_secret},
+        {"Authorization": header_secret},
+    ]
     assert close_count == 2
 
 

@@ -34,17 +34,42 @@ from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.file_authority import AuthorityManifest
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
-from deerflow.runtime import RunStatus, run_agent
+from deerflow.runtime import run_agent
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.runs.execution_contracts import (
+    RunAgentOutcome,
+    RunAgentUsageSnapshot,
+)
 from deerflow.sandbox.exceptions import SandboxRuntimeError
 from deerflow.sandbox.sandbox_provider import (
     PrivateSandboxLease,
     RunScopedReadOnlyMount,
 )
 from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ParentExecutionBindingFactory,
+    PrivateRunParentExecutionProfile,
+)
 from deerflow.tools.builtins.task_tool import task_tool
 
 _MODEL_REF = "00000000-0000-4000-8000-000000000451"
 _FULL_BUILDER_TOOL_GROUPS = ("bash", "task")
+
+
+def _runner_success() -> RunAgentOutcome:
+    return RunAgentOutcome.succeeded(
+        RunAgentUsageSnapshot(
+            total_input_tokens=0,
+            total_output_tokens=0,
+            total_tokens=0,
+            llm_call_count=0,
+            lead_agent_tokens=0,
+            subagent_tokens=0,
+            middleware_tokens=0,
+            token_usage_by_model={},
+        )
+    )
 
 
 class _Runtime:
@@ -359,18 +384,18 @@ async def test_skill_builder_executor_installs_private_file_authority_with_exact
     async def runner(
         _bridge,
         _run_manager,
-        record,
+        _record,
         *,
         ctx,
         agent_factory,
         config,
         **_kwargs,
-    ) -> None:
+    ) -> RunAgentOutcome:
         observed["file_authority"] = ctx.file_authority
         observed["agent_factory"] = agent_factory
         observed["host_execution_approval_port"] = ctx.host_execution_approval_port
         observed["config"] = config
-        record.status = RunStatus.success
+        return _runner_success()
 
     executor, execution, authority, _runtime = _execution_bundle(
         tmp_path,
@@ -469,14 +494,35 @@ def test_skill_builder_local_approval_hides_direct_bash(
 @pytest.mark.asyncio
 async def test_skill_builder_local_approval_blocks_delegated_bash() -> None:
     app_config = _tool_policy_config(aio=False)
+    binding_factory = ParentExecutionBindingFactory(
+        PrivateRunParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=(),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=app_config,
+            asset_context=None,
+            private_runtime=object(),
+            model_name=_MODEL_REF,
+            thinking_enabled=False,
+            reasoning_effort=None,
+            runtime_skills=(),
+            runtime_agent_catalog=None,
+            tool_groups=(),
+        )
+    )
     result = await task_tool.coroutine(
         runtime=SimpleNamespace(
             context={
-                "app_config": app_config,
-                "non_interactive": True,
+                RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: binding_factory,
+                RuntimeContextKeys.NON_INTERACTIVE: True,
             },
             state={},
             config={},
+            store=None,
         ),
         description="test delegated bash",
         prompt="Run a harmless command.",
@@ -531,9 +577,9 @@ async def test_skill_builder_provider_acquisition_failure_precedes_agent_model_b
             self._released = True
             events.append("authority-release")
 
-    async def worker_runner(*args, ctx, **kwargs) -> None:
+    async def worker_runner(*args, ctx, **kwargs) -> RunAgentOutcome:
         _bridge, run_manager, record = args
-        await run_agent(
+        return await run_agent(
             SimpleNamespace(
                 publish=AsyncMock(),
                 publish_end=AsyncMock(),
@@ -562,7 +608,12 @@ async def test_skill_builder_provider_acquisition_failure_precedes_agent_model_b
     result = await executor.execute(execution, authority)
 
     assert result.status == "failed"
-    assert events[0] == "provider-acquire"
+    assert events == [
+        "provider-acquire",
+        "mark-failed",
+        "authority-release",
+        "runtime-close",
+    ]
     model_build.assert_not_called()
 
 

@@ -23,3 +23,11 @@ def test_make_stop_unloads_macos_daemon_supervisors() -> None:
     assert '"com.actweave.deerflow.dev"' in source
     assert '"com.actweave.deerflow.prod"' in source
     assert 'launchctl remove "$label"' in source
+
+
+def test_make_stop_tolerates_listener_exit_during_port_reporting() -> None:
+    source = SERVE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("_report_reclaimed_ports() {")
+    block = source[start : source.index("_kill_repo_processes() {", start)]
+
+    assert 'files=$(lsof -b -w -p "$pid" 2>/dev/null) || continue' in block

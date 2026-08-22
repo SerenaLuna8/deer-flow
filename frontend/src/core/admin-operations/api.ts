@@ -18,6 +18,7 @@ import { assetIdSchema } from "@/core/shared-assets/types";
 import {
   adminAuditQueryKey,
   adminProjectLifecycleMutationKey,
+  adminProjectQueryKey,
   adminProjectQuotaLimitsMutationKey,
   adminProjectUsageQueryKey,
   adminJobsQueryKey,
@@ -209,6 +210,20 @@ export async function fetchAdminProjects(
   return readOperationsResponse(response, adminProjectPageSchema);
 }
 
+export async function fetchAdminProject(
+  accountId: string,
+  projectId: string,
+  signal?: AbortSignal,
+): Promise<AdminProjectPage["items"][number]> {
+  accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  const response = await requestOperations(
+    `${operationsBaseURL()}/projects/${encodeURIComponent(parsedProjectId)}`,
+    { signal },
+  );
+  return readOperationsResponse(response, adminProjectSchema);
+}
+
 export async function changeAdminProjectLifecycle(
   accountId: string,
   projectId: string,
@@ -349,6 +364,23 @@ export function adminProjectsQueryOptions(
   };
 }
 
+export function adminProjectQueryOptions(
+  accountId: string,
+  projectId: string,
+  enabled = true,
+) {
+  const parsedAccountId = accountIdSchema.parse(accountId);
+  const parsedProjectId = assetIdSchema.parse(projectId);
+  return {
+    queryKey: adminProjectQueryKey(parsedAccountId, parsedProjectId),
+    queryFn: ({ signal }: { signal: AbortSignal }) =>
+      fetchAdminProject(parsedAccountId, parsedProjectId, signal),
+    enabled,
+    retry: false,
+    refetchOnWindowFocus: false,
+  };
+}
+
 export function adminJobsQueryOptions(
   accountId: string,
   cursor: string | null = null,
@@ -424,6 +456,14 @@ export function useAdminProjects(
   limit = 50,
 ) {
   return useQuery(adminProjectsQueryOptions(accountId, cursor, filters, limit));
+}
+
+export function useAdminProject(
+  accountId: string,
+  projectId: string,
+  enabled = true,
+) {
+  return useQuery(adminProjectQueryOptions(accountId, projectId, enabled));
 }
 
 export function useAdminProjectLifecycle(accountId: string) {

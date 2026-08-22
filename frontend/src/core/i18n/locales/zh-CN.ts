@@ -19,6 +19,7 @@ export const zhCN: Translations = {
 
   // Common
   common: {
+    skipToContent: "跳到主要内容",
     home: "首页",
     settings: "设置",
     delete: "删除",
@@ -27,6 +28,7 @@ export const zhCN: Translations = {
     share: "分享",
     openInNewWindow: "在新窗口打开",
     close: "关闭",
+    closeArtifacts: "关闭文件面板",
     more: "更多",
     search: "搜索",
     loadMore: "加载更多",
@@ -301,6 +303,149 @@ export const zhCN: Translations = {
     mcp: "工具",
     memory: "记忆",
     usage: "用量",
+    navigation: {
+      label: "项目导航",
+      menuLabel: "项目菜单栏",
+      workspaceAria: "ActWeave 工作空间",
+      overview: "项目概览",
+      conversations: "会话",
+      automations: "自动化",
+      agents: "智能体",
+      skills: "技能",
+      mcp: "工具",
+      memory: "记忆",
+      connections: "渠道连接",
+      audit: "审计日志",
+      settings: "项目设置",
+      backToWorkspace: "返回工作空间",
+      sections: {
+        work: "工作",
+        capabilities: "能力",
+        management: "项目管理",
+      },
+      account: "账户",
+      platformAdministration: "平台管理",
+      systemSettings: "系统设置",
+      logout: "退出登录",
+      expand: "展开菜单栏",
+      collapse: "收起菜单栏",
+      open: "打开项目导航",
+      sheetTitle: "项目导航",
+      sheetDescription: "项目页面导航",
+    },
+    accessDenied: {
+      title: "没有访问权限",
+      description: (area) =>
+        `你是该项目的成员，但当前角色无权访问${area}。如需使用，请联系项目管理员调整角色。`,
+      backToProject: "返回项目首页",
+    },
+    settings: {
+      accessArea: "项目设置",
+      governanceEyebrow: (projectName) => `${projectName} · 治理`,
+      title: "项目设置",
+      description: "管理项目资料、成员和生命周期。",
+      navigationLabel: "项目设置",
+      navigation: {
+        general: {
+          label: "常规设置",
+          description: "项目资料与生命周期",
+        },
+        members: {
+          label: "项目成员",
+          description: "成员角色与邀请",
+        },
+      },
+      general: {
+        title: "项目资料",
+        description: "这些信息会出现在工作空间和项目导航中。",
+        displayName: "项目名称",
+        icon: "图标",
+        slug: "项目标识",
+        slugDescription: "项目标识用于访问地址，创建后不可修改。",
+        projectDescription: "项目描述",
+        descriptionPlaceholder: "说明这个项目的目标和用途",
+        saved: "项目资料已保存",
+        saving: "保存中…",
+        save: "保存修改",
+      },
+      lifecycle: {
+        title: "项目生命周期",
+        description:
+          "请求删除后，项目会立即停止进入和治理，并提供 30 天恢复窗口。恢复窗口结束后将无法自助恢复。",
+        requestDeletion: "请求删除项目",
+        confirmTitle: "确认删除项目",
+        confirmDescription:
+          "项目会立即进入待删除状态，你将返回工作空间。项目管理员可在 30 天恢复窗口内撤销这次操作。",
+        cancel: "取消",
+        confirm: "确认请求删除",
+      },
+    },
+    members: {
+      managementEyebrow: (projectName) => `${projectName} · 项目管理`,
+      title: "成员与邀请",
+      description: "管理项目成员、角色和待处理邀请。",
+      inviteMember: "邀请成员",
+      membersTitle: "成员",
+      invitationsTitle: "邀请",
+      emptyInvitations: "暂无项目邀请。",
+      columns: {
+        account: "账户",
+        role: "角色",
+        status: "状态",
+        actions: "操作",
+      },
+      roles: {
+        admin: "管理员",
+        editor: "编辑者",
+        runner: "运行者",
+        viewer: "查看者",
+      },
+      membershipStatuses: {
+        active: "有效",
+        left: "已退出",
+        removed: "已移除",
+      },
+      invitationStatuses: {
+        pending: "待接受",
+        redeemed: "已接受",
+        revoked: "已撤销",
+        expired: "已过期",
+      },
+      actions: {
+        changeRole: "修改角色",
+        removeMember: "移除成员",
+        leaveProject: "退出项目",
+        revokeInvitation: "撤销邀请",
+      },
+      confirmations: {
+        removeTitle: "确认移除成员",
+        removeDescription: (email) =>
+          `移除 ${email} 后，该成员将立即失去项目访问权限。`,
+        removeConfirm: "确认移除成员",
+        leaveTitle: "确认退出项目",
+        leaveDescription: "退出后，你将无法访问这个项目，除非再次受邀。",
+        leaveConfirm: "确认退出项目",
+        revokeTitle: "确认撤销邀请",
+        revokeDescription: (email) =>
+          `撤销后，发送给 ${email} 的邀请链接将立即失效。`,
+        revokeConfirm: "确认撤销邀请",
+        cancel: "取消",
+      },
+      inviteDialog: {
+        title: "邀请成员",
+        description: "邀请链接只显示一次，请通过可信渠道发送。",
+        inviteLink: "邀请链接",
+        done: "完成",
+        email: "邮箱",
+        projectRole: "项目角色",
+        create: "创建邀请",
+      },
+      roleDialog: {
+        title: "修改成员角色",
+        projectRole: "项目角色",
+        save: "保存角色",
+      },
+    },
     governance: {
       retry: "重试",
       tokenSeries: {
@@ -813,6 +958,8 @@ export const zhCN: Translations = {
       backToProjects: "返回项目选择",
       projectGovernance: "项目共享资产代管",
       projectId: "项目 UUID",
+      shortProjectId: (projectId) => `UUID ${projectId}`,
+      projectIdentityUnavailable: "无法加载项目身份信息。",
     },
     common: {
       assetVersion: "资产修订",
@@ -876,6 +1023,10 @@ export const zhCN: Translations = {
       },
     },
     catalog: {
+      assetCatalog: "资产目录",
+      projectAgentTitle: "项目 Agent",
+      projectSkillTitle: "项目 Skill",
+      projectMcpTitle: "项目 MCP",
       systemAssets: "系统资产",
       systemAssetsDescription:
         "系统资产只读共享；项目绑定固定到明确版本，不会自动升级。",
@@ -918,6 +1069,9 @@ export const zhCN: Translations = {
       previousPage: "上一页",
       nextPage: "下一页",
       noResults: "没有符合当前筛选条件的资产。",
+      catalogUnavailable: "无法加载资产目录。",
+      versionHistoryUnavailable: "无法加载版本记录。",
+      projectCatalogUnavailable: "无法加载项目资产。",
       noSystemAssets: "暂无可见系统资产。",
       system: "系统",
       systemPublishStatus: "系统发布状态",
@@ -948,6 +1102,11 @@ export const zhCN: Translations = {
       suspend: "暂停",
     },
     version: {
+      current: "当前版本",
+      candidate: "候选版本",
+      historical: "历史版本",
+      currentUnconfirmed: "当前配置无法确认。",
+      activate: "激活版本",
       none: "尚未创建版本。",
       mcpNone: "尚未保存配置。",
       selectHint: "选择左侧版本以查看详情。",
@@ -1005,8 +1164,8 @@ export const zhCN: Translations = {
         "当前项目 MCP 需要无内嵌凭据、无查询参数或片段的绝对 HTTP 或 HTTPS URL，主机仅支持精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不解析普通 DNS 主机名。localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 必须属于管理员配置的允许网段。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       projectOAuth:
         "当前项目 MCP 不支持配置内 OAuth。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
-      projectHeadersOnly:
-        "当前项目 MCP 秘密槽位仅支持请求头或查询参数。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
+      projectCredentialTargetsOnly:
+        "当前项目 MCP 的凭证参数只能发送到请求头（Header）或查询参数（Query）。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
       missingSystemCommand:
         "当前标准输入输出型系统 MCP 缺少命令，不能绑定或用于 Agent。",
       missingSystemUrl: "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。",
@@ -1016,6 +1175,18 @@ export const zhCN: Translations = {
         "当前远程系统 MCP 秘密槽位仅支持请求头、查询参数或 OAuth，不能绑定或用于 Agent。",
     },
     dialogs: {
+      authoring: {
+        title: (name) => `为 ${name} 创建版本`,
+        skillDescription:
+          "System Skill v1 不允许升级；Project Skill 可保存新的候选版本。",
+        mcpDescription: "MCP 定义只声明秘密槽位，不在版本定义中保存秘密值。",
+        description: "说明",
+        secretSlots: "秘密槽位 JSON",
+        invalidSecretSlots: "秘密槽位必须是有效的 JSON 数组。",
+        cancel: "取消",
+        saving: "正在保存…",
+        save: "保存版本",
+      },
       binding: {
         switchTitle: "切换项目绑定版本",
         enableTitle: "启用系统资产",
@@ -1032,6 +1203,9 @@ export const zhCN: Translations = {
         enable: "启用到当前项目",
         rollback: "回退到此版本",
         switchVersion: "切换到新版本",
+        currentVersion: "当前版本",
+        currentVersionUnavailable: "当前版本不可用。",
+        currentVersionInUse: "已使用当前版本",
       },
     },
     errors: {
@@ -1040,7 +1214,7 @@ export const zhCN: Translations = {
       conflict: "资产状态已变化，请刷新后重试。",
       validationFailed: "提交内容不符合资产要求。",
       mcpVersionValidation:
-        "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌秘密、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个秘密槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。",
+        "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌秘密、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每组访问凭证至少包含一个 Header 或 Query 参数，也可以同时包含两类参数，且字段名有效。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。",
       storageQuota:
         "项目 Skill 存储配额已用尽，请清理不再需要的 Skill 后重试。",
       storageUnavailable: "资产存储暂时不可用，请稍后重试。",
@@ -1251,7 +1425,6 @@ export const zhCN: Translations = {
           "设计稿仍有未解决的冲突，请继续对话，让 Agent 重新生成设计稿后再创建。",
         sessionLimitExceeded:
           "未完成的 Agent 设计已达到上限。请先恢复或取消一个已有设计，再新建设计。",
-        secretDetected: "输入中疑似包含密钥或其他敏感信息，请移除后重试。",
         commitUncertain:
           "创建结果暂时无法确认。请勿重复创建，先返回列表检查同名 Agent；若未出现再重试。",
         stale: "设计内容已发生变化，请刷新到最新状态后再继续。",
@@ -1286,6 +1459,23 @@ export const zhCN: Translations = {
       },
       blueprint: {
         title: "Agent 设计稿",
+        triggerLabel: "设计稿",
+        openAria: "查看 Agent 设计稿",
+        conflictCount: (count) => `${count} 项待解决冲突`,
+        readyTitle: "Agent 设计稿已就绪",
+        summary: (conflictCount) =>
+          conflictCount > 0
+            ? `4 个文档 · ${conflictCount} 项待解决冲突`
+            : "4 个文档",
+        viewBlueprint: "查看设计稿",
+        closeAria: "关闭 Agent 设计稿",
+        panelSummary: (conflictCount) =>
+          conflictCount > 0
+            ? `4 个文档 · ${conflictCount} 项待解决冲突`
+            : "4 个文档",
+        tabsAria: "Agent 设计稿内容",
+        overviewTab: "概览",
+        documentsTab: "文档",
         runtime: "运行配置",
         noDescription: "暂未生成 Agent 简介。",
         nameLabel: "Agent 名称",
@@ -1300,6 +1490,7 @@ export const zhCN: Translations = {
         assumptionsTitle: "设计假设",
         conflictsTitle: "待解决冲突",
         conflictDocuments: "涉及文档",
+        openConflictDocument: (name) => `在文档中查看 ${name}`,
         blockingConflictHint:
           "请继续对话，让 Agent 重新生成设计稿；红色冲突消失后才能创建 Agent。",
         createHint: "保存后生成不可变的 v1 候选版本；激活后才会用于运行",
@@ -1586,12 +1777,6 @@ export const zhCN: Translations = {
       label: "导出 ZIP",
       preparing: "正在准备…",
       started: "下载已开始",
-      tooltip: (version) => `导出当前选中的 v${version}`,
-      unsaved: "请先保存或放弃当前修改",
-      loading: "正在加载当前版本，请稍候",
-      revoked: "已撤销的 System Skill 版本不可导出",
-      notCurrent: "System Skill 只有 Current Version 可以导出",
-      noVersion: "请选择一个已持久化的版本",
     },
     secrets: {
       workbenchAria: "Skill 编辑区域",
@@ -2128,6 +2313,29 @@ export const zhCN: Translations = {
     modelOutputLimitDescription: "模型达到单次输出上限，当前回复未完成。",
     modelOutputLimitRetry: "关闭深度思考后重试",
     modelOutputLimitRetrying: "正在重试…",
+    loopSafetyLimitTitle: "重复操作触发安全上限",
+    loopSafetyLimitDescription:
+      "本次运行已停止。已有回答或文件属于部分结果；本次失败原因是循环安全限制。",
+    recoveredModelFailuresTitle: "模型调用失败后已恢复",
+    recoveredModelFailuresDescription: (count) =>
+      `本轮有 ${count} 次模型请求失败。这些请求经重试后恢复；本轮最终状态以运行提示为准。`,
+    recoveredModelFailureAttempt: (
+      index,
+      attempt,
+      maxAttempts,
+      reason,
+      errorCode,
+    ) =>
+      `失败 ${index}：第 ${attempt}/${maxAttempts} 次模型请求——${reason}（${errorCode}）。`,
+    recoveredModelFailureReasons: {
+      quota: "模型配额不足",
+      auth: "模型认证失败",
+      busy: "模型服务繁忙",
+      transient: "模型服务或网络连接暂时不可用",
+      generic: "模型请求失败",
+      current_upload: "当前图片附件不可用",
+      circuit_open: "模型请求熔断器处于打开状态",
+    },
     tokenBudgetReachedTitle: "已达到本次运行的 Token 预算",
     tokenBudgetReachedDescription: "本次运行已提前停止，当前回复可能不完整。",
     outputDeliveryIncompleteTitle: "结果文件未完成交付",

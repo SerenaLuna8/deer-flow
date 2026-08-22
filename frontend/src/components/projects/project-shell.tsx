@@ -27,6 +27,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { SettingsDialog } from "@/components/workspace/settings";
 import type { User } from "@/core/auth/types";
+import { useI18n } from "@/core/i18n/hooks";
 import type { Project } from "@/core/projects/types";
 import { cn } from "@/lib/utils";
 
@@ -63,6 +64,7 @@ function ProjectAccountMenu({
   onOpenSettings: () => void;
   onLogout: () => void | Promise<void>;
 }) {
+  const { t } = useI18n();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -70,7 +72,7 @@ function ProjectAccountMenu({
           type="button"
           variant="ghost"
           className={compact ? "shrink-0 px-2" : "w-full justify-start"}
-          aria-label="账户"
+          aria-label={t.project.navigation.account}
         >
           <UserRoundIcon aria-hidden className="size-4 shrink-0" />
           {!compact && <span className="truncate">{accountUsername}</span>}
@@ -86,7 +88,7 @@ function ProjectAccountMenu({
             <DropdownMenuItem asChild>
               <Link href="/admin/operations">
                 <ShieldCheckIcon aria-hidden className="size-4" />
-                平台管理
+                {t.project.navigation.platformAdministration}
               </Link>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
@@ -94,12 +96,12 @@ function ProjectAccountMenu({
         ) : null}
         <DropdownMenuItem onSelect={onOpenSettings}>
           <SettingsIcon aria-hidden className="size-4" />
-          系统设置
+          {t.project.navigation.systemSettings}
         </DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => void onLogout()}>
           <LogOutIcon aria-hidden className="size-4" />
-          退出登录
+          {t.project.navigation.logout}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -119,6 +121,7 @@ export function ProjectShell({
   onLogout: () => void | Promise<void>;
   children: React.ReactNode;
 }) {
+  const { t } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [desktopNavCollapsed, setDesktopNavCollapsed] = useState(false);
   const desktopNavigation = useMemo(
@@ -145,6 +148,12 @@ export function ProjectShell({
             : "md:grid-cols-[15rem_minmax(0,1fr)]",
         )}
       >
+        <a
+          href="#project-main"
+          className="bg-background text-foreground focus-visible:ring-ring fixed top-2 left-2 z-[60] -translate-y-16 rounded-md border px-3 py-2 text-sm font-medium shadow-sm transition-transform focus:translate-y-0 focus-visible:ring-2 focus-visible:outline-none"
+        >
+          {t.common.skipToContent}
+        </a>
         <ProjectDesktopNav
           project={project}
           collapsed={desktopNavCollapsed}
@@ -171,7 +180,9 @@ export function ProjectShell({
               />
             }
           />
-          <div className="min-w-0">{children}</div>
+          <div id="project-main" tabIndex={-1} className="min-w-0 outline-none">
+            {children}
+          </div>
         </div>
       </div>
     </ProjectDesktopNavigationContext.Provider>

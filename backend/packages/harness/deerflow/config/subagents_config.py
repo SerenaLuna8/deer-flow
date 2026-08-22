@@ -9,6 +9,7 @@ from deerflow.config.token_budget_config import TokenBudgetConfig
 logger = logging.getLogger(__name__)
 
 DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN = 6
+DEFAULT_MAX_CONCURRENT_SUBAGENT_CALLS = 3
 MIN_TOTAL_SUBAGENTS_PER_RUN = 1
 MAX_TOTAL_SUBAGENTS_PER_RUN = 50
 MIN_CONCURRENT_SUBAGENT_CALLS = 1

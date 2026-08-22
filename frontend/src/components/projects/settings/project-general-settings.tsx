@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
 import { useUpdateProject } from "@/core/projects/hooks";
 import type { PatchProjectInput } from "@/core/projects/types";
 
@@ -40,6 +41,8 @@ export function ProjectGeneralSettings() {
   const project = useCurrentProject();
   const { user } = useAuth();
   const update = useUpdateProject(user?.id, project.id);
+  const { t } = useI18n();
+  const labels = t.project.settings.general;
   const [saved, setSaved] = useState(false);
   const canUpdate = project.capabilities.includes("project.update");
 
@@ -58,10 +61,10 @@ export function ProjectGeneralSettings() {
               id="project-general-settings-title"
               className="text-lg font-semibold"
             >
-              项目资料
+              {labels.title}
             </h2>
             <p className="text-muted-foreground mt-1 text-sm">
-              这些信息会出现在工作空间和项目导航中。
+              {labels.description}
             </p>
           </div>
         </div>
@@ -82,7 +85,7 @@ export function ProjectGeneralSettings() {
       >
         <div className="grid gap-5 sm:grid-cols-2">
           <label className="grid gap-2 text-sm font-medium">
-            项目名称
+            {labels.displayName}
             <Input
               name="display_name"
               defaultValue={project.display_name}
@@ -92,7 +95,7 @@ export function ProjectGeneralSettings() {
             />
           </label>
           <label className="grid gap-2 text-sm font-medium">
-            图标
+            {labels.icon}
             <Input
               name="icon"
               defaultValue={project.icon}
@@ -104,7 +107,7 @@ export function ProjectGeneralSettings() {
         </div>
 
         <label className="grid gap-2 text-sm font-medium">
-          项目标识
+          {labels.slug}
           <div className="relative">
             <Input
               value={project.slug}
@@ -121,25 +124,25 @@ export function ProjectGeneralSettings() {
             id="project-slug-description"
             className="text-muted-foreground text-xs font-normal"
           >
-            项目标识用于访问地址，创建后不可修改。
+            {labels.slugDescription}
           </span>
         </label>
 
         <label className="grid gap-2 text-sm font-medium">
-          项目描述
+          {labels.projectDescription}
           <Textarea
             name="description"
             defaultValue={project.description}
             maxLength={500}
             rows={4}
             readOnly={!canUpdate}
-            placeholder="说明这个项目的目标和用途"
+            placeholder={labels.descriptionPlaceholder}
           />
         </label>
 
         {update.error ? (
           <p role="alert" className="text-destructive text-sm">
-            {projectErrorMessage(update.error)}
+            {projectErrorMessage(update.error, t.projectWorkspace.errors)}
           </p>
         ) : null}
         {saved && !update.error ? (
@@ -148,14 +151,14 @@ export function ProjectGeneralSettings() {
             className="text-muted-foreground flex items-center gap-2 text-sm"
           >
             <CheckCircle2Icon aria-hidden className="size-4 text-emerald-600" />
-            项目资料已保存
+            {labels.saved}
           </p>
         ) : null}
 
         {canUpdate ? (
           <div className="flex justify-end">
             <Button type="submit" disabled={update.isPending}>
-              {update.isPending ? "保存中…" : "保存修改"}
+              {update.isPending ? labels.saving : labels.save}
             </Button>
           </div>
         ) : null}

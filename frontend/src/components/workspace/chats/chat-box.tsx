@@ -34,6 +34,26 @@ const RIGHT_PANEL_ANIMATION_MS = 280;
 
 export type ChatRightPanelKind = "sidecar" | "artifacts";
 
+export function ArtifactPanelCloseButton({
+  label,
+  onClose,
+}: {
+  label: string;
+  onClose: () => void;
+}) {
+  return (
+    <Button
+      type="button"
+      size="icon-sm"
+      variant="ghost"
+      aria-label={label}
+      onClick={onClose}
+    >
+      <XIcon aria-hidden />
+    </Button>
+  );
+}
+
 export function resolveChatRightPanel({
   sidecarOpen,
   artifactsEnabled,
@@ -212,15 +232,10 @@ const ChatBox: React.FC<{
       return (
         <div className="relative flex size-full justify-center">
           <div className="absolute top-1 right-1 z-30">
-            <Button
-              size="icon-sm"
-              variant="ghost"
-              onClick={() => {
-                setArtifactsOpen(false);
-              }}
-            >
-              <XIcon />
-            </Button>
+            <ArtifactPanelCloseButton
+              label={t.common.closeArtifacts}
+              onClose={() => setArtifactsOpen(false)}
+            />
           </div>
           {artifacts.length === 0 ? (
             <ConversationEmptyState
@@ -239,14 +254,14 @@ const ChatBox: React.FC<{
               <header className="shrink-0">
                 <h2 className="text-lg font-medium">{t.common.artifacts}</h2>
               </header>
-              <main className="min-h-0 grow">
+              <div className="min-h-0 grow">
                 <ArtifactFileList
                   className="max-w-(--container-width-sm) p-4 pt-12"
                   files={artifacts}
                   threadId={threadId}
                   canDelete={canDeleteFiles}
                 />
-              </main>
+              </div>
             </div>
           )}
         </div>
@@ -261,6 +276,7 @@ const ChatBox: React.FC<{
     artifacts,
     setArtifactsOpen,
     locale,
+    t.common.closeArtifacts,
     t.common.artifacts,
     canDeleteFiles,
   ]);

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from deerflow.runtime.private_scope import PrivateResourceScope
+
 from .types import WORKSPACE_CHANGES_EVENT_TYPE, WORKSPACE_CHANGES_METADATA_KEY
 
 EMPTY_SUMMARY = {
@@ -21,13 +23,15 @@ async def get_workspace_changes_response(
     *,
     include_files: bool = True,
     include_diff: bool = True,
+    scope: PrivateResourceScope | None = None,
 ) -> dict[str, Any]:
-    events = await event_store.list_events(
-        thread_id,
-        run_id,
-        event_types=[WORKSPACE_CHANGES_EVENT_TYPE],
-        limit=10,
-    )
+    query: dict[str, Any] = {
+        "event_types": [WORKSPACE_CHANGES_EVENT_TYPE],
+        "limit": 10,
+    }
+    if scope is not None:
+        query["scope"] = scope
+    events = await event_store.list_events(thread_id, run_id, **query)
     if not events:
         return _empty_response()
 

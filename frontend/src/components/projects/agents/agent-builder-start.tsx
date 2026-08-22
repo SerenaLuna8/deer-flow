@@ -57,9 +57,6 @@ export function agentBuilderErrorMessage(
   if (error.code === "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED") {
     return copy.sessionLimitExceeded;
   }
-  if (error.code === "AGENT_DESIGN_SECRET_DETECTED") {
-    return copy.secretDetected;
-  }
   return error.message || copy.unavailable;
 }
 

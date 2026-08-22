@@ -1,21 +1,29 @@
 import asyncio
 from contextlib import suppress
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, TypedDict
 from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.base import empty_checkpoint
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
 
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_CONTEXT_KEY
 from deerflow.error_codes import PublicRunError, PublicRunErrorCode
+from deerflow.runtime.checkpoint_state import (
+    CheckpointStateAccessor,
+    build_state_mutation_graph,
+)
 from deerflow.runtime.context_keys import (
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     RuntimeContextKeys,
 )
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.recovered_llm_failures import (
+    RunRecoveredLLMFailureRecorder,
+)
 from deerflow.runtime.runs.manager import ConflictError, RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import (
@@ -23,9 +31,9 @@ from deerflow.runtime.runs.worker import (
     _agent_factory_supports_app_config,
     _build_runtime_context,
     _collect_pre_existing_message_ids,
-    _complete_state_replacement_values,
     _extract_llm_error_fallback_message,
     _install_runtime_context,
+    _linearize_delta_checkpoint_resume,
     _rollback_to_pre_run_checkpoint,
     _try_extract_from_message,
     run_agent,
@@ -57,6 +65,7 @@ def test_public_run_error_codes_have_closed_stable_payloads() -> None:
     expected_messages = {
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
         PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
+        PublicRunErrorCode.LOOP_SAFETY_LIMIT: ("The Run stopped after reaching the loop safety limit"),
         PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE: ("The required output file was not presented"),
         PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),
@@ -834,6 +843,9 @@ async def test_run_agent_threads_explicit_app_config_into_config_only_factory():
     assert captured["astream_context"]["app_config"] is app_config
     assert captured["factory_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
     assert captured["astream_context"][CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] == frozenset()
+    factory_recorder = captured["factory_context"][RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER]
+    assert isinstance(factory_recorder, RunRecoveredLLMFailureRecorder)
+    assert captured["astream_context"][RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER] is factory_recorder
     fetched = await run_manager.get(record.run_id)
     assert fetched is not None
     assert fetched.status == RunStatus.success
@@ -1015,6 +1027,243 @@ async def test_run_agent_marks_llm_error_fallback_as_error_status():
     assert fetched is not None
     assert fetched.status == RunStatus.error
     assert fetched.error == "LLM_PROVIDER_UNAVAILABLE"
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_does_not_promote_subagent_custom_fallback_to_run_failure():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    class DummyAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            del graph_input, config, stream_mode, subgraphs
+            yield (
+                "custom",
+                {
+                    "type": "task_running",
+                    "task_id": "child-task-1",
+                    "message": AIMessage(
+                        content="The delegated model provider is unavailable.",
+                        additional_kwargs={
+                            "deerflow_error_fallback": True,
+                            "error_code": "LLM_PROVIDER_UNAVAILABLE",
+                            "error_reason": "transient",
+                        },
+                    ),
+                },
+            )
+            yield (
+                "values",
+                {
+                    "messages": [
+                        AIMessage(
+                            id="lead-final",
+                            content="The lead agent completed the requested work.",
+                        )
+                    ]
+                },
+            )
+
+    def factory(*, config):
+        del config
+        return DummyAgent()
+
+    outcome = await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={},
+        config={},
+        stream_modes=["custom"],
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert fetched.error is None
+    assert outcome.status == "succeeded"
+    assert outcome.public_error_code is None
+    assert all(call.args[1] != "values" for call in bridge.publish.await_args_list)
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_custom_only_still_observes_lead_fallback():
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    async def lead_fallback(_state):
+        return {
+            "messages": [
+                AIMessage(
+                    id="lead-fallback",
+                    content="The configured model provider is unavailable.",
+                    additional_kwargs={
+                        "deerflow_error_fallback": True,
+                        "error_code": "LLM_PROVIDER_UNAVAILABLE",
+                        "error_reason": "transient",
+                    },
+                )
+            ]
+        }
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("lead_fallback", lead_fallback)
+    builder.add_edge(START, "lead_fallback")
+    builder.add_edge("lead_fallback", END)
+    graph = builder.compile()
+
+    def factory(*, config):
+        del config
+        return graph
+
+    outcome = await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=factory,
+        graph_input={"messages": [HumanMessage(content="Do the work")]},
+        config={},
+        stream_modes=["custom"],
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.error
+    assert fetched.error == "LLM_PROVIDER_UNAVAILABLE"
+    assert outcome.status == "failed"
+    assert outcome.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
+    assert all(call.args[1] != "values" for call in bridge.publish.await_args_list)
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_messages_lane_does_not_promote_nested_graph_fallback():
+    class ParentState(TypedDict, total=False):
+        prompt: str
+        result: str
+
+    class ChildState(TypedDict, total=False):
+        prompt: str
+        messages: list[Any]
+
+    async def child_fallback(_state):
+        return {
+            "messages": [
+                AIMessage(
+                    id="child-fallback",
+                    content="The delegated model provider is unavailable.",
+                    additional_kwargs={
+                        "deerflow_error_fallback": True,
+                        "error_code": "LLM_PROVIDER_UNAVAILABLE",
+                        "error_reason": "transient",
+                    },
+                )
+            ]
+        }
+
+    child_builder = StateGraph(ChildState)
+    child_builder.add_node("child_fallback", child_fallback)
+    child_builder.add_edge(START, "child_fallback")
+    child_builder.add_edge("child_fallback", END)
+
+    async def lead_final(_state):
+        return {"result": "ok"}
+
+    parent_builder = StateGraph(ParentState)
+    parent_builder.add_node("child", child_builder.compile())
+    parent_builder.add_node("lead_final", lead_final)
+    parent_builder.add_edge(START, "child")
+    parent_builder.add_edge("child", "lead_final")
+    parent_builder.add_edge("lead_final", END)
+    graph = parent_builder.compile()
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    outcome = await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_: graph,
+        graph_input={"prompt": "Do the work"},
+        config={},
+        stream_modes=["messages"],
+        stream_subgraphs=False,
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert fetched.error is None
+    assert outcome.status == "succeeded"
+    assert outcome.public_error_code is None
+    assert all(call.args[1] != "values" for call in bridge.publish.await_args_list)
+    bridge.publish_end.assert_awaited_once_with(record.run_id)
+
+
+@pytest.mark.anyio
+async def test_run_agent_events_only_keeps_internal_values_lane_hidden():
+    async def lead_final(_state):
+        return {
+            "messages": [
+                AIMessage(
+                    id="lead-final",
+                    content="The lead agent completed the requested work.",
+                )
+            ]
+        }
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("lead_final", lead_final)
+    builder.add_edge(START, "lead_final")
+    builder.add_edge("lead_final", END)
+    graph = builder.compile()
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+
+    outcome = await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None),
+        agent_factory=lambda **_: graph,
+        graph_input={"messages": [HumanMessage(content="Do the work")]},
+        config={},
+        stream_modes=["events"],
+    )
+
+    fetched = await run_manager.get(record.run_id)
+    assert fetched is not None
+    assert fetched.status == RunStatus.success
+    assert outcome.status == "succeeded"
+    assert all(call.args[1] != "values" for call in bridge.publish.await_args_list)
     bridge.publish_end.assert_awaited_once_with(record.run_id)
 
 
@@ -1244,19 +1493,87 @@ async def test_private_rollback_without_checkpoint_never_deletes_business_thread
 
 
 def test_state_replacement_rejects_channels_outside_effective_schema():
-    mutation_graph = SimpleNamespace(channels={"messages": object()})
+    mutation_graph = build_state_mutation_graph("rollback", "full")
+    accessor = CheckpointStateAccessor.bind(
+        mutation_graph,
+        object(),
+        mode="full",
+    )
 
     with pytest.raises(RuntimeError, match="outside the effective schema"):
-        _complete_state_replacement_values(
-            mutation_graph=mutation_graph,
-            selected_values={
+        accessor.replacement_values(
+            {
                 "messages": [],
                 "unknown_middleware_channel": "must-not-be-dropped",
             },
             current_values={"messages": []},
-            run_id="run-1",
-            operation="rollback",
         )
+
+
+@pytest.mark.anyio
+async def test_delta_historical_resume_replaces_current_head_without_replay() -> None:
+    checkpointer = InMemorySaver()
+    graph = build_state_mutation_graph("checkpoint_resume", "delta")
+    accessor = CheckpointStateAccessor.bind(
+        graph,
+        checkpointer,
+        mode="delta",
+    )
+    head_config = {
+        "configurable": {
+            "thread_id": "thread-delta-resume",
+            "checkpoint_ns": "",
+        },
+    }
+    selected_config = await accessor.aupdate(
+        head_config,
+        accessor.replacement_values(
+            {"messages": [HumanMessage(content="selected history")]},
+            current_values={},
+        ),
+        as_node="checkpoint_resume",
+    )
+    await accessor.aupdate(
+        head_config,
+        accessor.replacement_values(
+            {
+                "messages": [HumanMessage(content="newer head")],
+                "artifacts": ["outputs/stale.txt"],
+                "summary_text": "stale summary",
+            },
+            current_values=(await accessor.aget(head_config)).values,
+        ),
+        as_node="checkpoint_resume",
+    )
+    selected_id = selected_config["configurable"]["checkpoint_id"]
+    run_config = {
+        "configurable": {
+            "thread_id": "thread-delta-resume",
+            "checkpoint_ns": "",
+            "checkpoint_id": selected_id,
+            "checkpoint_map": {"": selected_id},
+        },
+    }
+
+    messages = await _linearize_delta_checkpoint_resume(
+        accessor=accessor,
+        checkpointer=checkpointer,
+        config=run_config,
+        thread_id="thread-delta-resume",
+        run_id="run-delta-resume",
+    )
+
+    materialized = await accessor.aget(head_config)
+    assert [message.content for message in messages or []] == [
+        "selected history",
+    ]
+    assert [message.content for message in materialized.values["messages"]] == [
+        "selected history",
+    ]
+    assert materialized.values["artifacts"] == []
+    assert materialized.values["summary_text"] is None
+    assert "checkpoint_id" not in run_config["configurable"]
+    assert "checkpoint_map" not in run_config["configurable"]
 
 
 @pytest.mark.anyio

@@ -1,11 +1,4 @@
-"""Clean-process acceptance probe for the event-driven ``task`` tool.
-
-The main pytest process installs a lightweight executor module before test
-collection to break an unrelated import cycle.  This probe runs in a fresh
-Python process so it exercises the production ``SubagentResult`` and the full
-``task`` tool coroutine, including progress forwarding, terminal wake-up,
-``ToolMessage`` construction, and registry cleanup.
-"""
+"""Clean-process acceptance probe for the lifecycle-owned task tool."""
 
 from __future__ import annotations
 
@@ -13,7 +6,6 @@ import asyncio
 import hashlib
 import importlib
 import json
-import threading
 import time
 from types import SimpleNamespace
 from typing import Any
@@ -21,15 +13,15 @@ from typing import Any
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.subagents.config import SubagentConfig
-from deerflow.subagents.executor import (
-    SubagentResult,
-    SubagentStatus,
-    _background_tasks,
-    _background_tasks_lock,
-    cleanup_background_task,
-    get_background_task_result,
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ConfiguredLeadParentExecutionProfile,
+    ParentExecutionBindingFactory,
 )
+from deerflow.subagents.config import SubagentConfig
+from deerflow.subagents.executor import _SubagentGraphResult, _SubagentGraphStatus
+from deerflow.subagents.lifecycle import subagent_task_lifecycle
 
 
 async def _run_probe() -> dict[str, Any]:
@@ -37,46 +29,51 @@ async def _run_probe() -> dict[str, Any]:
     events: list[dict[str, Any]] = []
 
     class ProbeExecutor:
-        def __init__(self, **_kwargs: Any) -> None:
-            pass
+        trace_id = "probe-trace"
 
-        def execute_async(self, _prompt: str, task_id: str | None = None) -> str:
-            assert task_id is not None
-            result = SubagentResult(
-                task_id=task_id,
-                trace_id="probe-trace",
-                status=SubagentStatus.RUNNING,
+        def _create_lifecycle_result_holder(
+            self,
+            *,
+            execution_id,
+            changes,
+        ) -> _SubagentGraphResult:
+            return _SubagentGraphResult(
+                execution_id=execution_id,
+                trace_id=self.trace_id,
+                status=_SubagentGraphStatus.PENDING,
+                changes=changes,
             )
-            with _background_tasks_lock:
-                _background_tasks[task_id] = result
 
-            def finish() -> None:
-                time.sleep(0.10)
-                assert result.ai_messages is not None
+        async def _run_lifecycle_graph(
+            self,
+            _prompt: str,
+            result: _SubagentGraphResult,
+        ) -> _SubagentGraphResult:
+            await asyncio.sleep(0.10)
+            assert result.ai_messages is not None
+            with result._state_lock:
                 result.ai_messages.append({"role": "assistant", "content": "step one"})
-                result.changes.notify()
-                # This second progress notification is deliberately inside the
-                # one-second debounce window.  The terminal notification must
-                # still drain it exactly once instead of losing or duplicating it.
-                time.sleep(0.05)
+            result.changes.notify()
+            await asyncio.sleep(0.05)
+            with result._state_lock:
                 result.ai_messages.append({"role": "assistant", "content": "step two"})
-                result.changes.notify()
-                time.sleep(0.05)
-                result.try_set_terminal(
-                    SubagentStatus.COMPLETED,
-                    result="probe complete",
-                    token_usage_records=[
-                        {
-                            "model": "probe-model",
-                            "input_tokens": 2,
-                            "output_tokens": 3,
-                            "total_tokens": 5,
-                        }
-                    ],
-                )
-
-            threading.Thread(target=finish, daemon=True).start()
-            return task_id
+            result.changes.notify()
+            await asyncio.sleep(0.05)
+            result.try_set_terminal(
+                _SubagentGraphStatus.COMPLETED,
+                result="probe complete",
+                token_usage_records=[
+                    {
+                        "source_run_id": "probe-source-1",
+                        "caller": "subagent:general-purpose",
+                        "model_name": "probe-model",
+                        "input_tokens": 2,
+                        "output_tokens": 3,
+                        "total_tokens": 5,
+                    }
+                ],
+            )
+            return result
 
     async def no_tools(**_kwargs: Any) -> list[Any]:
         return []
@@ -84,23 +81,48 @@ async def _run_probe() -> dict[str, Any]:
     config = SubagentConfig(
         name="general-purpose",
         description="probe",
-        model="probe-model",
+        model="inherit",
         timeout_seconds=2,
     )
-    task_module.SubagentExecutor = ProbeExecutor
-    task_module.SubagentStatus = SubagentStatus
-    task_module.get_background_task_result = get_background_task_result
-    task_module.cleanup_background_task = cleanup_background_task
+    app_config = SimpleNamespace()
+    factory = ParentExecutionBindingFactory(
+        ConfiguredLeadParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=(),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=app_config,
+            asset_context=None,
+            agent_config=None,
+            model_name="probe-model",
+            thinking_enabled=False,
+            reasoning_effort=None,
+            plan_mode=False,
+            subagent_enabled=True,
+            agent_name="lead",
+            available_skills=None,
+        )
+    )
     task_module.get_available_subagent_names = lambda **_kwargs: ["general-purpose"]
     task_module.get_subagent_config = lambda *_args, **_kwargs: config
     task_module._assemble_subagent_tools = no_tools
-    task_module._token_usage_cache_enabled = lambda _app_config: False
+    task_module._new_subagent_graph_runner = lambda **_kwargs: ProbeExecutor()
     task_module.get_stream_writer = lambda: events.append
 
     runtime = SimpleNamespace(
         state={},
-        context={},
-        config={"metadata": {"model_name": "probe-model"}},
+        context={
+            RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY: factory,
+        },
+        config={
+            "metadata": {},
+            "configurable": {},
+            "callbacks": [],
+        },
+        store=None,
     )
     started = time.monotonic()
     command = await task_module.task_tool.coroutine(
@@ -128,6 +150,9 @@ async def _run_probe() -> dict[str, Any]:
         "output_tokens": 3,
         "total_tokens": 5,
     }
+    receipt_id = message.additional_kwargs["subagent_usage_receipt_id"]
+    assert receipt_id != message.tool_call_id
+
     event_types = [event["type"] for event in events]
     assert event_types == [
         "task_started",
@@ -136,15 +161,13 @@ async def _run_probe() -> dict[str, Any]:
         "task_completed",
     ]
     assert [event["message_index"] for event in events if event["type"] == "task_running"] == [1, 2]
-    assert [event["message"]["content"] for event in events if event["type"] == "task_running"] == [
-        "step one",
-        "step two",
-    ]
-    assert get_background_task_result("probe-task") is None
+    assert [event["message"]["content"] for event in events if event["type"] == "task_running"] == ["step one", "step two"]
+    await subagent_task_lifecycle.aclose()
     return {
         "elapsed": elapsed,
         "event_types": event_types,
         "tool_status": message.additional_kwargs["subagent_status"],
+        "usage_receipt_is_internal": receipt_id != message.tool_call_id,
     }
 
 

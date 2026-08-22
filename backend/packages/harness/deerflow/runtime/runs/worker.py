@@ -55,12 +55,11 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
-    graph_reducer_channels,
     graph_state_schema,
-    graph_writable_channels,
 )
 from deerflow.runtime.context_carrier import RuntimeContextCarrier
 from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.events.models import STREAM_TERMINAL_ERROR_CODES
 from deerflow.runtime.events.stream_base import StreamBridge
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -83,6 +82,9 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.host_execution_runner import (
     execute_frozen_host_execution_continuation,
+)
+from deerflow.runtime.recovered_llm_failures import (
+    RunRecoveredLLMFailureRecorder,
 )
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.user_context import DEFAULT_USER_ID, get_current_user, get_effective_user_id
@@ -108,6 +110,12 @@ from deerflow.workspace_changes import (
 )
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
+from .execution_contracts import (
+    RunAgentOutcome,
+    RunAgentResourceOwnership,
+    RunAgentUsageSnapshot,
+    RunSemanticStopRecorder,
+)
 from .manager import RunManager, RunRecord
 from .naming import resolve_root_run_name
 from .private_file_lifecycle import PrivateFileLifecycle, await_despite_cancellation
@@ -117,6 +125,12 @@ logger = logging.getLogger(__name__)
 
 # Valid stream_mode values for LangGraph's graph.astream()
 _VALID_LG_MODES = {"values", "updates", "checkpoints", "tasks", "debug", "messages", "custom"}
+# Only the parent graph's materialized state may authorize a Run-level model
+# failure. LangGraph may forward nested-graph messages through the root
+# ``messages`` transport even when ``subgraphs=False``, so neither transport
+# metadata nor an absent namespace proves Lead ownership. ``values`` is the
+# sole lane whose root chunk represents the parent graph's semantic state.
+_LLM_ERROR_FALLBACK_AUTHORITY_MODES = frozenset({"values"})
 _PRIVATE_OUTPUT_NOT_PRESENTED_ERROR = "Run produced output files but did not present a current-run output"
 _ROLLBACK_SUCCEEDED_ERROR = "Rolled back by user"
 # Keep this streaming policy separate from middleware write-authorization sets.
@@ -490,6 +504,7 @@ def _build_runtime_context(
     channel_user_id: str | None = None,
     server_abort_event: object | None = None,
     vision_dispatch_authority: object | None = None,
+    run_semantic_stop_recorder: RunSemanticStopRecorder | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -521,6 +536,7 @@ def _build_runtime_context(
         channel_user_id=channel_user_id,
         server_abort_event=server_abort_event,
         vision_dispatch_authority=vision_dispatch_authority,
+        run_semantic_stop_recorder=run_semantic_stop_recorder,
     ).build(caller_context)
     if private_scope is not None and channel_user_id is None:
         # A private Run without verified IM identity must explicitly clear the
@@ -574,6 +590,7 @@ class RunContext:
     host_execution_approval_port: object | None = field(default=None)
     channel_user_id: str | None = field(default=None)
     vision_dispatch_authority: object | None = field(default=None)
+    resource_ownership: RunAgentResourceOwnership | None = field(default=None)
 
 
 def _checkpoint_runtime_settings(
@@ -777,7 +794,7 @@ async def run_agent(
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
-) -> None:
+) -> RunAgentOutcome:
     """Execute an agent in the background, publishing events to *bridge*."""
 
     # Unpack infrastructure dependencies from RunContext.
@@ -814,6 +831,7 @@ async def run_agent(
     rollback_point: RollbackPoint | None = None
     checkpoint_mode, checkpoint_snapshot_frequency = _checkpoint_runtime_settings(ctx.app_config)
     journal = None
+    recovered_llm_failure_recorder = RunRecoveredLLMFailureRecorder()
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
@@ -827,6 +845,8 @@ async def run_agent(
     defer_terminal_settlement = False
     terminal_published = False
     suspended_approval_id: str | None = None
+    terminal_approval_id: str | None = None
+    semantic_stop_recorder = RunSemanticStopRecorder()
     local_host_execution_approval_enabled = ctx.host_execution_approval_port is not None and isinstance(ctx.app_config, AppConfig) and resolve_host_bash_execution_mode(ctx.app_config) is HostBashExecutionMode.LOCAL_APPROVAL_REQUIRED
 
     async def _settle_requested_rollback() -> bool:
@@ -855,6 +875,9 @@ async def run_agent(
             run_id,
         )
 
+    if ctx.resource_ownership is not None:
+        ctx.resource_ownership.transfer_to_runner()
+
     try:
         await private_files.enter_finalizing()
         await run_manager.wait_for_prior_finalizing(thread_id, run_id)
@@ -875,6 +898,8 @@ async def run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
                 scope=record.scope,
+                recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
+                semantic_stop_recorder=semantic_stop_recorder,
             )
 
         # 1. Mark running
@@ -1034,6 +1059,7 @@ async def run_agent(
             channel_user_id=ctx.channel_user_id,
             server_abort_event=record.abort_event,
             vision_dispatch_authority=ctx.vision_dispatch_authority,
+            run_semantic_stop_recorder=semantic_stop_recorder,
         )
         runtime_model_name = None
         prompt_bundle = None
@@ -1087,6 +1113,7 @@ async def run_agent(
             ),
             trace_id=deerflow_trace_id,
             run_journal=journal,
+            recovered_llm_failure_recorder=(recovered_llm_failure_recorder),
         ).install_into(runtime_ctx)
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
@@ -1281,9 +1308,6 @@ async def run_agent(
                 continue
             elif m in _VALID_LG_MODES:
                 lg_modes.append(m)
-        if not lg_modes:
-            lg_modes = ["values"]
-
         # Deduplicate while preserving order
         seen: set[str] = set()
         deduped: list[str] = []
@@ -1291,7 +1315,15 @@ async def run_agent(
             if m not in seen:
                 seen.add(m)
                 deduped.append(m)
-        lg_modes = deduped
+        published_lg_modes = frozenset(deduped)
+        lg_modes = deduped or ["values"]
+
+        # Semantic outcome cannot depend on which observational lanes the
+        # caller chose to receive. Always consume the parent graph's ``values``
+        # authority lane; when it was not requested, keep it hidden from the
+        # caller's StreamBridge.
+        if "values" not in lg_modes:
+            lg_modes.append("values")
 
         logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
@@ -1310,6 +1342,23 @@ async def run_agent(
                     app_config=ctx.app_config,
                 )
             return goal_evaluator_model
+
+        def _capture_run_fallback(
+            *,
+            namespace: tuple[str, ...],
+            mode: str,
+            chunk: Any,
+        ) -> None:
+            nonlocal llm_error_fallback_message, llm_error_fallback_code
+            if namespace or mode not in _LLM_ERROR_FALLBACK_AUTHORITY_MODES or llm_error_fallback_message is not None:
+                return
+            fallback = _extract_llm_error_fallback(
+                chunk,
+                pre_existing_message_ids,
+            )
+            if fallback is not None:
+                llm_error_fallback_message = fallback.message
+                llm_error_fallback_code = fallback.error_code
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal suspended_approval_id, llm_error_fallback_message, llm_error_fallback_code
@@ -1351,27 +1400,26 @@ async def run_agent(
                                 run_id,
                             )
                             break
-                        fallback = _extract_llm_error_fallback(
-                            chunk,
-                            pre_existing_message_ids,
+                        _capture_run_fallback(
+                            namespace=(),
+                            mode=single_mode,
+                            chunk=chunk,
                         )
-                        if fallback is not None and llm_error_fallback_message is None:
-                            llm_error_fallback_message = fallback.message
-                            llm_error_fallback_code = fallback.error_code
                         current_run_approval_id = _current_run_host_execution_approval_id(
                             chunk,
                             run_id,
                         )
-                        sse_event = _lg_mode_to_sse_event(single_mode)
-                        frames = text_delta_coalescer.push(chunk) if single_mode == "messages" and text_delta_coalescer is not None else [chunk]
-                        for frame in frames:
-                            await bridge.publish(
-                                run_id,
-                                sse_event,
-                                serialize(frame, mode=single_mode),
-                            )
-                        if single_mode == "custom":
-                            await subagent_events.add(chunk)
+                        if single_mode in published_lg_modes:
+                            sse_event = _lg_mode_to_sse_event(single_mode)
+                            frames = text_delta_coalescer.push(chunk) if single_mode == "messages" and text_delta_coalescer is not None else [chunk]
+                            for frame in frames:
+                                await bridge.publish(
+                                    run_id,
+                                    sse_event,
+                                    serialize(frame, mode=single_mode),
+                                )
+                            if single_mode == "custom":
+                                await subagent_events.add(chunk)
                         if current_run_approval_id is not None and suspended_approval_id is None:
                             suspended_approval_id = current_run_approval_id
                             logger.info(
@@ -1420,28 +1468,26 @@ async def run_agent(
                     if mode is None:
                         continue
 
-                    if not namespace:
-                        fallback = _extract_llm_error_fallback(
-                            chunk,
-                            pre_existing_message_ids,
-                        )
-                        if fallback is not None and llm_error_fallback_message is None:
-                            llm_error_fallback_message = fallback.message
-                            llm_error_fallback_code = fallback.error_code
+                    _capture_run_fallback(
+                        namespace=namespace,
+                        mode=mode,
+                        chunk=chunk,
+                    )
                     current_run_approval_id = _current_run_host_execution_approval_id(
                         chunk,
                         run_id,
                     )
-                    await _publish_stream_item(
-                        bridge=bridge,
-                        run_id=run_id,
-                        mode=mode,
-                        chunk=chunk,
-                        namespace=namespace,
-                        file_tool_chunk_batcher=file_tool_chunk_batcher,
-                        text_delta_coalescer=text_delta_coalescer,
-                        subagent_events=subagent_events,
-                    )
+                    if mode in published_lg_modes:
+                        await _publish_stream_item(
+                            bridge=bridge,
+                            run_id=run_id,
+                            mode=mode,
+                            chunk=chunk,
+                            namespace=namespace,
+                            file_tool_chunk_batcher=file_tool_chunk_batcher,
+                            text_delta_coalescer=text_delta_coalescer,
+                            subagent_events=subagent_events,
+                        )
                     if current_run_approval_id is not None and suspended_approval_id is None:
                         suspended_approval_id = current_run_approval_id
                         logger.info(
@@ -1503,7 +1549,7 @@ async def run_agent(
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         await _stream_once(graph_input, initial_runnable_config)
         await _refresh_host_execution_approval_gate()
-        while suspended_approval_id is None and not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
+        while suspended_approval_id is None and not record.abort_event.is_set() and semantic_stop_recorder.reason is None and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,
                 checkpointer=checkpointer,
@@ -1548,29 +1594,36 @@ async def run_agent(
             await run_manager.set_status(run_id, RunStatus.error, error=error_code)
         else:
             await private_files.finalize()
-            obligation_status = await private_files.output_delivery_status()
-            if suspended_approval_id is not None:
-                await run_manager.set_status(run_id, RunStatus.success)
-            elif obligation_status == "delivered":
-                # The persisted any-one obligation covers the union of source
-                # candidates and continuation outputs.  Delivering an exact
-                # candidate is sufficient even when the command also created
-                # another output during this continuation.
-                await run_manager.set_status(run_id, RunStatus.success)
-            elif obligation_status not in {"not_required", "delivered"}:
+            if semantic_stop_recorder.reason == "loop_capped":
                 await run_manager.set_status(
                     run_id,
                     RunStatus.error,
-                    error=PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+                    error=PublicRunErrorCode.LOOP_SAFETY_LIMIT.value,
                 )
-            elif private_files.output_delivery_satisfied():
-                await run_manager.set_status(run_id, RunStatus.success)
             else:
-                await run_manager.set_status(
-                    run_id,
-                    RunStatus.error,
-                    error=_PRIVATE_OUTPUT_NOT_PRESENTED_ERROR,
-                )
+                obligation_status = await private_files.output_delivery_status()
+                if suspended_approval_id is not None:
+                    await run_manager.set_status(run_id, RunStatus.success)
+                elif obligation_status == "delivered":
+                    # The persisted any-one obligation covers the union of source
+                    # candidates and continuation outputs.  Delivering an exact
+                    # candidate is sufficient even when the command also created
+                    # another output during this continuation.
+                    await run_manager.set_status(run_id, RunStatus.success)
+                elif obligation_status not in {"not_required", "delivered"}:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error=PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE.value,
+                    )
+                elif private_files.output_delivery_satisfied():
+                    await run_manager.set_status(run_id, RunStatus.success)
+                else:
+                    await run_manager.set_status(
+                        run_id,
+                        RunStatus.error,
+                        error=_PRIVATE_OUTPUT_NOT_PRESENTED_ERROR,
+                    )
 
     except asyncio.CancelledError:
         await run_manager.set_finalizing(run_id, True)
@@ -1830,8 +1883,8 @@ async def run_agent(
                     exc_info=True,
                 )
 
-        record.suspended_approval_id = suspended_approval_id if record.status is RunStatus.success else None
-        if record.suspended_approval_id is not None and local_host_execution_approval_enabled:
+        terminal_approval_id = suspended_approval_id if record.status is RunStatus.success else None
+        if terminal_approval_id is not None and local_host_execution_approval_enabled:
             seal_suspension = getattr(
                 ctx.host_execution_approval_port,
                 "seal_suspended_approval_marker",
@@ -1844,11 +1897,38 @@ async def run_agent(
             # This is the last durable side-effect before the public success
             # terminal. It proves the checkpoint-safe pause under the live
             # source Job lease so a later attempt can recover the exact row.
-            await seal_suspension(record.suspended_approval_id)
+            await seal_suspension(terminal_approval_id)
         if not defer_terminal_settlement and not terminal_published:
             await bridge.publish_end(run_id)
         if private_files.cancellation_pending or rollback_cancellation_pending:
             raise asyncio.CancelledError
+
+    usage = RunAgentUsageSnapshot(
+        total_input_tokens=record.total_input_tokens,
+        total_output_tokens=record.total_output_tokens,
+        total_tokens=record.total_tokens,
+        llm_call_count=record.llm_call_count,
+        lead_agent_tokens=record.lead_agent_tokens,
+        subagent_tokens=record.subagent_tokens,
+        middleware_tokens=record.middleware_tokens,
+        token_usage_by_model=record.token_usage_by_model,
+    )
+    if record.status is RunStatus.success:
+        return RunAgentOutcome.succeeded(
+            usage,
+            suspended_approval_id=terminal_approval_id,
+        )
+    if record.status is RunStatus.interrupted:
+        return RunAgentOutcome.cancelled(usage)
+    if record.status is RunStatus.error:
+        error_code = record.error if record.error in STREAM_TERMINAL_ERROR_CODES else "AGENT_EXECUTION_FAILED"
+        return RunAgentOutcome.failed(
+            usage,
+            public_error_code=error_code,
+        )
+    raise RuntimeError(
+        f"Run {run_id} finished without a semantic terminal outcome",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2464,37 +2544,6 @@ def _rollback_point_from_legacy_snapshot(
     )
 
 
-def _complete_state_replacement_values(
-    *,
-    mutation_graph: Any,
-    selected_values: dict[str, Any],
-    current_values: dict[str, Any],
-    run_id: str,
-    operation: str,
-) -> dict[str, Any]:
-    """Build a whole-state replacement using the effective graph schema."""
-
-    writable_fields = graph_writable_channels(mutation_graph)
-    reducer_fields = graph_reducer_channels(mutation_graph)
-    if writable_fields is None or reducer_fields is None:
-        raise RuntimeError(f"Run {run_id} could not inspect the state schema for {operation}")
-    unknown_fields = (set(selected_values) | set(current_values)) - writable_fields
-    if unknown_fields:
-        raise RuntimeError(f"Run {run_id} cannot {operation}: materialized state contains channels outside the effective schema")
-
-    replacement_values: dict[str, Any] = {}
-    for field_name in writable_fields:
-        if field_name in selected_values:
-            replacement = copy.deepcopy(selected_values[field_name])
-        elif field_name in current_values:
-            channel = mutation_graph.channels.get(field_name)
-            replacement = copy.deepcopy(channel.get()) if channel is not None and channel.is_available() else None
-        else:
-            continue
-        replacement_values[field_name] = Overwrite(replacement) if field_name in reducer_fields else replacement
-    return replacement_values
-
-
 async def _linearize_delta_checkpoint_resume(
     *,
     accessor: CheckpointStateAccessor,
@@ -2546,17 +2595,14 @@ async def _linearize_delta_checkpoint_resume(
         graph_state_schema(accessor.graph),
         snapshot_frequency=snapshot_frequency,
     )
-    replacement_values = _complete_state_replacement_values(
-        mutation_graph=mutation_graph,
-        selected_values=selected_values,
-        current_values=_snapshot_values(head),
-        run_id=run_id,
-        operation="checkpoint resume",
-    )
     mutation_accessor = CheckpointStateAccessor.bind(
         mutation_graph,
         checkpointer,
         mode=accessor.mode,
+    )
+    replacement_values = mutation_accessor.replacement_values(
+        selected_values,
+        current_values=_snapshot_values(head),
     )
     await mutation_accessor.aupdate(
         head_config,
@@ -2782,12 +2828,9 @@ async def _rollback_to_pre_run_checkpoint(
         current = await accessor.aget(restore_config)
         selected_values = copy.deepcopy(rollback_point.state_values)
         selected_values["messages"] = list(rollback_point.messages)
-        replacement_values = _complete_state_replacement_values(
-            mutation_graph=mutation_graph,
-            selected_values=selected_values,
+        replacement_values = mutation_accessor.replacement_values(
+            selected_values,
             current_values=_snapshot_values(current),
-            run_id=run_id,
-            operation="rollback",
         )
     else:
         restore_config = rollback_point.config

@@ -7,7 +7,7 @@ import logging
 import re
 import threading
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from email.utils import parsedate_to_datetime
 from typing import Any, override
 
@@ -15,6 +15,7 @@ from httpx import HTTPStatusError
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import (
+    ExtendedModelResponse,
     ModelCallResult,
     ModelRequest,
     ModelResponse,
@@ -29,6 +30,14 @@ from deerflow.error_codes import (
 from deerflow.public_error_codes import (
     llm_error_code_for_reason,
     normalize_llm_error_reason,
+)
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.recovered_llm_failures import (
+    RECOVERED_LLM_FAILURES_KEY,
+    RecoveredLLMFailure,
+    RunRecoveredLLMFailureRecorder,
+    build_recovered_llm_failures_receipt,
+    read_recovered_llm_failures,
 )
 
 logger = logging.getLogger(__name__)
@@ -389,6 +398,102 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception:
             logger.debug("Failed to emit llm_retry event")
 
+    @staticmethod
+    def _attach_recovered_failures(
+        result: ModelCallResult,
+        failures: Sequence[RecoveredLLMFailure],
+    ) -> ModelCallResult:
+        """Attach a safe, replayable receipt to the successful AI response."""
+
+        if isinstance(result, ExtendedModelResponse):
+            response = result.model_response
+        elif isinstance(result, AIMessage):
+            response = ModelResponse(result=[result])
+        else:
+            response = result
+
+        messages = list(response.result)
+        target_index: int | None = None
+        changed = False
+        for index, message in enumerate(messages):
+            if not isinstance(message, AIMessage):
+                continue
+            target_index = index
+            additional_kwargs = dict(message.additional_kwargs or {})
+            if RECOVERED_LLM_FAILURES_KEY in additional_kwargs:
+                additional_kwargs.pop(RECOVERED_LLM_FAILURES_KEY, None)
+                messages[index] = message.model_copy(
+                    update={"additional_kwargs": additional_kwargs},
+                )
+                changed = True
+
+        if target_index is not None and failures:
+            message = messages[target_index]
+            assert isinstance(message, AIMessage)
+            additional_kwargs = dict(message.additional_kwargs or {})
+            additional_kwargs[RECOVERED_LLM_FAILURES_KEY] = build_recovered_llm_failures_receipt(failures)
+            messages[target_index] = message.model_copy(
+                update={"additional_kwargs": additional_kwargs},
+            )
+            changed = True
+
+        if not changed:
+            return result
+
+        rebuilt = ModelResponse(
+            result=messages,
+            structured_response=response.structured_response,
+        )
+        if isinstance(result, ExtendedModelResponse):
+            return ExtendedModelResponse(rebuilt, result.command)
+        if isinstance(result, AIMessage):
+            return messages[0]
+        return rebuilt
+
+    @staticmethod
+    def _record_recovered_failures(
+        request: ModelRequest,
+        failures: Sequence[RecoveredLLMFailure],
+    ) -> tuple[RecoveredLLMFailure, ...]:
+        """Return the authoritative Run aggregate when a recorder is present."""
+
+        runtime = getattr(request, "runtime", None)
+        context = getattr(runtime, "context", None)
+        if not isinstance(context, Mapping):
+            return tuple(failures)
+        recorder = context.get(
+            RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER,
+        )
+        if not isinstance(recorder, RunRecoveredLLMFailureRecorder):
+            return tuple(failures)
+        try:
+            snapshot = (
+                recorder.record(
+                    build_recovered_llm_failures_receipt(failures),
+                )
+                if failures
+                else recorder.snapshot()
+            )
+            parsed = read_recovered_llm_failures(
+                build_recovered_llm_failures_receipt(snapshot),
+            )
+        except Exception:
+            logger.debug(
+                "Failed to record safe recovered LLM failure receipt",
+            )
+            return tuple(failures)
+        return parsed if len(parsed) == len(snapshot) else tuple(failures)
+
+    def _attach_existing_run_recovered_failures(
+        self,
+        request: ModelRequest,
+        result: ModelCallResult,
+    ) -> ModelCallResult:
+        """Attach only facts already settled by earlier successful calls."""
+
+        aggregate = self._record_recovered_failures(request, ())
+        return self._attach_recovered_failures(result, aggregate)
+
     @override
     def wrap_model_call(
         self,
@@ -396,17 +501,28 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return self._build_error_fallback_message(
-                self._build_circuit_breaker_message(),
-                reason="circuit_open",
+            return self._attach_existing_run_recovered_failures(
+                request,
+                self._build_error_fallback_message(
+                    self._build_circuit_breaker_message(),
+                    reason="circuit_open",
+                ),
             )
 
         attempt = 1
+        recovered_failures: list[RecoveredLLMFailure] = []
         while True:
             try:
                 response = handler(request)
                 self._record_success()
-                return response
+                aggregate = self._record_recovered_failures(
+                    request,
+                    recovered_failures,
+                )
+                return self._attach_recovered_failures(
+                    response,
+                    aggregate,
+                )
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
                 with self._circuit_lock:
@@ -427,6 +543,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         error_code,
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
+                    recovered_failures.append(
+                        {
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error_code": error_code,
+                            "reason": normalize_llm_error_reason(reason),
+                            "disposition": "recovered",
+                        }
+                    )
                     time.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
@@ -437,7 +562,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return self._build_user_fallback_message(exc, reason)
+                return self._attach_existing_run_recovered_failures(
+                    request,
+                    self._build_user_fallback_message(exc, reason),
+                )
 
     @override
     async def awrap_model_call(
@@ -446,17 +574,28 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         if self._check_circuit():
-            return self._build_error_fallback_message(
-                self._build_circuit_breaker_message(),
-                reason="circuit_open",
+            return self._attach_existing_run_recovered_failures(
+                request,
+                self._build_error_fallback_message(
+                    self._build_circuit_breaker_message(),
+                    reason="circuit_open",
+                ),
             )
 
         attempt = 1
+        recovered_failures: list[RecoveredLLMFailure] = []
         while True:
             try:
                 response = await handler(request)
                 self._record_success()
-                return response
+                aggregate = self._record_recovered_failures(
+                    request,
+                    recovered_failures,
+                )
+                return self._attach_recovered_failures(
+                    response,
+                    aggregate,
+                )
             except GraphBubbleUp:
                 # Preserve LangGraph control-flow signals (interrupt/pause/resume).
                 with self._circuit_lock:
@@ -477,6 +616,15 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                         error_code,
                     )
                     self._emit_retry_event(attempt, wait_ms, reason)
+                    recovered_failures.append(
+                        {
+                            "attempt": attempt,
+                            "max_attempts": max_attempts,
+                            "error_code": error_code,
+                            "reason": normalize_llm_error_reason(reason),
+                            "disposition": "recovered",
+                        }
+                    )
                     await asyncio.sleep(wait_ms / 1000)
                     attempt += 1
                     continue
@@ -487,7 +635,10 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 )
                 if retriable:
                     self._record_failure()
-                return self._build_user_fallback_message(exc, reason)
+                return self._attach_existing_run_recovered_failures(
+                    request,
+                    self._build_user_fallback_message(exc, reason),
+                )
 
 
 def _matches_any(detail: str, patterns: tuple[str, ...]) -> bool:

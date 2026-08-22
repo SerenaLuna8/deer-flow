@@ -56,6 +56,13 @@ from deerflow.agents.thread_state import (
     normalize_middleware_state_schemas,
 )
 from deerflow.config.database_config import CheckpointChannelMode
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ParentExecutionBindingFactory,
+    SdkFeatureSnapshot,
+    SdkParentExecutionProfile,
+    bind_task_tool_in_tools,
+)
 from deerflow.tools.builtins import ask_clarification_tool
 
 if TYPE_CHECKING:
@@ -173,8 +180,13 @@ def create_deerflow_agent(
 
     if middleware is not None:
         effective_middleware = list(middleware)
+        feature_snapshot = None
     else:
         feat = features or RuntimeFeatures()
+        feature_snapshot = SdkFeatureSnapshot.capture(
+            feat,
+            extra_middleware=extra_middleware or (),
+        )
         effective_middleware, extra_tools = _assemble_from_features(
             feat,
             name=name,
@@ -192,6 +204,29 @@ def create_deerflow_agent(
         effective_middleware,
         checkpoint_channel_mode,
         checkpoint_snapshot_frequency,
+    )
+
+    binding_factory = ParentExecutionBindingFactory(
+        SdkParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=model,
+                tools=tuple(effective_tools),
+                middleware=tuple(effective_middleware),
+                system_prompt=system_prompt,
+                state_schema=effective_state,
+                checkpointer=checkpointer,
+                name=name,
+            ),
+            features=feature_snapshot,
+            full_middleware_takeover=middleware is not None,
+            plan_mode=plan_mode,
+            checkpoint_channel_mode=checkpoint_channel_mode,
+            checkpoint_snapshot_frequency=checkpoint_snapshot_frequency,
+        )
+    )
+    effective_tools = bind_task_tool_in_tools(
+        effective_tools,
+        binding_factory,
     )
 
     return create_agent(
@@ -216,6 +251,7 @@ def _assemble_from_features(
     name: str = "default",
     plan_mode: bool = False,
     extra_middleware: list[AgentMiddleware] | None = None,
+    delegated: bool = False,
 ) -> tuple[list[AgentMiddleware], list[BaseTool]]:
     """Map feature switches onto the shared builders and compose the SDK chain.
 
@@ -245,7 +281,7 @@ def _assemble_from_features(
 
     runtime_middlewares = build_runtime_middlewares(
         app_config=None,
-        include_uploads=True,
+        include_uploads=not delegated,
         include_dangling_tool_call_patch=True,
         include_security_wrappers=False,
         sandbox=feat.sandbox,
@@ -269,7 +305,7 @@ def _assemble_from_features(
         )
 
     title_middleware = None
-    if feat.auto_title is not False:
+    if not delegated and feat.auto_title is not False:
         if isinstance(feat.auto_title, AgentMiddleware):
             title_middleware = feat.auto_title
         else:

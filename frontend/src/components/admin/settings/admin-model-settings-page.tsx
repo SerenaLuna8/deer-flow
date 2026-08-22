@@ -36,8 +36,156 @@ import {
 } from "@/core/admin-settings/models";
 import { consumeWriteOnlyInput } from "@/core/api/write-only-input";
 import { useAuth } from "@/core/auth/AuthProvider";
+import type { Locale } from "@/core/i18n";
+import { useI18n } from "@/core/i18n/hooks";
 
 type EditorTarget = AdminModelItem | null;
+
+const MODEL_SETTINGS_COPY = {
+  "en-US": {
+    pageTitle: "Model settings",
+    sectionTitle: "System models",
+    searchModels: "Search models",
+    searchPlaceholder: "Search by name, provider, or model ID",
+    filterStatus: "Filter models by status",
+    allStatuses: "All statuses",
+    active: "Active",
+    suspended: "Suspended",
+    enable: "Enable",
+    disable: "Disable",
+    refresh: "Refresh",
+    addModel: "Add model",
+    catalogLoadFailed: "The model catalog could not be loaded.",
+    retry: "Retry",
+    noMatches: "No matching models.",
+    editModel: "Edit model",
+    dialogDescription:
+      "The model domain encrypts and stores the API Key. Leave it blank when editing to preserve the saved value; connection tests always require a temporary re-entry.",
+    displayName: "Display name",
+    provider: "Provider",
+    providerModelId: "Provider model ID",
+    providerSettingsJson: "Provider settings JSON",
+    supportsThinking: "Thinking",
+    supportsReasoningEffort: "Reasoning effort",
+    supportsVision: "Vision",
+    apiKey: "API Key",
+    preserveKeyPlaceholder: "Leave blank to preserve the saved Key",
+    inputKeyPlaceholder: "Enter API Key",
+    apiKeyHint:
+      "A connection test immediately clears this Key and never saves it. Re-enter it after testing to create a model or replace the saved Key; a blank edit preserves the existing Key.",
+    testingConnection: "Testing…",
+    testConnection: "Test connection",
+    cancel: "Cancel",
+    saving: "Saving…",
+    save: "Save",
+    invalidSettingsJson: "Provider settings must be a JSON object.",
+    apiKeyRequired:
+      "Enter an API Key before saving a new model for this provider.",
+    invalidModelConfiguration: "Model configuration is invalid.",
+    saveFailed: "The model could not be saved.",
+    testKeyRequired:
+      "Enter a temporary API Key for the connection test; the saved database value cannot be used.",
+    testFailed: "Connection test failed.",
+    connectionSucceeded:
+      "Connection test succeeded. The test Key was cleared from the form; re-enter the API Key before saving.",
+    connectionFailed:
+      "Connection test failed. The test Key was cleared from the form; re-enter the API Key to retry or save.",
+    connectionSucceededEdit:
+      "Connection test succeeded. The test Key was cleared and not saved. Leave the field blank to preserve the saved Key, or re-enter a Key to replace it.",
+    connectionFailedEdit:
+      "Connection test failed. The test Key was cleared and not saved. Leave the field blank to preserve the saved Key, or re-enter a Key to retry or replace it.",
+    default: "Default",
+    configured: "Configured",
+    notConfigured: "Not configured",
+    secretRevision: "Secret revision",
+    readiness: "Readiness",
+    ready: "Ready",
+    unready: "Not ready",
+    configurationRevision: "Configuration revision",
+    edit: "Edit",
+    setDefault: "Set as default",
+    clearApiKey: "Clear API Key",
+    operationFailed: "Model operation failed.",
+    clearDialogTitle: "Clear API Key?",
+    clearDialogDescription:
+      "Clearing the Key makes this model unavailable to new Runs. Runs already running or preparing receive no special handling.",
+    clearing: "Clearing…",
+    confirmClear: "Confirm clear",
+  },
+  "zh-CN": {
+    pageTitle: "模型配置",
+    sectionTitle: "系统模型",
+    searchModels: "搜索模型",
+    searchPlaceholder: "搜索名称、Provider 或模型 ID",
+    filterStatus: "筛选模型状态",
+    allStatuses: "全部状态",
+    active: "启用",
+    suspended: "停用",
+    enable: "启用",
+    disable: "停用",
+    refresh: "刷新",
+    addModel: "新增模型",
+    catalogLoadFailed: "模型目录读取失败。",
+    retry: "重试",
+    noMatches: "没有匹配的模型。",
+    editModel: "编辑模型",
+    dialogDescription:
+      "API Key 直接由模型域加密保存。编辑时留空表示保留；连接测试必须临时重新输入。",
+    displayName: "显示名称",
+    provider: "Provider",
+    providerModelId: "Provider 模型 ID",
+    providerSettingsJson: "Provider 设置 JSON",
+    supportsThinking: "思考模式",
+    supportsReasoningEffort: "推理强度",
+    supportsVision: "视觉输入",
+    apiKey: "API Key",
+    preserveKeyPlaceholder: "留空以保留已保存的 Key",
+    inputKeyPlaceholder: "输入 API Key",
+    apiKeyHint:
+      "连接测试会立即清空这里的 Key，且不会保存。新增模型或替换已保存 Key 时，测试后必须重新输入；编辑时留空只会保留原 Key。",
+    testingConnection: "正在测试…",
+    testConnection: "测试连接",
+    cancel: "取消",
+    saving: "正在保存…",
+    save: "保存",
+    invalidSettingsJson: "Provider 设置必须是 JSON 对象。",
+    apiKeyRequired: "新增此 Provider 的模型必须输入 API Key 后才能保存。",
+    invalidModelConfiguration: "模型配置无效。",
+    saveFailed: "模型保存失败。",
+    testKeyRequired:
+      "连接测试必须临时重新输入 API Key，不能使用数据库中已保存的值。",
+    testFailed: "连接测试失败。",
+    connectionSucceeded:
+      "连接测试成功。测试用 Key 已从表单清除；保存前必须重新输入 API Key。",
+    connectionFailed:
+      "连接测试失败。测试用 Key 已从表单清除；如需重试或保存，请重新输入 API Key。",
+    connectionSucceededEdit:
+      "连接测试成功。测试用 Key 已清空且不会保存；留空可保留原 Key，重新输入才会替换。",
+    connectionFailedEdit:
+      "连接测试失败。测试用 Key 已清空且不会保存；留空可保留原 Key，重新输入可再次测试或替换。",
+    default: "默认",
+    configured: "已配置",
+    notConfigured: "未配置",
+    secretRevision: "秘密 revision",
+    readiness: "就绪状态",
+    ready: "就绪",
+    unready: "未就绪",
+    configurationRevision: "配置 revision",
+    edit: "编辑",
+    setDefault: "设为默认",
+    clearApiKey: "清除 API Key",
+    operationFailed: "模型操作失败。",
+    clearDialogTitle: "清除 API Key？",
+    clearDialogDescription:
+      "清除后此模型会变为未就绪，新的 Run 不能使用它。已经运行或正在准备的 Run 不做额外处理。",
+    clearing: "正在清除…",
+    confirmClear: "确认清除",
+  },
+} as const satisfies Record<Locale, Record<string, string>>;
+
+export function adminModelSettingsCopy(locale: Locale) {
+  return MODEL_SETTINGS_COPY[locale];
+}
 
 export function selectAdminModelCatalogItems(
   items: readonly AdminModelItem[],
@@ -65,6 +213,7 @@ export function consumeAdminModelEditorSubmission(
   provider: string,
   apiKey: string,
   clearApiKey: () => void,
+  locale: Locale = "zh-CN",
 ) {
   // Consume the write-only value before JSON or field validation can return.
   // The returned local is used only by the immediate imperative request.
@@ -78,7 +227,7 @@ export function consumeAdminModelEditorSubmission(
     }
     settings = parsed as CreateAdminModelInput["settings"];
   } catch {
-    throw new Error("Provider settings 必须是 JSON 对象。");
+    throw new Error(adminModelSettingsCopy(locale).invalidSettingsJson);
   }
   return {
     common: {
@@ -91,6 +240,56 @@ export function consumeAdminModelEditorSubmission(
       supports_vision: form.get("supports_vision") === "on",
     },
     submittedKey,
+  };
+}
+
+export function isAdminModelEditorSaveDisabled({
+  apiKey,
+  creating,
+  pending,
+  providerRequiresApiKey,
+  testPending,
+}: {
+  apiKey: string;
+  creating: boolean;
+  pending: boolean;
+  providerRequiresApiKey: boolean;
+  testPending: boolean;
+}): boolean {
+  return (
+    pending ||
+    testPending ||
+    (creating && providerRequiresApiKey && apiKey.trim() === "")
+  );
+}
+
+export function adminModelConnectionTestResultMessage(
+  status: "failed" | "succeeded",
+  locale: Locale,
+  mode: "create" | "edit" = "create",
+): string {
+  const copy = adminModelSettingsCopy(locale);
+  if (mode === "edit") {
+    return status === "succeeded"
+      ? copy.connectionSucceededEdit
+      : copy.connectionFailedEdit;
+  }
+  return status === "succeeded"
+    ? copy.connectionSucceeded
+    : copy.connectionFailed;
+}
+
+export function adminModelConnectionTestErrorState(
+  error: unknown,
+  locale: Locale,
+  mode: "create" | "edit" = "create",
+): { error: string; result: string } {
+  return {
+    error:
+      error instanceof Error
+        ? error.message
+        : adminModelSettingsCopy(locale).testFailed,
+    result: adminModelConnectionTestResultMessage("failed", locale, mode),
   };
 }
 
@@ -109,6 +308,8 @@ function ModelEditorDialog({
   onOpenChange: (open: boolean) => void;
   onSaved: () => Promise<unknown>;
 }) {
+  const { locale } = useI18n();
+  const copy = adminModelSettingsCopy(locale);
   const [provider, setProvider] = useState(
     target?.provider_adapter ?? descriptors[0]?.id ?? "",
   );
@@ -120,10 +321,16 @@ function ModelEditorDialog({
   const create = useCreateAdminModel(accountId);
   const replace = useReplaceAdminModel(accountId);
   const test = useTestAdminModelConnection(accountId);
+  const selectedDescriptor = descriptors.find((item) => item.id === provider);
+  const providerRequiresApiKey = selectedDescriptor?.api_key_required ?? false;
 
   async function save(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError(null);
+    if (!target && providerRequiresApiKey && apiKey.trim() === "") {
+      setError(copy.apiKeyRequired);
+      return;
+    }
     let submission: ReturnType<typeof consumeAdminModelEditorSubmission>;
     try {
       submission = consumeAdminModelEditorSubmission(
@@ -131,9 +338,14 @@ function ModelEditorDialog({
         provider,
         apiKey,
         () => setApiKey(""),
+        locale,
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "模型配置无效。");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : copy.invalidModelConfiguration,
+      );
       return;
     }
     const { common, submittedKey } = submission;
@@ -157,7 +369,7 @@ function ModelEditorDialog({
       await onSaved();
       onOpenChange(false);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "模型保存失败。");
+      setError(caught instanceof Error ? caught.message : copy.saveFailed);
     } finally {
       setPending(false);
     }
@@ -167,9 +379,7 @@ function ModelEditorDialog({
     setError(null);
     setTestResult(null);
     if (apiKey === "") {
-      setError(
-        "连接测试必须临时重新输入 API Key，不能使用数据库中已保存的值。",
-      );
+      setError(copy.testKeyRequired);
       return;
     }
     let submission: ReturnType<typeof consumeAdminModelEditorSubmission>;
@@ -179,9 +389,14 @@ function ModelEditorDialog({
         provider,
         apiKey,
         () => setApiKey(""),
+        locale,
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "模型配置无效。");
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : copy.invalidModelConfiguration,
+      );
       return;
     }
     const { common, submittedKey } = submission;
@@ -195,10 +410,20 @@ function ModelEditorDialog({
         api_key: submittedKey,
       });
       setTestResult(
-        result.status === "succeeded" ? "连接测试成功。" : "连接测试失败。",
+        adminModelConnectionTestResultMessage(
+          result.status,
+          locale,
+          target ? "edit" : "create",
+        ),
       );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "连接测试失败。");
+      const failure = adminModelConnectionTestErrorState(
+        caught,
+        locale,
+        target ? "edit" : "create",
+      );
+      setError(failure.error);
+      setTestResult(failure.result);
     } finally {
       setTestPending(false);
     }
@@ -211,16 +436,13 @@ function ModelEditorDialog({
     >
       <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{target ? "编辑模型" : "新增模型"}</DialogTitle>
-          <DialogDescription>
-            API Key
-            直接由模型域加密保存。编辑时留空表示保留；连接测试必须临时重新输入。
-          </DialogDescription>
+          <DialogTitle>{target ? copy.editModel : copy.addModel}</DialogTitle>
+          <DialogDescription>{copy.dialogDescription}</DialogDescription>
         </DialogHeader>
         <form className="space-y-4" onSubmit={save}>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="grid gap-2 text-sm">
-              显示名称
+              {copy.displayName}
               <Input
                 name="display_name"
                 required
@@ -228,7 +450,7 @@ function ModelEditorDialog({
               />
             </label>
             <label className="grid gap-2 text-sm">
-              Provider
+              {copy.provider}
               <select
                 className="border-input bg-background h-9 rounded-md border px-3 text-sm"
                 value={provider}
@@ -243,7 +465,7 @@ function ModelEditorDialog({
             </label>
           </div>
           <label className="grid gap-2 text-sm">
-            Provider Model ID
+            {copy.providerModelId}
             <Input
               name="provider_model"
               required
@@ -251,7 +473,7 @@ function ModelEditorDialog({
             />
           </label>
           <label className="grid gap-2 text-sm">
-            Provider settings JSON
+            {copy.providerSettingsJson}
             <textarea
               name="settings"
               className="border-input bg-background min-h-36 rounded-md border p-3 font-mono text-sm"
@@ -265,7 +487,7 @@ function ModelEditorDialog({
                 type="checkbox"
                 defaultChecked={target?.supports_thinking}
               />
-              Thinking
+              {copy.supportsThinking}
             </label>
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -273,7 +495,7 @@ function ModelEditorDialog({
                 type="checkbox"
                 defaultChecked={target?.supports_reasoning_effort}
               />
-              Reasoning effort
+              {copy.supportsReasoningEffort}
             </label>
             <label className="flex items-center gap-2 text-sm">
               <input
@@ -281,22 +503,30 @@ function ModelEditorDialog({
                 type="checkbox"
                 defaultChecked={target?.supports_vision}
               />
-              Vision
+              {copy.supportsVision}
             </label>
           </div>
           <label className="grid gap-2 text-sm">
-            API Key
+            {copy.apiKey}
             <Input
               type="password"
               autoComplete="new-password"
               value={apiKey}
+              required={!target && providerRequiresApiKey}
+              aria-describedby="admin-model-api-key-hint"
               placeholder={
                 target?.api_key_configured
-                  ? "留空以保留已保存的 Key"
-                  : "输入 API Key"
+                  ? copy.preserveKeyPlaceholder
+                  : copy.inputKeyPlaceholder
               }
               onChange={(event) => setApiKey(event.target.value)}
             />
+            <span
+              id="admin-model-api-key-hint"
+              className="text-muted-foreground text-xs leading-5"
+            >
+              {copy.apiKeyHint}
+            </span>
           </label>
           {error ? (
             <p role="alert" className="text-destructive text-sm">
@@ -317,7 +547,7 @@ function ModelEditorDialog({
                 void testConnection(event.currentTarget.form!)
               }
             >
-              {testPending ? "正在测试…" : "测试连接"}
+              {testPending ? copy.testingConnection : copy.testConnection}
             </Button>
             <Button
               type="button"
@@ -325,10 +555,19 @@ function ModelEditorDialog({
               disabled={pending || testPending}
               onClick={() => onOpenChange(false)}
             >
-              取消
+              {copy.cancel}
             </Button>
-            <Button type="submit" disabled={pending || testPending}>
-              {pending ? "正在保存…" : "保存"}
+            <Button
+              type="submit"
+              disabled={isAdminModelEditorSaveDisabled({
+                apiKey,
+                creating: !target,
+                pending,
+                providerRequiresApiKey,
+                testPending,
+              })}
+            >
+              {pending ? copy.saving : copy.save}
             </Button>
           </DialogFooter>
         </form>
@@ -346,6 +585,8 @@ function ModelCard({
   item: AdminModelItem;
   onEdit: () => void;
 }) {
+  const { locale } = useI18n();
+  const copy = adminModelSettingsCopy(locale);
   const status = useSetAdminModelStatus(accountId);
   const makeDefault = useSetAdminModelDefault(accountId);
   const clear = useClearAdminModelApiKey(accountId);
@@ -362,9 +603,9 @@ function ModelCard({
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
-            {item.is_default ? <Badge>默认</Badge> : null}
+            {item.is_default ? <Badge>{copy.default}</Badge> : null}
             <Badge variant={item.status === "active" ? "default" : "secondary"}>
-              {item.status === "active" ? "启用" : "停用"}
+              {item.status === "active" ? copy.active : copy.suspended}
             </Badge>
           </div>
         </div>
@@ -373,25 +614,33 @@ function ModelCard({
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div>
             <dt className="text-muted-foreground text-xs">API Key</dt>
-            <dd>{item.api_key_configured ? "已配置" : "未配置"}</dd>
+            <dd>
+              {item.api_key_configured ? copy.configured : copy.notConfigured}
+            </dd>
           </div>
           <div>
-            <dt className="text-muted-foreground text-xs">秘密 revision</dt>
+            <dt className="text-muted-foreground text-xs">
+              {copy.secretRevision}
+            </dt>
             <dd>{item.secret_revision}</dd>
           </div>
           <div>
-            <dt className="text-muted-foreground text-xs">就绪状态</dt>
-            <dd>{item.secret_readiness === "ready" ? "就绪" : "未就绪"}</dd>
+            <dt className="text-muted-foreground text-xs">{copy.readiness}</dt>
+            <dd>
+              {item.secret_readiness === "ready" ? copy.ready : copy.unready}
+            </dd>
           </div>
           <div>
-            <dt className="text-muted-foreground text-xs">配置 revision</dt>
+            <dt className="text-muted-foreground text-xs">
+              {copy.configurationRevision}
+            </dt>
             <dd>{item.revision}</dd>
           </div>
         </dl>
         <div className="flex flex-wrap gap-2">
           <Button type="button" size="sm" variant="outline" onClick={onEdit}>
             <PencilIcon aria-hidden className="size-4" />
-            编辑
+            {copy.edit}
           </Button>
           <Button
             type="button"
@@ -407,7 +656,7 @@ function ModelCard({
               })
             }
           >
-            {item.status === "active" ? "停用" : "启用"}
+            {item.status === "active" ? copy.disable : copy.enable}
           </Button>
           {!item.is_default ? (
             <Button
@@ -423,7 +672,7 @@ function ModelCard({
                 makeDefault.mutate({ modelId: item.id, input: {} })
               }
             >
-              设为默认
+              {copy.setDefault}
             </Button>
           ) : null}
           {item.api_key_configured ? (
@@ -433,24 +682,21 @@ function ModelCard({
               variant="outline"
               onClick={() => setConfirmClear(true)}
             >
-              清除 API Key
+              {copy.clearApiKey}
             </Button>
           ) : null}
         </div>
         {error ? (
           <p role="alert" className="text-destructive text-sm">
-            {error instanceof Error ? error.message : "模型操作失败。"}
+            {error instanceof Error ? error.message : copy.operationFailed}
           </p>
         ) : null}
       </CardContent>
       <Dialog open={confirmClear} onOpenChange={setConfirmClear}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>清除 API Key？</DialogTitle>
-            <DialogDescription>
-              清除后此模型会变为未就绪，新的 Run
-              不能使用它。已经运行或正在准备的 Run 不做额外处理。
-            </DialogDescription>
+            <DialogTitle>{copy.clearDialogTitle}</DialogTitle>
+            <DialogDescription>{copy.clearDialogDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
             <Button
@@ -458,7 +704,7 @@ function ModelCard({
               variant="outline"
               onClick={() => setConfirmClear(false)}
             >
-              取消
+              {copy.cancel}
             </Button>
             <Button
               type="button"
@@ -470,7 +716,7 @@ function ModelCard({
                 })
               }
             >
-              {clear.isPending ? "正在清除…" : "确认清除"}
+              {clear.isPending ? copy.clearing : copy.confirmClear}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -481,6 +727,8 @@ function ModelCard({
 
 export function AdminModelSettingsPage() {
   const { user } = useAuth();
+  const { locale } = useI18n();
+  const copy = adminModelSettingsCopy(locale);
   const accountId = user?.id ?? "default";
   const catalog = useAdminModelCatalog(accountId);
   const [search, setSearch] = useState("");
@@ -495,8 +743,8 @@ export function AdminModelSettingsPage() {
   if (!user) return null;
   return (
     <AdminPage>
-      <AdminPageHeader title="模型配置" />
-      <AdminSection title="系统模型">
+      <AdminPageHeader title={copy.pageTitle} />
+      <AdminSection title={copy.sectionTitle}>
         <div className="mb-5 flex flex-col gap-3 sm:flex-row">
           <label className="relative min-w-0 flex-1">
             <SearchIcon
@@ -506,19 +754,20 @@ export function AdminModelSettingsPage() {
             <Input
               className="pl-9"
               value={search}
-              aria-label="搜索模型"
-              placeholder="搜索名称、Provider 或模型 ID"
+              aria-label={copy.searchModels}
+              placeholder={copy.searchPlaceholder}
               onChange={(event) => setSearch(event.target.value)}
             />
           </label>
           <select
             className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+            aria-label={copy.filterStatus}
             value={status}
             onChange={(event) => setStatus(event.target.value as typeof status)}
           >
-            <option value="all">全部状态</option>
-            <option value="active">启用</option>
-            <option value="suspended">停用</option>
+            <option value="all">{copy.allStatuses}</option>
+            <option value="active">{copy.active}</option>
+            <option value="suspended">{copy.suspended}</option>
           </select>
           <Button
             type="button"
@@ -527,7 +776,7 @@ export function AdminModelSettingsPage() {
             onClick={() => void catalog.refetch()}
           >
             <RefreshCwIcon aria-hidden className="size-4" />
-            刷新
+            {copy.refresh}
           </Button>
           <Button
             type="button"
@@ -537,7 +786,7 @@ export function AdminModelSettingsPage() {
             }}
           >
             <PlusIcon aria-hidden className="size-4" />
-            新增模型
+            {copy.addModel}
           </Button>
         </div>
         {catalog.isLoading ? (
@@ -550,19 +799,19 @@ export function AdminModelSettingsPage() {
             <p role="alert" className="text-destructive text-sm">
               {catalog.error instanceof Error
                 ? catalog.error.message
-                : "模型目录读取失败。"}
+                : copy.catalogLoadFailed}
             </p>
             <Button
               type="button"
               variant="outline"
               onClick={() => void catalog.refetch()}
             >
-              重试
+              {copy.retry}
             </Button>
           </div>
         ) : items.length === 0 ? (
           <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">
-            没有匹配的模型。
+            {copy.noMatches}
           </p>
         ) : (
           <div className="grid gap-4 xl:grid-cols-2">

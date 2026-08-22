@@ -110,7 +110,7 @@ async def test_initial_turn_approval_drains_graph_then_skips_goal_continuation(
             stream_drained_after_approval += 1
             yield {"messages": []}
 
-    await run_agent(
+    outcome = await run_agent(
         _bridge(),
         run_manager,
         record,
@@ -120,10 +120,11 @@ async def test_initial_turn_approval_drains_graph_then_skips_goal_continuation(
         config={},
     )
 
+    assert outcome.status == "succeeded"
     assert record.status is RunStatus.success
     assert stream_invocations == 1
     assert stream_drained_after_approval == 1
-    assert record.suspended_approval_id == "approval-current"
+    assert outcome.suspended_approval_id == "approval-current"
     evaluator.assert_not_awaited()
 
 
@@ -183,7 +184,7 @@ async def test_source_output_delivery_is_deferred_at_exact_approval_pause(
     suspension_port = SimpleNamespace(
         seal_suspended_approval_marker=AsyncMock(),
     )
-    await run_agent(
+    outcome = await run_agent(
         _bridge(),
         run_manager,
         record,
@@ -200,7 +201,7 @@ async def test_source_output_delivery_is_deferred_at_exact_approval_pause(
 
     assert record.status is RunStatus.success
     assert record.error is None
-    assert record.suspended_approval_id == "approval-deferred-output"
+    assert outcome.suspended_approval_id == "approval-deferred-output"
     suspension_port.seal_suspended_approval_marker.assert_awaited_once_with(
         "approval-deferred-output",
     )
@@ -251,7 +252,7 @@ async def test_goal_continuation_approval_drains_graph_then_skips_next_hidden_tu
                 return
             raise AssertionError("agent must not receive another hidden turn")
 
-    await run_agent(
+    outcome = await run_agent(
         _bridge(),
         run_manager,
         record,
@@ -264,7 +265,7 @@ async def test_goal_continuation_approval_drains_graph_then_skips_next_hidden_tu
     assert record.status is RunStatus.success
     assert len(stream_inputs) == 2
     assert stream_drained_after_approval == 1
-    assert record.suspended_approval_id == "approval-continuation"
+    assert outcome.suspended_approval_id == "approval-continuation"
     assert evaluator.await_count == 1
 
 
@@ -309,7 +310,7 @@ async def test_sync_durability_is_scoped_to_local_approval_runs(
             if False:
                 yield None
 
-    await run_agent(
+    outcome = await run_agent(
         _bridge(),
         run_manager,
         record,
@@ -325,6 +326,7 @@ async def test_sync_durability_is_scoped_to_local_approval_runs(
         stream_subgraphs=stream_subgraphs,
     )
 
+    assert outcome.status == "succeeded"
     assert record.status is RunStatus.success
     assert len(stream_kwargs) == 1
     if expected_durability is None:
@@ -412,7 +414,7 @@ async def test_custom_only_stream_uses_checkpoint_artifact_to_skip_goal_continua
         side_effect=lambda _run_id: terminal_order.append("terminal"),
     )
 
-    await run_agent(
+    outcome = await run_agent(
         bridge,
         run_manager,
         record,
@@ -429,7 +431,7 @@ async def test_custom_only_stream_uses_checkpoint_artifact_to_skip_goal_continua
 
     assert record.status is RunStatus.success
     assert _ToolBindingFakeModel.generate_calls == 1
-    assert record.suspended_approval_id == "approval-custom"
+    assert outcome.suspended_approval_id == "approval-custom"
     assert terminal_order == ["marker", "terminal"]
     suspension_port.seal_suspended_approval_marker.assert_awaited_once_with(
         "approval-custom",

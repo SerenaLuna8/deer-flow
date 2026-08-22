@@ -57,11 +57,11 @@ export function AssetStatusBadge({
       />
       {label ??
         (status === "current"
-          ? "当前版本"
+          ? t.adminAssets.version.current
           : status === "candidate"
-            ? "候选版本"
+            ? t.adminAssets.version.candidate
             : status === "historical"
-              ? "历史版本"
+              ? t.adminAssets.version.historical
               : t.adminAssets.status[status])}
     </Badge>
   );

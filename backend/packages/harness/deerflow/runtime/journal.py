@@ -32,6 +32,9 @@ from langchain_core.messages import AIMessage, AnyMessage, BaseMessage, HumanMes
 from langgraph.types import Command
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.loop_detection_middleware import (
+    LOOP_SAFETY_REPLACEMENT_KEY,
+)
 from deerflow.agents.middlewares.token_budget_middleware import (
     TOKEN_BUDGET_STATUS_KEY,
     read_token_budget_status,
@@ -40,6 +43,13 @@ from deerflow.public_error_codes import (
     LLM_PUBLIC_ERROR_CODES,
     llm_error_code_for_reason,
 )
+from deerflow.runtime.recovered_llm_failures import (
+    RECOVERED_LLM_FAILURES_KEY,
+    RunRecoveredLLMFailureRecorder,
+    build_recovered_llm_failures_receipt,
+    read_recovered_llm_failures,
+)
+from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
 from deerflow.utils.messages import message_to_text
 
 if TYPE_CHECKING:
@@ -53,6 +63,7 @@ _RECONCILED_TOOL_MESSAGE_NAMES = frozenset({"ask_clarification"})
 _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES = frozenset({"ask_clarification"})
 _REASONING_DURATION_KEY = "reasoning_duration_ms"
 _MAX_REASONING_DURATION_MS = 24 * 60 * 60 * 1000
+_SAFE_EXCEPTION_CLASS_MAX_LENGTH = 96
 
 
 @dataclass
@@ -76,6 +87,15 @@ def _should_persist_human_input_message(message: BaseMessage) -> bool:
     return response is not None and response["source"] in _PERSISTED_HIDDEN_HUMAN_INPUT_RESPONSE_SOURCES
 
 
+def _safe_exception_class(error: BaseException) -> str:
+    """Return a bounded classifier without persisting exception text."""
+
+    name = type(error).__name__
+    if not name or len(name) > _SAFE_EXCEPTION_CLASS_MAX_LENGTH or not name.replace("_", "").isalnum():
+        return "Exception"
+    return name
+
+
 class RunJournal(BaseCallbackHandler):
     """LangChain callback handler that captures events to RunEventStore."""
 
@@ -90,6 +110,8 @@ class RunJournal(BaseCallbackHandler):
         progress_reporter: Callable[[dict], Awaitable[None]] | None = None,
         progress_flush_interval: float = 5.0,
         scope: PrivateResourceScope | None = None,
+        recovered_llm_failure_recorder: RunRecoveredLLMFailureRecorder | None = None,
+        semantic_stop_recorder: RunSemanticStopRecorder | None = None,
     ):
         super().__init__()
         self.run_id = run_id
@@ -100,6 +122,8 @@ class RunJournal(BaseCallbackHandler):
         self._progress_reporter = progress_reporter
         self._progress_flush_interval = progress_flush_interval
         self._scope = scope
+        self._recovered_llm_failure_recorder = recovered_llm_failure_recorder or RunRecoveredLLMFailureRecorder()
+        self._semantic_stop_recorder = semantic_stop_recorder
 
         # Write buffer
         self._buffer: list[dict] = []
@@ -148,6 +172,14 @@ class RunJournal(BaseCallbackHandler):
         self._tool_call_callers: dict[str, str] = {}
         self._tool_run_callers: dict[str, str] = {}
         self._persisted_tool_message_identities: set[str] = set()
+        self._persisted_recovered_llm_failure_count = 0
+        self._latest_lead_ai_observation_by_id: dict[
+            str,
+            tuple[str, int],
+        ] = {}
+        self._lead_tool_call_messages_by_id: dict[str, AIMessage] = {}
+        self._reconciled_recovered_llm_observations: set[tuple[str, str, int]] = set()
+        self._reconciled_loop_safety_message_ids: set[str] = set()
 
     # -- Lifecycle callbacks --
 
@@ -206,9 +238,11 @@ class RunJournal(BaseCallbackHandler):
         if parent_run_id is not None:
             return
         self._reconcile_final_error_fallback(outputs)
+        self._reconcile_suppressed_loop_proposals()
+        self._reconcile_final_recovered_llm_failures(outputs)
         self._reconcile_final_token_budget_message(outputs)
         self._reconcile_final_tool_messages(outputs)
-        terminal_status = "error" if self._had_llm_error_fallback else "success"
+        terminal_status = "error" if self._had_llm_error_fallback or (self._semantic_stop_recorder is not None and self._semantic_stop_recorder.reason == "loop_capped") else "success"
         self._put(
             event_type="run.end",
             category="outputs",
@@ -217,12 +251,22 @@ class RunJournal(BaseCallbackHandler):
         )
         self._flush_sync()
 
-    def on_chain_error(self, error: BaseException, *, run_id: UUID, **kwargs: Any) -> None:
+    def on_chain_error(
+        self,
+        error: BaseException,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if parent_run_id is not None:
+            return
+        self._reconcile_suppressed_loop_proposals()
         self._put(
             event_type="run.error",
             category="error",
-            content=str(error),
-            metadata={"error_type": type(error).__name__},
+            content="Run execution failed",
+            metadata={"error_type": _safe_exception_class(error)},
         )
         self._flush_sync()
 
@@ -406,6 +450,20 @@ class RunJournal(BaseCallbackHandler):
                     "llm_call_index": call_index,
                 },
             )
+            if caller == "lead_agent" and isinstance(message, AIMessage):
+                message_id = message.id
+                if isinstance(message_id, str) and message_id.strip():
+                    observation = (rid, message_index)
+                    self._latest_lead_ai_observation_by_id[message_id] = observation
+                    if message.tool_calls:
+                        self._lead_tool_call_messages_by_id[message_id] = message.model_copy(deep=True)
+                    else:
+                        # Some providers may reuse one message id across model
+                        # calls. A later plain final answer supersedes any old
+                        # tool proposal with that id. Retaining the proposal
+                        # would let loop reconciliation append a hidden same-id
+                        # row after the answer and erase it during replay dedupe.
+                        self._lead_tool_call_messages_by_id.pop(message_id, None)
             if rid not in self._counted_message_llm_run_ids:
                 self._record_message_summary(message, caller=caller)
 
@@ -448,7 +506,12 @@ class RunJournal(BaseCallbackHandler):
         self._llm_start_times.pop(rid, None)
         self._reasoning_windows.pop(rid, None)
         self._finalized_reasoning_durations.pop(rid, None)
-        self._put(event_type="llm.error", category="trace", content=str(error))
+        self._put(
+            event_type="llm.error",
+            category="trace",
+            content="LLM request failed",
+            metadata={"exception_class": _safe_exception_class(error)},
+        )
 
     def on_tool_start(self, serialized, input_str, *, run_id, parent_run_id=None, tags=None, metadata=None, inputs=None, **kwargs):
         """Cache the exact callback-run caller for later tool-result correlation."""
@@ -763,6 +826,119 @@ class RunJournal(BaseCallbackHandler):
                 continue
             if self._should_reconcile_tool_message(message):
                 self._persist_tool_result_message(message, caller="lead_agent")
+
+    def _reconcile_suppressed_loop_proposals(self) -> None:
+        """Supersede only proposals suppressed by the server-owned loop guard."""
+
+        recorder = self._semantic_stop_recorder
+        if recorder is None:
+            return
+        for message_id in recorder.suppressed_ai_message_ids:
+            if message_id in self._reconciled_loop_safety_message_ids:
+                continue
+            original = self._lead_tool_call_messages_by_id.get(message_id)
+            if original is None or not original.tool_calls:
+                continue
+            additional_kwargs = dict(original.additional_kwargs or {})
+            additional_kwargs.pop("tool_calls", None)
+            additional_kwargs.pop("function_call", None)
+            additional_kwargs["hide_from_ui"] = True
+            additional_kwargs[LOOP_SAFETY_REPLACEMENT_KEY] = True
+            response_metadata = dict(original.response_metadata or {})
+            if response_metadata.get("finish_reason") == "tool_calls":
+                response_metadata["finish_reason"] = "stop"
+            replacement = original.model_copy(
+                deep=True,
+                update={
+                    "tool_calls": [],
+                    "invalid_tool_calls": [],
+                    "additional_kwargs": additional_kwargs,
+                    "response_metadata": response_metadata,
+                },
+            )
+            self._put(
+                event_type="llm.ai.response",
+                category="message",
+                content=self._message_payload(
+                    replacement,
+                    reasoning_duration_ms=None,
+                ),
+                metadata={
+                    "caller": "lead_agent",
+                    "source": "loop_safety_reconciliation",
+                },
+            )
+            self._reconciled_loop_safety_message_ids.add(message_id)
+
+    def _reconcile_final_recovered_llm_failures(self, outputs: Any) -> None:
+        """Persist safe recovered-attempt facts added after on_llm_end fired."""
+
+        recovered_failures = self._recovered_llm_failure_recorder.snapshot()
+
+        if not recovered_failures:
+            return
+
+        persisted_count = self._persisted_recovered_llm_failure_count
+        new_failures = recovered_failures[persisted_count:]
+        if new_failures:
+            self._put(
+                event_type="run.recovered_issue",
+                category="trace",
+                content={
+                    "kind": "llm_retry_recovered",
+                    **build_recovered_llm_failures_receipt(
+                        new_failures,
+                    ),
+                },
+                metadata={"caller": "lead_agent"},
+            )
+            self._persisted_recovered_llm_failure_count = len(recovered_failures)
+        aggregate = tuple(recovered_failures)
+        for message in reversed(self._final_output_messages(outputs)):
+            if isinstance(message, HumanMessage):
+                break
+            if not isinstance(message, AIMessage):
+                continue
+            if message.additional_kwargs.get("hide_from_ui") is True:
+                continue
+            message_id = message.id
+            if not isinstance(message_id, str) or not message_id.strip():
+                break
+            observation = self._latest_lead_ai_observation_by_id.get(
+                message_id,
+            )
+            if observation is None:
+                break
+            reconciliation_key = (message_id, *observation)
+            if reconciliation_key in self._reconciled_recovered_llm_observations:
+                break
+            message_failures = read_recovered_llm_failures(
+                message.additional_kwargs.get(
+                    RECOVERED_LLM_FAILURES_KEY,
+                )
+            )
+            if message_failures != aggregate:
+                break
+            raw_reasoning_duration = message.additional_kwargs.get(
+                _REASONING_DURATION_KEY,
+            )
+            reasoning_duration_ms = raw_reasoning_duration if type(raw_reasoning_duration) is int and 0 <= raw_reasoning_duration <= _MAX_REASONING_DURATION_MS else None
+            self._put(
+                event_type="llm.ai.response",
+                category="message",
+                content=self._message_payload(
+                    message,
+                    reasoning_duration_ms=reasoning_duration_ms,
+                ),
+                metadata={
+                    "caller": "lead_agent",
+                    "source": "recovered_llm_failures",
+                },
+            )
+            self._reconciled_recovered_llm_observations.add(
+                reconciliation_key,
+            )
+            break
 
     def _reconcile_final_token_budget_message(self, outputs: Any) -> None:
         for message in reversed(self._final_output_messages(outputs)):

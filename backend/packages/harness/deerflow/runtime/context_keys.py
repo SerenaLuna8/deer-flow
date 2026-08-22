@@ -66,6 +66,8 @@ class RuntimeContextKeys:
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS: Final[str] = CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
     TRACE_ID: Final[str] = ACT_WEAVE_TRACE_METADATA_KEY
     RUN_JOURNAL: Final[str] = "__run_journal"
+    RECOVERED_LLM_FAILURE_RECORDER: Final[str] = "__recovered_llm_failure_recorder"
+    RUN_SEMANTIC_STOP_RECORDER: Final[str] = "__run_semantic_stop_recorder"
     SERVER_ABORT_EVENT: Final[str] = "__server_abort_event"
     VISION_DISPATCH_AUTHORITY: Final[str] = "__vision_dispatch_authority"
     MEMORY_ARCHIVE_CONTEXT: Final[str] = MEMORY_ARCHIVE_CONTEXT_KEY
@@ -75,6 +77,7 @@ class RuntimeContextKeys:
     SANDBOX_ID: Final[str] = "sandbox_id"
     HOST_EXECUTION_APPROVAL_PORT: Final[str] = HOST_EXECUTION_APPROVAL_CONTEXT_KEY
     HOST_EXECUTION_AGENT_PATH: Final[str] = HOST_EXECUTION_AGENT_PATH_CONTEXT_KEY
+    PARENT_EXECUTION_BINDING_FACTORY: Final[str] = "__parent_execution_binding_factory"
 
     # Supported non-authority values that intentionally survive a Worker merge.
     # Unknown non-reserved extension keys remain pass-through compatible too;
@@ -112,11 +115,14 @@ class RuntimeContextKeys:
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS,
             TRACE_ID,
             RUN_JOURNAL,
+            RECOVERED_LLM_FAILURE_RECORDER,
+            RUN_SEMANTIC_STOP_RECORDER,
             SERVER_ABORT_EVENT,
             VISION_DISPATCH_AUTHORITY,
             MEMORY_ARCHIVE_CONTEXT,
             HOST_EXECUTION_APPROVAL_PORT,
             HOST_EXECUTION_AGENT_PATH,
+            PARENT_EXECUTION_BINDING_FACTORY,
         },
     )
     CALLER_PASSTHROUGH_KEYS: Final[frozenset[str]] = frozenset(

@@ -38,6 +38,7 @@ class PublicRunErrorCode(StrEnum):
 
     PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE = "PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE"
     MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT"
+    LOOP_SAFETY_LIMIT = "LOOP_SAFETY_LIMIT"
     OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE"
     CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE"
     SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED = "SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED"
@@ -48,6 +49,7 @@ _PUBLIC_RUN_ERROR_MESSAGE_BY_CODE: Final[Mapping[PublicRunErrorCode, str]] = Map
     {
         PublicRunErrorCode.PRIVATE_RUN_MESSAGE_BOUNDARY_UNAVAILABLE: ("Private Run pre-run message boundary is unavailable"),
         PublicRunErrorCode.MODEL_OUTPUT_LIMIT: ("The model reached its output limit before completing the response"),
+        PublicRunErrorCode.LOOP_SAFETY_LIMIT: ("The Run stopped after reaching the loop safety limit"),
         PublicRunErrorCode.OUTPUT_DELIVERY_INCOMPLETE: ("The required output file was not presented"),
         PublicRunErrorCode.CURRENT_UPLOAD_UNAVAILABLE: ("The current image attachment could not be read or validated"),
         PublicRunErrorCode.SANDBOX_READ_ONLY_MOUNTS_UNSUPPORTED: ("Configured sandbox provider does not support run-scoped read-only mounts"),

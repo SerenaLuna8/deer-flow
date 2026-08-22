@@ -16,14 +16,16 @@ export function WorkspaceCapabilityPage({
     <WorkspaceContainer>
       <WorkspaceHeader />
       <WorkspaceBody className="overflow-y-auto">
-        <div
+        <main
+          id="workspace-main"
+          tabIndex={-1}
           className={cn(
-            "w-full p-4 sm:p-6 md:p-8",
+            "w-full p-4 outline-none sm:p-6 md:p-8",
             width === "wide" ? "max-w-[1440px]" : "max-w-5xl",
           )}
         >
           {children}
-        </div>
+        </main>
       </WorkspaceBody>
     </WorkspaceContainer>
   );

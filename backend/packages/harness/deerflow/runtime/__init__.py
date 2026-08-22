@@ -7,7 +7,17 @@ from importlib import import_module
 
 from .checkpointer import checkpointer_context, get_checkpointer, make_checkpointer, reset_checkpointer
 from .private_scope import PrivateResourceScope
-from .runs import ConflictError, DisconnectMode, RunManager, RunRecord, RunStatus, UnsupportedStrategyError
+from .runs import (
+    ConflictError,
+    DisconnectMode,
+    RunAgentOutcome,
+    RunAgentResourceOwnership,
+    RunAgentUsageSnapshot,
+    RunManager,
+    RunRecord,
+    RunStatus,
+    UnsupportedStrategyError,
+)
 from .serialization import serialize, serialize_channel_values, serialize_channel_values_for_api, serialize_lc_object, serialize_messages_tuple, strip_data_url_image_blocks
 from .store import get_store, make_store, reset_store, store_context
 
@@ -33,6 +43,9 @@ __all__ = [
     "ConflictError",
     "DisconnectMode",
     "RunContext",
+    "RunAgentOutcome",
+    "RunAgentResourceOwnership",
+    "RunAgentUsageSnapshot",
     "RunManager",
     "RunRecord",
     "RunStatus",

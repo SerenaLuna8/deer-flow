@@ -4,6 +4,7 @@ import { expect, test } from "@rstest/core";
 import {
   buildVisibleHistoryMessages,
   mergeMessages,
+  mergeRunMessageRows,
   resolveFailedRunComposerInput,
   retainOptimisticHumanMessagesAfterFailure,
   retainUnacknowledgedOptimisticHumanMessages,
@@ -14,6 +15,48 @@ import {
   pruneConfirmedArchivedMessages,
 } from "@/core/threads/message-projection";
 import type { RunMessage } from "@/core/threads/types";
+
+test("keeps the newer reconciled payload when an older duplicate arrives on a later page", () => {
+  const row = (seq: string, reconciled: boolean): RunMessage => ({
+    run_id: "run-reconciled",
+    seq,
+    content: {
+      type: "ai",
+      id: "assistant-reconciled",
+      content: "Recovered answer",
+      additional_kwargs: reconciled
+        ? {
+            deerflow_recovered_llm_failures: {
+              schema_version: 1,
+              failures: [
+                {
+                  attempt: 1,
+                  max_attempts: 3,
+                  error_code: "LLM_PROVIDER_UNAVAILABLE",
+                  reason: "transient",
+                  disposition: "recovered",
+                },
+              ],
+            },
+          }
+        : {},
+    } as Message,
+    metadata: { caller: "lead_agent" },
+    created_at: "2026-08-22T00:00:00Z",
+  });
+
+  const merged = mergeRunMessageRows(
+    [row("100", true)],
+    [row("49", false)],
+    [],
+  );
+
+  expect(merged).toHaveLength(1);
+  expect(
+    merged[0]?.content.additional_kwargs?.deerflow_recovered_llm_failures,
+  ).toBeDefined();
+  expect(merged[0]?.seq).toBe("100");
+});
 
 test("keeps a sanitized run input before its output after a late dynamic-context injection", () => {
   const runId = "run-1";

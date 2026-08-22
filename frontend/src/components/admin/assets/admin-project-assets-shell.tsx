@@ -10,6 +10,11 @@ import {
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { shortAdminProjectId } from "@/components/admin/operations/admin-operations-ui";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useAdminProject } from "@/core/admin-operations/api";
+import type { AdminProjectPage } from "@/core/admin-operations/types";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -20,6 +25,28 @@ const NAVIGATION = [
   { segment: "quotas", labelKey: "quota", icon: GaugeIcon },
 ] as const;
 
+export function AdminProjectIdentitySummary({
+  project,
+}: {
+  project: AdminProjectPage["items"][number];
+}) {
+  const { t } = useI18n();
+  return (
+    <div className="min-w-0">
+      <p className="truncate text-sm font-semibold">{project.display_name}</p>
+      <p className="text-muted-foreground mt-0.5 flex min-w-0 flex-wrap items-center gap-x-2 font-mono text-xs">
+        <span className="truncate">{project.slug}</span>
+        <span aria-hidden>·</span>
+        <span title={project.project_id}>
+          {t.adminAssets.shell.shortProjectId(
+            shortAdminProjectId(project.project_id),
+          )}
+        </span>
+      </p>
+    </div>
+  );
+}
+
 export function AdminProjectAssetsShell({
   projectId,
   children,
@@ -29,7 +56,13 @@ export function AdminProjectAssetsShell({
 }) {
   const pathname = usePathname();
   const base = `/admin/projects/${projectId}/assets`;
+  const { user } = useAuth();
   const { t } = useI18n();
+  const project = useAdminProject(
+    user?.id ?? "default",
+    projectId,
+    Boolean(user),
+  );
 
   return (
     <section
@@ -55,9 +88,20 @@ export function AdminProjectAssetsShell({
                 aria-hidden
                 className="bg-border hidden h-4 w-px shrink-0 sm:block"
               />
-              <p className="flex h-8 min-w-0 items-center truncate text-sm font-semibold">
-                {t.adminAssets.shell.projectGovernance}
-              </p>
+              <div className="min-w-0">
+                <p className="text-muted-foreground text-xs font-medium">
+                  {t.adminAssets.shell.projectGovernance}
+                </p>
+                {project.data ? (
+                  <AdminProjectIdentitySummary project={project.data} />
+                ) : project.isLoading ? (
+                  <Skeleton className="mt-1 h-8 w-56" />
+                ) : (
+                  <p className="text-destructive mt-1 text-xs" role="alert">
+                    {t.adminAssets.shell.projectIdentityUnavailable}
+                  </p>
+                )}
+              </div>
             </div>
             <div
               className="border-border bg-muted/45 min-w-0 rounded-md border px-3 py-2 text-xs sm:whitespace-nowrap"
@@ -67,7 +111,7 @@ export function AdminProjectAssetsShell({
                 {t.adminAssets.shell.projectId}
               </span>
               <span className="font-mono [overflow-wrap:anywhere] sm:[overflow-wrap:normal]">
-                {projectId}
+                {shortAdminProjectId(projectId)}
               </span>
             </div>
           </div>

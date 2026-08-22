@@ -11,6 +11,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.tool_call_metadata import clone_ai_message_with_tool_calls
 from deerflow.agents.thread_state import delegation_identity
 from deerflow.config.subagents_config import (
+    DEFAULT_MAX_CONCURRENT_SUBAGENT_CALLS,
     DEFAULT_MAX_TOTAL_SUBAGENTS_PER_RUN,
     MAX_CONCURRENT_SUBAGENT_CALLS,
     MAX_TOTAL_SUBAGENTS_PER_RUN,
@@ -20,7 +21,6 @@ from deerflow.config.subagents_config import (
     clamp_total_subagents_per_run,
 )
 from deerflow.private_scope import PrivateResourceScope
-from deerflow.subagents.executor import MAX_CONCURRENT_SUBAGENTS
 
 logger = logging.getLogger(__name__)
 
@@ -169,14 +169,16 @@ class SubagentLimitMiddleware(AgentMiddleware[AgentState]):
 
     Args:
         max_concurrent: Maximum number of concurrent subagent calls allowed.
-            Defaults to MAX_CONCURRENT_SUBAGENTS (3). Clamped to [1, 4].
+            Defaults to DEFAULT_MAX_CONCURRENT_SUBAGENT_CALLS (3). Clamped to
+            [1, 4]. This per-model-response policy is independent of the
+            process-wide Sub-Agent Task scheduler gate.
         max_total: Maximum task delegations admitted across one Run. Defaults
             to 6 and is clamped to [1, 50].
     """
 
     def __init__(
         self,
-        max_concurrent: int = MAX_CONCURRENT_SUBAGENTS,
+        max_concurrent: int = DEFAULT_MAX_CONCURRENT_SUBAGENT_CALLS,
         max_total: int = DEFAULT_MAX_TOTAL_SUBAGENTS,
     ):
         super().__init__()

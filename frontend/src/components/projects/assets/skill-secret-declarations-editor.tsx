@@ -87,9 +87,11 @@ export function skillSecretAutonomousFromInjectionMode(
 }
 
 export function shouldShowSkillSecretInjectionSettings(
-  requiredSecretCount: number,
+  _requiredSecretCount: number,
 ): boolean {
-  return requiredSecretCount > 0;
+  // `secrets-autonomous` remains a supported SKILL.md/runtime contract. It is
+  // intentionally not exposed through this page.
+  return false;
 }
 
 export function skillSecretNameFocusDecision({

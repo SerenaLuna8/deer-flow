@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Mapping
 from typing import Any, override
 
 from langchain.agents import AgentState
@@ -11,6 +12,14 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.todo import Todo
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.runtime import Runtime
+
+from deerflow.subagents.status_contract import (
+    SUBAGENT_USAGE_RECEIPT_STATE_KEY,
+    SUBAGENT_USAGE_RECEIPT_STATE_VERSION,
+    normalize_token_usage,
+    read_subagent_usage_receipt,
+    read_subagent_usage_receipt_state,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +237,68 @@ def _has_tool_call(message: AIMessage, tool_call_id: str) -> bool:
     return False
 
 
+def _set_subagent_usage_receipts(
+    message: AIMessage,
+    *,
+    receipts: Mapping[str, dict[str, int]],
+    conflicts: frozenset[str],
+) -> AIMessage:
+    state = read_subagent_usage_receipt_state(message.additional_kwargs)
+    if state is None:
+        if SUBAGENT_USAGE_RECEIPT_STATE_KEY in message.additional_kwargs:
+            logger.warning("Ignoring subagent token usage because its persisted receipt state is malformed")
+            return message
+        if message.usage_metadata is None:
+            baseline = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+            }
+        else:
+            baseline = normalize_token_usage(message.usage_metadata)
+            if baseline is None:
+                logger.warning("Ignoring subagent token usage because parent usage metadata cannot form a durable baseline")
+                return message
+        if not receipts and not conflicts:
+            return message
+    else:
+        baseline, _persisted_contributions, _persisted_conflicts = state
+
+    if set(receipts) & conflicts:
+        raise ValueError("Sub-Agent Task receipt cannot be both accepted and conflicted")
+
+    contributions = {receipt_id: dict(receipts[receipt_id]) for receipt_id in sorted(receipts)}
+
+    merged_usage = dict(message.usage_metadata or {})
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        merged_usage[key] = baseline[key] + sum(contribution[key] for contribution in contributions.values())
+
+    receipt_state_payload = {
+        "version": SUBAGENT_USAGE_RECEIPT_STATE_VERSION,
+        "baseline": baseline,
+        "contributions": [
+            {
+                "receipt_id": applied_receipt_id,
+                "usage": contributions[applied_receipt_id],
+            }
+            for applied_receipt_id in sorted(contributions)
+        ],
+    }
+    if conflicts:
+        receipt_state_payload["conflicts"] = sorted(conflicts)
+    if merged_usage == dict(message.usage_metadata or {}) and message.additional_kwargs.get(SUBAGENT_USAGE_RECEIPT_STATE_KEY) == receipt_state_payload:
+        return message
+
+    additional_kwargs = dict(message.additional_kwargs or {})
+    additional_kwargs[SUBAGENT_USAGE_RECEIPT_STATE_KEY] = receipt_state_payload
+    return message.model_copy(
+        update={
+            "usage_metadata": merged_usage,
+            "additional_kwargs": additional_kwargs,
+        }
+    )
+
+
 def _build_attribution(message: AIMessage, todos: list[Todo]) -> dict[str, Any]:
     tool_calls = getattr(message, "tool_calls", None) or []
     actions: list[dict[str, Any]] = []
@@ -272,46 +343,119 @@ class TokenUsageMiddleware(AgentMiddleware):
         if not messages:
             return None
 
-        # Annotate subagent token usage onto the AIMessage that dispatched it.
-        # When a task tool completes, its usage is cached by tool_call_id.  Detect
-        # the ToolMessage → search backward for the corresponding AIMessage → merge.
-        # Walk backward through consecutive ToolMessages before the new AIMessage
-        # so that multiple concurrent task tool calls all get their subagent tokens
-        # written back to the same dispatch message (merging into one update).
+        # Annotate Sub-Agent Task token usage onto the AIMessage that dispatched
+        # it. Durable receipt metadata is authoritative; its immutable baseline
+        # and per-receipt contributions make checkpoint replay deterministic.
+        # Legacy ToolMessages without receipts are intentionally ignored: a
+        # process cache cannot be reconstructed during checkpoint replay.
+        # Reduce the whole transcript so receipt identity is global, not scoped
+        # to one dispatch or one hook invocation. The earliest dispatch owns a
+        # repeated same-value receipt; conflicting values remove that receipt
+        # from every dispatch deterministically.
         state_updates: dict[int, AIMessage] = {}
         if len(messages) >= 2:
-            from deerflow.tools.builtins.task_tool import pop_cached_subagent_usage
+            occurrences: dict[
+                str,
+                dict[tuple[int, int, int, int], dict[str, int]],
+            ] = {}
+            conflict_dispatches: dict[str, set[int]] = {}
+            state_dispatches: set[int] = set()
 
-            idx = len(messages) - 2
-            while idx >= 0:
-                tool_msg = messages[idx]
+            def record_occurrence(
+                receipt_id: str,
+                usage: dict[str, int],
+                dispatch_idx: int,
+            ) -> None:
+                signature = (
+                    dispatch_idx,
+                    usage["input_tokens"],
+                    usage["output_tokens"],
+                    usage["total_tokens"],
+                )
+                occurrences.setdefault(receipt_id, {})[signature] = usage
+
+            for dispatch_idx, candidate in enumerate(messages):
+                if not isinstance(candidate, AIMessage):
+                    continue
+                receipt_state = read_subagent_usage_receipt_state(
+                    candidate.additional_kwargs,
+                )
+                if receipt_state is not None:
+                    state_dispatches.add(dispatch_idx)
+                    _baseline, contributions, conflicts = receipt_state
+                    for receipt_id, usage in contributions.items():
+                        record_occurrence(receipt_id, usage, dispatch_idx)
+                    for receipt_id in conflicts:
+                        conflict_dispatches.setdefault(receipt_id, set()).add(
+                            dispatch_idx,
+                        )
+                elif SUBAGENT_USAGE_RECEIPT_STATE_KEY in candidate.additional_kwargs:
+                    logger.warning(
+                        "Ignoring malformed persisted Sub-Agent Task receipt state: message_id=%s",
+                        candidate.id,
+                    )
+
+            for tool_idx, tool_msg in enumerate(messages):
                 if not isinstance(tool_msg, ToolMessage) or not tool_msg.tool_call_id:
-                    break
+                    continue
+                usage_receipt = read_subagent_usage_receipt(
+                    tool_msg.additional_kwargs,
+                )
+                if usage_receipt is None:
+                    continue
+                dispatch_idx = tool_idx - 1
+                while dispatch_idx >= 0:
+                    candidate = messages[dispatch_idx]
+                    if isinstance(candidate, AIMessage) and _has_tool_call(
+                        candidate,
+                        tool_msg.tool_call_id,
+                    ):
+                        receipt_id, subagent_usage = usage_receipt
+                        record_occurrence(
+                            receipt_id,
+                            subagent_usage,
+                            dispatch_idx,
+                        )
+                        break
+                    dispatch_idx -= 1
 
-                subagent_usage = pop_cached_subagent_usage(tool_msg.tool_call_id)
-                if subagent_usage:
-                    # Search backward from the ToolMessage to find the AIMessage
-                    # that dispatched it.  A single model response can dispatch
-                    # multiple task tool calls, so we can't assume a fixed offset.
-                    dispatch_idx = idx - 1
-                    while dispatch_idx >= 0:
-                        candidate = messages[dispatch_idx]
-                        if isinstance(candidate, AIMessage) and _has_tool_call(candidate, tool_msg.tool_call_id):
-                            # Accumulate into an existing update for the same
-                            # AIMessage (multiple task calls in one response),
-                            # or merge fresh from the original message.
-                            existing_update = state_updates.get(dispatch_idx)
-                            prev = existing_update.usage_metadata if existing_update else (getattr(candidate, "usage_metadata", None) or {})
-                            merged = {
-                                **prev,
-                                "input_tokens": prev.get("input_tokens", 0) + subagent_usage["input_tokens"],
-                                "output_tokens": prev.get("output_tokens", 0) + subagent_usage["output_tokens"],
-                                "total_tokens": prev.get("total_tokens", 0) + subagent_usage["total_tokens"],
-                            }
-                            state_updates[dispatch_idx] = candidate.model_copy(update={"usage_metadata": merged})
-                            break
-                        dispatch_idx -= 1
-                idx -= 1
+            desired_by_dispatch: dict[int, dict[str, dict[str, int]]] = {}
+            conflicts_by_dispatch: dict[int, set[str]] = {}
+            for receipt_id in sorted(occurrences.keys() | conflict_dispatches.keys()):
+                receipt_occurrences = occurrences.get(receipt_id, {})
+                usage_values = {signature[1:] for signature in receipt_occurrences}
+                owner_candidates = {signature[0] for signature in receipt_occurrences} | conflict_dispatches.get(receipt_id, set())
+                if not owner_candidates:
+                    continue
+                if receipt_id in conflict_dispatches or len(usage_values) != 1:
+                    logger.warning(
+                        "Ignoring conflicting Sub-Agent Task usage receipt transcript: receipt_id=%s",
+                        receipt_id,
+                    )
+                    for owner_dispatch in owner_candidates:
+                        conflicts_by_dispatch.setdefault(owner_dispatch, set()).add(
+                            receipt_id,
+                        )
+                    continue
+                owner_dispatch = min(owner_candidates)
+                usage = next(iter(receipt_occurrences.values()))
+                desired_by_dispatch.setdefault(owner_dispatch, {})[receipt_id] = usage
+
+            for dispatch_idx in sorted(
+                state_dispatches | desired_by_dispatch.keys() | conflicts_by_dispatch.keys(),
+            ):
+                candidate = messages[dispatch_idx]
+                if not isinstance(candidate, AIMessage):
+                    continue
+                updated = _set_subagent_usage_receipts(
+                    candidate,
+                    receipts=desired_by_dispatch.get(dispatch_idx, {}),
+                    conflicts=frozenset(
+                        conflicts_by_dispatch.get(dispatch_idx, set()),
+                    ),
+                )
+                if updated is not candidate:
+                    state_updates[dispatch_idx] = updated
 
         last = messages[-1]
         if not isinstance(last, AIMessage):
@@ -339,14 +483,16 @@ class TokenUsageMiddleware(AgentMiddleware):
 
         todos = state.get("todos") or []
         attribution = _build_attribution(last, todos if isinstance(todos, list) else [])
-        additional_kwargs = dict(getattr(last, "additional_kwargs", {}) or {})
+        last_index = len(messages) - 1
+        last_for_update = state_updates.get(last_index, last)
+        additional_kwargs = dict(getattr(last_for_update, "additional_kwargs", {}) or {})
 
         if additional_kwargs.get(TOKEN_USAGE_ATTRIBUTION_KEY) == attribution:
             return {"messages": [state_updates[idx] for idx in sorted(state_updates)]} if state_updates else None
 
         additional_kwargs[TOKEN_USAGE_ATTRIBUTION_KEY] = attribution
-        updated_msg = last.model_copy(update={"additional_kwargs": additional_kwargs})
-        state_updates[len(messages) - 1] = updated_msg
+        updated_msg = last_for_update.model_copy(update={"additional_kwargs": additional_kwargs})
+        state_updates[last_index] = updated_msg
         return {"messages": [state_updates[idx] for idx in sorted(state_updates)]}
 
     @override
@@ -355,4 +501,12 @@ class TokenUsageMiddleware(AgentMiddleware):
 
     @override
     async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+    @override
+    def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return self._apply(state)
+
+    @override
+    async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         return self._apply(state)

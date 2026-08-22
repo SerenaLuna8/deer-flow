@@ -1,9 +1,7 @@
 import { describe, expect, test } from "@rstest/core";
-import { renderToStaticMarkup } from "react-dom/server";
 
 import {
   filterProjectAssetItems,
-  ProjectAgentDirectorySearch,
   projectAssetSelectionDecision,
   projectAssetSelectionFromSearch,
   projectAssetSelectionHref,
@@ -45,25 +43,8 @@ const catalog = {
   ],
 } as ProjectAssetList;
 
-describe("Agent directory search and deep-link navigation", () => {
-  test("renders an accessible Agent search control with result feedback", () => {
-    const html = renderToStaticMarkup(
-      <ProjectAgentDirectorySearch
-        searchQuery="review"
-        visibleCount={1}
-        sourceCount={2}
-        onSearchQueryChange={() => undefined}
-      />,
-    );
-
-    expect(html).toContain("搜索 Agent");
-    expect(html).toContain('type="search"');
-    expect(html).toContain('placeholder="搜索名称或 slug"');
-    expect(html).toContain('role="status"');
-    expect(html).toContain("显示 1 / 2 项");
-  });
-
-  test("filters both system and project Agent collections by name or slug", () => {
+describe("Project asset search and Agent directory deep-link navigation", () => {
+  test("filters system and project asset collections by name or slug", () => {
     expect(
       filterProjectAssetItems(catalog, "PROJECT-assistant", "system").map(
         (item) => item.id,

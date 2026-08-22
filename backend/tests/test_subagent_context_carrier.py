@@ -1,4 +1,4 @@
-"""SubagentExecutor acceptance test for the typed context carrier."""
+"""Subagent graph-runner acceptance test for the typed context carrier."""
 
 from __future__ import annotations
 

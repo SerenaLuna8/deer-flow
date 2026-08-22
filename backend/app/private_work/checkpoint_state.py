@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import copy
 from collections.abc import Mapping
 from typing import Any
 
-from langgraph.types import Overwrite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.private_work.checkpointer import ProjectScopedCheckpointer
@@ -19,8 +17,6 @@ from deerflow.runtime.checkpoint_mode import (
 from deerflow.runtime.checkpoint_state import (
     CheckpointStateAccessor,
     build_state_mutation_graph,
-    graph_reducer_channels,
-    graph_writable_channels,
 )
 
 
@@ -101,31 +97,3 @@ def snapshot_checkpoint_id(snapshot: object | None) -> str | None:
         return None
     value = configurable.get("checkpoint_id")
     return value if isinstance(value, str) and value else None
-
-
-def replacement_values(
-    accessor: CheckpointStateAccessor,
-    source_values: Mapping[str, Any],
-    *,
-    current_values: Mapping[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Build a whole-state replacement safe for reducer and delta channels."""
-    writable = graph_writable_channels(accessor.graph)
-    if writable is None:
-        writable = frozenset(source_values)
-        if current_values is not None:
-            writable |= frozenset(current_values)
-    reducers = graph_reducer_channels(accessor.graph) or frozenset()
-    present = set(source_values)
-    if current_values is not None:
-        present.update(current_values)
-    unknown = present - set(writable)
-    if unknown:
-        names = ", ".join(sorted(unknown))
-        raise RuntimeError(f"checkpoint state schema does not expose source channels: {names}")
-
-    values: dict[str, Any] = {}
-    for name in writable & present:
-        value = copy.deepcopy(source_values.get(name))
-        values[name] = Overwrite(value) if name in reducers else value
-    return values

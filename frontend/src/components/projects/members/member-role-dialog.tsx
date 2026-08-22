@@ -11,6 +11,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { useI18n } from "@/core/i18n/hooks";
 import type { ProjectMembership, ProjectRole } from "@/core/projects/types";
 
 const ROLES: ProjectRole[] = ["admin", "editor", "runner", "viewer"];
@@ -30,6 +31,8 @@ export function MemberRoleDialog({
   onOpenChange: (open: boolean) => void;
   onSubmit: (role: ProjectRole) => void;
 }) {
+  const { t } = useI18n();
+  const labels = t.project.members;
   const [role, setRole] = useState<ProjectRole>(member?.role ?? "viewer");
 
   useEffect(() => {
@@ -40,11 +43,11 @@ export function MemberRoleDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>修改成员角色</DialogTitle>
+          <DialogTitle>{labels.roleDialog.title}</DialogTitle>
           <DialogDescription>{member?.account_email}</DialogDescription>
         </DialogHeader>
         <fieldset className="space-y-2">
-          <legend className="sr-only">项目角色</legend>
+          <legend className="sr-only">{labels.roleDialog.projectRole}</legend>
           {ROLES.map((item) => (
             <label
               key={item}
@@ -56,8 +59,7 @@ export function MemberRoleDialog({
                 checked={role === item}
                 onChange={() => setRole(item)}
               />
-              {item[0]?.toUpperCase()}
-              {item.slice(1)}
+              {labels.roles[item]}
             </label>
           ))}
         </fieldset>
@@ -72,7 +74,7 @@ export function MemberRoleDialog({
             disabled={pending || !member}
             onClick={() => onSubmit(role)}
           >
-            保存角色
+            {labels.roleDialog.save}
           </Button>
         </DialogFooter>
       </DialogContent>

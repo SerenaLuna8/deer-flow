@@ -575,6 +575,18 @@ async def test_drain_grace_is_bounded_when_handler_suppresses_first_cancel() -> 
         assert backend.succeeded == []
         assert backend.cancelled == []
         assert backend.failed == []
+
+        joined = asyncio.create_task(service.join_detached())
+        await asyncio.sleep(0.02)
+        assert not joined.done()
+        joined.cancel("shutdown caller cancelled once")
+        await asyncio.sleep(0.02)
+        assert not joined.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(joined, timeout=1)
+        assert service._detached == set()
     finally:
         release.set()
         await asyncio.wait_for(running, timeout=1)

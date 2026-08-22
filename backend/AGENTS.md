@@ -143,9 +143,60 @@ or downgrade an application database.
 - Run admission freezes an exact Agent/model/Skill/MCP payload closure plus exact
   domain-secret Generation references. Retry and resume use that closure rather
   than current catalog pointers.
+- Sub-Agent Task lifecycle ownership is process-wide and lives in
+  `deerflow.subagents.lifecycle`: it alone owns the scheduler gate, internal UUID
+  registry, graph task/future, cancellation, timeout arbitration, usage receipt,
+  quiescence, and reaper. `task_tool` is a wire Adapter; the internal graph
+  runner must not grow `start/get/cancel/cleanup` lifecycle APIs.
+- Each Agent graph binds one explicit SDK, Embedded, configured Lead, or Private
+  profile factory. Each task invocation creates a per-call parent binding from
+  that factory plus live runtime authority; never infer the profile from
+  `private_scope` or reconstruct SDK model/tools/middleware from global config.
+  Expensive model, Skill, tool, middleware, and graph materialization occurs
+  only after scheduler admission and counts against the execution budget.
+- Parent-to-child runtime propagation is one opaque
+  `DelegatedRuntimeContextProjection`. It alone selects and copies inherited
+  identity, preserves channel-identity absence versus explicit clear, applies
+  Private-profile gates, and adapts loop-affine authority. The task Adapter may
+  select graph/profile inputs, but the graph runner must not reconstruct raw
+  runtime-context keys or accept the corresponding authority fields separately.
+- The process scheduler's execution deadline is independent from owner-loop
+  observers. Its concurrency lease remains held through cancelled thread work,
+  inherited-operation quiescence, and usage settlement; a timed-out child still
+  consuming resources cannot admit a replacement into the same slot. Bounded
+  profiles seal parent-operation admission at timeout and cannot return while
+  an already-open owner-loop receipt still needs that loop to unwind.
+- A Private Sub-Agent Task cannot return until its graph and inherited parent
+  operations are quiescent. Worker drain explicitly closes the lifecycle, joins
+  detached Run handlers, and only then tears down checkpointer/store resources.
+  Repeated lifecycle close calls share that same completion barrier. Aggregate
+  ToolMessage usage is replay-idempotent by internal execution receipt; detailed
+  records have one lifecycle settlement attempt into the parent Run Journal on
+  its owner loop. Pre-receipt checkpoint messages are not re-attributed because
+  no durable fact says whether the old process cache already folded them into
+  parent usage. Conflicting receipt values create a persistent transcript
+  tombstone on every occurrence-owning turn so retained history remains closed
+  under compaction. TokenBudget hard-stops only when that conflict is new to
+  the Run, including terminal paths that reach `after_agent` without another
+  model hook.
 - Durable events are committed before notification. PostgreSQL `NOTIFY` is only
   a wake-up hint; correctness comes from scoped reads, monotonic cursors, and one
   durable terminal outcome.
+- A loop hard-stop owns one private-state, tool-free finalization turn. Its
+  Run-scoped semantic recorder, not model message metadata, authorizes durable
+  suppression of unexecuted proposals on both graph success and error paths. A
+  loop-capped Lead Run is terminal error `LOOP_SAFETY_LIMIT`; any answer or files
+  already produced are partial results. Recovered LLM retry attempts use a
+  separate bounded, redacted Run receipt shared with delegated graphs. The
+  receipt may explain recovered attempts but never overrides the durable Run
+  terminal or exposes raw exception text.
+- Harness Execution resource ownership transfers exactly once at runner entry.
+  Before transfer, the external executor owns materialization fallback; after
+  transfer, `run_agent()` alone joins File Finalization and private-resource
+  cleanup. Only after cleanup, approval sealing, and durable stream terminal
+  publication may it return an immutable `RunAgentOutcome`; the executor maps
+  that outcome plus lease/cancellation facts and must not infer normal semantic
+  success or failure from the mutable `RunRecord`.
 - Once a private Run has durably completed its assistant response and required
   file finalization, teardown failure is a Worker operational fault, not an
   Agent-execution failure. Keep its in-process resource-cleanup barrier and
@@ -156,6 +207,12 @@ or downgrade an application database.
   database must use the same full/delta settings and restart together. Consumers
   materialize state through the scoped checkpointer; raw delta channels are not
   a complete-state API.
+- `CheckpointStateAccessor.replacement_values()` is the canonical whole-state
+  replacement mechanic for both full and delta modes. Callers must provide the
+  current materialized values; source values win, current-only channels reset to
+  their effective graph-schema default (or `None`), unknown channels fail
+  closed, and reducer/delta channels use `Overwrite`. Rollback, historical
+  resume, branch, takeover, and compaction remain distinct workflows.
 - Current-message files and images are admitted from server file authority.
   Worker retry revalidates the frozen metadata; missing or changed attachments
   fail closed rather than degrading silently.
@@ -238,7 +295,8 @@ or downgrade an application database.
   and `tool_search`; stale or malformed evidence fails closed.
 - Project MCP authoring accepts only supported remote HTTP/SSE definitions under
   the configured CIDR policy. Projects save encrypted values by exact MCP Version
-  and header/query slot. Worker disables redirects and ambient proxy trust, revalidates the
+  and slot; one Project slot may declare Header fields, Query fields, or both and
+  is replaced atomically as one payload. Worker disables redirects and ambient proxy trust, revalidates the
   target and closure for discovery/calls, and treats inventory as diagnostic—not
   execution authority.
 - After exact closure and secret materialization succeed, Worker isolates a
@@ -261,10 +319,9 @@ or downgrade an application database.
   keyset; `updated_at` is presentation ordering only. Each project/owner may
   retain at most eight incomplete sessions, enforced under the create-admission
   lock after idempotency replay. Commit's optional slug is normalized,
-  secret-checked, and included in the idempotency checksum; the effective slug
+  included in the idempotency checksum; the effective slug
   becomes both the new Agent slug/display name and is synced back to the session.
-  `AGENT_DESIGN_SECRET_DETECTED` (422),
-  `AGENT_DESIGN_SLUG_CONFLICT` (409), and
+  `AGENT_DESIGN_SLUG_CONFLICT` (409) and
   `AGENT_DESIGN_CONFLICT_UNRESOLVED` (409) are domain errors, not generic CAS
   conflicts; `AGENT_DESIGN_SESSION_LIMIT_EXCEEDED` (429) instructs the owner to
   resume or cancel an existing design. Builder HTTP responses default to the
@@ -428,6 +485,7 @@ source constant changes, update this section and the owning detailed document.
   160 MiB wire limit.
 - Current-message vision injects at most four unique images with a 20 MiB per-image limit.
 - Fresh installs seed the `inspect_image` end-to-end deadline at 60 seconds; administrators may set `5..120`, and each Run freezes the selected value.
+- Agent Builder's one-turn model-generation deadline defaults to and is capped at 600 seconds; its dedicated proxy route retains a 60-second settlement margin.
 - Verified Skill reads remain active for `skills.read_evidence_ttl_calls` subsequent lead model calls (default 12).
 - SNIP free-prose task continuity bounded to 2,000 characters and tagged fact lines bounded to 1,000 characters; the packaged prompt raises a declared output cap below 4,096 tokens.
 

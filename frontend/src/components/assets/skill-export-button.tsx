@@ -6,11 +6,6 @@ import { toast } from "sonner";
 
 import { adminAssetErrorMessage } from "@/components/admin/assets/admin-asset-view-model";
 import { Button } from "@/components/ui/button";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { useI18n } from "@/core/i18n/hooks";
 import type { SkillDistributionDownload } from "@/core/shared-assets";
 
@@ -72,53 +67,32 @@ export function SkillExportButton({
   const { t } = useI18n();
   const [pending, setPending] = useState(false);
   const copy = t.skills.export;
-  const reason =
-    blockReason === "unsaved"
-      ? copy.unsaved
-      : blockReason === "loading"
-        ? copy.loading
-        : blockReason === "revoked"
-          ? copy.revoked
-          : blockReason === "not-current"
-            ? copy.notCurrent
-            : blockReason === "no-version" || versionNumber === null
-              ? copy.noVersion
-              : copy.tooltip(versionNumber);
 
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <span className="inline-flex">
-          <Button
-            type="button"
-            variant="outline"
-            disabled={pending || blockReason !== null || versionNumber === null}
-            aria-label={copy.label}
-            onClick={() => {
-              setPending(true);
-              void download()
-                .then((result) => {
-                  startSkillDistributionDownload(result);
-                  toast.success(copy.started);
-                })
-                .catch((error: unknown) => {
-                  toast.error(
-                    adminAssetErrorMessage(error, t.adminAssets.errors),
-                  );
-                })
-                .finally(() => setPending(false));
-            }}
-          >
-            {pending ? (
-              <LoaderCircleIcon aria-hidden className="animate-spin" />
-            ) : (
-              <DownloadIcon aria-hidden />
-            )}
-            {pending ? copy.preparing : copy.label}
-          </Button>
-        </span>
-      </TooltipTrigger>
-      <TooltipContent>{reason}</TooltipContent>
-    </Tooltip>
+    <Button
+      type="button"
+      variant="outline"
+      disabled={pending || blockReason !== null || versionNumber === null}
+      aria-label={copy.label}
+      onClick={() => {
+        setPending(true);
+        void download()
+          .then((result) => {
+            startSkillDistributionDownload(result);
+            toast.success(copy.started);
+          })
+          .catch((error: unknown) => {
+            toast.error(adminAssetErrorMessage(error, t.adminAssets.errors));
+          })
+          .finally(() => setPending(false));
+      }}
+    >
+      {pending ? (
+        <LoaderCircleIcon aria-hidden className="animate-spin" />
+      ) : (
+        <DownloadIcon aria-hidden />
+      )}
+      {pending ? copy.preparing : copy.label}
+    </Button>
   );
 }

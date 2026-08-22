@@ -25,7 +25,7 @@ export function Section({
           </div>
         )}
       </header>
-      <main className="mt-4 w-full min-w-0 px-4">{children}</main>
+      <div className="mt-4 w-full min-w-0 px-4">{children}</div>
     </section>
   );
 }

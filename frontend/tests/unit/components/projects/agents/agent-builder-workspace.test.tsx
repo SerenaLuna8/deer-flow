@@ -150,23 +150,13 @@ describe("Agent Builder workspace", () => {
         selectedGenerationMode="pro"
         canAuthor
         mutationPending={false}
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -189,23 +179,13 @@ describe("Agent Builder workspace", () => {
         pendingUserMessage="请重点检查并发安全"
         canAuthor
         mutationPending
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -279,23 +259,13 @@ describe("Agent Builder workspace", () => {
         selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending={false}
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -310,6 +280,9 @@ describe("Agent Builder workspace", () => {
     expect(html).not.toContain("已接收请求");
     expect(html).not.toContain("本轮生成结束");
     expect(html).not.toMatch(/<details[^>]* open/);
+    const activityBlock = /<details[^>]*>/.exec(html)?.[0];
+    expect(activityBlock).toContain("ml-0");
+    expect(activityBlock).not.toMatch(/sm:ml-/);
   });
 
   test("renders each Agent document once without duplicate progress copy", () => {
@@ -334,23 +307,13 @@ describe("Agent Builder workspace", () => {
         selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -380,23 +343,13 @@ describe("Agent Builder workspace", () => {
         selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -417,24 +370,14 @@ describe("Agent Builder workspace", () => {
           canAuthor
           mutationPending
           stopPending={false}
-          commitPending={false}
           blueprintEditing={false}
           blueprintDraft={null}
           blueprintDirty={false}
-          selectedField="agents_instructions"
-          displayMode="preview"
           errorMessage={null}
           onComposerTextChange={() => undefined}
           onSubmitMessage={() => undefined}
           onStopGeneration={() => undefined}
           onSubmitClarification={() => undefined}
-          onSelectedFieldChange={() => undefined}
-          onDisplayModeChange={() => undefined}
-          onBlueprintChange={() => undefined}
-          onBlueprintEdit={() => undefined}
-          onBlueprintSave={() => undefined}
-          onBlueprintDiscard={() => undefined}
-          onComplete={() => undefined}
         />
       </I18nProvider>,
     );
@@ -470,23 +413,13 @@ describe("Agent Builder workspace", () => {
         selectedGenerationModelName={MODEL_ID}
         canAuthor
         mutationPending
-        commitPending
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -506,25 +439,15 @@ describe("Agent Builder workspace", () => {
         selectedGenerationMode="pro"
         canAuthor
         mutationPending={false}
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onModelsRetry={() => undefined}
         onGenerationModelChange={() => undefined}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
 
@@ -532,6 +455,69 @@ describe("Agent Builder workspace", () => {
     expect(html).toContain("GPT-5.6 Luna");
     expect(html).toContain("Pro");
     expect(html).not.toContain(MODEL_ID);
+  });
+
+  test("uses the ordinary chat composer hierarchy without changing Builder controls", () => {
+    const html = renderAgentUi(
+      <AgentBuilderConversationView
+        session={session()}
+        composerText="补充审查范围"
+        models={MODELS}
+        selectedGenerationModelName={MODEL_ID}
+        selectedGenerationMode="pro"
+        canAuthor
+        mutationPending={false}
+        blueprintEditing={false}
+        blueprintDraft={null}
+        blueprintDirty={false}
+        errorMessage={null}
+        onGenerationModelChange={() => undefined}
+        onGenerationModeChange={() => undefined}
+        onComposerTextChange={() => undefined}
+        onSubmitMessage={() => undefined}
+        onSubmitClarification={() => undefined}
+      />,
+    );
+    const shellStart = html.indexOf("data-agent-builder-composer-shell");
+    const shellTagEnd = html.indexOf(">", shellStart);
+    const composerStart = html.indexOf(
+      "data-agent-builder-composer=",
+      shellStart,
+    );
+    const composerEnd = html.indexOf("</form>", composerStart);
+    const composerMarkup = html.slice(composerStart, composerEnd);
+    const leadingStart = composerMarkup.indexOf(
+      "data-agent-builder-composer-leading=",
+    );
+    const trailingStart = composerMarkup.indexOf(
+      "data-agent-builder-composer-trailing=",
+    );
+    const sendLabel = 'aria-label="发送"';
+    const sendLabelIndex = composerMarkup.indexOf(sendLabel);
+    const sendButtonStart = composerMarkup.lastIndexOf(
+      "<button",
+      sendLabelIndex,
+    );
+    const sendButtonEnd = composerMarkup.indexOf("</button>", sendLabelIndex);
+    const sendButtonMarkup = composerMarkup.slice(
+      sendButtonStart,
+      sendButtonEnd,
+    );
+
+    expect(shellStart).toBeGreaterThanOrEqual(0);
+    expect(html.slice(shellStart, shellTagEnd)).not.toContain("border-t");
+    expect(html.slice(shellStart, shellTagEnd)).toContain("pb-4");
+    expect(composerStart).toBeGreaterThanOrEqual(0);
+    expect(composerMarkup).toContain("backdrop-blur-sm");
+    expect(leadingStart).toBeGreaterThanOrEqual(0);
+    expect(trailingStart).toBeGreaterThan(leadingStart);
+    expect(composerMarkup.slice(leadingStart, trailingStart)).toContain("Pro");
+    expect(composerMarkup.slice(leadingStart, trailingStart)).not.toContain(
+      "GPT-5.6 Luna",
+    );
+    expect(composerMarkup.slice(trailingStart)).toContain("GPT-5.6 Luna");
+    expect(sendButtonMarkup).toContain("rounded-full");
+    expect(sendButtonMarkup).toContain("lucide-arrow-up");
   });
 
   test("locks the model picker from another page while generation is active", () => {
@@ -544,24 +530,14 @@ describe("Agent Builder workspace", () => {
         selectedGenerationMode="pro"
         canAuthor
         mutationPending={false}
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={null}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onGenerationModelChange={() => undefined}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
       />,
     );
     const labelIndex = html.indexOf('aria-label="选择创建 Agent 的对话模型"');
@@ -572,7 +548,7 @@ describe("Agent Builder workspace", () => {
     expect(html.slice(buttonStart, buttonEnd)).toContain("disabled");
   });
 
-  test("renders a completed design record as read-only", () => {
+  test("keeps the completed blueprint out of the conversation and links to its panel", () => {
     const html = renderAgentUi(
       <AgentBuilderConversationView
         session={{
@@ -583,39 +559,28 @@ describe("Agent Builder workspace", () => {
           created_agent_id: "44444444-4444-4444-8444-444444444444",
         }}
         composerText=""
-        agentName="Code Review"
-        agentSlug="code-review"
         models={MODELS}
         selectedGenerationModelName={MODEL_ID}
         selectedGenerationMode="pro"
         canAuthor={false}
         mutationPending={false}
-        commitPending={false}
         blueprintEditing={false}
         blueprintDraft={blueprint()}
         blueprintDirty={false}
-        selectedField="agents_instructions"
-        displayMode="preview"
         errorMessage={null}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}
         onSubmitClarification={() => undefined}
-        onSelectedFieldChange={() => undefined}
-        onDisplayModeChange={() => undefined}
-        onBlueprintChange={() => undefined}
-        onBlueprintEdit={() => undefined}
-        onBlueprintSave={() => undefined}
-        onBlueprintDiscard={() => undefined}
-        onComplete={() => undefined}
+        onOpenBlueprint={() => undefined}
       />,
     );
-    const inputId = html.indexOf('id="agent-builder-commit-name"');
-    const inputStart = html.lastIndexOf("<input", inputId);
-    const inputEnd = html.indexOf(">", inputId);
 
-    expect(inputId).toBeGreaterThanOrEqual(0);
-    expect(html.slice(inputStart, inputEnd)).toContain("disabled");
-    expect(html).not.toContain(">编辑<");
+    expect(html).toContain('data-testid="agent-builder-blueprint-summary"');
+    expect(html).toContain("Agent 设计稿已就绪");
+    expect(html).toContain("查看设计稿");
+    expect(html).not.toContain('id="agent-builder-commit-name"');
+    expect(html).not.toContain('aria-label="Agent 指令文档"');
+    expect(html).not.toContain("运行配置");
   });
 
   test("keeps the created Agent runtime model read-only in the blueprint", () => {
@@ -745,6 +710,8 @@ describe("Agent Builder workspace", () => {
     expect(html).toContain("人格设定与身份定位冲突");
     expect(html).toContain("SOUL.md");
     expect(html).toContain("IDENTITY.md");
+    expect(html).toContain('aria-label="在文档中查看 SOUL.md"');
+    expect(html).toContain('aria-label="在文档中查看 IDENTITY.md"');
     expect(html).toContain("请继续对话，让 Agent 重新生成设计稿");
     expect(html.slice(buttonStart, buttonEnd)).toContain("disabled");
   });

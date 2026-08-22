@@ -266,6 +266,27 @@ class WorkerService:
         self._detached.add(task)
         task.add_done_callback(self._consume_detached)
 
+    async def join_detached(self) -> None:
+        """Join detached handler cleanup before process resources are closed.
+
+        ``run`` deliberately keeps its operator-facing drain bounded. The
+        composition root calls this second-phase barrier only after closing
+        Sub-Agent Tasks, which releases Private handlers that suppressed their
+        first cancellation while waiting for child quiescence.
+        """
+
+        cancellation: asyncio.CancelledError | None = None
+        while self._detached:
+            try:
+                await asyncio.sleep(0.01)
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+                current = asyncio.current_task()
+                if current is not None:
+                    current.uncancel()
+        if cancellation is not None:
+            raise cancellation
+
     @asynccontextmanager
     async def _repository(self):
         async with self._factory() as session, session.begin():

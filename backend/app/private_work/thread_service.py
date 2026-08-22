@@ -13,7 +13,6 @@ from app.private_work.checkpoint_state import (
     bind_scoped_checkpoint_state,
     bind_transaction_checkpoint_state,
     checkpoint_config,
-    replacement_values,
     snapshot_checkpoint_id,
 )
 from app.private_work.checkpointer import ProjectScopedCheckpointer
@@ -455,16 +454,15 @@ class PrivateThreadService:
             selected_values = {key: value for key, value in source_snapshot.values.items() if key not in excluded}
             await target_state.aupdate(
                 checkpoint_config(target_thread_id),
-                replacement_values(
-                    target_state,
+                target_state.replacement_values(
                     base_values,
+                    current_values={},
                 ),
                 as_node="branch",
             )
             await target_state.aupdate(
                 checkpoint_config(target_thread_id),
-                replacement_values(
-                    target_state,
+                target_state.replacement_values(
                     selected_values,
                     current_values=base_values,
                 ),

@@ -43,6 +43,10 @@ export function adminProjectsQueryKey(
   ] as const;
 }
 
+export function adminProjectQueryKey(accountId: string, projectId: string) {
+  return [...adminOperationsRoot(accountId), "projects", projectId] as const;
+}
+
 export function adminJobsQueryKey(
   accountId: string,
   cursor: string | null = null,

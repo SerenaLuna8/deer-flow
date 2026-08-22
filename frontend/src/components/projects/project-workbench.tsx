@@ -176,7 +176,11 @@ export function ProjectWorkbench({
         </div>
       </header>
       <WorkspaceBody className="overflow-y-auto">
-        <main className="mx-auto w-full max-w-[1440px] px-5 py-10 sm:px-8 sm:py-12 lg:px-12 lg:py-14">
+        <main
+          id="workspace-main"
+          tabIndex={-1}
+          className="mx-auto w-full max-w-[1440px] px-5 py-10 outline-none sm:px-8 sm:py-12 lg:px-12 lg:py-14"
+        >
           <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">

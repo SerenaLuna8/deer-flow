@@ -33,6 +33,7 @@ const projectStreamCursorStates = new Map<string, ProjectStreamCursorState>();
 const CANONICAL_POSITIVE_EVENT_ID = /^[1-9][0-9]*$/;
 const CANONICAL_NONNEGATIVE_EVENT_ID = /^(?:0|[1-9][0-9]*)$/;
 const POSTGRES_SIGNED_BIGINT_MAX = "9223372036854775807";
+const PROJECT_JOIN_REPLAY_YIELD_INTERVAL = 64;
 
 export type ProjectStreamCursorState = {
   // Keep the PostgreSQL BIGINT cursor as a canonical decimal string. JavaScript
@@ -57,6 +58,7 @@ export const PROJECT_RUN_TERMINAL_FAILURE = "PROJECT_RUN_TERMINAL_FAILURE";
 export const PROJECT_RUN_TERMINAL_EVENT_TYPE = "project_run_terminal_failure";
 export const PROJECT_STREAM_INCOMPLETE = "PROJECT_STREAM_INCOMPLETE";
 export const MODEL_OUTPUT_LIMIT = "MODEL_OUTPUT_LIMIT";
+export const LOOP_SAFETY_LIMIT = "LOOP_SAFETY_LIMIT";
 export const OUTPUT_DELIVERY_INCOMPLETE = "OUTPUT_DELIVERY_INCOMPLETE";
 export const CURRENT_UPLOAD_UNAVAILABLE = "CURRENT_UPLOAD_UNAVAILABLE";
 export const LLM_QUOTA_EXCEEDED = "LLM_QUOTA_EXCEEDED";
@@ -68,6 +70,7 @@ export const LLM_CIRCUIT_OPEN = "LLM_CIRCUIT_OPEN";
 
 export type ProjectRunFailureCode =
   | typeof MODEL_OUTPUT_LIMIT
+  | typeof LOOP_SAFETY_LIMIT
   | typeof OUTPUT_DELIVERY_INCOMPLETE
   | typeof CURRENT_UPLOAD_UNAVAILABLE
   | typeof LLM_QUOTA_EXCEEDED
@@ -79,6 +82,7 @@ export type ProjectRunFailureCode =
 
 const PROJECT_RUN_FAILURE_CODES = [
   MODEL_OUTPUT_LIMIT,
+  LOOP_SAFETY_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   CURRENT_UPLOAD_UNAVAILABLE,
   LLM_QUOTA_EXCEEDED,
@@ -944,6 +948,10 @@ function streamFrameRunId(frame: ProjectStreamFrame): string | null {
   return typeof runId === "string" && runId.length > 0 ? runId : null;
 }
 
+function yieldProjectJoinReplayTurn(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 function installProjectStreamAdapter(
   client: LangGraphClient,
   scope: ProjectClientScope,
@@ -1094,27 +1102,37 @@ function installProjectStreamAdapter(
       let started = false;
       let terminal = false;
       let failureName: ProjectRunFailureCode | null = null;
+      let sourceFramesSinceYield = 0;
       for await (const frame of originalJoinStream(
         threadId,
         runId,
         selectedOptions,
       )) {
         if (!isProjectThreadRuntimeActive(entry, threadId)) return;
+        sourceFramesSinceYield += 1;
         const projectFrame: ProjectStreamFrame = frame;
         const decision = acceptProjectStreamFrame(state, projectFrame, runId);
-        if (!decision.accepted) continue;
-        state = decision.state;
-        started = true;
-        terminal ||= projectFrame.event === "end";
-        writeProjectStreamCursorState(scope, threadId, state, entry);
-        if (state.terminalRunId === runId) {
-          clearReconnectRun(threadId, runId, reconnectStorage);
+        if (decision.accepted) {
+          state = decision.state;
+          started = true;
+          terminal ||= projectFrame.event === "end";
+          writeProjectStreamCursorState(scope, threadId, state, entry);
+          if (state.terminalRunId === runId) {
+            clearReconnectRun(threadId, runId, reconnectStorage);
+          }
+          if (projectFrame.event === "error") {
+            failureName = projectStreamFailureName(projectFrame) ?? failureName;
+          } else {
+            yield projectStreamFrameForUI(frame, failureName);
+          }
         }
-        if (projectFrame.event === "error") {
-          failureName = projectStreamFailureName(projectFrame) ?? failureName;
-          continue;
+        if (
+          !terminal &&
+          sourceFramesSinceYield >= PROJECT_JOIN_REPLAY_YIELD_INTERVAL
+        ) {
+          sourceFramesSinceYield = 0;
+          await yieldProjectJoinReplayTurn();
         }
-        yield projectStreamFrameForUI(frame, failureName);
       }
       assertDurableProjectStreamCompleted({
         started,

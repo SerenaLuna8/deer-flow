@@ -19,6 +19,15 @@ consumers read the structured facts carried inside
   delegated run.
 - ``subagent_token_usage`` (optional): validated cumulative input/output/total
   token snapshot returned by the provider.
+- ``subagent_usage_receipt_id`` (optional): stable identity for applying the
+  aggregate usage exactly once when checkpointed messages are replayed. This is
+  deliberately independent from the provider-owned, reusable tool-call ID.
+  Historical messages that predate this field are not re-attributed because
+  their aggregate may already have been folded into the parent message and no
+  durable fact distinguishes the two cases.
+- ``subagent_usage_completeness`` (optional): ``final_observed`` only after
+  graph and inherited-operation quiescence; ``latest_observed`` identifies a
+  bounded coordination cutoff whose aggregate usage may be incomplete.
 
 """
 
@@ -36,7 +45,18 @@ SUBAGENT_RESULT_BRIEF_KEY = "subagent_result_brief"
 SUBAGENT_RESULT_SHA256_KEY = "subagent_result_sha256"
 SUBAGENT_MODEL_NAME_KEY = "subagent_model_name"
 SUBAGENT_TOKEN_USAGE_KEY = "subagent_token_usage"
+SUBAGENT_USAGE_RECEIPT_ID_KEY = "subagent_usage_receipt_id"
+SUBAGENT_USAGE_RECEIPT_STATE_KEY = "subagent_usage_receipt_state"
+SUBAGENT_USAGE_COMPLETENESS_KEY = "subagent_usage_completeness"
 SUBAGENT_METADATA_TEXT_MAX_CHARS = 2000
+SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS = 128
+SUBAGENT_USAGE_RECEIPT_STATE_VERSION = 1
+
+SubagentUsageCompletenessValue = Literal["final_observed", "latest_observed"]
+SUBAGENT_USAGE_COMPLETENESS_VALUES: tuple[SubagentUsageCompletenessValue, ...] = (
+    "final_observed",
+    "latest_observed",
+)
 
 #: The producer always emits ``hashlib.sha256(...).hexdigest()`` — 64
 #: lowercase hex chars. Readers enforce the same shape so a corrupted
@@ -132,6 +152,8 @@ def make_subagent_additional_kwargs(
     stop_reason: SubagentStopReasonValue | None = None,
     model_name: str | None = None,
     token_usage: Mapping[str, object] | None = None,
+    usage_receipt_id: str | None = None,
+    usage_completeness: SubagentUsageCompletenessValue | None = None,
 ) -> dict[str, object]:
     """Build the ``additional_kwargs`` payload the middleware stamps.
 
@@ -150,6 +172,10 @@ def make_subagent_additional_kwargs(
         raise ValueError(f"invalid subagent status {status!r}; expected one of {SUBAGENT_STATUS_VALUES}")
     if stop_reason is not None and stop_reason not in SUBAGENT_STOP_REASON_VALUES:
         raise ValueError(f"invalid subagent stop_reason {stop_reason!r}; expected one of {SUBAGENT_STOP_REASON_VALUES}")
+    if usage_completeness is not None and usage_completeness not in SUBAGENT_USAGE_COMPLETENESS_VALUES:
+        raise ValueError(
+            f"invalid subagent usage_completeness {usage_completeness!r}; expected one of {SUBAGENT_USAGE_COMPLETENESS_VALUES}",
+        )
     payload: dict[str, object] = {SUBAGENT_STATUS_KEY: status}
     if status in _RESULT_BEARING_STATUSES and isinstance(result, str) and result.strip():
         payload[SUBAGENT_RESULT_BRIEF_KEY] = _bound_metadata_text(result)
@@ -165,6 +191,17 @@ def make_subagent_additional_kwargs(
     normalized_usage = normalize_token_usage(token_usage)
     if normalized_usage is not None:
         payload[SUBAGENT_TOKEN_USAGE_KEY] = normalized_usage
+    if usage_receipt_id is not None:
+        if not isinstance(usage_receipt_id, str):
+            raise ValueError("usage_receipt_id must be a string")
+        normalized_receipt_id = usage_receipt_id.strip()
+        if not normalized_receipt_id:
+            raise ValueError("usage_receipt_id must not be blank")
+        if len(normalized_receipt_id) > SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS:
+            raise ValueError(f"usage_receipt_id exceeds {SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS} characters")
+        payload[SUBAGENT_USAGE_RECEIPT_ID_KEY] = normalized_receipt_id
+    if usage_completeness is not None:
+        payload[SUBAGENT_USAGE_COMPLETENESS_KEY] = usage_completeness
     return payload
 
 
@@ -179,6 +216,62 @@ def normalize_token_usage(value: Any) -> dict[str, int] | None:
             return None
         normalized[key] = amount
     return normalized
+
+
+def read_subagent_usage_receipt(
+    metadata: Mapping[str, object] | None,
+) -> tuple[str, dict[str, int]] | None:
+    """Read one immutable aggregate receipt from ToolMessage metadata."""
+
+    if not isinstance(metadata, Mapping):
+        return None
+    raw_receipt_id = metadata.get(SUBAGENT_USAGE_RECEIPT_ID_KEY)
+    if isinstance(raw_receipt_id, str):
+        receipt_id = raw_receipt_id.strip()
+    else:
+        receipt_id = ""
+    usage = normalize_token_usage(metadata.get(SUBAGENT_TOKEN_USAGE_KEY))
+    if not receipt_id or len(receipt_id) > SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS or usage is None:
+        return None
+    return receipt_id, usage
+
+
+def read_subagent_usage_receipt_state(
+    metadata: Mapping[str, object] | None,
+) -> tuple[dict[str, int], dict[str, dict[str, int]], frozenset[str]] | None:
+    """Read the replay-safe baseline and aggregate receipt contributions."""
+
+    if not isinstance(metadata, Mapping):
+        return None
+    payload = metadata.get(SUBAGENT_USAGE_RECEIPT_STATE_KEY)
+    if not isinstance(payload, Mapping) or type(payload.get("version")) is not int or payload.get("version") != SUBAGENT_USAGE_RECEIPT_STATE_VERSION:
+        return None
+    baseline = normalize_token_usage(payload.get("baseline"))
+    raw_contributions = payload.get("contributions")
+    if baseline is None or not isinstance(raw_contributions, list):
+        return None
+
+    contributions: dict[str, dict[str, int]] = {}
+    for raw_contribution in raw_contributions:
+        if not isinstance(raw_contribution, Mapping):
+            return None
+        raw_receipt_id = raw_contribution.get("receipt_id")
+        receipt_id = raw_receipt_id.strip() if isinstance(raw_receipt_id, str) else ""
+        usage = normalize_token_usage(raw_contribution.get("usage"))
+        if not receipt_id or len(receipt_id) > SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS or usage is None or receipt_id in contributions:
+            return None
+        contributions[receipt_id] = usage
+
+    raw_conflicts = payload.get("conflicts", [])
+    if not isinstance(raw_conflicts, list):
+        return None
+    conflicts: set[str] = set()
+    for raw_conflict in raw_conflicts:
+        receipt_id = raw_conflict.strip() if isinstance(raw_conflict, str) else ""
+        if not receipt_id or len(receipt_id) > SUBAGENT_USAGE_RECEIPT_ID_MAX_CHARS or receipt_id in conflicts or receipt_id in contributions:
+            return None
+        conflicts.add(receipt_id)
+    return baseline, contributions, frozenset(conflicts)
 
 
 def format_subagent_result_message(

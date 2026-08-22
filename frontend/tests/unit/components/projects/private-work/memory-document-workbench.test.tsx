@@ -144,6 +144,10 @@ describe("Memory document workbench", () => {
   test("offers current memory and archive tabs with the document frame", () => {
     const html = render();
 
+    expect(html.match(/<main\b/gu)).toHaveLength(1);
+    expect(html).toContain("h-[calc(100svh-3.5rem)]");
+    expect(html).toContain("md:h-screen");
+    expect(html).not.toContain("h-[calc(100svh)]");
     expect(html).toContain("当前记忆");
     expect(html).toContain("历史归档");
     expect(html).toContain("MEMORY.md");

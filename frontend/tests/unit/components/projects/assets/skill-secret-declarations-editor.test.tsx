@@ -49,9 +49,9 @@ describe("Skill secret declaration editor product states", () => {
     expect(skillSecretAutonomousFromInjectionMode("explicit")).toBe(false);
   });
 
-  test("hides injection settings until at least one variable is declared", () => {
+  test("does not expose injection settings through the declaration page", () => {
     expect(shouldShowSkillSecretInjectionSettings(0)).toBe(false);
-    expect(shouldShowSkillSecretInjectionSettings(1)).toBe(true);
+    expect(shouldShowSkillSecretInjectionSettings(1)).toBe(false);
   });
 
   test("focuses the variable input only after the empty-state CTA enters edit mode", () => {

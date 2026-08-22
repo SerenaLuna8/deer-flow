@@ -7,6 +7,8 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from agent_sandbox.core.api_error import ApiError
+from agent_sandbox.types.response_file_read_result import ResponseFileReadResult
+from pydantic import ValidationError
 
 from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 from deerflow.sandbox.exceptions import SandboxFileError
@@ -79,6 +81,52 @@ def test_read_file_raises_typed_error_instead_of_returning_error_text() -> None:
     assert exc_info.value.path == "/mnt/user-data/workspace/input.txt"
     assert exc_info.value.operation == "read"
     assert "transport failed" not in str(exc_info.value)
+
+
+def test_read_file_normalizes_provider_missing_file_payload() -> None:
+    path = "/mnt/user-data/outputs/new-report.md"
+    with pytest.raises(ValidationError) as validation_error:
+        ResponseFileReadResult.model_validate(
+            {
+                "data": {
+                    "path": path,
+                    "error_type": "not_found",
+                    "exception_type": "FileNotFoundError",
+                    "errno": 2,
+                    "errno_name": "ENOENT",
+                    "operation": "read",
+                    "retryable": False,
+                }
+            }
+        )
+    sandbox = _sandbox(_FakeFileApi(read_error=validation_error.value))
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        sandbox.read_file(path)
+
+    assert exc_info.value.filename == path
+
+
+def test_read_file_keeps_unrecognized_provider_validation_error_typed() -> None:
+    path = "/mnt/user-data/outputs/new-report.md"
+    with pytest.raises(ValidationError) as validation_error:
+        ResponseFileReadResult.model_validate(
+            {
+                "data": {
+                    "path": path,
+                    "error_type": "not_found",
+                    "exception_type": "PermissionError",
+                    "errno": 13,
+                    "errno_name": "EACCES",
+                    "operation": "read",
+                    "retryable": False,
+                }
+            }
+        )
+    sandbox = _sandbox(_FakeFileApi(read_error=validation_error.value))
+
+    with pytest.raises(SandboxFileError):
+        sandbox.read_file(path)
 
 
 def test_append_preserves_legitimate_content_starting_with_error_prefix() -> None:

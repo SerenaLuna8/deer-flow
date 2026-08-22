@@ -11,6 +11,7 @@ from typing import TypeVar
 from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.audit.models import (
     AuditAction,
@@ -570,6 +571,11 @@ class SystemModelCatalogService:
             model.provider_adapter = command.provider_adapter
             model.provider_model = command.provider_model
             model.settings = dict(command.settings)
+            # JSON numbers such as 600 and 600.0 compare equal in Python even
+            # though their canonical JSON bytes (and therefore checksum) differ.
+            # Force the exact validated representation to be persisted whenever
+            # the checksum is replaced in this transaction.
+            flag_modified(model, "settings")
             model.supports_thinking = command.supports_thinking
             model.supports_reasoning_effort = command.supports_reasoning_effort
             model.supports_vision = command.supports_vision

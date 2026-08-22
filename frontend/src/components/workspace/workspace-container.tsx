@@ -21,8 +21,15 @@ export function WorkspaceContainer({
   children,
   ...props
 }: React.ComponentProps<"div">) {
+  const { t } = useI18n();
   return (
     <div className={cn("flex h-screen w-full flex-col", className)} {...props}>
+      <a
+        href="#workspace-main"
+        className="bg-background text-foreground focus-visible:ring-ring fixed top-2 left-2 z-[60] -translate-y-16 rounded-md border px-3 py-2 text-sm font-medium shadow-sm transition-transform focus:translate-y-0 focus-visible:ring-2 focus-visible:outline-none"
+      >
+        {t.common.skipToContent}
+      </a>
       {children}
     </div>
   );
@@ -97,9 +104,9 @@ export function WorkspaceBody({
   className,
   children,
   ...props
-}: React.ComponentProps<"main">) {
+}: React.ComponentProps<"div">) {
   return (
-    <main
+    <div
       className={cn(
         "relative flex min-h-0 w-full flex-1 flex-col items-center",
         className,
@@ -107,7 +114,7 @@ export function WorkspaceBody({
       {...props}
     >
       <div className="flex h-full w-full flex-col items-center">{children}</div>
-    </main>
+    </div>
   );
 }
 

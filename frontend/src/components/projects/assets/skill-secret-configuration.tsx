@@ -1,5 +1,6 @@
 "use client";
 
+import { EyeIcon, EyeOffIcon } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -45,6 +46,9 @@ export function SkillSecretConfiguration({
   const replace = useReplaceProjectSkillSecrets(accountId, projectId);
   const clear = useClearProjectSkillSecret(accountId, projectId);
   const [values, setValues] = useState<Record<string, string>>({});
+  const [visibleNames, setVisibleNames] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [clearName, setClearName] = useState<string | null>(null);
   const [pending, setPending] = useState<"replace" | "clear" | null>(null);
   const [mutationError, setMutationError] = useState<unknown>(null);
@@ -59,9 +63,10 @@ export function SkillSecretConfiguration({
     if (Object.keys(secrets).length === 0) return;
     setPending("replace");
     setMutationError(null);
-    const submittedSecrets = consumeWriteOnlyInput(secrets, () =>
-      setValues({}),
-    );
+    const submittedSecrets = consumeWriteOnlyInput(secrets, () => {
+      setValues({});
+      setVisibleNames(new Set());
+    });
     try {
       await replace.execute({
         skillId,
@@ -116,18 +121,23 @@ export function SkillSecretConfiguration({
           {query.data.requirements.map((requirement) => (
             <div
               key={requirement.name}
-              className="grid gap-2 rounded-xl border p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+              className="grid gap-3 rounded-xl border p-3 md:grid-cols-[minmax(14rem,0.8fr)_minmax(0,1fr)_auto] md:items-center"
             >
-              <label className="min-w-0 space-y-2">
+              <div className="min-w-0">
                 <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
-                  <code>{requirement.name}</code>
+                  <code className="break-all">{requirement.name}</code>
                   <span className="text-muted-foreground text-xs">
                     {requirement.optional ? "可选" : "必需"} ·{" "}
                     {requirement.configured ? "已配置" : "未配置"}
                   </span>
                 </span>
+              </div>
+              <div className="relative min-w-0">
                 <Input
-                  type="password"
+                  className="pr-10"
+                  type={
+                    visibleNames.has(requirement.name) ? "text" : "password"
+                  }
                   autoComplete="new-password"
                   value={values[requirement.name] ?? ""}
                   disabled={!canReplace || pending !== null}
@@ -142,11 +152,37 @@ export function SkillSecretConfiguration({
                     }))
                   }
                 />
-              </label>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="absolute inset-y-0 right-0 my-auto"
+                  disabled={!canReplace || pending !== null}
+                  aria-label={`${visibleNames.has(requirement.name) ? "隐藏" : "显示"} ${requirement.name} 秘密值`}
+                  aria-pressed={visibleNames.has(requirement.name)}
+                  onClick={() =>
+                    setVisibleNames((current) => {
+                      const next = new Set(current);
+                      if (next.has(requirement.name)) {
+                        next.delete(requirement.name);
+                      } else {
+                        next.add(requirement.name);
+                      }
+                      return next;
+                    })
+                  }
+                >
+                  {visibleNames.has(requirement.name) ? (
+                    <EyeOffIcon aria-hidden className="size-4" />
+                  ) : (
+                    <EyeIcon aria-hidden className="size-4" />
+                  )}
+                </Button>
+              </div>
               <Button
                 type="button"
                 variant="outline"
-                className="self-end"
+                className="shrink-0 justify-self-end"
                 disabled={
                   !canClear || !requirement.configured || pending !== null
                 }

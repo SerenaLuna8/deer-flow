@@ -253,30 +253,3 @@ async def commit_thread_compaction(
     if isinstance(new_config, dict):
         new_checkpoint_id = new_config.get("configurable", {}).get("checkpoint_id")
     return replace(prepared.result, checkpoint_id=new_checkpoint_id)
-
-
-async def compact_thread_context(
-    accessor: CheckpointStateAccessor,
-    thread_id: str,
-    *,
-    keep: tuple[str, int | float] | None = None,
-    force: bool = True,
-    user_id: str | None = None,
-    agent_name: str | None = None,
-    app_config: AppConfig | None = None,
-    authorization_boundary: object | None = None,
-    memory_archive_context: SnipArchiveContext | None = None,
-) -> ThreadCompactionResult:
-    """Summarize old messages in a thread and write a compacted checkpoint."""
-    prepared = await prepare_thread_compaction(
-        accessor,
-        thread_id,
-        keep=keep,
-        force=force,
-        user_id=user_id,
-        agent_name=agent_name,
-        app_config=app_config,
-        authorization_boundary=authorization_boundary,
-        memory_archive_context=memory_archive_context,
-    )
-    return await commit_thread_compaction(accessor, prepared)

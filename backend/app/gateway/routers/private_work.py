@@ -119,6 +119,7 @@ from deerflow.runtime.runs.private_file_lifecycle import await_despite_cancellat
 from deerflow.runtime.runs.store import RunStore
 from deerflow.utils.messages import message_to_text
 from deerflow.utils.time import coerce_iso
+from deerflow.workspace_changes import get_workspace_changes_response
 
 router = APIRouter(
     prefix="/api/projects/{project_id}/private-work",
@@ -2047,6 +2048,43 @@ async def get_private_run(
     except PrivateWorkError as error:
         _raise_http(error)
     return _run_response(record)
+
+
+@router.get(
+    "/threads/{thread_id}/runs/{run_id}/workspace-changes",
+    response_model=dict[str, Any],
+)
+async def get_private_run_workspace_changes(
+    thread_id: uuid.UUID,
+    run_id: uuid.UUID,
+    request: Request,
+    include_files: bool = Query(default=True),
+    include_diff: bool = Query(default=True),
+    context: PrivateWorkContext = Depends(private_work_context),
+) -> dict[str, Any]:
+    """Return the scoped workspace/output changes recorded for one chat Run."""
+
+    try:
+        service = await _browser_chat_run_service(
+            request,
+            context,
+            str(thread_id),
+        )
+        await service.get(
+            context,
+            str(thread_id),
+            str(run_id),
+        )
+        return await get_workspace_changes_response(
+            _run_event_store(request, context.request_id),
+            str(thread_id),
+            str(run_id),
+            include_files=include_files,
+            include_diff=include_diff,
+            scope=context.resource_scope,
+        )
+    except PrivateWorkError as error:
+        _raise_http(error)
 
 
 @router.post("/threads/{thread_id}/runs/{run_id}/cancel")

@@ -33,6 +33,8 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   工具失败以错误结果返回 Agent，由其使用现有上下文继续或明确说明未完成部分。
 - System/Project Agent、Skill、MCP 的不可变版本和准入快照。Model、Skill、MCP、
   Channels 分别拥有自己的加密 Secret 与生命周期。Project
+  MCP 的访问凭证按请求参数逐行声明，每行选择 Header 或 Query；两类参数可在同一
+  凭证组中同时配置并一次加密保存，值不写入 MCP URL、资产定义或浏览器缓存。
   Agent/Skill 保存后生成不可变 Candidate Version；显式激活会原子设置
   `current_version_id` 并启用资产，历史版本只读且不能恢复、复制或重新激活。System
   Agent/Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
@@ -55,8 +57,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
 - Agent Builder 以独立于普通会话的设计会话展示真实模型思考和校验、保存阶段，支持按模型
   能力选择思考强度、停止当前生成并继续设计，以及断线后完整回放过程。它不调用工具，也不
-  展示 Provider 原始响应、系统提示或最终 JSON；最终确认只创建 suspended Agent 和
-  Candidate Version，不会自动激活。
+  展示 Provider 原始响应、系统提示或最终 JSON；生成后的四份指令文档在独立设计稿侧栏中
+  查看和编辑，聊天区只保留摘要入口。最终确认只创建 suspended Agent 和 Candidate
+  Version，不会自动激活。每次模型生成回合的默认值和硬上限均为 600 秒，不限制整个 Agent
+  设计会话。
 - AI Skill Builder 由仅供专用解析器访问的内置 Agent 执行，不出现在项目、全局管理或
   运行时 Agent 目录及其常规 API。它复用普通 Agent 的 Web、文件、Sandbox 和任务委派
   装配，并遵循 Local/AIO Provider 各自的安全策略；候选文件只能经受管工具、检查和

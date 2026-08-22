@@ -8,6 +8,7 @@ export function AdminPage({ className, ...props }: ComponentProps<"main">) {
   return (
     <main
       id="admin-main"
+      tabIndex={-1}
       data-slot="admin-page"
       className={cn(
         "mx-auto w-full max-w-[90rem] space-y-4 px-4 py-4 sm:px-5 sm:py-5 lg:px-6 lg:py-6",

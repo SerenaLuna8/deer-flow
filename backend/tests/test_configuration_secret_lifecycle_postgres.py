@@ -25,6 +25,7 @@ from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
 from app.reliability.owner_refs import AuditHmacKeyring
 from app.system_settings.errors import SystemModelInvalid
+from app.system_settings.materializer import SystemModelMaterializer
 from app.system_settings.models import CreateSystemModel, UpdateSystemModel
 from app.system_settings.repository import SystemModelRepository
 from app.system_settings.service import SystemModelCatalogService
@@ -73,6 +74,84 @@ def _model_update(
         supports_vision=False,
         api_key=api_key,
     )
+
+
+@pytest.mark.asyncio
+async def test_system_model_update_keeps_json_settings_and_checksum_atomic(
+    migrated_postgres_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A JSON number representation change must reach PostgreSQL with its checksum."""
+
+    monkeypatch.setenv(
+        "ACT_WEAVE_SECRET_KEY",
+        base64.b64encode(b"n" * 32).decode("ascii"),
+    )
+    seed = await seed_private_thread_database(migrated_postgres_database_url)
+    admin_id = seed.owner_a.user_id
+    try:
+        async with seed.factory() as session, session.begin():
+            await session.execute(update(UserRow).where(UserRow.id == str(admin_id)).values(system_role="system_admin"))
+
+        context = resolve_system_audit_context(
+            SimpleNamespace(id=admin_id, system_role="system_admin"),
+            request_id="system-model-json-checksum-atomicity",
+        )
+        service = SystemModelCatalogService(
+            seed.factory,
+            audit_service=AuditService(
+                seed.factory,
+                AuditHmacKeyring("test", {"test": b"a" * 32}),
+            ),
+        )
+        created = await service.create_model(
+            context,
+            CreateSystemModel(
+                display_name="DeepSeek numeric settings",
+                status="active",
+                provider_adapter="patched_deepseek",
+                provider_model="deepseek-v4-flash",
+                settings={
+                    "base_url": "https://api.deepseek.com",
+                    "request_timeout": 600.0,
+                },
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                supports_vision=False,
+                api_key="numeric-settings-secret",
+            ),
+        )
+
+        await service.update_model(
+            context,
+            created.id,
+            UpdateSystemModel(
+                display_name="DeepSeek numeric settings",
+                provider_adapter="patched_deepseek",
+                provider_model="deepseek-v4-flash",
+                settings={
+                    "base_url": "https://api.deepseek.com",
+                    # Browser JSON round-tripping serializes 600.0 as 600.
+                    "request_timeout": 600,
+                },
+                supports_thinking=True,
+                supports_reasoning_effort=True,
+                supports_vision=False,
+                api_key=None,
+            ),
+        )
+
+        async with seed.factory() as session:
+            model = await session.get(SystemModelConfigRow, created.id)
+            assert model is not None
+            assert type(model.settings["request_timeout"]) is int
+
+        runtime = await SystemModelMaterializer(
+            seed.factory,
+        ).materialize_active(str(created.id))
+        assert runtime.name == str(created.id)
+    finally:
+        await seed.engine.dispose()
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.gateway.deps import private_work_context, require_project_private_open
 from app.gateway.routers import private_work as private_work_router
+from app.private_work.errors import PrivateWorkNotFound
 from deerflow.runtime import DisconnectMode
 from deerflow.runtime.events.models import StoredStreamFrame
 
@@ -100,6 +101,122 @@ def test_private_work_router_exposes_project_run_stream() -> None:
         "/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/stream",
         "GET",
     ) in routes
+    assert (
+        "/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/workspace-changes",
+        "GET",
+    ) in routes
+
+
+@pytest.mark.asyncio
+async def test_workspace_changes_route_scopes_run_and_event_lookup(
+    app: FastAPI,
+    context: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = uuid.uuid4()
+    thread_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    resource_scope = object()
+    context.resource_scope = resource_scope
+    service = SimpleNamespace(get=AsyncMock(return_value=object()))
+
+    class _EventStore:
+        def __init__(self) -> None:
+            self.calls: list[tuple[object, ...]] = []
+
+        async def list_events(self, *args: object, **kwargs: object) -> list[dict[str, object]]:
+            self.calls.append((*args, kwargs))
+            return [
+                {
+                    "metadata": {
+                        "workspace_changes": {
+                            "version": 1,
+                            "summary": {"created": 1},
+                            "files": [{"path": "report.md", "diff": "+done"}],
+                        }
+                    }
+                }
+            ]
+
+    event_store = _EventStore()
+    browser_service = AsyncMock(return_value=service)
+    monkeypatch.setattr(
+        private_work_router,
+        "_browser_chat_run_service",
+        browser_service,
+    )
+    monkeypatch.setattr(
+        private_work_router,
+        "_run_event_store",
+        lambda _request, _request_id: event_store,
+    )
+
+    response = await _request(
+        app,
+        "GET",
+        (f"/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/workspace-changes?include_files=true&include_diff=false"),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "available": True,
+        "version": 1,
+        "summary": {"created": 1},
+        "files": [{"path": "report.md", "diff": ""}],
+    }
+    browser_service.assert_awaited_once()
+    service.get.assert_awaited_once_with(
+        context,
+        str(thread_id),
+        str(run_id),
+    )
+    assert event_store.calls == [
+        (
+            str(thread_id),
+            str(run_id),
+            {
+                "event_types": ["workspace_changes"],
+                "limit": 10,
+                "scope": resource_scope,
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_workspace_changes_route_does_not_query_events_for_hidden_run(
+    app: FastAPI,
+    context: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_id = uuid.uuid4()
+    thread_id = uuid.uuid4()
+    run_id = uuid.uuid4()
+    context.resource_scope = object()
+    service = SimpleNamespace(
+        get=AsyncMock(side_effect=PrivateWorkNotFound(context.request_id)),
+    )
+    event_store = SimpleNamespace(list_events=AsyncMock())
+    monkeypatch.setattr(
+        private_work_router,
+        "_browser_chat_run_service",
+        AsyncMock(return_value=service),
+    )
+    monkeypatch.setattr(
+        private_work_router,
+        "_run_event_store",
+        lambda _request, _request_id: event_store,
+    )
+
+    response = await _request(
+        app,
+        "GET",
+        f"/api/projects/{project_id}/private-work/threads/{thread_id}/runs/{run_id}/workspace-changes",
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "PRIVATE_WORK_NOT_FOUND"
+    event_store.list_events.assert_not_awaited()
 
 
 @pytest.mark.asyncio

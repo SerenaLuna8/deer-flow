@@ -38,6 +38,7 @@ _DETERMINISTIC_NONRETRYABLE_ERROR_CODES = (
     frozenset(
         {
             "MODEL_OUTPUT_LIMIT",
+            "LOOP_SAFETY_LIMIT",
             "OUTPUT_DELIVERY_INCOMPLETE",
             "CURRENT_UPLOAD_UNAVAILABLE",
         }

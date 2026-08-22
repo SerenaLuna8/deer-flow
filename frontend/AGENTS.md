@@ -155,9 +155,12 @@ generator. A necessary local patch needs focused coverage and an explanation.
   not imply activation or binding unless the response says so.
 - Agent Builder Activity has its own account/project/session query and SSE cursor;
   it never shares Thread/Run history, reconnect state, or cache keys. Render only
-  the strict public Activity contract, preserve replayed real reasoning, and do
-  not invent reasoning for a stage-only generation. The Builder model/mode chooser
-  reuses the ordinary chat resolver while its preference remains session-local.
+  the strict public Activity contract, page durable replay to completion before
+  joining SSE, merge late REST monotonically, preserve replayed real reasoning,
+  and do not invent reasoning for a stage-only generation. A generated blueprint
+  lives in the separate workbench; the conversation keeps only its compact entry.
+  The Builder model/mode chooser reuses the ordinary chat resolver while its
+  preference remains session-local.
 - An error-severity Builder conflict blocks commit until a later AI turn
   regenerates the candidate; editing a document alone does not resolve it. Commit
   includes `slug` only when the normalized review name differs from
@@ -205,7 +208,9 @@ generator. A necessary local patch needs focused coverage and an explanation.
 - Project MCP authoring exposes only backend-supported remote transports and
   secret-free URLs. Every Project stores encrypted values by exact MCP Version
   and slot; the browser never probes the endpoint, performs discovery, or infers
-  CIDR authorization. Replacing or clearing a value marks discovery stale.
+  CIDR authorization. Credential fields are dynamic rows whose target is Header
+  or Query; one slot may contain both targets and is submitted as one write-only
+  replacement. Replacing or clearing a value marks discovery stale.
 - Model API keys belong to the Model configuration. Connection tests always
   require a temporary Key from the current form and never read the stored copy.
 - Model/thinking selections are preferences. Gateway returns the effective

@@ -18,6 +18,11 @@ from deerflow.assets.catalog import AssetCatalogUnavailable
 from deerflow.client import DeerFlowClient
 from deerflow.config.paths import Paths
 from deerflow.models import ModelRuntimeProfile
+from deerflow.subagents.binding import (
+    EmbeddedParentExecutionProfile,
+    ParentExecutionBindingFactory,
+)
+from deerflow.tools.builtins import task_tool as canonical_task_tool
 from deerflow.uploads.manager import PathTraversalError
 
 # ---------------------------------------------------------------------------
@@ -974,6 +979,44 @@ class TestEnsureAgent:
         mock_apply_prompt.assert_called_once()
         assert mock_apply_prompt.call_args.kwargs.get("agent_name") == "custom-agent"
         assert mock_apply_prompt.call_args.kwargs.get("available_skills") == {"test_skill"}
+
+    def test_builds_explicit_embedded_parent_execution_profile(self, client):
+        config = client._get_runnable_config(
+            "t-binding",
+            subagent_enabled=True,
+        )
+        model = MagicMock(name="embedded-model")
+
+        with (
+            patch(
+                "deerflow.client.ModelRuntime.build_chat_model",
+                return_value=model,
+            ),
+            patch(
+                "deerflow.client.create_agent",
+                return_value=MagicMock(),
+            ) as create_agent,
+            patch("deerflow.client.build_middlewares", return_value=[]),
+            patch("deerflow.client.apply_prompt_template", return_value="prompt"),
+            patch.object(
+                client,
+                "_get_tools",
+                return_value=[canonical_task_tool],
+            ),
+        ):
+            client._ensure_agent(config)
+
+        bound_task = create_agent.call_args.kwargs["tools"][0]
+        assert bound_task.name == "task"
+        assert bound_task is not canonical_task_tool
+        binding_factory = next(cell.cell_contents for cell in bound_task.coroutine.__closure__ or () if type(cell.cell_contents) is ParentExecutionBindingFactory)
+        profile = binding_factory.profile
+        assert type(profile) is EmbeddedParentExecutionProfile
+        assert profile.kind == "embedded"
+        assert profile.app_config is client._app_config
+        assert profile.asset_context is client._asset_context
+        assert profile.graph.model is model
+        assert profile.subagent_enabled is True
 
     def test_delta_mode_uses_delta_state_schema(self, client):
         client._checkpoint_channel_mode = "delta"

@@ -106,6 +106,7 @@ from deerflow.subagents.runtime_catalog import (
     build_runtime_agent_profile,
 )
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
+from deerflow.utils.asyncio import joined_to_thread
 
 logger = logging.getLogger("app.private_work.asset_runtime")
 
@@ -428,7 +429,7 @@ class PrivateAgentRuntime:
                             except SecretKeyInvalid:
                                 raise AssetStorageUnavailable(self._context.request_id) from None
                         try:
-                            plaintext = await asyncio.to_thread(
+                            plaintext = await joined_to_thread(
                                 envelope.materialize,
                                 recipient=skill_secret_recipient(
                                     self._context.project_id,

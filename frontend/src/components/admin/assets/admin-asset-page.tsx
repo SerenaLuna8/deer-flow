@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/sheet";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
 import {
   useAdminAssets,
   useAdminAssetVersions,
@@ -57,13 +58,7 @@ export function VersionTimeline({
   kind: AssetListKind;
   versions: AssetVersion[];
 }) {
-  return (
-    <AssetVersionHistory
-      kind={kind}
-      scope="system"
-      versions={versions}
-    />
-  );
+  return <AssetVersionHistory kind={kind} scope="system" versions={versions} />;
 }
 
 export function filterAdminCatalogItems<T extends AssetSummary>(
@@ -92,6 +87,7 @@ function AssetDetail({
   item: AssetSummary;
   onClose: () => void;
 }) {
+  const { t } = useI18n();
   const history = useAdminAssetVersions(accountId, kind, item.id);
   return (
     <Sheet open onOpenChange={(open) => !open && onClose()}>
@@ -99,14 +95,14 @@ function AssetDetail({
         <SheetHeader>
           <SheetTitle>{item.display_name}</SheetTitle>
           <SheetDescription>
-            {item.slug} · System {PAGE_META[kind].label}
+            {item.slug} · {t.adminAssets.catalog.system} {PAGE_META[kind].label}
           </SheetDescription>
         </SheetHeader>
         <div className="space-y-5 px-4 pb-6">
           <div className="flex items-center gap-3">
             <AssetStatusBadge status={item.status} />
             <span className="text-muted-foreground text-xs">
-              revision {item.revision}
+              {t.adminAssets.common.assetVersion} {item.revision}
             </span>
           </div>
           {history.isLoading ? (
@@ -116,10 +112,14 @@ function AssetDetail({
               <p role="alert" className="text-destructive text-sm">
                 {history.error instanceof Error
                   ? history.error.message
-                  : "版本记录读取失败。"}
+                  : t.adminAssets.catalog.versionHistoryUnavailable}
               </p>
-              <Button type="button" variant="outline" onClick={() => void history.refetch()}>
-                重试
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void history.refetch()}
+              >
+                {t.adminAssets.common.retry}
               </Button>
             </div>
           ) : (
@@ -143,12 +143,16 @@ function AuthenticatedAdminAssetPage({
   accountId: string;
   kind: AssetListKind;
 }) {
+  const { t } = useI18n();
   const query = useAdminAssets(accountId, kind);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"all" | AssetSummary["status"]>("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const items = query.data ? filterAdminCatalogItems(query.data.items, search, status) : [];
-  const selected = query.data?.items.find((item) => item.id === selectedId) ?? null;
+  const items = query.data
+    ? filterAdminCatalogItems(query.data.items, search, status)
+    : [];
+  const selected =
+    query.data?.items.find((item) => item.id === selectedId) ?? null;
   const Icon = PAGE_META[kind].icon;
 
   return (
@@ -157,41 +161,57 @@ function AuthenticatedAdminAssetPage({
         <Icon aria-hidden className="text-muted-foreground size-4" />
         <h1 className="font-semibold">System {PAGE_META[kind].label}</h1>
       </header>
-      <AdminSection title="资产目录">
+      <AdminSection title={t.adminAssets.catalog.assetCatalog}>
         <div className="mb-4 grid gap-3 sm:grid-cols-[1fr_12rem]">
           <label className="relative">
-            <SearchIcon aria-hidden className="text-muted-foreground absolute top-2.5 left-3 size-4" />
+            <SearchIcon
+              aria-hidden
+              className="text-muted-foreground absolute top-2.5 left-3 size-4"
+            />
             <Input
               className="pl-9"
               value={search}
-              placeholder="搜索名称或标识"
-              aria-label="搜索资产"
+              placeholder={t.adminAssets.catalog.searchPlaceholder}
+              aria-label={t.adminAssets.catalog.searchPlaceholder}
               onChange={(event) => setSearch(event.target.value)}
             />
           </label>
           <select
             className="border-input bg-background h-9 rounded-md border px-3 text-sm"
             value={status}
-            aria-label="资产状态"
+            aria-label={t.adminAssets.catalog.lifecycleStatus}
             onChange={(event) => setStatus(event.target.value as typeof status)}
           >
-            <option value="all">全部状态</option>
-            <option value="active">启用</option>
-            <option value="suspended">停用</option>
-            <option value="archived">归档</option>
+            <option value="all">{t.adminAssets.catalog.filterAll}</option>
+            <option value="active">{t.adminAssets.status.active}</option>
+            <option value="suspended">{t.adminAssets.status.suspended}</option>
+            <option value="archived">{t.adminAssets.status.archived}</option>
           </select>
         </div>
         {query.isLoading ? (
-          <div className="space-y-3"><Skeleton className="h-24" /><Skeleton className="h-24" /></div>
+          <div className="space-y-3">
+            <Skeleton className="h-24" />
+            <Skeleton className="h-24" />
+          </div>
         ) : query.error ? (
           <div className="space-y-3">
             <p role="alert" className="text-destructive text-sm">
-              {query.error instanceof Error ? query.error.message : "资产目录读取失败。"}
+              {query.error instanceof Error
+                ? query.error.message
+                : t.adminAssets.catalog.catalogUnavailable}
             </p>
-            <Button type="button" variant="outline" onClick={() => void query.refetch()}>重试</Button>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => void query.refetch()}
+            >
+              {t.adminAssets.common.retry}
+            </Button>
           </div>
         ) : items.length === 0 ? (
-          <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">没有匹配的资产。</p>
+          <p className="text-muted-foreground rounded-xl border border-dashed p-8 text-center text-sm">
+            {t.adminAssets.catalog.noResults}
+          </p>
         ) : (
           <div className="grid gap-3 lg:grid-cols-2">
             {items.map((item) => (
@@ -199,10 +219,19 @@ function AuthenticatedAdminAssetPage({
                 <CardContent className="flex items-center gap-4 px-4">
                   <div className="min-w-0 flex-1">
                     <p className="truncate font-medium">{item.display_name}</p>
-                    <p className="text-muted-foreground truncate text-xs">{item.slug}</p>
+                    <p className="text-muted-foreground truncate text-xs">
+                      {item.slug}
+                    </p>
                   </div>
                   <AssetStatusBadge status={item.status} />
-                  <Button type="button" size="sm" variant="outline" onClick={() => setSelectedId(item.id)}>查看</Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    onClick={() => setSelectedId(item.id)}
+                  >
+                    {t.adminAssets.catalog.viewDetails}
+                  </Button>
                 </CardContent>
               </Card>
             ))}
@@ -210,7 +239,12 @@ function AuthenticatedAdminAssetPage({
         )}
       </AdminSection>
       {selected ? (
-        <AssetDetail accountId={accountId} kind={kind} item={selected} onClose={() => setSelectedId(null)} />
+        <AssetDetail
+          accountId={accountId}
+          kind={kind}
+          item={selected}
+          onClose={() => setSelectedId(null)}
+        />
       ) : null}
     </AdminPage>
   );

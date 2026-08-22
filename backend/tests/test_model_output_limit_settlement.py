@@ -91,11 +91,23 @@ def test_every_durable_error_terminal_is_nonretryable() -> None:
         },
         terminal=True,
     )
+    loop_safety = StoredStreamFrame(
+        id="5",
+        thread_id="thread-1",
+        run_id="run-5",
+        event="end",
+        data={
+            "status": "error",
+            "error_code": "LOOP_SAFETY_LIMIT",
+        },
+        terminal=True,
+    )
 
     typed_result = PrivateRunJobHandler._terminal_result(typed)
     legacy_result = PrivateRunJobHandler._terminal_result(legacy)
     current_upload_result = PrivateRunJobHandler._terminal_result(current_upload)
     provider_unavailable_result = PrivateRunJobHandler._terminal_result(provider_unavailable)
+    loop_safety_result = PrivateRunJobHandler._terminal_result(loop_safety)
 
     assert typed_result.public_error_code == "MODEL_OUTPUT_LIMIT"
     assert typed_result.retryable is False
@@ -105,11 +117,14 @@ def test_every_durable_error_terminal_is_nonretryable() -> None:
     assert current_upload_result.retryable is False
     assert provider_unavailable_result.public_error_code == "LLM_PROVIDER_UNAVAILABLE"
     assert provider_unavailable_result.retryable is False
+    assert loop_safety_result.public_error_code == "LOOP_SAFETY_LIMIT"
+    assert loop_safety_result.retryable is False
 
 
 def test_stream_terminal_error_code_is_a_closed_contract() -> None:
     assert STREAM_TERMINAL_ERROR_CODES == {
         "MODEL_OUTPUT_LIMIT",
+        "LOOP_SAFETY_LIMIT",
         "OUTPUT_DELIVERY_INCOMPLETE",
         "CURRENT_UPLOAD_UNAVAILABLE",
         "LLM_QUOTA_EXCEEDED",
@@ -125,6 +140,13 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
     ).data == {
         "status": "error",
         "error_code": "MODEL_OUTPUT_LIMIT",
+    }
+    assert StreamFrame.end(
+        status="error",
+        error_code="LOOP_SAFETY_LIMIT",
+    ).data == {
+        "status": "error",
+        "error_code": "LOOP_SAFETY_LIMIT",
     }
     assert StreamFrame.end(
         status="error",
@@ -154,9 +176,9 @@ def test_stream_terminal_error_code_is_a_closed_contract() -> None:
         StreamFrame.end(status="error", error_code="RAW_PROVIDER_ERROR")
 
 
-def test_executor_record_mapping_is_nonretryable_for_output_limit() -> None:
+def test_executor_outcome_mapping_is_nonretryable_for_output_limit() -> None:
     result = RunAgentPrivateExecutor._terminal_failure_result(
-        SimpleNamespace(error="MODEL_OUTPUT_LIMIT"),
+        "MODEL_OUTPUT_LIMIT",
         attempt_usage=_usage(),
     )
 
@@ -167,7 +189,7 @@ def test_executor_record_mapping_is_nonretryable_for_output_limit() -> None:
 
 def test_executor_generic_durable_terminal_is_nonretryable() -> None:
     result = RunAgentPrivateExecutor._terminal_failure_result(
-        SimpleNamespace(error="Connection error"),
+        "AGENT_EXECUTION_FAILED",
         attempt_usage=_usage(),
     )
 
@@ -176,9 +198,20 @@ def test_executor_generic_durable_terminal_is_nonretryable() -> None:
     assert result.attempt_usage == _usage()
 
 
+def test_executor_loop_safety_terminal_is_nonretryable() -> None:
+    result = RunAgentPrivateExecutor._terminal_failure_result(
+        "LOOP_SAFETY_LIMIT",
+        attempt_usage=_usage(),
+    )
+
+    assert result.public_error_code == "LOOP_SAFETY_LIMIT"
+    assert result.retryable is False
+    assert result.attempt_usage == _usage()
+
+
 def test_executor_current_upload_terminal_preserves_public_error_code() -> None:
     result = RunAgentPrivateExecutor._terminal_failure_result(
-        SimpleNamespace(error="CURRENT_UPLOAD_UNAVAILABLE"),
+        "CURRENT_UPLOAD_UNAVAILABLE",
         attempt_usage=_usage(),
     )
 
@@ -189,7 +222,7 @@ def test_executor_current_upload_terminal_preserves_public_error_code() -> None:
 
 def test_executor_provider_terminal_is_typed_and_nonretryable() -> None:
     result = RunAgentPrivateExecutor._terminal_failure_result(
-        SimpleNamespace(error="LLM_PROVIDER_UNAVAILABLE"),
+        "LLM_PROVIDER_UNAVAILABLE",
         attempt_usage=_usage(),
     )
 
@@ -214,6 +247,14 @@ def test_unknown_retry_safety_preserves_reviewed_nonretryable_terminal_codes() -
             retryable=True,
         )
         == "SIDE_EFFECT_STATE_UNKNOWN"
+    )
+    assert (
+        _dead_error_code_for_failure(
+            retry_safety="unknown",
+            public_error_code="LOOP_SAFETY_LIMIT",
+            retryable=False,
+        )
+        == "LOOP_SAFETY_LIMIT"
     )
     assert (
         _dead_error_code_for_failure(

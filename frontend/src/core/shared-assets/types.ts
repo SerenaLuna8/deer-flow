@@ -1207,9 +1207,9 @@ const projectConfiguredMcpSecretPayloadSchema = z
     query: secretFieldListSchema.optional(),
   })
   .strict()
-  .refine((value) => Object.keys(value).length === 1, {
+  .refine((value) => Object.keys(value).length > 0, {
     message:
-      "Configured project MCP secret slots support exactly one headers or query group",
+      "Configured project MCP secret slots require headers or query fields",
   });
 
 const projectConfiguredMcpSecretSlotInputSchema =

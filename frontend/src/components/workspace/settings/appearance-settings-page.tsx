@@ -140,7 +140,10 @@ export function AppearanceSettingsPage() {
             }
           }}
         >
-          <SelectTrigger className="w-[220px]">
+          <SelectTrigger
+            className="w-[220px]"
+            aria-label={t.settings.appearance.languageTitle}
+          >
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -219,6 +222,7 @@ function ThemePreviewCard({
   return (
     <button
       type="button"
+      aria-pressed={active}
       onClick={() => onSelect(mode)}
       className={cn(
         "group flex h-full flex-col gap-3 rounded-lg border p-4 text-left transition-all",

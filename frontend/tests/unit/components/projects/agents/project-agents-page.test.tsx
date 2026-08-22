@@ -83,6 +83,15 @@ function renderCatalog(viewMode: "cards" | "list") {
 }
 
 describe("ProjectAgentCatalogView", () => {
+  test("does not render descriptive copy below the Agent section headings", () => {
+    const html = renderCatalog("cards");
+
+    expect(html).toContain("系统 Agent");
+    expect(html).toContain("项目 Agent");
+    expect(html).not.toContain("平台提供并由项目启用的 Agent。");
+    expect(html).not.toContain("在当前项目中设计和管理的 Agent。");
+  });
+
   test("orders the project default first and never offers a restore-Main action", () => {
     const html = renderCatalog("cards");
 

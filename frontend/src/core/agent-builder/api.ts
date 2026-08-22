@@ -27,6 +27,8 @@ import {
 
 const uuidSchema = z.string().uuid();
 const MAX_AGENT_BUILDER_SESSION_PAGES = 100;
+const AGENT_BUILDER_ACTIVITY_PAGE_SIZE = 2_000;
+const MAX_AGENT_BUILDER_ACTIVITY_PAGES = 100;
 const AGENT_BUILDER_CONTRACT_VERSION = "3";
 
 function sortAgentBuilderSessionsForResume(
@@ -66,7 +68,6 @@ export type AgentBuilderApiErrorCode =
   | "AGENT_DESIGN_SLUG_CONFLICT"
   | "AGENT_DESIGN_CONFLICT_UNRESOLVED"
   | "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED"
-  | "AGENT_DESIGN_SECRET_DETECTED"
   | "AGENT_DESIGN_GENERATION_PROFILE_STALE";
 
 export class AgentBuilderApiError extends Error {
@@ -116,7 +117,6 @@ function safeCode(
     serverCode === "AGENT_DESIGN_SLUG_CONFLICT" ||
     serverCode === "AGENT_DESIGN_CONFLICT_UNRESOLVED" ||
     serverCode === "AGENT_DESIGN_SESSION_LIMIT_EXCEEDED" ||
-    serverCode === "AGENT_DESIGN_SECRET_DETECTED" ||
     serverCode === "AGENT_DESIGN_GENERATION_PROFILE_STALE"
   ) {
     return serverCode;
@@ -321,12 +321,63 @@ export function listAgentBuilderActivities(
   sessionId: string,
   afterSeq = "0",
   signal?: AbortSignal,
+  limit = AGENT_BUILDER_ACTIVITY_PAGE_SIZE,
 ) {
-  const query = new URLSearchParams({ after_seq: afterSeq });
+  const query = new URLSearchParams({
+    after_seq: afterSeq,
+    limit: String(limit),
+  });
   return request(
     `${sessionURL(projectId, sessionId)}/activities?${query.toString()}`,
     agentBuilderActivityListResponseSchema,
     { signal },
+  );
+}
+
+export async function listAllAgentBuilderActivities(
+  projectId: string,
+  sessionId: string,
+  signal?: AbortSignal,
+): Promise<AgentBuilderActivity[]> {
+  const activities: AgentBuilderActivity[] = [];
+  let cursor = "0";
+  for (
+    let pageNumber = 0;
+    pageNumber < MAX_AGENT_BUILDER_ACTIVITY_PAGES;
+    pageNumber += 1
+  ) {
+    const page = await listAgentBuilderActivities(
+      projectId,
+      sessionId,
+      cursor,
+      signal,
+      AGENT_BUILDER_ACTIVITY_PAGE_SIZE,
+    );
+    let pageCursor = cursor;
+    for (const activity of page.data) {
+      if (
+        activity.seq.length < pageCursor.length ||
+        (activity.seq.length === pageCursor.length &&
+          activity.seq.localeCompare(pageCursor) <= 0)
+      ) {
+        throw new AgentBuilderApiError(
+          200,
+          "AGENT_BUILDER_RESPONSE_INVALID",
+          "Agent 设计服务返回了无效活动游标",
+        );
+      }
+      activities.push(activity);
+      pageCursor = activity.seq;
+    }
+    if (page.data.length < AGENT_BUILDER_ACTIVITY_PAGE_SIZE) {
+      return activities;
+    }
+    cursor = pageCursor;
+  }
+  throw new AgentBuilderApiError(
+    200,
+    "AGENT_BUILDER_RESPONSE_INVALID",
+    "Agent 设计活动分页超过安全上限",
   );
 }
 

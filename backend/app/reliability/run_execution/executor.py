@@ -130,7 +130,6 @@ from deerflow.runtime import (
     RunContext,
     RunManager,
     RunRecord,
-    RunStatus,
     run_agent,
 )
 from deerflow.runtime.checkpoint_mode import CheckpointModeMismatchError
@@ -140,6 +139,11 @@ from deerflow.runtime.host_execution_approval import (
 )
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.runtime.private_scope import PrivateResourceScope
+from deerflow.runtime.runs.execution_contracts import (
+    RunAgentOutcome,
+    RunAgentResourceOwnership,
+    RunAgentUsageSnapshot,
+)
 from deerflow.runtime.user_context import (
     reset_current_user,
     reset_runtime_storage_user_id,
@@ -309,17 +313,28 @@ class RunAgentPrivateExecutor:
         )
 
     @staticmethod
+    def _outcome_usage_snapshot(
+        usage: RunAgentUsageSnapshot,
+    ) -> PrivateRunUsageSnapshot:
+        return PrivateRunUsageSnapshot(
+            total_input_tokens=usage.total_input_tokens,
+            total_output_tokens=usage.total_output_tokens,
+            total_tokens=usage.total_tokens,
+            llm_call_count=usage.llm_call_count,
+            lead_agent_tokens=usage.lead_agent_tokens,
+            subagent_tokens=usage.subagent_tokens,
+            middleware_tokens=usage.middleware_tokens,
+            token_usage_by_model={model_name: dict(counters) for model_name, counters in usage.token_usage_by_model.items()},
+        )
+
+    @staticmethod
     def _terminal_failure_result(
-        record: RunRecord,
+        public_error_code: str,
         *,
         attempt_usage: PrivateRunUsageSnapshot,
     ) -> AgentExecutionResult:
-        error_code = record.error if record.error in STREAM_TERMINAL_ERROR_CODES else "AGENT_EXECUTION_FAILED"
-        # ``run_agent`` publishes the durable error terminal before returning.
-        # Re-executing after that point cannot replace the closed stream and can
-        # duplicate already-persisted messages or tool side effects.
         return AgentExecutionResult.failed(
-            error_code,
+            public_error_code,
             retryable=False,
             attempt_usage=attempt_usage,
         )
@@ -542,6 +557,7 @@ class RunAgentPrivateExecutor:
         private_runtime = None
         file_authority = None
         record: RunRecord | None = None
+        resource_ownership = RunAgentResourceOwnership()
         runtime_config_pushed = False
         try:
             current_upload_snapshot = self._required_current_upload_snapshot(
@@ -856,6 +872,7 @@ class RunAgentPrivateExecutor:
                 host_execution_approval_port=(host_execution_approval_port),
                 channel_user_id=channel_user_id,
                 vision_dispatch_authority=vision_dispatch_authority,
+                resource_ownership=resource_ownership,
             )
             owner_token = set_current_user(
                 SimpleNamespace(id=execution.run.owner_user_id),
@@ -895,7 +912,7 @@ class RunAgentPrivateExecutor:
                             claim,
                         ),
                     )
-                await self._runner(
+                outcome = await self._runner(
                     stream_bridge,
                     run_manager,
                     record,
@@ -919,23 +936,28 @@ class RunAgentPrivateExecutor:
                 raise TransientExecutionError(
                     "EXECUTION_AUTHORITY_UNAVAILABLE",
                 )
-            attempt_usage = self._usage_snapshot(record)
+            if type(outcome) is not RunAgentOutcome:
+                raise TypeError("Run Agent runner returned an invalid outcome")
+            attempt_usage = self._outcome_usage_snapshot(outcome.usage)
             if boundary.cancel_requested or boundary.authorization_revoked:
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
                 )
-            if record.status is RunStatus.success:
+            if outcome.status == "succeeded":
                 return AgentExecutionResult.succeeded(
                     attempt_usage=attempt_usage,
-                    suspended_approval_id=record.suspended_approval_id,
+                    suspended_approval_id=outcome.suspended_approval_id,
                 )
-            if record.status is RunStatus.interrupted:
+            if outcome.status == "cancelled":
                 return AgentExecutionResult.cancelled(
                     attempt_usage=attempt_usage,
                 )
-            if record.status is RunStatus.error and record.error in STREAM_TERMINAL_ERROR_CODES:
+            error_code = outcome.public_error_code
+            if error_code is None:
+                raise RuntimeError("failed Run Agent outcome has no error code")
+            if error_code in STREAM_TERMINAL_ERROR_CODES:
                 return self._terminal_failure_result(
-                    record,
+                    error_code,
                     attempt_usage=attempt_usage,
                 )
             if boundary.ambiguous_side_effect:
@@ -943,7 +965,7 @@ class RunAgentPrivateExecutor:
                     attempt_usage=attempt_usage,
                 )
             return self._terminal_failure_result(
-                record,
+                error_code,
                 attempt_usage=attempt_usage,
             )
         except asyncio.CancelledError:
@@ -1020,7 +1042,7 @@ class RunAgentPrivateExecutor:
         finally:
             if runtime_config_pushed:
                 pop_current_app_config()
-            if file_authority is not None:
+            if not resource_ownership.transferred and file_authority is not None:
                 try:
                     await file_authority.release()
                 except Exception:
@@ -1029,7 +1051,7 @@ class RunAgentPrivateExecutor:
                         execution.run.run_id,
                         exc_info=True,
                     )
-            if private_runtime is not None:
+            if not resource_ownership.transferred and private_runtime is not None:
                 try:
                     await private_runtime.aclose()
                 except Exception:

@@ -43,14 +43,14 @@ const version: Extract<AssetVersion, { agent_id: string }> = {
   created_at: "2026-08-16T00:00:00Z",
 };
 
-function renderTimeline(models: Model[]) {
+function renderTimeline(models: Model[], locale: "en-US" | "zh-CN" = "zh-CN") {
   const queryClient = new QueryClient();
   queryClient.setQueryData<ModelsResponse>(modelsQueryKey, {
     models,
     token_usage: { enabled: false },
   });
   return renderToStaticMarkup(
-    <I18nProvider initialLocale="zh-CN">
+    <I18nProvider initialLocale={locale}>
       <QueryClientProvider client={queryClient}>
         <VersionTimeline kind="agents" versions={[version]} />
       </QueryClientProvider>
@@ -71,5 +71,12 @@ describe("admin Agent model presentation", () => {
 
     expect(html).toContain("当前引用的模型已不可用");
     expect(html).not.toContain(MODEL_REF);
+  });
+
+  test("renders Current Version status without Chinese in English", () => {
+    const html = renderTimeline([model], "en-US");
+
+    expect(html).toContain("Current Version");
+    expect(html).not.toMatch(/\p{Script=Han}/u);
   });
 });

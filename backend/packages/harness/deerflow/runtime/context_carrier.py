@@ -57,11 +57,14 @@ class RuntimeContextCarrier:
     current_run_pre_existing_message_ids: frozenset[str] | None = None
     trace_id: str | None = None
     run_journal: object | None = None
+    recovered_llm_failure_recorder: object | None = None
+    run_semantic_stop_recorder: object | None = None
     server_abort_event: object | None = None
     vision_dispatch_authority: object | None = None
     memory_archive_context: object | None = None
     host_execution_approval_port: object | None = None
     host_execution_agent_path: tuple[str, ...] | None = None
+    parent_execution_binding_factory: object | None = None
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}(<opaque>)"
@@ -120,6 +123,14 @@ class RuntimeContextCarrier:
             (RuntimeContextKeys.TRACE_ID, self.trace_id),
             (RuntimeContextKeys.RUN_JOURNAL, self.run_journal),
             (
+                RuntimeContextKeys.RECOVERED_LLM_FAILURE_RECORDER,
+                self.recovered_llm_failure_recorder,
+            ),
+            (
+                RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER,
+                self.run_semantic_stop_recorder,
+            ),
+            (
                 RuntimeContextKeys.SERVER_ABORT_EVENT,
                 self.server_abort_event,
             ),
@@ -138,6 +149,10 @@ class RuntimeContextCarrier:
             (
                 RuntimeContextKeys.HOST_EXECUTION_AGENT_PATH,
                 self.host_execution_agent_path,
+            ),
+            (
+                RuntimeContextKeys.PARENT_EXECUTION_BINDING_FACTORY,
+                self.parent_execution_binding_factory,
             ),
         )
         for key, value in values:

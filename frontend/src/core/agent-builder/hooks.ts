@@ -24,7 +24,7 @@ import {
   getAgentBuilderSession,
   getAgentBuilderSessionByAgent,
   listAllAgentBuilderSessions,
-  listAgentBuilderActivities,
+  listAllAgentBuilderActivities,
   parseAgentBuilderActivity,
   setAgentBuilderGenerationPreference,
   submitAgentBuilderTurn,
@@ -235,16 +235,28 @@ export function useAgentBuilderActivities(
   );
   const query = useQuery({
     queryKey: key,
-    queryFn: ({ signal }) =>
-      listAgentBuilderActivities(projectId, sessionId, "0", signal).then(
-        (response) => response.data,
-      ),
+    queryFn: async ({ signal }) => {
+      const replay = await listAllAgentBuilderActivities(
+        projectId,
+        sessionId,
+        signal,
+      );
+      // Activity is append-only. A slower REST replay must merge with, rather
+      // than replace, newer SSE frames already committed to the cache.
+      return mergeAgentBuilderActivities(
+        queryClient.getQueryData<AgentBuilderActivity[]>(key) ?? [],
+        replay,
+      );
+    },
     enabled,
+    refetchOnReconnect: false,
+    refetchOnWindowFocus: false,
   });
 
   useEffect(() => {
     if (
       !enabled ||
+      !query.isSuccess ||
       access.scope.accountId !== accountId ||
       access.scope.projectId !== projectId ||
       !access.subscribeEventStream
@@ -267,7 +279,16 @@ export function useAgentBuilderActivities(
         }
       },
     );
-  }, [access, accountId, enabled, key, projectId, queryClient, sessionId]);
+  }, [
+    access,
+    accountId,
+    enabled,
+    key,
+    projectId,
+    query.isSuccess,
+    queryClient,
+    sessionId,
+  ]);
 
   return query;
 }

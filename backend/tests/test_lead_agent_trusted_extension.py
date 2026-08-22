@@ -12,6 +12,11 @@ import deerflow.agents.lead_agent.agent as lead_agent_module
 from deerflow.agents.lead_agent.agent import TrustedLeadAgentExtension
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.subagents.binding import (
+    ParentExecutionBindingFactory,
+    PrivateRunParentExecutionProfile,
+)
+from deerflow.tools.builtins import task_tool as canonical_task_tool
 
 MODEL_NAME = "77777777-7777-4777-8777-777777777778"
 FULL_TOOL_GROUPS = ("web", "file:read", "file:write", "bash", "task")
@@ -210,3 +215,34 @@ def test_private_runtime_capability_notice_reaches_canonical_prompt(
 
     assert graph == "canonical-graph"
     assert captured["prompt_calls"][0]["runtime_capability_notice"] == private_runtime.capability_notice  # type: ignore[index]
+
+
+def test_private_runtime_builds_explicit_parent_execution_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    _install_factory_spies(monkeypatch, captured=captured)
+    private_runtime = _private_runtime(tmp_path)
+    monkeypatch.setattr(
+        "deerflow.tools.get_available_tools",
+        lambda **_kwargs: [canonical_task_tool],
+    )
+    graph = lead_agent_module._make_lead_agent(
+        # No private_scope marker: the explicit private_runtime argument, not
+        # caller metadata, owns profile selection.
+        {"configurable": {"thinking_enabled": False}},
+        app_config=_app_config(),
+        private_runtime=private_runtime,
+    )
+
+    assert graph == "canonical-graph"
+    bound_task = captured["agent_kwargs"]["tools"][0]  # type: ignore[index]
+    assert bound_task.name == "task"
+    assert bound_task is not canonical_task_tool
+    binding_factory = next(cell.cell_contents for cell in bound_task.coroutine.__closure__ or () if type(cell.cell_contents) is ParentExecutionBindingFactory)
+    profile = binding_factory.profile
+    assert type(profile) is PrivateRunParentExecutionProfile
+    assert profile.kind == "private_run"
+    assert profile.private_runtime is private_runtime
+    assert profile.tool_groups == FULL_TOOL_GROUPS

@@ -189,9 +189,14 @@ export function AutomationScheduleInput({
   const compact = layout === "compact";
 
   const typeToggle = !scheduleTypeLocked ? (
-    <div className="flex flex-wrap gap-2">
+    <div
+      className="flex flex-wrap gap-2"
+      role="group"
+      aria-label={labels.detail.schedule}
+    >
       <Button
         type="button"
+        aria-pressed={scheduleType === "cron"}
         variant={scheduleType === "cron" ? "default" : "outline"}
         size={compact ? "default" : "sm"}
         onClick={() => setScheduleType("cron")}
@@ -200,6 +205,7 @@ export function AutomationScheduleInput({
       </Button>
       <Button
         type="button"
+        aria-pressed={scheduleType === "once"}
         variant={scheduleType === "once" ? "default" : "outline"}
         size={compact ? "default" : "sm"}
         onClick={() => setScheduleType("once")}
@@ -243,6 +249,7 @@ export function AutomationScheduleInput({
               <SelectTrigger
                 className={cn("w-full", compact && COMPACT_CONTROL_CLASS)}
                 data-testid="schedule-preset"
+                aria-label={labels.preset.label}
               >
                 <SelectValue />
               </SelectTrigger>
@@ -259,6 +266,7 @@ export function AutomationScheduleInput({
               <SelectTrigger
                 className={cn("w-full", compact && COMPACT_CONTROL_CLASS)}
                 data-testid="schedule-timezone"
+                aria-label={labels.fields.timezone}
               >
                 <SelectValue />
               </SelectTrigger>
@@ -323,6 +331,7 @@ export function AutomationScheduleInput({
                 <SelectTrigger
                   className={cn("w-full", compact && COMPACT_CONTROL_CLASS)}
                   data-testid="schedule-preset"
+                  aria-label={labels.preset.label}
                 >
                   <SelectValue />
                 </SelectTrigger>
@@ -423,6 +432,7 @@ export function AutomationScheduleInput({
             <SelectTrigger
               className={cn("w-full", compact && COMPACT_CONTROL_CLASS)}
               data-testid="schedule-timezone"
+              aria-label={labels.fields.timezone}
             >
               <SelectValue />
             </SelectTrigger>

@@ -304,7 +304,7 @@ export function AdminProjectSystemBindingDialog({
             <p className="text-muted-foreground text-xs font-medium">
               {kind === "mcp-servers"
                 ? t.adminAssets.dialogs.binding.selectPublished
-                : "当前版本"}
+                : t.adminAssets.dialogs.binding.currentVersion}
             </p>
             <p className="mt-1.5 text-sm font-semibold">
               {target
@@ -343,13 +343,13 @@ export function AdminProjectSystemBindingDialog({
             <span>
               {kind === "mcp-servers"
                 ? t.adminAssets.dialogs.binding.selectPublished
-                : "当前版本"}
+                : t.adminAssets.dialogs.binding.currentVersion}
             </span>
             <select
               aria-label={
                 kind === "mcp-servers"
                   ? t.adminAssets.dialogs.binding.selectPublishedAria
-                  : "当前版本"
+                  : t.adminAssets.dialogs.binding.currentVersion
               }
               value={selectedVersionId}
               onChange={(event) => setSelectedVersionId(event.target.value)}
@@ -398,7 +398,7 @@ export function AdminProjectSystemBindingDialog({
               <span className="text-muted-foreground text-xs font-normal">
                 {kind === "mcp-servers"
                   ? t.adminAssets.dialogs.binding.noBindableVersions
-                  : "当前版本不可用"}
+                  : t.adminAssets.dialogs.binding.currentVersionUnavailable}
               </span>
             ) : null}
           </label>
@@ -419,7 +419,7 @@ export function AdminProjectSystemBindingDialog({
             {t.adminAssets.status.revoked}:{" "}
             {kind === "mcp-servers"
               ? t.adminAssets.dialogs.binding.selectPublished
-              : "当前版本"}{" "}
+              : t.adminAssets.dialogs.binding.currentVersion}{" "}
             / {t.adminAssets.dialogs.binding.disable}
           </p>
         ) : null}
@@ -465,7 +465,7 @@ export function AdminProjectSystemBindingDialog({
                 ? t.adminAssets.dialogs.binding.rollback
                 : kind === "mcp-servers"
                   ? t.adminAssets.dialogs.binding.switchVersion
-                  : "已使用当前版本"}
+                  : t.adminAssets.dialogs.binding.currentVersionInUse}
           </Button>
         </DialogFooter>
       </DialogContent>

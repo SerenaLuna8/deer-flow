@@ -8,6 +8,7 @@ import uuid
 import httpx
 from agent_sandbox import Sandbox as AioSandboxClient
 from agent_sandbox.core.api_error import ApiError
+from pydantic import ValidationError
 
 from deerflow.community.remote_file_authority import (
     PRIVATE_GUEST_REQUEST_ENV,
@@ -46,6 +47,29 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
     "sandbox image to all-in-one-sandbox >= 1.9.3 (set `sandbox.image` in config.yaml, "
     "e.g. pin the tag `1.11.0`) and recreate the sandbox container, then try again."
 )
+
+
+def _is_missing_file_response_error(exc: ValidationError, path: str) -> bool:
+    """Recognize the AIO server's HTTP-200 missing-file error payload.
+
+    Some sandbox image/SDK combinations return ``{path, error_type}`` where
+    the generated SDK expects a successful ``{file, content}`` payload.  The
+    SDK therefore raises ``ValidationError`` before callers can observe the
+    missing-file semantic.  Match only the exact path and error type so every
+    other schema or transport failure remains a ``SandboxFileError``.
+    """
+
+    errors = exc.errors(include_url=False)
+    return bool(errors) and all(
+        isinstance(provider_input := error.get("input"), dict)
+        and provider_input.get("path") == path
+        and provider_input.get("error_type") == "not_found"
+        and provider_input.get("exception_type") == "FileNotFoundError"
+        and provider_input.get("errno") == errno.ENOENT
+        and provider_input.get("errno_name") == "ENOENT"
+        and provider_input.get("operation") == "read"
+        for error in errors
+    )
 
 
 class AioSandbox(Sandbox):
@@ -325,6 +349,22 @@ class AioSandbox(Sandbox):
         try:
             result = self._client.file.read_file(file=path)
             return result.data.content if result.data else ""
+        except ValidationError as exc:
+            if _is_missing_file_response_error(exc, path):
+                raise FileNotFoundError(
+                    errno.ENOENT,
+                    "No such file or directory",
+                    path,
+                ) from exc
+            logger.error(
+                "Failed to read file in AIO sandbox; provider_error_type=%s",
+                type(exc).__name__,
+            )
+            raise SandboxFileError(
+                "Failed to read file in sandbox",
+                path=path,
+                operation="read",
+            ) from exc
         except Exception as exc:
             logger.error(
                 "Failed to read file in AIO sandbox; provider_error_type=%s",

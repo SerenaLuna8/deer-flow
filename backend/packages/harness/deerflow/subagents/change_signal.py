@@ -1,11 +1,9 @@
-"""Cross-thread change signal for background subagent state (U8).
+"""Cross-thread change signal for lifecycle-owned Sub-Agent Task state.
 
-Background subagents mutate their ``SubagentResult`` from the isolated
-subagent event-loop thread and from the scheduler pool thread, while the
-``task`` tool waits on the parent Worker's event loop. Historically the tool
-polled every 5 seconds, so a 200ms subtask still paid up to 5 seconds of
-tail latency. This signal keeps that 5-second cadence as a *heartbeat upper
-bound* but wakes waiters the moment something actually changed.
+Subagent graphs mutate their internal result holder from the lifecycle's
+isolated event-loop thread, while the task Adapter waits on the parent owner
+loop. The lifecycle keeps a heartbeat as a staleness bound but wakes waiters
+the moment something actually changes.
 
 Design points:
 
@@ -30,7 +28,7 @@ _DEFAULT_DEBOUNCE_SECONDS = 1.0
 
 
 class SubagentChangeSignal:
-    """Wakes event-loop waiters when a background subagent's state changes."""
+    """Wake event-loop waiters when lifecycle graph state changes."""
 
     __slots__ = ("_debounce_seconds", "_last_notify", "_lock", "_terminal", "_waiters")
 

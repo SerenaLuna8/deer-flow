@@ -243,6 +243,7 @@ PRIVATE_LEAD_HOOK_GOLDEN = {
     MiddlewareHook.AFTER_AGENT: (
         "TokenBudgetMiddleware",
         "LoopDetectionMiddleware",
+        "TokenUsageMiddleware",
         "TodoMiddleware",
         "SandboxMiddleware",
     ),

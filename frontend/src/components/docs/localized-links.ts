@@ -1,5 +1,5 @@
-const SUPPORTED_DOC_LANGUAGES = new Set(["en", "zh"]);
-const UNLOCALIZED_DOCS_PATH = /^\/docs(?=\/|[?#]|$)/;
+const SUPPORTED_DOC_LANGUAGES = new Set(["en", "en-US", "zh", "zh-CN"]);
+const UNLOCALIZED_DOCS_PATH = /^(?:\.|)\/docs(?=\/|[?#]|$)/;
 
 export function localizeDocsHref(
   href: string,
@@ -11,5 +11,6 @@ export function localizeDocsHref(
   if (!UNLOCALIZED_DOCS_PATH.test(href)) {
     return href;
   }
-  return `/${lang}${href}`;
+  const absoluteDocsHref = href.startsWith("./") ? href.slice(1) : href;
+  return `/${lang}${absoluteDocsHref}`;
 }

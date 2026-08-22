@@ -53,29 +53,28 @@ import { isStaticWebsiteOnly } from "@/core/static-mode";
 import { cn } from "@/lib/utils";
 
 type ProjectNavigationItem = {
-  href: string;
-  icon: typeof FolderKanbanIcon;
-  i18nKey?:
-    | "audit"
+  id:
+    | "overview"
+    | "conversations"
     | "automations"
     | "agents"
     | "skills"
     | "mcp"
     | "memory"
-    | "usage";
-  label: string;
+    | "connections"
+    | "audit"
+    | "settings";
+  href: string;
+  icon: typeof FolderKanbanIcon;
   section: ProjectNavigationSection | null;
 };
 
 type ProjectNavigationSection = "capabilities" | "management" | "work";
 
-const PROJECT_NAVIGATION_SECTIONS: Array<{
-  id: ProjectNavigationSection;
-  label: string;
-}> = [
-  { id: "work", label: "工作" },
-  { id: "capabilities", label: "能力" },
-  { id: "management", label: "项目管理" },
+const PROJECT_NAVIGATION_SECTIONS: ProjectNavigationSection[] = [
+  "work",
+  "capabilities",
+  "management",
 ];
 
 function canViewSettings(project: Project): boolean {
@@ -100,9 +99,9 @@ export function projectNavigationItems(
   const base = `/projects/${encodeURIComponent(project.slug)}`;
   const items: ProjectNavigationItem[] = [
     {
+      id: "overview",
       href: base,
       icon: FolderKanbanIcon,
-      label: "项目概览",
       section: null,
     },
   ];
@@ -115,9 +114,9 @@ export function projectNavigationItems(
     );
   if (privateWorkEnabled) {
     items.push({
+      id: "conversations",
       href: `${base}/chats`,
       icon: MessagesSquareIcon,
-      label: "会话",
       section: "work",
     });
   }
@@ -130,10 +129,9 @@ export function projectNavigationItems(
     )
   ) {
     items.push({
+      id: "automations",
       href: `${base}/automations`,
       icon: CalendarClockIcon,
-      i18nKey: "automations",
-      label: "Automations",
       section: "work",
     });
   }
@@ -142,37 +140,33 @@ export function projectNavigationItems(
   );
   if (canReadProjectAgents(project.capabilities)) {
     items.push({
+      id: "agents",
       href: `${base}/agents`,
       icon: BotIcon,
-      i18nKey: "agents",
-      label: "Agent",
       section: "capabilities",
     });
   }
   if (capabilityWorkspaceVisible) {
     items.push(
       {
+        id: "skills",
         href: `${base}/skills`,
         icon: SparklesIcon,
-        i18nKey: "skills",
-        label: "Skill",
         section: "capabilities",
       },
       {
+        id: "mcp",
         href: `${base}/mcp`,
         icon: NetworkIcon,
-        i18nKey: "mcp",
-        label: "MCP",
         section: "capabilities",
       },
     );
   }
   if (privateWorkEnabled) {
     items.push({
+      id: "memory",
       href: `${base}/memory`,
       icon: BrainCircuitIcon,
-      i18nKey: "memory",
-      label: "Memory",
       section: "work",
     });
   }
@@ -182,9 +176,9 @@ export function projectNavigationItems(
     project.capabilities.includes("project.channels.manage")
   ) {
     items.push({
+      id: "connections",
       href: `${base}/connections`,
       icon: CableIcon,
-      label: "渠道连接",
       section: "management",
     });
   }
@@ -193,9 +187,9 @@ export function projectNavigationItems(
     project.capabilities.includes("project.audit.read")
   ) {
     items.push({
+      id: "audit",
       href: `${base}/audit`,
       icon: ScrollTextIcon,
-      label: "审计日志",
       section: "management",
     });
   }
@@ -205,13 +199,13 @@ export function projectNavigationItems(
       project.capabilities.includes("project.update") ||
       project.capabilities.includes("project.lifecycle.manage");
     items.push({
+      id: "settings",
       href:
         canOpenGeneral ||
         !project.capabilities.includes("project.members.manage")
           ? settingsBase
           : `${settingsBase}/members`,
       icon: SettingsIcon,
-      label: "项目设置",
       section: "management",
     });
   }
@@ -231,10 +225,11 @@ export function isProjectNavigationItemActive(
 }
 
 function ProjectBrand() {
+  const { t } = useI18n();
   return (
     <Link
       href="/workspace"
-      aria-label="ActWeave 工作空间"
+      aria-label={t.project.navigation.workspaceAria}
       className="focus-visible:ring-ring inline-flex min-w-0 items-center gap-2 rounded-md focus-visible:ring-2 focus-visible:outline-none"
     >
       <span
@@ -332,13 +327,8 @@ function ProjectNavigationLinksContent({
     staticWebsiteOnly,
   );
   const standaloneLinks = links.filter((item) => item.section === null);
-  const renderLink = ({
-    href,
-    icon: Icon,
-    i18nKey,
-    label,
-  }: ProjectNavigationItem) => {
-    const visibleLabel = i18nKey ? t.project[i18nKey] : label;
+  const renderLink = ({ id, href, icon: Icon }: ProjectNavigationItem) => {
+    const visibleLabel = t.project.navigation[id];
     const active = isProjectNavigationItemActive(href, pathname);
     const iconOnly = collapsed && !mobile;
     const link = (
@@ -389,22 +379,22 @@ function ProjectNavigationLinksContent({
   const workspaceLink = (
     <Link
       href="/workspace"
-      aria-label={collapsed ? "返回工作空间" : undefined}
-      title={collapsed ? "返回工作空间" : undefined}
+      aria-label={collapsed ? t.project.navigation.backToWorkspace : undefined}
+      title={collapsed ? t.project.navigation.backToWorkspace : undefined}
       className={cn(
         "text-muted-foreground hover:bg-accent hover:text-accent-foreground focus-visible:ring-ring flex items-center rounded-lg text-sm font-medium focus-visible:ring-2 focus-visible:outline-none",
         collapsed ? "size-10 justify-center" : "gap-3 px-3 py-2",
       )}
     >
       <ArrowLeftIcon aria-hidden className="size-4" />
-      {!collapsed && "返回工作空间"}
+      {!collapsed && t.project.navigation.backToWorkspace}
     </Link>
   );
   const visibleWorkspaceLink = collapsed ? (
     <Tooltip>
       <TooltipTrigger asChild>{workspaceLink}</TooltipTrigger>
       <TooltipContent side="right" align="center">
-        返回工作空间
+        {t.project.navigation.backToWorkspace}
       </TooltipContent>
     </Tooltip>
   ) : (
@@ -412,20 +402,18 @@ function ProjectNavigationLinksContent({
   );
   return (
     <nav
-      aria-label="项目导航"
+      aria-label={t.project.navigation.label}
       className={cn("flex flex-col", collapsed ? "gap-2" : "gap-5")}
     >
       {standaloneLinks.length > 0 && (
         <div className="grid gap-1">{standaloneLinks.map(renderLink)}</div>
       )}
       {PROJECT_NAVIGATION_SECTIONS.map((section) => {
-        const sectionLinks = links.filter(
-          (item) => item.section === section.id,
-        );
+        const sectionLinks = links.filter((item) => item.section === section);
         if (sectionLinks.length === 0) return null;
-        const sectionId = `project-${mobile ? "mobile" : "desktop"}-nav-${section.id}`;
+        const sectionId = `project-${mobile ? "mobile" : "desktop"}-nav-${section}`;
         return (
-          <section key={section.id} aria-labelledby={sectionId}>
+          <section key={section} aria-labelledby={sectionId}>
             <p
               id={sectionId}
               className={cn(
@@ -433,7 +421,7 @@ function ProjectNavigationLinksContent({
                 collapsed && "sr-only",
               )}
             >
-              {section.label}
+              {t.project.navigation.sections[section]}
             </p>
             <div className="grid gap-1">{sectionLinks.map(renderLink)}</div>
           </section>
@@ -463,9 +451,10 @@ export function ProjectDesktopNav({
   onCollapsedChange?: (collapsed: boolean) => void;
   className?: string;
 }) {
+  const { t } = useI18n();
   return (
     <aside
-      aria-label="项目菜单栏"
+      aria-label={t.project.navigation.menuLabel}
       data-state={collapsed ? "collapsed" : "expanded"}
       className={cn(
         "border-border/70 bg-sidebar sticky top-0 hidden h-screen min-w-0 flex-col self-start overflow-hidden border-r md:flex",
@@ -479,8 +468,8 @@ export function ProjectDesktopNav({
               type="button"
               size="icon"
               variant="ghost"
-              aria-label="展开菜单栏"
-              title="展开菜单栏"
+              aria-label={t.project.navigation.expand}
+              title={t.project.navigation.expand}
               onClick={() => onCollapsedChange?.(false)}
             >
               <MenuIcon aria-hidden className="size-5" />
@@ -500,8 +489,8 @@ export function ProjectDesktopNav({
                 size="icon"
                 variant="ghost"
                 className="-mr-1 size-8 shrink-0"
-                aria-label="收起菜单栏"
-                title="收起菜单栏"
+                aria-label={t.project.navigation.collapse}
+                title={t.project.navigation.collapse}
                 onClick={() => onCollapsedChange?.(true)}
               >
                 <PanelLeftCloseIcon aria-hidden className="size-4" />
@@ -525,6 +514,7 @@ export function ProjectMobileNav({
   project: Project;
   account: React.ReactNode;
 }) {
+  const { t } = useI18n();
   return (
     <header className="border-border/70 bg-background/95 sticky top-0 z-30 flex min-w-0 items-center gap-2 border-b px-3 py-2 backdrop-blur md:hidden">
       <Sheet>
@@ -533,7 +523,7 @@ export function ProjectMobileNav({
             type="button"
             size="icon"
             variant="ghost"
-            aria-label="打开项目导航"
+            aria-label={t.project.navigation.open}
           >
             <MenuIcon aria-hidden className="size-5" />
           </Button>
@@ -543,13 +533,15 @@ export function ProjectMobileNav({
           className="bg-sidebar w-[min(20rem,85vw)] p-0"
         >
           <SheetHeader className="border-foreground/15 border-b p-4 text-left">
-            <SheetTitle className="sr-only">项目导航</SheetTitle>
+            <SheetTitle className="sr-only">
+              {t.project.navigation.sheetTitle}
+            </SheetTitle>
             <ProjectBrand />
             <div className="pt-3">
               <ProjectIdentity project={project} />
             </div>
             <SheetDescription className="sr-only">
-              项目页面导航
+              {t.project.navigation.sheetDescription}
             </SheetDescription>
           </SheetHeader>
           <div className="min-h-0 flex-1 overflow-y-auto p-3">

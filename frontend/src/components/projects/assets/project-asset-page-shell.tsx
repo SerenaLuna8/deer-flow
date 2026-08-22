@@ -237,46 +237,6 @@ export function projectAssetSelectionDecision(
   return dirty ? "confirm-discard" : "apply";
 }
 
-export function ProjectAgentDirectorySearch({
-  searchQuery,
-  visibleCount,
-  sourceCount,
-  onSearchQueryChange,
-}: {
-  searchQuery: string;
-  visibleCount: number;
-  sourceCount: number;
-  onSearchQueryChange: (value: string) => void;
-}) {
-  const filterActive = searchQuery.trim() !== "";
-  return (
-    <div className="mb-4 flex flex-col gap-3 border-b pb-4 sm:flex-row sm:items-center">
-      <label className="relative min-w-0 flex-1">
-        <span className="sr-only">搜索 Agent</span>
-        <SearchIcon
-          aria-hidden
-          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2"
-        />
-        <Input
-          type="search"
-          value={searchQuery}
-          onChange={(event) => onSearchQueryChange(event.target.value)}
-          placeholder="搜索名称或 slug"
-          className="h-9 bg-transparent pl-9"
-        />
-      </label>
-      {filterActive ? (
-        <p
-          role="status"
-          className="text-muted-foreground shrink-0 text-xs tabular-nums"
-        >
-          显示 {visibleCount} / {sourceCount} 项
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 export function defaultProjectAssetSource(
   data: Pick<ProjectAssetList, "system_items" | "project_items">,
 ): ProjectAssetSourceFilter {
@@ -1631,10 +1591,6 @@ function ProjectAssetCatalog({
   const projectStatusErrorAssetId = changeStatus.error
     ? changeStatus.variables?.assetId
     : null;
-  const agentVisibleCount =
-    filteredData.system_items.length + filteredData.project_items.length;
-  const agentSourceCount = data.system_items.length + data.project_items.length;
-
   return (
     <>
       {renderLead?.({ project, data })}
@@ -1650,31 +1606,14 @@ function ProjectAssetCatalog({
       ) : null}
 
       {layout === "agent-cards" && renderList ? (
-        <>
-          <ProjectAgentDirectorySearch
-            searchQuery={searchQuery}
-            visibleCount={agentVisibleCount}
-            sourceCount={agentSourceCount}
-            onSearchQueryChange={setSearchQuery}
-          />
-          {filterActive && agentVisibleCount === 0 ? (
-            <p
-              role="status"
-              className="text-muted-foreground rounded-xl border border-dashed px-5 py-10 text-center text-sm"
-            >
-              没有找到匹配的 Agent，请调整搜索词。
-            </p>
-          ) : (
-            renderList({
-              project,
-              data: filteredData,
-              items: filteredData.project_items,
-              source: "project",
-              selectedAssetId,
-              onSelect: (item) => navigateToAsset(item.id, "push"),
-            })
-          )}
-        </>
+        renderList({
+          project,
+          data,
+          items: data.project_items,
+          source: "project",
+          selectedAssetId,
+          onSelect: (item) => navigateToAsset(item.id, "push"),
+        })
       ) : (
         <Tabs
           value={sourceFilter}

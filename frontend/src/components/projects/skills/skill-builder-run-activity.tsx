@@ -201,7 +201,7 @@ export function SkillBuilderActivityBlock({
 
   return (
     <details
-      className="border-border/70 bg-muted/15 group ml-0 rounded-xl border px-3 py-2 sm:ml-13"
+      className="border-border/70 bg-muted/15 group ml-0 rounded-xl border px-3 py-2"
       open={active}
       data-testid="skill-builder-activity"
     >

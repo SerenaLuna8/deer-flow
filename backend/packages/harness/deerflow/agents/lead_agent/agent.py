@@ -62,6 +62,13 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.sandbox.security import requires_host_bash_approval
 from deerflow.skills.types import Skill
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ConfiguredLeadParentExecutionProfile,
+    ParentExecutionBindingFactory,
+    PrivateRunParentExecutionProfile,
+    bind_task_tool_in_tools,
+)
 from deerflow.subagents.runtime_catalog import trusted_runtime_agent_catalog
 from deerflow.tracing import build_tracing_callbacks
 
@@ -770,12 +777,13 @@ def _make_lead_agent(
         container_base_path=container_base_path,
     )
     # Default lead agent (unchanged behavior)
+    asset_context = _trusted_runtime_asset_context(cfg)
     tool_kwargs = {
         "model_name": model_name,
         "groups": list(getattr(private_runtime, "tool_groups", ())) if private_runtime is not None else agent_config.tool_groups if agent_config else None,
         "subagent_enabled": subagent_enabled,
         "app_config": resolved_app_config,
-        "asset_context": _trusted_runtime_asset_context(cfg),
+        "asset_context": asset_context,
     }
     if private_runtime is not None:
         tool_kwargs["include_mcp"] = False
@@ -874,58 +882,97 @@ def _make_lead_agent(
             profile=ModelRuntimeProfile.AGENT_GRAPH,
             **recovery_model_kwargs,
         )
+    effective_middleware = normalize_middleware_state_schemas(
+        build_middlewares(
+            config,
+            model_name=model_name,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+            deferred_setup=setup,
+            mcp_routing_middleware=mcp_routing_middleware,
+            user_id=resolved_user_id,
+            runtime_skills=runtime_skills,
+            runtime_skill_version_ids=runtime_skill_version_ids,
+            runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
+            runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
+            resolved_subagent_enabled=subagent_enabled,
+            resolved_max_concurrent_subagents=max_concurrent_subagents,
+            output_limit_recovery_model=output_limit_recovery_model,
+            output_limit_recovery_override=(extension.output_limit_recovery_override),
+            custom_middlewares=list(extension.custom_middlewares),
+        ),
+        mode,
+        snapshot_frequency,
+    )
+    system_prompt = (
+        extension.system_prompt_override
+        if extension.system_prompt_override is not None
+        else apply_prompt_template(
+            subagent_enabled=subagent_enabled,
+            max_concurrent_subagents=max_concurrent_subagents,
+            agent_name=agent_name,
+            available_skills=available_skills,
+            app_config=resolved_app_config,
+            deferred_names=setup.deferred_names,
+            mcp_routing_hints_section=mcp_routing_hints_section,
+            user_id=resolved_user_id,
+            skill_names=skill_setup.skill_names or None,
+            exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None and private_prompt_bundle is None else None,
+            exact_agent_prompt=private_prompt_bundle,
+            exact_skills=runtime_skills,
+            exact_skills_container_path=container_base_path if runtime_skills is not None else None,
+            runtime_agent_catalog=runtime_agent_catalog,
+            inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
+            runtime_capability_notice=runtime_capability_notice,
+        )
+    )
+    state_schema = get_thread_state_schema(mode, snapshot_frequency)
+    graph_inputs = AgentGraphExecutionInputs(
+        model=lead_model,
+        tools=tuple(final_tools),
+        middleware=tuple(effective_middleware),
+        system_prompt=system_prompt,
+        state_schema=state_schema,
+        name=agent_name,
+    )
+    if private_runtime is not None:
+        parent_profile = PrivateRunParentExecutionProfile(
+            graph=graph_inputs,
+            app_config=resolved_app_config,
+            asset_context=asset_context,
+            private_runtime=private_runtime,
+            model_name=model_name,
+            thinking_enabled=bool(thinking_enabled),
+            reasoning_effort=reasoning_effort,
+            runtime_skills=tuple(runtime_skills or ()),
+            runtime_agent_catalog=runtime_agent_catalog,
+            tool_groups=tuple(getattr(private_runtime, "tool_groups", ())),
+        )
+    else:
+        parent_profile = ConfiguredLeadParentExecutionProfile(
+            graph=graph_inputs,
+            app_config=resolved_app_config,
+            asset_context=asset_context,
+            agent_config=agent_config,
+            model_name=model_name,
+            thinking_enabled=bool(thinking_enabled),
+            reasoning_effort=reasoning_effort,
+            plan_mode=bool(is_plan_mode),
+            subagent_enabled=bool(subagent_enabled),
+            agent_name=agent_name,
+            available_skills=(tuple(sorted(available_skills)) if available_skills is not None else None),
+        )
+    final_tools = bind_task_tool_in_tools(
+        final_tools,
+        ParentExecutionBindingFactory(parent_profile),
+    )
     return create_agent(
         model=lead_model,
         tools=final_tools,
-        middleware=normalize_middleware_state_schemas(
-            build_middlewares(
-                config,
-                model_name=model_name,
-                agent_name=agent_name,
-                available_skills=available_skills,
-                app_config=resolved_app_config,
-                deferred_setup=setup,
-                mcp_routing_middleware=mcp_routing_middleware,
-                user_id=resolved_user_id,
-                runtime_skills=runtime_skills,
-                runtime_skill_version_ids=runtime_skill_version_ids,
-                runtime_skills_root=(runtime_skills_root if runtime_skills is not None else None),
-                runtime_skills_container_path=(container_base_path if runtime_skills is not None else None),
-                resolved_subagent_enabled=subagent_enabled,
-                resolved_max_concurrent_subagents=max_concurrent_subagents,
-                output_limit_recovery_model=output_limit_recovery_model,
-                output_limit_recovery_override=(extension.output_limit_recovery_override),
-                custom_middlewares=list(extension.custom_middlewares),
-            ),
-            mode,
-            snapshot_frequency,
-        ),
-        system_prompt=(
-            extension.system_prompt_override
-            if extension.system_prompt_override is not None
-            else apply_prompt_template(
-                subagent_enabled=subagent_enabled,
-                max_concurrent_subagents=max_concurrent_subagents,
-                agent_name=agent_name,
-                available_skills=available_skills,
-                app_config=resolved_app_config,
-                deferred_names=setup.deferred_names,
-                mcp_routing_hints_section=mcp_routing_hints_section,
-                user_id=resolved_user_id,
-                skill_names=skill_setup.skill_names or None,
-                exact_soul=str(getattr(private_runtime, "soul")) if private_runtime is not None and private_prompt_bundle is None else None,
-                exact_agent_prompt=private_prompt_bundle,
-                exact_skills=runtime_skills,
-                exact_skills_container_path=container_base_path if runtime_skills is not None else None,
-                runtime_agent_catalog=runtime_agent_catalog,
-                inspect_image_available=any(tool.name == "inspect_image" for tool in final_tools),
-                runtime_capability_notice=runtime_capability_notice,
-            )
-        ),
-        state_schema=get_thread_state_schema(
-            mode,
-            snapshot_frequency,
-        ),
+        middleware=effective_middleware,
+        system_prompt=system_prompt,
+        state_schema=state_schema,
     )
 
 

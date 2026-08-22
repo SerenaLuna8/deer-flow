@@ -12,8 +12,11 @@ const APP =
 
 const MODEL_FIRST = "playwright-model-first-never-expose";
 const MODEL_SECOND = "playwright-model-second-never-expose";
+const MCP_DELETED = "playwright-mcp-deleted-never-expose";
 const MCP_FIRST = "playwright-mcp-first-never-expose";
+const MCP_QUERY_FIRST = "playwright-mcp-query-first-never-expose";
 const MCP_SECOND = "playwright-mcp-second-never-expose";
+const MCP_QUERY_SECOND = "playwright-mcp-query-second-never-expose";
 const CHANNEL_FIRST = "playwright-channel-first-never-expose";
 const CHANNEL_SECOND = "playwright-channel-second-never-expose";
 
@@ -252,15 +255,59 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     await createDialog.getByLabel("名称").fill(displayName);
     await createDialog.getByLabel("标识").fill(slug);
     await createDialog.getByLabel("URL").fill("http://127.0.0.1:65535/mcp");
-    await createDialog.getByLabel("注入位置").selectOption("headers");
-    await createDialog.getByLabel("槽位名").fill("auth");
-    await createDialog.getByLabel("字段名（每行一个）").fill("Authorization");
-    const createSecretInput = createDialog.getByLabel("headers.Authorization", {
+    await expect(createDialog.getByLabel("凭证发送方式")).toHaveCount(0);
+    await expect(createDialog.getByLabel("槽位名")).toHaveCount(0);
+    await createDialog.getByRole("button", { name: "添加凭证参数" }).click();
+    const headerNames = createDialog.getByLabel("请求头名称", { exact: true });
+    await headerNames.fill("X-Temporary-Test");
+    await createDialog
+      .getByLabel("X-Temporary-Test 的凭证值", { exact: true })
+      .fill(MCP_DELETED);
+    await createDialog.getByRole("button", { name: "添加凭证参数" }).click();
+    await expect(headerNames).toHaveCount(2);
+    await headerNames.nth(1).fill("Authorization");
+    const createSecretInputByLabel = createDialog.getByLabel(
+      "Authorization 的凭证值",
+      {
+        exact: true,
+      },
+    );
+    await expect(createSecretInputByLabel).toHaveAttribute(
+      "name",
+      "project_mcp_secret_1",
+    );
+    const createSecretInput = createDialog.locator(
+      'input[name="project_mcp_secret_1"]',
+    );
+    await createSecretInput.pressSequentially(MCP_FIRST);
+    await headerNames.nth(1).fill("Authorization-Edited");
+    await expect(createSecretInput).toHaveValue(MCP_FIRST);
+    await headerNames.nth(1).fill("Authorization");
+    await expect(createSecretInput).toHaveValue(MCP_FIRST);
+    await createDialog.getByRole("button", { name: "添加凭证参数" }).click();
+    await expect(headerNames).toHaveCount(3);
+    const querySecretInput = createDialog.locator(
+      'input[name="project_mcp_secret_2"]',
+    );
+    await querySecretInput.fill(MCP_DELETED);
+    await createDialog
+      .getByLabel("第 3 个凭证参数的发送位置")
+      .selectOption("query");
+    await expect(querySecretInput).toHaveValue("");
+    const queryNames = createDialog.getByLabel("查询参数名称", {
       exact: true,
     });
+    await queryNames.fill("api_key");
+    await querySecretInput.fill(MCP_QUERY_FIRST);
+    await createDialog
+      .getByRole("button", { name: "删除第 1 个凭证参数" })
+      .click();
+    await expect(headerNames).toHaveCount(1);
+    await expect(headerNames).toHaveValue("Authorization");
+    await expect(queryNames).toHaveValue("api_key");
     await expect(createSecretInput).toHaveAttribute("type", "password");
-    await createSecretInput.pressSequentially(MCP_FIRST);
     await expect(createSecretInput).toHaveValue(MCP_FIRST);
+    await expect(querySecretInput).toHaveValue(MCP_QUERY_FIRST);
     await createSecretInput.press("Tab");
     await page.evaluate(
       () =>
@@ -270,7 +317,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     );
     await expect(createSecretInput).toHaveValue(MCP_FIRST);
     expect(await createSecretInput.getAttribute("name")).toBe(
-      "project_mcp_secret_0",
+      "project_mcp_secret_1",
     );
     expect(
       await createSecretInput.evaluate((input: HTMLInputElement) => {
@@ -278,6 +325,19 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
         return new FormData(input.form).get(input.name);
       }),
     ).toBe(MCP_FIRST);
+    expect(
+      await querySecretInput.evaluate((input: HTMLInputElement) => {
+        if (!input.form) throw new Error("MCP query secret input has no form");
+        return new FormData(input.form).get(input.name);
+      }),
+    ).toBe(MCP_QUERY_FIRST);
+    const createRequestPromise = page.waitForRequest(
+      (request) =>
+        request.method() === "POST" &&
+        request
+          .url()
+          .endsWith(`/api/projects/${project.id}/mcp-servers/configured`),
+    );
     const createResponsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === "POST" &&
@@ -293,10 +353,24 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     );
     await createDialog.getByRole("button", { name: "保存" }).click();
     await expect(createSecretInput).toHaveValue("");
+    await expect(querySecretInput).toHaveValue("");
+    expect((await createRequestPromise).postDataJSON()).toMatchObject({
+      secret_slots: [
+        {
+          name: "auth",
+          payload_schema: {
+            headers: ["Authorization"],
+            query: ["api_key"],
+          },
+        },
+      ],
+    });
     const createResponse = await createResponsePromise;
     const createText = await createResponse.text();
     expect(createResponse.status(), createText).toBe(201);
+    expect(createText).not.toContain(MCP_DELETED);
     expect(createText).not.toContain(MCP_FIRST);
+    expect(createText).not.toContain(MCP_QUERY_FIRST);
     const createBody = JSON.parse(createText) as {
       item?: { id?: unknown };
       version?: { id?: unknown };
@@ -306,11 +380,18 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     if (typeof assetId !== "string" || typeof versionOneId !== "string") {
       throw new Error("Configured MCP response is missing stable IDs");
     }
-    const first = await expectSafeMcpResponse(
-      await firstSecretResponsePromise,
-      true,
-      [MCP_FIRST],
-    );
+    const firstSecretResponse = await firstSecretResponsePromise;
+    expect(firstSecretResponse.request().postDataJSON()).toEqual({
+      payload: {
+        headers: { Authorization: MCP_FIRST },
+        query: { api_key: MCP_QUERY_FIRST },
+      },
+    });
+    const first = await expectSafeMcpResponse(firstSecretResponse, true, [
+      MCP_DELETED,
+      MCP_FIRST,
+      MCP_QUERY_FIRST,
+    ]);
     await expect(createDialog).toBeHidden();
 
     const detail = page.getByRole("dialog", { name: displayName });
@@ -320,7 +401,9 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
       secrets.getByText("必需 · 已配置", { exact: true }),
     ).toBeVisible();
     const secretInput = secrets.getByLabel("auth headers Authorization 秘密值");
+    const querySecret = secrets.getByLabel("auth query api_key 秘密值");
     await expect(secretInput).toHaveValue("");
+    await expect(querySecret).toHaveValue("");
     await expect(
       secrets.getByRole("button", { name: "替换此槽位" }),
     ).toBeDisabled();
@@ -331,7 +414,10 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     });
     await editDialog.getByLabel("URL").fill("http://127.0.0.1:65535/mcp-v2");
     await expect(
-      editDialog.getByLabel("headers.Authorization", { exact: true }),
+      editDialog.getByLabel("Authorization 的凭证值", { exact: true }),
+    ).toHaveValue("");
+    await expect(
+      editDialog.getByLabel("api_key 的凭证值", { exact: true }),
     ).toHaveValue("");
     const updateResponsePromise = page.waitForResponse(
       (response) =>
@@ -347,6 +433,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     const updateText = await updateResponse.text();
     expect(updateResponse.status(), updateText).toBe(200);
     expect(updateText).not.toContain(MCP_FIRST);
+    expect(updateText).not.toContain(MCP_QUERY_FIRST);
     const updateBody = JSON.parse(updateText) as {
       version?: { id?: unknown; supersedes_version_id?: unknown };
     };
@@ -375,7 +462,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
         `${APP}/api/projects/${project.id}/mcp-servers/${assetId}/versions/${versionTwoId}/secrets`,
       ),
       true,
-      [MCP_FIRST],
+      [MCP_FIRST, MCP_QUERY_FIRST],
     );
     const retainedStatusPromise = page.waitForResponse(
       (response) =>
@@ -391,9 +478,13 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     await expect(
       detail.locator("p").filter({ hasText: "配置 2 · 已发布" }),
     ).toBeVisible();
-    await expectSafeMcpResponse(await retainedStatusPromise, true, [MCP_FIRST]);
+    await expectSafeMcpResponse(await retainedStatusPromise, true, [
+      MCP_FIRST,
+      MCP_QUERY_FIRST,
+    ]);
 
     await secretInput.fill(MCP_SECOND);
+    await querySecret.fill(MCP_QUERY_SECOND);
     const replacementResponsePromise = page.waitForResponse(
       (response) =>
         response.request().method() === "PUT" &&
@@ -414,11 +505,20 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     );
     await secrets.getByRole("button", { name: "替换此槽位" }).click();
     await expect(secretInput).toHaveValue("");
-    const replaced = await expectSafeMcpResponse(
-      await replacementResponsePromise,
-      true,
-      [MCP_FIRST, MCP_SECOND],
-    );
+    await expect(querySecret).toHaveValue("");
+    const replacementResponse = await replacementResponsePromise;
+    expect(replacementResponse.request().postDataJSON()).toEqual({
+      payload: {
+        headers: { Authorization: MCP_SECOND },
+        query: { api_key: MCP_QUERY_SECOND },
+      },
+    });
+    const replaced = await expectSafeMcpResponse(replacementResponse, true, [
+      MCP_FIRST,
+      MCP_QUERY_FIRST,
+      MCP_SECOND,
+      MCP_QUERY_SECOND,
+    ]);
     expect(replaced.revision).toBe(first.revision + 1);
     expect((await exactInventoryRefreshPromise).status()).toBe(200);
     await expect(versionPicker).toHaveValue(versionOneId);
@@ -427,7 +527,7 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
         `${APP}/api/projects/${project.id}/mcp-servers/${assetId}/versions/${versionTwoId}/secrets`,
       ),
       true,
-      [MCP_FIRST, MCP_SECOND],
+      [MCP_FIRST, MCP_QUERY_FIRST, MCP_SECOND, MCP_QUERY_SECOND],
     );
     expect(copiedAfterReplacement.revision).toBe(copiedVersionStatus.revision);
 
@@ -460,24 +560,31 @@ test.describe("Domain-owned configuration secrets (real Gateway)", () => {
     const cleared = await expectSafeMcpResponse(
       await clearResponsePromise,
       false,
-      [MCP_FIRST, MCP_SECOND],
+      [MCP_FIRST, MCP_QUERY_FIRST, MCP_SECOND, MCP_QUERY_SECOND],
     );
     expect(cleared.revision).toBe(first.revision + 2);
     await expect(
       secrets.getByText("必需 · 未配置", { exact: true }),
     ).toBeVisible();
     await expect(secretInput).toHaveValue("");
+    await expect(querySecret).toHaveValue("");
     const copiedAfterClear = await expectSafeMcpResponse(
       await page.request.get(
         `${APP}/api/projects/${project.id}/mcp-servers/${assetId}/versions/${versionTwoId}/secrets`,
       ),
       true,
-      [MCP_FIRST, MCP_SECOND],
+      [MCP_FIRST, MCP_QUERY_FIRST, MCP_SECOND, MCP_QUERY_SECOND],
     );
     expect(copiedAfterClear.revision).toBe(copiedVersionStatus.revision);
 
     expect(
-      await browserPersistenceSecretLocations(page, [MCP_FIRST, MCP_SECOND]),
+      await browserPersistenceSecretLocations(page, [
+        MCP_DELETED,
+        MCP_FIRST,
+        MCP_QUERY_FIRST,
+        MCP_SECOND,
+        MCP_QUERY_SECOND,
+      ]),
     ).toEqual([]);
   });
 

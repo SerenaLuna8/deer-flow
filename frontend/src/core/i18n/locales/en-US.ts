@@ -19,6 +19,7 @@ export const enUS: Translations = {
 
   // Common
   common: {
+    skipToContent: "Skip to main content",
     home: "Home",
     settings: "Settings",
     delete: "Delete",
@@ -27,6 +28,7 @@ export const enUS: Translations = {
     share: "Share",
     openInNewWindow: "Open in new window",
     close: "Close",
+    closeArtifacts: "Close artifacts",
     more: "More",
     search: "Search",
     loadMore: "Load more",
@@ -317,6 +319,153 @@ export const enUS: Translations = {
     mcp: "MCP",
     memory: "Memory",
     usage: "Usage",
+    navigation: {
+      label: "Project navigation",
+      menuLabel: "Project menu",
+      workspaceAria: "ActWeave workspace",
+      overview: "Overview",
+      conversations: "Chats",
+      automations: "Automations",
+      agents: "Agent",
+      skills: "Skill",
+      mcp: "MCP",
+      memory: "Memory",
+      connections: "Connections",
+      audit: "Audit log",
+      settings: "Project settings",
+      backToWorkspace: "Back to workspace",
+      sections: {
+        work: "Work",
+        capabilities: "Capabilities",
+        management: "Project management",
+      },
+      account: "Account",
+      platformAdministration: "Platform administration",
+      systemSettings: "System settings",
+      logout: "Log out",
+      expand: "Expand project menu",
+      collapse: "Collapse project menu",
+      open: "Open project navigation",
+      sheetTitle: "Project navigation",
+      sheetDescription: "Navigate this project",
+    },
+    accessDenied: {
+      title: "You do not have access",
+      description: (area) =>
+        `You are a member of this project, but your current role cannot access ${area}. Ask a project administrator to change your role if you need access.`,
+      backToProject: "Back to project overview",
+    },
+    settings: {
+      accessArea: "project settings",
+      governanceEyebrow: (projectName) => `${projectName} · Governance`,
+      title: "Project settings",
+      description: "Manage project details, members, and lifecycle.",
+      navigationLabel: "Project settings",
+      navigation: {
+        general: {
+          label: "General settings",
+          description: "Project details and lifecycle",
+        },
+        members: {
+          label: "Project members",
+          description: "Member roles and invitations",
+        },
+      },
+      general: {
+        title: "Project details",
+        description:
+          "This information appears in the workspace and project navigation.",
+        displayName: "Project name",
+        icon: "Icon",
+        slug: "Project slug",
+        slugDescription:
+          "The project slug is used in its URL and cannot be changed after creation.",
+        projectDescription: "Project description",
+        descriptionPlaceholder: "Describe this project's purpose and goals",
+        saved: "Project details saved",
+        saving: "Saving…",
+        save: "Save changes",
+      },
+      lifecycle: {
+        title: "Project lifecycle",
+        description:
+          "Requesting deletion immediately blocks entry and governance, then starts a 30-day recovery window. Self-service recovery is unavailable after that window.",
+        requestDeletion: "Request project deletion",
+        confirmTitle: "Delete this project?",
+        confirmDescription:
+          "The project will immediately enter pending deletion and you will return to the workspace. A project administrator can undo this action during the 30-day recovery window.",
+        cancel: "Cancel",
+        confirm: "Confirm deletion request",
+      },
+    },
+    members: {
+      managementEyebrow: (projectName) => `${projectName} · Project management`,
+      title: "Members and invitations",
+      description: "Manage project members, roles, and pending invitations.",
+      inviteMember: "Invite member",
+      membersTitle: "Members",
+      invitationsTitle: "Invitations",
+      emptyInvitations: "No project invitations.",
+      columns: {
+        account: "Account",
+        role: "Role",
+        status: "Status",
+        actions: "Actions",
+      },
+      roles: {
+        admin: "Admin",
+        editor: "Editor",
+        runner: "Runner",
+        viewer: "Viewer",
+      },
+      membershipStatuses: {
+        active: "Active",
+        left: "Left",
+        removed: "Removed",
+      },
+      invitationStatuses: {
+        pending: "Pending",
+        redeemed: "Accepted",
+        revoked: "Revoked",
+        expired: "Expired",
+      },
+      actions: {
+        changeRole: "Change role",
+        removeMember: "Remove member",
+        leaveProject: "Leave project",
+        revokeInvitation: "Revoke invitation",
+      },
+      confirmations: {
+        removeTitle: "Remove this member?",
+        removeDescription: (email) =>
+          `Removing ${email} immediately revokes their access to this project.`,
+        removeConfirm: "Remove member",
+        leaveTitle: "Leave this project?",
+        leaveDescription:
+          "You will lose access to this project unless you are invited again.",
+        leaveConfirm: "Leave project",
+        revokeTitle: "Revoke this invitation?",
+        revokeDescription: (email) =>
+          `The invitation link sent to ${email} will stop working immediately.`,
+        revokeConfirm: "Revoke invitation",
+        cancel: "Cancel",
+      },
+      inviteDialog: {
+        title: "Invite member",
+        description:
+          "The invitation link is shown only once. Send it through a trusted channel.",
+        inviteLink: "Invitation link",
+        done: "Done",
+        email: "Email",
+        projectRole: "Project role",
+        create: "Create invitation",
+      },
+      roleDialog: {
+        title: "Change member role",
+        projectRole: "Project role",
+        save: "Save role",
+      },
+    },
     governance: {
       retry: "Retry",
       tokenSeries: {
@@ -853,6 +1002,8 @@ export const enUS: Translations = {
       backToProjects: "Back to projects",
       projectGovernance: "Project shared-asset governance",
       projectId: "Project UUID",
+      shortProjectId: (projectId) => `UUID ${projectId}`,
+      projectIdentityUnavailable: "Project identity could not be loaded.",
     },
     common: {
       assetVersion: "Asset revision",
@@ -926,6 +1077,10 @@ export const enUS: Translations = {
       },
     },
     catalog: {
+      assetCatalog: "Asset catalog",
+      projectAgentTitle: "Project Agents",
+      projectSkillTitle: "Project Skills",
+      projectMcpTitle: "Project MCP",
       systemAssets: "System assets",
       systemAssetsDescription:
         "System assets are shared read-only. Project bindings pin an explicit version and never upgrade automatically.",
@@ -969,6 +1124,9 @@ export const enUS: Translations = {
       previousPage: "Previous page",
       nextPage: "Next page",
       noResults: "No assets match the current filters.",
+      catalogUnavailable: "The asset catalog could not be loaded.",
+      versionHistoryUnavailable: "Version history could not be loaded.",
+      projectCatalogUnavailable: "Project assets could not be loaded.",
       noSystemAssets: "No visible system assets.",
       system: "System",
       systemPublishStatus: "System publication",
@@ -999,6 +1157,11 @@ export const enUS: Translations = {
       suspend: "Suspend",
     },
     version: {
+      current: "Current Version",
+      candidate: "Candidate Version",
+      historical: "Historical Version",
+      currentUnconfirmed: "The current configuration could not be confirmed.",
+      activate: "Activate version",
       none: "No versions have been created.",
       mcpNone: "No configuration has been saved.",
       selectHint: "Select a version on the left to inspect its details.",
@@ -1056,8 +1219,8 @@ export const enUS: Translations = {
         "Project MCP requires an absolute HTTP or HTTPS URL without embedded credentials, query parameters, or fragments. The host must be exactly localhost or a canonical IPv4/IPv6 literal; ordinary DNS hostnames are not resolved. localhost is case-insensitive and is treated as 127.0.0.1; for IPv6 loopback, enter [::1] explicitly. The IP must belong to an administrator-configured allowed network range. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       projectOAuth:
         "Project MCP does not support configuration-level OAuth. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
-      projectHeadersOnly:
-        "Project MCP secret slots support headers or query parameters only. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
+      projectCredentialTargetsOnly:
+        "Project MCP credential parameters can be sent only as headers or query parameters. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       missingSystemCommand:
         "This stdio system MCP has no command and cannot be bound or used by an Agent.",
       missingSystemUrl:
@@ -1068,6 +1231,19 @@ export const enUS: Translations = {
         "Remote system MCP secret slots support headers, query parameters, or oauth only and cannot otherwise be bound or used by an Agent.",
     },
     dialogs: {
+      authoring: {
+        title: (name) => `Create a version for ${name}`,
+        skillDescription:
+          "System Skill v1 cannot be upgraded. A Project Skill can save a new Candidate Version.",
+        mcpDescription:
+          "An MCP definition declares secret slots but never stores secret values in the version definition.",
+        description: "Description",
+        secretSlots: "Secret slots JSON",
+        invalidSecretSlots: "Secret slots must be a valid JSON array.",
+        cancel: "Cancel",
+        saving: "Saving…",
+        save: "Save version",
+      },
       binding: {
         switchTitle: "Switch project binding version",
         enableTitle: "Enable system asset",
@@ -1084,6 +1260,9 @@ export const enUS: Translations = {
         enable: "Enable for this project",
         rollback: "Roll back to this version",
         switchVersion: "Switch to new version",
+        currentVersion: "Current Version",
+        currentVersionUnavailable: "The Current Version is unavailable.",
+        currentVersionInUse: "Current Version in use",
       },
     },
     errors: {
@@ -1093,7 +1272,7 @@ export const enUS: Translations = {
       validationFailed:
         "The submitted content does not meet asset requirements.",
       mcpVersionValidation:
-        "The MCP configuration failed validation. Confirm the transport is HTTP (Streamable HTTP) or SSE; the URL has no embedded secrets, query parameters, or fragments; the host is exactly localhost or a canonical IPv4/IPv6 literal rather than an ordinary DNS hostname; localhost is case-insensitive and is treated as 127.0.0.1, while IPv6 loopback is entered explicitly as [::1]; the IP belongs to an administrator-configured allowed network range; and every secret slot uses exactly one headers or query group with fields. Network ranges are configured by platform administrators, not in this form. If an administrator just changed the allowed ranges, restart Gateway, Scheduler, and Worker.",
+        "The MCP configuration failed validation. Confirm the transport is HTTP (Streamable HTTP) or SSE; the URL has no embedded secrets, query parameters, or fragments; the host is exactly localhost or a canonical IPv4/IPv6 literal rather than an ordinary DNS hostname; localhost is case-insensitive and is treated as 127.0.0.1, while IPv6 loopback is entered explicitly as [::1]; the IP belongs to an administrator-configured allowed network range; and every credential group contains at least one header or query field (or both) with valid field names. Network ranges are configured by platform administrators, not in this form. If an administrator just changed allowed ranges, restart Gateway, Scheduler, and Worker.",
       storageQuota:
         "The project Skill storage quota is exhausted. Remove unused Skills and try again.",
       storageUnavailable:
@@ -1314,8 +1493,6 @@ export const enUS: Translations = {
           "The blueprint still has unresolved conflicts. Continue the conversation and have the Agent regenerate it before creating the Agent.",
         sessionLimitExceeded:
           "You have reached the unfinished Agent design limit. Resume or cancel an existing design before starting another.",
-        secretDetected:
-          "The input appears to contain a secret or other sensitive value. Remove it and retry.",
         commitUncertain:
           "The creation result could not be confirmed. Do not create a duplicate. Check the Agent list first, then retry only if it is absent.",
         stale:
@@ -1351,6 +1528,24 @@ export const enUS: Translations = {
       },
       blueprint: {
         title: "Agent blueprint",
+        triggerLabel: "Blueprint",
+        openAria: "Open Agent blueprint",
+        conflictCount: (count) =>
+          `${count} unresolved ${count === 1 ? "conflict" : "conflicts"}`,
+        readyTitle: "Agent blueprint ready",
+        summary: (conflictCount) =>
+          conflictCount > 0
+            ? `4 documents · ${conflictCount} unresolved ${conflictCount === 1 ? "conflict" : "conflicts"}`
+            : "4 documents",
+        viewBlueprint: "View blueprint",
+        closeAria: "Close Agent blueprint",
+        panelSummary: (conflictCount) =>
+          conflictCount > 0
+            ? `4 documents · ${conflictCount} unresolved ${conflictCount === 1 ? "conflict" : "conflicts"}`
+            : "4 documents",
+        tabsAria: "Agent blueprint content",
+        overviewTab: "Overview",
+        documentsTab: "Documents",
         runtime: "Runtime configuration",
         noDescription: "No Agent description has been generated.",
         nameLabel: "Agent name",
@@ -1366,6 +1561,7 @@ export const enUS: Translations = {
         assumptionsTitle: "Design assumptions",
         conflictsTitle: "Conflicts to resolve",
         conflictDocuments: "Related documents",
+        openConflictDocument: (name) => `Open ${name} in documents`,
         blockingConflictHint:
           "Continue the conversation so the Agent regenerates the blueprint. The Agent cannot be created until all red conflicts disappear.",
         createHint:
@@ -1676,12 +1872,6 @@ export const enUS: Translations = {
       label: "Export ZIP",
       preparing: "Preparing…",
       started: "Download started",
-      tooltip: (version) => `Export the selected v${version}`,
-      unsaved: "Save or discard the current changes first",
-      loading: "The selected version is still loading",
-      revoked: "Revoked System Skill versions cannot be exported",
-      notCurrent: "Only the System Skill Current Version can be exported",
-      noVersion: "Select a persisted version first",
     },
     secrets: {
       workbenchAria: "Skill editing area",
@@ -2263,6 +2453,30 @@ export const enUS: Translations = {
       "The model reached its per-request output limit, so this response is incomplete.",
     modelOutputLimitRetry: "Retry without deep thinking",
     modelOutputLimitRetrying: "Retrying…",
+    loopSafetyLimitTitle: "Repeated operations triggered the safety limit",
+    loopSafetyLimitDescription:
+      "This Run has stopped. Any existing answer or files are partial results; the failure reason is the loop safety limit.",
+    recoveredModelFailuresTitle: "Model request failures recovered",
+    recoveredModelFailuresDescription: (count) =>
+      `${count} model ${count === 1 ? "request" : "requests"} failed during this Run. Those requests recovered after retry; refer to the Run status for the final outcome.`,
+    recoveredModelFailureAttempt: (
+      index,
+      attempt,
+      maxAttempts,
+      reason,
+      errorCode,
+    ) =>
+      `Failure ${index}: model attempt ${attempt}/${maxAttempts} — ${reason} (${errorCode}).`,
+    recoveredModelFailureReasons: {
+      quota: "model quota was exhausted",
+      auth: "model authentication failed",
+      busy: "the model provider was busy",
+      transient:
+        "the model provider or network connection was temporarily unavailable",
+      generic: "the model request failed",
+      current_upload: "the current image attachment was unavailable",
+      circuit_open: "the model request circuit breaker was open",
+    },
     tokenBudgetReachedTitle: "Run token budget reached",
     tokenBudgetReachedDescription:
       "This run stopped early, so the response may be incomplete.",

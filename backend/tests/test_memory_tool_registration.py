@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib
 import uuid
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from pydantic import SecretStr
@@ -14,6 +15,12 @@ import deerflow.tools.tools as tools_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.tool_config import ToolConfig, ToolGroupConfig
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ParentExecutionBarrier,
+    ParentExecutionBinding,
+    PrivateRunParentExecutionProfile,
+)
 
 task_tool_module = importlib.import_module("deerflow.tools.builtins.task_tool")
 
@@ -93,6 +100,42 @@ class _FullAuthority(_SearchAuthority, _ProposeAuthority):
     pass
 
 
+def _private_parent_binding(app_config: AppConfig) -> ParentExecutionBinding:
+    parent_tools = tools_module.get_available_tools(
+        model_name=MODEL_NAME,
+        subagent_enabled=True,
+        app_config=app_config,
+        include_mcp=False,
+        include_acp=False,
+    )
+    return ParentExecutionBinding(
+        profile=PrivateRunParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=tuple(parent_tools),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=app_config,
+            asset_context=None,
+            private_runtime=object(),
+            model_name=MODEL_NAME,
+            thinking_enabled=False,
+            reasoning_effort=None,
+            runtime_skills=(),
+            runtime_agent_catalog=None,
+            tool_groups=(),
+        ),
+        state=MappingProxyType({}),
+        context=MappingProxyType({}),
+        config=MappingProxyType({}),
+        owner_loop=asyncio.get_running_loop(),
+        store=None,
+        barrier=ParentExecutionBarrier(),
+    )
+
+
 def _assemble_lead_tool_names(
     monkeypatch,
     tmp_path,
@@ -153,17 +196,19 @@ def test_production_lead_assembly_registers_only_authorized_memory_tools(
 
 @pytest.mark.asyncio
 async def test_production_subagent_assembly_never_inherits_parent_memory_tools() -> None:
+    app_config = _app_config()
     parent_context = {
         "private_scope": object(),
         "__memory_authority": _FullAuthority(),
     }
 
     tools = await task_tool_module._assemble_subagent_tools(
+        parent_binding=_private_parent_binding(app_config),
         parent_context=parent_context,
         runtime_agent_profile=None,
         effective_model=MODEL_NAME,
         effective_tool_groups=None,
-        app_config=_app_config(),
+        app_config=app_config,
     )
 
     names = {tool.name for tool in tools}
@@ -199,12 +244,14 @@ def test_private_text_lead_registers_bridge_but_native_vision_does_not(
 
 @pytest.mark.asyncio
 async def test_subagent_never_inherits_parent_bridge_tool() -> None:
+    app_config = _app_config(bridge=True)
     tools = await task_tool_module._assemble_subagent_tools(
+        parent_binding=_private_parent_binding(app_config),
         parent_context={"private_scope": object()},
         runtime_agent_profile=None,
         effective_model=MODEL_NAME,
         effective_tool_groups=None,
-        app_config=_app_config(bridge=True),
+        app_config=app_config,
     )
 
     assert "inspect_image" not in {tool.name for tool in tools}

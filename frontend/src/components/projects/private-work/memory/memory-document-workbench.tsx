@@ -47,7 +47,7 @@ export function MemoryDocumentWorkbench({
     document.data.injectionAdvisory.reason !== "no_document";
 
   return (
-    <div className="mx-auto flex h-[calc(100svh)] w-full max-w-5xl flex-col px-4 py-4 sm:px-6 lg:px-8 lg:py-6">
+    <main className="mx-auto flex h-[calc(100svh-3.5rem)] w-full max-w-5xl flex-col px-4 py-4 sm:px-6 md:h-screen lg:px-8 lg:py-6">
       <Tabs
         value={activeTab}
         onValueChange={(value) => {
@@ -129,6 +129,6 @@ export function MemoryDocumentWorkbench({
       </Tabs>
 
       <MemoryVersionDetail detail={detail} actions={actions} />
-    </div>
+    </main>
   );
 }

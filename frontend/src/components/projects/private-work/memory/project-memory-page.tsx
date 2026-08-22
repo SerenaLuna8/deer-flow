@@ -5,6 +5,7 @@ import { useCallback } from "react";
 
 import { ProjectAccessDenied } from "@/components/projects/project-access-denied";
 import { useCurrentProject } from "@/components/projects/project-context";
+import { useI18n } from "@/core/i18n/hooks";
 import { useProjectMemoryQueryModel } from "@/core/private-work/memory/hooks";
 import { projectMemoryPermissions } from "@/core/private-work/memory/permissions";
 import {
@@ -104,9 +105,12 @@ function AuthorizedProjectMemoryPage({
 }
 
 export function ProjectMemoryAccessBoundary({ project }: { project: Project }) {
+  const { t } = useI18n();
   const permissions = projectMemoryPermissions(project.capabilities);
   if (!permissions.canRead) {
-    return <ProjectAccessDenied projectSlug={project.slug} area="项目记忆" />;
+    return (
+      <ProjectAccessDenied projectSlug={project.slug} area={t.project.memory} />
+    );
   }
   return (
     <AuthorizedProjectMemoryPage

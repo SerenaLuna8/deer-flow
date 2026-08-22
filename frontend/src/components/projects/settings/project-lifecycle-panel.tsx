@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useAuth } from "@/core/auth/AuthProvider";
+import { useI18n } from "@/core/i18n/hooks";
 import { useRequestProjectDeletion } from "@/core/projects/hooks";
 
 import { useCurrentProject } from "../project-context";
@@ -23,6 +24,8 @@ export function ProjectLifecyclePanel() {
   const { user } = useAuth();
   const router = useRouter();
   const deletion = useRequestProjectDeletion(user?.id, project.id);
+  const { t } = useI18n();
+  const labels = t.project.settings.lifecycle;
   const [confirmOpen, setConfirmOpen] = useState(false);
   const canManage = project.capabilities.includes("project.lifecycle.manage");
 
@@ -34,16 +37,14 @@ export function ProjectLifecyclePanel() {
       className="border-destructive/30 bg-destructive/5 rounded-2xl border p-6"
     >
       <h2 id="project-lifecycle-title" className="text-lg font-semibold">
-        项目生命周期
+        {labels.title}
       </h2>
       <p className="text-muted-foreground mt-2 max-w-2xl text-sm">
-        {
-          "请求删除后，项目会立即停止进入和治理，并提供 30 天恢复窗口。恢复窗口结束后将无法自助恢复。"
-        }
+        {labels.description}
       </p>
       {deletion.error && (
         <p role="alert" className="text-destructive mt-3 text-sm">
-          {projectErrorMessage(deletion.error)}
+          {projectErrorMessage(deletion.error, t.projectWorkspace.errors)}
         </p>
       )}
       <Button
@@ -52,20 +53,25 @@ export function ProjectLifecyclePanel() {
         className="mt-5"
         onClick={() => setConfirmOpen(true)}
       >
-        请求删除项目
+        {labels.requestDeletion}
       </Button>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>确认删除项目</DialogTitle>
-            <DialogDescription>
-              {
-                "项目会立即进入待删除状态，你将返回工作空间。项目管理员可在 30 天恢复窗口内撤销这次操作。"
-              }
-            </DialogDescription>
+            <DialogTitle>{labels.confirmTitle}</DialogTitle>
+            <DialogDescription>{labels.confirmDescription}</DialogDescription>
           </DialogHeader>
           <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              autoFocus
+              disabled={deletion.isPending}
+              onClick={() => setConfirmOpen(false)}
+            >
+              {labels.cancel}
+            </Button>
             <Button
               type="button"
               variant="destructive"
@@ -76,7 +82,7 @@ export function ProjectLifecyclePanel() {
                 })
               }
             >
-              确认请求删除
+              {labels.confirm}
             </Button>
           </DialogFooter>
         </DialogContent>

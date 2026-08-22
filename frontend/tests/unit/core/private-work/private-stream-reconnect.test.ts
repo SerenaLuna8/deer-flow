@@ -11,6 +11,7 @@ import {
   isModelOutputLimitError,
   isOutputDeliveryIncompleteError,
   LLM_PROVIDER_UNAVAILABLE,
+  LOOP_SAFETY_LIMIT,
   MODEL_OUTPUT_LIMIT,
   OUTPUT_DELIVERY_INCOMPLETE,
   PROJECT_STREAM_INCOMPLETE,
@@ -389,6 +390,133 @@ describe("private stream reconnect", () => {
         data: { status: "completed" },
       },
     ]);
+  });
+
+  test("yields a browser task within a bounded origin replay batch", async () => {
+    const storage = makeSessionStorage();
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    const replayFrameCount = 128;
+    const terminalEventId = replayFrameCount + 1;
+    const replayBody = [
+      ...Array.from({ length: replayFrameCount }, (_, index) => [
+        "event: updates",
+        `data: {"delta":${index + 1}}`,
+        `id: ${index + 1}`,
+        "",
+      ]).flat(),
+      "event: end",
+      'data: {"status":"completed"}',
+      `id: ${terminalEventId}`,
+      "",
+      "",
+    ].join("\n");
+    const encodedReplay = new TextEncoder().encode(replayBody);
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(encodedReplay);
+                controller.close();
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    let consumedFrameCount = 0;
+    let resolveBrowserTurn!: (value: number) => void;
+    const browserTurn = new Promise<number>((resolve) => {
+      resolveBrowserTurn = resolve;
+    });
+    const drainReplay = (async () => {
+      for await (const frame of getProjectAPIClient(SCOPE).runs.joinStream(
+        THREAD_ID,
+        "run-buffered",
+      )) {
+        consumedFrameCount += frame ? 1 : 0;
+        if (consumedFrameCount === 1) {
+          setTimeout(() => resolveBrowserTurn(consumedFrameCount), 0);
+        }
+      }
+    })();
+
+    const consumedBeforeBrowserTurn = await browserTurn;
+    await drainReplay;
+
+    expect(consumedBeforeBrowserTurn).toBeLessThanOrEqual(64);
+    expect(consumedFrameCount).toBe(terminalEventId);
+  });
+
+  test("yields a browser task while dropping a buffered duplicate replay batch", async () => {
+    const storage = makeSessionStorage();
+    rs.stubGlobal("window", {
+      location: { origin: "http://localhost:2026" },
+      sessionStorage: storage,
+    });
+    const duplicateFrameCount = 128;
+    const replayBody = [
+      "event: updates",
+      'data: {"delta":"first"}',
+      "id: 1",
+      "",
+      ...Array.from({ length: duplicateFrameCount }, () => [
+        "event: updates",
+        'data: {"delta":"duplicate"}',
+        "id: 1",
+        "",
+      ]).flat(),
+      "event: end",
+      'data: {"status":"completed"}',
+      "id: 2",
+      "",
+      "",
+    ].join("\n");
+    const encodedReplay = new TextEncoder().encode(replayBody);
+    rs.stubGlobal(
+      "fetch",
+      rs.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(encodedReplay);
+                controller.close();
+              },
+            }),
+            { headers: { "Content-Type": "text/event-stream" } },
+          ),
+      ),
+    );
+
+    let emittedFrameCount = 0;
+    let resolveBrowserTurn!: (value: number) => void;
+    const browserTurn = new Promise<number>((resolve) => {
+      resolveBrowserTurn = resolve;
+    });
+    const drainReplay = (async () => {
+      for await (const frame of getProjectAPIClient(SCOPE).runs.joinStream(
+        THREAD_ID,
+        "run-duplicate-buffer",
+      )) {
+        emittedFrameCount += frame ? 1 : 0;
+        if (emittedFrameCount === 1) {
+          setTimeout(() => resolveBrowserTurn(emittedFrameCount), 0);
+        }
+      }
+    })();
+
+    const emittedBeforeBrowserTurn = await browserTurn;
+    await drainReplay;
+
+    expect(emittedBeforeBrowserTurn).toBe(1);
+    expect(emittedFrameCount).toBe(2);
   });
 
   test("rejects a started durable stream that reaches clean EOF before terminal", async () => {
@@ -894,6 +1022,26 @@ describe("private stream reconnect", () => {
     expect(isModelOutputLimitError({ name: MODEL_OUTPUT_LIMIT })).toBe(true);
     expect(isModelOutputLimitError(new Error(MODEL_OUTPUT_LIMIT))).toBe(true);
     expect(isModelOutputLimitError({ name: "other" })).toBe(false);
+  });
+
+  test("preserves the stable loop safety limit at the durable terminal", () => {
+    const failureCode = LOOP_SAFETY_LIMIT;
+    const terminal = {
+      id: "9",
+      event: "end",
+      data: { status: "error", error_code: failureCode },
+    };
+
+    expect(projectStreamFailureName(terminal)).toBe(failureCode);
+    expect(projectStreamFrameForUI(terminal)).toEqual({
+      id: "9",
+      event: "custom",
+      data: {
+        type: "project_run_terminal_failure",
+        error: failureCode,
+        message: failureCode,
+      },
+    });
   });
 
   test("preserves the stable output-delivery failure until the durable terminal", () => {

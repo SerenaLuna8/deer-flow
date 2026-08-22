@@ -1,15 +1,20 @@
-"""Clean-process probe for SubagentExecutor runtime-context installation."""
+"""Clean-process probe for _SubagentGraphRunner runtime-context installation."""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import uuid
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 
 from langchain_core.messages import ToolMessage
 
+from deerflow.runtime.context_carrier import RuntimeContextCarrier
+from deerflow.subagents.change_signal import SubagentChangeSignal
 from deerflow.subagents.config import SubagentConfig
-from deerflow.subagents.executor import SubagentExecutor
+from deerflow.subagents.delegated_context import DelegatedRuntimeContextProjection
+from deerflow.subagents.executor import _SubagentGraphRunner
 
 
 class _HostExecutionApprovalPort:
@@ -61,34 +66,43 @@ async def _run() -> dict[str, object]:
             "EXAMPLE_TOKEN": "secret-value",
         },
     }
-    executor = SubagentExecutor(
+    projection = DelegatedRuntimeContextProjection(
+        _carrier=RuntimeContextCarrier(
+            app_config=SimpleNamespace(
+                logging=SimpleNamespace(
+                    enhance=SimpleNamespace(enabled=True),
+                ),
+            ),
+            thread_id="thread-1",
+            run_id="run-1",
+            user_id="user-1",
+            user_role="runner",
+            private_scope=object(),
+            file_authority=object(),
+            authorization_boundary=object(),
+            authorization_checker=object(),
+            run_read_only_mounts=(object(),),
+            channel_user_id="channel-user-1",
+            is_subagent=True,
+            trace_id="trace-1",
+            guardrail_attribution=attribution,
+            skill_scoped_secrets=secrets,
+            skill_secret_provider=lambda: None,
+            host_execution_approval_port=approval_port,
+            host_execution_agent_path=("lead", "subagent:context-probe"),
+        ),
+        channel_identity_mode="set",
+        agent_prompt_bundle=None,
+        runtime_skills=(),
+    )
+    executor = _SubagentGraphRunner(
         config=SubagentConfig(
             name="context-probe",
             description="context carrier probe",
             model="probe-model",
         ),
         tools=[],
-        app_config=SimpleNamespace(
-            logging=SimpleNamespace(
-                enhance=SimpleNamespace(enabled=True),
-            ),
-        ),
-        thread_id="thread-1",
-        run_id="run-1",
-        user_id="user-1",
-        user_role="runner",
-        private_scope=object(),
-        file_authority=object(),
-        authorization_boundary=object(),
-        authorization_checker=object(),
-        run_read_only_mounts=(object(),),
-        channel_user_id="channel-user-1",
-        deerflow_trace_id="trace-1",
-        guardrail_attribution=attribution,
-        skill_scoped_secrets=secrets,
-        skill_secret_provider=lambda: None,
-        host_execution_approval_port=approval_port,
-        host_execution_agent_path=("lead", "subagent:context-probe"),
+        delegated_context=projection,
     )
     agent = _Agent()
 
@@ -117,7 +131,13 @@ async def _run() -> dict[str, object]:
         executor,
     )
 
-    result = await executor._aexecute("probe")
+    result = await executor._aexecute(
+        "probe",
+        executor._create_lifecycle_result_holder(
+            execution_id=uuid.uuid4(),
+            changes=SubagentChangeSignal(),
+        ),
+    )
     assert agent.context is not None
     installed_context = agent.context
     installed_secrets = installed_context["__skill_scoped_secrets"]
@@ -126,11 +146,21 @@ async def _run() -> dict[str, object]:
     # Private Lead Runs carry an explicit channel-identity clear. Delegation
     # must preserve that three-state value instead of collapsing None to
     # "absent", which could inherit stale Worker environment state.
-    executor.channel_user_id = None
-    executor.channel_identity_present = True
+    executor._delegated_context = DelegatedRuntimeContextProjection(
+        _carrier=replace(projection._carrier, channel_user_id=None),
+        channel_identity_mode="unset",
+        agent_prompt_bundle=None,
+        runtime_skills=(),
+    )
     cleared_agent = _Agent()
     agent = cleared_agent
-    await executor._aexecute("probe-explicit-clear")
+    await executor._aexecute(
+        "probe-explicit-clear",
+        executor._create_lifecycle_result_holder(
+            execution_id=uuid.uuid4(),
+            changes=SubagentChangeSignal(),
+        ),
+    )
     assert cleared_agent.context is not None
     explicit_clear = "channel_user_id" in cleared_agent.context and cleared_agent.context["channel_user_id"] is None
     return {

@@ -118,6 +118,10 @@ describe("project workbench locale", () => {
     }
 
     expect(html).toContain('aria-pressed="true"');
+    expect(html.match(/<main\b/gu)).toHaveLength(1);
+    expect(html).toContain('href="#workspace-main"');
+    expect(html).toContain('id="workspace-main"');
+    expect(html).toContain("Skip to main content");
 
     expect(enUS.projectWorkspace).toMatchObject({
       platformAdministration: "Platform administration",

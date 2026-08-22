@@ -4,6 +4,7 @@ import { Settings2Icon, UsersIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
+import { useI18n } from "@/core/i18n/hooks";
 import type { Project } from "@/core/projects/types";
 import { cn } from "@/lib/utils";
 
@@ -13,8 +14,7 @@ import { ProjectPageHeader } from "../project-page-header";
 
 type ProjectSettingsNavigationItem = {
   href: string;
-  label: string;
-  description: string;
+  id: "general" | "members";
   icon: typeof Settings2Icon;
 };
 
@@ -29,16 +29,14 @@ export function projectSettingsNavigationItems(
   ) {
     items.push({
       href: base,
-      label: "常规设置",
-      description: "项目资料与生命周期",
+      id: "general",
       icon: Settings2Icon,
     });
   }
   if (project.capabilities.includes("project.members.manage")) {
     items.push({
       href: `${base}/members`,
-      label: "项目成员",
-      description: "成员角色与邀请",
+      id: "members",
       icon: UsersIcon,
     });
   }
@@ -52,27 +50,35 @@ export function ProjectSettingsShell({
 }) {
   const project = useCurrentProject();
   const pathname = usePathname();
+  const { t } = useI18n();
+  const labels = t.project.settings;
   const items = projectSettingsNavigationItems(project);
 
   if (items.length === 0) {
-    return <ProjectAccessDenied projectSlug={project.slug} area="项目设置" />;
+    return (
+      <ProjectAccessDenied
+        projectSlug={project.slug}
+        area={labels.accessArea}
+      />
+    );
   }
 
   return (
     <main className="mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
       <ProjectPageHeader
         className="mb-6"
-        eyebrow={`${project.display_name} · 治理`}
-        title="项目设置"
-        description="管理项目资料、成员和生命周期。"
+        eyebrow={labels.governanceEyebrow(project.display_name)}
+        title={labels.title}
+        description={labels.description}
       />
 
       <div className="grid items-start gap-6 lg:grid-cols-[14rem_minmax(0,1fr)]">
         <nav
-          aria-label="项目设置"
+          aria-label={labels.navigationLabel}
           className="border-border/70 bg-card grid gap-1 rounded-2xl border p-2 lg:sticky lg:top-6"
         >
-          {items.map(({ href, label, description, icon: Icon }) => {
+          {items.map(({ href, id, icon: Icon }) => {
+            const itemLabels = labels.navigation[id];
             const active =
               pathname === href ||
               (href.endsWith("/settings")
@@ -100,7 +106,9 @@ export function ProjectSettingsShell({
                   )}
                 />
                 <span className="min-w-0">
-                  <span className="block text-sm font-medium">{label}</span>
+                  <span className="block text-sm font-medium">
+                    {itemLabels.label}
+                  </span>
                   <span
                     className={cn(
                       "mt-0.5 block text-xs leading-5",
@@ -109,7 +117,7 @@ export function ProjectSettingsShell({
                         : "text-muted-foreground",
                     )}
                   >
-                    {description}
+                    {itemLabels.description}
                   </span>
                 </span>
               </Link>

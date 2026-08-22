@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from langgraph.types import Overwrite
 
 from deerflow.agents.thread_state import get_thread_state_schema
 from deerflow.config.database_config import CheckpointChannelMode
@@ -191,3 +195,44 @@ class CheckpointStateAccessor:
             values,
             as_node=as_node,
         )
+
+    def replacement_values(
+        self,
+        source_values: Mapping[str, Any],
+        *,
+        current_values: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build one complete materialized-state replacement.
+
+        Values present in ``source_values`` win. A channel that exists only in
+        ``current_values`` is actively reset to the effective graph schema's
+        default, so a whole-state replacement cannot accidentally retain the
+        previous materialized value. Reducer and delta channels are wrapped in
+        :class:`Overwrite` to bypass their ordinary merge semantics.
+        """
+
+        writable = graph_writable_channels(self.graph)
+        reducers = graph_reducer_channels(self.graph)
+        channels = getattr(self.graph, "channels", None)
+        if writable is None or reducers is None or not isinstance(channels, Mapping):
+            raise RuntimeError(
+                "checkpoint state schema is unavailable for whole-state replacement",
+            )
+
+        present = set(source_values) | set(current_values)
+        unknown = present - set(writable)
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise RuntimeError(
+                f"checkpoint state contains channels outside the effective schema: {names}",
+            )
+
+        replacement: dict[str, Any] = {}
+        for name in writable & present:
+            if name in source_values:
+                value = copy.deepcopy(source_values[name])
+            else:
+                channel = channels.get(name)
+                value = copy.deepcopy(channel.get()) if channel is not None and callable(getattr(channel, "is_available", None)) and channel.is_available() else None
+            replacement[name] = Overwrite(value) if name in reducers else value
+        return replacement

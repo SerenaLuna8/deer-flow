@@ -40,7 +40,7 @@ export function AgentBuilderActivityBlock({
 
   return (
     <details
-      className="border-border/70 bg-muted/15 group ml-0 rounded-xl border px-3 py-2 sm:ml-13"
+      className="border-border/70 bg-muted/15 group ml-0 rounded-xl border px-3 py-2"
       open={active}
     >
       <summary className="text-muted-foreground flex cursor-pointer list-none items-center gap-2 text-xs">

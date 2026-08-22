@@ -6,7 +6,7 @@ import asyncio
 import concurrent.futures
 import sys
 import threading
-from types import ModuleType, SimpleNamespace
+from types import MappingProxyType, ModuleType, SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -48,10 +48,18 @@ from deerflow.sandbox.tools import (
     _prepare_local_host_execution,
     bash_tool,
 )
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ConfiguredLeadParentExecutionProfile,
+    ParentExecutionBarrier,
+    ParentExecutionBinding,
+)
+from deerflow.subagents.delegated_context import (
+    _OwnerLoopHostExecutionApprovalProxy,
+)
 from deerflow.subagents.registry import get_available_subagent_names
 from deerflow.tools.builtins.task_tool import (
     _host_execution_approval_command,
-    _OwnerLoopHostExecutionApprovalProxy,
 )
 from deerflow.tools.tools import get_available_tools
 
@@ -651,10 +659,13 @@ def test_delegated_approval_anchor_builds_parent_checkpoint_command() -> None:
         approval_id="approval-1",
         source_run_id="run-1",
         source_tool_call_id="inner-call-1",
-    ).to_payload()
+    )
     command = _host_execution_approval_command(
         tool_call_id="outer-task-call-1",
         artifact=artifact,
+        usage={"input_tokens": 2, "output_tokens": 3, "total_tokens": 5},
+        usage_receipt_id="execution-1",
+        usage_completeness="final_observed",
     )
 
     assert command.goto == END
@@ -662,7 +673,16 @@ def test_delegated_approval_anchor_builds_parent_checkpoint_command() -> None:
     assert parent_message.name == "task"
     assert parent_message.tool_call_id == "outer-task-call-1"
     assert parent_message.artifact == {
-        "host_execution_approval": artifact,
+        "host_execution_approval": artifact.to_payload(),
+    }
+    assert parent_message.additional_kwargs == {
+        "subagent_token_usage": {
+            "input_tokens": 2,
+            "output_tokens": 3,
+            "total_tokens": 5,
+        },
+        "subagent_usage_receipt_id": "execution-1",
+        "subagent_usage_completeness": "final_observed",
     }
 
 
@@ -787,14 +807,47 @@ class _FakeApprovalPort:
         self.completions.append((approval_id, outcome))
 
 
+def _parent_binding(
+    owner_loop: asyncio.AbstractEventLoop,
+) -> ParentExecutionBinding:
+    return ParentExecutionBinding(
+        profile=ConfiguredLeadParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=(),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=object(),
+            asset_context=None,
+            agent_config=None,
+            model_name="test-model",
+            thinking_enabled=False,
+            reasoning_effort=None,
+            plan_mode=False,
+            subagent_enabled=True,
+            agent_name="lead",
+            available_skills=None,
+        ),
+        state=MappingProxyType({}),
+        context=MappingProxyType({}),
+        config=MappingProxyType({}),
+        owner_loop=owner_loop,
+        store=None,
+        barrier=ParentExecutionBarrier(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_subagent_owner_loop_proxy_preserves_typed_approval_port() -> None:
+    owner_loop = asyncio.get_running_loop()
     target = _FakeApprovalPort(
         HostExecutionApprovalResult.denied("test_denied"),
     )
     proxy = _OwnerLoopHostExecutionApprovalProxy(
         target,
-        asyncio.get_running_loop(),
+        _parent_binding(owner_loop),
     )
     plan = HostExecutionPlan(
         source_tool_call_id="call-child-1",

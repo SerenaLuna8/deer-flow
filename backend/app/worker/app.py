@@ -57,6 +57,10 @@ from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.sandbox.security import resolve_host_bash_execution_mode
 from deerflow.secrets import SecretKey
+from deerflow.subagents.lifecycle import (
+    SubagentTaskLifecycle,
+    subagent_task_lifecycle,
+)
 
 WORKER_VERSION = "m6"
 
@@ -68,10 +72,34 @@ class WorkerConfigurationUnavailable(RuntimeError):
         super().__init__("Worker configuration is unavailable")
 
 
+async def _run_service_until_subagents_close(
+    service: WorkerService,
+    stop_event: asyncio.Event,
+    lifecycle: SubagentTaskLifecycle,
+) -> None:
+    """Keep Sub-Agent Tasks inside the Worker's resource lifetime."""
+
+    try:
+        await service.run(stop_event)
+    finally:
+        try:
+            # This executes while run_worker still owns its AsyncExitStack, so
+            # private owner-loop proxies become quiet before stores/checkpointers
+            # and the database engine are released.
+            await lifecycle.aclose()
+        finally:
+            # WorkerService keeps its operator-facing grace period bounded by
+            # detaching cancellation-resistant handlers. Once child Tasks are
+            # quiet, join those parent handlers through their real finally
+            # blocks before the AsyncExitStack can release shared resources.
+            await service.join_detached()
+
+
 async def run_worker(
     *,
     handlers: dict[str, JobHandler] | None = None,
     stop_event: asyncio.Event | None = None,
+    subagent_lifecycle: SubagentTaskLifecycle | None = None,
 ) -> None:
     try:
         SecretKey.from_environment()
@@ -291,7 +319,11 @@ async def run_worker(
             after_claim_commit=reconcile_deferred_automation_terminals,
             execution_domain=host_execution_domain,
         )
-        await service.run(stop_event or asyncio.Event())
+        await _run_service_until_subagents_close(
+            service,
+            stop_event or asyncio.Event(),
+            subagent_lifecycle or subagent_task_lifecycle,
+        )
 
 
 def main() -> None:

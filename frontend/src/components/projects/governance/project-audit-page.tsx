@@ -109,7 +109,7 @@ export function ProjectAuditStateView({
       <AdminDataTable
         aria-label={labels.title}
         className="min-w-[56rem] table-fixed"
-        containerClassName="hidden max-h-[calc(100svh-11rem)] overflow-auto md:block"
+        containerClassName="hidden overflow-x-auto md:block"
       >
         <thead className="bg-muted/45 text-muted-foreground sticky top-0 z-10">
           <tr className="border-border/70 border-b">
@@ -194,10 +194,7 @@ export function ProjectAuditStateView({
         </tbody>
       </AdminDataTable>
 
-      <AdminMobileRecordList
-        aria-label={labels.title}
-        className="max-h-[calc(100svh-11rem)] overflow-y-auto md:hidden"
-      >
+      <AdminMobileRecordList aria-label={labels.title} className="md:hidden">
         {state.data.items.map((item) => {
           const detail = describeAuditItem(item, locale);
           const detailsSummary = formatMetadataSummary(detail.metadata);
@@ -265,13 +262,19 @@ export function ProjectAuditStateView({
 
 export function ProjectAuditPage() {
   const project = useCurrentProject();
+  const { t } = useI18n();
   const canRead = project.capabilities.includes("project.audit.read");
   const staticMode = isStaticWebsiteOnly();
   const access = usePrivateWorkAccess();
 
   if (staticMode) notFound();
   if (!canRead) {
-    return <ProjectAccessDenied projectSlug={project.slug} area="项目审计" />;
+    return (
+      <ProjectAccessDenied
+        projectSlug={project.slug}
+        area={t.project.governance.audit.title}
+      />
+    );
   }
   return (
     <AuthorizedProjectAuditPage

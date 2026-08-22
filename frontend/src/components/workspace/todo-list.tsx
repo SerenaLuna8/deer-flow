@@ -1,5 +1,5 @@
 import { ChevronUpIcon, ListTodoIcon } from "lucide-react";
-import { useState } from "react";
+import { useId, useState } from "react";
 
 import type { Todo } from "@/core/todos";
 import { cn } from "@/lib/utils";
@@ -27,6 +27,7 @@ export function TodoList({
   const [internalCollapsed, setInternalCollapsed] = useState(true);
   const isControlled = controlledCollapsed !== undefined;
   const collapsed = isControlled ? controlledCollapsed : internalCollapsed;
+  const contentId = useId();
 
   const handleToggle = () => {
     if (isControlled) {
@@ -44,28 +45,30 @@ export function TodoList({
         className,
       )}
     >
-      <header
-        className={cn(
-          "bg-accent flex min-h-8 shrink-0 cursor-pointer items-center justify-between px-4 text-sm transition-all duration-300 ease-out",
-        )}
-        onClick={handleToggle}
-      >
-        <div className="text-muted-foreground">
-          <div className="flex items-center justify-center gap-2">
-            <ListTodoIcon className="size-4" />
-            <div>To-dos</div>
-          </div>
-        </div>
-        <div>
+      <header className="bg-accent shrink-0">
+        <button
+          type="button"
+          aria-controls={contentId}
+          aria-expanded={!collapsed}
+          className="focus-visible:ring-ring text-muted-foreground flex min-h-8 w-full cursor-pointer items-center justify-between px-4 text-sm transition-all duration-300 ease-out focus-visible:ring-2 focus-visible:outline-none"
+          onClick={handleToggle}
+        >
+          <span className="flex items-center justify-center gap-2">
+            <ListTodoIcon aria-hidden className="size-4" />
+            <span>To-dos</span>
+          </span>
           <ChevronUpIcon
+            aria-hidden
             className={cn(
               "text-muted-foreground size-4 transition-transform duration-300 ease-out",
               collapsed ? "" : "rotate-180",
             )}
           />
-        </div>
+        </button>
       </header>
-      <main
+      <div
+        id={contentId}
+        hidden={collapsed}
         className={cn(
           "bg-accent flex grow px-2 transition-all duration-300 ease-out",
           collapsed ? "h-0 pb-3" : "h-28 pb-4",
@@ -93,7 +96,7 @@ export function TodoList({
             </QueueItem>
           ))}
         </QueueList>
-      </main>
+      </div>
     </div>
   );
 }

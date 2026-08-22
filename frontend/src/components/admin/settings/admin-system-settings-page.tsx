@@ -22,7 +22,15 @@ import {
   WrenchIcon,
   XIcon,
 } from "lucide-react";
-import { useState, type FormEvent, type ReactNode } from "react";
+import { useRouter } from "next/navigation";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+} from "react";
 import type { z } from "zod";
 
 import {
@@ -33,6 +41,14 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
   InputGroup,
@@ -491,6 +507,7 @@ function localizedUnit(
       词: "words",
       字符: "characters",
       秒: "seconds",
+      分钟: "minutes",
       条: "items",
       天: "days",
       次: "times",
@@ -1425,11 +1442,82 @@ function agentRuntimeGroups(locale: Locale) {
 type AgentRuntimeGroupValue = ReturnType<
   typeof agentRuntimeGroups
 >[number]["value"];
-type SettingsDestination =
+export type SettingsDestination =
   | "auth"
   | "automations"
   | "quotas"
   | AgentRuntimeGroupValue;
+
+type PendingSystemSettingsLeave = {
+  href: string;
+  viaHistory: boolean;
+};
+
+type DirtyDestinationsBySection = Partial<
+  Record<SystemSettingsSectionName, readonly SettingsDestination[]>
+>;
+
+const AGENT_RUNTIME_DESTINATION_FIELDS: Record<
+  AgentRuntimeGroupValue,
+  readonly (keyof AgentRuntimeSettingsValue)[]
+> = {
+  "run-limits": [
+    "token_usage",
+    "token_budget",
+    "max_recursion_limit",
+    "subagents",
+  ],
+  "assistant-experience": ["title", "suggestions", "input_polish"],
+  summarization: ["summarization"],
+  memory: ["memory"],
+  "vision-bridge": ["vision_bridge"],
+  tools: ["tool_search", "tool_output"],
+  safeguards: ["loop_detection", "read_before_write", "safety_finish_reason"],
+};
+
+function sameDraftValue(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function dirtySystemSettingsDestinations(
+  section: SystemSettingsSectionName,
+  base: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+  draft: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+): SettingsDestination[] {
+  if (sameDraftValue(base, draft)) return [];
+  if (section === "memory_document") return ["memory"];
+  if (section !== "agent_runtime") return [section];
+
+  const runtimeBase = base as AgentRuntimeSettingsValue;
+  const runtimeDraft = draft as AgentRuntimeSettingsValue;
+  return Object.entries(AGENT_RUNTIME_DESTINATION_FIELDS).flatMap(
+    ([destination, fields]) =>
+      fields.some(
+        (field) => !sameDraftValue(runtimeBase[field], runtimeDraft[field]),
+      )
+        ? [destination as AgentRuntimeGroupValue]
+        : [],
+  );
+}
+
+export function collectDirtySystemSettingsDestinations(
+  sections: DirtyDestinationsBySection,
+): ReadonlySet<SettingsDestination> {
+  return new Set(Object.values(sections).flatMap((items) => items ?? []));
+}
+
+export function isSameDocumentNavigation(
+  currentHref: string,
+  destinationHref: string,
+): boolean {
+  const current = new URL(currentHref);
+  const destination = new URL(destinationHref, current);
+  return (
+    destination.origin === current.origin &&
+    destination.pathname === current.pathname &&
+    destination.search === current.search
+  );
+}
 
 function isAgentRuntimeGroup(
   destination: SettingsDestination,
@@ -2087,6 +2175,7 @@ function EditableSection<Value>({
   error,
   lastResult,
   modelsStatus,
+  onDraftChange,
   onSave,
   pending,
   revision,
@@ -2105,6 +2194,11 @@ function EditableSection<Value>({
   error?: string;
   lastResult?: SystemSettingsMutationResponse;
   modelsStatus: ModelsStatus;
+  onDraftChange: (
+    section: SystemSettingsSectionName,
+    base: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+    draft: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+  ) => void;
   onSave: SaveSection;
   pending: boolean;
   revision: number;
@@ -2130,6 +2224,15 @@ function EditableSection<Value>({
   const dirty = JSON.stringify(base) !== JSON.stringify(draft);
   const schemaValid =
     section !== "memory_document" || schema.safeParse(draft).success;
+
+  function updateDraft(next: Value): void {
+    setDraft(next);
+    onDraftChange(
+      section,
+      base as SystemSettingsSectionValueMap[SystemSettingsSectionName],
+      next as SystemSettingsSectionValueMap[SystemSettingsSectionName],
+    );
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -2165,6 +2268,11 @@ function EditableSection<Value>({
     setBase(next);
     setDraft(next);
     setBaseRevision(result.stored_revision);
+    onDraftChange(
+      section,
+      next as SystemSettingsSectionValueMap[SystemSettingsSectionName],
+      next as SystemSettingsSectionValueMap[SystemSettingsSectionName],
+    );
   }
 
   return (
@@ -2208,7 +2316,7 @@ function EditableSection<Value>({
           aria-busy={pending}
           className="min-w-0 p-4 sm:p-5"
         >
-          {renderEditor(draft, setDraft, activeModels, modelsStatus)}
+          {renderEditor(draft, updateDraft, activeModels, modelsStatus)}
         </fieldset>
         <div
           data-settings-save-footer={section}
@@ -2240,7 +2348,7 @@ function EditableSection<Value>({
               className="min-h-11 sm:min-h-9"
               disabled={!dirty || pending}
               onClick={() => {
-                setDraft(base);
+                updateDraft(base);
                 setLocalError(null);
               }}
             >
@@ -2276,6 +2384,7 @@ export function AdminSystemSettingsStateView({
   activeModels,
   lastResults,
   modelsStatus,
+  onNavigate,
   onRetry,
   onSave,
   pendingSection,
@@ -2286,6 +2395,7 @@ export function AdminSystemSettingsStateView({
   activeModels: Model[];
   lastResults: LastResults;
   modelsStatus: ModelsStatus;
+  onNavigate?: (href: string) => void;
   onRetry: () => void;
   onSave: SaveSection;
   pendingSection: SystemSettingsSectionName | null;
@@ -2297,6 +2407,17 @@ export function AdminSystemSettingsStateView({
   const labels = t.adminSystemSettings;
   const [activeDestination, setActiveDestination] =
     useState<SettingsDestination>("auth");
+  const [dirtyBySection, setDirtyBySection] =
+    useState<DirtyDestinationsBySection>({});
+  const [pendingLeave, setPendingLeave] =
+    useState<PendingSystemSettingsLeave | null>(null);
+  const allowLeaveRef = useRef(false);
+  const dirtyDestinations = useMemo(
+    () => collectDirtySystemSettingsDestinations(dirtyBySection),
+    [dirtyBySection],
+  );
+  const hasUnsavedChanges = dirtyDestinations.size > 0;
+  const unsavedLabel = locale === "zh-CN" ? "未保存" : "Unsaved";
   const platformDestinations = [
     {
       value: "auth",
@@ -2325,6 +2446,82 @@ export function AdminSystemSettingsStateView({
   )
     ? activeDestination
     : "run-limits";
+
+  function recordDraft(
+    section: SystemSettingsSectionName,
+    base: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+    draft: SystemSettingsSectionValueMap[SystemSettingsSectionName],
+  ): void {
+    const next = dirtySystemSettingsDestinations(section, base, draft);
+    setDirtyBySection((current) => {
+      if (sameDraftValue(current[section] ?? [], next)) return current;
+      return { ...current, [section]: next };
+    });
+  }
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+    const warnBeforeUnload = (event: BeforeUnloadEvent) => {
+      if (allowLeaveRef.current) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnBeforeUnload);
+    return () => window.removeEventListener("beforeunload", warnBeforeUnload);
+  }, [hasUnsavedChanges]);
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) return;
+
+    const preventDirtyNavigation = (event: MouseEvent) => {
+      if (
+        allowLeaveRef.current ||
+        event.defaultPrevented ||
+        event.button !== 0 ||
+        event.metaKey ||
+        event.ctrlKey ||
+        event.shiftKey ||
+        event.altKey
+      ) {
+        return;
+      }
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      const anchor = target.closest<HTMLAnchorElement>("a[href]");
+      if (
+        !anchor ||
+        anchor.target === "_blank" ||
+        anchor.hasAttribute("download")
+      ) {
+        return;
+      }
+      const destination = new URL(anchor.href, window.location.href);
+      if (isSameDocumentNavigation(window.location.href, destination.href)) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      setPendingLeave({ href: destination.href, viaHistory: false });
+    };
+
+    const currentHref = window.location.href;
+    const currentHistoryState: unknown = window.history.state;
+    const preventHistoryNavigation = (event: PopStateEvent) => {
+      if (allowLeaveRef.current) return;
+      const destination = window.location.href;
+      if (isSameDocumentNavigation(currentHref, destination)) return;
+      event.stopImmediatePropagation();
+      window.history.pushState(currentHistoryState, "", currentHref);
+      setPendingLeave({ href: destination, viaHistory: true });
+    };
+
+    document.addEventListener("click", preventDirtyNavigation, true);
+    window.addEventListener("popstate", preventHistoryNavigation, true);
+    return () => {
+      document.removeEventListener("click", preventDirtyNavigation, true);
+      window.removeEventListener("popstate", preventHistoryNavigation, true);
+    };
+  }, [hasUnsavedChanges]);
 
   return (
     <AdminPage className="max-w-7xl space-y-5">
@@ -2420,6 +2617,9 @@ export function AdminSystemSettingsStateView({
                   {platformDestinations.map((destination) => (
                     <option key={destination.value} value={destination.value}>
                       {destination.label}
+                      {dirtyDestinations.has(destination.value)
+                        ? ` · ${unsavedLabel}`
+                        : ""}
                     </option>
                   ))}
                 </optgroup>
@@ -2429,6 +2629,9 @@ export function AdminSystemSettingsStateView({
                   {agentDestinations.map((destination) => (
                     <option key={destination.value} value={destination.value}>
                       {destination.title}
+                      {dirtyDestinations.has(destination.value)
+                        ? ` · ${unsavedLabel}`
+                        : ""}
                     </option>
                   ))}
                 </optgroup>
@@ -2457,6 +2660,9 @@ export function AdminSystemSettingsStateView({
                       type="button"
                       data-settings-task={destination.value}
                       data-settings-destination={destination.value}
+                      data-settings-dirty={
+                        dirtyDestinations.has(destination.value) || undefined
+                      }
                       aria-current={selected ? "page" : undefined}
                       className={cn(
                         "text-muted-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-blue-50 dark:hover:bg-blue-500/15",
@@ -2467,6 +2673,15 @@ export function AdminSystemSettingsStateView({
                     >
                       <Icon aria-hidden className="size-4 shrink-0" />
                       <span className="font-medium">{destination.label}</span>
+                      {dirtyDestinations.has(destination.value) ? (
+                        <Badge
+                          variant="outline"
+                          data-settings-dirty-marker={destination.value}
+                          className="border-warning/40 bg-warning/10 text-warning-foreground ml-auto px-1.5 py-0 text-[10px]"
+                        >
+                          {unsavedLabel}
+                        </Badge>
+                      ) : null}
                     </button>
                   );
                 })}
@@ -2489,6 +2704,9 @@ export function AdminSystemSettingsStateView({
                         key={destination.value}
                         type="button"
                         data-settings-destination={destination.value}
+                        data-settings-dirty={
+                          dirtyDestinations.has(destination.value) || undefined
+                        }
                         aria-current={selected ? "page" : undefined}
                         className={cn(
                           "text-muted-foreground flex min-h-10 w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors hover:bg-blue-50 dark:hover:bg-blue-500/15",
@@ -2499,6 +2717,15 @@ export function AdminSystemSettingsStateView({
                       >
                         <Icon aria-hidden className="size-4 shrink-0" />
                         <span className="font-medium">{destination.title}</span>
+                        {dirtyDestinations.has(destination.value) ? (
+                          <Badge
+                            variant="outline"
+                            data-settings-dirty-marker={destination.value}
+                            className="border-warning/40 bg-warning/10 text-warning-foreground ml-auto px-1.5 py-0 text-[10px]"
+                          >
+                            {unsavedLabel}
+                          </Badge>
+                        ) : null}
                       </button>
                     );
                   })}
@@ -2525,6 +2752,7 @@ export function AdminSystemSettingsStateView({
                 lastResult={lastResults.auth}
                 activeModels={activeModels}
                 modelsStatus={modelsStatus}
+                onDraftChange={recordDraft}
                 onSave={onSave}
                 renderEditor={(value, setValue) => (
                   <AuthEditor value={value} onChange={setValue} />
@@ -2550,6 +2778,7 @@ export function AdminSystemSettingsStateView({
                 lastResult={lastResults.automations}
                 activeModels={activeModels}
                 modelsStatus={modelsStatus}
+                onDraftChange={recordDraft}
                 onSave={onSave}
                 renderEditor={(value, setValue) => (
                   <AutomationsEditor value={value} onChange={setValue} />
@@ -2575,6 +2804,7 @@ export function AdminSystemSettingsStateView({
                 lastResult={lastResults.quotas}
                 activeModels={activeModels}
                 modelsStatus={modelsStatus}
+                onDraftChange={recordDraft}
                 onSave={onSave}
                 renderEditor={(value, setValue) => (
                   <QuotasEditor value={value} onChange={setValue} />
@@ -2609,6 +2839,7 @@ export function AdminSystemSettingsStateView({
                 lastResult={lastResults.agent_runtime}
                 activeModels={activeModels}
                 modelsStatus={modelsStatus}
+                onDraftChange={recordDraft}
                 onSave={onSave}
                 renderEditor={(value, setValue, models, modelStatus) => (
                   <AgentRuntimeEditor
@@ -2640,6 +2871,7 @@ export function AdminSystemSettingsStateView({
                 lastResult={lastResults.memory_document}
                 activeModels={activeModels}
                 modelsStatus={modelsStatus}
+                onDraftChange={recordDraft}
                 onSave={onSave}
                 renderEditor={(value, setValue) => (
                   <MemoryDocumentSectionsEditor
@@ -2652,6 +2884,60 @@ export function AdminSystemSettingsStateView({
           </div>
         </div>
       )}
+      <Dialog
+        open={pendingLeave !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingLeave(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {locale === "zh-CN"
+                ? "放弃未保存修改？"
+                : "Discard unsaved changes?"}
+            </DialogTitle>
+            <DialogDescription>
+              {locale === "zh-CN"
+                ? "系统配置草稿只保存在当前页面。离开后将丢失这些修改。"
+                : "System-setting drafts exist only on this page and will be lost if you leave."}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setPendingLeave(null)}
+            >
+              {locale === "zh-CN" ? "继续编辑" : "Continue editing"}
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => {
+                const leave = pendingLeave;
+                setPendingLeave(null);
+                if (!leave) return;
+                allowLeaveRef.current = true;
+                if (leave.viaHistory) {
+                  window.history.back();
+                  return;
+                }
+                const url = new URL(leave.href, window.location.href);
+                if (url.origin === window.location.origin && onNavigate) {
+                  onNavigate(`${url.pathname}${url.search}${url.hash}`);
+                } else {
+                  window.location.assign(url.href);
+                }
+              }}
+            >
+              {locale === "zh-CN"
+                ? "放弃修改并离开"
+                : "Discard changes and leave"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </AdminPage>
   );
 }
@@ -2662,6 +2948,7 @@ function AuthorizedAdminSystemSettingsPage({
   accountId: string;
 }) {
   const { t } = useI18n();
+  const router = useRouter();
   const labels = t.adminSystemSettings;
   const catalog = useAdminSystemSettings(accountId);
   const models = useModels();
@@ -2768,6 +3055,7 @@ function AuthorizedAdminSystemSettingsPage({
       pendingSection={pendingSection}
       sectionErrors={sectionErrors}
       lastResults={lastResults}
+      onNavigate={(href) => router.push(href)}
       onSave={saveSection}
       onRetry={() => void catalog.refetch()}
       retrying={catalog.isFetching}

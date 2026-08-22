@@ -902,9 +902,6 @@ export function ProjectAgentCatalogView({
               {orderedSystemItems.length}
             </Badge>
           </div>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {copy.systemDescription}
-          </p>
         </div>
         <ProjectAgentCollectionView
           {...sharedProps}
@@ -929,9 +926,6 @@ export function ProjectAgentCatalogView({
               {orderedProjectItems.length}
             </Badge>
           </div>
-          <p className="text-muted-foreground mt-1 text-sm">
-            {copy.projectDescription}
-          </p>
         </div>
         <ProjectAgentCollectionView
           {...sharedProps}

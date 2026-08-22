@@ -278,7 +278,7 @@ export function projectMcpVersionErrorMessage(
   ) {
     return (
       copy?.mcpVersionValidation ??
-      "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌秘密、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个秘密槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。"
+      "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌秘密、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每组访问凭证至少包含一个 Header 或 Query 参数，也可以同时包含两类参数，且字段名有效。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。"
     );
   }
   return adminAssetErrorMessage(error, copy);

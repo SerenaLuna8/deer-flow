@@ -13,7 +13,7 @@ Detection strategy:
      list, *after* all ToolMessage responses to the previous
      AIMessage(tool_calls).
   4. If it appears >= hard_limit times, strip all tool_calls from the
-     response so the agent is forced to produce a final text answer.
+     response and route exactly once through a tool-free finalization turn.
 
 Why the warning is injected at ``wrap_model_call`` instead of
 ``after_model``:
@@ -38,9 +38,9 @@ hard-stop path still forces termination when the configured safety limit
 is reached.
 
 Stop-reason surfacing (#3875 Phase 2):
-  Like the token-budget guard, the loop hard stop does NOT raise — it
-  strips ``tool_calls`` so the agent loop terminates naturally with a
-  final answer. To let the caller (the subagent executor) distinguish a
+  Like the token-budget guard, the loop hard stop records an additive
+  stop reason. It strips the repeated ``tool_calls`` and performs one bounded,
+  tool-free finalization turn. To let the caller (the subagent executor) distinguish a
   loop-capped completion from a clean one, the run that triggered the hard
   stop is recorded in ``_stop_reason`` and exposed via
   :meth:`consume_stop_reason`. The executor collects that reason alongside
@@ -54,19 +54,30 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import posixpath
+import re
 import threading
 from collections import OrderedDict, defaultdict
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Annotated, NotRequired, TypedDict, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware.types import (
+    ModelCallResult,
+    ModelRequest,
+    ModelResponse,
+    PrivateStateAttr,
+    hook_config,
+)
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares._bounded_dict import BoundedDict
+from deerflow.agents.middlewares.read_before_write_middleware import READ_MARK_KEY
+from deerflow.runtime.context_keys import RuntimeContextKeys
+from deerflow.runtime.runs.execution_contracts import RunSemanticStopRecorder
 
 if TYPE_CHECKING:
     from deerflow.config.loop_detection_config import LoopDetectionConfig
@@ -81,6 +92,21 @@ _DEFAULT_MAX_TRACKED_THREADS = 100  # LRU eviction limit
 _DEFAULT_TOOL_FREQ_WARN = 30  # warn after 30 calls to the same tool type
 _DEFAULT_TOOL_FREQ_HARD_LIMIT = 50  # force-stop after 50 calls to the same tool type
 _MAX_PENDING_WARNINGS_PER_RUN = 4
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}\Z")
+LOOP_FINALIZATION_STATE_KEY = "loop_detection_finalization"
+LOOP_SAFETY_REPLACEMENT_KEY = "deerflow_loop_safety_replacement"
+_LOOP_FINALIZATION_STATE_VERSION = 1
+
+
+class _LoopFinalizationFacts(TypedDict):
+    version: int
+    run_id: str
+    phase: str
+    reason: str
+
+
+class LoopDetectionState(AgentState):
+    loop_detection_finalization: NotRequired[Annotated[_LoopFinalizationFacts | None, PrivateStateAttr]]
 
 
 def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
@@ -109,7 +135,13 @@ def _normalize_tool_call_args(raw_args: object) -> tuple[dict, str | None]:
     return {}, json.dumps(raw_args, sort_keys=True, default=str)
 
 
-def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
+def _stable_tool_key(
+    name: str,
+    args: dict,
+    fallback_key: str | None,
+    *,
+    read_mark: str | None = None,
+) -> str:
     """Derive a stable key from salient args without overfitting to noise."""
     if name == "read_file" and fallback_key is None:
         path = args.get("path") or ""
@@ -131,7 +163,11 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
         bucket_end = max(end_line, 1)
         bucket_start = (bucket_start - 1) // bucket_size
         bucket_end = (bucket_end - 1) // bucket_size
-        return f"{path}:{bucket_start}-{bucket_end}"
+        # ReadBeforeWrite stamps the exact content version observed by every
+        # successful read_file call.  Including that authenticated mark keeps
+        # ``read(v0) -> write -> read(v1)`` productive while identical reads of
+        # an unchanged version still converge on one loop identity.
+        return f"{path}:{bucket_start}-{bucket_end}:{read_mark or 'unmarked'}"
 
     # File mutations are content-sensitive: the same path may be updated with
     # different payloads during iteration or bounded chunking. Using only the
@@ -152,7 +188,11 @@ def _stable_tool_key(name: str, args: dict, fallback_key: str | None) -> str:
     return json.dumps(args, sort_keys=True, default=str)
 
 
-def _hash_tool_calls(tool_calls: list[dict]) -> str:
+def _hash_tool_calls(
+    tool_calls: list[dict],
+    *,
+    read_marks: Mapping[str, str] | None = None,
+) -> str:
     """Deterministic hash of a set of tool calls (name + stable key).
 
     This is intended to be order-independent: the same multiset of tool calls
@@ -163,7 +203,14 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     for tc in tool_calls:
         name = tc.get("name", "")
         args, fallback_key = _normalize_tool_call_args(tc.get("args", {}))
-        key = _stable_tool_key(name, args, fallback_key)
+        path = args.get("path") if fallback_key is None else None
+        normalized_path = posixpath.normpath(path) if isinstance(path, str) and path else None
+        key = _stable_tool_key(
+            name,
+            args,
+            fallback_key,
+            read_mark=(read_marks.get(normalized_path) if read_marks is not None and normalized_path is not None else None),
+        )
 
         normalized.append(f"{name}:{key}")
 
@@ -171,6 +218,23 @@ def _hash_tool_calls(tool_calls: list[dict]) -> str:
     normalized.sort()
     blob = json.dumps(normalized, sort_keys=True, default=str)
     return hashlib.md5(blob.encode()).hexdigest()[:12]
+
+
+def _current_read_marks(messages: list[object]) -> dict[str, str]:
+    """Return the newest authenticated read version for each normalized path."""
+
+    marks: dict[str, str] = {}
+    for message in messages:
+        if not isinstance(message, ToolMessage) or message.status == "error" or message.name != "read_file":
+            continue
+        mark = (message.additional_kwargs or {}).get(READ_MARK_KEY)
+        if not isinstance(mark, Mapping):
+            continue
+        path = mark.get("path")
+        content_hash = mark.get("hash")
+        if isinstance(path, str) and path and isinstance(content_hash, str) and _SHA256_HEX.fullmatch(content_hash) is not None:
+            marks[posixpath.normpath(path)] = content_hash
+    return marks
 
 
 _WARNING_MSG = "[LOOP DETECTED] You are repeating the same tool calls. Stop calling tools and produce your final answer now. If you cannot complete the task, summarize what you accomplished so far."
@@ -183,8 +247,16 @@ _HARD_STOP_MSG = "[FORCED STOP] Repeated tool calls exceeded the safety limit. P
 
 _TOOL_FREQ_HARD_STOP_MSG = "[FORCED STOP] Tool {tool_name} called {count} times — exceeded the per-tool safety limit. Producing final answer with results collected so far."
 
+_FINALIZATION_PROMPT = (
+    "The loop safety guard stopped further tool calls because: {reason} "
+    "Produce the user-facing final answer now using only results already present in the conversation. "
+    "Do not call tools. Clearly state what triggered the stop, what requested work is complete or incomplete, "
+    "and the direct cause of every observed tool or model failure. Do not claim there were no failures unless "
+    "the visible execution history supports that claim."
+)
 
-class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
+
+class LoopDetectionMiddleware(AgentMiddleware[LoopDetectionState]):
     """Detects and breaks repetitive tool call loops.
 
     Threshold parameters are validated upstream by :class:`LoopDetectionConfig`;
@@ -214,6 +286,8 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             weakening protection on all other tools. Default: ``None``
             (no overrides).
     """
+
+    state_schema = LoopDetectionState
 
     def __init__(
         self,
@@ -406,7 +480,10 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             return None, False
 
         thread_id = self._get_thread_id(runtime)
-        call_hash = _hash_tool_calls(tool_calls)
+        call_hash = _hash_tool_calls(
+            tool_calls,
+            read_marks=_current_read_marks(messages),
+        )
 
         with self._lock:
             # Touch / create entry (move to end for LRU)
@@ -518,15 +595,22 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
     @staticmethod
     def _build_hard_stop_update(last_msg, content: str | list) -> dict:
-        """Clear tool-call metadata so forced-stop messages serialize as plain assistant text."""
+        """Clear tool-call metadata and hide the provisional stop placeholder."""
         update = {
             "tool_calls": [],
+            "invalid_tool_calls": [],
             "content": content,
         }
 
         additional_kwargs = dict(getattr(last_msg, "additional_kwargs", {}) or {})
         for key in ("tool_calls", "function_call"):
             additional_kwargs.pop(key, None)
+        # The next bounded, tool-free model turn owns the user-visible answer.
+        # Keeping this stripped message hidden preserves a valid checkpointed
+        # tool-call sequence without exposing an internal placeholder as if it
+        # were the requested deliverable.
+        additional_kwargs["hide_from_ui"] = True
+        additional_kwargs[LOOP_SAFETY_REPLACEMENT_KEY] = True
         update["additional_kwargs"] = additional_kwargs
 
         response_metadata = deepcopy(getattr(last_msg, "response_metadata", {}) or {})
@@ -536,7 +620,51 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
 
         return update
 
-    def _apply(self, state: AgentState, runtime: Runtime) -> dict | None:
+    def _record_loop_capped(
+        self,
+        runtime: Runtime,
+        *,
+        run_id: str,
+        message: AIMessage,
+    ) -> None:
+        context = getattr(runtime, "context", None)
+        recorder = context.get(RuntimeContextKeys.RUN_SEMANTIC_STOP_RECORDER) if isinstance(context, Mapping) else None
+        message_id = message.id
+        suppressed_message_id = message_id if isinstance(message_id, str) and message_id.strip() else None
+        if isinstance(recorder, RunSemanticStopRecorder):
+            recorder.record(
+                "loop_capped",
+                suppressed_ai_message_id=suppressed_message_id,
+            )
+            return
+        # Delegated graphs intentionally do not receive the lead Run's
+        # recorder. Their lifecycle consumes this graph-local signal and
+        # preserves ``completed + loop_capped`` for the parent.
+        with self._lock:
+            self._stop_reason[run_id] = "loop_capped"
+
+    def _apply(self, state: LoopDetectionState, runtime: Runtime) -> dict | None:
+        run_id = self._get_run_id(runtime)
+        finalization = state.get(LOOP_FINALIZATION_STATE_KEY)
+        if isinstance(finalization, Mapping) and finalization.get("version") == _LOOP_FINALIZATION_STATE_VERSION and finalization.get("run_id") == run_id and finalization.get("phase") == "pending":
+            messages = state.get("messages", [])
+            last_msg = messages[-1] if messages else None
+            if not isinstance(last_msg, AIMessage):
+                raise RuntimeError("Loop finalization returned no assistant response")
+            if last_msg.tool_calls:
+                self._record_loop_capped(
+                    runtime,
+                    run_id=run_id,
+                    message=last_msg,
+                )
+                raise RuntimeError("Loop finalization attempted another tool call")
+            if not self._has_visible_text(last_msg.content):
+                raise RuntimeError("Loop finalization returned no visible answer")
+            return {
+                LOOP_FINALIZATION_STATE_KEY: None,
+                "jump_to": "end",
+            }
+
         warning, hard_stop = self._track_and_check(state, runtime)
 
         if hard_stop:
@@ -548,18 +676,29 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             # Written under the lock to match ``TokenBudgetMiddleware``: the lead
             # agent's middleware instance is shared across concurrent Gateway
             # threads, so the bounded-dict write needs the same guard.
-            run_id = self._get_run_id(runtime)
-            with self._lock:
-                self._stop_reason[run_id] = "loop_capped"
             # Strip tool_calls from the last AIMessage to force text output.
             # Once tool_calls are stripped, the AIMessage no longer requires
             # matching ToolMessage responses, so mutating it in place here
             # is safe for OpenAI/Moonshot pairing validators.
             messages = state.get("messages", [])
             last_msg = messages[-1]
+            self._record_loop_capped(
+                runtime,
+                run_id=run_id,
+                message=last_msg,
+            )
             content = self._append_text(last_msg.content, warning or _HARD_STOP_MSG)
             stripped_msg = last_msg.model_copy(update=self._build_hard_stop_update(last_msg, content))
-            return {"messages": [stripped_msg]}
+            return {
+                "messages": [stripped_msg],
+                LOOP_FINALIZATION_STATE_KEY: {
+                    "version": _LOOP_FINALIZATION_STATE_VERSION,
+                    "run_id": run_id,
+                    "phase": "pending",
+                    "reason": warning or _HARD_STOP_MSG,
+                },
+                "jump_to": "model",
+            }
 
         if warning:
             # Defer injection to the next model call. We must NOT alter the
@@ -604,12 +743,14 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         self._clear_other_run_pending_warnings(runtime)
         return None
 
+    @hook_config(can_jump_to=["model", "end"])
     @override
-    def after_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+    def after_model(self, state: LoopDetectionState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
+    @hook_config(can_jump_to=["model", "end"])
     @override
-    async def aafter_model(self, state: AgentState, runtime: Runtime) -> dict | None:
+    async def aafter_model(self, state: LoopDetectionState, runtime: Runtime) -> dict | None:
         return self._apply(state, runtime)
 
     @override
@@ -630,6 +771,19 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
             self._pending_warning_touch_order.pop(pending_key, None)
         return warnings
 
+    @staticmethod
+    def _has_visible_text(content: object) -> bool:
+        if isinstance(content, str):
+            return bool(content.strip())
+        if not isinstance(content, list):
+            return False
+        for block in content:
+            if isinstance(block, str) and block.strip():
+                return True
+            if isinstance(block, Mapping) and str(block.get("type", "")).lower() in {"text", "output_text"} and isinstance(block.get("text"), str) and block["text"].strip():
+                return True
+        return False
+
     def _augment_request(self, request: ModelRequest) -> ModelRequest:
         """Append queued loop warnings (if any) to the outgoing message list.
 
@@ -640,6 +794,26 @@ class LoopDetectionMiddleware(AgentMiddleware[AgentState]):
         restriction (we use HumanMessage), and never mutates an existing
         AIMessage.
         """
+        state = request.state or {}
+        run_id = self._get_run_id(request.runtime)
+        finalization = state.get(LOOP_FINALIZATION_STATE_KEY)
+        if isinstance(finalization, Mapping) and finalization.get("version") == _LOOP_FINALIZATION_STATE_VERSION and finalization.get("run_id") == run_id and finalization.get("phase") == "pending":
+            self._drain_pending_warnings(request.runtime)
+            reason = str(finalization.get("reason") or _HARD_STOP_MSG)
+            return request.override(
+                messages=[
+                    *request.messages,
+                    HumanMessage(
+                        content=_FINALIZATION_PROMPT.format(reason=reason),
+                        name="loop_finalization",
+                        additional_kwargs={"hide_from_ui": True},
+                    ),
+                ],
+                tools=[],
+                tool_choice=None,
+                response_format=None,
+            )
+
         warnings = self._drain_pending_warnings(request.runtime)
         if not warnings:
             return request

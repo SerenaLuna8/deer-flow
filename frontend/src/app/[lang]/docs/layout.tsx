@@ -1,34 +1,21 @@
-import type { PageMapItem } from "nextra";
+import { notFound } from "next/navigation";
 import { getPageMap } from "nextra/page-map";
 import { Layout } from "nextra-theme-docs";
 
 import { Footer } from "@/components/landing/footer";
 import { Header } from "@/components/landing/header";
-import { getLocaleByLang } from "@/core/i18n/locale";
+import { buildDocsPageMap, resolveDocsLanguage } from "@/core/docs/routing";
 import "nextra-theme-docs/style.css";
-
-const i18n = [
-  { locale: "en", name: "English" },
-  { locale: "zh", name: "中文" },
-];
-
-function formatPageRoute(base: string, items: PageMapItem[]): PageMapItem[] {
-  return items.map((item) => {
-    if ("route" in item && !item.route.startsWith(base)) {
-      item.route = `${base}${item.route}`;
-    }
-    if ("children" in item && item.children) {
-      item.children = formatPageRoute(base, item.children);
-    }
-    return item;
-  });
-}
 
 export default async function DocLayout({ children, params }) {
   const { lang } = await params;
-  const locale = getLocaleByLang(lang);
-  const pages = await getPageMap(`/${lang}`);
-  const pageMap = formatPageRoute(`/${lang}/docs`, pages);
+  const docsLanguage = resolveDocsLanguage(lang);
+  if (!docsLanguage) {
+    notFound();
+  }
+
+  const pages = await getPageMap(`/${docsLanguage.contentLang}`);
+  const pageMap = buildDocsPageMap(`/${lang}/docs`, pages);
 
   return (
     <Layout
@@ -36,13 +23,12 @@ export default async function DocLayout({ children, params }) {
         <Header
           className="sticky max-w-full px-10"
           homeURL="/"
-          locale={locale}
+          locale={docsLanguage.locale}
         />
       }
       pageMap={pageMap}
       footer={<Footer className="mt-0" />}
-      i18n={i18n}
-      // ... Your additional layout options
+      i18n={docsLanguage.localeOptions}
     >
       {children}
     </Layout>

@@ -13,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from app.shared_assets.agent_design_generation import (
+    DEFAULT_GENERATION_TIMEOUT_SECONDS,
+)
 from app.shared_assets.skill_archive import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILE_BYTES,
@@ -163,6 +166,11 @@ DOCUMENTED_CONSTANTS = (
         pattern=r"`inspect_image` end-to-end deadline at (\d+) seconds",
         expected=str(DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS),
         source="deerflow.config.vision_bridge_config.DEFAULT_VISION_BRIDGE_TIMEOUT_SECONDS",
+    ),
+    DocumentedConstant(
+        pattern=r"one-turn model-generation deadline defaults to and is capped at (\d+) seconds",
+        expected=str(int(DEFAULT_GENERATION_TIMEOUT_SECONDS)),
+        source="app.shared_assets.agent_design_generation.DEFAULT_GENERATION_TIMEOUT_SECONDS",
     ),
     DocumentedConstant(
         pattern=r"`skills\.read_evidence_ttl_calls` subsequent lead model calls \(default (\d+)",

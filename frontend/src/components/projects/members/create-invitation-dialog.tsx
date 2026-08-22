@@ -12,6 +12,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { useI18n } from "@/core/i18n/hooks";
 import type {
   CreateProjectInvitationInput,
   CreatedProjectInvitation,
@@ -34,6 +35,8 @@ export function CreateInvitationDialog({
   onOpenChange: (open: boolean) => void;
   onSubmit: (input: CreateProjectInvitationInput) => void;
 }) {
+  const { t } = useI18n();
+  const labels = t.project.members;
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<InvitableProjectRole>("viewer");
 
@@ -48,20 +51,20 @@ export function CreateInvitationDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
         <DialogHeader>
-          <DialogTitle>邀请成员</DialogTitle>
+          <DialogTitle>{labels.inviteDialog.title}</DialogTitle>
           <DialogDescription>
-            邀请链接只显示一次，请通过可信渠道发送。
+            {labels.inviteDialog.description}
           </DialogDescription>
         </DialogHeader>
         {result ? (
           <div className="space-y-4">
             <label className="block space-y-2 text-sm font-medium">
-              邀请链接
+              {labels.inviteDialog.inviteLink}
               <Input readOnly value={result.invite_url_fragment} />
             </label>
             <DialogFooter>
               <Button type="button" onClick={() => onOpenChange(false)}>
-                完成
+                {labels.inviteDialog.done}
               </Button>
             </DialogFooter>
           </div>
@@ -74,7 +77,7 @@ export function CreateInvitationDialog({
             }}
           >
             <label className="block space-y-2 text-sm font-medium">
-              邮箱
+              {labels.inviteDialog.email}
               <Input
                 type="email"
                 value={email}
@@ -83,7 +86,9 @@ export function CreateInvitationDialog({
               />
             </label>
             <fieldset className="space-y-2">
-              <legend className="text-sm font-medium">项目角色</legend>
+              <legend className="text-sm font-medium">
+                {labels.inviteDialog.projectRole}
+              </legend>
               <div className="grid grid-cols-2 gap-2">
                 {INVITABLE_PROJECT_ROLES.map((item) => (
                   <label
@@ -96,8 +101,7 @@ export function CreateInvitationDialog({
                       checked={role === item}
                       onChange={() => setRole(item)}
                     />
-                    {item[0]?.toUpperCase()}
-                    {item.slice(1)}
+                    {labels.roles[item]}
                   </label>
                 ))}
               </div>
@@ -109,7 +113,7 @@ export function CreateInvitationDialog({
             )}
             <DialogFooter>
               <Button type="submit" disabled={pending}>
-                创建邀请
+                {labels.inviteDialog.create}
               </Button>
             </DialogFooter>
           </form>

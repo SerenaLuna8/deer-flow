@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
 from langchain_core.messages import ToolMessage
@@ -12,7 +12,13 @@ from deerflow.agents.middlewares.tool_output_budget_middleware import (
     ToolOutputBudgetMiddleware,
 )
 from deerflow.config.tool_output_config import ToolOutputConfig
-from deerflow.tools.builtins.task_tool import _OwnerLoopFileAuthorityProxy
+from deerflow.subagents.binding import (
+    AgentGraphExecutionInputs,
+    ConfiguredLeadParentExecutionProfile,
+    ParentExecutionBarrier,
+    ParentExecutionBinding,
+)
+from deerflow.subagents.delegated_context import _OwnerLoopFileAuthorityProxy
 
 
 class _LoopBoundFileAuthority:
@@ -33,11 +39,44 @@ class _LoopBoundFileAuthority:
         return f"/mnt/user-data/outputs/{relative_path}"
 
 
+def _binding(owner_loop: asyncio.AbstractEventLoop) -> ParentExecutionBinding:
+    return ParentExecutionBinding(
+        profile=ConfiguredLeadParentExecutionProfile(
+            graph=AgentGraphExecutionInputs(
+                model=object(),
+                tools=(),
+                middleware=(),
+                system_prompt=None,
+                state_schema=dict,
+            ),
+            app_config=object(),
+            asset_context=None,
+            agent_config=None,
+            model_name="test-model",
+            thinking_enabled=False,
+            reasoning_effort=None,
+            plan_mode=False,
+            subagent_enabled=True,
+            agent_name="lead",
+            available_skills=None,
+        ),
+        state=MappingProxyType({}),
+        context=MappingProxyType({}),
+        config=MappingProxyType({}),
+        owner_loop=owner_loop,
+        store=None,
+        barrier=ParentExecutionBarrier(),
+    )
+
+
 @pytest.mark.asyncio
 async def test_large_subagent_tool_output_uses_file_authority_owner_loop() -> None:
     owner_loop = asyncio.get_running_loop()
     authority = _LoopBoundFileAuthority(owner_loop)
-    proxy = _OwnerLoopFileAuthorityProxy(authority, owner_loop)  # type: ignore[arg-type]
+    proxy = _OwnerLoopFileAuthorityProxy(  # type: ignore[arg-type]
+        authority,
+        _binding(owner_loop),
+    )
     large_result = "x" * 12_001
     request = SimpleNamespace(
         tool=SimpleNamespace(),

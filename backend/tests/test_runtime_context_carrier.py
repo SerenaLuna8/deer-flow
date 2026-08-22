@@ -136,11 +136,14 @@ def test_carrier_fields_cover_the_complete_install_key_set() -> None:
         current_run_pre_existing_message_ids=frozenset({"message-1"}),
         trace_id="trace-1",
         run_journal=object(),
+        recovered_llm_failure_recorder=object(),
+        run_semantic_stop_recorder=object(),
         server_abort_event=object(),
         vision_dispatch_authority=object(),
         memory_archive_context=object(),
         host_execution_approval_port=object(),
         host_execution_agent_path=("lead",),
+        parent_execution_binding_factory=object(),
     ).build()
 
     assert frozenset(context) == RuntimeContextKeys.INSTALL_KEYS
