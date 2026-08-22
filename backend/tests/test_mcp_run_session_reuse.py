@@ -490,7 +490,7 @@ async def test_five_real_streamable_http_calls_reuse_one_initialized_session() -
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_end(
+async def test_new_run_materializes_superseded_exact_mcp_version_and_reuses_session(
     migrated_postgres_database_url: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -505,13 +505,19 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
     from app.shared_assets.agent_payload_checksum import agent_payload_checksum
     from app.shared_assets.mcp_secret_closure import lock_mcp_secret_closure
-    from app.shared_assets.mcp_service import McpDefinition, McpService
+    from app.shared_assets.mcp_secret_store import McpSecretStore
+    from app.shared_assets.mcp_service import (
+        McpDefinition,
+        McpSecretSlot,
+        McpService,
+    )
     from app.shared_assets.mcp_tool_inventory_repository import (
         McpToolInventoryRepository,
     )
     from app.shared_assets.models import AgentPayload
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
+    from deerflow.persistence.shared_assets import McpSecretSlotRow
     from deerflow.secrets import SecretKey
 
     server = FastMCP(
@@ -526,11 +532,13 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
 
     app = server.streamable_http_app()
     methods: Counter[str] = Counter()
+    authorization_headers: list[bytes | None] = []
 
     async def counting_app(scope, receive, send) -> None:
         if scope["type"] != "http":
             await app(scope, receive, send)
             return
+        authorization_headers.append(dict(scope.get("headers", ())).get(b"authorization"))
 
         received: list[dict[str, Any]] = []
         body = b""
@@ -580,17 +588,35 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
         )
 
     endpoint = "http://127.0.0.1:8000/mcp"
-    mcp_checksum = McpService._checksum(
+    current_endpoint = "http://127.0.0.1:8001/mcp"
+    authorization_value = "superseded-run-version-secret"
+    mcp_definition = McpDefinition(
+        description="admitted run probe",
+        transport="http",
+        url=endpoint,
+        secret_slots=(
+            McpSecretSlot(
+                name="authorization",
+                purpose="Authenticate the exact superseded Version",
+                payload_schema={"headers": ("Authorization",)},
+                required=True,
+            ),
+        ),
+    )
+    mcp_checksum = McpService._checksum(mcp_definition)
+    current_mcp_checksum = McpService._checksum(
         McpDefinition(
-            description="admitted run probe",
+            description="current replacement",
             transport="http",
-            url=endpoint,
+            url=current_endpoint,
         )
     )
     endpoint_policy = NetworkMcpEndpointPolicy(("127.0.0.0/8",))
     seed = await seed_private_thread_database(migrated_postgres_database_url)
     mcp_id = uuid.uuid4()
     mcp_version_id = uuid.uuid4()
+    mcp_slot_id = uuid.uuid4()
+    current_mcp_version_id = uuid.uuid4()
     agent_id = uuid.uuid4()
     agent_version_id = uuid.uuid4()
     agent_checksum = agent_payload_checksum(
@@ -635,8 +661,59 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 },
             )
             await session.execute(
+                text(
+                    """SELECT set_config(
+                        'deerflow.asset_version_assembly',
+                        :version_id,
+                        true
+                    )"""
+                ),
+                {"version_id": str(mcp_version_id)},
+            )
+            slot = McpSecretSlotRow(
+                id=mcp_slot_id,
+                mcp_server_version_id=mcp_version_id,
+                name="authorization",
+                purpose="Authenticate the exact superseded Version",
+                payload_schema={"headers": ["Authorization"]},
+                required=True,
+            )
+            session.add(slot)
+            await session.flush()
+            await McpSecretStore(
+                session,
+                secret_key=SecretKey(b"m" * 32),
+            ).replace(
+                project_id=seed.owner_a.project_id,
+                mcp_server_id=mcp_id,
+                mcp_server_version_id=mcp_version_id,
+                slots=(slot,),
+                slot_name="authorization",
+                payload={"headers": {"Authorization": authorization_value}},
+                actor_user_id=str(seed.owner_a.user_id),
+                request_id=seed.owner_a.request_id,
+            )
+            await session.execute(
+                text(
+                    """INSERT INTO mcp_server_versions
+                    (id,mcp_server_id,version_number,workflow_status,description,
+                     transport,url,supersedes_version_id,payload_checksum,
+                     created_by_user_id)
+                    VALUES (:id,:mcp_id,2,'published','current replacement',
+                            'http',:url,:supersedes,:checksum,:owner)"""
+                ),
+                {
+                    "id": current_mcp_version_id,
+                    "mcp_id": mcp_id,
+                    "url": current_endpoint,
+                    "supersedes": mcp_version_id,
+                    "checksum": current_mcp_checksum,
+                    "owner": str(seed.owner_a.user_id),
+                },
+            )
+            await session.execute(
                 text("UPDATE mcp_servers SET current_published_version_id=:version_id WHERE id=:mcp_id"),
-                {"version_id": mcp_version_id, "mcp_id": mcp_id},
+                {"version_id": current_mcp_version_id, "mcp_id": mcp_id},
             )
             await session.execute(
                 text(
@@ -697,9 +774,11 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 project_id=seed.owner_a.project_id,
                 mcp_server_id=mcp_id,
                 mcp_server_version_id=mcp_version_id,
-                slots=(),
+                slots=(slot,),
                 request_id=seed.owner_a.request_id,
             )
+            assert len(closure.materials) == 1
+            closure_material = closure.materials[0]
             await McpToolInventoryRepository(session).record_success(
                 project_id=seed.owner_a.project_id,
                 mcp_server_id=mcp_id,
@@ -754,8 +833,21 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                     thread_id,
                     PrivateRunCreate(run_id=f"mcp-run-{reuse}-{uuid.uuid4()}"),
                 )
+                mcp_assets = tuple(asset for asset in admitted.snapshot.assets if asset.asset_kind == "mcp")
+                assert len(mcp_assets) == 1
+                assert mcp_assets[0].version_id == mcp_version_id
+                assert mcp_assets[0].payload_checksum == mcp_checksum
+                assert all(asset.version_id != current_mcp_version_id for asset in admitted.snapshot.assets)
+                assert len(admitted.snapshot.mcp_secrets) == 1
+                persisted_secret = admitted.snapshot.mcp_secrets[0]
+                assert persisted_secret.mcp_server_id == mcp_id
+                assert persisted_secret.mcp_server_version_id == mcp_version_id
+                assert persisted_secret.slot_id == mcp_slot_id
+                assert persisted_secret.secret_generation_id == closure_material.generation_id
+                assert persisted_secret.secret_generation_digest == closure_material.generation_digest
 
                 methods.clear()
+                authorization_headers.clear()
                 resolver = ProjectAssetResolver(
                     seed.factory,
                     secret_key=SecretKey(b"m" * 32),
@@ -768,6 +860,9 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                     run_session_reuse=reuse,
                 ).materialize(seed.owner_a, admitted)
                 assert len(runtime.mcp_tools) == 1
+                assert len(runtime.safe_manifest.mcps) == 1
+                assert runtime.safe_manifest.mcps[0].version_id == mcp_version_id
+                assert runtime.safe_manifest.mcps[0].definition["url"] == endpoint
                 materialize_baseline = materialize_calls
                 revalidation_baseline = revalidation_calls
                 started = time.monotonic()
@@ -776,6 +871,8 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 methods_by_reuse[reuse] = methods.copy()
 
                 assert [result[0]["text"] for result in results] == [str(index) for index in range(5)]
+                assert authorization_headers
+                assert set(authorization_headers) == {authorization_value.encode("utf-8")}
                 assert materialize_calls - materialize_baseline == 5
                 # Every proxy call revalidates before materialization, inside
                 # the locked materialization transaction, and before dispatch.

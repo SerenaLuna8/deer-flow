@@ -82,8 +82,13 @@ type MutableAssetKind = AssetListKind;
 
 export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
+  scope: ProjectAssetItem["scope"],
 ): boolean {
-  return kind === "skills" || kind === "agents";
+  return (
+    kind === "skills" ||
+    kind === "agents" ||
+    (kind === "mcp-servers" && scope === "project")
+  );
 }
 
 export function projectAssetDetailVersionPickerPlacement(
@@ -223,7 +228,10 @@ export function projectAssetDetailContentVersion(
   if (kind !== "mcp-servers" || !editableConfigurationSucceeded) {
     return selectedVersion;
   }
-  return editableConfiguration?.version ?? selectedVersion;
+  const editableVersion = editableConfiguration?.version;
+  return editableVersion && editableVersion.id === selectedVersion?.id
+    ? editableVersion
+    : selectedVersion;
 }
 
 export function projectMcpSystemUsageLabel(
@@ -274,7 +282,7 @@ export function projectAssetDetailVersionTerms(
   if (kind === "mcp-servers") {
     return {
       current: "当前配置",
-      history: "",
+      history: "配置历史",
       edit: "编辑配置",
       empty: "尚未保存配置。",
     };
@@ -299,7 +307,7 @@ export function projectAssetDetailRevisionCopy(kind: MutableAssetKind): {
 } {
   if (kind === "mcp-servers") {
     return {
-      label: () => "配置",
+      label: (number) => `配置 ${number}`,
       currentFallback: "已发布",
       pinnedFallback: "已启用",
       updateAvailable: "有配置更新",
@@ -452,15 +460,31 @@ const VERSION_STATUS_LABEL: Record<VersionStatus, string> = {
 };
 
 export function projectMcpCurrentConfigurationLabel(
-  status: McpVersion["workflow_status"],
+  version: Pick<McpVersion, "version_number" | "workflow_status">,
 ): string {
-  return status === "pending_approval"
+  return version.workflow_status === "pending_approval"
     ? "秘密未配置 · 尚未生效"
-    : VERSION_STATUS_LABEL[status];
+    : `配置 ${version.version_number} · ${VERSION_STATUS_LABEL[version.workflow_status]}`;
 }
 
 function isMcpVersion(version: AssetVersion): version is McpVersion {
   return "mcp_server_id" in version;
+}
+
+export function projectAssetVersionPickerStatusLabel(
+  kind: MutableAssetKind,
+  version: AssetVersion,
+  currentVersionId: string | null,
+): string {
+  if (
+    kind === "mcp-servers" &&
+    isMcpVersion(version) &&
+    version.id === currentVersionId &&
+    version.workflow_status === "published"
+  ) {
+    return "当前配置";
+  }
+  return VERSION_STATUS_LABEL[projectAssetVersionDisplayStatus(version)];
 }
 
 export function projectAssetVersionDisplayStatus(
@@ -839,7 +863,10 @@ export function ProjectAssetDetailSheet({
     item.id,
     editableMcpConfigurationEnabled,
   );
-  const showsVersionHistory = projectAssetDetailShowsVersionHistory(kind);
+  const showsVersionHistory = projectAssetDetailShowsVersionHistory(
+    kind,
+    item.scope,
+  );
   const showsVersionContent = true;
   const versionTerms = projectAssetDetailVersionTerms(kind, item.scope);
   const revisionCopy = projectAssetDetailRevisionCopy(kind);
@@ -908,7 +935,9 @@ export function ProjectAssetDetailSheet({
       : null;
   const selectedVersion =
     kind === "mcp-servers"
-      ? (mcpConfiguration?.version ?? null)
+      ? (versions.find((version) => version.id === selectedVersionId) ??
+        mcpConfiguration?.version ??
+        null)
       : (versions.find((version) => version.id === selectedVersionId) ?? null);
   const selectedVersionIdentity = selectedVersion?.id ?? null;
   const selectedSkillActivationValid =
@@ -989,19 +1018,6 @@ export function ProjectAssetDetailSheet({
       onRequestedVersionHandled(item.id, requestedVersionId, false);
     }
     if (versions.length === 0) return;
-    if (kind === "mcp-servers") {
-      const preferredId = projectAssetDetailPreferredVersionId(
-        kind,
-        item.scope,
-        versions,
-        item.current_version_id,
-      );
-      setSelectedVersionId(preferredId);
-      if (requestedVersionResolution === "available" && requestedVersionId) {
-        onRequestedVersionHandled(item.id, requestedVersionId, true);
-      }
-      return;
-    }
     if (requestedVersionResolution === "available" && requestedVersionId) {
       setSelectedVersionId(requestedVersionId);
       onRequestedVersionHandled(item.id, requestedVersionId, true);
@@ -1110,8 +1126,7 @@ export function ProjectAssetDetailSheet({
     return versionWorkflowActions(
       kind,
       selectedVersion.workflow_status,
-      isMcpVersion(selectedVersion) &&
-        selectedVersion.secret_slots.length > 0,
+      isMcpVersion(selectedVersion) && selectedVersion.secret_slots.length > 0,
     );
   }, [item.scope, kind, selectedVersion]);
 
@@ -1337,7 +1352,11 @@ export function ProjectAssetDetailSheet({
           {versions.map((version) => (
             <option key={version.id} value={version.id}>
               {revisionCopy.label(version.version_number)} ·{" "}
-              {VERSION_STATUS_LABEL[projectAssetVersionDisplayStatus(version)]}
+              {projectAssetVersionPickerStatusLabel(
+                kind,
+                version,
+                item.current_version_id,
+              )}
             </option>
           ))}
         </select>
@@ -1393,7 +1412,7 @@ export function ProjectAssetDetailSheet({
                         ? mcpConfiguration?.state === "ready" &&
                           mcpConfiguration.version
                           ? projectMcpCurrentConfigurationLabel(
-                              mcpConfiguration.version.workflow_status,
+                              mcpConfiguration.version,
                             )
                           : mcpConfiguration?.state === "empty"
                             ? "尚未保存配置"
@@ -1785,8 +1804,7 @@ export function ProjectAssetDetailSheet({
                             secretConfigurationDirty,
                             onEditingChange: setVersionEditing,
                             onDirtyChange: updateVersionDirty,
-                            onSecretsDirtyChange:
-                              updateSecretsDirty,
+                            onSecretsDirtyChange: updateSecretsDirty,
                             onActivationValidityChange:
                               handleSkillActivationValidityChange,
                             onVersionCreated: handleWorkbenchVersionCreated,

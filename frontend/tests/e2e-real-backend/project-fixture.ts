@@ -17,9 +17,15 @@ export async function registerReplayProject(
   app: string,
 ): Promise<ReplayProjectScope> {
   const uniq = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  const rateLimitIdentity = randomUUID().replaceAll("-", "");
+  const rateLimitClientIp = `2001:db8:${rateLimitIdentity.slice(0, 4)}:${rateLimitIdentity.slice(4, 8)}:${rateLimitIdentity.slice(8, 12)}:${rateLimitIdentity.slice(12, 16)}::1`;
   const registration = await context.request.post(
     `${app}/api/v1/auth/register`,
     {
+      // The replay Gateway is loopback-only and uses the production trusted
+      // proxy boundary. Give each isolated scenario a synthetic client address
+      // so repeated business tests do not share the registration quota.
+      headers: { "X-Real-IP": rateLimitClientIp },
       data: {
         email: `e2e-${uniq}@example.com`,
         username: `e2e_${uniq.replaceAll("-", "_")}`,

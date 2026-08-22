@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -21,6 +20,7 @@ from deerflow.secrets import (
     SecretKeyInvalid,
     SecretMaterializationFailed,
     SecretProtectionFailed,
+    secret_envelope_digest,
 )
 
 
@@ -39,10 +39,6 @@ def skill_secret_recipient(
             secret_name,
         )
     )
-
-
-def _digest(recipient: str, envelope: SecretEnvelope) -> str:
-    return hashlib.sha256(recipient.encode("utf-8") + envelope.nonce + envelope.ciphertext).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,7 +192,7 @@ class SkillSecretStore:
                 revision=revision,
                 nonce=envelope.nonce,
                 ciphertext=envelope.ciphertext,
-                envelope_digest=_digest(recipient, envelope),
+                envelope_digest=secret_envelope_digest(recipient, envelope),
                 created_by_user_id=actor_user_id,
             )
             self.session.add(generation)

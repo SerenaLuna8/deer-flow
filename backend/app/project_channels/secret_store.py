@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import uuid
 from collections.abc import Mapping
@@ -28,6 +27,7 @@ from deerflow.secrets import (
     SecretKey,
     SecretKeyInvalid,
     SecretProtectionFailed,
+    secret_envelope_digest,
 )
 
 
@@ -41,13 +41,6 @@ def channel_secret_recipient(instance: ProjectChannelInstanceRow) -> str:
             instance.provider_identity_digest,
         )
     )
-
-
-def _envelope_digest(
-    recipient: str,
-    envelope: SecretEnvelope,
-) -> str:
-    return hashlib.sha256(recipient.encode("utf-8") + envelope.nonce + envelope.ciphertext).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -172,7 +165,7 @@ class ProjectChannelSecretStore:
             revision=revision,
             nonce=envelope.nonce,
             ciphertext=envelope.ciphertext,
-            envelope_digest=_envelope_digest(recipient, envelope),
+            envelope_digest=secret_envelope_digest(recipient, envelope),
             created_by_user_id=str(context.user_id),
         )
         self._session.add(generation)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import uuid
 from collections.abc import Mapping
 from urllib.parse import urlsplit
@@ -11,7 +10,7 @@ from app.system_settings.validation import (
     ModelSettingsInvalid,
     materialize_effective_model_settings,
 )
-from deerflow.secrets import SecretEnvelope
+from deerflow.secrets import SecretEnvelope, secret_envelope_digest
 
 
 def model_secret_recipient(
@@ -47,11 +46,7 @@ def model_secret_envelope_digest(
     recipient: str,
     envelope: SecretEnvelope,
 ) -> str:
-    digest = hashlib.sha256()
-    digest.update(recipient.encode("utf-8"))
-    digest.update(envelope.nonce)
-    digest.update(envelope.ciphertext)
-    return digest.hexdigest()
+    return secret_envelope_digest(recipient, envelope)
 
 
 __all__ = ["model_secret_envelope_digest", "model_secret_recipient"]

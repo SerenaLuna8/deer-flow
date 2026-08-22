@@ -932,8 +932,12 @@ class ProjectAssetResolver:
         if asset is not None:
             if selection.kind is AssetKind.AGENT and asset.status == "archived":
                 raise AgentArchived(context.request_id)
-            version_id = asset.current_published_version_id if selection.kind is AssetKind.MCP else asset.current_version_id
-            if version_id is None or (selection.version_id is not None and selection.version_id != version_id):
+            if selection.kind is AssetKind.MCP:
+                version_id = selection.version_id or asset.current_published_version_id
+            else:
+                version_id = asset.current_version_id
+            non_mcp_version_mismatch = selection.kind is not AssetKind.MCP and selection.version_id is not None and selection.version_id != version_id
+            if version_id is None or non_mcp_version_mismatch:
                 raise AssetResolutionUnavailable(context.request_id)
             version = await self._lock_version(
                 session,
@@ -1638,14 +1642,7 @@ class ProjectAssetResolver:
             .with_for_update(read=True, of=McpServerVersionRow)
         )
         version = (await session.execute(version_statement)).scalar_one_or_none()
-        if (
-            asset is None
-            or version is None
-            or asset.status == "suspended"
-            or version.workflow_status != "published"
-            or version.payload_checksum != resolved.checksum
-            or (scope is AssetScope.PROJECT and asset.current_published_version_id != resolved.version_id)
-        ):
+        if asset is None or version is None or asset.status == "suspended" or version.workflow_status != "published" or version.payload_checksum != resolved.checksum:
             raise AssetResolutionUnavailable(request_id)
 
         record = _ResolvedRecord(scope, asset, version)

@@ -195,7 +195,9 @@ make stop
 MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 和 Codex CLI 模型适配器已停止支持，不再允许新建、启用、设为默认或准入新 Run；已有
 历史目录记录仍可由管理员查看并改配到受支持适配器。全新数据库只初始化
-`patched_deepseek` 和 `openai` 模型配置。
+三个 `patched_deepseek` 模型配置：`deepseek-v4-flash`、`deepseek-v4-pro` 和
+`deepseek-v4-flash-vision-exp`。Flash 是默认 System Model；Vision Exp 是默认
+Vision Bridge。
 
 ### 文本模型图片识别桥接
 
@@ -203,8 +205,8 @@ MiMo、MiniMax、StepFun、MindIE、Claude Code CLI
 `/admin/settings/models` 检查内置模型或创建 active、`supports_vision=true` 的视觉模型，
 并使用“测试连接”验证其多模态调用，再到 `/admin/settings/system` 的“图片识别桥接”
 确认或选择该模型。非空选择即对后续 text-only project Run 启用，清空即关闭。全新安装
-默认选择已内置的
-GPT 5.6 Luna；原生视觉 lead model 继续使用现有 `view_image`，不会同时注册
+默认选择已内置的 `deepseek-v4-flash-vision-exp`；原生视觉 lead model 继续使用现有
+`view_image`，不会同时注册
 `inspect_image`。该 bootstrap 默认值不替代供应商数据政策审批；生产部署尚未批准外发
 时，须在接收项目 Run 前清空选择。
 全新安装把单次 `inspect_image` 端到端截止时间初始化为 60 秒；管理员可在 5–120 秒内

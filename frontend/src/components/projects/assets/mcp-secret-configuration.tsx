@@ -79,7 +79,6 @@ export function McpSecretConfiguration({
         slotName,
         input: { payload: submittedPayload },
       });
-      await query.refetch();
     } catch (error) {
       setMutationError(error);
     } finally {
@@ -98,7 +97,6 @@ export function McpSecretConfiguration({
         slotName: clearName,
         input: { confirmed: true },
       });
-      await query.refetch();
       setClearName(null);
     } catch (error) {
       setMutationError(error);

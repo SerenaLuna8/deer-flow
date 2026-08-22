@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -88,13 +88,16 @@ export type ProjectMcpFormSubmission = {
   secret: { slotName: string; payload: McpSecretPayload } | null;
 };
 
+export function projectMcpSecretInputName(index: number): string {
+  return `project_mcp_secret_${index}`;
+}
+
 export function buildProjectMcpFormSubmission({
   form,
   configuration,
   mode,
   slotName,
   fields,
-  secretValues,
   clearSecretValues,
 }: {
   form: FormData;
@@ -102,11 +105,15 @@ export function buildProjectMcpFormSubmission({
   mode: AuthMode;
   slotName: string;
   fields: string[];
-  secretValues: Record<string, string>;
   clearSecretValues: () => void;
 }): ProjectMcpFormSubmission {
   const submittedSecretValues = consumeWriteOnlyInput(
-    secretValues,
+    Object.fromEntries(
+      fields.map((field, index) => [
+        field,
+        formString(form, projectMcpSecretInputName(index)),
+      ]),
+    ),
     clearSecretValues,
   );
   const url = formString(form, "url").trim();
@@ -217,7 +224,6 @@ export function ProjectMcpFormDialog({
   const [mode, setMode] = useState<AuthMode>(initial.mode);
   const [slotName, setSlotName] = useState(initial.slotName);
   const [fieldsText, setFieldsText] = useState(initial.fields.join("\n"));
-  const [secretValues, setSecretValues] = useState<Record<string, string>>({});
   const [validationError, setValidationError] = useState<string | null>(null);
   const preservesMultipleSecretSlots =
     (configuration?.version.definition.secret_slots.length ?? 0) > 1;
@@ -226,25 +232,26 @@ export function ProjectMcpFormDialog({
     .map((value) => value.trim())
     .filter(Boolean);
 
-  useEffect(() => {
-    if (!open) setSecretValues({});
-  }, [open]);
-
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setValidationError(null);
+    const formElement = event.currentTarget;
     try {
-      onSubmit(
-        buildProjectMcpFormSubmission({
-          form: new FormData(event.currentTarget),
-          configuration,
-          mode,
-          slotName,
-          fields,
-          secretValues,
-          clearSecretValues: () => setSecretValues({}),
-        }),
-      );
+      const submission = buildProjectMcpFormSubmission({
+        form: new FormData(formElement),
+        configuration,
+        mode,
+        slotName,
+        fields,
+        clearSecretValues: () => {
+          for (const input of formElement.querySelectorAll<HTMLInputElement>(
+            "input[data-project-mcp-secret]",
+          )) {
+            input.value = "";
+          }
+        },
+      });
+      onSubmit(submission);
     } catch (caught) {
       setValidationError(
         caught instanceof Error ? caught.message : "MCP 配置无效。",
@@ -362,22 +369,17 @@ export function ProjectMcpFormDialog({
                     MCP 详情中分别管理。
                   </p>
                 ) : null}
-                {fields.map((field) => (
+                {fields.map((field, index) => (
                   <label key={field} className="grid gap-2 text-sm">
                     <code>
                       {mode}.{field}
                     </code>
                     <Input
+                      name={projectMcpSecretInputName(index)}
                       type="password"
                       autoComplete="new-password"
-                      value={secretValues[field] ?? ""}
+                      data-project-mcp-secret
                       placeholder={configuration ? "留空以保留" : "输入秘密值"}
-                      onChange={(event) =>
-                        setSecretValues((current) => ({
-                          ...current,
-                          [field]: event.target.value,
-                        }))
-                      }
                     />
                   </label>
                 ))}

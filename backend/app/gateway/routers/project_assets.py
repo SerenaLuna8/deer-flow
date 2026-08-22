@@ -92,7 +92,7 @@ from app.shared_assets.agent_catalog import (
     StaticToolGroupCatalog,
 )
 from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
-from app.shared_assets.mcp_secret_service import McpSecretService
+from app.shared_assets.mcp_secret_service import McpSecretService, McpSecretSetView
 from app.shared_assets.skill_archive import MAX_SKILL_ARCHIVE_UPLOAD_BYTES
 from app.shared_assets.skill_secret_service import SkillSecretService
 from app.shared_assets.skill_service import (
@@ -2217,14 +2217,28 @@ async def get_project_configured_mcp(
         raise_asset_domain(exc)
 
 
-def _mcp_secret_response(value: object, request_id: str) -> McpSecretSetResponse:
+def _mcp_secret_response(
+    value: McpSecretSetView,
+    request_id: str,
+) -> McpSecretSetResponse:
     return McpSecretSetResponse.model_validate(
         {
-            "mcp_server_id": getattr(value, "mcp_server_id"),
-            "mcp_server_version_id": getattr(value, "mcp_server_version_id"),
-            "revision": getattr(value, "revision"),
-            "readiness": getattr(value, "readiness"),
-            "slots": [vars(slot) for slot in getattr(value, "slots")],
+            "mcp_server_id": value.mcp_server_id,
+            "mcp_server_version_id": value.mcp_server_version_id,
+            "revision": value.revision,
+            "readiness": value.readiness,
+            "slots": [
+                {
+                    "id": slot.id,
+                    "name": slot.name,
+                    "purpose": slot.purpose,
+                    "payload_schema": {group: list(fields) for group, fields in slot.payload_schema.items()},
+                    "required": slot.required,
+                    "configured": slot.configured,
+                    "revision": slot.revision,
+                }
+                for slot in value.slots
+            ],
             "request_id": request_id,
         }
     )

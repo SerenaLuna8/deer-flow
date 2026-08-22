@@ -1,11 +1,12 @@
 import { gzipSync } from "node:zlib";
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 
 import {
   registerReplayProject,
   type ReplayProjectScope,
 } from "./project-fixture";
+import { browserPersistenceSecretLocations } from "./secret-browser-fixture";
 
 const APP =
   process.env.E2E_APP_URL ??
@@ -120,70 +121,6 @@ async function expectSafeSecretResponse(
   return body as unknown as SkillSecretStatus;
 }
 
-async function browserPersistenceDump(page: Page): Promise<string> {
-  return page.evaluate(async () => {
-    const persisted: unknown[] = [
-      [...Array.from({ length: localStorage.length }, (_, index) => index)].map(
-        (index) => {
-          const key = localStorage.key(index) ?? "";
-          return [key, localStorage.getItem(key)];
-        },
-      ),
-      [
-        ...Array.from({ length: sessionStorage.length }, (_, index) => index),
-      ].map((index) => {
-        const key = sessionStorage.key(index) ?? "";
-        return [key, sessionStorage.getItem(key)];
-      }),
-      document.cookie,
-    ];
-    if ("caches" in globalThis) {
-      for (const name of await caches.keys()) {
-        const cache = await caches.open(name);
-        for (const request of await cache.keys()) {
-          persisted.push([
-            name,
-            request.url,
-            await (await cache.match(request))?.text(),
-          ]);
-        }
-      }
-    }
-    if (typeof indexedDB.databases === "function") {
-      for (const info of await indexedDB.databases()) {
-        if (!info.name) continue;
-        const databaseName = info.name;
-        const database = await new Promise<IDBDatabase>((resolve, reject) => {
-          const request = indexedDB.open(databaseName, info.version);
-          request.onsuccess = () => resolve(request.result);
-          request.onerror = () =>
-            reject(request.error ?? new Error("Unable to inspect IndexedDB"));
-        });
-        try {
-          for (const storeName of database.objectStoreNames) {
-            const values = await new Promise<unknown[]>((resolve, reject) => {
-              const request = database
-                .transaction(storeName, "readonly")
-                .objectStore(storeName)
-                .getAll();
-              request.onsuccess = () => resolve(request.result);
-              request.onerror = () =>
-                reject(
-                  request.error ??
-                    new Error("Unable to inspect IndexedDB object store"),
-                );
-            });
-            persisted.push([databaseName, storeName, values]);
-          }
-        } finally {
-          database.close();
-        }
-      }
-    }
-    return JSON.stringify(persisted);
-  });
-}
-
 test.describe("Project Skill Configuration Secrets (real Gateway)", () => {
   let project: ReplayProjectScope;
 
@@ -243,7 +180,9 @@ test.describe("Project Skill Configuration Secrets (real Gateway)", () => {
     ).toHaveAttribute("aria-selected", "true");
     const secretInput = detail.getByLabel(`${SECRET_NAME} 秘密值`);
     await expect(secretInput).toHaveValue("");
-    await expect(detail.getByText("必需 · 未配置", { exact: true })).toBeVisible();
+    await expect(
+      detail.getByText("必需 · 未配置", { exact: true }),
+    ).toBeVisible();
 
     await secretInput.fill(FIRST_VALUE);
     const firstResponsePromise = page.waitForResponse(
@@ -263,7 +202,9 @@ test.describe("Project Skill Configuration Secrets (real Gateway)", () => {
       [FIRST_VALUE],
     );
     const firstRevision = first.requirements[0]!.revision;
-    await expect(detail.getByText("必需 · 已配置", { exact: true })).toBeVisible();
+    await expect(
+      detail.getByText("必需 · 已配置", { exact: true }),
+    ).toBeVisible();
 
     const blankPreserveResponse = await context.request.put(
       `${APP}/api/projects/${project.id}/skills/${skillId}/versions/${versionId}/secrets`,
@@ -321,11 +262,16 @@ test.describe("Project Skill Configuration Secrets (real Gateway)", () => {
       [FIRST_VALUE, SECOND_VALUE],
     );
     expect(cleared.requirements[0]!.revision).toBe(firstRevision + 2);
-    await expect(detail.getByText("必需 · 未配置", { exact: true })).toBeVisible();
+    await expect(
+      detail.getByText("必需 · 未配置", { exact: true }),
+    ).toBeVisible();
     await expect(secretInput).toHaveValue("");
 
-    const persisted = await browserPersistenceDump(page);
-    expect(persisted).not.toContain(FIRST_VALUE);
-    expect(persisted).not.toContain(SECOND_VALUE);
+    expect(
+      await browserPersistenceSecretLocations(page, [
+        FIRST_VALUE,
+        SECOND_VALUE,
+      ]),
+    ).toEqual([]);
   });
 });

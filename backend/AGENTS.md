@@ -95,9 +95,12 @@ import `app.*`.
 - Passwords, JWTs, CSRF values, raw session IDs, API keys, secret plaintext,
   nonces, ciphertext, storage locators, and full connection URLs never enter
   logs, traces, public responses, snapshots, audit metadata, or browser caches.
-- Skill and MCP plaintext is decrypted only at the Worker execution boundary and
-  injected into the exact authorized Sandbox or remote call. Output masking is
-  accidental-leak protection, not DLP; secret-bearing Skills are trusted code.
+- Runtime Skill and MCP plaintext materialization belongs to the Worker execution
+  boundary and the exact authorized Sandbox, child process, or remote call. The
+  only Gateway materialization path is an authorized, transaction-serialized
+  compatible Candidate/Version copy that immediately re-encrypts an independent
+  Generation for the new recipient. Output masking is accidental-leak protection,
+  not DLP; secret-bearing Skills are trusted code.
 
 ### PostgreSQL schema and persistence
 

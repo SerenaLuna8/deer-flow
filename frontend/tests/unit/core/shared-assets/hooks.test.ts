@@ -21,7 +21,9 @@ import { projectKeys } from "@/core/projects/query-keys";
 import { SharedAssetApiError } from "@/core/shared-assets/api";
 import {
   applyProjectAgentMutationToCatalog,
+  invalidateConfiguredProjectMcpQueries,
   invalidateProjectAgentConflictQueries,
+  invalidateProjectMcpSecretQueries,
   isProjectAgentCasConflict,
   useProjectAssetVersions,
   useActivateProjectAssetVersion,
@@ -31,6 +33,9 @@ import {
   projectAssetKey,
   projectAssetVersionsKey,
   projectDefaultAgentKey,
+  projectMcpEditableConfigurationKey,
+  projectMcpSecretsKey,
+  projectMcpToolInventoryKey,
 } from "@/core/shared-assets/query-keys";
 import type {
   AssetMutationResponse,
@@ -117,6 +122,85 @@ describe("shared asset hooks", () => {
     expect(invalidateQueries).toHaveBeenCalledWith({
       queryKey: projectKeys.workspace(accountId),
     });
+  });
+
+  test("refreshes configured MCP state without remounting the active project scope", async () => {
+    const invalidateQueries = rs.fn(async () => undefined);
+    const queryClient = { invalidateQueries } as unknown as QueryClient;
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const projectId = "22222222-2222-4222-8222-222222222222";
+    const assetId = "33333333-3333-4333-8333-333333333333";
+
+    await invalidateConfiguredProjectMcpQueries(
+      queryClient,
+      accountId,
+      projectId,
+      assetId,
+    );
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAssetKey(accountId, projectId, "mcp-servers"),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAgentRuntimeAssessmentsRoot(accountId, projectId),
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAssetVersionsKey(
+        accountId,
+        projectId,
+        "mcp-servers",
+        assetId,
+      ),
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectMcpEditableConfigurationKey(
+        accountId,
+        projectId,
+        assetId,
+      ),
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectKeys.workspace(accountId),
+      refetchType: "none",
+    });
+    expect(invalidateQueries).toHaveBeenCalledTimes(5);
+  });
+
+  test("refreshes exact MCP secret, discovery, and Agent readiness after a secret mutation", async () => {
+    const invalidateQueries = rs.fn(async () => undefined);
+    const queryClient = { invalidateQueries } as unknown as QueryClient;
+    const accountId = "11111111-1111-4111-8111-111111111111";
+    const projectId = "22222222-2222-4222-8222-222222222222";
+    const assetId = "33333333-3333-4333-8333-333333333333";
+    const versionId = "44444444-4444-4444-8444-444444444444";
+
+    await invalidateProjectMcpSecretQueries(
+      queryClient,
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+    );
+
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectMcpSecretsKey(accountId, projectId, assetId, versionId),
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectMcpToolInventoryKey(
+        accountId,
+        projectId,
+        assetId,
+        versionId,
+      ),
+      exact: true,
+    });
+    expect(invalidateQueries).toHaveBeenCalledWith({
+      queryKey: projectAgentRuntimeAssessmentsRoot(accountId, projectId),
+    });
+    expect(invalidateQueries).toHaveBeenCalledTimes(3);
   });
 
   test("recognizes only mapped Agent CAS conflicts", () => {

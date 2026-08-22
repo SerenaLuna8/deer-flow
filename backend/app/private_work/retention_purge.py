@@ -1196,10 +1196,13 @@ async def purge_project_shared_scope(
                    SELECT version.id FROM agent_versions AS version
                    JOIN agents AS asset ON asset.id=version.agent_id
                    WHERE asset.scope='project' AND asset.project_id=:project_id
-               ) OR ref.skill_version_id IN (
-                   SELECT version.id FROM skill_versions AS version
-                   JOIN skills AS asset ON asset.id=version.skill_id
-                   WHERE asset.scope='project' AND asset.project_id=:project_id
+               ) OR (
+                   ref.skill_asset_scope='project'
+                   AND ref.skill_asset_id IN (
+                       SELECT asset.id FROM skills AS asset
+                       WHERE asset.scope='project'
+                         AND asset.project_id=:project_id
+                   )
                )"""
         ),
         parameters,
@@ -1238,13 +1241,17 @@ async def purge_project_shared_scope(
         parameters,
     )
 
-    for table_name in ("agents", "skills", "mcp_servers"):
+    for table_name, pointer_column, revision_column in (
+        ("agents", "current_version_id", "revision"),
+        ("skills", "current_version_id", "revision"),
+        ("mcp_servers", "current_published_version_id", "version"),
+    ):
         await session.execute(
             text(
                 f"""UPDATE {table_name}
-                        SET current_published_version_id=NULL, status='archived',
+                        SET {pointer_column}=NULL, status='archived',
                             source_key=NULL, updated_at=:purged_at,
-                            version=version + 1
+                            {revision_column}={revision_column} + 1
                       WHERE scope='project' AND project_id=:project_id"""
             ),
             parameters,
@@ -1308,7 +1315,7 @@ async def purge_project_shared_scope(
             """UPDATE agents
                   SET slug='purged-' || replace(id::text, '-', ''),
                       display_name='purged', status='archived', source_key=NULL,
-                      updated_at=:purged_at, version=version + 1
+                      updated_at=:purged_at, revision=revision + 1
                 WHERE scope='project' AND project_id=:project_id"""
         ),
         parameters,

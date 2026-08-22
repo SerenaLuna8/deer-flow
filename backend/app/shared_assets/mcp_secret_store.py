@@ -23,6 +23,7 @@ from deerflow.secrets import (
     SecretKeyInvalid,
     SecretMaterializationFailed,
     SecretProtectionFailed,
+    secret_envelope_digest,
 )
 
 
@@ -41,10 +42,6 @@ def mcp_secret_recipient(
             str(slot_id),
         )
     )
-
-
-def _envelope_digest(recipient: str, envelope: SecretEnvelope) -> str:
-    return hashlib.sha256(recipient.encode("utf-8") + envelope.nonce + envelope.ciphertext).hexdigest()
 
 
 def mcp_secret_closure_digest(
@@ -248,7 +245,7 @@ class McpSecretStore:
             revision=revision,
             nonce=envelope.nonce,
             ciphertext=envelope.ciphertext,
-            envelope_digest=_envelope_digest(recipient, envelope),
+            envelope_digest=secret_envelope_digest(recipient, envelope),
             created_by_user_id=actor_user_id,
         )
         self.session.add(generation)

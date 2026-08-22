@@ -12,7 +12,54 @@ from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
+from starlette.requests import Request
+
 _REPLAY_ADMIN_ID = uuid.UUID("5fb66f7d-5655-54df-a7da-66066c114f17")
+
+
+def replay_gateway_admin_user() -> SimpleNamespace:
+    """Return the persisted admin identity used by replay Gateway requests."""
+
+    return SimpleNamespace(
+        id=_REPLAY_ADMIN_ID,
+        email="replay-runtime-admin@example.invalid",
+        username="replay-runtime-admin",
+        password_hash=None,
+        system_role="system_admin",
+        needs_setup=False,
+        token_version=0,
+        oauth_provider=None,
+    )
+
+
+async def replay_gateway_user(request: Request):
+    """Map only auth-disabled replay requests to the persisted admin.
+
+    Session and internal requests must retain the identity already resolved by
+    ``AuthMiddleware``.  Replacing those identities would split middleware,
+    ``/auth/me``, and FastAPI dependency authority inside one request.
+    """
+
+    from app.gateway.auth_disabled import (
+        AUTH_SOURCE_AUTH_DISABLED,
+        AUTH_SOURCE_INTERNAL,
+        AUTH_SOURCE_SESSION,
+    )
+
+    state = getattr(request, "state", None)
+    source = getattr(state, "auth_source", None)
+    state_user = getattr(state, "user", None)
+    if source == AUTH_SOURCE_AUTH_DISABLED:
+        return replay_gateway_admin_user()
+    if state_user is not None and source in {
+        AUTH_SOURCE_SESSION,
+        AUTH_SOURCE_INTERNAL,
+    }:
+        return state_user
+
+    from app.gateway.deps import get_current_user_from_request
+
+    return await get_current_user_from_request(request)
 
 
 def build_config_yaml(*, home: Path) -> str:

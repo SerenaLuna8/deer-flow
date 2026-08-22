@@ -10,6 +10,7 @@ from deerflow.secrets import (
     SecretKey,
     SecretKeyInvalid,
     SecretMaterializationFailed,
+    secret_envelope_digest,
 )
 
 
@@ -119,3 +120,24 @@ def test_secret_envelope_repr_redacts_protected_material(
     assert "write-only-secret" not in repr(envelope)
     assert repr(envelope.nonce) not in repr(envelope)
     assert repr(envelope.ciphertext) not in repr(envelope)
+
+
+def test_secret_envelope_digest_is_recipient_bound_and_secret_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "ACT_WEAVE_SECRET_KEY",
+        b64encode(b"k" * 32).decode("ascii"),
+    )
+    envelope = SecretEnvelope.protect(
+        b"write-only-secret",
+        recipient="mcp:project:version:slot",
+        key=SecretKey.from_environment(),
+    )
+
+    first = secret_envelope_digest("mcp:project:version:slot", envelope)
+    second = secret_envelope_digest("mcp:other-project:version:slot", envelope)
+
+    assert len(first) == 64
+    assert first != second
+    assert "write-only-secret" not in first

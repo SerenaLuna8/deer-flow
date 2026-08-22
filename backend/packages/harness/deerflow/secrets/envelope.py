@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass, field
 
@@ -85,3 +86,23 @@ class SecretEnvelope:
             )
         except Exception:
             raise SecretMaterializationFailed from None
+
+
+def secret_envelope_digest(
+    recipient: str,
+    envelope: SecretEnvelope,
+) -> str:
+    """Return the secret-free identity digest shared by consuming domains."""
+
+    if (
+        not isinstance(recipient, str)
+        or not recipient
+        or not isinstance(
+            envelope,
+            SecretEnvelope,
+        )
+    ):
+        raise ValueError("Configuration secret envelope digest input is invalid")
+    return hashlib.sha256(
+        recipient.encode("utf-8") + envelope.nonce + envelope.ciphertext,
+    ).hexdigest()

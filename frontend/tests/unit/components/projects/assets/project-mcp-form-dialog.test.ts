@@ -2,6 +2,7 @@ import { describe, expect, test } from "@rstest/core";
 
 import {
   buildProjectMcpFormSubmission,
+  projectMcpSecretInputName,
   projectMcpSecretSlotsForSubmission,
 } from "@/components/projects/assets/project-mcp-form-dialog";
 
@@ -81,6 +82,7 @@ describe("Project MCP form secret-slot preservation", () => {
   test("local validation failure consumes write-only secret values first", () => {
     const form = new FormData();
     form.set("url", "https://mcp.example.test/tools?invalid=true");
+    form.set(projectMcpSecretInputName(0), "temporary-secret");
     let cleared = false;
 
     expect(() =>
@@ -89,12 +91,36 @@ describe("Project MCP form secret-slot preservation", () => {
         mode: "headers",
         slotName: "auth",
         fields: ["Authorization"],
-        secretValues: { Authorization: "temporary-secret" },
         clearSecretValues: () => {
           cleared = true;
         },
       }),
     ).toThrow("MCP URL 必须是没有 query 或 fragment 的有效地址。");
+    expect(cleared).toBe(true);
+  });
+
+  test("submits a complete write-only slot from the form snapshot", () => {
+    const form = new FormData();
+    form.set("display_name", "Example MCP");
+    form.set("slug", "example-mcp");
+    form.set("url", "http://127.0.0.1:65535/mcp");
+    form.set(projectMcpSecretInputName(0), "temporary-secret");
+    let cleared = false;
+
+    const submission = buildProjectMcpFormSubmission({
+      form,
+      mode: "headers",
+      slotName: "auth",
+      fields: ["Authorization"],
+      clearSecretValues: () => {
+        cleared = true;
+      },
+    });
+
+    expect(submission.secret).toEqual({
+      slotName: "auth",
+      payload: { headers: { Authorization: "temporary-secret" } },
+    });
     expect(cleared).toBe(true);
   });
 });

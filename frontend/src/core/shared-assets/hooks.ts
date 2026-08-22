@@ -93,6 +93,7 @@ import type {
   AgentInstructionsInput,
   AssetKind,
   AssetListKind,
+  ConfiguredMcpResponse,
   CreateConfiguredMcpInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
@@ -153,6 +154,73 @@ export function invalidateProjectAgentRuntimeAssessments(
   return queryClient.invalidateQueries({
     queryKey: projectAgentRuntimeAssessmentsRoot(accountId, projectId),
   });
+}
+
+export function invalidateConfiguredProjectMcpQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId?: string,
+) {
+  return Promise.all([
+    invalidateProjectAssetQueries(
+      queryClient,
+      accountId,
+      projectId,
+      "mcp-servers",
+    ),
+    ...(assetId
+      ? [
+          queryClient.invalidateQueries({
+            queryKey: projectAssetVersionsKey(
+              accountId,
+              projectId,
+              "mcp-servers",
+              assetId,
+            ),
+            exact: true,
+          }),
+          queryClient.invalidateQueries({
+            queryKey: projectMcpEditableConfigurationKey(
+              accountId,
+              projectId,
+              assetId,
+            ),
+            exact: true,
+          }),
+        ]
+      : []),
+    invalidateProjectAgentRuntimeAssessments(queryClient, accountId, projectId),
+    queryClient.invalidateQueries({
+      queryKey: projectKeys.workspace(accountId),
+      refetchType: "none",
+    }),
+  ]);
+}
+
+export function invalidateProjectMcpSecretQueries(
+  queryClient: QueryClient,
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+) {
+  return Promise.all([
+    queryClient.invalidateQueries({
+      queryKey: projectMcpSecretsKey(accountId, projectId, assetId, versionId),
+      exact: true,
+    }),
+    queryClient.invalidateQueries({
+      queryKey: projectMcpToolInventoryKey(
+        accountId,
+        projectId,
+        assetId,
+        versionId,
+      ),
+      exact: true,
+    }),
+    invalidateProjectAgentRuntimeAssessments(queryClient, accountId, projectId),
+  ]);
 }
 
 export function invalidateProjectSkillConflictQueries(
@@ -640,9 +708,22 @@ export function useReplaceProjectMcpSecret(
   accountId: string,
   projectId: string,
 ) {
-  const { runMutation } = useProjectMutationRunner(accountId, projectId);
+  const queryClient = useQueryClient();
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
+  const invalidate = whenActive((assetId: string, versionId: string) =>
+    invalidateProjectMcpSecretQueries(
+      queryClient,
+      accountId,
+      projectId,
+      assetId,
+      versionId,
+    ),
+  );
   return useImperativeRequest(
-    ({
+    async ({
       assetId,
       versionId,
       slotName,
@@ -652,8 +733,8 @@ export function useReplaceProjectMcpSecret(
       versionId: string;
       slotName: string;
       input: McpSecretReplaceInput;
-    }) =>
-      runMutation((signal) =>
+    }) => {
+      const result = await runMutation((signal) =>
         replaceProjectMcpSecret(
           projectId,
           assetId,
@@ -662,12 +743,19 @@ export function useReplaceProjectMcpSecret(
           input,
           signal,
         ),
-      ),
+      );
+      await invalidate(assetId, versionId);
+      return result;
+    },
   );
 }
 
 export function useClearProjectMcpSecret(accountId: string, projectId: string) {
-  const { runMutation } = useProjectMutationRunner(accountId, projectId);
+  const queryClient = useQueryClient();
+  const { runMutation, whenActive } = useProjectMutationRunner(
+    accountId,
+    projectId,
+  );
   return useMutation({
     mutationKey: projectAssetMutationKey(
       accountId,
@@ -696,6 +784,24 @@ export function useClearProjectMcpSecret(accountId: string, projectId: string) {
           signal,
         ),
       ),
+    onSuccess: whenActive(
+      (
+        _data,
+        variables: {
+          assetId: string;
+          versionId: string;
+          slotName: string;
+          input: SecretClearInput;
+        },
+      ) =>
+        invalidateProjectMcpSecretQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+          variables.versionId,
+        ),
+    ),
   });
 }
 
@@ -790,11 +896,7 @@ export function useCreateConfiguredProjectMcp(
   accountId: string,
   projectId: string,
 ) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "mcp-servers",
-  );
+  const queryClient = useQueryClient();
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -810,7 +912,14 @@ export function useCreateConfiguredProjectMcp(
       runMutation((signal) =>
         createConfiguredProjectMcp(projectId, input, signal),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive((response: ConfiguredMcpResponse) =>
+      invalidateConfiguredProjectMcpQueries(
+        queryClient,
+        accountId,
+        projectId,
+        response.item.id,
+      ),
+    ),
   });
 }
 
@@ -818,11 +927,7 @@ export function useUpdateConfiguredProjectMcp(
   accountId: string,
   projectId: string,
 ) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "mcp-servers",
-  );
+  const queryClient = useQueryClient();
   const { runMutation, whenActive } = useProjectMutationRunner(
     accountId,
     projectId,
@@ -844,7 +949,18 @@ export function useUpdateConfiguredProjectMcp(
       runMutation((signal) =>
         updateConfiguredProjectMcp(projectId, assetId, input, signal),
       ),
-    onSuccess: whenActive(invalidate),
+    onSuccess: whenActive(
+      (
+        _response,
+        variables: { assetId: string; input: UpdateConfiguredMcpInput },
+      ) =>
+        invalidateConfiguredProjectMcpQueries(
+          queryClient,
+          accountId,
+          projectId,
+          variables.assetId,
+        ),
+    ),
   });
 }
 

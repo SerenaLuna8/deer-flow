@@ -42,6 +42,7 @@ def main() -> int:
         install_replay_model_adapter,
         prepare_hermetic_skills,
         prepare_replay_runtime_catalog,
+        replay_gateway_user,
         replay_worker,
     )
 
@@ -68,7 +69,9 @@ def main() -> int:
     from replay_agent_router import router as replay_agent_router
 
     from app.gateway.app import app as gateway_app
+    from app.gateway.deps import get_current_user_from_request
 
+    gateway_app.dependency_overrides[get_current_user_from_request] = replay_gateway_user
     gateway_app.include_router(replay_agent_router)
 
     print(f"[replay-gw] config={cfg} fixture={args.fixture} cors={args.cors} port={args.port}", flush=True)
