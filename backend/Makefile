@@ -30,12 +30,6 @@ format:
 setup-db:
 	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/setup_postgres.py
 
-upgrade-db:
-	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/upgrade_postgres.py $(ARGS)
-
-preflight-upgrade:
-	PYTHONPATH=. uv run $(if $(SETUP_ENV_FILE),--env-file $(SETUP_ENV_FILE)) python scripts/upgrade_postgres.py --preflight-only
-
 check-db:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/check_postgres.py
 
@@ -50,9 +44,6 @@ prune-run-events:
 
 reconcile-usage:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/reconcile_usage.py $(ARGS)
-
-rotate-credentials:
-	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/rotate_credentials.py $(ARGS)
 
 import-project-skills:
 	PYTHONPATH=. $(RUNTIME_ENV_RUNNER) python scripts/import_project_skills.py $(ARGS)

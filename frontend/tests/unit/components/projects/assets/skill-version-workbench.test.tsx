@@ -19,22 +19,22 @@ const ASSET_ID = "33333333-3333-4333-8333-333333333333";
 const SOURCE_VERSION_ID = "44444444-4444-4444-8444-444444444444";
 
 describe("Skill version conflict recovery", () => {
-  test("focuses Runtime credentials after saving a Candidate with declarations", () => {
+  test("focuses Runtime secrets after saving a Candidate with declarations", () => {
     const events: unknown[][] = [];
     notifySkillCandidateVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
       secret_requirements: [{ name: "API_KEY", optional: false }],
     });
-    expect(events).toEqual([[SOURCE_VERSION_ID, { focusCredentials: true }]]);
+    expect(events).toEqual([[SOURCE_VERSION_ID, { focusSecrets: true }]]);
   });
 
-  test("does not force Runtime credentials after saving a Candidate without declarations", () => {
+  test("does not force Runtime secrets after saving a Candidate without declarations", () => {
     const events: unknown[][] = [];
     notifySkillCandidateVersionCreated((...args) => events.push(args), {
       id: SOURCE_VERSION_ID,
       secret_requirements: [],
     });
-    expect(events).toEqual([[SOURCE_VERSION_ID, { focusCredentials: false }]]);
+    expect(events).toEqual([[SOURCE_VERSION_ID, { focusSecrets: false }]]);
   });
 
   test("uses a high-contrast selected tab variant", () => {

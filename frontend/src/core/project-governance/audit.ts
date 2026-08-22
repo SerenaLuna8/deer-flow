@@ -37,11 +37,6 @@ export const auditActionSchema = z.enum([
   "asset.exported",
   "asset.bound",
   "asset.unbound",
-  "asset.credential_created",
-  "asset.credential_replaced",
-  "asset.credential_revoked",
-  "asset.credential_deleted",
-  "asset.credential_grants_migrated",
   "automation.created",
   "automation.updated",
   "automation.deleted",
@@ -100,23 +95,20 @@ const assetOperationSchema = z.enum([
   "skill.export",
   "skill.delete",
   "skill.enable",
-  "skill.credential_bindings.configure",
+  "skill.secret.replace",
+  "skill.secret.clear",
   "skill.suspend",
   "mcp.create",
   "mcp.version.create",
   "mcp.submit_approval",
   "mcp.approve",
-  "mcp.credential_grants.configure",
+  "mcp.secret.replace",
+  "mcp.secret.clear",
   "mcp.publish",
   "mcp.archive",
   "mcp.suspend",
   "mcp.activate",
   "mcp.delete",
-  "credential.create",
-  "credential.replace",
-  "credential.revoke",
-  "credential.delete",
-  "credential.grants.migrate",
   "binding.enable",
   "binding.upgrade",
   "binding.rollback",
@@ -147,8 +139,6 @@ const currentAssetMetadataSchema = z
     const kindMatches =
       !["agent", "skill", "mcp"].includes(operationDomain) ||
       operationDomain === value.asset_kind;
-    const credentialMatches =
-      operationDomain !== "credential" || value.asset_kind === "mcp";
     const versionMatches =
       operationDomain === "agent"
         ? versionedAgentOperations.has(value.operation) ===
@@ -157,7 +147,7 @@ const currentAssetMetadataSchema = z
           ? versionedSkillOperations.has(value.operation) ===
             (value.version_number !== undefined)
           : value.version_number === undefined;
-    if (!kindMatches || !credentialMatches || !versionMatches) {
+    if (!kindMatches || !versionMatches) {
       context.addIssue({
         code: "custom",
         message: "Asset audit metadata is inconsistent",
@@ -426,11 +416,6 @@ const auditMetadataSchemas: Record<AuditAction, z.ZodTypeAny> = {
   "asset.exported": assetMetadataSchema,
   "asset.bound": assetMetadataSchema,
   "asset.unbound": assetMetadataSchema,
-  "asset.credential_created": assetMetadataSchema,
-  "asset.credential_replaced": assetMetadataSchema,
-  "asset.credential_revoked": assetMetadataSchema,
-  "asset.credential_deleted": assetMetadataSchema,
-  "asset.credential_grants_migrated": assetMetadataSchema,
   "automation.created": automationMetadataSchema,
   "automation.updated": automationMetadataSchema,
   "automation.deleted": automationMetadataSchema,

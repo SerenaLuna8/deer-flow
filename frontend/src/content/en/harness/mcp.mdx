@@ -1,12 +1,12 @@
 ---
 title: MCP Integration
-description: Versioned system and project MCP assets with admitted credentials.
+description: Versioned system and project MCP assets with project-owned secrets.
 ---
 
 # MCP Integration
 
 MCP definitions are immutable database asset versions. System admins publish system versions; project members create project versions or bind approved system versions.
 
-Credentials are stored separately in encrypted envelopes. A definition never contains a secret. Gateway admission freezes the exact MCP versions and Credential grants for a Run; Worker dispatches only that snapshot and records quota/audit at the actual call boundary.
+Each Project stores encrypted values by exact MCP Version and slot. A definition never contains a secret. Gateway admission freezes the exact MCP Version and Secret Generation for a Run; Worker materializes it only at the call boundary and records quota/audit there.
 
 Manage system MCP assets in the admin asset console and project MCP assets in project settings. Viewer access remains read-only when permitted by capability.

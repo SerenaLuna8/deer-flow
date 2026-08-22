@@ -1,4 +1,4 @@
-"""Secret-safe application contracts for the system model catalog."""
+"""Secret-safe application contracts for the stable System Model catalog."""
 
 from __future__ import annotations
 
@@ -7,15 +7,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from deerflow.persistence.shared_assets import (
-    CredentialEnvelopeRow,
-    CredentialRow,
-    CredentialVersionRow,
-)
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.persistence.system_settings import (
-    RunModelConfigSnapshotRow,
     SystemModelConfigRow,
-    SystemModelConfigVersionRow,
+    SystemModelSecretGenerationRow,
 )
 
 
@@ -29,9 +24,7 @@ class CreateSystemModel:
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
+    api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,42 +36,18 @@ class UpdateSystemModel:
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
+    api_key: str | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class SystemModelConnectionCheck:
-    """Validated, non-persistent inputs for one administrator connection check."""
+    """Validated transient inputs for one administrator connection check."""
 
     provider_adapter: str
     provider_model: str
     settings: Mapping[str, object]
     supports_vision: bool
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
-
-
-@dataclass(frozen=True, slots=True)
-class SystemModelVersionView:
-    id: uuid.UUID
-    model_config_id: uuid.UUID
-    version_number: int
-    provider_adapter: str
-    provider_model: str
-    settings: Mapping[str, object]
-    supports_thinking: bool
-    supports_reasoning_effort: bool
-    supports_vision: bool
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
-    payload_checksum: str
-    supersedes_version_id: uuid.UUID | None
-    created_by_user_id: str
-    created_at: datetime
+    api_key: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,9 +55,17 @@ class SystemModelView:
     id: uuid.UUID
     display_name: str
     status: str
-    current_version_id: uuid.UUID
+    provider_adapter: str
+    provider_model: str
+    settings: Mapping[str, object]
+    supports_thinking: bool
+    supports_reasoning_effort: bool
+    supports_vision: bool
+    payload_checksum: str
+    api_key_configured: bool
+    secret_readiness: str
+    secret_revision: int
     revision: int
-    current_version: SystemModelVersionView
     created_by_user_id: str
     updated_by_user_id: str
     created_at: datetime
@@ -129,13 +106,12 @@ class RunModelConfigSnapshotView:
     purpose: str
     model_ref: str
     provider_adapter: str
+    provider_model: str
     provider_settings: Mapping[str, object]
     model_config_id: uuid.UUID
-    model_config_version_id: uuid.UUID
     payload_checksum: str
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
+    secret_generation_id: uuid.UUID | None
+    secret_envelope_digest: str | None
     supports_thinking: bool
     supports_reasoning_effort: bool
     supports_vision: bool
@@ -144,41 +120,32 @@ class RunModelConfigSnapshotView:
 
 @dataclass(frozen=True, slots=True)
 class LockedSystemModelMaterial:
-    """Exact material with envelope bytes hidden from repr and serialization."""
+    """Exact execution payload with protected bytes hidden from serialization."""
 
     model: SystemModelConfigRow
-    version: SystemModelConfigVersionRow
-    credential: CredentialRow | None = field(default=None, repr=False)
-    credential_version: CredentialVersionRow | None = field(
+    secret_generation: SystemModelSecretGenerationRow | None = field(
         default=None,
         repr=False,
     )
-    envelope: CredentialEnvelopeRow | None = field(default=None, repr=False)
-    snapshot: RunModelConfigSnapshotRow | None = field(default=None, repr=False)
+    execution: FrozenSystemModelExecution | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
 class ConnectionTestSystemModelMaterial:
-    """One verified Credential reference for a transient connection check."""
+    """Transient administrator-provided Key; never persisted or returned."""
 
-    command: SystemModelConnectionCheck
-    credential: CredentialRow | None = field(default=None, repr=False)
-    credential_version: CredentialVersionRow | None = field(
-        default=None,
-        repr=False,
-    )
-    envelope: CredentialEnvelopeRow | None = field(default=None, repr=False)
+    command: SystemModelConnectionCheck = field(repr=False)
 
 
 __all__ = [
     "ConnectionTestSystemModelMaterial",
     "CreateSystemModel",
+    "FrozenSystemModelExecution",
     "LockedSystemModelMaterial",
     "PublicSystemModelView",
     "RunModelConfigSnapshotView",
     "SystemModelCatalogStateView",
     "SystemModelCatalogView",
-    "SystemModelVersionView",
     "SystemModelView",
     "SystemModelConnectionCheck",
     "UpdateSystemModel",

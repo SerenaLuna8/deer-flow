@@ -1,12 +1,12 @@
 ---
 title: MCP 集成
-description: 使用 admitted Credential 的版本化系统与项目 MCP 资产。
+description: 使用 Project-owned Secret 的版本化系统与项目 MCP 资产。
 ---
 
 # MCP 集成
 
 MCP definition 是数据库中的不可变资产版本。system admin 发布系统版本，项目成员创建项目版本或 binding 已批准的系统版本。
 
-Credential 独立存入加密 envelope，definition 永远不包含 secret。Gateway 准入为每个 Run 固定 exact MCP version 和 Credential grant；Worker 只 dispatch 该 snapshot，并在实际调用边界记录 quota/audit。
+每个 Project 按精确 MCP Version 和 slot 保存加密 Secret，definition 永远不包含值。Gateway 准入为每个 Run 固定精确 MCP Version 和 Secret Generation；Worker 只在实际调用边界 materialize，并在那里记录 quota/audit。
 
 系统 MCP 在 admin 资产控制台管理，项目 MCP 在项目设置管理。Viewer 仅在 capability 允许时只读访问。

@@ -3,12 +3,11 @@ from __future__ import annotations
 import hashlib
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 import sqlalchemy as sa
-from sqlalchemy import text
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import seed_system_model_config
 
 from app.private_work.memory_dream_service import MemoryDreamAdmissionService
 from app.private_work.memory_service import PrivateMemoryDocumentService
@@ -19,6 +18,7 @@ from app.system_runtime_settings.models import (
     LockedAgentRuntimePolicy,
     RuntimePolicySection,
 )
+from app.system_settings.repository import SystemModelRepository
 from app.worker.memory_dream import MemoryDreamJobHandler
 from deerflow.agents.memory.dream import (
     DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
@@ -275,8 +275,6 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
     before_run_id = str(uuid.uuid4())
     after_run_id = str(uuid.uuid4())
     model_id = uuid.uuid4()
-    model_version_id = uuid.uuid4()
-    model_checksum = "c" * 64
     model_ref = str(model_id)
     worker_id = uuid.uuid4()
     now = datetime.now(UTC)
@@ -301,45 +299,12 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
         assert validate_memory_document(rewritten_content, budget) == rewritten_content
 
         async with seed.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_configs
-                    (id,display_name,status,current_version_id,
-                     revision,created_by_user_id,
-                     updated_by_user_id)
-                    VALUES (:id,'Budget rewrite test','active',
-                            NULL,1,:owner,:owner)"""
-                ),
-                {
-                    "id": model_id,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'vision_bridge_fake','budget-rewrite-test',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,NULL,:owner)"""
-                ),
-                {
-                    "id": model_version_id,
-                    "model": model_id,
-                    "checksum": model_checksum,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """UPDATE system_model_configs
-                    SET current_version_id=:version WHERE id=:model"""
-                ),
-                {"version": model_version_id, "model": model_id},
+            await seed_system_model_config(
+                connection,
+                model_id=model_id,
+                owner_user_id=scope.owner_user_id,
+                display_name="Budget rewrite test",
+                provider_model="budget-rewrite-test",
             )
 
         async with seed.factory() as session, session.begin():
@@ -444,18 +409,12 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
                 is None
             )
 
-        runtime_model = SimpleNamespace(
-            model=SimpleNamespace(id=model_id),
-            version=SimpleNamespace(
-                id=model_version_id,
-                payload_checksum=model_checksum,
-            ),
-        )
-
         class Admission(MemoryDreamAdmissionService):
             @staticmethod
-            async def _platform_runtime(_session, *, create_document):
+            async def _platform_runtime(session, *, create_document):
                 assert create_document is False
+                runtime_model = await SystemModelRepository(session).resolve_active_model(model_ref, load_secret=True)
+                assert runtime_model is not None
                 return policy, policy_revision, runtime_model, None
 
         async with seed.factory() as session, session.begin():
@@ -504,33 +463,10 @@ async def test_budget_rewrite_restores_real_postgres_snapshot_injection(
         assert work.history_count == 0
         assert work.history_digest == BUDGET_REWRITE_HISTORY_DIGEST
 
-        class RuntimePolicy:
-            async def materialize_current_with_revision_in_session(
-                self,
-                _session,
-                section,
-                *,
-                for_update,
-            ):
-                assert section is RuntimePolicySection.AGENT_RUNTIME
-                assert for_update is True
-                return policy, policy_revision
-
-        class Models:
-            def __init__(self, _session) -> None:
-                pass
-
-            async def resolve_active_model(self, model_ref, *, load_envelope):
-                assert model_ref == policy.memory.model_name
-                assert load_envelope is False
-                return runtime_model
-
         handler = MemoryDreamJobHandler(
             seed.factory,
             app_config=None,
-            runtime_policy_materializer=RuntimePolicy(),
             runner_factory=lambda _model: None,
-            model_repository_builder=Models,
         )
         settlement = handler._success_settlement(
             claim,

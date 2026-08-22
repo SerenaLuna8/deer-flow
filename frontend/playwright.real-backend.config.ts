@@ -41,10 +41,10 @@ export default defineConfig({
       stdout: "pipe",
       stderr: "pipe",
       env: {
-        DEER_FLOW_AUTH_DISABLED: "1",
+        ACT_WEAVE_AUTH_DISABLED: "1",
         // The Current Version acceptance regenerates one completed turn in the
         // same Thread, so each deterministic recorded turn is consumed twice.
-        DEERFLOW_REPLAY_REPEAT_COUNT: "2",
+        ACT_WEAVE_REPLAY_REPEAT_COUNT: "2",
       },
     },
     {
@@ -55,13 +55,13 @@ export default defineConfig({
       env: {
         PORT: frontendPort,
         SKIP_ENV_VALIDATION: "1",
-        DEER_FLOW_AUTH_DISABLED: "1",
+        ACT_WEAVE_AUTH_DISABLED: "1",
         BETTER_AUTH_SECRET: "local-dev-secret",
         // Leave NEXT_PUBLIC_* unset so the frontend uses its built-in
         // next.config rewrites (same-origin proxy) instead of talking to the
         // gateway cross-origin — cross-origin fetches drop the auth cookies.
         // Just point that proxy at the replay gateway.
-        DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: gatewayInternalUrl,
+        ACT_WEAVE_INTERNAL_GATEWAY_BASE_URL: gatewayInternalUrl,
       },
     },
   ],

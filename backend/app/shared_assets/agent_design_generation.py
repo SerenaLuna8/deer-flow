@@ -25,9 +25,10 @@ from app.shared_assets.agent_service import (
     MAX_AGENT_INSTRUCTION_FIELD_BYTES,
     MAX_AGENT_INSTRUCTIONS_TOTAL_BYTES,
 )
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.models.runtime import AsyncAbortEvent, ModelRuntimeProfile
 from deerflow.utils import llm_text
 from deerflow.utils.oneshot_llm import run_oneshot_llm
@@ -617,8 +618,7 @@ class AgentDesignModelCaller(Protocol):
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
-        model_version_id: str | None = None,
-        model_payload_checksum: str | None = None,
+        model_execution: FrozenSystemModelExecution | None = None,
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
         abort_event: AsyncAbortEvent | None = None,
@@ -639,8 +639,7 @@ class RunOneshotAgentDesignModelCaller:
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
-        model_version_id: str | None = None,
-        model_payload_checksum: str | None = None,
+        model_execution: FrozenSystemModelExecution | None = None,
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
         abort_event: AsyncAbortEvent | None = None,
@@ -685,8 +684,7 @@ class AgentDesignGenerationService:
         *,
         context: AgentDesignGenerationContext,
         model_ref: str | None = None,
-        model_version_id: str | None = None,
-        model_payload_checksum: str | None = None,
+        model_execution: FrozenSystemModelExecution | None = None,
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
         abort_event: AsyncAbortEvent | None = None,
@@ -706,25 +704,12 @@ class AgentDesignGenerationService:
                 "AGENT_DESIGN_INVALID_INPUT",
                 "Agent design model selection is invalid.",
             )
-        exact_profile = model_version_id is not None or model_payload_checksum is not None
-        if exact_profile and (model_ref is None or exact_model_ref(model_ref) is None or model_version_id is None or model_payload_checksum is None):
+        exact_profile = model_execution is not None
+        if exact_profile and (model_ref is None or exact_model_ref(model_ref) is None or not isinstance(model_execution, FrozenSystemModelExecution) or str(model_execution.model_config_id) != model_ref):
             raise AgentDesignGenerationInvalid(
                 "AGENT_DESIGN_INVALID_INPUT",
                 "Agent design model selection is invalid.",
             )
-        if exact_profile:
-            try:
-                uuid.UUID(model_version_id)
-            except (TypeError, ValueError):
-                raise AgentDesignGenerationInvalid(
-                    "AGENT_DESIGN_INVALID_INPUT",
-                    "Agent design model selection is invalid.",
-                ) from None
-            if not isinstance(model_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", model_payload_checksum) is None:
-                raise AgentDesignGenerationInvalid(
-                    "AGENT_DESIGN_INVALID_INPUT",
-                    "Agent design model selection is invalid.",
-                )
         input_document = self._input_document(request, context)
         if self._contains_secret(input_document):
             raise AgentDesignGenerationUnsafe(
@@ -761,8 +746,7 @@ class AgentDesignGenerationService:
                     if model_ref is not None:
                         caller_kwargs["model_ref"] = model_ref
                     if exact_profile:
-                        caller_kwargs["model_version_id"] = model_version_id
-                        caller_kwargs["model_payload_checksum"] = model_payload_checksum
+                        caller_kwargs["model_execution"] = model_execution
                     if thinking_enabled or reasoning_effort is not None:
                         caller_kwargs["thinking_enabled"] = thinking_enabled
                         caller_kwargs["reasoning_effort"] = reasoning_effort

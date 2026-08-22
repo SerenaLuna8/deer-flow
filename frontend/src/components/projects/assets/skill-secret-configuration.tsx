@@ -1,0 +1,193 @@
+"use client";
+
+import { useEffect, useState } from "react";
+
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
+import {
+  useClearProjectSkillSecret,
+  useReplaceProjectSkillSecrets,
+  useProjectSkillSecrets,
+} from "@/core/shared-assets";
+
+export function SkillSecretConfiguration({
+  accountId,
+  projectId,
+  skillId,
+  versionId,
+  canManage,
+  onDirtyChange,
+}: {
+  accountId: string;
+  projectId: string;
+  skillId: string;
+  versionId: string;
+  canManage: boolean;
+  onDirtyChange: (dirty: boolean) => void;
+}) {
+  const query = useProjectSkillSecrets(
+    accountId,
+    projectId,
+    skillId,
+    versionId,
+  );
+  const replace = useReplaceProjectSkillSecrets(accountId, projectId);
+  const clear = useClearProjectSkillSecret(accountId, projectId);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [clearName, setClearName] = useState<string | null>(null);
+  const [pending, setPending] = useState<"replace" | "clear" | null>(null);
+  const [mutationError, setMutationError] = useState<unknown>(null);
+  const dirty = Object.values(values).some((value) => value !== "");
+
+  useEffect(() => onDirtyChange(dirty), [dirty, onDirtyChange]);
+
+  async function save() {
+    const secrets = Object.fromEntries(
+      Object.entries(values).filter(([, value]) => value !== ""),
+    );
+    if (Object.keys(secrets).length === 0) return;
+    setPending("replace");
+    setMutationError(null);
+    setValues({});
+    try {
+      await replace.mutateAsync({
+        skillId,
+        versionId,
+        input: { secrets },
+      });
+      await query.refetch();
+    } catch (error) {
+      setMutationError(error);
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function confirmClear() {
+    if (!clearName) return;
+    setPending("clear");
+    setMutationError(null);
+    try {
+      await clear.mutateAsync({
+        skillId,
+        versionId,
+        secretName: clearName,
+        input: { confirmed: true },
+      });
+      await query.refetch();
+      setClearName(null);
+    } catch (error) {
+      setMutationError(error);
+    } finally {
+      setPending(null);
+    }
+  }
+
+  const error = query.error ?? mutationError;
+
+  return (
+    <section className="space-y-4" aria-label="Skill 秘密配置">
+      <div>
+        <h3 className="text-sm font-semibold">运行秘密</h3>
+        <p className="text-muted-foreground mt-1 text-xs">
+          秘密值仅可写入。编辑时留空表示保留当前值；保存后输入框会立即清空。
+        </p>
+      </div>
+
+      {query.isLoading ? (
+        <p role="status" className="text-muted-foreground text-sm">
+          正在读取配置状态…
+        </p>
+      ) : query.data?.requirements.length ? (
+        <div className="space-y-3">
+          {query.data.requirements.map((requirement) => (
+            <div
+              key={requirement.name}
+              className="grid gap-2 rounded-xl border p-3 sm:grid-cols-[minmax(0,1fr)_auto]"
+            >
+              <label className="min-w-0 space-y-2">
+                <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                  <code>{requirement.name}</code>
+                  <span className="text-muted-foreground text-xs">
+                    {requirement.optional ? "可选" : "必需"} · {requirement.configured ? "已配置" : "未配置"}
+                  </span>
+                </span>
+                <Input
+                  type="password"
+                  autoComplete="new-password"
+                  value={values[requirement.name] ?? ""}
+                  disabled={!canManage || pending !== null}
+                  aria-label={`${requirement.name} 秘密值`}
+                  placeholder={requirement.configured ? "留空以保留" : "输入秘密值"}
+                  onChange={(event) =>
+                    setValues((current) => ({
+                      ...current,
+                      [requirement.name]: event.target.value,
+                    }))
+                  }
+                />
+              </label>
+              <Button
+                type="button"
+                variant="outline"
+                className="self-end"
+                disabled={!canManage || !requirement.configured || pending !== null}
+                onClick={() => setClearName(requirement.name)}
+              >
+                清除
+              </Button>
+            </div>
+          ))}
+          {canManage ? (
+            <Button
+              type="button"
+              disabled={!dirty || pending !== null}
+              onClick={() => void save()}
+            >
+              {pending === "replace" ? "正在保存…" : "保存非空秘密值"}
+            </Button>
+          ) : (
+            <p className="text-muted-foreground text-sm">
+              当前账户没有管理项目秘密的权限。
+            </p>
+          )}
+        </div>
+      ) : (
+        <p className="text-muted-foreground text-sm">此版本未声明运行秘密。</p>
+      )}
+
+      {error ? (
+        <p role="alert" className="text-destructive text-sm">
+          {error instanceof Error ? error.message : "秘密配置操作失败。"}
+        </p>
+      ) : null}
+
+      <Dialog open={clearName !== null} onOpenChange={(open) => !open && setClearName(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>清除秘密值？</DialogTitle>
+            <DialogDescription>
+              清除后，依赖此值的配置会立即变为未就绪；新的 Run 将无法使用它。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={() => setClearName(null)}>
+              取消
+            </Button>
+            <Button type="button" variant="destructive" disabled={pending !== null} onClick={() => void confirmClear()}>
+              {pending === "clear" ? "正在清除…" : "确认清除"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </section>
+  );
+}

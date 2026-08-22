@@ -26,12 +26,12 @@ type ProjectSkillStatusItem = Pick<
   ProjectAssetItem,
   "capabilities" | "current_version_id" | "scope" | "status"
 >;
-type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+type MutableAssetKind = AssetListKind;
 
-export function projectSkillCredentialSetupRequired(error: unknown): boolean {
+export function projectSkillSecretSetupRequired(error: unknown): boolean {
   return (
     error instanceof SharedAssetApiError &&
-    error.code === "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE"
+    error.code === "SKILL_SECRETS_INCOMPLETE"
   );
 }
 
@@ -58,7 +58,7 @@ export function projectConfiguredMcpErrorMessage(error: unknown): string {
 
 export function projectMcpDeleteErrorMessage(error: unknown): string {
   if (error instanceof SharedAssetApiError && error.status === 409) {
-    return "该 MCP 状态已变化，或仍被 Agent、历史运行或 Credential 授权快照引用；刷新并解除引用后重试。";
+    return "该 MCP 状态已变化，或仍被 Agent、历史运行或执行快照引用；刷新并解除引用后重试。";
   }
   return adminAssetErrorMessage(error);
 }

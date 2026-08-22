@@ -20,7 +20,7 @@ export function ProjectAssetSection({
   onCreateVersion,
   renderDetails,
 }: {
-  kind: Exclude<AssetListKind, "credentials">;
+  kind: AssetListKind;
   items: ProjectAssetItem[];
   onCreateVersion?: (item: ProjectAssetItem) => void;
   renderDetails?: (item: ProjectAssetItem) => React.ReactNode;

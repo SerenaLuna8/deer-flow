@@ -10,15 +10,15 @@
 #   - provisioner: (optional) Sandbox provisioner for Kubernetes mode
 #
 # Key environment variables (set via environment/.env or scripts/deploy.sh):
-#   DEER_FLOW_PROJECT_ROOT           — project root for relative runtime paths
-#   DEER_FLOW_HOME                   — runtime data dir, default .deer-flow under $DEER_FLOW_PROJECT_ROOT (or cwd)
-#   DEER_FLOW_CONFIG_PATH            — path to config.yaml
-#   DEER_FLOW_SKILLS_PATH            — skills dir, default $DEER_FLOW_PROJECT_ROOT/skills
-#   DEER_FLOW_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
-#   DEER_FLOW_REPO_ROOT              — repo root (used for skills host path in DooD)
+#   ACT_WEAVE_PROJECT_ROOT           — project root for relative runtime paths
+#   ACT_WEAVE_HOME                   — runtime data dir, default .deer-flow under $ACT_WEAVE_PROJECT_ROOT (or cwd)
+#   ACT_WEAVE_CONFIG_PATH            — path to config.yaml
+#   ACT_WEAVE_SKILLS_PATH            — skills dir, default $ACT_WEAVE_PROJECT_ROOT/skills
+#   ACT_WEAVE_DOCKER_SOCKET          — Docker socket path for aio/DooD mode, default /var/run/docker.sock (used only by the opt-in docker-compose.dood.yaml overlay)
+#   ACT_WEAVE_REPO_ROOT              — repo root (used for skills host path in DooD)
 #   BETTER_AUTH_SECRET               — required for frontend auth/session security
-#   DEER_FLOW_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
-#   DEER_FLOW_PROXY_AUTH_TOKEN       — nginx-to-Gateway client-IP attestation token
+#   ACT_WEAVE_INTERNAL_AUTH_TOKEN    — shared internal Gateway auth token for multi-worker IM channels
+#   ACT_WEAVE_PROXY_AUTH_TOKEN       — nginx-to-Gateway client-IP attestation token
 #   PROVISIONER_API_KEY              — shared config value; Worker authenticates to Provisioner with it
 #
 # LangSmith tracing is disabled by default (LANGSMITH_TRACING=false).
@@ -36,9 +36,9 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
     environment:
-      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
+      - ACT_WEAVE_PROXY_AUTH_TOKEN=${ACT_WEAVE_PROXY_AUTH_TOKEN}
     command: >
-      sh -c "envsubst '$$DEER_FLOW_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+      sh -c "envsubst '$$ACT_WEAVE_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
       && nginx -g 'daemon off;'"
     depends_on:
       - frontend
@@ -59,7 +59,7 @@ services:
     container_name: deer-flow-frontend
     environment:
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
-      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - ACT_WEAVE_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
       - ../frontend/.env
     networks:
@@ -80,9 +80,9 @@ services:
     # Gateway admits project Runs; the independent Worker executes durable jobs.
     command: sh -c "cd backend && PYTHONPATH=. uv run uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers ${GATEWAY_WORKERS:-1}"
     volumes:
-      - ${DEER_FLOW_CONFIG_PATH}:/app/backend/config.yaml:ro
+      - ${ACT_WEAVE_CONFIG_PATH}:/app/backend/config.yaml:ro
       - ../skills:/app/skills:ro
-      - ${DEER_FLOW_HOME}:/app/backend/.deer-flow
+      - ${ACT_WEAVE_HOME}:/app/backend/.deer-flow
       # DooD: the host Docker socket is never mounted into Gateway. The opt-in
       # docker-compose.dood.yaml overlay adds it only to Worker for aio mode.
       # See backend/docs/CONFIGURATION.md Security Note for details.
@@ -93,27 +93,26 @@ services:
     environment:
       - CI=true
       - GATEWAY_WORKERS=${GATEWAY_WORKERS:-1}
-      - DEER_FLOW_PROJECT_ROOT=/app
-      - DEER_FLOW_HOME=/app/backend/.deer-flow
-      - DEER_FLOW_CONFIG_PATH=/app/backend/config.yaml
-      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
-      - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      - ACT_WEAVE_PROJECT_ROOT=/app
+      - ACT_WEAVE_HOME=/app/backend/.deer-flow
+      - ACT_WEAVE_CONFIG_PATH=/app/backend/config.yaml
+      - ACT_WEAVE_CHANNELS_LANGGRAPH_URL=${ACT_WEAVE_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
+      - ACT_WEAVE_CHANNELS_GATEWAY_URL=${ACT_WEAVE_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
       - DATABASE_URL=${DATABASE_URL:-}
-      - DEER_FLOW_AUDIT_ACTIVE_KEY_ID=${DEER_FLOW_AUDIT_ACTIVE_KEY_ID:-}
-      - DEER_FLOW_AUDIT_KEYRING_JSON=${DEER_FLOW_AUDIT_KEYRING_JSON:-}
-      - DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID=${DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID:-}
-      - DEER_FLOW_CREDENTIAL_KEYRING_JSON=${DEER_FLOW_CREDENTIAL_KEYRING_JSON:-}
-      - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN}
-      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
+      - ACT_WEAVE_AUDIT_ACTIVE_KEY_ID=${ACT_WEAVE_AUDIT_ACTIVE_KEY_ID:-}
+      - ACT_WEAVE_AUDIT_KEYRING_JSON=${ACT_WEAVE_AUDIT_KEYRING_JSON:-}
+      - ACT_WEAVE_SECRET_KEY=${ACT_WEAVE_SECRET_KEY:-}
+      - ACT_WEAVE_INTERNAL_AUTH_TOKEN=${ACT_WEAVE_INTERNAL_AUTH_TOKEN}
+      - ACT_WEAVE_PROXY_AUTH_TOKEN=${ACT_WEAVE_PROXY_AUTH_TOKEN}
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
       # DooD path/network translation
-      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_REPO_ROOT}/skills
-      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - ACT_WEAVE_HOST_BASE_DIR=${ACT_WEAVE_HOME}
+      - ACT_WEAVE_HOST_SKILLS_PATH=${ACT_WEAVE_REPO_ROOT}/skills
+      - ACT_WEAVE_SANDBOX_HOST=host.docker.internal
       # Forward only the explicit runtime proxy contract. The root .env is not
-      # mounted wholesale because model provider Credentials live in PostgreSQL.
+      # mounted wholesale because model provider secrets live in PostgreSQL.
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - ALL_PROXY=${ALL_PROXY:-}
@@ -169,9 +168,9 @@ services:
     environment:
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
-      - SKILLS_HOST_PATH=${DEER_FLOW_REPO_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
-      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
+      - SKILLS_HOST_PATH=${ACT_WEAVE_REPO_ROOT}/skills
+      - THREADS_HOST_PATH=${ACT_WEAVE_HOME}/threads
+      - ACT_WEAVE_HOST_BASE_DIR=${ACT_WEAVE_HOME}
       - KUBECONFIG_PATH=/root/.kube/config
       - SANDBOX_SERVICE_TYPE=NodePort
       - NODE_HOST=host.docker.internal

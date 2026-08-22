@@ -48,7 +48,7 @@ class SkillsConfig(BaseModel):
 
         Resolution order:
             1. Explicit ``path`` field
-            2. ``DEER_FLOW_SKILLS_PATH`` environment variable
+            2. ``ACT_WEAVE_SKILLS_PATH`` environment variable
             3. ``skills`` under the caller project root (``project_root()``)
             4. Legacy repo-root candidates for monorepo compatibility (``_legacy_skills_candidates``)
 
@@ -58,7 +58,7 @@ class SkillsConfig(BaseModel):
         if self.path:
             # Use configured path (can be absolute or relative to project root)
             return resolve_path(self.path)
-        if env_path := os.getenv("DEER_FLOW_SKILLS_PATH"):
+        if env_path := os.getenv("ACT_WEAVE_SKILLS_PATH"):
             return resolve_path(env_path)
 
         project_default = project_root() / "skills"

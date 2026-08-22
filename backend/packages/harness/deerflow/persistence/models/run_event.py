@@ -120,7 +120,13 @@ class RunEventInvariantRow(Base):
 
     __tablename__ = "run_event_invariants"
 
-    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    # Shares the already allocated RunEvent identity; it must not own a second
+    # sequence in a fresh Schema V1 catalog.
+    id: Mapped[int] = mapped_column(
+        BigInteger,
+        primary_key=True,
+        autoincrement=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     owner_user_id: Mapped[str] = mapped_column(String(36), nullable=False)

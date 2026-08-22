@@ -120,7 +120,7 @@ def test_authenticated_mcp_payload_rejects_coerced_slot_required(
 ) -> None:
     payload = {
         "transport": "stdio",
-        "credential_slots": [
+        "secret_slots": [
             {
                 "name": "token",
                 "payload_schema": {},

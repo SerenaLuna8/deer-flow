@@ -11,7 +11,7 @@ from starlette.requests import Request
 from app.gateway.auth.config import get_auth_config
 from deerflow.config.auth_config import AuthAppConfig
 
-PROXY_AUTH_TOKEN_ENV = "DEER_FLOW_PROXY_AUTH_TOKEN"
+PROXY_AUTH_TOKEN_ENV = "ACT_WEAVE_PROXY_AUTH_TOKEN"
 PROXY_AUTH_TOKEN_HEADER = "x-deerflow-proxy-token"
 _MIN_PROXY_AUTH_TOKEN_LENGTH = 32
 
@@ -35,7 +35,7 @@ def validate_proxy_identity_config(config: AuthAppConfig) -> None:
         return
     jwt_secret = get_auth_config().jwt_secret
     separated_secrets = (
-        os.getenv("DEER_FLOW_INTERNAL_AUTH_TOKEN"),
+        os.getenv("ACT_WEAVE_INTERNAL_AUTH_TOKEN"),
         jwt_secret,
         os.getenv("AUTH_JWT_SECRET"),
     )

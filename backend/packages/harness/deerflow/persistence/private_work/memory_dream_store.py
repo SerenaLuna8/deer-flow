@@ -10,6 +10,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.memory_contract import (
     BUDGET_REWRITE_HISTORY_DIGEST,
     DEFAULT_EPISODE_RETENTION_DAYS,
@@ -54,7 +55,6 @@ from deerflow.persistence.private_work.memory_repository_parts import (
     version_record,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
-from deerflow.persistence.system_settings import SystemModelConfigVersionRow
 from deerflow.persistence.user.model import UserRow
 
 # Persistence-only Dream orchestration limits.
@@ -584,7 +584,13 @@ class MemoryDreamStore:
             base_content_digest=document.content_digest,
             preference_version=frozen.preference_version,
             policy_revision=frozen.policy_revision,
-            model_ref=frozen.model_version_id,
+            model_config_id=frozen.model_execution.model_config_id,
+            model_provider_payload=dict(
+                frozen.model_execution.provider_payload,
+            ),
+            model_payload_checksum=frozen.model_execution.payload_checksum,
+            model_secret_generation_id=(frozen.model_execution.secret_generation_id),
+            model_secret_envelope_digest=(frozen.model_execution.secret_envelope_digest),
             prompt_version=frozen.prompt_version,
             result_version=None,
             created_at=now,
@@ -672,7 +678,6 @@ class MemoryDreamStore:
                 sa.select(
                     MemoryDreamRunRow,
                     MemoryDocumentRow,
-                    SystemModelConfigVersionRow,
                     JobRow,
                 )
                 .join(
@@ -683,10 +688,6 @@ class MemoryDreamStore:
                         MemoryDocumentRow.namespace == MemoryDreamRunRow.namespace,
                     ),
                 )
-                .join(
-                    SystemModelConfigVersionRow,
-                    SystemModelConfigVersionRow.id == MemoryDreamRunRow.model_ref,
-                )
                 .join(JobRow, JobRow.id == MemoryDreamRunRow.job_id)
                 .where(
                     MemoryDreamRunRow.job_id == job_id,
@@ -696,7 +697,7 @@ class MemoryDreamStore:
         ).one_or_none()
         if result is None:
             return None
-        run, document, model_version, job = result
+        run, document, job = result
         history_rows = tuple(
             (
                 await self.session.execute(
@@ -737,9 +738,13 @@ class MemoryDreamStore:
             sections_policy_version_id=sections_policy_version_id,
             preference_version=int(run.preference_version),
             policy_revision=int(run.policy_revision),
-            model_config_id=model_version.model_config_id,
-            model_version_id=model_version.id,
-            model_payload_checksum=model_version.payload_checksum,
+            model_execution=FrozenSystemModelExecution(
+                model_config_id=uuid.UUID(str(run.model_config_id)),
+                provider_payload=dict(run.model_provider_payload),
+                payload_checksum=run.model_payload_checksum,
+                secret_generation_id=(uuid.UUID(str(run.model_secret_generation_id)) if run.model_secret_generation_id is not None else None),
+                secret_envelope_digest=run.model_secret_envelope_digest,
+            ),
             prompt_version=run.prompt_version,
             result_version=(None if run.result_version is None else int(run.result_version)),
             cancel_requested=job.cancel_requested_at is not None,
@@ -850,7 +855,6 @@ class MemoryDreamStore:
             history_to=run.history_to,
             history_count=run.history_count,
             prompt_version=run.prompt_version,
-            model_ref=run.model_ref,
             needs_review=memory_document_needs_review(document.content, content, history),
             created_at=now,
         )

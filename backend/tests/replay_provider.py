@@ -48,7 +48,7 @@ Point a config model's ``use`` at this class and set the fixture via env::
         use: replay_provider:ReplayChatModel
         model: gpt-5.5            # placeholder; ignored
 
-    DEERFLOW_REPLAY_FIXTURE=/path/to/write_read_file.ultra.json
+    ACT_WEAVE_REPLAY_FIXTURE=/path/to/write_read_file.ultra.json
 
 A cache miss raises loudly with a diagnostic — that is the signal that the
 replayed run diverged from the fixture (graph changed, a new volatile field
@@ -82,8 +82,8 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_core.runnables import Runnable
 from pydantic import PrivateAttr
 
-_FIXTURE_ENV = "DEERFLOW_REPLAY_FIXTURE"
-_REPEAT_COUNT_ENV = "DEERFLOW_REPLAY_REPEAT_COUNT"
+_FIXTURE_ENV = "ACT_WEAVE_REPLAY_FIXTURE"
+_REPEAT_COUNT_ENV = "ACT_WEAVE_REPLAY_REPEAT_COUNT"
 _DEFAULT_CALLER = "lead_agent"
 _CALLER_TAG_PREFIXES = ("middleware:", "subagent:")
 _CALLER_NAME_ALIASES = {
@@ -129,7 +129,7 @@ _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.D
 _UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 _ISO_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?")
 _DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
-# Absolute temp/home roots used for per-run isolation (macOS + Linux + DEER_FLOW_HOME tmp).
+# Absolute temp/home roots used for per-run isolation (macOS + Linux + ACT_WEAVE_HOME tmp).
 _PATH_RE = re.compile(r"(?:/private)?/(?:var/folders|tmp)/[^\s\"']*")
 
 # InputSanitizationMiddleware wraps user content in plain-text boundary markers.
@@ -360,7 +360,7 @@ class ReplayChatModel(BaseChatModel):
             if bucket:
                 key = legacy_key
         if not bucket:
-            if os.environ.get("DEERFLOW_REPLAY_DEBUG_EXCEPTIONS") == "1":
+            if os.environ.get("ACT_WEAVE_REPLAY_DEBUG_EXCEPTIONS") == "1":
                 print(
                     f"[replay-provider] miss caller={caller!r} input_hash={key} conversation_hash={legacy_key}",
                     flush=True,

@@ -46,7 +46,7 @@ def _run_config_upgrade(config_path: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [str(CONFIG_UPGRADE)],
         cwd=REPO_ROOT,
-        env={**os.environ, "DEER_FLOW_CONFIG_PATH": str(config_path)},
+        env={**os.environ, "ACT_WEAVE_CONFIG_PATH": str(config_path)},
         check=False,
         capture_output=True,
         text=True,

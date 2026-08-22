@@ -25,7 +25,7 @@ import type {
   UpdateAutomationInput,
 } from "@/core/project-automations/types";
 import type { Capability, Project } from "@/core/projects/types";
-import { useProjectAssets, type ProjectAssetList } from "@/core/shared-assets";
+import { useProjectAssets } from "@/core/shared-assets";
 import { useThreads } from "@/core/threads/hooks";
 import { titleOfThread } from "@/core/threads/utils";
 
@@ -220,7 +220,7 @@ export function ProjectAutomationsPage({ project }: { project: Project }) {
     },
   );
   const agentItems = executableProjectAgents(
-    agentsQuery.data as ProjectAssetList | undefined,
+    agentsQuery.data,
   );
   const mcpDependencyRuntime = useAgentMcpDependencyRuntime({
     accountId: user?.id ?? "",

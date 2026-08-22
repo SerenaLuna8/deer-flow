@@ -98,7 +98,7 @@ def _runtime_config() -> AppConfig:
         model="fake-vision",
         supports_vision=True,
     )
-    vision._system_model_config_version_id = uuid.uuid4()
+    vision._system_model_config_id = uuid.uuid4()
     vision._system_provider_adapter = "vision_bridge_fake"
     return AppConfig(
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),

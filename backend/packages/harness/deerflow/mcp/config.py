@@ -49,13 +49,12 @@ class McpOAuthConfig(BaseModel):
 
     enabled: bool = Field(default=True, description="Whether OAuth token injection is enabled")
     token_url: str = Field(description="OAuth token endpoint URL")
-    grant_type: Literal["client_credentials", "refresh_token"] = Field(
+    grant_type: Literal["client_credentials"] = Field(
         default="client_credentials",
         description="OAuth grant type",
     )
     client_id: str | None = Field(default=None, description="OAuth client ID")
     client_secret: str | None = Field(default=None, description="OAuth client secret")
-    refresh_token: str | None = Field(default=None, description="OAuth refresh token (for refresh_token grant)")
     scope: str | None = Field(default=None, description="OAuth scope")
     audience: str | None = Field(default=None, description="OAuth audience (provider-specific)")
     token_field: str = Field(default="access_token", description="Field name containing access token in token response")

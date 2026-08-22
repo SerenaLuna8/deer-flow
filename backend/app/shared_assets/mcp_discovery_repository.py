@@ -57,7 +57,7 @@ class McpToolDiscoveryAttemptRecord:
     requested_by_user_id: str
     trigger: McpToolDiscoveryTrigger
     payload_checksum: str
-    grant_digest: str
+    secret_digest: str
     status: McpToolDiscoveryStatus
     requested_at: datetime
     started_at: datetime | None
@@ -117,7 +117,7 @@ class McpToolDiscoveryAttemptRepository:
         mcp_server_id: uuid.UUID,
         mcp_server_version_id: uuid.UUID,
         payload_checksum: str,
-        grant_digest: str,
+        secret_digest: str,
         trigger: McpToolDiscoveryTrigger,
         idempotency_key: str,
     ) -> McpToolDiscoveryAttemptRecord:
@@ -126,7 +126,7 @@ class McpToolDiscoveryAttemptRepository:
         asset = _uuid(mcp_server_id, field="mcp_server_id")
         version = _uuid(mcp_server_version_id, field="mcp_server_version_id")
         checksum = _digest(payload_checksum, field="payload_checksum")
-        closure_digest = _digest(grant_digest, field="grant_digest")
+        closure_digest = _digest(secret_digest, field="secret_digest")
         if trigger not in {"auto", "manual"}:
             raise ValueError("unsupported MCP discovery trigger")
 
@@ -159,7 +159,7 @@ class McpToolDiscoveryAttemptRepository:
                 requested_by_user_id=requester,
                 trigger=trigger,
                 payload_checksum=checksum,
-                grant_digest=closure_digest,
+                secret_digest=closure_digest,
                 requested_at=requested_at,
                 revision=1,
             )
@@ -171,7 +171,7 @@ class McpToolDiscoveryAttemptRepository:
         record = await self.get(project, job_id)
         if record is None:
             raise RuntimeError("MCP discovery attempt admission was not persisted")
-        if record.requested_by_user_id != requester or record.mcp_server_id != asset or record.mcp_server_version_id != version or record.payload_checksum != checksum or record.grant_digest != closure_digest or record.trigger != trigger:
+        if record.requested_by_user_id != requester or record.mcp_server_id != asset or record.mcp_server_version_id != version or record.payload_checksum != checksum or record.secret_digest != closure_digest or record.trigger != trigger:
             raise JobIdempotencyConflict("MCP discovery idempotency target conflict")
         return record
 
@@ -224,13 +224,13 @@ class McpToolDiscoveryAttemptRepository:
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
         payload_checksum: str,
-        grant_digest: str,
+        secret_digest: str,
     ) -> McpToolDiscoveryAttemptRecord | None:
         project = _uuid(project_id, field="project_id")
         asset = _uuid(asset_id, field="asset_id")
         version = _uuid(version_id, field="version_id")
         checksum = _digest(payload_checksum, field="payload_checksum")
-        closure_digest = _digest(grant_digest, field="grant_digest")
+        closure_digest = _digest(secret_digest, field="secret_digest")
         row = (
             await self.session.execute(
                 self._record_statement()
@@ -239,7 +239,7 @@ class McpToolDiscoveryAttemptRepository:
                     McpToolDiscoveryAttemptRow.mcp_server_id == asset,
                     McpToolDiscoveryAttemptRow.mcp_server_version_id == version,
                     McpToolDiscoveryAttemptRow.payload_checksum == checksum,
-                    McpToolDiscoveryAttemptRow.grant_digest == closure_digest,
+                    McpToolDiscoveryAttemptRow.secret_digest == closure_digest,
                     JobRow.status.in_(_ACTIVE_JOB_STATUSES),
                 )
                 .order_by(
@@ -309,7 +309,7 @@ class McpToolDiscoveryAttemptRepository:
         if (
             attempt.trigger not in {"auto", "manual"}
             or _HEX_DIGEST.fullmatch(attempt.payload_checksum) is None
-            or _HEX_DIGEST.fullmatch(attempt.grant_digest) is None
+            or _HEX_DIGEST.fullmatch(attempt.secret_digest) is None
             or attempt.result_status not in {None, "succeeded", "failed", "cancelled"}
             or (attempt.result_status == "failed" and attempt.public_error_code not in _MCP_DISCOVERY_ERROR_CODES)
             or (attempt.result_status != "failed" and attempt.public_error_code is not None)
@@ -330,7 +330,7 @@ class McpToolDiscoveryAttemptRepository:
             requested_by_user_id=attempt.requested_by_user_id,
             trigger=cast(McpToolDiscoveryTrigger, attempt.trigger),
             payload_checksum=attempt.payload_checksum,
-            grant_digest=attempt.grant_digest,
+            secret_digest=attempt.secret_digest,
             status=status,
             requested_at=attempt.requested_at,
             started_at=job.started_at,

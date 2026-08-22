@@ -30,12 +30,12 @@ SECRETS_CONTEXT_KEY = "secrets"
 
 # Private Worker-to-harness carrier for exact admitted Skill bindings. Values are
 # isolated by the Skill's canonical container ``SKILL.md`` path so two Skills
-# may safely bind the same environment-variable name to different Credential
+# may safely bind the same environment-variable name to different secret
 # values. This key is internal runtime state, never a client input contract.
 SKILL_SCOPED_SECRETS_CONTEXT_KEY = "__skill_scoped_secrets"
 
 # Private Worker-to-harness callable that revalidates the admitted Skill
-# Credential closure and returns a fresh path-scoped carrier for one sandbox
+# secret closure and returns a fresh path-scoped carrier for one sandbox
 # command.  The callable is opaque app-owned runtime state, never a client
 # contract or serializable value.
 SKILL_SECRET_PROVIDER_CONTEXT_KEY = "__skill_secret_provider"
@@ -43,7 +43,7 @@ SKILL_SECRET_PROVIDER_CONTEXT_KEY = "__skill_secret_provider"
 # Name-only activation plan produced by SkillActivationMiddleware.  A private
 # provider uses this immediately before bash execution to select values from
 # the freshly materialized path-scoped carrier.  It intentionally contains no
-# Credential values.
+# secret values.
 ACTIVE_SECRET_SOURCES_CONTEXT_KEY = "__active_skill_secret_sources"
 
 # Ephemeral marker set only by the async bash wrapper after a private provider

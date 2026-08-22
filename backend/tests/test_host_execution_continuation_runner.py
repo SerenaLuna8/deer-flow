@@ -416,12 +416,12 @@ async def test_executor_queue_revocation_is_revalidated_at_spawn_and_never_spawn
                 channel_user_id="source-channel-user",
             ),
             None,
-            "export DEERFLOW_CHANNEL_USER_ID=source-channel-user; ",
+            "export ACT_WEAVE_CHANNEL_USER_ID=source-channel-user; ",
         ),
         (
             _plan(channel_identity_mode="unset"),
             "forged-continuation-user",
-            "unset DEERFLOW_CHANNEL_USER_ID; ",
+            "unset ACT_WEAVE_CHANNEL_USER_ID; ",
         ),
         (
             _plan(),
@@ -639,7 +639,7 @@ async def test_frozen_exact_skill_secret_plan_revalidates_injects_masks_and_clea
 
 
 @pytest.mark.asyncio
-async def test_frozen_skill_credential_refreshes_after_executor_queue(
+async def test_frozen_skill_secret_refreshes_after_executor_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     source = HostExecutionSkillSecretSource(
@@ -812,7 +812,7 @@ async def test_cancelling_continuation_before_spawn_prevents_credential_process(
 
 
 @pytest.mark.asyncio
-async def test_real_local_sandbox_subprocess_reads_frozen_skill_credential(
+async def test_real_local_sandbox_subprocess_reads_frozen_skill_secret(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:

@@ -30,7 +30,7 @@ import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
 import { adminAssetErrorMessage } from "./admin-asset-view-model";
 
-const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
+const BINDING_KIND: Record<AssetListKind, AssetKind> = {
   agents: "agent",
   skills: "skill",
   "mcp-servers": "mcp",
@@ -70,7 +70,7 @@ export function AdminProjectSystemBindingDialog({
 }: {
   accountId: string;
   projectId: string;
-  kind: Exclude<AssetListKind, "credentials">;
+  kind: AssetListKind;
   item: ProjectAssetItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;

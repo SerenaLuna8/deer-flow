@@ -45,7 +45,7 @@ def resolve_development_database_url(
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    if os.getenv("DEER_FLOW_CORE_REQUIRE_ZERO_SKIPS") != "1":
+    if os.getenv("ACT_WEAVE_CORE_REQUIRE_ZERO_SKIPS") != "1":
         return
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     stats = getattr(reporter, "stats", {})
@@ -71,7 +71,7 @@ def main(
     # captures it before replacing the application-facing value with a safe
     # nonexistent target; no other root .env values are exported to pytest.
     os.environ["DATABASE_URL"] = database_url
-    os.environ["DEER_FLOW_CORE_REQUIRE_ZERO_SKIPS"] = "1"
+    os.environ["ACT_WEAVE_CORE_REQUIRE_ZERO_SKIPS"] = "1"
     return int(pytest.main(list(argv) if argv is not None else sys.argv[1:]))
 
 

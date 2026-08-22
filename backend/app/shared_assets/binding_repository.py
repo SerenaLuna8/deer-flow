@@ -9,11 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext
-from app.shared_assets.credential_closure import (
-    McpCredentialClosureInvalid,
-    McpCredentialClosureTarget,
-    lock_mcp_credential_closures,
-)
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetNotFound,
@@ -23,10 +18,11 @@ from app.shared_assets.errors import (
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
+from app.shared_assets.mcp_secret_closure import lock_mcp_secret_closure
 from app.shared_assets.models import AssetKind, AssetScope, AssetSelection
-from app.shared_assets.skill_credential_closure import (
-    SkillCredentialClosureInvalid,
-    lock_skill_credential_closure,
+from app.shared_assets.skill_secret_closure import (
+    SkillSecretClosureInvalid,
+    lock_skill_secret_closure,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -34,6 +30,7 @@ from deerflow.persistence.shared_assets import (
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectSystemAgentBindingRow,
@@ -395,19 +392,14 @@ class BindingRepository:
         if selection.kind is AssetKind.MCP:
             if selection.version_id is None:
                 raise AssetValidationFailed(context.request_id)
-            await self._validate_mcp_versions((selection.version_id,), context.request_id)
+            await self._validate_mcp_versions(
+                (selection.version_id,),
+                context,
+                require_secrets=False,
+            )
             return
         target = await self.lock_target(context, selection, read=True)
         if selection.kind is AssetKind.SKILL:
-            try:
-                await lock_skill_credential_closure(
-                    self.session,
-                    self._project_id(context),
-                    selection.asset_id,
-                    target.version.id,
-                )
-            except SkillCredentialClosureInvalid:
-                raise AssetValidationFailed(context.request_id) from None
             return
         if selection.kind is not AssetKind.AGENT:
             return
@@ -448,18 +440,31 @@ class BindingRepository:
             )
             if binding is None or not binding.enabled:
                 raise AssetValidationFailed(context.request_id)
-            await self.lock_target(
+            skill_target = await self.lock_target(
                 context,
                 AssetSelection(AssetKind.SKILL, skill_asset_id),
                 read=True,
             )
+            try:
+                await lock_skill_secret_closure(
+                    self.session,
+                    self._project_id(context),
+                    skill_asset_id,
+                    skill_target.version.id,
+                )
+            except SkillSecretClosureInvalid:
+                raise AssetValidationFailed(context.request_id) from None
         if not await self._system_versions_are_bound(
             context,
             AssetKind.MCP,
             mcp_ids,
         ):
             raise AssetValidationFailed(context.request_id)
-        await self._validate_mcp_versions(mcp_ids, context.request_id)
+        await self._validate_mcp_versions(
+            mcp_ids,
+            context,
+            require_secrets=True,
+        )
 
     async def _system_versions_are_bound(
         self,
@@ -524,14 +529,16 @@ class BindingRepository:
     async def _validate_mcp_versions(
         self,
         version_ids: Sequence[uuid.UUID],
-        request_id: str,
+        context: _Actor,
+        *,
+        require_secrets: bool,
     ) -> None:
         if not version_ids:
             return
         version_rows = tuple(
             (
                 await self.session.execute(
-                    select(McpServerVersionRow.id)
+                    select(McpServerVersionRow, McpServerRow)
                     .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
                     .where(
                         McpServerVersionRow.id.in_(version_ids),
@@ -541,24 +548,21 @@ class BindingRepository:
                         McpServerRow.status != "suspended",
                     )
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
-        if set(version_rows) != set(version_ids):
-            raise AssetValidationFailed(request_id)
-        targets = tuple(
-            McpCredentialClosureTarget(
-                version_id=version_id,
-                scope=AssetScope.SYSTEM,
-                project_id=None,
+        by_version = {version.id: (version, asset) for version, asset in version_rows}
+        if set(by_version) != set(version_ids):
+            raise AssetValidationFailed(context.request_id)
+        if not require_secrets:
+            return
+        for version_id in sorted(by_version, key=lambda value: value.int):
+            version, asset = by_version[version_id]
+            slots = tuple((await self.session.execute(select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == version.id).order_by(McpSecretSlotRow.id).with_for_update(read=True, of=McpSecretSlotRow))).scalars().all())
+            await lock_mcp_secret_closure(
+                self.session,
+                project_id=self._project_id(context),
+                mcp_server_id=asset.id,
+                mcp_server_version_id=version.id,
+                slots=slots,
+                request_id=context.request_id,
             )
-            for version_id in sorted(
-                {uuid.UUID(str(value)) for value in version_ids},
-                key=lambda value: value.int,
-            )
-        )
-        try:
-            await lock_mcp_credential_closures(self.session, targets)
-        except McpCredentialClosureInvalid:
-            raise AssetValidationFailed(request_id) from None

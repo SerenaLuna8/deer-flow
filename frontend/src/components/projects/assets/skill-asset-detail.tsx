@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import type { AssetVersion } from "@/core/shared-assets";
 
-import { SkillCredentialBindings } from "./skill-credential-bindings";
+import { SkillSecretConfiguration } from "./skill-secret-configuration";
 import { SkillVersionWorkbench } from "./skill-version-workbench";
 
 export type SkillAssetVersion = Extract<AssetVersion, { skill_id: string }>;
@@ -30,14 +30,13 @@ type SkillWorkspaceProps = Omit<
   ComponentProps<typeof SkillVersionWorkbench>,
   "version"
 > & {
-  canManageCredentials: boolean;
-  credentialsHref: string;
-  focusCredentials: boolean;
-  onCredentialsFocused: () => void;
-  onCredentialBindingsDirtyChange: (dirty: boolean) => void;
+  canManageSecrets: boolean;
+  focusSecrets: boolean;
+  onSecretsFocused: () => void;
+  onSecretsDirtyChange: (dirty: boolean) => void;
 };
 
-export function skillCredentialBindingsMounted({
+export function skillSecretConfigurationMounted({
   selectedVersionId,
   editing,
 }: {
@@ -47,10 +46,10 @@ export function skillCredentialBindingsMounted({
   return !editing && selectedVersionId !== "";
 }
 
-export function skillCredentialBindingsVisible(
+export function skillSecretConfigurationVisible(
   selectedVersionId: string,
 ): boolean {
-  return skillCredentialBindingsMounted({
+  return skillSecretConfigurationMounted({
     selectedVersionId,
     editing: false,
   });
@@ -136,7 +135,7 @@ function SkillMetadata({ version }: { version: SkillAssetVersion }) {
       <section className="space-y-3">
         <h3 className="text-sm font-semibold">环境变量声明</h3>
         {version.secret_requirements.length === 0 ? (
-          <p className="text-muted-foreground text-sm">无需凭据。</p>
+          <p className="text-muted-foreground text-sm">无需秘密。</p>
         ) : (
           <div className="flex flex-wrap gap-2">
             {version.secret_requirements.map((requirement) => (
@@ -179,45 +178,40 @@ export function SkillAssetDetail({
   if (!workspace) return <SkillMetadata version={version} />;
 
   const {
-    canManageCredentials,
-    credentialsHref,
-    focusCredentials,
-    onCredentialsFocused,
-    onCredentialBindingsDirtyChange,
+    canManageSecrets,
+    focusSecrets,
+    onSecretsFocused,
+    onSecretsDirtyChange,
     ...workbench
   } = workspace;
-  let credentialBindings: ReactNode = null;
+  let secretConfiguration: ReactNode = null;
   if (!workspace.editing) {
     const current = version.id === workspace.item.current_version_id;
-    const writable =
-      current ||
-      (workspace.item.scope === "project" && version.relation === "candidate");
-    credentialBindings = (
-      <SkillCredentialBindings
+    const projectOwnedWritable =
+      workspace.item.scope === "project" &&
+      (current || version.relation === "candidate");
+    const boundSystemVersion =
+      workspace.item.scope === "system" &&
+      workspace.item.binding?.enabled === true &&
+      workspace.item.binding.current_version_id === version.id;
+    const visible = workspace.item.scope === "project" || boundSystemVersion;
+    secretConfiguration = visible ? (
+      <SkillSecretConfiguration
         key={`${workspace.item.id}:${version.id}`}
         accountId={workspace.accountId}
         projectId={workspace.projectId}
         skillId={workspace.item.id}
         versionId={version.id}
-        skillActive={workspace.item.status === "active" && current}
-        canManage={canManageCredentials && writable}
-        readOnlyReason={
-          !canManageCredentials
-            ? "approval"
-            : !writable
-              ? "historical"
-              : undefined
-        }
-        credentialsHref={credentialsHref}
-        onDirtyChange={onCredentialBindingsDirtyChange}
+        canManage={canManageSecrets && (projectOwnedWritable || boundSystemVersion)}
+        onDirtyChange={onSecretsDirtyChange}
       />
-    );
+    ) : null;
   }
   return (
     <div className="space-y-8">
       {designRecordHref &&
       !workspace.editing &&
-      !workspace.credentialBindingsDirty ? (
+      !workspace.secretConfigurationDirty ? (
         <div>
           <Button asChild size="sm" variant="outline">
             <Link href={designRecordHref}>
@@ -229,9 +223,9 @@ export function SkillAssetDetail({
       <SkillVersionWorkbench
         {...workbench}
         version={version}
-        focusCredentials={focusCredentials}
-        onCredentialsFocused={onCredentialsFocused}
-        credentialBindings={credentialBindings}
+        focusSecrets={focusSecrets}
+        onSecretsFocused={onSecretsFocused}
+        secretConfiguration={secretConfiguration}
       />
       <details className="border-border/70 rounded-xl border px-4 py-3">
         <summary className="cursor-pointer text-sm font-medium">

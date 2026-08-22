@@ -17,7 +17,8 @@ Features and bug fixes use TDD. `make test` loads the development `DATABASE_URL`
 
 - Authenticate first, then resolve immutable ProjectContext and capability.
 - Private repositories always filter project + owner + resource key.
-- Worker execution uses only Gateway-admitted Agent/Skill/MCP/Credential snapshots.
+- Worker execution uses only Gateway-admitted Agent/Skill/MCP snapshots and
+  exact domain-owned Secret Generation identities.
 - No default-user, owner-only, global asset, filesystem Memory, or raw saver fallback.
 - Secret-bearing input never enters declarative caches or logs.
 

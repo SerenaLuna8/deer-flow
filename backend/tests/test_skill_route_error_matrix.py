@@ -21,10 +21,10 @@ from app.shared_assets import (
     AssetValidationFailed,
     SharedAssetError,
     SkillArchiveLimitExceeded,
-    SkillCredentialBindingInvalid,
-    SkillCredentialBindingsIncomplete,
-    SkillCredentialSelectionStale,
     SkillRuntimeNameConflict,
+    SkillSecretConfigurationInvalid,
+    SkillSecretRevisionStale,
+    SkillSecretsIncomplete,
 )
 
 _PROJECT_ID = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -100,22 +100,22 @@ async def _get(application: FastAPI, asset_id: str) -> httpx.Response:
             "Asset validation failed",
         ),
         (
-            SkillCredentialBindingInvalid,
+            SkillSecretConfigurationInvalid,
             422,
-            "SKILL_CREDENTIAL_BINDING_INVALID",
-            "Skill credential binding is invalid",
+            "SKILL_SECRET_CONFIGURATION_INVALID",
+            "Skill secret configuration is invalid",
         ),
         (
-            SkillCredentialBindingsIncomplete,
+            SkillSecretsIncomplete,
             422,
-            "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
-            "Required Skill credential bindings are incomplete",
+            "SKILL_SECRETS_INCOMPLETE",
+            "Required Skill secrets are incomplete",
         ),
         (
-            SkillCredentialSelectionStale,
+            SkillSecretRevisionStale,
             409,
-            "SKILL_CREDENTIAL_SELECTION_STALE",
-            "Skill credential selection is stale",
+            "SKILL_SECRET_REVISION_STALE",
+            "Skill secret revision is stale",
         ),
         (
             SkillArchiveLimitExceeded,

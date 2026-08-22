@@ -9,8 +9,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.bootstrap import CURRENT_SCHEMA_REVISION
+from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
 
-M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
+SCHEMA_V1_REVISION = CURRENT_SCHEMA_REVISION
 
 FINAL_REQUIRED_RELATIONS = (
     "projects",
@@ -25,16 +26,25 @@ FINAL_REQUIRED_RELATIONS = (
     "skill_design_activities",
     "skill_design_operation_baseline_files",
     "skill_design_draft_files",
-    "project_skill_credential_configs",
-    "project_skill_credential_bindings",
+    "project_skill_secret_states",
+    "project_skill_secret_generations",
+    "project_skill_secret_tombstones",
     "project_channel_instances",
-    "project_channel_credential_bindings",
+    "project_channel_secret_states",
+    "project_channel_secret_generations",
+    "project_channel_secret_tombstones",
     "project_channel_instance_leases",
     "project_channel_group_binding_challenges",
     "project_channel_group_bindings",
     "channel_external_principals",
-    "run_skill_credential_snapshots",
+    "run_skill_secret_snapshots",
     "mcp_servers",
+    "mcp_server_versions",
+    "mcp_version_secret_slots",
+    "project_mcp_secret_states",
+    "project_mcp_secret_generations",
+    "project_mcp_secret_tombstones",
+    "run_mcp_secret_snapshots",
     "mcp_tool_discovery_attempts",
     "project_mcp_tool_inventories",
     "threads_meta",
@@ -56,11 +66,19 @@ FINAL_REQUIRED_RELATIONS = (
     "execution_approval_output_delivery_candidates",
     "project_usage_ledger",
     "audit_logs",
+    "system_model_catalog_state",
+    "system_model_configs",
+    "system_model_secret_generations",
+    "system_model_secret_tombstones",
+    "run_model_config_snapshots",
     "system_runtime_policy_catalog_state",
     "system_runtime_policies",
     "system_runtime_policy_versions",
     "run_runtime_policy_snapshots",
 )
+
+# The ORM-backed Schema V1 catalog is the sole application relation authority.
+FINAL_REQUIRED_RELATIONS = tuple(sorted(FINAL_APP_TABLES))
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +107,7 @@ class FinalSchemaProbe:
     def __init__(
         self,
         *,
-        accepted_revisions: tuple[str, ...] = (M7_FINAL_SCHEMA_REVISION,),
+        accepted_revisions: tuple[str, ...] = (SCHEMA_V1_REVISION,),
         required_relations: tuple[str, ...] = FINAL_REQUIRED_RELATIONS,
     ) -> None:
         self._accepted_revisions = accepted_revisions
@@ -126,7 +144,7 @@ class FinalSchemaProbe:
 
 __all__ = [
     "FINAL_REQUIRED_RELATIONS",
-    "M7_FINAL_SCHEMA_REVISION",
+    "SCHEMA_V1_REVISION",
     "FinalSchemaError",
     "FinalSchemaProbe",
     "FinalSchemaRequired",

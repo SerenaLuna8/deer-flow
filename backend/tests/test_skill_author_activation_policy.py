@@ -51,7 +51,7 @@ async def test_editor_is_authorized_to_activate_skill_version() -> None:
             uuid.uuid4(),
             expected_asset_version=1,
             expected_payload_checksum="a" * 64,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
 
 

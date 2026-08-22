@@ -12,7 +12,6 @@ import {
   MAX_AGENT_RUNTIME_ASSESSMENTS,
   type AgentRuntimeAssessmentReasonCode,
   type ProjectAssetItem,
-  type ProjectAssetList,
   type VersionHistoryResponse,
 } from "@/core/shared-assets";
 import {
@@ -33,7 +32,7 @@ const AGENT_RUNTIME_BLOCK_REASONS: Record<
 > = {
   agent_unavailable: "Agent 当前版本或项目绑定不可用，请刷新后重试。",
   runtime_dependency_unavailable:
-    "Agent 的 Skill、MCP 或凭据依赖当前不可用，请完成配置后重试。",
+    "Agent 的 Skill、MCP 或秘密依赖当前不可用，请完成配置后重试。",
   model_unavailable: "Agent 配置的模型当前不可用，请联系管理员。",
 };
 
@@ -108,7 +107,7 @@ export function useMcpDependencyRuntime({
   );
   const items = useMemo(() => {
     if (!shouldLoad) return [];
-    const data = catalog.data as ProjectAssetList | undefined;
+    const data = catalog.data;
     return data ? [...data.system_items, ...data.project_items] : [];
   }, [catalog.data, shouldLoad]);
   const histories = useQueries({

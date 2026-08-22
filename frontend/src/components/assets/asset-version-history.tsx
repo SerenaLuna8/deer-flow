@@ -1,13 +1,8 @@
 "use client";
 
 import { ChevronDownIcon } from "lucide-react";
-import { useState } from "react";
 
 import { versionWorkflowActions } from "@/components/admin/assets/admin-asset-view-model";
-import {
-  McpApprovalDialog,
-  type CredentialVersionOption,
-} from "@/components/projects/assets/mcp-approval-dialog";
 import { Button } from "@/components/ui/button";
 import { useI18n } from "@/core/i18n/hooks";
 import { useModels } from "@/core/models/hooks";
@@ -22,31 +17,16 @@ import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 import { AssetStatusBadge } from "./asset-status-badge";
 import { AssetVersionDiff } from "./asset-version-diff";
 
-type McpVersion = Extract<AssetVersion, { mcp_server_id: string }>;
-
-export function activeCredentialGrantVersions(
-  version: McpVersion,
-): Record<string, number> {
-  const slotNames = new Map(
-    version.credential_slots.map((slot) => [slot.id, slot.name]),
-  );
-  return Object.fromEntries(
-    version.credential_grants
-      .filter((grant) => grant.status === "active")
-      .map((grant) => {
-        const slotName = slotNames.get(grant.credential_slot_id);
-        return slotName ? ([slotName, grant.version] as const) : null;
-      })
-      .filter((entry): entry is readonly [string, number] => entry !== null),
-  );
-}
-
 function versionStatus(version: AssetVersion) {
+  if (
+    "governance_status" in version &&
+    version.governance_status === "revoked"
+  ) {
+    return "revoked";
+  }
   return "workflow_status" in version
     ? version.workflow_status
-    : "relation" in version
-      ? version.relation
-      : version.status;
+    : version.relation;
 }
 
 export function AssetVersionHistory({
@@ -56,17 +36,7 @@ export function AssetVersionHistory({
   pending = false,
   onActivate,
   onPublish,
-  onSubmit,
-  onApprove,
-  onConfigureCredentialGrants,
-  approvalCredentials = [],
-  approvalCredentialScope = "project",
-  approvalCredentialsLoading = false,
-  approvalCredentialsError,
-  approvalError,
-  configureCredentialGrantsVersionId,
   currentVersionId,
-  onRetryApprovalCredentials,
 }: {
   kind: AssetListKind;
   scope: AssetScope;
@@ -74,33 +44,10 @@ export function AssetVersionHistory({
   pending?: boolean;
   onActivate?: (version: AssetVersion) => void;
   onPublish?: (version: AssetVersion) => void;
-  onSubmit?: (version: McpVersion) => void;
-  onApprove?: (
-    version: McpVersion,
-    credentialVersions: Record<string, string>,
-  ) => boolean | void | Promise<boolean | void>;
-  onConfigureCredentialGrants?: (
-    version: McpVersion,
-    credentialVersions: Record<string, string>,
-    expectedActiveGrantVersions: Record<string, number>,
-  ) => boolean | void | Promise<boolean | void>;
-  approvalCredentials?: CredentialVersionOption[];
-  approvalCredentialScope?: "system" | "project";
-  approvalCredentialsLoading?: boolean;
-  approvalCredentialsError?: unknown;
-  approvalError?: unknown;
-  configureCredentialGrantsVersionId?: string | null;
   currentVersionId?: string | null;
-  onRetryApprovalCredentials?: () => void;
 }) {
   const { locale, t } = useI18n();
   const { models } = useModels({ enabled: kind === "agents" });
-  const [approvalVersion, setApprovalVersion] = useState<McpVersion | null>(
-    null,
-  );
-  const [approvalMode, setApprovalMode] = useState<
-    "publish" | "configure-grants"
-  >("publish");
 
   if (versions.length === 0) {
     return (
@@ -130,8 +77,7 @@ export function AssetVersionHistory({
       : versions;
 
   return (
-    <>
-      <div className="space-y-3">
+    <div className="space-y-3">
         {displayedVersions.map((version, index) => {
           const isMcp = "mcp_server_id" in version;
           const runtimeBlockReason = isMcp
@@ -141,14 +87,13 @@ export function AssetVersionHistory({
                 t.adminAssets.runtime,
               )
             : null;
-          const actions =
-            kind === "credentials" || !("workflow_status" in version)
-              ? []
-              : versionWorkflowActions(
+          const actions = !("workflow_status" in version)
+            ? []
+            : versionWorkflowActions(
                   kind,
                   version.workflow_status,
-                  isMcp && version.credential_slots.length > 0,
-                );
+                  isMcp && version.secret_slots.length > 0,
+              );
           const detail = (
             <div
               className={
@@ -172,28 +117,6 @@ export function AssetVersionHistory({
                         : t.adminAssets.version.publish}
                     </Button>
                   )}
-                  {actions.includes("submit") && isMcp && onSubmit && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={pending || Boolean(runtimeBlockReason)}
-                      title={runtimeBlockReason ?? undefined}
-                      onClick={() => onSubmit?.(version)}
-                    >
-                      {t.adminAssets.version.submit}
-                    </Button>
-                  )}
-                  {actions.includes("approve") && isMcp && onApprove && (
-                    <Button
-                      type="button"
-                      size="sm"
-                      disabled={pending || Boolean(runtimeBlockReason)}
-                      title={runtimeBlockReason ?? undefined}
-                      onClick={() => setApprovalVersion(version)}
-                    >
-                      {t.adminAssets.version.approveMcp}
-                    </Button>
-                  )}
                 </div>
               )}
               {!isMcp &&
@@ -214,24 +137,6 @@ export function AssetVersionHistory({
                   {runtimeBlockReason}
                 </p>
               ) : null}
-              {isMcp &&
-                version.workflow_status === "published" &&
-                version.id === configureCredentialGrantsVersionId &&
-                version.credential_slots.length > 0 &&
-                onConfigureCredentialGrants && (
-                  <Button
-                    type="button"
-                    size="sm"
-                    variant="outline"
-                    disabled={pending}
-                    onClick={() => {
-                      setApprovalMode("configure-grants");
-                      setApprovalVersion(version);
-                    }}
-                  >
-                    {t.adminAssets.version.configureGrants}
-                  </Button>
-                )}
               <AssetVersionDiff
                 previous={isMcp ? null : (displayedVersions[index + 1] ?? null)}
                 current={version}
@@ -275,36 +180,6 @@ export function AssetVersionHistory({
             </details>
           );
         })}
-      </div>
-
-      <McpApprovalDialog
-        version={approvalVersion}
-        open={approvalVersion !== null}
-        pending={pending}
-        credentials={approvalCredentials}
-        credentialScope={approvalCredentialScope}
-        credentialsLoading={approvalCredentialsLoading}
-        credentialsError={approvalCredentialsError}
-        approvalError={approvalError}
-        onRetryCredentials={onRetryApprovalCredentials}
-        mode={approvalMode}
-        onOpenChange={(open) => {
-          if (!open) {
-            setApprovalVersion(null);
-            setApprovalMode("publish");
-          }
-        }}
-        onApprove={(version, bindings) => {
-          if (approvalMode === "configure-grants") {
-            return onConfigureCredentialGrants?.(
-              version,
-              bindings,
-              activeCredentialGrantVersions(version),
-            );
-          }
-          return onApprove?.(version, bindings);
-        }}
-      />
-    </>
+    </div>
   );
 }

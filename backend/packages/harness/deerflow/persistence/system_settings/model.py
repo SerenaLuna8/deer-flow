@@ -1,4 +1,4 @@
-"""Final-schema ORM rows for the system model catalog."""
+"""Schema V1 ORM rows for stable System Model configurations."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     ForeignKeyConstraint,
     Index,
+    LargeBinary,
     SmallInteger,
     String,
     UniqueConstraint,
@@ -87,7 +88,7 @@ class SystemModelCatalogStateRow(Base):
 
 
 class SystemModelConfigRow(Base):
-    """Stable model identity, display metadata, and current version pointer."""
+    """Stable mutable model identity and its current domain-owned API Key."""
 
     __tablename__ = "system_model_configs"
 
@@ -103,9 +104,42 @@ class SystemModelConfigRow(Base):
         default="suspended",
         server_default=text("'suspended'"),
     )
-    current_version_id: Mapped[uuid.UUID | None] = mapped_column(
+    provider_adapter: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_model: Mapped[str] = mapped_column(String(255), nullable=False)
+    settings: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+    )
+    supports_thinking: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    supports_reasoning_effort: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    supports_vision: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=text("false"),
+    )
+    payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    current_secret_generation_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         nullable=True,
+    )
+    secret_revision: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
     )
     revision: Mapped[int] = mapped_column(
         BigInteger,
@@ -143,21 +177,28 @@ class SystemModelConfigRow(Base):
             name="ck_system_model_configs_status",
         ),
         CheckConstraint(
+            "jsonb_typeof(settings) = 'object'",
+            name="ck_system_model_configs_settings_object",
+        ),
+        CheckConstraint(
+            "payload_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_system_model_configs_checksum",
+        ),
+        CheckConstraint(
+            "secret_revision >= 0",
+            name="ck_system_model_configs_secret_revision",
+        ),
+        CheckConstraint(
             "revision >= 1",
             name="ck_system_model_configs_revision",
         ),
-        UniqueConstraint(
-            "id",
-            "current_version_id",
-            name="uq_system_model_configs_id_current_version",
-        ),
         ForeignKeyConstraint(
-            ["id", "current_version_id"],
+            ["id", "current_secret_generation_id"],
             [
-                "system_model_config_versions.model_config_id",
-                "system_model_config_versions.id",
+                "system_model_secret_generations.model_config_id",
+                "system_model_secret_generations.id",
             ],
-            name="fk_system_model_configs_current_version",
+            name="fk_system_model_configs_current_secret_generation",
             ondelete="RESTRICT",
             use_alter=True,
         ),
@@ -170,61 +211,20 @@ class SystemModelConfigRow(Base):
     )
 
 
-class SystemModelConfigVersionRow(Base):
-    """Immutable, secret-free provider configuration."""
+class SystemModelSecretGenerationRow(Base):
+    """One materializable API Key generation owned by one System Model."""
 
-    __tablename__ = "system_model_config_versions"
+    __tablename__ = "system_model_secret_generations"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        primary_key=True,
-        default=uuid.uuid4,
-    )
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     model_config_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("system_model_configs.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    version_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    provider_adapter: Mapped[str] = mapped_column(String(64), nullable=False)
-    provider_model: Mapped[str] = mapped_column(String(255), nullable=False)
-    settings: Mapped[dict[str, object]] = mapped_column(
-        JSONB,
-        nullable=False,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-    )
-    supports_thinking: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=text("false"),
-    )
-    supports_reasoning_effort: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=text("false"),
-    )
-    supports_vision: Mapped[bool] = mapped_column(
-        Boolean,
-        nullable=False,
-        default=False,
-        server_default=text("false"),
-    )
-    credential_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
-    credential_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid,
-        nullable=True,
-    )
-    credential_env_key: Mapped[str | None] = mapped_column(
-        String(255),
-        nullable=True,
-    )
-    payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    supersedes_version_id: Mapped[uuid.UUID | None] = mapped_column(
-        Uuid,
-        nullable=True,
-    )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_by_user_id: Mapped[str] = mapped_column(
         String(36),
         ForeignKey("users.id", ondelete="RESTRICT"),
@@ -239,99 +239,106 @@ class SystemModelConfigVersionRow(Base):
 
     __table_args__ = (
         CheckConstraint(
-            "version_number >= 1",
-            name="ck_system_model_config_versions_number",
+            "revision >= 1",
+            name="ck_system_model_secret_generations_revision",
         ),
         CheckConstraint(
-            "jsonb_typeof(settings) = 'object'",
-            name="ck_system_model_config_versions_settings_object",
+            "octet_length(nonce) = 12",
+            name="ck_system_model_secret_generations_nonce_size",
         ),
         CheckConstraint(
-            "payload_checksum ~ '^[0-9a-f]{64}$'",
-            name="ck_system_model_config_versions_checksum",
+            "octet_length(ciphertext) >= 16",
+            name="ck_system_model_secret_generations_ciphertext_size",
         ),
         CheckConstraint(
-            "(credential_id IS NULL AND credential_version_id IS NULL AND credential_env_key IS NULL) OR (credential_id IS NOT NULL AND credential_version_id IS NOT NULL AND credential_env_key IS NOT NULL)",
-            name="ck_system_model_config_versions_credential_group",
-        ),
-        CheckConstraint(
-            "credential_env_key IS NULL OR credential_env_key ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
-            name="ck_system_model_config_versions_env_key",
+            "envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_system_model_secret_generations_digest",
         ),
         UniqueConstraint(
             "model_config_id",
-            "version_number",
-            name="uq_system_model_config_versions_number",
+            "revision",
+            name="uq_system_model_secret_generations_revision",
         ),
         UniqueConstraint(
             "model_config_id",
             "id",
-            name="uq_system_model_config_versions_model_id",
+            name="uq_system_model_secret_generations_model_id",
+        ),
+    )
+
+
+class SystemModelSecretTombstoneRow(Base):
+    """Secret-free history for a destroyed System Model generation."""
+
+    __tablename__ = "system_model_secret_tombstones"
+
+    generation_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    model_config_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("system_model_configs.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    reason: Mapped[str] = mapped_column(String(32), nullable=False)
+    destroyed_by_user_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    destroyed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_system_model_secret_tombstones_revision",
+        ),
+        CheckConstraint(
+            "envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_system_model_secret_tombstones_digest",
+        ),
+        CheckConstraint(
+            "reason IN ('replaced', 'cleared', 'recipient_changed')",
+            name="ck_system_model_secret_tombstones_reason",
         ),
         UniqueConstraint(
             "model_config_id",
-            "id",
-            "payload_checksum",
-            name="uq_system_model_config_versions_exact",
-        ),
-        UniqueConstraint(
-            "model_config_id",
-            "id",
-            "payload_checksum",
-            "credential_id",
-            "credential_version_id",
-            "credential_env_key",
-            name="uq_system_model_config_versions_snapshot_closure",
-        ),
-        ForeignKeyConstraint(
-            ["credential_id", "credential_version_id"],
-            ["credential_versions.credential_id", "credential_versions.id"],
-            name="fk_system_model_config_versions_credential_version",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            ["model_config_id", "supersedes_version_id"],
-            [
-                "system_model_config_versions.model_config_id",
-                "system_model_config_versions.id",
-            ],
-            name="fk_system_model_config_versions_supersedes",
-            ondelete="RESTRICT",
-        ),
-        Index(
-            "ix_system_model_config_versions_credential",
-            credential_id,
-            credential_version_id,
+            "revision",
+            name="uq_system_model_secret_tombstones_revision",
         ),
     )
 
 
 class RunModelConfigSnapshotRow(Base):
-    """Exact, secret-free model version admitted for one Run purpose."""
+    """Exact secret-free model payload admitted for one Run purpose."""
 
     __tablename__ = "run_model_config_snapshots"
 
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    owner_user_id: Mapped[str] = mapped_column(
-        String(36),
-        primary_key=True,
-    )
+    owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     purpose: Mapped[str] = mapped_column(String(64), primary_key=True)
     model_config_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    model_config_version_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
+    provider_payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
         nullable=False,
     )
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    credential_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
-    credential_version_id: Mapped[uuid.UUID | None] = mapped_column(
+    secret_generation_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         nullable=True,
     )
-    credential_env_key: Mapped[str | None] = mapped_column(
-        String(255),
+    secret_envelope_digest: Mapped[str | None] = mapped_column(
+        CHAR(64),
         nullable=True,
     )
     created_at: Mapped[datetime] = mapped_column(
@@ -347,16 +354,20 @@ class RunModelConfigSnapshotRow(Base):
             name="ck_run_model_config_snapshots_purpose",
         ),
         CheckConstraint(
+            "jsonb_typeof(provider_payload) = 'object'",
+            name="ck_run_model_config_snapshots_provider_payload",
+        ),
+        CheckConstraint(
             "payload_checksum ~ '^[0-9a-f]{64}$'",
             name="ck_run_model_config_snapshots_checksum",
         ),
         CheckConstraint(
-            "(credential_id IS NULL AND credential_version_id IS NULL AND credential_env_key IS NULL) OR (credential_id IS NOT NULL AND credential_version_id IS NOT NULL AND credential_env_key IS NOT NULL)",
-            name="ck_run_model_config_snapshots_credential_group",
+            "(secret_generation_id IS NULL AND secret_envelope_digest IS NULL) OR (secret_generation_id IS NOT NULL AND secret_envelope_digest IS NOT NULL)",
+            name="ck_run_model_config_snapshots_secret_group",
         ),
         CheckConstraint(
-            "credential_env_key IS NULL OR credential_env_key ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
-            name="ck_run_model_config_snapshots_env_key",
+            "secret_envelope_digest IS NULL OR secret_envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_run_model_config_snapshots_secret_digest",
         ),
         ForeignKeyConstraint(
             ["project_id"],
@@ -383,33 +394,9 @@ class RunModelConfigSnapshotRow(Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["model_config_id", "model_config_version_id", "payload_checksum"],
-            [
-                "system_model_config_versions.model_config_id",
-                "system_model_config_versions.id",
-                "system_model_config_versions.payload_checksum",
-            ],
-            name="fk_run_model_config_snapshots_exact_model",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            [
-                "model_config_id",
-                "model_config_version_id",
-                "payload_checksum",
-                "credential_id",
-                "credential_version_id",
-                "credential_env_key",
-            ],
-            [
-                "system_model_config_versions.model_config_id",
-                "system_model_config_versions.id",
-                "system_model_config_versions.payload_checksum",
-                "system_model_config_versions.credential_id",
-                "system_model_config_versions.credential_version_id",
-                "system_model_config_versions.credential_env_key",
-            ],
-            name="fk_run_model_config_snapshots_model_credential",
+            ["model_config_id"],
+            ["system_model_configs.id"],
+            name="fk_run_model_config_snapshots_model",
             ondelete="RESTRICT",
         ),
         Index(
@@ -420,14 +407,12 @@ class RunModelConfigSnapshotRow(Base):
             run_id,
         ),
         Index(
-            "ix_run_model_config_snapshots_model_version",
+            "ix_run_model_config_snapshots_model",
             model_config_id,
-            model_config_version_id,
         ),
         Index(
-            "ix_run_model_config_snapshots_credential",
-            credential_id,
-            credential_version_id,
+            "ix_run_model_config_snapshots_secret_generation",
+            secret_generation_id,
         ),
     )
 
@@ -436,5 +421,6 @@ __all__ = [
     "RunModelConfigSnapshotRow",
     "SystemModelCatalogStateRow",
     "SystemModelConfigRow",
-    "SystemModelConfigVersionRow",
+    "SystemModelSecretGenerationRow",
+    "SystemModelSecretTombstoneRow",
 ]

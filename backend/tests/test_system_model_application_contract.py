@@ -9,11 +9,15 @@ from pydantic import ValidationError
 
 from app.audit.models import resolve_system_audit_context
 from app.gateway.routers.admin_model_settings import (
+    AdminModelConnectionTestRequest,
     AdminModelCreateRequest,
+    AdminModelDefaultRequest,
     AdminModelItemResponse,
+    AdminModelStatusRequest,
     AdminModelUpdateRequest,
 )
 from app.gateway.routers.models import ModelResponse, _public_response
+from app.system_settings.errors import SystemModelInvalid
 from app.system_settings.models import (
     CreateSystemModel,
     PublicSystemModelView,
@@ -48,11 +52,9 @@ async def test_admin_create_uses_the_model_uuid_as_its_only_stable_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model_id = uuid.UUID("00000000-0000-4000-8000-000000000a02")
-    version_id = uuid.UUID("00000000-0000-4000-8000-000000000a03")
-    generated_ids = iter((model_id, version_id))
     monkeypatch.setattr(
         "app.system_settings.service.uuid.uuid4",
-        lambda: next(generated_ids),
+        lambda: model_id,
     )
     state = SimpleNamespace(
         revision=1,
@@ -72,17 +74,8 @@ async def test_admin_create_uses_the_model_uuid_as_its_only_stable_identity(
             assert for_update is True
             return state
 
-        async def lock_system_credential_reference(self, *args, **kwargs):
-            assert args == (None, None, None)
-            assert kwargs == {
-                "require_current": True,
-                "load_envelope": False,
-            }
-            return None
-
-        async def add_model(self, model, version) -> None:  # type: ignore[no-untyped-def]
+        async def add_model(self, model) -> None:  # type: ignore[no-untyped-def]
             self.created_model = model
-            model.current_version_id = version.id
 
     repository = Repository()
     created = await _AdminOperationService(repository).create_model(
@@ -96,9 +89,7 @@ async def test_admin_create_uses_the_model_uuid_as_its_only_stable_identity(
             supports_thinking=False,
             supports_reasoning_effort=False,
             supports_vision=True,
-            credential_id=None,
-            credential_version_id=None,
-            credential_env_key=None,
+            api_key=None,
         ),
     )
 
@@ -147,6 +138,117 @@ def test_admin_and_public_api_contracts_omit_removed_model_metadata() -> None:
         )
 
 
+def test_admin_model_api_is_write_only_and_has_no_credential_or_version_contract() -> None:
+    created = AdminModelCreateRequest.model_validate(
+        {
+            "display_name": "DeepSeek Flash",
+            "status": "active",
+            "provider_adapter": "patched_deepseek",
+            "provider_model": "deepseek-v4-flash",
+            "settings": {"base_url": "https://api.deepseek.com"},
+            "api_key": "transient-create-key",
+        }
+    )
+    assert created.api_key is not None
+    assert created.api_key.get_secret_value() == "transient-create-key"
+    assert "transient-create-key" not in repr(created)
+
+    request_fields = set(AdminModelCreateRequest.model_fields) | set(AdminModelUpdateRequest.model_fields)
+    response_fields = set(AdminModelItemResponse.model_fields)
+    for removed in (
+        "credential_id",
+        "credential_version_id",
+        "credential_env_key",
+        "version_number",
+        "current_version_id",
+    ):
+        assert removed not in request_fields
+        assert removed not in response_fields
+    assert {
+        "api_key_configured",
+        "secret_readiness",
+        "secret_revision",
+    }.issubset(response_fields)
+    assert "api_key" not in response_fields
+    assert "expected_revision" not in AdminModelUpdateRequest.model_fields
+    assert "expected_revision" not in AdminModelStatusRequest.model_fields
+    assert "expected_catalog_revision" not in AdminModelDefaultRequest.model_fields
+
+    with pytest.raises(ValidationError):
+        AdminModelConnectionTestRequest.model_validate(
+            {
+                "provider_adapter": "patched_deepseek",
+                "provider_model": "deepseek-v4-flash",
+                "settings": {"base_url": "https://api.deepseek.com"},
+                "supports_vision": False,
+            }
+        )
+    with pytest.raises(ValidationError):
+        AdminModelConnectionTestRequest.model_validate(
+            {
+                "provider_adapter": "patched_deepseek",
+                "provider_model": "deepseek-v4-flash",
+                "settings": {"base_url": "https://api.deepseek.com"},
+                "supports_vision": False,
+                "api_key": "",
+            }
+        )
+
+
+@pytest.mark.anyio
+async def test_unready_active_model_is_not_auto_selected_or_accepted_as_default() -> None:
+    model_id = uuid.UUID("00000000-0000-4000-8000-000000000a05")
+    state = SimpleNamespace(
+        revision=1,
+        default_model_config_id=None,
+        updated_by_user_id=None,
+        updated_at=None,
+    )
+    model = SimpleNamespace(
+        id=model_id,
+        display_name="Unready model",
+        status="suspended",
+        provider_adapter="patched_deepseek",
+        provider_model="deepseek-v4-flash",
+        settings={"base_url": "https://api.deepseek.com"},
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+        payload_checksum="a" * 64,
+        current_secret_generation_id=None,
+        secret_revision=0,
+        revision=1,
+        created_by_user_id=str(_admin_context().user_id),
+        updated_by_user_id=str(_admin_context().user_id),
+        created_at=None,
+        updated_at=None,
+    )
+
+    class Session:
+        async def flush(self) -> None:
+            return None
+
+    class Repository:
+        session = Session()
+
+        async def catalog_state(self, *, for_update: bool = False):
+            assert for_update is True
+            return state
+
+        async def lock_model(self, requested_id: uuid.UUID):
+            assert requested_id == model_id
+            return model
+
+    service = _AdminOperationService(Repository())
+    activated = await service.set_status(_admin_context(), model_id, "active")
+
+    assert activated.secret_readiness == "unready"
+    assert state.default_model_config_id is None
+    with pytest.raises(SystemModelInvalid):
+        await service.set_default(_admin_context(), model_id)
+    assert state.default_model_config_id is None
+
+
 def test_public_api_projects_the_model_uuid_without_provider_identifiers() -> None:
     model_ref = "00000000-0000-4000-8000-000000000a04"
 
@@ -172,6 +274,9 @@ async def test_repository_orders_models_by_created_time_then_id_descending() -> 
     captured: list[object] = []
 
     class Result:
+        def scalars(self):
+            return self
+
         def all(self):
             return ()
 
@@ -214,14 +319,14 @@ async def test_repository_resolves_only_canonical_model_uuid_references() -> Non
     assert (
         await repository.resolve_active_model(
             "legacy-logical-name",
-            load_envelope=False,
+            load_secret=False,
         )
         is None
     )
     assert (
         await repository.resolve_active_model(
             str(model_id).upper(),
-            load_envelope=False,
+            load_secret=False,
         )
         is None
     )
@@ -230,7 +335,7 @@ async def test_repository_resolves_only_canonical_model_uuid_references() -> Non
     assert (
         await repository.resolve_active_model(
             str(model_id),
-            load_envelope=False,
+            load_secret=False,
         )
         is None
     )
@@ -257,19 +362,17 @@ async def test_public_catalog_keeps_default_first_then_repository_time_order(
         return SimpleNamespace(
             id=ids[index],
             display_name=f"Model {index}",
+            provider_adapter="openai",
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+            supports_vision=False,
+            current_secret_generation_id=uuid.uuid4(),
         )
 
-    version = SimpleNamespace(
-        provider_adapter="openai",
-        settings={},
-        supports_thinking=False,
-        supports_reasoning_effort=False,
-        supports_vision=False,
-    )
     repository_rows = (
-        (model(0), version),
-        (model(1), version),
-        (model(2), version),
+        model(0),
+        model(1),
+        model(2),
     )
 
     class Session:
@@ -331,15 +434,15 @@ async def test_public_catalog_projects_vision_capability_without_a_second_protoc
         ),
     )
     repository_rows = tuple(
-        (
-            SimpleNamespace(id=model_id, display_name=f"Model {index}"),
-            SimpleNamespace(
-                provider_adapter=provider_adapter,
-                settings=settings,
-                supports_thinking=False,
-                supports_reasoning_effort=False,
-                supports_vision=supports_vision,
-            ),
+        SimpleNamespace(
+            id=model_id,
+            display_name=f"Model {index}",
+            provider_adapter=provider_adapter,
+            settings=settings,
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+            supports_vision=supports_vision,
+            current_secret_generation_id=uuid.uuid4(),
         )
         for index, (model_id, (provider_adapter, settings, supports_vision)) in enumerate(zip(ids, adapters, strict=True))
     )

@@ -17,7 +17,7 @@ make dev
 - Gateway 是认证和授权权威；页面只使用服务端返回的 capability。
 - 项目客户端和缓存按 `account UUID + project UUID` 隔离，URL slug 只用于导航。
 - API 响应先通过 strict Zod schema，旧 scope 的请求和流不得更新新项目。
-- Credential 等 Secret write 使用直接请求，不进入 TanStack Query/Mutation cache。
+- Model、Skill、MCP、Channels 的 Secret write 使用直接请求，不进入 TanStack Query/Mutation cache。
 - SSE 和历史序号保持 PostgreSQL BIGINT 的十进制字符串语义。
 - `BUILD_MODE=static` 是无认证、无网络的本地演示边界。
 

@@ -31,7 +31,7 @@ class _ProjectMcpHttpLogFilter(logging.Filter):
     """Suppress transport records only while a project MCP request is active.
 
     httpx logs the complete request URL at INFO, and httpcore may log the
-    request target at DEBUG. Query Credential values are intentionally present
+    request target at DEBUG. Query secret values are intentionally present
     in that one-shot URL, so neither record is safe to emit. A ContextVar keeps
     the suppression scoped to this client and preserves concurrent, unrelated
     HTTP observability.

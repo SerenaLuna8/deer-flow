@@ -1143,7 +1143,7 @@ async def run_agent(
             user_id=_repository_trace_user_id(record),
             assistant_id=record.assistant_id,
             model_name=record.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            environment=os.environ.get("ACT_WEAVE_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
             include_deerflow_trace_id=is_trace_correlation_enabled(
                 ctx.app_config,

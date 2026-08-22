@@ -101,7 +101,8 @@ class ResolvedSkillSnapshot(ResolvedAssetSnapshot):
 @dataclass(frozen=True)
 class ResolvedMcpSnapshot(ResolvedAssetSnapshot):
     definition: Mapping[str, object]
-    credential_grant_ids: tuple[uuid.UUID, ...]
+    secret_generation_ids: tuple[uuid.UUID, ...]
+    secret_digest: str
 
 
 @dataclass(frozen=True)

@@ -1201,7 +1201,7 @@ class SubagentExecutor:
                 user_id=self.user_id,
                 assistant_id=assistant_id,
                 model_name=self.model_name,
-                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                environment=os.environ.get("ACT_WEAVE_ENV") or os.environ.get("ENVIRONMENT"),
                 deerflow_trace_id=self.deerflow_trace_id,
                 include_deerflow_trace_id=is_trace_correlation_enabled(
                     self.app_config,

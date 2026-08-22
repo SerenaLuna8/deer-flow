@@ -20,30 +20,28 @@ from app.shared_assets.agent_payload_checksum import (
     agent_payload_checksum,
     persisted_agent_payload_checksum_matches,
 )
-from app.shared_assets.credential_closure import (
-    McpCredentialClosureInvalid,
-    McpCredentialClosureTarget,
-    lock_mcp_credential_closures,
-)
 from app.shared_assets.errors import AssetValidationFailed, SharedAssetError
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
-from app.shared_assets.keyring import CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
 from app.shared_assets.mcp_service import McpService
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
     AssetKind,
     AssetScope,
+    AssetSelection,
     ResolvedMcpSnapshot,
     SkillAssetRef,
 )
-from app.shared_assets.resolver import materialize_mcp_secrets as materialize_resolved_mcp_secrets
+from app.shared_assets.resolver import ProjectAssetResolver
+from app.shared_assets.resolver import (
+    materialize_mcp_secrets as materialize_resolved_mcp_secrets,
+)
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillService
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.assets.catalog import (
     AssetCatalogAgentSnapshot,
     AssetCatalogMcpSnapshot,
@@ -59,6 +57,7 @@ from deerflow.persistence.shared_assets import (
     AgentVersionRow,
     AgentVersionSkillRefRow,
     AssetCatalogStateRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
     SkillRow,
@@ -90,7 +89,7 @@ class PostgresAssetCatalogProvider:
 
     Every public lookup reads ``asset_catalog_state`` before consulting the
     process cache. A generation change clears all three asset-kind caches in
-    one operation, so activation, suspend and credential/grant revocation cannot
+    one operation, so activation, suspension, and secret clearing cannot
     leave a cross-kind stale snapshot behind.
     """
 
@@ -205,25 +204,28 @@ class PostgresAssetCatalogProvider:
         snapshot: AssetCatalogMcpSnapshot,
     ) -> Mapping[str, Mapping[str, object]]:
         if not isinstance(context, ProjectContext):
-            raise AssetCatalogUnavailable("trusted project context is required for MCP credentials")
+            raise AssetCatalogUnavailable("trusted project context is required for MCP secrets")
         require_system_asset(snapshot)
         try:
             if not isinstance(snapshot.asset_id, uuid.UUID):
                 raise ValueError
             version_id = uuid.UUID(str(snapshot.version_id))
-            resolved = ResolvedMcpSnapshot(
-                kind=AssetKind.MCP,
-                scope=AssetScope.SYSTEM,
-                asset_id=snapshot.asset_id,
-                version_id=version_id,
-                checksum=snapshot.checksum,
-                catalog_generation=snapshot.generation,
-                dependency_version_ids=(),
-                definition=snapshot.definition,
-                credential_grant_ids=snapshot.credential_grant_ids,
+            if self._session_factory is None:
+                raise ValueError
+            resolved = await ProjectAssetResolver(
+                self._session_factory,
+            ).resolve_project_asset_snapshot(
+                context,
+                AssetSelection(
+                    kind=AssetKind.MCP,
+                    asset_id=snapshot.asset_id,
+                    version_id=version_id,
+                ),
             )
+            if not isinstance(resolved, ResolvedMcpSnapshot) or resolved.scope is not AssetScope.SYSTEM or resolved.checksum != snapshot.checksum or resolved.definition != snapshot.definition:
+                raise ValueError
         except (TypeError, ValueError):
-            raise AssetCatalogUnavailable("system MCP credential snapshot is invalid") from None
+            raise AssetCatalogUnavailable("system MCP secret snapshot is invalid") from None
         if self._session_factory is None:
             raise AssetCatalogUnavailable("asset catalog database is unavailable")
         try:
@@ -233,8 +235,8 @@ class PostgresAssetCatalogProvider:
                 session_factory=self._session_factory,
             )
             return materialized.by_slot
-        except (SharedAssetError, CredentialKeyringInvalid):
-            raise AssetCatalogUnavailable("system MCP credentials are unavailable") from None
+        except SharedAssetError:
+            raise AssetCatalogUnavailable("system MCP secrets are unavailable") from None
 
     def _session(self) -> AsyncSession:
         if self._session_factory is None:
@@ -265,7 +267,7 @@ class PostgresAssetCatalogProvider:
                     return loaded
         except AssetCatalogUnavailable:
             raise
-        except McpCredentialClosureInvalid:
+        except SharedAssetError:
             raise AssetCatalogUnavailable("system MCP catalog is unavailable") from None
         except (DBAPIError, SATimeoutError):
             raise AssetCatalogUnavailable("asset catalog database is unavailable") from None
@@ -555,14 +557,12 @@ class PostgresAssetCatalogProvider:
                 .order_by(McpServerRow.slug)
             )
         ).all()
-        targets = tuple(McpCredentialClosureTarget(uuid.UUID(str(version.id)), AssetScope.SYSTEM, None) for _asset, version in rows)
-        closures = await lock_mcp_credential_closures(session, targets) if targets else {}
         snapshots: list[AssetCatalogMcpSnapshot] = []
         for asset, version in rows:
             if asset.status != "active":
                 raise AssetCatalogUnavailable("system MCP catalog is invalid")
-            closure = closures[uuid.UUID(str(version.id))]
-            record = McpVersionRecord(version, closure.slots, closure.grants)
+            slots = tuple((await session.execute(select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == version.id).order_by(McpSecretSlotRow.name, McpSecretSlotRow.id))).scalars().all())
+            record = McpVersionRecord(version, slots)
             canonical_definition = McpService._definition_from_record(record)
             if McpService._checksum(canonical_definition) != version.payload_checksum:
                 raise AssetCatalogUnavailable("system MCP catalog is invalid")
@@ -579,14 +579,14 @@ class PostgresAssetCatalogProvider:
                     "routing": canonical_definition.routing,
                     "tool_overrides": canonical_definition.tool_overrides,
                     "timeout_seconds": canonical_definition.timeout_seconds,
-                    "credential_slots": tuple(
+                    "secret_slots": tuple(
                         {
                             "name": slot.name,
                             "purpose": slot.purpose,
                             "payload_schema": slot.payload_schema,
                             "required": slot.required,
                         }
-                        for slot in canonical_definition.credential_slots
+                        for slot in canonical_definition.secret_slots
                     ),
                 }
             )
@@ -601,7 +601,6 @@ class PostgresAssetCatalogProvider:
                     generation=generation,
                     checksum=version.payload_checksum,
                     definition=definition,
-                    credential_grant_ids=closure.grant_ids,
                 )
             )
         return tuple(snapshots)

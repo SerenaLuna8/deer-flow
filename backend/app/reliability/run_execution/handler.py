@@ -581,7 +581,7 @@ class PrivateRunJobHandler:
                 state.run.run_id,
                 lock=True,
             )
-            grants = await self._snapshots.list_mcp_grants_in_session(
+            secrets = await self._snapshots.list_mcp_secrets_in_session(
                 session,
                 context,
                 state.run.run_id,
@@ -592,7 +592,7 @@ class PrivateRunJobHandler:
                 raise TransientExecutionError("RUN_SNAPSHOT_UNAVAILABLE")
             snapshot = PersistedRunSnapshot(
                 assets=assets,
-                mcp_grants=grants,
+                mcp_secrets=secrets,
                 catalog_generation=generations.pop(),
             )
             resume_from_checkpoint = False

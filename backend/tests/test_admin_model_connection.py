@@ -49,54 +49,12 @@ def test_gateway_model_callers_do_not_import_vision_protocol_implementations() -
     assert not any(module.startswith("deerflow.vision") for module in imported_modules)
 
 
-class _ConnectionTestRepository:
-    async def lock_system_credential_reference(
-        self,
-        credential_id: uuid.UUID | None,
-        credential_version_id: uuid.UUID | None,
-        credential_env_key: str | None,
-        *,
-        require_current: bool,
-        load_envelope: bool,
-    ) -> None:
-        assert (credential_id, credential_version_id, credential_env_key) == (
-            None,
-            None,
-            None,
-        )
-        assert require_current is True
-        assert load_envelope is True
-        return None
-
-
-class _CredentialConnectionTestRepository:
-    def __init__(self, reference: object) -> None:
-        self.reference = reference
-
-    async def lock_system_credential_reference(
-        self,
-        credential_id: uuid.UUID | None,
-        credential_version_id: uuid.UUID | None,
-        credential_env_key: str | None,
-        *,
-        require_current: bool,
-        load_envelope: bool,
-    ) -> object:
-        assert credential_id == self.reference.credential.id  # type: ignore[attr-defined]
-        assert credential_version_id == self.reference.version.id  # type: ignore[attr-defined]
-        assert credential_env_key == "OPENAI_API_KEY"
-        assert require_current is True
-        assert load_envelope is True
-        return self.reference
-
-
 class _ConnectionTestService(SystemModelCatalogService):
-    def __init__(self, repository: _ConnectionTestRepository) -> None:
+    def __init__(self) -> None:
         super().__init__(lambda: None)  # type: ignore[arg-type]
-        self.repository = repository
 
     async def _admin_operation(self, context: object, operation):  # type: ignore[no-untyped-def]
-        return await operation(self.repository, self._require_admin(context))
+        return await operation(object(), self._require_admin(context))
 
 
 @pytest.mark.anyio
@@ -255,8 +213,7 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
     expected_probe: str,
 ) -> None:
     request_id = "admin-model-connection-route"
-    repository = _ConnectionTestRepository()
-    service = _ConnectionTestService(repository)
+    service = _ConnectionTestService()
     runtime_config = _RuntimeConfig()
     observed: list[str] = []
 
@@ -296,9 +253,7 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
                 "provider_model": "vision-test",
                 "settings": {},
                 "supports_vision": supports_vision,
-                "credential_id": None,
-                "credential_version_id": None,
-                "credential_env_key": None,
+                "api_key": "request-only-test-key",
             },
         )
 
@@ -311,47 +266,12 @@ async def test_admin_model_connection_route_uses_requested_probe_profile(
 
 
 @pytest.mark.anyio
-async def test_admin_visual_connection_route_materializes_credential_without_leak(
+async def test_admin_visual_connection_route_uses_transient_key_without_leak(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app.shared_assets.keyring import CredentialKeyring
-    from app.system_settings.credential_adapter import SystemModelCredentialAdapter
-
-    credential_id = uuid.uuid4()
-    credential_version_id = uuid.uuid4()
     secret = "connection-test-secret"
-    reference = SimpleNamespace(
-        credential=SimpleNamespace(
-            id=credential_id,
-            scope="system",
-            project_id=None,
-            credential_type="model_api_key",
-            status="active",
-            is_delete=False,
-        ),
-        version=SimpleNamespace(
-            id=credential_version_id,
-            credential_id=credential_id,
-            payload_schema={"env": ["OPENAI_API_KEY"]},
-            status="active",
-        ),
-        envelope=SimpleNamespace(
-            credential_version_id=credential_version_id,
-            key_id="test",
-            nonce=b"nonce",
-            ciphertext=b"ciphertext",
-            is_active=True,
-        ),
-    )
-    service = _ConnectionTestService(
-        _CredentialConnectionTestRepository(reference),  # type: ignore[arg-type]
-    )
+    service = _ConnectionTestService()
     observed: dict[str, object] = {}
-
-    monkeypatch.setattr(
-        "app.system_settings.credential_adapter.decrypt_credential_payload",
-        lambda *_args, **_kwargs: {"env": {"OPENAI_API_KEY": secret}},
-    )
 
     class Runtime:
         def __init__(self, *, app_config: object) -> None:
@@ -368,17 +288,9 @@ async def test_admin_visual_connection_route_materializes_credential_without_lea
     monkeypatch.setattr("app.gateway.system_model_callers.ModelRuntime", Runtime)
     context = resolve_system_audit_context(
         SimpleNamespace(id=uuid.uuid4(), system_role="system_admin"),
-        request_id="credential-vision-probe",
+        request_id="transient-key-vision-probe",
     )
-    materializer = SystemModelMaterializer(
-        lambda: None,  # type: ignore[arg-type]
-        credential_adapter=SystemModelCredentialAdapter(
-            keyring=CredentialKeyring(
-                active_key_id="test",
-                _keys={"test": b"k" * 32},
-            ),
-        ),
-    )
+    materializer = SystemModelMaterializer(lambda: None)  # type: ignore[arg-type]
     app = FastAPI()
     app.include_router(admin_model_settings.router)
     app.dependency_overrides[admin_model_settings.current_model_admin_context] = lambda: context
@@ -397,16 +309,14 @@ async def test_admin_visual_connection_route_materializes_credential_without_lea
                 "provider_model": "vision-test",
                 "settings": {"base_url": "https://vision.example.test/v1"},
                 "supports_vision": True,
-                "credential_id": str(credential_id),
-                "credential_version_id": str(credential_version_id),
-                "credential_env_key": "OPENAI_API_KEY",
+                "api_key": secret,
             },
         )
 
     assert response.status_code == 200
     assert response.json() == {
         "status": "succeeded",
-        "request_id": "credential-vision-probe",
+        "request_id": "transient-key-vision-probe",
     }
     assert observed == {"secret": secret, "probe": "vision"}
     assert secret not in response.text
@@ -416,19 +326,17 @@ async def test_admin_visual_connection_route_materializes_credential_without_lea
 def test_connection_test_materializer_uses_requested_probe_profile(
     supports_vision: bool,
 ) -> None:
-    from app.system_settings.credential_adapter import SystemModelCredentialAdapter
+    from app.system_settings.execution_adapter import SystemModelExecutionAdapter
 
     command = SystemModelConnectionCheck(
         provider_adapter="vision_bridge_fake",
         provider_model="vision-test",
         settings={},
         supports_vision=supports_vision,
-        credential_id=None,
-        credential_version_id=None,
-        credential_env_key=None,
+        api_key="request-only-test-key",
     )
 
-    model = SystemModelCredentialAdapter().materialize_connection_test(
+    model = SystemModelExecutionAdapter().materialize_connection_test(
         ConnectionTestSystemModelMaterial(
             command=command,
         ),
@@ -443,9 +351,7 @@ def test_connection_test_reuses_provider_and_credential_validation() -> None:
         provider_model="gpt-5.2",
         settings={},
         supports_vision=False,
-        credential_id=None,
-        credential_version_id=None,
-        credential_env_key=None,
+        api_key="request-only-test-key",
     )
 
     assert validate_system_model_connection_test(command) == command
@@ -457,8 +363,6 @@ def test_connection_test_reuses_provider_and_credential_validation() -> None:
                 provider_model="gpt-5.2",
                 settings={},
                 supports_vision=False,
-                credential_id=None,
-                credential_version_id=None,
-                credential_env_key=None,
+                api_key="",
             ),
         )

@@ -17,7 +17,7 @@ from app.shared_assets.errors import (
     AssetNotFound,
     AssetValidationFailed,
 )
-from app.shared_assets.mcp_tool_inventory_repository import mcp_grant_closure_digest
+from app.shared_assets.mcp_secret_store import mcp_secret_closure_digest
 from app.shared_assets.project_authoring_catalog import (
     MAX_AUTHORING_MCP_SCAN_PER_PAGE,
     McpToolCatalogSearch,
@@ -49,6 +49,19 @@ def _sql(statement: object) -> str:
         statement.compile(  # type: ignore[union-attr]
             dialect=postgresql.dialect(),
             compile_kwargs={"literal_binds": True},
+        )
+    )
+
+
+def _secret_digest(*generation_ids: uuid.UUID) -> str:
+    return mcp_secret_closure_digest(
+        tuple(
+            SimpleNamespace(
+                slot_id=uuid.uuid5(uuid.NAMESPACE_URL, f"slot:{generation_id}"),
+                generation_id=generation_id,
+                generation_digest="a" * 64,
+            )
+            for generation_id in generation_ids
         )
     )
 
@@ -240,12 +253,23 @@ async def test_exact_skill_text_read_rejects_corrupt_content() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_search_reads_only_current_cached_inventory_metadata() -> None:
+async def test_mcp_search_reads_only_current_cached_inventory_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = _context(Capability.SHARED_ASSETS_READ)
     server_id = uuid.uuid4()
     version_id = uuid.uuid4()
     grant_id = uuid.uuid4()
-    grant_digest = mcp_grant_closure_digest((grant_id,))
+    grant_digest = _secret_digest(grant_id)
+
+    async def secret_digests(*_args: object, **_kwargs: object):
+        return {(server_id, version_id): grant_digest}
+
+    monkeypatch.setattr(
+        ProjectAuthoringCatalogRepository,
+        "_secret_digests",
+        secret_digests,
+    )
     now = datetime.now(UTC)
     tool_row = SimpleNamespace(
         scope="system",
@@ -260,16 +284,12 @@ async def test_mcp_search_reads_only_current_cached_inventory_metadata() -> None
         tool_name="search_issues",
         tool_description="Search\nproject issues",
         attempt_payload_checksum="f" * 64,
-        attempt_grant_digest=grant_digest,
+        attempt_secret_digest=grant_digest,
         attempt_status="ready",
         public_error_code=None,
         tools_payload_checksum="f" * 64,
-        tools_grant_digest=grant_digest,
+        tools_secret_digest=grant_digest,
         last_success_at=now,
-    )
-    grant_row = SimpleNamespace(
-        mcp_server_version_id=version_id,
-        id=grant_id,
     )
 
     class _Result:
@@ -287,7 +307,7 @@ async def test_mcp_search_reads_only_current_cached_inventory_metadata() -> None
 
         async def execute(self, statement: object) -> _Result:
             self.statements.append(statement)
-            return _Result([tool_row] if len(self.statements) == 1 else [grant_row])
+            return _Result([tool_row])
 
     session = _Session()
     result = await ProjectAuthoringCatalogRepository(  # type: ignore[arg-type]
@@ -318,9 +338,8 @@ async def test_mcp_search_reads_only_current_cached_inventory_metadata() -> None
             }
         )
     )
-    assert len(session.statements) == 2
+    assert len(session.statements) == 1
     catalog_sql = _sql(session.statements[0])
-    grant_sql = _sql(session.statements[1])
     assert "mcp_servers.status = 'active'" in catalog_sql
     assert "mcp_servers.current_published_version_id = mcp_server_versions.id" in catalog_sql
     assert "project_system_mcp_bindings.enabled IS true" in catalog_sql
@@ -332,9 +351,6 @@ async def test_mcp_search_reads_only_current_cached_inventory_metadata() -> None
     assert "credential_envelopes" not in catalog_sql
     assert "credential_versions" not in catalog_sql
     assert "ciphertext" not in catalog_sql
-    assert "credential_grants.id" in grant_sql
-    assert "credential_grants.status = 'active'" in grant_sql
-    assert "credential_versions" not in grant_sql
 
 
 @pytest.mark.asyncio
@@ -407,12 +423,23 @@ async def test_empty_skill_query_lists_and_cursor_is_bound_to_query() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_cursor_can_page_past_scan_budget_without_unreachable_tools() -> None:
+async def test_mcp_cursor_can_page_past_scan_budget_without_unreachable_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = _context(Capability.SHARED_ASSETS_READ)
     server_id = uuid.uuid4()
     version_id = uuid.uuid4()
     now = datetime.now(UTC)
-    current_digest = mcp_grant_closure_digest(())
+    current_digest = _secret_digest()
+
+    async def secret_digests(*_args: object, **_kwargs: object):
+        return {(server_id, version_id): current_digest}
+
+    monkeypatch.setattr(
+        ProjectAuthoringCatalogRepository,
+        "_secret_digests",
+        secret_digests,
+    )
 
     def _row(index: int, *, current: bool) -> SimpleNamespace:
         digest = current_digest if current else "stale-grant-closure"
@@ -432,11 +459,11 @@ async def test_mcp_cursor_can_page_past_scan_budget_without_unreachable_tools() 
             tool_name=f"tool_{index:03d}",
             tool_description=f"Tool {index}",
             attempt_payload_checksum="c" * 64,
-            attempt_grant_digest=digest,
+            attempt_secret_digest=digest,
             attempt_status="ready",
             public_error_code=None,
             tools_payload_checksum="c" * 64,
-            tools_grant_digest=digest,
+            tools_secret_digest=digest,
             last_success_at=now,
         )
 
@@ -494,11 +521,22 @@ async def test_mcp_cursor_can_page_past_scan_budget_without_unreachable_tools() 
 
 
 @pytest.mark.asyncio
-async def test_mcp_inspect_rejects_inventory_from_a_stale_grant_closure() -> None:
+async def test_mcp_inspect_rejects_inventory_from_a_stale_secret_closure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     context = _context(Capability.SHARED_ASSETS_READ)
     server_id = uuid.uuid4()
     version_id = uuid.uuid4()
-    stale_digest = mcp_grant_closure_digest((uuid.uuid4(),))
+    stale_digest = _secret_digest(uuid.uuid4())
+
+    async def secret_digests(*_args: object, **_kwargs: object):
+        return {(server_id, version_id): _secret_digest()}
+
+    monkeypatch.setattr(
+        ProjectAuthoringCatalogRepository,
+        "_secret_digests",
+        secret_digests,
+    )
     row = SimpleNamespace(
         scope="project",
         scope_rank=0,
@@ -512,11 +550,11 @@ async def test_mcp_inspect_rejects_inventory_from_a_stale_grant_closure() -> Non
         tool_name="search",
         tool_description="Search",
         attempt_payload_checksum="1" * 64,
-        attempt_grant_digest=stale_digest,
+        attempt_secret_digest=stale_digest,
         attempt_status="ready",
         public_error_code=None,
         tools_payload_checksum="1" * 64,
-        tools_grant_digest=stale_digest,
+        tools_secret_digest=stale_digest,
         last_success_at=datetime.now(UTC),
     )
 

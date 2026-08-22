@@ -149,15 +149,15 @@ export function projectChannelConfigErrorMessage(
   const descriptor = projectChannelProviderDescriptor(provider);
   if (error instanceof GatewayApiError) {
     if (error.code === "CHANNEL_INSTANCE_INVALID") {
-      const credentialInvalid = error.fields.some(
-        (field) => field === "credentials" || field.startsWith("credentials."),
+      const secretInvalid = error.fields.some(
+        (field) => field === "secrets" || field.startsWith("secrets."),
       );
-      if (credentialInvalid) {
-        const credentialLabel =
+      if (secretInvalid) {
+        const secretLabel =
           descriptor?.secretFields.length === 1
             ? descriptor.secretFields[0]?.label
-            : "渠道凭据";
-        return `${credentialLabel ?? "渠道凭据"} 无效，请重新填写后重试。`;
+            : "渠道秘密";
+        return `${secretLabel ?? "渠道秘密"} 无效，请重新填写后重试。`;
       }
       return "渠道配置无效，请检查填写内容后重试。";
     }
@@ -206,7 +206,7 @@ function formValue(form: FormData, field: string) {
 
 export function buildProjectChannelInstanceInput(
   provider: ChannelProviderId,
-  configured: boolean,
+  secretConfigured: boolean,
   form: FormData,
   enabled = true,
 ): ConfigureProjectChannelInstanceInput {
@@ -220,32 +220,32 @@ export function buildProjectChannelInstanceInput(
     if (value) publicConfig[field.name] = value;
   }
 
-  const credentials: Record<string, string> = {};
+  const secrets: Record<string, string> = {};
   for (const field of descriptor.secretFields) {
     const value = formValue(form, field.name);
-    if (!configured && field.required && !value) {
+    if (!secretConfigured && field.required && !value) {
       throw new Error(`请填写${field.label}`);
     }
-    if (value) credentials[field.name] = value;
+    if (value) secrets[field.name] = value;
   }
 
   return {
     publicConfig,
-    ...(Object.keys(credentials).length > 0 ? { credentials } : {}),
+    ...(Object.keys(secrets).length > 0 ? { secrets } : {}),
     enabled,
   };
 }
 
 export function submitProjectChannelInstanceForm({
   provider,
-  configured,
+  secretConfigured,
   enabled = true,
   form,
   clearSecrets,
   onSubmit,
 }: {
   provider: ChannelProviderId;
-  configured: boolean;
+  secretConfigured: boolean;
   enabled?: boolean;
   form: FormData;
   clearSecrets: () => void;
@@ -255,7 +255,7 @@ export function submitProjectChannelInstanceForm({
 }) {
   const input = buildProjectChannelInstanceInput(
     provider,
-    configured,
+    secretConfigured,
     form,
     enabled,
   );
@@ -292,7 +292,7 @@ export function ChannelInstanceConfigDialog({
   const descriptor = instance
     ? projectChannelProviderDescriptor(instance.provider)
     : null;
-  const credentialLabel =
+  const secretLabel =
     descriptor?.secretFields.length === 1
       ? descriptor.secretFields[0]?.label
       : "凭据";
@@ -303,7 +303,7 @@ export function ChannelInstanceConfigDialog({
     const formElement = event.currentTarget;
     await submitProjectChannelInstanceForm({
       provider: instance.provider,
-      configured: instance.configured,
+      secretConfigured: instance.secret_configured,
       enabled: instance.configured ? instance.enabled : true,
       form: new FormData(formElement),
       clearSecrets: () =>
@@ -321,8 +321,8 @@ export function ChannelInstanceConfigDialog({
             {descriptor?.displayName ?? "渠道"}
           </DialogTitle>
           <DialogDescription>
-            {instance?.credential_configured
-              ? `${credentialLabel} 已配置；留空表示保留。`
+            {instance?.secret_configured
+              ? `${secretLabel} 已配置；留空表示保留。`
               : ""}
           </DialogDescription>
         </DialogHeader>
@@ -350,9 +350,9 @@ export function ChannelInstanceConfigDialog({
                 <Input
                   name={field.name}
                   type="password"
-                  required={field.required && !instance.configured}
+                  required={field.required && !instance.secret_configured}
                   placeholder={
-                    instance.credential_configured ? "已配置，留空表示保留" : ""
+                    instance.secret_configured ? "已配置，留空表示保留" : ""
                   }
                   disabled={pending}
                   autoComplete="new-password"
@@ -448,13 +448,21 @@ export function ChannelInstanceCard({
   pendingAction,
   onConfigure,
   onToggle,
+  onClearSecret,
   onDelete,
 }: {
   instance: ProjectChannelInstance;
   manageable: boolean;
-  pendingAction: "configure" | "enable" | "disable" | "delete" | null;
+  pendingAction:
+    | "configure"
+    | "enable"
+    | "disable"
+    | "clear-secret"
+    | "delete"
+    | null;
   onConfigure: (instance: ProjectChannelInstance) => void;
   onToggle: (instance: ProjectChannelInstance, enabled: boolean) => void;
+  onClearSecret: (instance: ProjectChannelInstance) => void;
   onDelete: (instance: ProjectChannelInstance) => void;
 }) {
   const descriptor = projectChannelProviderDescriptor(instance.provider);
@@ -467,7 +475,7 @@ export function ChannelInstanceCard({
     .filter((field): field is { label: string; value: string } =>
       Boolean(field.value),
     );
-  const credentialLabel =
+  const secretLabel =
     descriptor?.secretFields.length === 1
       ? descriptor.secretFields[0]?.label
       : "凭据";
@@ -500,9 +508,9 @@ export function ChannelInstanceCard({
           ) : null}
           {instance.configured ? (
             <p className="text-muted-foreground mt-2 text-xs">
-              {instance.credential_configured
-                ? `${credentialLabel} 已配置`
-                : "凭据未配置"}
+              {instance.secret_configured
+                ? `${secretLabel} 已配置`
+                : "秘密未配置"}
             </p>
           ) : null}
           {instance.last_error ? (
@@ -542,6 +550,21 @@ export function ChannelInstanceCard({
                 ) : null}
                 {instance.enabled ? "停用" : "启用"}
               </Button>
+              {instance.secret_configured ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive"
+                  disabled={pending}
+                  onClick={() => onClearSecret(instance)}
+                >
+                  {pendingAction === "clear-secret" ? (
+                    <LoaderCircleIcon className="animate-spin" />
+                  ) : null}
+                  清除秘密
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 size="sm"

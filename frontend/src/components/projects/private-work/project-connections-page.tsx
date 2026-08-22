@@ -30,6 +30,7 @@ import {
 } from "@/components/ui/dialog";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
+  clearProjectChannelInstanceSecret,
   configureProjectChannelInstance,
   deleteProjectChannelInstance,
   listProjectChannelInstances,
@@ -167,7 +168,7 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
     "agents",
     agentCatalogEnabled,
   );
-  const agentCatalog = agentsQuery.data as ProjectAssetList | undefined;
+  const agentCatalog = agentsQuery.data;
   const agents = useMemo(
     () => executableProjectAgents(agentCatalog),
     [agentCatalog],
@@ -220,10 +221,12 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
     useState<ProjectChannelInstance | null>(null);
   const [deleteTarget, setDeleteTarget] =
     useState<ProjectChannelInstance | null>(null);
+  const [clearSecretTarget, setClearSecretTarget] =
+    useState<ProjectChannelInstance | null>(null);
   const [configError, setConfigError] = useState<string | null>(null);
   const [channelPending, setChannelPending] = useState<{
     provider: string;
-    action: "configure" | "enable" | "disable" | "delete";
+    action: "configure" | "enable" | "disable" | "clear-secret" | "delete";
   } | null>(null);
   const visibleChannelInstances = (
     channelInstances.data?.instances ?? []
@@ -314,6 +317,28 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
     }
   };
 
+  const handleClearChannelSecret = async () => {
+    const instance = clearSecretTarget;
+    if (!instance || channelPending || !canManageChannels) return;
+    setChannelPending({ provider: instance.provider, action: "clear-secret" });
+    try {
+      await runPrivateWorkAbortable(privateWork, (signal) =>
+        clearProjectChannelInstanceSecret(
+          privateWork,
+          instance.provider,
+          signal,
+        ),
+      );
+      await refreshChannelState();
+      setClearSecretTarget(null);
+      toast.success(`${instance.display_name} 的秘密已清除`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "无法清除渠道秘密");
+    } finally {
+      setChannelPending(null);
+    }
+  };
+
   return (
     <main className="mx-auto w-full max-w-6xl space-y-6 p-6 lg:p-8">
       <header>
@@ -370,6 +395,7 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
                 onToggle={(target, enabled) =>
                   void handleToggleChannel(target, enabled)
                 }
+                onClearSecret={setClearSecretTarget}
                 onDelete={setDeleteTarget}
               />
             ))}
@@ -404,6 +430,46 @@ export function ProjectConnectionsPage({ project }: { project: Project }) {
         }}
         onSubmit={(instance, input) => handleConfigureChannel(instance, input)}
       />
+
+      <Dialog
+        open={clearSecretTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && channelPending?.action !== "clear-secret") {
+            setClearSecretTarget(null);
+          }
+        }}
+      >
+        <DialogContent closeLabel="关闭">
+          <DialogHeader>
+            <DialogTitle>清除渠道秘密</DialogTitle>
+            <DialogDescription>
+              清除 {clearSecretTarget?.display_name ?? "该渠道"}{" "}
+              的秘密值？清除后渠道将变为未就绪，必须重新配置才能启用。
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={channelPending?.action === "clear-secret"}
+              onClick={() => setClearSecretTarget(null)}
+            >
+              取消
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              disabled={channelPending?.action === "clear-secret"}
+              onClick={() => void handleClearChannelSecret()}
+            >
+              {channelPending?.action === "clear-secret" ? (
+                <LoaderCircleIcon className="animate-spin" />
+              ) : null}
+              确认清除
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog
         open={deleteTarget !== null}

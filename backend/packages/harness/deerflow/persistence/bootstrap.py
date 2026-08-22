@@ -16,36 +16,15 @@ import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.final_schema_contract import (
     FINAL_APP_TABLES,
     LANGGRAPH_TABLES,
-    inventory_is_m7_allowed,
+    inventory_is_schema_v1_allowed,
     inventory_user_schema_objects,
-    verify_m7_catalog,
+    verify_schema_v1_catalog,
 )
 
-# Ordered migration chain, root -> head. Every released revision id lives here;
-# ``backend/tests/test_schema_migration_parity.py`` pins this tuple to the actual
-# scripts under ``backend/migrations/versions``. ``initial_schema`` is the first
-# public root and known ancestors advance only through this explicit chain.
-# Provisional markers such as ``full_schema`` and ``execution_approvals`` remain
-# deliberately unknown and require a fresh database instead of an upgrade.
-KNOWN_CHAIN_REVISIONS: tuple[str, ...] = (
-    "initial_schema",
-    "approval_output_delivery",
-    "model_catalog_simplify",
-    "agent_design_resume_index",
-    "agent_archived_slug_reuse",
-    "skill_credential_source_field",
-    "current_asset_version_lifecycle",
-    "agent_design_activity",
-    "agent_design_activity_retry",
-    "agent_design_activity_terminal",
-    "skill_design_activity",
-)
-
-# The migration-chain head revision id. ``full_schema.sql`` stamps exactly
-# this marker, so a fresh install is always already at head.
-CURRENT_SCHEMA_REVISION = KNOWN_CHAIN_REVISIONS[-1]
-# Current-schema alias retained for the M7 readiness contract.
-M7_FINAL_SCHEMA_REVISION = CURRENT_SCHEMA_REVISION
+# Development reset baseline.  There is deliberately no upgrade ancestry:
+# pre-V1 databases must be recreated with the explicit setup command.
+CURRENT_SCHEMA_REVISION = "schema_v1"
+SCHEMA_V1_REVISION = CURRENT_SCHEMA_REVISION
 
 _FULL_SCHEMA_PATH = Path(__file__).resolve().parent / "full_schema.sql"
 SCHEMA_MUTATION_LOCK_KEY = 0x0DEE_12F1_0BEE_3682
@@ -56,13 +35,13 @@ _FINAL_APP_TABLES = FINAL_APP_TABLES
 _FINAL_ALLOWED_RELATIONS = _FINAL_APP_TABLES | _LANGGRAPH_TABLES | {"alembic_version"}
 
 
-class M7RecreateRequired(RuntimeError):
+class SchemaRecreateRequired(RuntimeError):
     """The existing database is not the exact supported full-schema snapshot."""
 
-    code = "M7_RECREATE_REQUIRED"
+    code = "SCHEMA_RECREATE_REQUIRED"
 
     def __init__(self) -> None:
-        super().__init__(f"M7_RECREATE_REQUIRED: nonempty database is not the exact {CURRENT_SCHEMA_REVISION} catalog and must be recreated")
+        super().__init__(f"SCHEMA_RECREATE_REQUIRED: nonempty database is not the exact {CURRENT_SCHEMA_REVISION} catalog and must be recreated")
 
 
 class SchemaSetupRequired(RuntimeError):
@@ -74,15 +53,6 @@ class SchemaSetupRequired(RuntimeError):
         super().__init__("DATABASE_SETUP_REQUIRED: run `make setup-db` before starting ActWeave")
 
 
-class SchemaUpgradeRequired(RuntimeError):
-    """A behind database needs an explicit, operator-driven migration run."""
-
-    code = "DATABASE_UPGRADE_REQUIRED"
-
-    def __init__(self, current_marker: str) -> None:
-        super().__init__(f"DATABASE_UPGRADE_REQUIRED: database is at {current_marker} but the current chain head is {CURRENT_SCHEMA_REVISION}; back up the database and run `make upgrade-db`")
-
-
 async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
     rows = await connection.execute(
         text(
@@ -90,7 +60,11 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
                FROM pg_class c
                JOIN pg_namespace n ON n.oid = c.relnamespace
                WHERE n.nspname = current_schema()
-                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')"""
+                 AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+                 AND NOT EXISTS (
+                     SELECT 1 FROM pg_inherits inheritance
+                     WHERE inheritance.inhrelid = c.oid
+                 )"""
         )
     )
     return frozenset(str(value) for value in rows.scalars())
@@ -98,31 +72,24 @@ async def list_user_relations(connection: AsyncConnection) -> frozenset[str]:
 
 async def classify_database(
     connection: AsyncConnection,
-) -> Literal["empty", "current", "behind"]:
+) -> Literal["empty", "current"]:
     """Classify a database without mutation.
 
-    Three accepted states: empty (installable), the exact chain-head catalog
-    (current), or a database stamped with a known ancestor revision (behind —
-    upgradable only through explicit ``make upgrade-db``). Every other
-    nonempty schema stays fail-closed and requires explicit recreation. A
-    behind database deliberately skips the head catalog contract: its older
-    catalog is verified by the migration run itself, whose post-upgrade check
-    re-enters the "current" branch here.
+    Only an empty database and the exact Schema V1 catalog are accepted.
+    Every other nonempty schema stays fail-closed and must be recreated.
     """
 
     objects = await inventory_user_schema_objects(connection)
     if not objects:
         return "empty"
     if "relation:r:alembic_version" not in objects:
-        raise M7RecreateRequired()
+        raise SchemaRecreateRequired()
 
     markers = tuple(str(value) for value in (await connection.execute(text("SELECT version_num FROM alembic_version ORDER BY version_num"))).scalars())
-    if len(markers) != 1 or markers[0] not in KNOWN_CHAIN_REVISIONS:
-        raise M7RecreateRequired()
-    if markers[0] != CURRENT_SCHEMA_REVISION:
-        return "behind"
-    if not inventory_is_m7_allowed(objects) or not await verify_m7_catalog(connection):
-        raise M7RecreateRequired()
+    if len(markers) != 1 or markers[0] != CURRENT_SCHEMA_REVISION:
+        raise SchemaRecreateRequired()
+    if not inventory_is_schema_v1_allowed(objects) or not await verify_schema_v1_catalog(connection):
+        raise SchemaRecreateRequired()
     return "current"
 
 
@@ -199,20 +166,11 @@ async def bootstrap_schema(engine: AsyncEngine) -> None:
     async with _postgres_lock(engine):
         async with engine.connect() as connection:
             state = await classify_database(connection)
-        if state == "behind":
-            # Setup never migrates: `make upgrade-db` is the only upgrade path.
-            raise SchemaUpgradeRequired(await _single_marker(engine))
         if state == "empty":
             await _install_full_schema(engine)
         async with engine.connect() as connection:
             if await classify_database(connection) != "current":
-                raise M7RecreateRequired()
-
-
-async def _single_marker(engine: AsyncEngine) -> str:
-    async with engine.connect() as connection:
-        marker = await connection.scalar(text("SELECT version_num FROM alembic_version"))
-    return str(marker)
+                raise SchemaRecreateRequired()
 
 
 async def validate_schema(engine: AsyncEngine) -> None:
@@ -224,19 +182,15 @@ async def validate_schema(engine: AsyncEngine) -> None:
         state = await classify_database(connection)
     if state == "current":
         return
-    if state == "behind":
-        raise SchemaUpgradeRequired(await _single_marker(engine))
     raise SchemaSetupRequired()
 
 
 __all__ = [
     "CURRENT_SCHEMA_REVISION",
-    "KNOWN_CHAIN_REVISIONS",
-    "M7RecreateRequired",
-    "M7_FINAL_SCHEMA_REVISION",
+    "SCHEMA_V1_REVISION",
     "SCHEMA_MUTATION_LOCK_KEY",
+    "SchemaRecreateRequired",
     "SchemaSetupRequired",
-    "SchemaUpgradeRequired",
     "bootstrap_schema",
     "classify_database",
     "list_user_relations",

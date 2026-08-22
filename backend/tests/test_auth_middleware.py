@@ -174,7 +174,7 @@ def _make_auth_csrf_app():
 
 @pytest.fixture
 def client(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "")
     return TestClient(_make_app())
 
 
@@ -203,7 +203,7 @@ def test_protected_path_no_cookie_returns_401(client):
 
 
 def test_auth_disabled_allows_protected_path_without_cookie(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     client = TestClient(_make_app())
 
     res = client.get("/api/models")
@@ -213,7 +213,7 @@ def test_auth_disabled_allows_protected_path_without_cookie(monkeypatch):
 
 
 def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     client = TestClient(_make_app())
 
     res = client.get("/api/whoami")
@@ -228,7 +228,7 @@ def test_auth_disabled_stamps_default_admin_user_without_cookie(monkeypatch):
 
 
 def test_auth_disabled_auth_me_reuses_middleware_user_without_cookie(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     client = TestClient(_make_app())
 
     res = client.get("/api/v1/auth/me")
@@ -253,7 +253,7 @@ def test_auth_disabled_does_not_clobber_valid_session_cookie(monkeypatch):
             needs_setup=False,
         )
 
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     monkeypatch.setattr("app.gateway.deps.get_current_user_from_request", fake_current_user)
     client = TestClient(_make_app())
     client.cookies.set("access_token", "valid-session")
@@ -273,7 +273,7 @@ def test_auth_disabled_does_not_clobber_internal_auth_identity(monkeypatch):
     from app.gateway.internal_auth import create_internal_auth_headers
     from deerflow.runtime.user_context import DEFAULT_USER_ID
 
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     client = TestClient(_make_app())
 
     res = client.get(
@@ -291,7 +291,7 @@ def test_auth_disabled_does_not_clobber_internal_auth_identity(monkeypatch):
 
 
 def test_auth_disabled_skips_csrf_for_state_changing_requests(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     client = TestClient(_make_auth_csrf_app())
 
     res = client.post("/api/threads/abc/runs/stream")
@@ -301,8 +301,8 @@ def test_auth_disabled_skips_csrf_for_state_changing_requests(monkeypatch):
 
 
 def test_auth_disabled_is_ignored_in_explicit_production_env(monkeypatch):
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
-    monkeypatch.setenv("DEER_FLOW_ENV", "production")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_ENV", "production")
     client = TestClient(_make_app())
 
     res = client.get("/api/models")
@@ -313,8 +313,8 @@ def test_auth_disabled_is_ignored_in_explicit_production_env(monkeypatch):
 def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
     from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
-    monkeypatch.delenv("DEER_FLOW_ENV", raising=False)
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
+    monkeypatch.delenv("ACT_WEAVE_ENV", raising=False)
     monkeypatch.delenv("ENVIRONMENT", raising=False)
 
     with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):
@@ -327,7 +327,7 @@ def test_auth_disabled_startup_warning_when_effective(monkeypatch, caplog):
 def test_auth_disabled_startup_warning_suppressed_in_explicit_production_env(monkeypatch, caplog):
     from app.gateway.auth_disabled import warn_if_auth_disabled_enabled
 
-    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("ACT_WEAVE_AUTH_DISABLED", "1")
     monkeypatch.setenv("ENVIRONMENT", "production")
 
     with caplog.at_level("WARNING", logger="app.gateway.auth_disabled"):

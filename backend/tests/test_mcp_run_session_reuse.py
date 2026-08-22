@@ -504,11 +504,11 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
     from app.private_work.run_repository import PrivateRunCreate
     from app.private_work.thread_repository import PrivateThreadRepository, ThreadAgentRef
     from app.shared_assets.agent_payload_checksum import agent_payload_checksum
-    from app.shared_assets.keyring import CredentialKeyring
     from app.shared_assets.mcp_service import McpDefinition, McpService
     from app.shared_assets.models import AgentPayload
     from app.shared_assets.resolver import ProjectAssetResolver
     from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
+    from deerflow.secrets import SecretKey
 
     server = FastMCP(
         "admitted-run-session-probe",
@@ -738,10 +738,7 @@ async def test_admitted_run_materializes_and_reuses_one_real_mcp_session_end_to_
                 methods.clear()
                 resolver = ProjectAssetResolver(
                     seed.factory,
-                    keyring=CredentialKeyring(
-                        active_key_id="mcp-run-test",
-                        _keys={"mcp-run-test": b"m" * 32},
-                    ),
+                    secret_key=SecretKey(b"m" * 32),
                 )
                 runtime = await PrivateAssetRuntime(
                     seed.factory,
@@ -890,7 +887,8 @@ def test_session_cache_key_is_limited_to_project_http_and_sse() -> None:
             catalog_generation=1,
             dependency_version_ids=(),
             definition={"transport": transport},
-            credential_grant_ids=(),
+            secret_generation_ids=(),
+            secret_digest="a" * 64,
         )
 
     project_http = snapshot(AssetScope.PROJECT, "http")

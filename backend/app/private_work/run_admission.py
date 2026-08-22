@@ -67,7 +67,7 @@ from app.private_work.sandbox_files import (
 )
 from app.private_work.snapshot_repository import (
     RunAssetSnapshot,
-    RunMcpGrantSnapshot,
+    RunMcpSecretSnapshot,
     RunModelSnapshotAdmissionPort,
     RunRuntimePolicyAdmissionPort,
     RunSnapshotAssetStale,
@@ -88,9 +88,9 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedRunAssetClosure
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.system_settings.model_refs import ModelRefResolver
 from deerflow.agents.memory.snip import MEMORY_ARCHIVE_RECEIPT_KEY
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.channel_connections import (
@@ -108,7 +108,7 @@ from deerflow.trace_context import generate_trace_id, normalize_trace_id
 @dataclass(frozen=True, slots=True)
 class PersistedRunSnapshot:
     assets: tuple[RunAssetSnapshot, ...]
-    mcp_grants: tuple[RunMcpGrantSnapshot, ...]
+    mcp_secrets: tuple[RunMcpSecretSnapshot, ...]
     catalog_generation: int
 
 
@@ -494,7 +494,7 @@ class PrivateRunAdmissionService:
             run_id,
             lock=True,
         )
-        grants = await self._snapshots.list_mcp_grants_in_session(
+        secrets = await self._snapshots.list_mcp_secrets_in_session(
             session,
             context,
             run_id,
@@ -507,7 +507,7 @@ class PrivateRunAdmissionService:
             raise RunSnapshotAssetStale
         return PersistedRunSnapshot(
             assets=assets,
-            mcp_grants=grants,
+            mcp_secrets=secrets,
             catalog_generation=generations.pop(),
         )
 

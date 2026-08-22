@@ -11,6 +11,10 @@ import sqlalchemy as sa
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import (
+    frozen_system_model_execution,
+    seed_system_model_config,
+)
 
 from app.private_work.retention_purge import purge_private_scope
 from deerflow.agents.memory.dream import (
@@ -47,51 +51,20 @@ def _jobs(session) -> JobRepository:
     return JobRepository(session, owner_ref_hasher=_owner_ref)
 
 
-async def _seed_model_version(seed, scope) -> uuid.UUID:
+async def _seed_model_config(seed, scope) -> uuid.UUID:
     model_id = uuid.uuid4()
-    model_version_id = uuid.uuid4()
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,
-                 updated_by_user_id)
-                VALUES (:id,'Episode test','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {
-                "id": model_id,
-                "owner": scope.owner_user_id,
-            },
+        await seed_system_model_config(
+            connection,
+            model_id=model_id,
+            owner_user_id=scope.owner_user_id,
+            display_name="Episode test",
+            provider_model="episode-test",
         )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,
-                 provider_model,settings,supports_thinking,
-                 supports_reasoning_effort,supports_vision,credential_id,
-                 credential_version_id,credential_env_key,payload_checksum,
-                 supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake','episode-test',
-                        '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                        :checksum,NULL,:owner)"""
-            ),
-            {
-                "id": model_version_id,
-                "model": model_id,
-                "checksum": "a" * 64,
-                "owner": scope.owner_user_id,
-            },
-        )
-        await connection.execute(
-            text("UPDATE system_model_configs SET current_version_id=:version WHERE id=:model"),
-            {"version": model_version_id, "model": model_id},
-        )
-    return model_version_id
+    return model_id
 
 
-def _history_entry(scope, *, index: int, model_version_id: uuid.UUID, created_at: datetime) -> MemoryHistoryEntryRow:
+def _history_entry(scope, *, index: int, model_config_id: uuid.UUID, created_at: datetime) -> MemoryHistoryEntryRow:
     tagged_text = f"- [durable] episode-fact-{index:02d}"
     return MemoryHistoryEntryRow(
         id=uuid.uuid4(),
@@ -107,7 +80,8 @@ def _history_entry(scope, *, index: int, model_version_id: uuid.UUID, created_at
         content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
         preference_version=1,
         snip_prompt_version="snip-prompt-v1",
-        summary_model_ref=model_version_id,
+        summary_model_config_id=model_config_id,
+        summary_model_payload_checksum="a" * 64,
         created_at=created_at,
     )
 
@@ -159,13 +133,14 @@ async def test_postgres_settlement_transfers_history_into_episodes(
     base_time = datetime.now(UTC)
     worker_id = uuid.uuid4()
     try:
-        model_version_id = await _seed_model_version(seed, scope)
+        model_config_id = await _seed_model_config(seed, scope)
         frozen = MemoryDreamFrozenRuntime(
             preference_version=1,
             policy_revision=1,
-            model_config_id=uuid.uuid4(),
-            model_version_id=model_version_id,
-            model_payload_checksum="a" * 64,
+            model_execution=frozen_system_model_execution(
+                model_id=model_config_id,
+                provider_model="episode-test",
+            ),
             prompt_version=DREAM_PROMPT_VERSION,
         )
 
@@ -187,7 +162,7 @@ async def test_postgres_settlement_transfers_history_into_episodes(
                     _history_entry(
                         scope,
                         index=index,
-                        model_version_id=model_version_id,
+                        model_config_id=model_config_id,
                         created_at=base_time + timedelta(microseconds=index),
                     )
                 )

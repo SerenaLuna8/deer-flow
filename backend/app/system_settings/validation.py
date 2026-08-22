@@ -20,7 +20,6 @@ from app.system_settings.models import (
 )
 
 _MAX_SETTINGS_BYTES = 32 * 1024
-_ENV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _PROVIDER_MODEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,254}\Z")
 _SETTING_FIELD_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
 _REASONING_EFFORTS = frozenset({"none", "minimal", "low", "medium", "high"})
@@ -106,7 +105,7 @@ class ProviderSettingFieldSpec:
 @dataclass(frozen=True, slots=True)
 class ProviderAdapterSpec:
     class_path: str
-    credential_required: bool
+    api_key_required: bool
     fields: tuple[ProviderSettingFieldSpec, ...] = ()
 
     def __post_init__(self) -> None:
@@ -602,42 +601,24 @@ def is_provider_adapter_supported(provider_adapter: object) -> bool:
     return is_provider_adapter_eligible_for_new_binding(provider_adapter)
 
 
-def provider_credential_required(provider_adapter: str) -> bool:
+def provider_api_key_required(provider_adapter: str) -> bool:
     try:
         return provider_adapter_descriptor(
             provider_adapter,
-        ).credential_required
+        ).api_key_required
     except ModelSettingsInvalid:
         raise ModelSettingsInvalid() from None
 
 
-def _validate_credential_group(
-    provider_adapter: str,
-    credential_id: uuid.UUID | None,
-    credential_version_id: uuid.UUID | None,
-    credential_env_key: str | None,
-) -> tuple[uuid.UUID | None, uuid.UUID | None, str | None]:
-    spec = provider_adapter_descriptor(provider_adapter)
-    values = (
-        credential_id,
-        credential_version_id,
-        credential_env_key,
-    )
-    present = tuple(value is not None for value in values)
-    if present not in {(False, False, False), (True, True, True)}:
+def _validate_api_key(value: object) -> str | None:
+    if value is None or value == "":
+        return None
+    if type(value) is not str or not value.strip() or len(value) > 16 * 1024:
         raise ValueError
-    if spec.credential_required and not all(present):
-        raise ValueError
-    if not spec.credential_required and any(present):
-        raise ValueError
-    if not any(present):
-        return None, None, None
-    if type(credential_id) is not uuid.UUID or type(credential_version_id) is not uuid.UUID or type(credential_env_key) is not str or _ENV_KEY.fullmatch(credential_env_key) is None:
-        raise ValueError
-    return credential_id, credential_version_id, credential_env_key
+    return value
 
 
-def _validate_version_fields(
+def _validate_configuration_fields(
     *,
     display_name: object,
     provider_adapter: object,
@@ -646,9 +627,7 @@ def _validate_version_fields(
     supports_thinking: object,
     supports_reasoning_effort: object,
     supports_vision: object,
-    credential_id: object,
-    credential_version_id: object,
-    credential_env_key: object,
+    api_key: object,
 ) -> dict[str, object]:
     try:
         if (
@@ -660,12 +639,9 @@ def _validate_version_fields(
             or type(supports_vision) is not bool
         ):
             raise ValueError
-        normalized_credential = _validate_credential_group(
-            provider_adapter,
-            credential_id,
-            credential_version_id,
-            credential_env_key,
-        )
+        normalized_api_key = _validate_api_key(api_key)
+        if normalized_api_key is not None and not provider_api_key_required(provider_adapter):
+            raise ValueError
         display_name = _validate_public_text(
             display_name,
             max_chars=120,
@@ -689,9 +665,7 @@ def _validate_version_fields(
             "supports_thinking": supports_thinking,
             "supports_reasoning_effort": supports_reasoning_effort,
             "supports_vision": supports_vision,
-            "credential_id": normalized_credential[0],
-            "credential_version_id": normalized_credential[1],
-            "credential_env_key": normalized_credential[2],
+            "api_key": normalized_api_key,
         }
     except (AttributeError, TypeError, ValueError):
         raise ModelSettingsInvalid() from None
@@ -705,7 +679,7 @@ def validate_create_system_model(
             raise ValueError
         if command.status not in {"active", "suspended"}:
             raise ValueError
-        values = _validate_version_fields(
+        values = _validate_configuration_fields(
             display_name=command.display_name,
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
@@ -713,9 +687,7 @@ def validate_create_system_model(
             supports_thinking=command.supports_thinking,
             supports_reasoning_effort=command.supports_reasoning_effort,
             supports_vision=command.supports_vision,
-            credential_id=command.credential_id,
-            credential_version_id=command.credential_version_id,
-            credential_env_key=command.credential_env_key,
+            api_key=command.api_key,
         )
         return replace(
             command,
@@ -733,7 +705,7 @@ def validate_update_system_model(
             raise ValueError
         return replace(
             command,
-            **_validate_version_fields(
+            **_validate_configuration_fields(
                 display_name=command.display_name,
                 provider_adapter=command.provider_adapter,
                 provider_model=command.provider_model,
@@ -741,9 +713,7 @@ def validate_update_system_model(
                 supports_thinking=command.supports_thinking,
                 supports_reasoning_effort=command.supports_reasoning_effort,
                 supports_vision=command.supports_vision,
-                credential_id=command.credential_id,
-                credential_version_id=command.credential_version_id,
-                credential_env_key=command.credential_env_key,
+                api_key=command.api_key,
             ),
         )
     except (AttributeError, TypeError, ValueError):
@@ -753,12 +723,12 @@ def validate_update_system_model(
 def validate_system_model_connection_test(
     command: SystemModelConnectionCheck,
 ) -> SystemModelConnectionCheck:
-    """Apply the same provider and Credential validation before a live probe."""
+    """Apply provider validation and require this request's transient Key."""
 
     try:
         if not isinstance(command, SystemModelConnectionCheck):
             raise ValueError
-        values = _validate_version_fields(
+        values = _validate_configuration_fields(
             display_name="Connection test",
             provider_adapter=command.provider_adapter,
             provider_model=command.provider_model,
@@ -766,19 +736,18 @@ def validate_system_model_connection_test(
             supports_thinking=False,
             supports_reasoning_effort=False,
             supports_vision=command.supports_vision,
-            credential_id=command.credential_id,
-            credential_version_id=command.credential_version_id,
-            credential_env_key=command.credential_env_key,
+            api_key=None,
         )
+        transient_api_key = _validate_api_key(command.api_key)
+        if provider_api_key_required(command.provider_adapter) and transient_api_key is None:
+            raise ValueError
         return replace(
             command,
             provider_adapter=values["provider_adapter"],
             provider_model=values["provider_model"],
             settings=values["settings"],
             supports_vision=values["supports_vision"],
-            credential_id=values["credential_id"],
-            credential_version_id=values["credential_version_id"],
-            credential_env_key=values["credential_env_key"],
+            api_key=transient_api_key or command.api_key,
         )
     except (AttributeError, TypeError, ValueError):
         raise ModelSettingsInvalid() from None
@@ -789,24 +758,9 @@ def canonical_model_payload_checksum(
     command: CreateSystemModel | UpdateSystemModel,
 ) -> str:
     try:
-        if type(model_config_id) is not uuid.UUID:
+        if not isinstance(model_config_id, uuid.UUID):
             raise ValueError
-        payload = {
-            "schema_version": 1,
-            "model_config_id": str(model_config_id),
-            "provider_adapter": command.provider_adapter,
-            "provider_model": command.provider_model,
-            "settings": validate_model_settings(
-                command.settings,
-                provider_adapter=command.provider_adapter,
-            ),
-            "supports_thinking": command.supports_thinking,
-            "supports_reasoning_effort": command.supports_reasoning_effort,
-            "supports_vision": command.supports_vision,
-            "credential_id": (str(command.credential_id) if command.credential_id is not None else None),
-            "credential_version_id": (str(command.credential_version_id) if command.credential_version_id is not None else None),
-            "credential_env_key": command.credential_env_key,
-        }
+        payload = canonical_model_payload(model_config_id, command)
         encoded = json.dumps(
             payload,
             allow_nan=False,
@@ -826,19 +780,44 @@ def canonical_model_payload_checksum(
         raise ModelSettingsInvalid() from None
 
 
+def canonical_model_payload(
+    model_config_id: uuid.UUID,
+    command: CreateSystemModel | UpdateSystemModel,
+) -> dict[str, object]:
+    try:
+        if not isinstance(model_config_id, uuid.UUID):
+            raise ValueError
+        return {
+            "schema_version": 1,
+            "model_config_id": str(model_config_id),
+            "provider_adapter": command.provider_adapter,
+            "provider_model": command.provider_model,
+            "settings": validate_model_settings(
+                command.settings,
+                provider_adapter=command.provider_adapter,
+            ),
+            "supports_thinking": command.supports_thinking,
+            "supports_reasoning_effort": command.supports_reasoning_effort,
+            "supports_vision": command.supports_vision,
+        }
+    except (AttributeError, TypeError, ValueError):
+        raise ModelSettingsInvalid() from None
+
+
 __all__ = [
     "BUILTIN_PROVIDER_ADAPTERS",
     "ModelSettingsInvalid",
     "PROVIDER_ADAPTERS",
     "ProviderAdapterSpec",
     "ProviderSettingFieldSpec",
+    "canonical_model_payload",
     "canonical_model_payload_checksum",
     "is_provider_adapter_authorable",
     "is_provider_adapter_eligible_for_new_binding",
     "is_provider_adapter_supported",
     "provider_adapter_descriptor",
     "provider_class_path",
-    "provider_credential_required",
+    "provider_api_key_required",
     "validate_materialized_model_settings",
     "validate_create_system_model",
     "validate_model_settings",

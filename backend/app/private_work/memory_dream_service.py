@@ -24,6 +24,7 @@ from app.system_runtime_settings.models import (
     RuntimePolicySection,
 )
 from app.system_runtime_settings.service import SystemRuntimePolicyService
+from app.system_settings.execution_payload import freeze_system_model_material
 from app.system_settings.repository import SystemModelRepository
 from deerflow.memory_contract import (
     DREAM_PROMPT_VERSION,
@@ -129,7 +130,7 @@ class MemoryDreamAdmissionService:
         )
         model = await SystemModelRepository(session).resolve_active_model(
             policy.memory.model_name,
-            load_envelope=False,
+            load_secret=True,
         )
         if model is None:
             return None
@@ -187,9 +188,7 @@ class MemoryDreamAdmissionService:
         frozen = MemoryDreamFrozenRuntime(
             preference_version=preference.version,
             policy_revision=policy_revision,
-            model_config_id=model.model.id,
-            model_version_id=model.version.id,
-            model_payload_checksum=model.version.payload_checksum,
+            model_execution=freeze_system_model_material(model),
             prompt_version=DREAM_PROMPT_VERSION,
         )
         repository = self._repository(session)

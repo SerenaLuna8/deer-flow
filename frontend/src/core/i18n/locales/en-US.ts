@@ -729,154 +729,6 @@ export const enUS: Translations = {
     },
   },
 
-  adminModelSettings: {
-    header: {
-      eyebrow: "System settings",
-      title: "Model settings",
-      create: "Create model",
-    },
-    overview: {
-      label: "Model catalog overview",
-      configured: "Configured models",
-      active: "Active models",
-      defaultModel: "Default model",
-      notSet: "Not set",
-      revision: "Catalog revision",
-    },
-    states: {
-      loading: "Loading model catalog",
-      unavailableTitle: "Model settings are unavailable",
-      unavailableDescription:
-        "No unverified data is shown. Check Gateway and database health, then retry.",
-      retry: "Retry",
-      emptyTitle: "No models are available yet",
-      emptyDescription:
-        "Create your first model, enable it, and set it as the default.",
-      catalogLabel: "Model catalog",
-    },
-    card: {
-      defaultModel: "Default model",
-      active: "Enabled",
-      suspended: "Suspended",
-      updatedAt: (formattedDate) => `Updated ${formattedDate}`,
-      updatedAtColumn: "Updated",
-      providerModel: "Model ID",
-      credential: "Credential",
-      environmentKey: "Environment variable",
-      status: "Status",
-      version: "Version",
-      versionMeta: (versionNumber, revision) =>
-        `Config v${versionNumber} · revision ${revision}`,
-      capabilities: "Model capabilities",
-      noCapabilities: "None",
-      thinking: "Thinking",
-      reasoningEffort: "Reasoning effort",
-      vision: "Vision input",
-      edit: "Edit",
-      pause: "Suspend",
-      enable: "Enable",
-      currentDefault: "Current default",
-      setDefault: "Set as default",
-      actions: "Actions",
-      actionFor: (action, name) => `${action}: ${name}`,
-      defaultCannotPause: "The default model cannot be suspended",
-      credentialUnbound: "No Credential bound",
-      credentialUnavailable: "Credential bound (currently unavailable)",
-      credentialHistorical: "Historical version",
-    },
-    adapters: {
-      patchedOpenAI: "OpenAI enhanced compatibility",
-      patchedDeepSeek: "DeepSeek enhanced compatibility",
-      patchedMiMo: "MiMo enhanced compatibility",
-      patchedMiniMax: "MiniMax enhanced compatibility",
-      patchedStepFun: "StepFun enhanced compatibility",
-    },
-    editor: {
-      editTitle: "Edit model",
-      createTitle: "Create model",
-      description:
-        "Provider parameters are saved as model configuration. Credential references point to existing versions; secret values are never entered here.",
-      basicInformation: "Basic information",
-      basicDescription: "Define the Provider mapping and catalog details.",
-      displayName: "Display name",
-      displayNamePlaceholder: "Analysis Pro",
-      providerAdapter: "Provider Adapter",
-      retiredProviderAdapter: "No longer supported",
-      retiredProviderAdapterHint:
-        "Select a supported Provider Adapter before saving or testing the connection.",
-      providerModel: "Model ID",
-      status: "Status",
-      active: "Enable",
-      suspended: "Suspend",
-      capabilities: "Model capabilities",
-      capabilitiesAndRuntime: "Capabilities and runtime parameters",
-      supportsThinking: "Supports thinking",
-      supportsReasoningEffort: "Supports reasoning effort",
-      supportsVision: "Supports vision input",
-      commonProviderSettings: "Runtime parameters",
-      baseUrl: "Base URL",
-      baseUrlHint:
-        "The Provider API base address. Do not include a model-specific path.",
-      temperature: "Temperature",
-      maxTokens: "Maximum Tokens",
-      requestTimeout: "Request timeout (seconds)",
-      maxRetries: "Maximum retries",
-      credentialBinding: "Credential binding",
-      systemCredential: "System Credential",
-      credentialsUnavailableHint:
-        "Credential metadata is unavailable, so the binding cannot be changed.",
-      credentialSelectionHint:
-        "Saving binds the selected Credential's current version without reading its value.",
-      selectCredential: "Select a Credential",
-      providerDoesNotUseCredential: "This Provider does not use a Credential",
-      environmentKey: "Injected environment variable",
-      environmentKeyHint:
-        "Only the variable name is saved, for example OPENAI_API_KEY.",
-      testConnection: "Test connection",
-      testingConnection: "Testing…",
-      testConnectionDescription:
-        "Sends a minimal request with the current form configuration and selected Credential. It does not save the model or return a secret to the browser.",
-      connectionSucceeded: "Connection succeeded",
-      connectionFailed:
-        "Connection failed. Check the Provider configuration and Credential, then try again.",
-      advancedJson: "Advanced JSON",
-      advancedJsonHint:
-        "Only allowlisted parameters and fixed structures are supported, such as reasoning_effort, extra_body.reasoning.effort, and the thinking toggle. Unknown fields and arbitrary strings are rejected.",
-      cancel: "Cancel",
-      saving: "Saving…",
-      saveChanges: "Save changes",
-      createModel: "Create model",
-    },
-    validation: {
-      invalidNumber: (label) => `${label} has an invalid format`,
-      temperature: "Temperature",
-      maxTokens: "Maximum Tokens",
-      requestTimeout: "Request timeout",
-      maxRetries: "Retry count",
-      advancedJsonInvalid: "Advanced JSON is invalid",
-      advancedJsonObject: "Advanced JSON must be an object",
-      advancedJsonUnsafe:
-        "Advanced JSON may contain only supported safe fields with exact value types",
-      invalidForm:
-        "Check required fields, display names, model IDs, and Credential binding",
-      invalidConfiguration: "The model configuration is invalid",
-    },
-    actionErrors: {
-      authRequired: "Your session has expired. Sign in again.",
-      conflict:
-        "Another administrator changed this model. Refresh and try again.",
-      invalid: "The model configuration failed server validation.",
-      generic: "The action was not completed. Refresh and try again.",
-    },
-    success: {
-      updated: (name) => `Updated model “${name}”.`,
-      created: (name) => `Created model “${name}”.`,
-      enabled: (name) => `Enabled model “${name}”.`,
-      suspended: (name) => `Suspended model “${name}”.`,
-      defaultSet: (name) => `Set “${name}” as the default model.`,
-    },
-  },
-
   adminSystemSettings: {
     header: {
       eyebrow: "Platform configuration",
@@ -991,7 +843,6 @@ export const enUS: Translations = {
       agent: "Agent",
       skill: "Skill",
       mcp: "MCP",
-      credential: "Credential",
       quota: "Quota",
     },
     shell: {
@@ -1005,78 +856,9 @@ export const enUS: Translations = {
     },
     common: {
       assetVersion: "Asset revision",
-      versionId: "Version UUID",
-      mcpConfigurationId: "Configuration UUID (internal revision)",
-      currentPublishedVersion: "Current published version",
-      currentPublishedMcpConfiguration: "Current published configuration",
-      updatedAt: "Updated",
       versionHistory: "Version history",
-      mcpConfigurationHistory: "Configuration history",
-      versionCount: (count) =>
-        `${count} ${count === 1 ? "version" : "versions"}`,
-      mcpConfigurationCount: (count) =>
-        `${count} ${count === 1 ? "configuration" : "configurations"}`,
-      credentialMetadata: "Credential metadata",
-      details: "Details",
-      dangerZone: "Danger zone",
-      type: "Type",
-      selectCredentialType: "Select a Credential type",
-      credentialTypes: {
-        modelApiKey: "LLM key",
-        apiKey: "API key",
-        token: "Access token",
-        mcpAuth: "MCP authentication",
-        skillAuth: "Skill authentication",
-        oauth: "OAuth authorization",
-        database: "Database Credential",
-      },
-      transportTypes: {
-        stdio: "Standard input/output (stdio)",
-        sse: "Server-sent events (SSE)",
-        http: "HTTP",
-      },
-      credentialPayloadGroups: {
-        env: "Environment variables (env)",
-        headers: "Request headers (headers)",
-        query: "Query parameters (query)",
-        oauth: "OAuth (oauth)",
-      },
-      metadataVersion: "Metadata revision",
-      replaceCredential: "Replace Credential",
-      migrateReferences: "Use new Credential version",
-      revokeCredential: "Revoke Credential",
-      delete: "Delete",
-      createCredential: "Create Credential",
-      createProjectCredential: "Create project Credential",
       retry: "Retry",
       retrying: "Retrying…",
-      createVersion: "Create version",
-      creatingVersion: "Creating…",
-      reload: "Reload",
-      systemProvided: "System provided",
-      projectOwned: "Project owned",
-      active: "Active",
-      revoked: "Revoked",
-      loading: "Loading",
-      migrationSuccess:
-        "Existing consumers now use the current Credential version.",
-      credentialMigrationChecking:
-        "Checking which consumers still use an older Credential version…",
-      credentialMigrationUnavailable:
-        "Credential version usage details are temporarily unavailable.",
-      credentialMigrationComplete:
-        "All consumers already use the current Credential version.",
-      pendingMigrationNotice: (
-        total,
-        mcpGrantCount,
-        skillBindingCount,
-        systemModelCount,
-      ) =>
-        `${total} ${total === 1 ? "consumer still uses" : "consumers still use"} an older Credential version: ${skillBindingCount} Skill environment ${skillBindingCount === 1 ? "binding" : "bindings"}, ${mcpGrantCount} MCP ${mcpGrantCount === 1 ? "grant" : "grants"}, and ${systemModelCount} system ${systemModelCount === 1 ? "model" : "models"}.`,
-      credentialRotationNote:
-        "Replacement creates a new version only. Existing MCP Grants, Skill environment bindings, and system models stay pinned to the previous key until they are migrated explicitly.",
-      historySchemaUnavailable:
-        "The current Credential field schema could not be verified. Reload and try again.",
     },
     status: {
       active: "Active",
@@ -1096,7 +878,7 @@ export const enUS: Translations = {
       toolCount: (count) => `${count} ${count === 1 ? "tool" : "tools"}`,
       loading: "Loading tool inventory",
       unpublished:
-        "This configuration is not active yet. Edit it and bind a Project Credential; once active, a Worker will automatically test the service and read its tool inventory.",
+        "This configuration is not active yet. Configure its Project-owned secrets; once active, a Worker will automatically test the service and read its tool inventory.",
       neverDiscovered:
         "No tool discovery has completed yet. You can test the service and read its tool inventory now.",
       testing: "Testing the service and reading tools…",
@@ -1105,7 +887,7 @@ export const enUS: Translations = {
       discoveryUnavailable:
         "The latest connection to the MCP service failed. Check service availability, outbound proxy, and network configuration, then test again.",
       stale:
-        "The MCP configuration or Credential authorization changed, so the previous tool inventory is stale. Test again.",
+        "The MCP configuration or its secrets changed, so the previous tool inventory is stale. Test again.",
       refreshFailed:
         "The tool inventory could not be refreshed. The last loaded result is still shown.",
       degradedSuffix: "The last successfully discovered tools are still shown.",
@@ -1141,29 +923,6 @@ export const enUS: Translations = {
           "The configuration or test state changed. Refresh and try again.",
         network: "The test request could not be submitted. Try again later.",
         generic: "The test request failed to submit. Try again later.",
-      },
-    },
-    pages: {
-      loading: "Loading assets",
-      loadFailed: "Assets could not be loaded",
-      systemCount: (count) => `${count} ${count === 1 ? "asset" : "assets"}`,
-      emptySystem: (kind) =>
-        `The packaged catalog contains no system ${kind} entries.`,
-      emptyCreate: "Use the create action above to add the first entry.",
-      system: {
-        agentsTitle: "System Agents",
-        skillsTitle: "System Skills",
-        mcpTitle: "System MCP",
-        credentialsTitle: "System Credentials",
-      },
-      projectLoadFailed: "Project assets could not be loaded",
-      sourceCounts: (systemCount, projectCount) =>
-        `System provided ${systemCount} · Project owned ${projectCount}`,
-      project: {
-        agentsTitle: "Project Agent governance",
-        skillsTitle: "Project Skill governance",
-        mcpTitle: "Project MCP governance",
-        credentialsTitle: "Project Credential governance",
       },
     },
     catalog: {
@@ -1233,10 +992,6 @@ export const enUS: Translations = {
       project: "Project",
       publishStatus: "Publication",
       createNewVersion: "Create new version",
-      credentialSource: "Credential source",
-      systemCredentials: "System Credentials",
-      projectCredentials: "Project Credentials",
-      emptyCredentials: (title) => `No ${title}.`,
       waitingForAdmin: "Waiting for administrator approval",
       archive: "Archive",
       activate: "Enable",
@@ -1254,7 +1009,6 @@ export const enUS: Translations = {
       submit: "Submit for approval",
       approve: "Approve and publish",
       approveMcp: "Approve and publish configuration",
-      configureGrants: "Configure Credential grants",
     },
     diff: {
       payloadChecksum: "Payload checksum",
@@ -1270,13 +1024,13 @@ export const enUS: Translations = {
       scanBlock: "Blocked",
       scanRules: "Scan rules",
       files: "Files",
-      credentialRequirements: "Credential requirements",
+      secretRequirements: "Secret requirements",
       transport: "Transport",
       command: "Command",
       url: "URL",
       arguments: "Arguments",
       timeout: "Timeout",
-      credentialSlots: "Credential slots",
+      secretSlots: "Secret slots",
       status: "Status",
       payloadSchemaVersion: "Payload schema version",
       payloadFields: "Payload fields",
@@ -1303,188 +1057,17 @@ export const enUS: Translations = {
       projectOAuth:
         "Project MCP does not support configuration-level OAuth. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       projectHeadersOnly:
-        "Project MCP Credential slots support headers or query parameters only. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
+        "Project MCP secret slots support headers or query parameters only. The historical configuration can be viewed but cannot be published, bound, or used by an Agent.",
       missingSystemCommand:
         "This stdio system MCP has no command and cannot be bound or used by an Agent.",
       missingSystemUrl:
         "This remote system MCP has no URL and cannot be bound or used by an Agent.",
       systemEnvOnly:
-        "Stdio system MCP Credential slots support env only and cannot otherwise be bound or used by an Agent.",
-      systemRemoteCredentialsOnly:
-        "Remote system MCP Credential slots support headers, query parameters, or oauth only and cannot otherwise be bound or used by an Agent.",
+        "Stdio system MCP secret slots support env only and cannot otherwise be bound or used by an Agent.",
+      systemRemoteSecretsOnly:
+        "Remote system MCP secret slots support headers, query parameters, or oauth only and cannot otherwise be bound or used by an Agent.",
     },
     dialogs: {
-      addMcpTitle: "Add MCP",
-      addMcpDescription:
-        "Enter connection and authentication details. Secret values stay encrypted in Project Credentials.",
-      addMcpSubmit: "Add MCP",
-      addAndPublish: "Add and publish",
-      addAndApprove: "Add, bind Credential, and publish",
-      addAndSubmitApproval: "Add and save configuration",
-      retryMcpApproval: "Retry binding and publication",
-      mcpSavedApprovalFailed:
-        "The MCP configuration was saved, but Credential binding and publication did not finish. Retry without creating another MCP.",
-      mcpSavedRetryApprovalOnly:
-        "The MCP is safely saved. Submitting again retries binding and publication only and will not create a duplicate.",
-      addingMcp: "Adding…",
-      editMcpConfigTitle: "Edit configuration",
-      saveMcpConfig: "Save configuration",
-      saveAndPublishMcpConfig: "Save and publish",
-      saveAndApproveMcpConfig: "Save, bind Credential, and publish",
-      saveAndSubmitMcpConfig: "Save configuration",
-      savingMcpConfig: "Saving…",
-      name: "Name",
-      assetSlug: "Asset slug",
-      slugTitle:
-        "Use 3–63 lowercase letters, digits, and single hyphen separators",
-      slugHelp: "3–63 lowercase letters, digits, or hyphens",
-      filePath: "File path",
-      mediaType: "Media type",
-      fileContent: "File content",
-      skillTemplateDescription: "Describe when and how to use this skill.",
-      skillTemplateInstructions: "Add instructions for this skill here.",
-      description: "Description",
-      transport: "Transport",
-      sseTransport: "Server-sent events (SSE)",
-      httpTransport: "HTTP (Streamable HTTP)",
-      mcpServiceUrl: "MCP service URL",
-      urlQueryRemoved:
-        "Query parameters were removed from the URL and their values will not be saved. Store them securely in a project Credential.",
-      authentication: "Authentication",
-      headerAuthentication: "Request header",
-      queryAuthentication: "Query parameter",
-      noAuthentication: "No authentication",
-      noAuthenticationHelp:
-        "This MCP does not read a Project Credential and can publish immediately.",
-      connectionAndAuthentication: "Connection and authentication",
-      needsProjectCredential: "Needs a project Credential",
-      slotName: "Slot name",
-      slotNameTitle:
-        "Start with a lowercase letter and use only lowercase letters, digits, dots, underscores, or hyphens",
-      slotNameHelp:
-        "Start with a lowercase letter. Use at most 63 letters, digits, dots, underscores, or hyphens.",
-      purpose: "Purpose",
-      credentialFieldGroup: "Credential field group",
-      requiredFields: "Required fields (comma or newline separated)",
-      requiredFieldsHelp:
-        "Enter the field names required in the selected Credential group. Separate multiple fields with commas or new lines.",
-      requestHeaderName: "Request header name",
-      queryParameterName: "Query parameter name",
-      credentialFieldNameTitle:
-        "Enter field names only. Separate multiple fields with commas; do not enter Basic, Bearer, or secret values.",
-      credentialFieldNameHelp:
-        "Enter field names only. Store secret values in a Project Credential; separate multiple fields with commas.",
-      queryGroup: "Query parameters",
-      unsupportedMcpTransport: "New MCP versions support SSE or HTTP only",
-      missingMcpUrl: "SSE and HTTP transports require a URL",
-      invalidMcpUrl:
-        "Enter an HTTP or HTTPS endpoint reachable by the Worker without embedded credentials, query parameters, or fragments. The host must be exactly localhost or a canonical IPv4/IPv6 literal; ordinary DNS hostnames are not resolved. localhost is case-insensitive and is treated as 127.0.0.1; for IPv6 loopback, enter [::1] explicitly. The IP must belong to an administrator-configured allowed network range. Network ranges are configured at the platform level, not in this form.",
-      mcpUrlQuery:
-        "The URL cannot contain query parameters. Enter the base URL and store the secret through a query Credential slot.",
-      unsupportedMcpCredentialGroup:
-        "Project MCP Credential slots support request headers or query parameters only.",
-      missingMcpCredentialSlotName:
-        "Enter a slot name when Credential fields are provided.",
-      missingMcpCredentialFields:
-        "Enter at least one required field when a slot name is provided.",
-      missingMcpHeaderName:
-        "Enter a request header name, such as Authorization.",
-      missingMcpQueryName: "Enter a query parameter name, such as key.",
-      invalidMcpCredentialFieldName:
-        "Enter only a request header or query parameter name. Do not paste Basic, Bearer, or secret values.",
-      projectCredential: "Project Credential",
-      createProjectCredential: "Create Project Credential",
-      credentialSelectedByAdmin: "A project admin will select a Credential",
-      noCompatibleCredential: "No matching Project Credential",
-      compatibleCredentialsOnly:
-        "Only enabled Credentials whose field structure exactly matches this authentication requirement are shown.",
-      credentialFieldsMatch: "Fields match",
-      adminCompletesApproval:
-        "This account cannot bind Credentials. Save first, then let a project admin bind the Credential and activate the configuration.",
-      safetyPreview: "Safety preview",
-      configurationPreviewReadonly: "Configuration preview (read only)",
-      serviceAddress: "Service address",
-      waitingForServiceAddress: "Waiting for a service address",
-      pendingCredentialSelection: "Waiting for a Project Credential",
-      encryptedRead: "Encrypted read",
-      secretNeverDisplayed:
-        "Credential secrets remain encrypted and never appear in this form or preview.",
-      credentialSource: "Credential source",
-      encryptedProjectCredential: "Project Credential (encrypted)",
-      publicationStatus: "Publication status",
-      publishOnSave: "Publishes immediately after save",
-      publishAfterApproval: "Binds and publishes automatically after save",
-      publicationFlow: "Publication flow",
-      saveMcpStep: "Save the MCP configuration",
-      saveMcpStepDetail:
-        "Connection details and authentication requirements are saved as an immutable configuration.",
-      selectCredentialStep:
-        "Select a Project Credential with an exact field match",
-      selectCredentialStepDetail:
-        "The group, field names, case, and order must match exactly.",
-      approvePublishStep: "Bind the Credential and publish",
-      approvePublishStepDetail:
-        "The MCP configuration becomes active as soon as the Credential is bound.",
-      approvalRunsAfterSave:
-        "After a matching Credential is selected, saving automatically completes binding and publication.",
-      createVersionTitle: (kind) => `Create ${kind} version`,
-      secretCreateTitle: "Create Credential",
-      secretReplaceTitle: "Replace Credential",
-      secretDescription:
-        "Secret values are used only for this encrypted write and are never returned after submission.",
-      credentialSlug: "Credential slug",
-      credentialSlugHelp:
-        "Use 1–63 lowercase letters, numbers, dots, underscores, or hyphens; start and end with a letter or number.",
-      credentialFields: "Credential fields",
-      credentialFieldsHelp:
-        "Add environment, header, query, or OAuth fields. Each secret value is written once.",
-      fixedCredentialFieldsHelp:
-        "The Credential type and field structure are fixed by the MCP authentication requirement. Enter only the name, slug, and secret value.",
-      addField: "Add field",
-      group: "Group",
-      envGroup: "Environment (env)",
-      headersGroup: "Headers",
-      fieldName: "Field name",
-      credentialValue: "Secret value",
-      removeField: (index) => `Remove field ${index}`,
-      remove: "Remove",
-      writing: "Writing…",
-      encryptWrite: "Encrypt and save",
-      validation: {
-        invalidCredentialName:
-          "Use 1–63 lowercase letters, numbers, dots, underscores, or hyphens; start and end with a letter or number.",
-        emptyFields: "Add at least one Credential field.",
-        unsupportedGroup: "Select a supported Credential field group.",
-        emptyField: "Enter a field name.",
-        fieldTooLong: "Field names cannot exceed 255 characters.",
-        duplicateField: "Fields cannot be duplicated within one group.",
-        emptyValue: "Enter a secret value.",
-      },
-      revokeTitle: "Revoke Credential?",
-      revokeDescription: (name) =>
-        `This cannot be undone. Revoking “${name}” invalidates all Credential versions and related active Grants in one transaction. MCP details will no longer report them as authorized.`,
-      cancel: "Cancel",
-      revoking: "Revoking…",
-      confirmRevoke: "Permanently revoke",
-      migrateTitle: "Move existing consumers to the current Credential version",
-      migrateDescription: (name) =>
-        `These consumers still use an older version of “${name}”. Confirm to switch all of them to the current version. If any consumer is incompatible, the entire operation is cancelled.`,
-      migrationDetailsTitle: "Consumers to update",
-      migrationCurrentDetailsTitle: "Current-version consumers",
-      migrationSkillBinding: "Skill environment variable",
-      migrationMcpGrant: "MCP grant",
-      migrationSystemModel: "System model",
-      migrationVersion: (version) => `Version ${version}`,
-      migrationTarget: "Usage",
-      migrationSource: "Source field",
-      migrating: "Switching…",
-      confirmMigrate: "Confirm switch",
-      deleteTitle: "Delete Credential?",
-      deleteDescription: (name) =>
-        `Deleting “${name}” removes all versions from ordinary lists and runtime queries. Related MCP Grants and Skill environment bindings become invalid. Only audit records remain. This cannot be undone.`,
-      deleting: "Deleting…",
-      confirmDeleteCountdown: (seconds) => `Confirm delete (${seconds}s)`,
-      confirmDelete: "Confirm delete",
       binding: {
         switchTitle: "Switch project binding version",
         enableTitle: "Enable system asset",
@@ -1502,27 +1085,6 @@ export const enUS: Translations = {
         rollback: "Roll back to this version",
         switchVersion: "Switch to new version",
       },
-      approval: {
-        configureTitle: "Configure MCP Credential grants",
-        configureDescription:
-          "Select system Credentials for a published packaged system MCP. This configures slot grants only; it never modifies or republishes the MCP definition.",
-        saveGrants: "Save grants",
-        configureEmptyOptional:
-          "No Credentials are eligible. Optional slots may remain empty to clear existing grants.",
-        clearOptionalGrant: "No Credential",
-        publishTitle: "Approve MCP configuration",
-        publishDescription:
-          "Select an enabled, currently visible Credential for each slot. The MCP configuration is published only after approval succeeds.",
-        approve: "Approve and publish configuration",
-        publishEmptyOptional:
-          "No Credentials are eligible. Optional slots may remain empty for approval.",
-        selectCredential: "Select a Credential",
-        currentVersion: "Current Credential",
-        loadingCredentials: "Loading Credentials…",
-        credentialsFailed: "Credentials could not be loaded. Retry.",
-        requiredUnavailable:
-          "No eligible Credential is available for a required slot.",
-      },
     },
     errors: {
       notFound: "The asset does not exist or is no longer visible.",
@@ -1531,9 +1093,7 @@ export const enUS: Translations = {
       validationFailed:
         "The submitted content does not meet asset requirements.",
       mcpVersionValidation:
-        "The MCP configuration failed validation. Confirm the transport is HTTP (Streamable HTTP) or SSE; the URL has no embedded credentials, query parameters, or fragments; the host is exactly localhost or a canonical IPv4/IPv6 literal rather than an ordinary DNS hostname; localhost is case-insensitive and is treated as 127.0.0.1, while IPv6 loopback is entered explicitly as [::1]; the IP belongs to an administrator-configured allowed network range; and every Credential slot uses exactly one headers or query group with fields. Network ranges are configured by platform administrators, not in this form. If an administrator just changed the allowed ranges, restart Gateway, Scheduler, and Worker.",
-      mcpCredentialMismatch:
-        "The selected Credential does not satisfy the MCP slot or is no longer active. Its group and field names must exactly match the selected slot schema, including case.",
+        "The MCP configuration failed validation. Confirm the transport is HTTP (Streamable HTTP) or SSE; the URL has no embedded secrets, query parameters, or fragments; the host is exactly localhost or a canonical IPv4/IPv6 literal rather than an ordinary DNS hostname; localhost is case-insensitive and is treated as 127.0.0.1, while IPv6 loopback is entered explicitly as [::1]; the IP belongs to an administrator-configured allowed network range; and every secret slot uses exactly one headers or query group with fields. Network ranges are configured by platform administrators, not in this form. If an administrator just changed the allowed ranges, restart Gateway, Scheduler, and Worker.",
       storageQuota:
         "The project Skill storage quota is exhausted. Remove unused Skills and try again.",
       storageUnavailable:
@@ -2126,7 +1686,7 @@ export const enUS: Translations = {
     secrets: {
       workbenchAria: "Skill editing area",
       filesTab: "Files",
-      secretsTab: "Runtime credentials",
+      secretsTab: "Runtime secrets",
       aria: "Environment variable declarations",
       title: "1. Environment variable declarations",
       viewSource: "View SKILL.md",
@@ -2169,17 +1729,17 @@ export const enUS: Translations = {
         "The name must start with a letter or underscore and contain only letters, numbers, and underscores.",
       duplicateName:
         "That environment variable is already declared. Names are case-sensitive.",
-      autonomousTitle: "Credential injection mode",
+      autonomousTitle: "Secret injection mode",
       autonomousDescription:
-        "Choose which Skill activation modes may inject already bound and authorized Credentials.",
-      autonomousAria: "Choose the Credential injection mode",
+        "Choose which Skill activation modes may inject already configured secrets.",
+      autonomousAria: "Choose the secret injection mode",
       advancedSettings: "Advanced settings",
       injectionAutomatic: "Inject after the Skill is read",
       injectionAutomaticDescription:
-        "The Agent may inject bound Credentials after reading this Skill. Explicit /Skill activation also injects them.",
+        "The Agent may inject configured secrets after reading this Skill. Explicit /Skill activation also injects them.",
       injectionExplicit: "Inject only after explicit /Skill activation",
       injectionExplicitDescription:
-        "Natural-language automatic loading does not inject Credentials. Injection requires explicit /Skill activation.",
+        "Natural-language automatic loading does not inject secrets. Injection requires explicit /Skill activation.",
       location: (line, column) =>
         `Line ${line}${column === null ? "" : `, column ${column}`}: `,
       loadSourceFailed:
@@ -2187,73 +1747,15 @@ export const enUS: Translations = {
       loadSource: "Loading SKILL.md…",
       saveBlocked:
         "Wait for the SKILL.md check to finish or fix the environment variable declaration",
-      publishBlocked:
-        "Wait for the SKILL.md check to finish and fix the environment variable declaration before activation.",
-      credentialLabel: "Project Credential",
-      noCompatibleCredential: "No compatible Credential",
-      optionalUnbound: "Leave unbound (optional)",
-      selectCredential: "Select a Credential",
-      credentialVersion: (name, version) => `${name} · version ${version}`,
-      credentialUnavailable: "Unavailable Credential · select a replacement",
-      versionLabel: (version) => `version ${version}`,
-      sourceFieldLabel: "Source environment variable",
-      selectCredentialFirst: "Select a project Credential first",
-      selectSourceField: "Select an env field from the Credential",
-      sourceFieldUnavailable: "field no longer available",
-      sourceFieldRequired: "Select a specific source env field.",
-      requiredMissing: "Select a Credential for this required variable.",
-      invalidMapping:
-        "This mapping is no longer compatible. Select an available Credential and source env field.",
-      createCredential: "Create Credential",
-      manageCredential: "Manage project Credentials",
-      mappingTitle: "2. Project Credential mappings",
-      mappingDescription:
-        "Map each Skill environment variable to a specific env field in a project Credential. Mappings are stored in the project database, never in SKILL.md, and secret values are never displayed.",
-      mappingEmpty:
-        "This version declares no environment variables, so no project Credential mapping is needed.",
-      mappingStatusConfigured: "Configured",
-      mappingStatusMissing: "Not configured",
-      mappingStatusInvalid: "Needs repair",
-      mappingReadOnly:
-        "You can edit the declarations in SKILL.md, but a member with Credential approval permission must configure their project Credential sources.",
-      mappingHistoricalReadOnly:
-        "Historical Versions are read-only. Candidate Versions and the Current Version support project Credential mappings.",
-      mappingRefreshPreserved:
-        "Server mappings changed. Your unsaved choices were preserved and merged with unchanged rows. Review them before saving or discarding.",
-      mappingReload: "Reload",
-      mappingDiscard: "Discard changes",
-      mappingSave: "Save mappings",
-      mappingSaving: "Saving…",
-      mappingCompleteRequired:
-        "Configure every required variable before saving mappings for an active Skill.",
-      mappingRepairInvalid:
-        "Repair invalid mappings or remove optional mappings before saving.",
-      mappingLoadingAria: "Loading this version's project Credential mappings",
-      mappingVersionMismatch:
-        "The returned Credential mappings do not belong to this version, so they were not displayed. Reload and try again.",
-      mappingRetry: "Try again",
-      mappingConflict:
-        "Credential mappings were changed by someone else, or this version is no longer editable. Your local choices were preserved; reload and review them.",
-      mappingForbidden: "You cannot modify these Credential mappings.",
-      mappingNotFound: "This Skill or version no longer exists.",
-      mappingInvalidResponse:
-        "The Credential mapping response was invalid, so it was not displayed to protect sensitive information.",
-      mappingLoadFailed: "Credential mappings could not be loaded.",
-      mappingSaveFailed:
-        "Credential mappings could not be saved. Try again later.",
-      mappingVersionChanged:
-        "The current version changed. Your unsaved choices are still preserved, but saving is paused; reload and confirm them again.",
     },
     activationDialog: {
       title: "Activate Skill Candidate Version",
       description: (version) =>
-        `Activate version ${version}. This dialog checks the exact version's environment variables and project Credential mappings.`,
+        `Activate version ${version}. This dialog checks the exact version's required Skill secrets.`,
       loading: "Checking runtime requirements…",
-      targetVersion: "Target version: ",
-      bindingRevision: "Binding revision: ",
       noRequirements:
         "The target version declares no environment variables and can be activated directly.",
-      bindingsTitle: "Version Credential bindings",
+      bindingsTitle: "Version secrets",
       required: "Required",
       optional: "Optional",
       statusConfigured: "Configured",
@@ -2263,47 +1765,13 @@ export const enUS: Translations = {
       preflightBlocked: "Runtime requirement checks did not pass",
       preflightSummary: (configuredRequired, required, invalid) =>
         `${configuredRequired}/${required} required mappings configured; ${invalid} invalid mapping${invalid === 1 ? "" : "s"}.`,
-      configureBeforeActivation:
-        "Return to Runtime credentials, complete required mappings, and repair invalid mappings before activation.",
-      configureCredentials: "Go to Runtime credentials",
-      noApprove:
-        "You cannot choose Credential sources. Ask a member with Credential approval permission to complete the mappings in Runtime credentials first.",
+      configureSecrets: "Configure version secrets",
       approvalRequiredForActive:
-        "Every Candidate Version must have all required mappings configured and invalid mappings repaired before activation. Ask an Admin to configure them first.",
-      optionalUnbound: (count) =>
-        `${count} optional variable${count === 1 ? " is" : "s are"} unbound and will not be injected at runtime.`,
-      staleBase:
-        "This version is not a forward descendant of the Current Version and cannot be activated.",
-      credentialChanged:
-        "Credentials changed. Compatible selections were preserved; review them and activate again.",
-      assetChanged: "The Skill changed. Check its runtime requirements again.",
+        "Every Candidate Version must have all required secrets configured before activation. Ask a Project Admin to configure them first.",
       cancel: "Cancel",
       retry: "Check again",
       activating: "Activating…",
       activate: "Activate version",
-      confirmOverwrite: "Activate version",
-      discardTitle: "Discard unsaved Credential selections?",
-      discardDescription:
-        "Closing clears selections made in this dialog. The Skill version and existing bindings are unchanged.",
-      continue: "Continue configuring",
-      discard: "Discard and close",
-      createdInvalid:
-        "The Credential was created, but its returned version metadata is invalid.",
-      createdIneligible:
-        "The Credential was created, but the latest runtime check does not consider its version compatible. Check its fields and try again.",
-      incomplete:
-        "Required environment variables for the active Skill are not fully bound. Complete the selections and try again.",
-      invalidBinding:
-        "The selected Credential is incompatible with the Skill declaration. Refresh the runtime check and try again.",
-      staleSelection:
-        "A Credential was rotated, suspended, or revoked. Available options were reloaded.",
-      staleActivationBase:
-        "This version is not a forward descendant of the Current Version and cannot be activated.",
-      invalidDeclaration:
-        "The target version has an invalid environment variable declaration. Create a new version and fix SKILL.md before activation.",
-      forbidden: "You cannot activate this Skill.",
-      credentialRequestOmitted:
-        "You cannot select Credentials, so this activation request will not submit bindings.",
     },
     builder: {
       errors: {
@@ -2435,7 +1903,7 @@ export const enUS: Translations = {
         title: "Candidate files",
         titleRevise: "Candidate files (revision)",
         filesSurface: "Files",
-        secretsSurface: "Runtime credentials",
+        secretsSurface: "Runtime secrets",
         secretsUnavailable:
           "The candidate package has no root SKILL.md, so environment variable declarations cannot be edited.",
         fileCount: (count) => `${count} UTF-8 text files`,
@@ -2462,7 +1930,7 @@ export const enUS: Translations = {
         save: "Save changes",
         checkPassed: "Checks passed",
         checkPassedWithWarnings: "Checks passed with warnings",
-        requiredCredentials: "Required credentials:",
+        requiredSecrets: "Required secrets:",
         acknowledgeWarnings: "I understand and accept the warnings above",
         checkSkill: "Check Skill",
         commitCreate: "Create Skill (disabled by default)",
@@ -2595,10 +2063,10 @@ export const enUS: Translations = {
         viewSkill: "View Skill",
         viewCandidateVersion: "View Candidate Version",
         revisionWithSecrets: (_version, count) =>
-          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime credentials.`,
+          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime secrets.`,
         createdWithSecrets: (count) =>
-          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime credentials.`,
-        configureCredentials: "Configure credentials",
+          `${count} environment variable${count === 1 ? " needs" : "s need"} runtime secrets.`,
+        configureSecrets: "Configure secrets",
       },
       versionConflict: {
         staleTitle: "The Current Version changed",

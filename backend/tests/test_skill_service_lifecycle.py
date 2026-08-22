@@ -17,8 +17,8 @@ from app.shared_assets.errors import (
     AssetNotFound,
     AssetStorageQuotaExceeded,
     AssetStorageUnavailable,
-    SkillCredentialBindingsIncomplete,
     SkillRuntimeNameConflict,
+    SkillSecretsIncomplete,
 )
 from app.shared_assets.models import SkillArchiveFile, VersionRelation
 from app.shared_assets.skill_repository import SkillVersionRecord
@@ -316,23 +316,6 @@ class _Quota:
         session.store.reservations.append(reservation)
 
 
-class _SkillCredentialRepository:
-    def __init__(self, _session: _Session) -> None:
-        pass
-
-    async def get_config(self, *_args: object, **_kwargs: object):
-        return None
-
-    async def active_bindings(self, *_args: object, **_kwargs: object):
-        return ()
-
-    async def lock_selected_credentials(self, *_args: object, **_kwargs: object):
-        return {}
-
-    async def lock_active_envelopes(self, *_args: object, **_kwargs: object):
-        return frozenset()
-
-
 class _GovernanceSink:
     async def append_project(self, session: _Session, **kwargs: object) -> None:
         session.store.governance.append(dict(kwargs))
@@ -354,10 +337,14 @@ def harness(monkeypatch: pytest.MonkeyPatch) -> _Harness:
     session = _Session(store)
     quota = _Quota()
     monkeypatch.setattr(skill_service_module, "SkillRepository", _Repository)
+
+    async def ready(*_args: object, **_kwargs: object) -> None:
+        return None
+
     monkeypatch.setattr(
         skill_service_module,
-        "SkillCredentialRepository",
-        _SkillCredentialRepository,
+        "validate_skill_secret_readiness_in_transaction",
+        ready,
     )
     service = skill_service_module.SkillService(
         lambda: session,
@@ -491,7 +478,7 @@ async def test_archive_replace_saves_incomplete_candidate_without_moving_current
         original.row.id,
         expected_asset_version=2,
         expected_payload_checksum=original.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     original_version_id = created.current_version_id
 
@@ -531,7 +518,7 @@ async def test_activation_preserves_version_payload_history_and_moves_current_po
         first_candidate.row.id,
         expected_asset_version=2,
         expected_payload_checksum=first_candidate.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     assert first.relation is VersionRelation.CURRENT
 
@@ -552,7 +539,7 @@ async def test_activation_preserves_version_payload_history_and_moves_current_po
         second.id,
         expected_asset_version=4,
         expected_payload_checksum=second_record.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
 
     persisted_asset = harness.store.assets[asset.id]
@@ -581,7 +568,7 @@ async def test_suspended_skill_can_activate_version_and_suspend_asset(
         candidate.row.id,
         expected_asset_version=2,
         expected_payload_checksum=candidate.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     suspended = await harness.service.suspend(
         actor,
@@ -600,7 +587,7 @@ async def test_suspended_skill_can_activate_version_and_suspend_asset(
 
 
 @pytest.mark.asyncio
-async def test_activation_reports_incomplete_required_credential_bindings(
+async def test_activation_reports_incomplete_required_secrets(
     harness: _Harness,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -613,22 +600,22 @@ async def test_activation_reports_incomplete_required_credential_bindings(
     )
 
     async def reject_incomplete(*_args: object, **_kwargs: object) -> None:
-        raise SkillCredentialBindingsIncomplete(actor.request_id)
+        raise SkillSecretsIncomplete(actor.request_id)
 
     monkeypatch.setattr(
         skill_service_module,
-        "prepare_skill_credential_bindings_in_transaction",
+        "validate_skill_secret_readiness_in_transaction",
         reject_incomplete,
     )
 
-    with pytest.raises(SkillCredentialBindingsIncomplete):
+    with pytest.raises(SkillSecretsIncomplete):
         await harness.service.activate_version(
             actor,
             created.id,
             candidate.row.id,
             expected_asset_version=2,
             expected_payload_checksum=candidate.row.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
 
     assert harness.store.assets[created.id].status == "suspended"
@@ -654,7 +641,7 @@ async def test_project_skill_activation_rejects_enabled_system_name_conflict(
             candidate.row.id,
             expected_asset_version=2,
             expected_payload_checksum=candidate.row.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
 
     assert harness.store.assets[created.id].status == "suspended"
@@ -685,7 +672,7 @@ async def test_stale_activation_expected_revision_has_no_side_effects(
             candidate.row.id,
             expected_asset_version=1,
             expected_payload_checksum=candidate.row.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
 
     assert exc_info.value.request_id == actor.request_id
@@ -770,7 +757,7 @@ async def test_only_forward_head_can_be_activated_and_history_cannot_return(
         first_candidate.row.id,
         expected_asset_version=2,
         expected_payload_checksum=first_candidate.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     second = await harness.service.create_version_from_archive(
         actor,
@@ -790,7 +777,7 @@ async def test_only_forward_head_can_be_activated_and_history_cannot_return(
         third.id,
         expected_asset_version=5,
         expected_payload_checksum=harness.store.versions[third.id].row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
 
     with pytest.raises(AssetConflict) as exc_info:
@@ -800,7 +787,7 @@ async def test_only_forward_head_can_be_activated_and_history_cannot_return(
             second.id,
             expected_asset_version=6,
             expected_payload_checksum=harness.store.versions[second.id].row.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
 
     persisted = harness.store.assets[asset.id]
@@ -830,7 +817,7 @@ async def test_create_project_version_from_preview_pins_forward_head(
         first_candidate.row.id,
         expected_asset_version=2,
         expected_payload_checksum=first_candidate.row.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     preview = await harness.service.preview_archive(
         actor,

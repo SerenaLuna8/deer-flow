@@ -15,9 +15,8 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 | `app/worker/`                | Agent graph、Job、lease 和终态结算                        |
 | `app/scheduler/`             | Automation 轮询和准入                                     |
 | `app/private_work/`          | Thread、Run、File、Artifact、Memory 等 owner-private 服务 |
-| `app/shared_assets/`         | Agent、Skill、MCP、Credential 治理                        |
+| `app/shared_assets/`         | Agent、Skill、MCP 定义、绑定与各自的秘密配置              |
 | `packages/harness/deerflow/` | Agent harness、middleware、tools、sandbox 和持久化        |
-| `migrations/`                | 存量数据库的显式 Alembic 迁移链                           |
 | `tests/`                     | 单元、PostgreSQL、进程和契约测试                          |
 
 依赖方向固定为 `app.* -> deerflow.*`；harness 不得导入应用层。
@@ -26,14 +25,14 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 
 - 私有业务操作必须使用认证账户、服务端签发的项目上下文和 owner scope。
 - Gateway 只准入和读取；Worker 是唯一 Agent graph 执行者。
-- Run 固定精确的 Agent、模型、Skill、MCP 和 Credential 引用快照。
-- MCP 冻结闭包验证和 Credential 材料化成功后，单个远端 discovery 不可用或目录非法
+- Run 固定精确的 Agent、模型、Skill、MCP 和域内 Secret Generation 引用快照。
+- MCP 冻结闭包验证和域内秘密材料化成功后，单个远端 discovery 不可用或目录非法
   只禁用该 MCP 的本次 Run 工具；Agent 使用其余能力继续。权限、闭包、数据库或材料化
   不确定仍 fail closed。普通 Skill/工具执行异常以安全错误结果返回 Agent。
 - System 资产定义由 packaged catalog 初始化；项目资产使用不可变版本。
-- Credential 明文只在 Worker 的精确执行边界解密，不进入 API、日志或快照。
-- `full_schema.sql` 用于新空库并直接记录当前链头 revision `skill_credential_source_field`；运行时
-  从不自动创建、迁移或修复 schema。
+- Model、Skill、MCP、Channel 各自拥有秘密值的表、API、权限和生命周期；明文只在
+  授权执行边界解密，不进入 API、日志或快照。
+- `full_schema.sql` 是新空库的 Schema V1 完整快照；运行时从不自动创建或修复 schema。
 
 ## 开发命令
 
@@ -47,7 +46,7 @@ PostgreSQL 是业务元数据、运行状态、资产版本、Checkpoint、Job�
 | `make lint` / `make format`                       | Ruff 检查与格式化              |
 | `make check-db`                                   | 只读检查 schema readiness      |
 
-完整应用从仓库根目录运行 `make dev`。数据库初始化和升级也应从根目录按
+完整应用从仓库根目录运行 `make dev`。数据库初始化应从根目录按
 [安装流程](../Install.md)执行。
 
 ## 文档

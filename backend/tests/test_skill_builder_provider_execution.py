@@ -175,7 +175,7 @@ def _execution_bundle(
         run=run,
         snapshot=PersistedRunSnapshot(
             assets=(),
-            mcp_grants=(),
+            mcp_secrets=(),
             catalog_generation=1,
         ),
         checkpoint_namespace="",

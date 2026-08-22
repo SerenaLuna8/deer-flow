@@ -12,13 +12,13 @@ let _cached: GatewayConfig | null = null;
 export function getGatewayConfig(): GatewayConfig {
   if (_cached) return _cached;
 
-  const rawUrl = process.env.DEER_FLOW_INTERNAL_GATEWAY_BASE_URL?.trim();
+  const rawUrl = process.env.ACT_WEAVE_INTERNAL_GATEWAY_BASE_URL?.trim();
   const internalGatewayUrl =
     rawUrl && rawUrl.length > 0
       ? rawUrl.replace(/\/+$/, "")
       : "http://127.0.0.1:8001";
 
-  const rawOrigins = process.env.DEER_FLOW_TRUSTED_ORIGINS?.trim();
+  const rawOrigins = process.env.ACT_WEAVE_TRUSTED_ORIGINS?.trim();
   const trustedOrigins = rawOrigins
     ? rawOrigins
         .split(",")

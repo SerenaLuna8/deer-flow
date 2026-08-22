@@ -48,7 +48,6 @@ from app.shared_assets.errors import (
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
 )
-from app.shared_assets.model_refs import exact_model_ref
 from app.shared_assets.models import SkillArchiveFile
 from app.shared_assets.project_authoring_catalog import (
     ProjectAuthoringCatalogRepository,
@@ -106,6 +105,7 @@ from app.shared_assets.skill_service import (
     SkillService,
     SkillVersionView,
 )
+from app.system_settings.model_refs import exact_model_ref
 from deerflow.persistence.jobs.model import JobRow
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.shared_assets import (

@@ -27,11 +27,31 @@ from app.shared_assets.agent_design_service import (
     AgentDesignSessionSummary,
     AgentDesignStatus,
 )
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.models import ModelRuntimeProfile
 
 GENERATION_MODEL_REF = "00000000-0000-4000-8000-000000000308"
 GENERATION_MODEL_VERSION_ID = "00000000-0000-4000-8000-000000000309"
 GENERATION_MODEL_CHECKSUM = "a" * 64
+
+
+def _frozen_model() -> FrozenSystemModelExecution:
+    return FrozenSystemModelExecution(
+        model_config_id=uuid.UUID(GENERATION_MODEL_REF),
+        provider_payload={
+            "schema_version": 1,
+            "model_config_id": GENERATION_MODEL_REF,
+            "provider_adapter": "deepseek",
+            "provider_model": "deepseek-v4-flash",
+            "settings": {},
+            "supports_thinking": True,
+            "supports_reasoning_effort": True,
+            "supports_vision": False,
+        },
+        payload_checksum=GENERATION_MODEL_CHECKSUM,
+        secret_generation_id=uuid.UUID(GENERATION_MODEL_VERSION_ID),
+        secret_envelope_digest="b" * 64,
+    )
 
 
 def test_agent_builder_session_summary_exposes_revision_for_safe_deletion() -> None:
@@ -55,8 +75,7 @@ def test_agent_builder_session_summary_exposes_revision_for_safe_deletion() -> N
 class _RecordingAgentDesignCaller:
     def __init__(self) -> None:
         self.model_ref: str | None = None
-        self.model_version_id: str | None = None
-        self.model_payload_checksum: str | None = None
+        self.model_execution: FrozenSystemModelExecution | None = None
         self.thinking_enabled: bool | None = None
         self.reasoning_effort: str | None = None
 
@@ -66,15 +85,13 @@ class _RecordingAgentDesignCaller:
         system_instruction: str,
         user_content: str,
         model_ref: str | None = None,
-        model_version_id: str | None = None,
-        model_payload_checksum: str | None = None,
+        model_execution: FrozenSystemModelExecution | None = None,
         thinking_enabled: bool = False,
         reasoning_effort: str | None = None,
     ) -> str:
         del system_instruction, user_content
         self.model_ref = model_ref
-        self.model_version_id = model_version_id
-        self.model_payload_checksum = model_payload_checksum
+        self.model_execution = model_execution
         self.thinking_enabled = thinking_enabled
         self.reasoning_effort = reasoning_effort
         return (
@@ -107,7 +124,7 @@ async def test_agent_design_generation_uses_the_selected_conversation_model() ->
 
 
 @pytest.mark.asyncio
-async def test_agent_design_generation_forwards_the_frozen_model_version() -> None:
+async def test_agent_design_generation_forwards_the_frozen_model_execution() -> None:
     caller = _RecordingAgentDesignCaller()
 
     await AgentDesignGenerationService(model_caller=caller).generate(
@@ -118,12 +135,10 @@ async def test_agent_design_generation_forwards_the_frozen_model_version() -> No
         ),
         context=AgentDesignGenerationContext(),
         model_ref=GENERATION_MODEL_REF,
-        model_version_id=GENERATION_MODEL_VERSION_ID,
-        model_payload_checksum=GENERATION_MODEL_CHECKSUM,
+        model_execution=_frozen_model(),
     )
 
-    assert caller.model_version_id == GENERATION_MODEL_VERSION_ID
-    assert caller.model_payload_checksum == GENERATION_MODEL_CHECKSUM
+    assert caller.model_execution == _frozen_model()
 
 
 @pytest.mark.asyncio
@@ -285,14 +300,14 @@ async def test_database_oneshot_caller_forwards_builder_reasoning_profile(
 
 
 @pytest.mark.asyncio
-async def test_database_oneshot_caller_materializes_the_frozen_model_version(
+async def test_database_oneshot_caller_materializes_the_frozen_model_execution(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    exact_materialization: dict[str, object] = {}
+    exact_materialization: list[FrozenSystemModelExecution] = []
 
     class _Materializer:
-        async def materialize_exact(self, **kwargs):
-            exact_materialization.update(kwargs)
+        async def materialize_frozen(self, execution):
+            exact_materialization.append(execution)
             return SimpleNamespace(name=GENERATION_MODEL_REF)
 
         async def materialize_active(self, _model_ref: str | None = None):
@@ -321,38 +336,23 @@ async def test_database_oneshot_caller_materializes_the_frozen_model_version(
             system_instruction="system",
             user_content="user",
             model_ref=GENERATION_MODEL_REF,
-            model_version_id=GENERATION_MODEL_VERSION_ID,
-            model_payload_checksum=GENERATION_MODEL_CHECKSUM,
+            model_execution=_frozen_model(),
         )
         == "ok"
     )
-    assert exact_materialization == {
-        "model_config_id": uuid.UUID(GENERATION_MODEL_REF),
-        "model_config_version_id": uuid.UUID(GENERATION_MODEL_VERSION_ID),
-        "payload_checksum": GENERATION_MODEL_CHECKSUM,
-    }
+    assert exact_materialization == [_frozen_model()]
 
 
 @pytest.mark.asyncio
-async def test_builder_settlement_rejects_a_changed_model_current_version(
+async def test_builder_settlement_does_not_recheck_the_current_model(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    changed_version_id = uuid.UUID("00000000-0000-4000-8000-000000000310")
-
     class _Repository:
         def __init__(self, _session: object) -> None:
             pass
 
         async def resolve_active_model(self, *_args: object, **_kwargs: object):
-            return SimpleNamespace(
-                model=SimpleNamespace(id=uuid.UUID(GENERATION_MODEL_REF)),
-                version=SimpleNamespace(
-                    id=changed_version_id,
-                    payload_checksum="b" * 64,
-                    supports_thinking=True,
-                    supports_reasoning_effort=True,
-                ),
-            )
+            raise AssertionError("settlement must not read the mutable model row")
 
     monkeypatch.setattr(
         "app.shared_assets.agent_design_service.SystemModelRepository",
@@ -370,12 +370,17 @@ async def test_builder_settlement_rejects_a_changed_model_current_version(
             "mode": "pro",
             "thinking_enabled": True,
             "reasoning_effort": "medium",
-            "model_version_id": GENERATION_MODEL_VERSION_ID,
-            "payload_checksum": GENERATION_MODEL_CHECKSUM,
+            "model_execution": {
+                "model_config_id": GENERATION_MODEL_REF,
+                "provider_payload": dict(_frozen_model().provider_payload),
+                "payload_checksum": GENERATION_MODEL_CHECKSUM,
+                "secret_generation_id": GENERATION_MODEL_VERSION_ID,
+                "secret_envelope_digest": "b" * 64,
+            },
         },
     )
 
-    assert not await AgentDesignService._generation_profile_is_current(  # noqa: SLF001
+    assert await AgentDesignService._generation_profile_is_valid(  # noqa: SLF001
         SimpleNamespace(),  # type: ignore[arg-type]
         operation,  # type: ignore[arg-type]
     )

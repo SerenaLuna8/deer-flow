@@ -9,6 +9,7 @@ import pytest
 from app.projects.capabilities import capabilities_for
 from app.projects.context import ProjectContext
 from app.projects.models import ProjectRole
+from app.shared_assets.contexts import SystemAssetGovernanceContext
 from app.shared_assets.errors import AssetValidationFailed
 
 
@@ -28,6 +29,75 @@ class _PermitEveryEndpoint:
     def allows(self, endpoint: str) -> bool:
         del endpoint
         return True
+
+
+@pytest.mark.parametrize(
+    "oauth",
+    (
+        {
+            "token_url": "https://identity.example.test/token",
+            "grant_type": "refresh_token",
+        },
+        {
+            "token_url": "https://identity.example.test/token",
+            "grant_type": "client_credentials",
+            "client_id": "definition-owned-client",
+        },
+    ),
+)
+def test_system_mcp_oauth_accepts_only_project_owned_client_credentials(
+    oauth: dict[str, object],
+) -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="req-system-mcp-oauth",
+    )
+    definition = service_module.McpDefinition(
+        transport="http",
+        url="https://mcp.example.test/tools",
+        oauth=oauth,
+        secret_slots=(
+            service_module.McpSecretSlot(
+                name="oauth",
+                purpose="Project OAuth service identity",
+                payload_schema={"oauth": ("client_id", "client_secret")},
+                required=True,
+            ),
+        ),
+    )
+
+    with pytest.raises(AssetValidationFailed):
+        service_module.McpService._validate_definition(actor, definition)
+
+
+def test_system_mcp_client_credentials_definition_keeps_identity_in_project_slot() -> None:
+    service_module = importlib.import_module("app.shared_assets.mcp_service")
+    actor = SystemAssetGovernanceContext(
+        user_id=uuid.uuid4(),
+        request_id="req-system-mcp-oauth",
+    )
+    definition = service_module.McpDefinition(
+        transport="http",
+        url="https://mcp.example.test/tools",
+        oauth={
+            "token_url": "https://identity.example.test/token",
+            "grant_type": "client_credentials",
+        },
+        secret_slots=(
+            service_module.McpSecretSlot(
+                name="oauth",
+                purpose="Project OAuth service identity",
+                payload_schema={"oauth": ("client_id", "client_secret")},
+                required=True,
+            ),
+        ),
+    )
+
+    validated = service_module.McpService._validate_definition(actor, definition)
+
+    assert validated.oauth["grant_type"] == "client_credentials"
+    assert "client_id" not in validated.oauth
 
 
 @pytest.mark.parametrize(
@@ -252,7 +322,7 @@ def test_project_mcp_definition_rejects_non_remote_supported_transports(
             env={},
             headers={},
             oauth={},
-            credential_slot_schemas=(),
+            secret_slot_schemas=(),
             endpoint_policy=_PermitEveryEndpoint(),
         )
 
@@ -277,7 +347,7 @@ def test_project_mcp_definition_rejects_every_literal_env_or_header(
             env=env,
             headers=headers,
             oauth={},
-            credential_slot_schemas=(),
+            secret_slot_schemas=(),
             endpoint_policy=_PermitEveryEndpoint(),
         )
 
@@ -310,7 +380,7 @@ def test_project_mcp_definition_rejects_runtime_unsupported_secret_targets(
             env={},
             headers={},
             oauth=oauth,
-            credential_slot_schemas=credential_slot_schemas,
+            secret_slot_schemas=credential_slot_schemas,
             endpoint_policy=_PermitEveryEndpoint(),
         )
 
@@ -340,7 +410,7 @@ def test_project_mcp_definition_rejects_unsafe_credential_header_names(
             env={},
             headers={},
             oauth={},
-            credential_slot_schemas=({"headers": (header_name,)},),
+            secret_slot_schemas=({"headers": (header_name,)},),
             endpoint_policy=_PermitEveryEndpoint(),
         )
 
@@ -373,7 +443,7 @@ def test_project_mcp_definition_accepts_an_in_network_remote_endpoint(
             env={},
             headers={},
             oauth={},
-            credential_slot_schemas=({"headers": ("Authorization",)},),
+            secret_slot_schemas=({"headers": ("Authorization",)},),
             endpoint_policy=network_policy,
         )
         == expected

@@ -32,7 +32,7 @@ export default defineConfig({
     env: {
       SKIP_ENV_VALIDATION: "1",
       BUILD_MODE: "static",
-      DEER_FLOW_AUTH_DISABLED: "1",
+      ACT_WEAVE_AUTH_DISABLED: "1",
     },
   },
 });

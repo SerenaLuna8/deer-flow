@@ -9,6 +9,7 @@ import uuid
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
@@ -32,7 +33,6 @@ from app.shared_assets.bootstrap.catalog import (
 )
 from app.shared_assets.bootstrap.skill_archive import load_skill_archive
 from app.shared_assets.errors import AssetValidationFailed
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentPayload,
     AssetScope,
@@ -43,19 +43,19 @@ from app.shared_assets.skill_service import (
     _analyze_skill_files,
     normalize_skill_files,
 )
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.projects import ProjectMembershipRow
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
-    CredentialEnvelopeRow,
-    CredentialGrantRow,
-    CredentialRow,
-    CredentialVersionRow,
-    McpCredentialSlotRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
+    ProjectMcpSecretGenerationRow,
+    ProjectMcpSecretStateRow,
+    ProjectMcpSecretTombstoneRow,
     ProjectSystemAgentBindingRow,
     ProjectSystemMcpBindingRow,
     ProjectSystemSkillBindingRow,
@@ -116,7 +116,7 @@ class _McpPayload(BaseModel):
     routing: dict[str, object] = Field(default_factory=dict)
     tool_overrides: dict[str, object] = Field(default_factory=dict)
     timeout_seconds: int = Field(default=30, gt=0)
-    credential_slots: tuple[_McpSlotPayload, ...] = ()
+    secret_slots: tuple[_McpSlotPayload, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,25 +233,6 @@ async def _ensure_builtin_principal(session: AsyncSession) -> None:
     membership = (await session.execute(select(ProjectMembershipRow.id).where(ProjectMembershipRow.user_id == principal_id).limit(1))).scalar_one_or_none()
     if membership is not None:
         raise BootstrapConflict("builtin asset principal cannot have project membership")
-
-    # Principal-integrity verification intentionally includes logically deleted
-    # Credentials: deletion must not hide a forbidden builtin-principal link.
-    credential_actor_columns = (
-        (CredentialRow, (CredentialRow.created_by_user_id, CredentialRow.revoked_by_user_id)),
-        (
-            CredentialVersionRow,
-            (CredentialVersionRow.created_by_user_id, CredentialVersionRow.revoked_by_user_id),
-        ),
-        (CredentialEnvelopeRow, (CredentialEnvelopeRow.created_by_user_id,)),
-        (
-            CredentialGrantRow,
-            (CredentialGrantRow.created_by_user_id, CredentialGrantRow.revoked_by_user_id),
-        ),
-    )
-    for model, columns in credential_actor_columns:
-        reference = (await session.execute(select(model).where(or_(*(column == principal_id for column in columns))).limit(1))).scalar_one_or_none()
-        if reference is not None:
-            raise BootstrapConflict("builtin asset principal cannot reference credentials")
 
     binding_actor_columns = (
         ProjectSystemAgentBindingRow,
@@ -495,36 +476,7 @@ async def _seed_skill(session: AsyncSession, catalog: BootstrapCatalog, entry: B
         if not exact:
             raise BootstrapConflict("existing System Skill checksum has drifted content")
         return False
-
-    before_checksum = version.payload_checksum
-    version.description = preview.description
-    version.frontmatter = dict(preview.frontmatter)
-    version.compatibility = preview.compatibility
-    version.secret_requirements = requirements
-    version.scan_decision = scan_decision
-    version.scan_summary = scan_summary
-    version.payload_checksum = preview.checksum
-    version.revoked_at = None
-    version.revoked_by_user_id = None
-    version.revocation_reason_code = None
-    await session.execute(
-        delete(SkillVersionFileRow).where(
-            SkillVersionFileRow.skill_version_id == version_id,
-        )
-    )
-    session.add_all(_skill_file_rows(version_id, expected_files))
-    asset.revision += 1
-    await session.flush()
-    await _record_system_upgrade(
-        session,
-        kind="skill",
-        asset_id=asset_id,
-        version_id=version_id,
-        before_checksum=before_checksum,
-        after_checksum=preview.checksum,
-        package_digest=catalog_digest(catalog),
-    )
-    return True
+    raise BootstrapConflict("System Skill v1 is immutable; publish changed content under a new identity")
 
 
 def _skill_file_rows(
@@ -824,7 +776,7 @@ def _mcp_checksum(raw: _McpPayload) -> str:
     canonical = {
         "args": list(raw.args),
         "command": raw.command,
-        "credential_slots": [slot.model_dump(mode="json") for slot in raw.credential_slots],
+        "secret_slots": [slot.model_dump(mode="json") for slot in raw.secret_slots],
         "description": raw.description,
         "env": raw.env,
         "headers": raw.headers,
@@ -839,6 +791,91 @@ def _mcp_checksum(raw: _McpPayload) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+async def _invalidate_project_mcp_secrets(
+    session: AsyncSession,
+    *,
+    mcp_server_id: uuid.UUID,
+    mcp_server_version_id: uuid.UUID,
+) -> None:
+    states = tuple(
+        (
+            await session.execute(
+                select(ProjectMcpSecretStateRow)
+                .where(
+                    ProjectMcpSecretStateRow.mcp_server_id == mcp_server_id,
+                    ProjectMcpSecretStateRow.mcp_server_version_id == mcp_server_version_id,
+                )
+                .order_by(
+                    ProjectMcpSecretStateRow.project_id,
+                    ProjectMcpSecretStateRow.slot_id,
+                )
+                .with_for_update(of=ProjectMcpSecretStateRow)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    actor_id = str(BUILTIN_ASSET_USER_ID)
+    for state in states:
+        generation_id = state.current_generation_id
+        if generation_id is not None:
+            generation = (
+                await session.execute(
+                    select(ProjectMcpSecretGenerationRow)
+                    .where(
+                        ProjectMcpSecretGenerationRow.id == generation_id,
+                        ProjectMcpSecretGenerationRow.project_id == state.project_id,
+                        ProjectMcpSecretGenerationRow.mcp_server_id == state.mcp_server_id,
+                        ProjectMcpSecretGenerationRow.mcp_server_version_id == state.mcp_server_version_id,
+                        ProjectMcpSecretGenerationRow.slot_id == state.slot_id,
+                    )
+                    .with_for_update(of=ProjectMcpSecretGenerationRow)
+                )
+            ).scalar_one_or_none()
+            if generation is None:
+                raise BootstrapConflict("System MCP Project secret state is inconsistent")
+            session.add(
+                ProjectMcpSecretTombstoneRow(
+                    project_id=state.project_id,
+                    mcp_server_id=state.mcp_server_id,
+                    mcp_server_version_id=state.mcp_server_version_id,
+                    slot_id=state.slot_id,
+                    destroyed_generation_id=generation.id,
+                    revision=generation.revision,
+                    envelope_digest=generation.envelope_digest,
+                    reason="definition_change",
+                    destroyed_by_user_id=actor_id,
+                )
+            )
+            state.current_generation_id = None
+            state.revision = int(state.revision) + 1
+            state.updated_by_user_id = actor_id
+            state.updated_at = datetime.now(UTC)
+            await session.flush()
+            await session.delete(generation)
+            await session.flush()
+        await session.delete(state)
+    await session.flush()
+
+
+def _mcp_slot_rows(
+    entry: BootstrapEntry,
+    version_id: uuid.UUID,
+    slots: tuple[_McpSlotPayload, ...],
+) -> tuple[McpSecretSlotRow, ...]:
+    return tuple(
+        McpSecretSlotRow(
+            id=_stable_id(f"{entry.source_key}:version:{entry.version}:slot:{slot.name}"),
+            mcp_server_version_id=version_id,
+            name=slot.name,
+            purpose=slot.purpose,
+            payload_schema=slot.payload_schema,
+            required=slot.required,
+        )
+        for slot in slots
+    )
+
+
 async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: BootstrapEntry) -> bool:
     raw = _decode_json(_McpPayload, catalog_payload(catalog, entry))
     checksum = _mcp_checksum(raw)
@@ -846,9 +883,13 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
     version_id = _version_id(entry)
     asset = await _existing_asset(session, entry)
     if asset is not None:
-        _validate_asset_row(asset, entry, expected_revision=1)
+        _validate_asset_row(asset, entry)
         version = await session.get(McpServerVersionRow, version_id)
-        if version is None or not _matches(
+        if version is None or asset.current_published_version_id != version_id:
+            raise BootstrapConflict("existing system MCP version is not canonical")
+        slots = tuple((await session.execute(select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == version_id).order_by(McpSecretSlotRow.name).with_for_update(of=McpSecretSlotRow))).scalars().all())
+        expected_slots = tuple(sorted(raw.secret_slots, key=lambda slot: slot.name))
+        version_exact = _matches(
             version,
             mcp_server_id=asset_id,
             version_number=entry.version,
@@ -871,14 +912,9 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
             reviewed_by_user_id=None,
             review_note=None,
             created_by_user_id=str(BUILTIN_ASSET_USER_ID),
-        ):
-            raise BootstrapConflict("existing system MCP conflicts with canonical payload")
-        slots = (await session.execute(select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == version_id).order_by(McpCredentialSlotRow.name))).scalars().all()
-        expected_slots = sorted(raw.credential_slots, key=lambda slot: slot.name)
-        if asset.current_published_version_id != version_id or len(slots) != len(expected_slots):
-            raise BootstrapConflict("existing system MCP slots conflict with canonical payload")
-        for slot, expected in zip(slots, expected_slots, strict=True):
-            if not _matches(
+        )
+        slots_exact = len(slots) == len(expected_slots) and all(
+            _matches(
                 slot,
                 id=_stable_id(f"{entry.source_key}:version:{entry.version}:slot:{expected.name}"),
                 mcp_server_version_id=version_id,
@@ -886,8 +922,9 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
                 purpose=expected.purpose,
                 payload_schema=expected.payload_schema,
                 required=expected.required,
-            ):
-                raise BootstrapConflict("existing system MCP slots conflict with canonical payload")
+            )
+            for slot, expected in zip(slots, expected_slots, strict=True)
+        )
         await _assert_exact_version_history(
             session,
             McpServerVersionRow,
@@ -895,7 +932,47 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
             asset_id,
             (entry,),
         )
-        return False
+        if version.payload_checksum == checksum:
+            if not version_exact or not slots_exact:
+                raise BootstrapConflict("existing System MCP checksum has drifted content")
+            return False
+
+        before_checksum = version.payload_checksum
+        await _invalidate_project_mcp_secrets(
+            session,
+            mcp_server_id=asset_id,
+            mcp_server_version_id=version_id,
+        )
+        await session.execute(
+            delete(McpSecretSlotRow).where(
+                McpSecretSlotRow.mcp_server_version_id == version_id,
+            )
+        )
+        version.description = raw.description
+        version.transport = raw.transport
+        version.command = raw.command
+        version.args = list(raw.args)
+        version.url = raw.url
+        version.non_secret_env = raw.env
+        version.non_secret_headers = raw.headers
+        version.oauth_metadata = raw.oauth
+        version.routing = raw.routing
+        version.tool_overrides = raw.tool_overrides
+        version.timeout_seconds = raw.timeout_seconds
+        version.payload_checksum = checksum
+        session.add_all(_mcp_slot_rows(entry, version_id, raw.secret_slots))
+        asset.version += 1
+        await session.flush()
+        await _record_system_upgrade(
+            session,
+            kind="mcp",
+            asset_id=asset_id,
+            version_id=version_id,
+            before_checksum=before_checksum,
+            after_checksum=checksum,
+            package_digest=catalog_digest(catalog),
+        )
+        return True
 
     asset = McpServerRow(
         id=asset_id,
@@ -931,19 +1008,7 @@ async def _seed_mcp(session: AsyncSession, catalog: BootstrapCatalog, entry: Boo
     )
     session.add_all([asset, version])
     await session.flush()
-    session.add_all(
-        [
-            McpCredentialSlotRow(
-                id=_stable_id(f"{entry.source_key}:version:{entry.version}:slot:{slot.name}"),
-                mcp_server_version_id=version_id,
-                name=slot.name,
-                purpose=slot.purpose,
-                payload_schema=slot.payload_schema,
-                required=slot.required,
-            )
-            for slot in raw.credential_slots
-        ]
-    )
+    session.add_all(_mcp_slot_rows(entry, version_id, raw.secret_slots))
     await session.flush()
     version.workflow_status = "published"
     await session.flush()

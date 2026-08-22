@@ -63,7 +63,7 @@ class HostExecutionContinuationError(RuntimeError):
 
 
 class _HostExecutionEnvironmentBindingUnavailable(RuntimeError):
-    """The exact per-command Skill Credential closure could not be refreshed."""
+    """The exact per-command Skill secret closure could not be refreshed."""
 
 
 @runtime_checkable

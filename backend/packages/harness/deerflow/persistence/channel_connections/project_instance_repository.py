@@ -15,14 +15,10 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deerflow.persistence.channel_connections.model import (
-    ProjectChannelCredentialBindingRow,
     ProjectChannelInstanceLeaseRow,
     ProjectChannelInstanceRow,
-)
-from deerflow.persistence.shared_assets import (
-    CredentialEnvelopeRow,
-    CredentialRow,
-    CredentialVersionRow,
+    ProjectChannelSecretGenerationRow,
+    ProjectChannelSecretStateRow,
 )
 
 _PROVIDER_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
@@ -390,35 +386,31 @@ class ProjectChannelInstanceRepository:
         await session.flush()
         return instance
 
-    async def get_credential_binding(
+    async def get_secret_state(
         self,
         session: AsyncSession,
         channel_instance_id: uuid.UUID | str,
         *,
         project_id: uuid.UUID | str | None = None,
         for_update: bool = False,
-    ) -> ProjectChannelCredentialBindingRow | None:
-        statement = select(ProjectChannelCredentialBindingRow).where(
-            ProjectChannelCredentialBindingRow.channel_instance_id == self._uuid(channel_instance_id, field="channel_instance_id"),
-            ProjectChannelCredentialBindingRow.status == "active",
+    ) -> ProjectChannelSecretStateRow | None:
+        statement = select(ProjectChannelSecretStateRow).where(
+            ProjectChannelSecretStateRow.channel_instance_id == self._uuid(channel_instance_id, field="channel_instance_id"),
         )
         if project_id is not None:
-            statement = statement.where(ProjectChannelCredentialBindingRow.project_id == self._uuid(project_id, field="project_id"))
+            statement = statement.where(ProjectChannelSecretStateRow.project_id == self._uuid(project_id, field="project_id"))
         if for_update:
             statement = statement.with_for_update()
         return (await session.execute(statement)).scalar_one_or_none()
 
-    async def replace_credential_binding(
+    async def ensure_secret_state(
         self,
         session: AsyncSession,
         *,
         project_id: uuid.UUID | str,
         channel_instance_id: uuid.UUID | str,
-        credential_id: uuid.UUID | str,
-        credential_version_id: uuid.UUID | str,
         actor_user_id: str,
-        now: datetime | None = None,
-    ) -> ProjectChannelCredentialBindingRow:
+    ) -> ProjectChannelSecretStateRow:
         project_uuid = self._uuid(project_id, field="project_id")
         instance = await self.get_instance(
             session,
@@ -428,68 +420,24 @@ class ProjectChannelInstanceRepository:
         )
         if instance is None:
             raise ProjectChannelInstanceNotFound()
-        current = await self.get_credential_binding(
+        current = await self.get_secret_state(
             session,
             instance.id,
             project_id=project_uuid,
             for_update=True,
         )
-        timestamp = self._now(now)
-        next_revision = 1
         if current is not None:
-            current.status = "revoked"
-            current.revoked_at = timestamp
-            current.revoked_by_user_id = actor_user_id
-            next_revision = current.binding_revision + 1
-            await session.flush()
-        binding = ProjectChannelCredentialBindingRow(
+            return current
+        state = ProjectChannelSecretStateRow(
             project_id=project_uuid,
             channel_instance_id=instance.id,
-            credential_id=self._uuid(credential_id, field="credential_id"),
-            credential_version_id=self._uuid(
-                credential_version_id,
-                field="credential_version_id",
-            ),
-            binding_revision=next_revision,
-            status="active",
-            created_by_user_id=actor_user_id,
+            current_generation_id=None,
+            revision=0,
+            updated_by_user_id=actor_user_id,
         )
-        session.add(binding)
+        session.add(state)
         await session.flush()
-        return binding
-
-    async def revoke_credential_binding(
-        self,
-        session: AsyncSession,
-        *,
-        project_id: uuid.UUID | str,
-        channel_instance_id: uuid.UUID | str,
-        actor_user_id: str,
-        now: datetime | None = None,
-    ) -> bool:
-        project_uuid = self._uuid(project_id, field="project_id")
-        instance = await self.get_instance(
-            session,
-            channel_instance_id,
-            project_id=project_uuid,
-            for_update=True,
-            include_deleted=True,
-        )
-        if instance is None:
-            raise ProjectChannelInstanceNotFound()
-        current = await self.get_credential_binding(
-            session,
-            instance.id,
-            project_id=project_uuid,
-            for_update=True,
-        )
-        if current is None:
-            return False
-        current.status = "revoked"
-        current.revoked_at = self._now(now)
-        current.revoked_by_user_id = actor_user_id
-        await session.flush()
-        return True
+        return state
 
     async def claim_instance_lease(
         self,
@@ -553,8 +501,8 @@ class ProjectChannelInstanceRepository:
         lease_token: str,
         fencing_generation: int,
         expected_revision: int | None = None,
-        binding_revision: int | None = None,
-        credential_version_id: uuid.UUID | str | None = None,
+        secret_revision: int | None = None,
+        secret_generation_id: uuid.UUID | str | None = None,
         now: datetime | None = None,
     ) -> bool:
         """Revalidate the exact live owner before an external side effect."""
@@ -579,48 +527,36 @@ class ProjectChannelInstanceRepository:
         ):
             return False
         closure_values = (
-            binding_revision,
-            credential_version_id,
+            secret_revision,
+            secret_generation_id,
         )
         if any(value is not None for value in closure_values):
             if any(value is None for value in closure_values):
                 raise ValueError("runtime closure fields must be provided together")
-            assert binding_revision is not None
-            assert credential_version_id is not None
-            exact_version_id = self._uuid(
-                credential_version_id,
-                field="credential_version_id",
+            assert secret_revision is not None
+            assert secret_generation_id is not None
+            exact_generation_id = self._uuid(
+                secret_generation_id,
+                field="secret_generation_id",
             )
-            exact_binding = (
+            exact_secret = (
                 await session.execute(
-                    select(ProjectChannelCredentialBindingRow.id)
+                    select(ProjectChannelSecretStateRow.channel_instance_id)
                     .join(
-                        CredentialRow,
-                        (CredentialRow.id == ProjectChannelCredentialBindingRow.credential_id)
-                        & (CredentialRow.project_id == ProjectChannelCredentialBindingRow.project_id)
-                        & (CredentialRow.scope == "project")
-                        & (CredentialRow.status == "active")
-                        & (CredentialRow.is_delete.is_(False)),
-                    )
-                    .join(
-                        CredentialVersionRow,
-                        (CredentialVersionRow.id == ProjectChannelCredentialBindingRow.credential_version_id) & (CredentialVersionRow.credential_id == CredentialRow.id) & (CredentialVersionRow.status == "active"),
-                    )
-                    .join(
-                        CredentialEnvelopeRow,
-                        (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & (CredentialEnvelopeRow.is_active.is_(True)),
+                        ProjectChannelSecretGenerationRow,
+                        (ProjectChannelSecretGenerationRow.id == ProjectChannelSecretStateRow.current_generation_id)
+                        & (ProjectChannelSecretGenerationRow.project_id == ProjectChannelSecretStateRow.project_id)
+                        & (ProjectChannelSecretGenerationRow.channel_instance_id == ProjectChannelSecretStateRow.channel_instance_id),
                     )
                     .where(
-                        ProjectChannelCredentialBindingRow.project_id == instance.project_id,
-                        ProjectChannelCredentialBindingRow.channel_instance_id == instance.id,
-                        ProjectChannelCredentialBindingRow.status == "active",
-                        ProjectChannelCredentialBindingRow.binding_revision == binding_revision,
-                        ProjectChannelCredentialBindingRow.credential_version_id == exact_version_id,
-                        CredentialRow.credential_type == f"channel.{instance.provider}",
+                        ProjectChannelSecretStateRow.project_id == instance.project_id,
+                        ProjectChannelSecretStateRow.channel_instance_id == instance.id,
+                        ProjectChannelSecretStateRow.revision == secret_revision,
+                        ProjectChannelSecretStateRow.current_generation_id == exact_generation_id,
                     )
                 )
             ).scalar_one_or_none()
-            if exact_binding is None:
+            if exact_secret is None:
                 return False
         return True
 

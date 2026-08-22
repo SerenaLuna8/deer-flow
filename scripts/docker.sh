@@ -44,29 +44,29 @@ load_proxy_env_from_dotenv() {
 ensure_proxy_auth_token() {
     local token_file="$PROJECT_ROOT/backend/.deer-flow/.proxy-auth-token"
 
-    if [ -z "${DEER_FLOW_PROXY_AUTH_TOKEN:-}" ]; then
+    if [ -z "${ACT_WEAVE_PROXY_AUTH_TOKEN:-}" ]; then
         mkdir -p "$(dirname "$token_file")"
         if [ -f "$token_file" ]; then
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$token_file")"
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(cat "$token_file")"
         elif command -v python3 >/dev/null 2>&1; then
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
-            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+            printf '%s\n' "$ACT_WEAVE_PROXY_AUTH_TOKEN" > "$token_file"
             chmod 600 "$token_file"
         elif command -v openssl >/dev/null 2>&1; then
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"
-            printf '%s\n' "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$token_file"
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"
+            printf '%s\n' "$ACT_WEAVE_PROXY_AUTH_TOKEN" > "$token_file"
             chmod 600 "$token_file"
         else
-            echo -e "${YELLOW}Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3 and openssl are unavailable.${NC}" >&2
+            echo -e "${YELLOW}Cannot generate ACT_WEAVE_PROXY_AUTH_TOKEN: python3 and openssl are unavailable.${NC}" >&2
             exit 1
         fi
     fi
 
-    if [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
-        echo -e "${YELLOW}DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+    if [ "${#ACT_WEAVE_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+        echo -e "${YELLOW}ACT_WEAVE_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
         exit 1
     fi
-    export DEER_FLOW_PROXY_AUTH_TOKEN
+    export ACT_WEAVE_PROXY_AUTH_TOKEN
 }
 
 detect_sandbox_mode() {
@@ -231,7 +231,7 @@ start() {
     # the default (local) and provisioner modes never expose the host daemon.
     # Mounting the socket grants root-equivalent control over the host daemon.
     if [ "$sandbox_mode" = "aio" ]; then
-        local docker_socket="${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}"
+        local docker_socket="${ACT_WEAVE_DOCKER_SOCKET:-/var/run/docker.sock}"
         if [ ! -S "$docker_socket" ]; then
             echo -e "${YELLOW}⚠ Docker socket not found at $docker_socket — AioSandboxProvider (DooD) will not work.${NC}"
             exit 1
@@ -249,10 +249,10 @@ start() {
     fi
     echo ""
     
-    # Set DEER_FLOW_ROOT for provisioner if not already set
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
-        echo -e "${BLUE}Setting DEER_FLOW_ROOT=$DEER_FLOW_ROOT${NC}"
+    # Set ACT_WEAVE_ROOT for provisioner if not already set
+    if [ -z "$ACT_WEAVE_ROOT" ]; then
+        export ACT_WEAVE_ROOT="$PROJECT_ROOT"
+        echo -e "${BLUE}Setting ACT_WEAVE_ROOT=$ACT_WEAVE_ROOT${NC}"
         echo ""
     fi
     
@@ -267,7 +267,7 @@ start() {
             echo -e "${YELLOW}============================================================${NC}"
             echo ""
             echo -e "${YELLOW}  Next: run make docker-start, sign in as system admin,    ${NC}"
-            echo -e "${YELLOW}  then configure models and encrypted Credentials at       ${NC}"
+            echo -e "${YELLOW}  then configure models and encrypted API keys at          ${NC}"
             echo -e "${YELLOW}  /admin/settings/models.                                  ${NC}"
             echo ""
             exit 0
@@ -332,10 +332,10 @@ logs() {
 
 # Stop Docker development environment
 stop() {
-    # DEER_FLOW_ROOT is referenced in docker-compose-dev.yaml; set it before
+    # ACT_WEAVE_ROOT is referenced in docker-compose-dev.yaml; set it before
     # running compose down to suppress "variable is not set" warnings.
-    if [ -z "$DEER_FLOW_ROOT" ]; then
-        export DEER_FLOW_ROOT="$PROJECT_ROOT"
+    if [ -z "$ACT_WEAVE_ROOT" ]; then
+        export ACT_WEAVE_ROOT="$PROJECT_ROOT"
     fi
     echo "Stopping Docker development services..."
     cd "$DOCKER_DIR" && $COMPOSE_CMD down

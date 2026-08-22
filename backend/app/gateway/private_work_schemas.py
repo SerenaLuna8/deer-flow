@@ -12,7 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from app.private_work.context import strip_private_client_fields
 from app.private_work.error_mapping import private_work_http_exception
 from app.private_work.errors import PrivateWorkInvalid
-from app.shared_assets.model_refs import exact_model_ref
+from app.system_settings.model_refs import exact_model_ref
 from deerflow.trace_context import generate_trace_id, get_current_trace_id
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
 

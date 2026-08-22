@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import uuid
-
 import pytest
-from pydantic import SecretStr
 
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
-from deerflow.config.model_config import ModelConfig
 from deerflow.runtime.journal import RunJournal
 from deerflow.vision.contracts import VisionUsageReceipt
 from deerflow.vision.dispatch import (
@@ -22,32 +18,6 @@ from deerflow.vision.dispatch import (
 )
 
 VISION_MODEL_REF = "00000000-0000-4000-8000-000000000306"
-
-
-def _model(*, model: str = "small-vlm") -> ModelConfig:
-    value = ModelConfig(
-        name=VISION_MODEL_REF,
-        display_name="Vision small",
-        description="",
-        use="langchain_openai:ChatOpenAI",
-        model=model,
-        base_url="https://vision.example.test/v1",
-        api_key=SecretStr("secret-value"),
-        supports_vision=True,
-    )
-    value._system_model_config_version_id = uuid.UUID("00000000-0000-0000-0000-000000000101")
-    value._system_provider_adapter = "vision_openai_compatible_v1"
-    return value
-
-
-class _Materializer:
-    def __init__(self, model: ModelConfig) -> None:
-        self.model = model
-        self.calls = 0
-
-    async def materialize_snapshot(self, **_kwargs: object) -> ModelConfig:
-        self.calls += 1
-        return self.model
 
 
 class _Boundary:
@@ -73,25 +43,14 @@ class _Boundary:
         self.after_calls += 1
 
 
-def _authority(
-    materializer: _Materializer,
-    boundary: _Boundary,
-) -> PrivateRunVisionDispatchAuthority:
-    return PrivateRunVisionDispatchAuthority(
-        boundary=boundary,
-        materializer=materializer,
-        project_id=uuid.uuid4(),
-        owner_user_id="owner",
-        run_id="run-1",
-        expected_model=_model(),
-    )
+def _authority(boundary: _Boundary) -> PrivateRunVisionDispatchAuthority:
+    return PrivateRunVisionDispatchAuthority(boundary=boundary)
 
 
 @pytest.mark.asyncio
-async def test_dispatch_revalidates_exact_model_before_and_after_http() -> None:
-    materializer = _Materializer(_model())
+async def test_dispatch_applies_frozen_run_boundary_before_and_after_http() -> None:
     boundary = _Boundary()
-    authority = _authority(materializer, boundary)
+    authority = _authority(boundary)
 
     attempt = await authority.before_attempt(
         normalized_bytes=100,
@@ -110,32 +69,14 @@ async def test_dispatch_revalidates_exact_model_before_and_after_http() -> None:
         error_code=None,
     )
 
-    assert materializer.calls == 2
     assert boundary.before_calls == 1
     assert boundary.after_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_dispatch_rejects_stale_exact_model_before_side_effect_fence() -> None:
-    materializer = _Materializer(_model(model="changed-vlm"))
-    boundary = _Boundary()
-    authority = _authority(materializer, boundary)
-
-    with pytest.raises(VisionDispatchDenied) as caught:
-        await authority.before_attempt(
-            normalized_bytes=100,
-            normalized_pixels=200,
-        )
-
-    assert caught.value.code == "VISION_AUTH_FAILED"
-    assert boundary.before_calls == 0
-
-
-@pytest.mark.asyncio
 async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
-    materializer = _Materializer(_model())
     boundary = _Boundary()
-    authority = _authority(materializer, boundary)
+    authority = _authority(boundary)
 
     for _ in range(MAX_VISION_CALLS_PER_RUN):
         await authority.before_attempt(
@@ -151,7 +92,7 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
     assert boundary.before_calls == MAX_VISION_CALLS_PER_RUN
 
     # Reconstructing the process-local authority must not reset the boundary.
-    reconstructed = _authority(_Materializer(_model()), boundary)
+    reconstructed = _authority(boundary)
     with pytest.raises(VisionDispatchDenied) as caught:
         await reconstructed.before_attempt(
             normalized_bytes=1,
@@ -160,7 +101,7 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
     assert caught.value.code == "VISION_RATE_LIMITED"
 
     byte_boundary = _Boundary()
-    byte_authority = _authority(_Materializer(_model()), byte_boundary)
+    byte_authority = _authority(byte_boundary)
     with pytest.raises(VisionDispatchDenied) as caught:
         await byte_authority.before_attempt(
             normalized_bytes=MAX_VISION_NORMALIZED_BYTES_PER_RUN + 1,
@@ -172,9 +113,8 @@ async def test_dispatch_uses_durable_boundary_for_cumulative_limits() -> None:
 
 @pytest.mark.asyncio
 async def test_dispatch_attempt_receipt_is_opaque_and_single_use() -> None:
-    materializer = _Materializer(_model())
     boundary = _Boundary()
-    authority = _authority(materializer, boundary)
+    authority = _authority(boundary)
     attempt = await authority.before_attempt(
         normalized_bytes=100,
         normalized_pixels=200,
@@ -198,7 +138,6 @@ async def test_dispatch_attempt_receipt_is_opaque_and_single_use() -> None:
         )
 
     assert caught.value.code == "VISION_CONFIGURATION_ERROR"
-    assert materializer.calls == 2
     assert boundary.after_calls == 1
 
 

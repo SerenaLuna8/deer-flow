@@ -56,6 +56,7 @@ from deerflow.runtime.events.store.db import DbRunEventStore
 from deerflow.runtime.events.stream import PostgresStreamBridge
 from deerflow.runtime.host_execution_domain import HostExecutionDomainSnapshot
 from deerflow.sandbox.security import resolve_host_bash_execution_mode
+from deerflow.secrets import SecretKey
 
 WORKER_VERSION = "m6"
 
@@ -73,6 +74,7 @@ async def run_worker(
     stop_event: asyncio.Event | None = None,
 ) -> None:
     try:
+        SecretKey.from_environment()
         config = await asyncio.to_thread(get_app_config)
         raw_mcp_security = getattr(config, "mcp_security", None)
         if isinstance(raw_mcp_security, McpSecurityConfig):

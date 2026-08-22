@@ -19,7 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from deerflow.config import get_enabled_tracing_providers
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
 # Lazy-imported below to avoid a circular import: ``deerflow.runtime`` eagerly
 # imports the run worker, which in turn needs ``deerflow.tracing``.
@@ -68,7 +68,7 @@ def build_langfuse_trace_metadata(
     if include_deerflow_trace_id:
         request_trace_id = normalize_trace_id(deerflow_trace_id) or get_current_trace_id()
         if request_trace_id:
-            metadata[DEERFLOW_TRACE_METADATA_KEY] = request_trace_id
+            metadata[ACT_WEAVE_TRACE_METADATA_KEY] = request_trace_id
 
     tags: list[str] = []
     if environment:

@@ -38,10 +38,7 @@ from app.shared_assets.mcp_discovery_repository import (
     McpToolDiscoveryErrorCode,
     McpToolDiscoveryResultStatus,
 )
-from app.shared_assets.mcp_tool_inventory_repository import (
-    McpToolInventoryRepository,
-    mcp_grant_closure_digest,
-)
+from app.shared_assets.mcp_tool_inventory_repository import McpToolInventoryRepository
 from app.shared_assets.models import (
     AssetKind,
     AssetScope,
@@ -63,7 +60,7 @@ _DISCOVERY_REQUEST_ID = "mcp-discovery-worker"
 
 
 class _McpDiscoveryCancelled(Exception):
-    """The admitted project/version/credential authority is no longer current."""
+    """The admitted project/version/secret authority is no longer current."""
 
 
 class _McpDiscoveryAuthorizationBoundary:
@@ -250,7 +247,7 @@ class McpToolDiscoveryJobHandler:
             and snapshot.asset_id == attempt.mcp_server_id
             and snapshot.version_id == attempt.mcp_server_version_id
             and snapshot.checksum == attempt.payload_checksum
-            and mcp_grant_closure_digest(snapshot.credential_grant_ids) == attempt.grant_digest
+            and snapshot.secret_digest == attempt.secret_digest
         )
 
     async def _resolve_and_materialize(
@@ -306,7 +303,7 @@ class McpToolDiscoveryJobHandler:
                     session,
                     attempt,
                 )
-                if current.scope is not snapshot.scope or current.definition != snapshot.definition or current.credential_grant_ids != snapshot.credential_grant_ids:
+                if current.scope is not snapshot.scope or current.definition != snapshot.definition or current.secret_generation_ids != snapshot.secret_generation_ids or current.secret_digest != snapshot.secret_digest:
                     raise _McpDiscoveryCancelled
                 validate_project_mcp_snapshot_policy(
                     current,
@@ -414,7 +411,7 @@ class McpToolDiscoveryJobHandler:
                             "mcp_server_id": attempt.mcp_server_id,
                             "mcp_server_version_id": attempt.mcp_server_version_id,
                             "payload_checksum": attempt.payload_checksum,
-                            "grant_digest": attempt.grant_digest,
+                            "secret_digest": attempt.secret_digest,
                             "attempted_at": attempted_at,
                         }
                         if final_status == "succeeded" and tools is not None:

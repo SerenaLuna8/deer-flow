@@ -163,7 +163,7 @@ def test_every_governance_operation_has_a_valid_closed_audit_encoding(
     operation: str,
 ) -> None:
     operation_domain = operation.partition(".")[0]
-    asset_kind = operation_domain if operation_domain in {"agent", "skill", "mcp"} else "mcp" if operation_domain == "credential" else "agent"
+    asset_kind = operation_domain if operation_domain in {"agent", "skill", "mcp", "model", "channel"} else "agent"
     metadata: dict[str, object] = {
         "asset_kind": asset_kind,
         "operation": operation,
@@ -177,12 +177,43 @@ def test_every_governance_operation_has_a_valid_closed_audit_encoding(
         "skill.version.activate",
         "skill.export",
         "skill.version.revoke",
+        "skill.secret.configure",
+        "skill.secret.replace",
+        "skill.secret.clear",
+        "skill.secret.copy",
+        "skill.secret.invalidate",
     }:
         metadata["version_number"] = 7
+    if ".secret." in operation:
+        suffix = operation.rsplit(".", 1)[-1]
+        metadata.update(
+            {
+                "revision": 1,
+                "result": {
+                    "clear": "cleared",
+                    "copy": "copied",
+                    "invalidate": "invalidated",
+                }.get(suffix, "configured"),
+                "reason": {
+                    "clear": "cleared",
+                    "copy": "compatible_copy",
+                    "invalidate": "definition_change",
+                }.get(suffix, "created" if suffix == "configure" else "replaced"),
+                "readiness": "unready" if suffix in {"clear", "invalidate"} else "ready",
+            }
+        )
+        if suffix in {"configure", "replace", "copy"}:
+            metadata["generation_id"] = uuid.uuid4()
+        if asset_kind in {"skill", "mcp"}:
+            metadata["version_id"] = uuid.uuid4()
+            metadata["secret_name"] = "API_KEY" if asset_kind == "skill" else "oauth"
+        if asset_kind == "mcp":
+            metadata["slot_id"] = uuid.uuid4()
 
     parsed = AUDIT_METADATA_MODELS[_ACTIONS[operation]].model_validate(metadata)
 
-    assert parsed.model_dump(mode="json", exclude_none=True) == metadata
+    expected = {key: str(value) if isinstance(value, uuid.UUID) else value for key, value in metadata.items()}
+    assert parsed.model_dump(mode="json", exclude_none=True) == expected
 
 
 @pytest.mark.asyncio

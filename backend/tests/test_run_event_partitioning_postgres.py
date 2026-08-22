@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from deerflow.persistence.bootstrap import (
-    M7RecreateRequired,
+    SchemaRecreateRequired,
     bootstrap_schema,
     classify_database,
 )
@@ -721,7 +721,7 @@ async def test_catalog_rejects_misnamed_partition_child(
                 )
             )
         async with engine.connect() as connection:
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()
@@ -743,7 +743,7 @@ async def test_catalog_rejects_arbitrary_index_on_partition_child(
                 )
             )
         async with engine.connect() as connection:
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()
@@ -766,7 +766,7 @@ async def test_catalog_rejects_arbitrary_trigger_on_partition_child(
                 )
             )
         async with engine.connect() as connection:
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()
@@ -825,7 +825,7 @@ async def test_catalog_requires_valid_partition_retention_state(
         async with engine.begin() as connection:
             await connection.execute(text(state_mutation))
         async with engine.connect() as connection:
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()
@@ -895,7 +895,7 @@ async def test_catalog_rejects_disabled_partition_trigger_clone(
                     )
                     == 1
                 )
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()

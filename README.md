@@ -29,9 +29,10 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   仍安全失败。
   单个 MCP 服务在远端工具发现阶段不可用或返回非法目录时，只会禁用该 MCP 的本次
   Run 工具并向 Agent 提供安全的能力降级提示；其他能力和主回复继续执行。授权撤销、
-  冻结快照漂移、Credential 材料化不确定等安全边界仍会终止 Run。Skill 脚本及普通
+  冻结快照漂移、Secret 材料化不确定等安全边界仍会终止 Run。Skill 脚本及普通
   工具失败以错误结果返回 Agent，由其使用现有上下文继续或明确说明未完成部分。
-- System/Project Agent、Skill、MCP 与 Credential 的不可变版本和准入快照。Project
+- System/Project Agent、Skill、MCP 的不可变版本和准入快照。Model、Skill、MCP、
+  Channels 分别拥有自己的加密 Secret 与生命周期。Project
   Agent/Skill 保存后生成不可变 Candidate Version；显式激活会原子设置
   `current_version_id` 并启用资产，历史版本只读且不能恢复、复制或重新激活。System
   Agent/Skill 只有自动成为 Current Version 的 v1，用户不能创建、保存或手工激活版本。
@@ -39,19 +40,18 @@ Agent graph 执行，Scheduler 只负责到期 Automation 准入；PostgreSQL �
   或 `.tgz` 包；常见 macOS 归档元数据会被忽略。超出上传、解压、单文件或成员数限制
   的包会以明确的大小限制错误拒绝。Skill 详情可把当前选中的已持久化版本导出为
   `<slug>-v<version_number>.zip` 标准分发包；`SKILL.md` 位于包根目录，包内不含
-  Credential 映射、密钥或版本历史，被治理撤销的 System Skill v1 不可导出。
+  Secret 值、密钥或版本历史，被治理撤销的 System Skill v1 不可导出。
   项目 Agent 的删除采用软归档：从项目目录移除并拒绝后续
   Run，既有会话、运行记录及已准入的执行快照继续保留；已归档 Agent 不再占用项目
   名称，同一名称可用于创建具有新 ID 的 Agent。Agent 详情按所选不可变版本展示
   指令和能力；只有最新向前派生的版本可以继续编辑，Historical Version 不能形成内容
   回退。Skill 可在 `SKILL.md` 中通过
   `required-secrets` 声明敏感环境变量；版本工作台和 AI Builder 提供结构化表单并与
-  同一源码副本同步。版本工作台的“运行凭证”把每个目标变量映射到精确的项目
-  Credential 版本及其中一个 `env` 来源字段：声明仍只写入 `SKILL.md`，项目映射只存
-  PostgreSQL。Candidate Version 激活前必须完成全部必需映射；Editor 只能看到完整性，
-  Admin 负责配置 Credential。向前保存的新版本会继承仍兼容的映射，激活时重新校验。
-  Current Version 的运行映射仍可独立轮换。明文只在
-  授权命令执行边界从选定来源字段解密，并以 Skill 声明的目标变量名注入；Local Provider
+  同一源码副本同步。版本工作台的“运行秘密”按精确 Skill Version 和变量名保存项目独有
+  密文：声明仍只写入 `SKILL.md`，值只存 PostgreSQL。Candidate Version 激活前必须完成
+  全部必需值；Editor 只能看到完整性，Project Admin 负责配置。向前保存的新版本会把仍兼容
+  的值解密后重新加密为独立副本，新增或变化的声明必须重新输入。明文只在
+  授权 Sandbox 执行边界解密，并以 Skill 声明的目标变量名注入；Local Provider
   与本地 AIO Provider 均不把它写入版本、快照或浏览器状态。
 - Agent Builder 以独立于普通会话的设计会话展示真实模型思考和校验、保存阶段，支持按模型
   能力选择思考强度、停止当前生成并继续设计，以及断线后完整回放过程。它不调用工具，也不
@@ -139,21 +139,19 @@ make setup
 
 ### 初始化数据库
 
-为一个新的空 PostgreSQL 目标配置 `DATABASE_URL`、`POSTGRES_ADMIN_URL` 和初始化
-所需的 Credential 环境变量，然后运行：
+为一个新的空 PostgreSQL 目标配置 `DATABASE_URL`、`POSTGRES_ADMIN_URL`、
+`ACT_WEAVE_SECRET_KEY` 和 `ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY`，然后运行：
 
 ```bash
 make setup-db
 make check-db
 ```
 
-- `make setup-db` 只初始化空目标库，并把完整快照记录为当前链头 revision
-  `skill_design_activity`。
-- 初始化会为应用表、Alembic 版本表、LangGraph 表及每个 `run_events` 物理分区写入
+- `make setup-db` 只初始化空目标库，并写入完整 Schema V1 快照。
+- 初始化会为应用表、Schema V1 标记表、LangGraph 表及每个 `run_events` 物理分区写入
   非空的中文表注释和字段注释；缺失或漂移的注释会使 schema 校验安全失败。
-- 已知旧版本先运行 `make preflight-upgrade` 获取只读 Agent/Skill 生命周期清单并排除阻断异常，再通过 `make upgrade-db` 显式升级；升级命令会在同一维护流程内再次执行该 preflight。
-- 未知 marker、未纳管的非空 schema 或 catalog drift 会安全失败。
-- Gateway、Worker 和 Scheduler 从不自动迁移或修复 schema。
+- 非空旧库、未知 marker 或 catalog drift 都会安全失败；开发阶段请重建数据库。
+- Gateway、Worker 和 Scheduler 从不自动创建或修复 schema。
 - 升级打包 System Agent/Skill 时，先停止运行服务，在维护窗口执行
   `make upgrade-system-assets`；该命令从标准运行环境读取 `DATABASE_URL`，以相同确定性
   UUID 原地替换唯一 v1 并保持它为 Current Version，不追加版本，可幂等重跑。System MCP
@@ -214,7 +212,7 @@ GPT 5.6 Luna；原生视觉 lead model 继续使用现有 `view_image`，不会�
 
 Bridge 不解析或重写厂商协议。`inspect_image` 通过唯一 `ModelRuntime` 向所选模型发送标准
 LangChain 多模态 content block；OpenAI、Anthropic、DeepSeek、vLLM 或其他已支持
-Provider 的现有 adapter 负责 Credential、Endpoint、请求序列化和响应解析。任意 active、
+Provider 的现有 adapter 负责 Secret、Endpoint、请求序列化和响应解析。任意 active、
 `supports_vision=true` 且 adapter 仍可新绑定的系统模型都可以被选择，不按模型名称或
 Luna 身份硬编码。
 
@@ -224,8 +222,8 @@ Luna 身份硬编码。
 平台生成的无敏感 64×64 蓝色方块 PNG 经过同一个 Runtime 和 adapter；成功只证明当次
 连接可用，生产启用前仍须完成供应商政策和真实 API 质量、延迟与限流验收。
 
-Run 仍冻结精确 `purpose="vision"` 模型版本和 Credential 引用，Worker 调用前后仍使用
-durable dispatch authority；暂停模型或撤销 Credential 会阻断后续调用，但不能召回已经
+Run 仍冻结精确 `purpose="vision"` 模型配置载荷和 Secret Generation，Worker 调用前后仍使用
+durable dispatch authority；暂停模型或清除 API Key 会阻断后续调用，但不能召回已经
 在途的请求。完整架构、实施状态、历史兼容和验收门禁见
 [Vision Bridge 架构收敛改造方案](./backend/docs/VISION_BRIDGE_REFACTOR_PLAN.md)。
 
@@ -276,7 +274,7 @@ checkout 手工执行相关 PostgreSQL、前端、浏览器、安全、容器和
 - Apple silicon Mac 上需要执行 Agent 生成的 Bash/Python 时，优先使用
   `AioSandboxProvider` + Apple Container；配置与实测流程见
   [Apple Container Sandbox](./backend/docs/APPLE_CONTAINER.md)。
-- API key、Cookie、Credential、数据库密码和完整连接 URL 不得进入代码、日志、
+- API key、Cookie、Secret、数据库密码和完整连接 URL 不得进入代码、日志、
   截图、浏览器缓存或诊断材料。
 - System admin 不自动拥有项目权限；项目访问必须服从服务端返回的 membership 和
   capability。

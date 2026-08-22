@@ -936,7 +936,7 @@ async def test_local_bash_plan_freezes_trusted_channel_identity(
     assert plan.channel_identity_mode == "set"
     assert plan.channel_user_id == "channel-user-1"
     assert plan.effective_command.startswith(
-        "export DEERFLOW_CHANNEL_USER_ID=channel-user-1; ",
+        "export ACT_WEAVE_CHANNEL_USER_ID=channel-user-1; ",
     )
 
 
@@ -1290,7 +1290,7 @@ async def test_aio_async_bash_materializes_exact_skill_secret_per_command(
 
 
 @pytest.mark.asyncio
-async def test_aio_bash_refreshes_skill_credential_after_executor_queue(
+async def test_aio_bash_refreshes_skill_secret_after_executor_queue(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class IsolatedSandbox:
@@ -1390,7 +1390,7 @@ async def test_aio_bash_refreshes_skill_credential_after_executor_queue(
 
         assert provider_states == [True]
         assert sandbox.envs == []
-        assert result == "Error: Skill credential material is unavailable"
+        assert result == "Error: Skill secret material is unavailable"
         assert "revoked credential detail" not in result
     finally:
         release_queue.set()

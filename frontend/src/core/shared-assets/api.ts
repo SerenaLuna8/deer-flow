@@ -19,7 +19,6 @@ import {
 } from "./skill-secret-declarations";
 import {
   adminAssetListSchema,
-  adminCredentialListSchema,
   agentCapabilityBindingsInputSchema,
   agentCreateResponseSchema,
   agentInstructionsInputSchema,
@@ -27,7 +26,6 @@ import {
   agentRuntimeAssessmentsResponseSchema,
   agentVersionHistoryResponseSchema,
   agentVersionResponseSchema,
-  approveMcpInputSchema,
   assetIdSchema,
   assetKindSchema,
   assetListKindSchema,
@@ -35,16 +33,8 @@ import {
   configuredMcpResponseSchema,
   createAgentInputSchema,
   createConfiguredMcpInputSchema,
-  createCredentialInputSchema,
-  configureSystemMcpCredentialGrantsInputSchema,
-  credentialGrantMigrationResponseSchema,
-  credentialMigrationStatusResponseSchema,
-  credentialMutationResponseSchema,
-  credentialReplacementResponseSchema,
-  credentialVersionHistoryResponseSchema,
   currentSystemBindingSchema,
   disableSystemBindingInputSchema,
-  deleteCredentialInputSchema,
   enableSystemBindingInputSchema,
   enableCurrentSystemBindingInputSchema,
   expectedAssetVersionInputSchema,
@@ -58,18 +48,17 @@ import {
   mcpVersionHistoryResponseSchema,
   mcpVersionInputSchema,
   mcpVersionResponseSchema,
-  migrateCredentialGrantsInputSchema,
   projectAssetListSchema,
-  projectCredentialListSchema,
   projectDefaultAgentInputSchema,
   projectDefaultAgentSchema,
   projectMcpEditableConfigurationResponseSchema,
   projectSkillImportResponseSchema,
   skillActivationInputSchema,
-  replaceCredentialInputSchema,
-  revokeCredentialInputSchema,
-  skillCredentialBindingsInputSchema,
-  skillCredentialBindingsResponseSchema,
+  skillSecretReplaceInputSchema,
+  skillSecretSetResponseSchema,
+  secretClearInputSchema,
+  mcpSecretReplaceInputSchema,
+  mcpSecretSetResponseSchema,
   skillVersionHistoryResponseSchema,
   skillFileForkInputSchema,
   skillFilePathSchema,
@@ -81,26 +70,17 @@ import {
   updateConfiguredMcpInputSchema,
   type AdminAssetList,
   type AdminProjectAssetStatusAction,
-  type AdminCredentialList,
   type AgentCapabilityBindingsInput,
   type AgentCreateResponse,
   type AgentInstructionsInput,
   type AgentRuntimeAssessmentsResponse,
   type AgentVersionResponse,
-  type ApproveMcpInput,
   type AssetKind,
   type AssetListKind,
   type AssetMutationResponse,
   type ConfiguredMcpResponse,
   type CreateAgentInput,
   type CreateConfiguredMcpInput,
-  type CreateCredentialInput,
-  type CredentialMigrationStatusResponse,
-  type ConfigureSystemMcpCredentialGrantsInput,
-  type CredentialGrantMigrationResponse,
-  type CredentialMutationResponse,
-  type CredentialReplacementResponse,
-  type DeleteCredentialInput,
   type DisableSystemBindingInput,
   type EnableSystemBindingInput,
   type EnableCurrentSystemBindingInput,
@@ -111,18 +91,17 @@ import {
   type McpToolDiscoveryAttemptResponse,
   type McpVersionInput,
   type McpToolInventoryResponse,
-  type MigrateCredentialGrantsInput,
   type ProjectAssetList,
   type ProjectAssetStatusAction,
-  type ProjectCredentialList,
   type ProjectDefaultAgent,
   type ProjectDefaultAgentInput,
   type ProjectMcpEditableConfigurationResponse,
   type ProjectSkillImportResponse,
-  type ReplaceCredentialInput,
-  type RevokeCredentialInput,
-  type SkillCredentialBindingsInput,
-  type SkillCredentialBindingsResponse,
+  type SkillSecretReplaceInput,
+  type SkillSecretSetResponse,
+  type McpSecretReplaceInput,
+  type McpSecretSetResponse,
+  type SecretClearInput,
   type SkillVersionInput,
   type SkillFileForkInput,
   type SkillVersionFileContentResponse,
@@ -133,7 +112,7 @@ import {
   type VersionResponse,
 } from "./types";
 
-type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
+type MutableAssetListKind = AssetListKind;
 type VersionedAssetListKind = MutableAssetListKind;
 
 export type SkillDistributionDownload = {
@@ -156,9 +135,9 @@ const serverErrorCodeSchema = z.enum([
   "SKILL_RUNTIME_NAME_CONFLICT",
   "SKILL_SECRET_DECLARATION_INVALID",
   "SKILL_FRONTMATTER_SOURCE_STALE",
-  "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
-  "SKILL_CREDENTIAL_BINDING_INVALID",
-  "SKILL_CREDENTIAL_SELECTION_STALE",
+  "SKILL_SECRETS_INCOMPLETE",
+  "SKILL_SECRET_CONFIGURATION_INVALID",
+  "SKILL_SECRET_REVISION_STALE",
 ]);
 
 const errorEnvelopeSchema = z
@@ -207,17 +186,17 @@ const SAFE_SERVER_ERRORS = {
     "SKILL_FRONTMATTER_SOURCE_STALE",
     "Skill frontmatter source changed",
   ],
-  SKILL_CREDENTIAL_BINDINGS_INCOMPLETE: [
-    "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
-    "Required Skill Credential bindings are incomplete",
+  SKILL_SECRETS_INCOMPLETE: [
+    "SKILL_SECRETS_INCOMPLETE",
+    "Required Skill secrets are incomplete",
   ],
-  SKILL_CREDENTIAL_BINDING_INVALID: [
-    "SKILL_CREDENTIAL_BINDING_INVALID",
-    "Skill Credential binding is invalid",
+  SKILL_SECRET_CONFIGURATION_INVALID: [
+    "SKILL_SECRET_CONFIGURATION_INVALID",
+    "Skill secret configuration is invalid",
   ],
-  SKILL_CREDENTIAL_SELECTION_STALE: [
-    "SKILL_CREDENTIAL_SELECTION_STALE",
-    "Skill Credential selection is stale",
+  SKILL_SECRET_REVISION_STALE: [
+    "SKILL_SECRET_REVISION_STALE",
+    "Skill secret revision is stale",
   ],
 } as const;
 
@@ -232,9 +211,9 @@ export const SHARED_ASSET_ERROR_CODES = [
   "SKILL_RUNTIME_NAME_CONFLICT",
   "SKILL_SECRET_DECLARATION_INVALID",
   "SKILL_FRONTMATTER_SOURCE_STALE",
-  "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE",
-  "SKILL_CREDENTIAL_BINDING_INVALID",
-  "SKILL_CREDENTIAL_SELECTION_STALE",
+  "SKILL_SECRETS_INCOMPLETE",
+  "SKILL_SECRET_CONFIGURATION_INVALID",
+  "SKILL_SECRET_REVISION_STALE",
   "ASSET_UPLOAD_TOO_LARGE",
   "AUTH_REQUIRED",
   "ASSET_NETWORK_ERROR",
@@ -413,7 +392,7 @@ function adminProjectAssetUrl(projectId: string, kind: AssetListKind): string {
   return `${getBackendBaseURL()}/api/admin/projects/${parsedProjectId}/assets/${parsedKind}`;
 }
 
-function systemCatalogUrl(kind: Exclude<AssetListKind, "credentials">): string {
+function systemCatalogUrl(kind: AssetListKind): string {
   return `${getBackendBaseURL()}/api/assets/catalog/${parseInput(
     assetListKindSchema,
     kind,
@@ -425,8 +404,7 @@ function versionHistorySchema(
 ): z.ZodType<VersionHistoryResponse> {
   if (kind === "agents") return agentVersionHistoryResponseSchema;
   if (kind === "skills") return skillVersionHistoryResponseSchema;
-  if (kind === "mcp-servers") return mcpVersionHistoryResponseSchema;
-  return credentialVersionHistoryResponseSchema;
+  return mcpVersionHistoryResponseSchema;
 }
 
 function versionResponseSchema(
@@ -437,25 +415,12 @@ function versionResponseSchema(
   return mcpVersionResponseSchema;
 }
 
-export function listProjectAssets(
-  projectId: string,
-  kind: "credentials",
-  signal?: AbortSignal,
-): Promise<ProjectCredentialList>;
-export function listProjectAssets(
-  projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
-  signal?: AbortSignal,
-): Promise<ProjectAssetList>;
 export async function listProjectAssets(
   projectId: string,
   kind: AssetListKind,
   signal?: AbortSignal,
-): Promise<ProjectAssetList | ProjectCredentialList> {
+): Promise<ProjectAssetList> {
   const response = await request(projectAssetUrl(projectId, kind), { signal });
-  if (kind === "credentials") {
-    return parseResponse(response, projectCredentialListSchema);
-  }
   return parseResponse(
     response,
     kind === "mcp-servers"
@@ -491,22 +456,11 @@ export async function setProjectDefaultAgent(
   );
 }
 
-export function listAdminAssets(
-  kind: "credentials",
-  signal?: AbortSignal,
-): Promise<AdminCredentialList>;
-export function listAdminAssets(
-  kind: Exclude<AssetListKind, "credentials">,
-  signal?: AbortSignal,
-): Promise<AdminAssetList>;
 export async function listAdminAssets(
   kind: AssetListKind,
   signal?: AbortSignal,
-): Promise<AdminAssetList | AdminCredentialList> {
+): Promise<AdminAssetList> {
   const response = await request(adminAssetUrl(kind), { signal });
-  if (kind === "credentials") {
-    return parseResponse(response, adminCredentialListSchema);
-  }
   return parseResponse(
     response,
     kind === "mcp-servers"
@@ -515,27 +469,14 @@ export async function listAdminAssets(
   );
 }
 
-export function listAdminProjectAssets(
-  projectId: string,
-  kind: "credentials",
-  signal?: AbortSignal,
-): Promise<ProjectCredentialList>;
-export function listAdminProjectAssets(
-  projectId: string,
-  kind: Exclude<AssetListKind, "credentials">,
-  signal?: AbortSignal,
-): Promise<ProjectAssetList>;
 export async function listAdminProjectAssets(
   projectId: string,
   kind: AssetListKind,
   signal?: AbortSignal,
-): Promise<ProjectAssetList | ProjectCredentialList> {
+): Promise<ProjectAssetList> {
   const response = await request(adminProjectAssetUrl(projectId, kind), {
     signal,
   });
-  if (kind === "credentials") {
-    return parseResponse(response, projectCredentialListSchema);
-  }
   return parseResponse(
     response,
     kind === "mcp-servers"
@@ -545,7 +486,7 @@ export async function listAdminProjectAssets(
 }
 
 export async function listSystemAssetCatalog(
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: AssetListKind,
   signal?: AbortSignal,
 ): Promise<AdminAssetList> {
   const response = await request(systemCatalogUrl(kind), { signal });
@@ -587,12 +528,12 @@ function configuredMcpResponseSchemaForRequest({
   projectId,
   assetId,
   expectedAssetVersion,
-  credentialSlotNames,
+  secretSlotNames,
 }: {
   projectId: string;
   assetId?: string;
   expectedAssetVersion?: number;
-  credentialSlotNames: readonly string[];
+  secretSlotNames: readonly string[];
 }) {
   return configuredMcpResponseSchema.superRefine((value, context) => {
     if (value.item.scope !== "project" || value.item.project_id !== projectId) {
@@ -621,28 +562,26 @@ function configuredMcpResponseSchemaForRequest({
       });
     }
 
-    const responseSlotNames = value.version.credential_slots.map(
+    const responseSlotNames = value.version.secret_slots.map(
       (slot) => slot.name,
     );
     if (
-      responseSlotNames.length !== credentialSlotNames.length ||
-      credentialSlotNames.some((name) => !responseSlotNames.includes(name))
+      responseSlotNames.length !== secretSlotNames.length ||
+      secretSlotNames.some((name) => !responseSlotNames.includes(name))
     ) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Configured MCP response Credential slots must match the request",
-        path: ["version", "credential_slots"],
+          "Configured MCP response secret slots must match the request",
+        path: ["version", "secret_slots"],
       });
     }
 
-    const expectedWorkflowStatus =
-      credentialSlotNames.length === 0 ? "published" : "pending_approval";
-    if (value.version.workflow_status !== expectedWorkflowStatus) {
+    if (value.version.workflow_status !== "published") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
         message:
-          "Configured MCP response workflow must match the requested Credential slots",
+          "Configured MCP response must be published",
         path: ["version", "workflow_status"],
       });
     }
@@ -688,6 +627,75 @@ export async function getProjectMcpEditableConfiguration(
   );
 }
 
+export async function getProjectMcpSecrets(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  signal?: AbortSignal,
+): Promise<McpSecretSetResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  return parseResponse(
+    await request(
+      `${projectAssetUrl(projectId, "mcp-servers")}/${asset}/versions/${version}/secrets`,
+      { signal },
+    ),
+    mcpSecretSetResponseSchema,
+  );
+}
+
+export async function replaceProjectMcpSecret(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  slotName: string,
+  input: McpSecretReplaceInput,
+  signal?: AbortSignal,
+): Promise<McpSecretSetResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  const slot = parseInput(z.string().min(1).max(63), slotName);
+  const body = parseInput(mcpSecretReplaceInputSchema, input);
+  return parseResponse(
+    await request(
+      `${projectAssetUrl(projectId, "mcp-servers")}/${asset}/versions/${version}/secrets/${encodeURIComponent(slot)}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    ),
+    mcpSecretSetResponseSchema,
+  );
+}
+
+export async function clearProjectMcpSecret(
+  projectId: string,
+  assetId: string,
+  versionId: string,
+  slotName: string,
+  input: SecretClearInput,
+  signal?: AbortSignal,
+): Promise<McpSecretSetResponse> {
+  const asset = parseInput(assetIdSchema, assetId);
+  const version = parseInput(assetIdSchema, versionId);
+  const slot = parseInput(z.string().min(1).max(63), slotName);
+  const body = parseInput(secretClearInputSchema, input);
+  return parseResponse(
+    await request(
+      `${projectAssetUrl(projectId, "mcp-servers")}/${asset}/versions/${version}/secrets/${encodeURIComponent(slot)}/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    ),
+    mcpSecretSetResponseSchema,
+  );
+}
+
 export async function createConfiguredProjectMcp(
   projectId: string,
   input: CreateConfiguredMcpInput,
@@ -708,7 +716,7 @@ export async function createConfiguredProjectMcp(
     response,
     configuredMcpResponseSchemaForRequest({
       projectId: parsedProjectId,
-      credentialSlotNames: (body.credential_slots ?? []).map(
+      secretSlotNames: (body.secret_slots ?? []).map(
         (slot) => slot.name,
       ),
     }),
@@ -739,7 +747,7 @@ export async function updateConfiguredProjectMcp(
       projectId: parsedProjectId,
       assetId: id,
       expectedAssetVersion: body.expected_asset_version,
-      credentialSlotNames: (body.credential_slots ?? []).map(
+      secretSlotNames: (body.secret_slots ?? []).map(
         (slot) => slot.name,
       ),
     }),
@@ -1012,52 +1020,6 @@ export function createAdminProjectAssetVersion(
   );
 }
 
-async function createCredential(
-  url: string,
-  input: CreateCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  const body = parseInput(createCredentialInputSchema, input);
-  const response = await request(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  return parseResponse(response, credentialMutationResponseSchema);
-}
-
-export function createProjectCredential(
-  projectId: string,
-  input: CreateCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  return createCredential(
-    projectAssetUrl(projectId, "credentials"),
-    input,
-    signal,
-  );
-}
-
-export function createAdminCredential(
-  input: CreateCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  return createCredential(adminAssetUrl("credentials"), input, signal);
-}
-
-export function createAdminProjectCredential(
-  projectId: string,
-  input: CreateCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  return createCredential(
-    adminProjectAssetUrl(projectId, "credentials"),
-    input,
-    signal,
-  );
-}
-
 async function changeAssetStatus(
   url: string,
   input: ExpectedAssetVersionInput | ExpectedRevisionInput,
@@ -1199,62 +1161,6 @@ export async function deleteProjectMcp(
   if (!response.ok) await throwResponseError(response);
 }
 
-async function deleteCredential(
-  url: string,
-  input: DeleteCredentialInput,
-  signal?: AbortSignal,
-): Promise<void> {
-  const body = parseInput(deleteCredentialInputSchema, input);
-  const response = await request(url, {
-    method: "DELETE",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  if (!response.ok) await throwResponseError(response);
-}
-
-export function deleteProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: DeleteCredentialInput,
-  signal?: AbortSignal,
-): Promise<void> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return deleteCredential(
-    `${projectAssetUrl(projectId, "credentials")}/${id}`,
-    input,
-    signal,
-  );
-}
-
-export function deleteAdminCredential(
-  credentialId: string,
-  input: DeleteCredentialInput,
-  signal?: AbortSignal,
-): Promise<void> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return deleteCredential(
-    `${adminAssetUrl("credentials")}/${id}`,
-    input,
-    signal,
-  );
-}
-
-export function deleteAdminProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: DeleteCredentialInput,
-  signal?: AbortSignal,
-): Promise<void> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return deleteCredential(
-    `${adminProjectAssetUrl(projectId, "credentials")}/${id}`,
-    input,
-    signal,
-  );
-}
-
 export async function listProjectAssetVersions(
   projectId: string,
   kind: AssetListKind,
@@ -1270,7 +1176,7 @@ export async function listProjectAssetVersions(
 }
 
 export async function listSystemAssetVersions(
-  kind: Exclude<AssetListKind, "credentials" | "mcp-servers">,
+  kind: Exclude<AssetListKind, "mcp-servers">,
   assetId: string,
   signal?: AbortSignal,
 ): Promise<VersionHistoryResponse> {
@@ -1410,32 +1316,32 @@ export async function getProjectSkillVersionFile(
   return parseResponse(response, skillVersionFileContentResponseSchema);
 }
 
-export async function getProjectSkillCredentialBindings(
+export async function getProjectSkillSecrets(
   projectId: string,
   skillId: string,
   versionId: string,
   signal?: AbortSignal,
-): Promise<SkillCredentialBindingsResponse> {
+): Promise<SkillSecretSetResponse> {
   const skill = parseInput(assetIdSchema, skillId);
   const version = parseInput(assetIdSchema, versionId);
   const response = await request(
-    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/credential-bindings`,
+    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/secrets`,
     { signal },
   );
   return parseResponse(
     response,
-    skillCredentialBindingsResponseSchema.superRefine((value, context) => {
+    skillSecretSetResponseSchema.superRefine((value, context) => {
       if (value.skill_id !== skill) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Skill Credential bindings belong to another Skill",
+          message: "Skill secrets belong to another Skill",
           path: ["skill_id"],
         });
       }
       if (value.skill_version_id !== version) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Skill Credential bindings belong to another version",
+          message: "Skill secrets belong to another version",
           path: ["skill_version_id"],
         });
       }
@@ -1443,18 +1349,18 @@ export async function getProjectSkillCredentialBindings(
   );
 }
 
-export async function updateProjectSkillCredentialBindings(
+export async function replaceProjectSkillSecrets(
   projectId: string,
   skillId: string,
   versionId: string,
-  input: SkillCredentialBindingsInput,
+  input: SkillSecretReplaceInput,
   signal?: AbortSignal,
-): Promise<SkillCredentialBindingsResponse> {
+): Promise<SkillSecretSetResponse> {
   const skill = parseInput(assetIdSchema, skillId);
   const version = parseInput(assetIdSchema, versionId);
-  const body = parseInput(skillCredentialBindingsInputSchema, input);
+  const body = parseInput(skillSecretReplaceInputSchema, input);
   const response = await request(
-    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/credential-bindings`,
+    `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/secrets`,
     {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -1464,22 +1370,48 @@ export async function updateProjectSkillCredentialBindings(
   );
   return parseResponse(
     response,
-    skillCredentialBindingsResponseSchema.superRefine((value, context) => {
+    skillSecretSetResponseSchema.superRefine((value, context) => {
       if (value.skill_id !== skill) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Skill Credential bindings belong to another Skill",
+          message: "Skill secrets belong to another Skill",
           path: ["skill_id"],
         });
       }
       if (value.skill_version_id !== version) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Skill Credential bindings belong to another version",
+          message: "Skill secrets belong to another version",
           path: ["skill_version_id"],
         });
       }
     }),
+  );
+}
+
+export async function clearProjectSkillSecret(
+  projectId: string,
+  skillId: string,
+  versionId: string,
+  secretName: string,
+  input: SecretClearInput,
+  signal?: AbortSignal,
+): Promise<SkillSecretSetResponse> {
+  const skill = parseInput(assetIdSchema, skillId);
+  const version = parseInput(assetIdSchema, versionId);
+  const name = parseInput(z.string().min(1).max(255), secretName);
+  const body = parseInput(secretClearInputSchema, input);
+  return parseResponse(
+    await request(
+      `${projectAssetUrl(projectId, "skills")}/${skill}/versions/${version}/secrets/${encodeURIComponent(name)}/clear`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+        signal,
+      },
+    ),
+    skillSecretSetResponseSchema,
   );
 }
 
@@ -1612,208 +1544,6 @@ export function publishAdminProjectMcpVersion(
   );
 }
 
-export function replaceProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: ReplaceCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialReplacementResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return postVersionMutation(
-    `${projectAssetUrl(projectId, "credentials")}/${id}/replace`,
-    replaceCredentialInputSchema,
-    credentialReplacementResponseSchema,
-    input,
-    signal,
-  );
-}
-
-export function replaceAdminCredential(
-  credentialId: string,
-  input: ReplaceCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialReplacementResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return postVersionMutation(
-    `${adminAssetUrl("credentials")}/${id}/replace`,
-    replaceCredentialInputSchema,
-    credentialReplacementResponseSchema,
-    input,
-    signal,
-  );
-}
-
-export function replaceAdminProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: ReplaceCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialReplacementResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return postVersionMutation(
-    `${adminProjectAssetUrl(projectId, "credentials")}/${id}/replace`,
-    replaceCredentialInputSchema,
-    credentialReplacementResponseSchema,
-    input,
-    signal,
-  );
-}
-
-async function revokeCredential(
-  url: string,
-  input: RevokeCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  const body = parseInput(revokeCredentialInputSchema, input);
-  const response = await request(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  return parseResponse(response, credentialMutationResponseSchema);
-}
-
-export function revokeProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: RevokeCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return revokeCredential(
-    `${projectAssetUrl(projectId, "credentials")}/${id}/revoke`,
-    input,
-    signal,
-  );
-}
-
-export function revokeAdminCredential(
-  credentialId: string,
-  input: RevokeCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return revokeCredential(
-    `${adminAssetUrl("credentials")}/${id}/revoke`,
-    input,
-    signal,
-  );
-}
-
-export function revokeAdminProjectCredential(
-  projectId: string,
-  credentialId: string,
-  input: RevokeCredentialInput,
-  signal?: AbortSignal,
-): Promise<CredentialMutationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return revokeCredential(
-    `${adminProjectAssetUrl(projectId, "credentials")}/${id}/revoke`,
-    input,
-    signal,
-  );
-}
-
-async function migrateCredentialGrants(
-  url: string,
-  input: MigrateCredentialGrantsInput,
-  signal?: AbortSignal,
-): Promise<CredentialGrantMigrationResponse> {
-  const body = parseInput(migrateCredentialGrantsInputSchema, input);
-  const response = await request(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    signal,
-  });
-  return parseResponse(response, credentialGrantMigrationResponseSchema);
-}
-
-async function getCredentialMigrationStatus(
-  url: string,
-  signal?: AbortSignal,
-): Promise<CredentialMigrationStatusResponse> {
-  const response = await request(url, { signal });
-  return parseResponse(response, credentialMigrationStatusResponseSchema);
-}
-
-export function getAdminCredentialMigrationStatus(
-  credentialId: string,
-  signal?: AbortSignal,
-): Promise<CredentialMigrationStatusResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return getCredentialMigrationStatus(
-    `${adminAssetUrl("credentials")}/${id}/migration-status`,
-    signal,
-  );
-}
-
-export function getAdminProjectCredentialMigrationStatus(
-  projectId: string,
-  credentialId: string,
-  signal?: AbortSignal,
-): Promise<CredentialMigrationStatusResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return getCredentialMigrationStatus(
-    `${adminProjectAssetUrl(projectId, "credentials")}/${id}/migration-status`,
-    signal,
-  );
-}
-
-export function getProjectCredentialMigrationStatus(
-  projectId: string,
-  credentialId: string,
-  signal?: AbortSignal,
-): Promise<CredentialMigrationStatusResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return getCredentialMigrationStatus(
-    `${projectAssetUrl(projectId, "credentials")}/${id}/migration-status`,
-    signal,
-  );
-}
-
-export function migrateProjectCredentialGrants(
-  projectId: string,
-  credentialId: string,
-  input: MigrateCredentialGrantsInput,
-  signal?: AbortSignal,
-): Promise<CredentialGrantMigrationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return migrateCredentialGrants(
-    `${projectAssetUrl(projectId, "credentials")}/${id}/migrate-grants`,
-    input,
-    signal,
-  );
-}
-
-export function migrateAdminCredentialGrants(
-  credentialId: string,
-  input: MigrateCredentialGrantsInput,
-  signal?: AbortSignal,
-): Promise<CredentialGrantMigrationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return migrateCredentialGrants(
-    `${adminAssetUrl("credentials")}/${id}/migrate-grants`,
-    input,
-    signal,
-  );
-}
-
-export function migrateAdminProjectCredentialGrants(
-  projectId: string,
-  credentialId: string,
-  input: MigrateCredentialGrantsInput,
-  signal?: AbortSignal,
-): Promise<CredentialGrantMigrationResponse> {
-  const id = parseInput(assetIdSchema, credentialId);
-  return migrateCredentialGrants(
-    `${adminProjectAssetUrl(projectId, "credentials")}/${id}/migrate-grants`,
-    input,
-    signal,
-  );
-}
-
 function projectMcpVersionUrl(
   projectId: string,
   assetId: string,
@@ -1840,22 +1570,6 @@ export function submitProjectMcpVersion(
   );
 }
 
-export function approveProjectMcpVersion(
-  projectId: string,
-  assetId: string,
-  versionId: string,
-  input: ApproveMcpInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse> {
-  return postVersionMutation(
-    `${projectMcpVersionUrl(projectId, assetId, versionId)}/approve`,
-    approveMcpInputSchema,
-    mcpVersionResponseSchema,
-    input,
-    signal,
-  );
-}
-
 function adminProjectMcpVersionUrl(
   projectId: string,
   assetId: string,
@@ -1876,39 +1590,6 @@ export function submitAdminProjectMcpVersion(
   return postVersionMutation(
     `${adminProjectMcpVersionUrl(projectId, assetId, versionId)}/submit-approval`,
     expectedAssetVersionInputSchema,
-    mcpVersionResponseSchema,
-    input,
-    signal,
-  );
-}
-
-export function approveAdminProjectMcpVersion(
-  projectId: string,
-  assetId: string,
-  versionId: string,
-  input: ApproveMcpInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse> {
-  return postVersionMutation(
-    `${adminProjectMcpVersionUrl(projectId, assetId, versionId)}/approve`,
-    approveMcpInputSchema,
-    mcpVersionResponseSchema,
-    input,
-    signal,
-  );
-}
-
-export function configureAdminMcpCredentialGrants(
-  assetId: string,
-  versionId: string,
-  input: ConfigureSystemMcpCredentialGrantsInput,
-  signal?: AbortSignal,
-): Promise<VersionResponse> {
-  const asset = parseInput(assetIdSchema, assetId);
-  const version = parseInput(assetIdSchema, versionId);
-  return postVersionMutation(
-    `${adminAssetUrl("mcp-servers")}/${asset}/versions/${version}/credential-grants`,
-    configureSystemMcpCredentialGrantsInputSchema,
     mcpVersionResponseSchema,
     input,
     signal,

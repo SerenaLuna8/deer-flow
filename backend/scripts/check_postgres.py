@@ -16,7 +16,7 @@ from sqlalchemy.pool import NullPool
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
-    M7RecreateRequired,
+    SchemaRecreateRequired,
     classify_database,
 )
 
@@ -47,10 +47,6 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "checkpoint_migrations",
     "checkpoint_writes",
     "checkpoints",
-    "credential_envelopes",
-    "credential_grants",
-    "credential_versions",
-    "credentials",
     "dead_jobs",
     "execution_approval_output_delivery_candidates",
     "execution_approval_output_delivery_obligations",
@@ -70,11 +66,16 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "mcp_server_versions",
     "mcp_servers",
     "mcp_tool_discovery_attempts",
-    "mcp_version_credential_slots",
+    "mcp_version_secret_slots",
+    "project_mcp_secret_generations",
+    "project_mcp_secret_states",
+    "project_mcp_secret_tombstones",
     "project_mcp_tool_inventories",
     "project_invitation_rate_limits",
     "project_invitations",
-    "project_channel_credential_bindings",
+    "project_channel_secret_generations",
+    "project_channel_secret_states",
+    "project_channel_secret_tombstones",
     "project_channel_group_binding_challenges",
     "project_channel_group_bindings",
     "project_channel_instance_leases",
@@ -82,8 +83,9 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "project_default_agents",
     "project_memberships",
     "project_quotas",
-    "project_skill_credential_bindings",
-    "project_skill_credential_configs",
+    "project_skill_secret_generations",
+    "project_skill_secret_states",
+    "project_skill_secret_tombstones",
     "project_system_agent_bindings",
     "project_system_mcp_bindings",
     "project_system_skill_bindings",
@@ -94,11 +96,11 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "run_event_invariants",
     "run_event_partition_state",
     "run_events",
-    "run_mcp_grant_snapshots",
+    "run_mcp_secret_snapshots",
     "run_memory_context_snapshots",
     "run_model_config_snapshots",
     "run_runtime_policy_snapshots",
-    "run_skill_credential_snapshots",
+    "run_skill_secret_snapshots",
     "runs",
     "scheduled_task_runs",
     "scheduled_tasks",
@@ -113,8 +115,9 @@ REQUIRED_TABLES: tuple[str, ...] = (
     "store",
     "store_migrations",
     "system_model_catalog_state",
-    "system_model_config_versions",
     "system_model_configs",
+    "system_model_secret_generations",
+    "system_model_secret_tombstones",
     "system_runtime_policy_catalog_state",
     "system_runtime_policy_versions",
     "system_runtime_policies",
@@ -141,7 +144,6 @@ class PostgresCheckResult:
     schema_state: Literal[
         "ready",
         "uninitialized",
-        "upgrade_required",
         "recreate_required",
         "unavailable",
     ] = "unavailable"
@@ -183,16 +185,13 @@ async def check_postgres(database_url: str) -> PostgresCheckResult:
             missing_tables = tuple(sorted(set(REQUIRED_TABLES) - present))
             try:
                 database_state = await classify_database(connection)
-            except M7RecreateRequired:
+            except SchemaRecreateRequired:
                 schema_state = "recreate_required"
-                error = "M7_RECREATE_REQUIRED: revision 未知或 schema catalog 发生漂移，需要人工检查"
+                error = "SCHEMA_RECREATE_REQUIRED: revision 未知或 schema catalog 发生漂移，需要显式重建"
             else:
                 if database_state == "current":
                     schema_state = "ready"
                     error = ""
-                elif database_state == "behind":
-                    schema_state = "upgrade_required"
-                    error = f"数据库处于已知历史 revision（{current_revision}），链头为 {expected_marker}；请运行 `make upgrade-db`"
                 else:
                     schema_state = "uninitialized"
                     error = "数据库尚未初始化；请运行 `make setup-db`"

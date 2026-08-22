@@ -594,7 +594,7 @@ async def change_password(request: Request, response: Response, body: ChangePass
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(
                 code=AuthErrorCode.INVALID_CREDENTIALS,
-                message="Password changes are not available when DEER_FLOW_AUTH_DISABLED=1.",
+                message="Password changes are not available when ACT_WEAVE_AUTH_DISABLED=1.",
             ).model_dump(),
         )
 

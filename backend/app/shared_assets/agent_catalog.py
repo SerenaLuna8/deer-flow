@@ -15,7 +15,7 @@ from typing import Protocol
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.shared_assets.errors import AssetStorageUnavailable, AssetValidationFailed
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,

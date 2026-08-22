@@ -67,7 +67,7 @@ def _app_config() -> AppConfig:
         api_key="test-only",
         supports_vision=True,
     )
-    vision._system_model_config_version_id = uuid.uuid4()
+    vision._system_model_config_id = uuid.uuid4()
     vision._system_provider_adapter = "openai"
     return AppConfig(
         sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),

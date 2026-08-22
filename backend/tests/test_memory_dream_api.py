@@ -174,7 +174,6 @@ class _Service:
             history_to=None,
             history_count=None,
             prompt_version=None,
-            model_ref=None,
             needs_review=False,
             created_at=datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC),
         )
@@ -455,7 +454,6 @@ async def test_budget_rewrite_version_endpoints_accept_zero_history(
             history_to=None,
             history_count=0,
             prompt_version="dream-v3",
-            model_ref=uuid.uuid4(),
             needs_review=False,
             created_at=created_at,
         ),
@@ -506,7 +504,6 @@ async def test_version_detail_and_restore_bound_legacy_oversized_diff(
         history_to=None,
         history_count=None,
         prompt_version=None,
-        model_ref=None,
         needs_review=False,
         created_at=datetime(2026, 8, 5, 3, 4, 5, tzinfo=UTC),
     )

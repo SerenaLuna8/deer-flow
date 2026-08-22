@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from app.shared_assets.model_refs import exact_model_ref
+from app.system_settings.model_refs import exact_model_ref
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
 from deerflow.models.runtime import ModelRuntimeProfile
@@ -419,7 +419,7 @@ class SkillBuilderDependencySnapshot(_StrictModel):
     """Run-local catalog evidence resolved before a candidate is finalized.
 
     This is authoring evidence only. It never activates a Skill, binds an MCP
-    server, grants a Credential, or expands a future Agent's authority.
+    server, configures a secret value, or expands a future Agent's authority.
     """
 
     version: Literal[1] = 1

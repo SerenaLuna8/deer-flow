@@ -114,7 +114,7 @@ def plan_launch(
         )
 
     forced_tui = bool(args.tui)
-    if forced_tui or _truthy(env.get("DEER_FLOW_TUI")) or (stdin_isatty and stdout_isatty):
+    if forced_tui or _truthy(env.get("ACT_WEAVE_TUI")) or (stdin_isatty and stdout_isatty):
         return LaunchPlan(
             mode="tui",
             message=positional,

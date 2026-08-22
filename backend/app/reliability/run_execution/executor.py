@@ -88,7 +88,6 @@ from app.reliability.run_execution.stream_authority import (
 from app.reliability.run_execution.vision_dispatch import (
     PrivateRunVisionDispatchAuthority,
 )
-from app.shared_assets.model_refs import resolve_model_ref
 from app.shared_assets.skill_builder_activity_stream import (
     SkillBuilderActivityEmitter,
     SkillBuilderActivityStreamBridge,
@@ -100,6 +99,8 @@ from app.shared_assets.skill_builder_agent_runtime import (
 )
 from app.shared_assets.skill_design_service import SkillDesignService
 from app.system_runtime_settings.models import auxiliary_model_snapshot_ref
+from app.system_settings.execution_payload import model_execution_provenance
+from app.system_settings.model_refs import resolve_model_ref
 from app.worker.service import JobLeaseAuthority
 from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_CONTEXT_KEY,
@@ -347,7 +348,7 @@ class RunAgentPrivateExecutor:
                 owner_user_id=str(execution.context.user_id),
                 namespace=DEFAULT_MEMORY_NAMESPACE,
                 preference_version=1,
-                summary_model_ref=None,
+                summary_model=None,
             )
         try:
             async with self._factory() as session, session.begin():
@@ -362,7 +363,7 @@ class RunAgentPrivateExecutor:
             ) from None
 
         enabled = bool(app_config.memory.enabled and preference.memory_enabled)
-        summary_model_ref: uuid.UUID | None = None
+        summary_model = None
         if enabled:
             model_name = app_config.summarization.model_name
             if model_name is None:
@@ -371,12 +372,9 @@ class RunAgentPrivateExecutor:
                     raise PermanentExecutionError("RUN_ASSET_STALE")
                 model_name = models[0].name
             model = app_config.get_model_config(model_name)
-            summary_model_ref = getattr(
-                model,
-                "_system_model_config_version_id",
-                None,
-            )
-            if not isinstance(summary_model_ref, uuid.UUID):
+            try:
+                summary_model = model_execution_provenance(model)
+            except ValueError:
                 raise PermanentExecutionError("RUN_ASSET_STALE")
         return SnipArchiveContext(
             enabled=enabled,
@@ -384,7 +382,7 @@ class RunAgentPrivateExecutor:
             owner_user_id=str(execution.context.user_id),
             namespace=DEFAULT_MEMORY_NAMESPACE,
             preference_version=preference.version,
-            summary_model_ref=summary_model_ref,
+            summary_model=summary_model,
         )
 
     @staticmethod
@@ -791,13 +789,8 @@ class RunAgentPrivateExecutor:
             vision_dispatch_authority = (
                 PrivateRunVisionDispatchAuthority(
                     boundary=boundary,
-                    materializer=self._model_materializer,
-                    project_id=execution.context.project_id,
-                    owner_user_id=str(execution.context.user_id),
-                    run_id=execution.run.run_id,
-                    expected_model=vision_model,
                 )
-                if (vision_model is not None and self._model_materializer is not None)
+                if vision_model is not None
                 else None
             )
 

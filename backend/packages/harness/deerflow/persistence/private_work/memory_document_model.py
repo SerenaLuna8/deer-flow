@@ -88,7 +88,10 @@ class MemoryHistoryEntryRow(Base):
     content_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     preference_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     snip_prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    summary_model_ref: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    summary_model_config_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    summary_model_payload_checksum: Mapped[str | None] = mapped_column(CHAR(64))
+    summary_model_secret_generation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    summary_model_secret_envelope_digest: Mapped[str | None] = mapped_column(CHAR(64))
     dream_job_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -123,8 +126,8 @@ class MemoryHistoryEntryRow(Base):
             ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
-            ["summary_model_ref"],
-            ["system_model_config_versions.id"],
+            ["summary_model_config_id"],
+            ["system_model_configs.id"],
             name="fk_memory_history_entries_summary_model",
             ondelete="RESTRICT",
         ),
@@ -137,11 +140,27 @@ class MemoryHistoryEntryRow(Base):
             "(origin = 'snip' AND source_run_id IS NULL"
             " AND source_checkpoint_id IS NOT NULL AND source_checkpoint_id <> ''"
             " AND committed_checkpoint_id IS NOT NULL AND committed_checkpoint_id <> ''"
-            " AND summary_model_ref IS NOT NULL) OR "
+            " AND summary_model_config_id IS NOT NULL"
+            " AND summary_model_payload_checksum IS NOT NULL) OR "
             "(origin = 'tool' AND source_run_id IS NOT NULL AND source_run_id <> ''"
             " AND source_checkpoint_id IS NULL AND committed_checkpoint_id IS NULL"
-            " AND summary_model_ref IS NULL)",
+            " AND summary_model_config_id IS NULL"
+            " AND summary_model_payload_checksum IS NULL"
+            " AND summary_model_secret_generation_id IS NULL"
+            " AND summary_model_secret_envelope_digest IS NULL)",
             name="ck_memory_history_entries_origin_source",
+        ),
+        CheckConstraint(
+            "summary_model_payload_checksum IS NULL OR summary_model_payload_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_memory_history_entries_model_checksum",
+        ),
+        CheckConstraint(
+            "(summary_model_secret_generation_id IS NULL AND summary_model_secret_envelope_digest IS NULL) OR (summary_model_secret_generation_id IS NOT NULL AND summary_model_secret_envelope_digest IS NOT NULL)",
+            name="ck_memory_history_entries_model_secret_group",
+        ),
+        CheckConstraint(
+            "summary_model_secret_envelope_digest IS NULL OR summary_model_secret_envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_memory_history_entries_model_secret_digest",
         ),
         CheckConstraint(
             "source_digest ~ '^[0-9a-f]{64}$' AND content_digest ~ '^[0-9a-f]{64}$'",
@@ -285,7 +304,14 @@ class MemoryDreamRunRow(Base):
     base_content_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     preference_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     policy_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    model_ref: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    model_config_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    model_provider_payload: Mapped[dict[str, object]] = mapped_column(
+        JSONB,
+        nullable=False,
+    )
+    model_payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    model_secret_generation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    model_secret_envelope_digest: Mapped[str | None] = mapped_column(CHAR(64))
     prompt_version: Mapped[str] = mapped_column(String(64), nullable=False)
     result_version: Mapped[int | None] = mapped_column(BigInteger)
     created_at: Mapped[datetime] = mapped_column(
@@ -322,8 +348,8 @@ class MemoryDreamRunRow(Base):
             ondelete="CASCADE",
         ),
         ForeignKeyConstraint(
-            ["model_ref"],
-            ["system_model_config_versions.id"],
+            ["model_config_id"],
+            ["system_model_configs.id"],
             name="fk_memory_dream_runs_model",
             ondelete="RESTRICT",
         ),
@@ -341,6 +367,22 @@ class MemoryDreamRunRow(Base):
             use_alter=True,
         ),
         CheckConstraint("namespace <> ''", name="ck_memory_dream_runs_namespace"),
+        CheckConstraint(
+            "jsonb_typeof(model_provider_payload) = 'object'",
+            name="ck_memory_dream_runs_model_provider_payload",
+        ),
+        CheckConstraint(
+            "model_payload_checksum ~ '^[0-9a-f]{64}$'",
+            name="ck_memory_dream_runs_model_payload_checksum",
+        ),
+        CheckConstraint(
+            "(model_secret_generation_id IS NULL AND model_secret_envelope_digest IS NULL) OR (model_secret_generation_id IS NOT NULL AND model_secret_envelope_digest IS NOT NULL)",
+            name="ck_memory_dream_runs_model_secret_group",
+        ),
+        CheckConstraint(
+            "model_secret_envelope_digest IS NULL OR model_secret_envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_memory_dream_runs_model_secret_digest",
+        ),
         CheckConstraint(
             "trigger IN ('auto_dream', 'manual_dream', 'budget_rewrite')",
             name="ck_memory_dream_runs_trigger",
@@ -522,7 +564,6 @@ class MemoryDocumentVersionRow(Base):
     history_to: Mapped[int | None] = mapped_column(BigInteger)
     history_count: Mapped[int | None] = mapped_column(Integer)
     prompt_version: Mapped[str | None] = mapped_column(String(64))
-    model_ref: Mapped[uuid.UUID | None] = mapped_column(Uuid)
     needs_review: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -566,12 +607,6 @@ class MemoryDocumentVersionRow(Base):
             name="fk_memory_document_versions_dream_run",
             ondelete="CASCADE",
         ),
-        ForeignKeyConstraint(
-            ["model_ref"],
-            ["system_model_config_versions.id"],
-            name="fk_memory_document_versions_model",
-            ondelete="RESTRICT",
-        ),
         CheckConstraint("namespace <> ''", name="ck_memory_document_versions_namespace"),
         CheckConstraint("version >= 1", name="ck_memory_document_versions_version"),
         CheckConstraint(
@@ -588,13 +623,13 @@ class MemoryDocumentVersionRow(Base):
         ),
         CheckConstraint(
             "(trigger = 'restore' AND dream_job_id IS NULL AND history_from IS NULL AND history_to IS NULL "
-            "AND history_count IS NULL AND prompt_version IS NULL AND model_ref IS NULL) OR "
+            "AND history_count IS NULL AND prompt_version IS NULL) OR "
             "(trigger = 'budget_rewrite' AND dream_job_id IS NOT NULL "
             "AND history_from IS NULL AND history_to IS NULL AND history_count = 0 "
-            "AND prompt_version IS NOT NULL AND prompt_version <> '' AND model_ref IS NOT NULL) OR "
+            "AND prompt_version IS NOT NULL AND prompt_version <> '') OR "
             "(trigger IN ('auto_dream', 'manual_dream') AND dream_job_id IS NOT NULL "
             "AND history_from >= 1 AND history_to >= history_from AND history_count BETWEEN 1 AND 20 "
-            "AND prompt_version IS NOT NULL AND prompt_version <> '' AND model_ref IS NOT NULL)",
+            "AND prompt_version IS NOT NULL AND prompt_version <> '')",
             name="ck_memory_document_versions_source",
         ),
         Index(

@@ -39,28 +39,36 @@ _ACTIONS: dict[str, AuditAction] = {
     "skill.version.revoke": AuditAction.ASSET_DEPRECATED,
     "skill.delete": AuditAction.ASSET_DELETED,
     "skill.enable": AuditAction.ASSET_UPDATED,
-    "skill.credential_bindings.configure": AuditAction.ASSET_UPDATED,
+    "skill.secret.configure": AuditAction.ASSET_UPDATED,
+    "skill.secret.replace": AuditAction.ASSET_UPDATED,
+    "skill.secret.clear": AuditAction.ASSET_UPDATED,
+    "skill.secret.copy": AuditAction.ASSET_UPDATED,
+    "skill.secret.invalidate": AuditAction.ASSET_UPDATED,
     "skill.suspend": AuditAction.ASSET_DEPRECATED,
     "mcp.create": AuditAction.ASSET_CREATED,
     "mcp.version.create": AuditAction.ASSET_UPDATED,
     "mcp.submit_approval": AuditAction.ASSET_UPDATED,
-    "mcp.approve": AuditAction.ASSET_UPDATED,
-    "mcp.credential_grants.configure": AuditAction.ASSET_UPDATED,
+    "mcp.secret.configure": AuditAction.ASSET_UPDATED,
+    "mcp.secret.replace": AuditAction.ASSET_UPDATED,
+    "mcp.secret.clear": AuditAction.ASSET_UPDATED,
+    "mcp.secret.copy": AuditAction.ASSET_UPDATED,
+    "mcp.secret.invalidate": AuditAction.ASSET_UPDATED,
     "mcp.publish": AuditAction.ASSET_PUBLISHED,
     "mcp.archive": AuditAction.ASSET_DEPRECATED,
     "mcp.suspend": AuditAction.ASSET_DEPRECATED,
     "mcp.activate": AuditAction.ASSET_UPDATED,
     "mcp.delete": AuditAction.ASSET_DELETED,
-    "credential.create": AuditAction.ASSET_CREDENTIAL_CREATED,
-    "credential.replace": AuditAction.ASSET_CREDENTIAL_REPLACED,
-    "credential.revoke": AuditAction.ASSET_CREDENTIAL_REVOKED,
-    "credential.delete": AuditAction.ASSET_CREDENTIAL_DELETED,
-    "credential.grants.migrate": AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
     "binding.enable": AuditAction.ASSET_BOUND,
     "binding.upgrade": AuditAction.ASSET_BOUND,
     "binding.rollback": AuditAction.ASSET_BOUND,
     "binding.sync_current": AuditAction.ASSET_BOUND,
     "binding.disable": AuditAction.ASSET_UNBOUND,
+    "model.secret.configure": AuditAction.ASSET_UPDATED,
+    "model.secret.replace": AuditAction.ASSET_UPDATED,
+    "model.secret.clear": AuditAction.ASSET_UPDATED,
+    "channel.secret.configure": AuditAction.ASSET_UPDATED,
+    "channel.secret.replace": AuditAction.ASSET_UPDATED,
+    "channel.secret.clear": AuditAction.ASSET_UPDATED,
 }
 
 _VERSIONED_AGENT_OPERATIONS = frozenset(
@@ -77,6 +85,11 @@ _VERSIONED_SKILL_OPERATIONS = frozenset(
         "skill.version.activate",
         "skill.export",
         "skill.version.revoke",
+        "skill.secret.configure",
+        "skill.secret.replace",
+        "skill.secret.clear",
+        "skill.secret.copy",
+        "skill.secret.invalidate",
     }
 )
 
@@ -100,6 +113,7 @@ class DurableSharedAssetGovernanceEventSink:
         action: str,
         request_id: str,
         asset_kind: str | None = None,
+        secret_metadata: dict[str, object] | None = None,
     ) -> None:
         selected_action, selected_kind = self._select_event(action, asset_kind)
         system_role = await session.scalar(
@@ -133,6 +147,7 @@ class DurableSharedAssetGovernanceEventSink:
             asset_kind=selected_kind,
             operation=action,
             version_number=version_number,
+            secret_metadata=secret_metadata,
         )
 
     async def append_project(
@@ -146,6 +161,7 @@ class DurableSharedAssetGovernanceEventSink:
         action: str,
         request_id: str,
         asset_kind: str | None = None,
+        secret_metadata: dict[str, object] | None = None,
     ) -> None:
         selected_action, selected_kind = self._select_event(action, asset_kind)
         membership_id = await session.scalar(
@@ -174,6 +190,7 @@ class DurableSharedAssetGovernanceEventSink:
             asset_kind=selected_kind,
             operation=action,
             version_number=version_number,
+            secret_metadata=secret_metadata,
         )
 
     @staticmethod
@@ -184,8 +201,8 @@ class DurableSharedAssetGovernanceEventSink:
         selected_action = _ACTIONS.get(operation)
         operation_domain = operation.partition(".")[0]
         selected_kind = asset_kind or operation_domain
-        kind_mismatch = operation_domain in {"agent", "skill", "mcp"} and selected_kind != operation_domain
-        if selected_action is None or selected_kind not in {"agent", "skill", "mcp"} or kind_mismatch:
+        kind_mismatch = operation_domain in {"agent", "skill", "mcp", "model", "channel"} and selected_kind != operation_domain
+        if selected_action is None or selected_kind not in {"agent", "skill", "mcp", "model", "channel"} or kind_mismatch:
             raise TypeError("shared asset audit event is invalid")
         return selected_action, selected_kind
 
@@ -237,6 +254,7 @@ class DurableSharedAssetGovernanceEventSink:
         asset_kind: str,
         operation: str,
         version_number: int | None,
+        secret_metadata: dict[str, object] | None,
     ) -> None:
         metadata: dict[str, object] = {
             "asset_kind": asset_kind,
@@ -244,6 +262,8 @@ class DurableSharedAssetGovernanceEventSink:
         }
         if version_number is not None:
             metadata["version_number"] = version_number
+        if secret_metadata is not None:
+            metadata.update(secret_metadata)
         await self._service.append(
             session,
             actor,

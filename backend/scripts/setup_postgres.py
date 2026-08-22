@@ -37,9 +37,8 @@ from app.system_settings.bootstrap import (
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     CURRENT_SCHEMA_REVISION,
-    M7RecreateRequired,
+    SchemaRecreateRequired,
     SchemaSetupRequired,
-    SchemaUpgradeRequired,
     bootstrap_schema,
 )
 from deerflow.persistence.final_schema_contract import FINAL_APP_TABLES
@@ -290,6 +289,25 @@ async def ensure_database(
                 pass
 
 
+async def _database_exists(admin_url: str, database_name: str) -> bool:
+    connection = None
+    try:
+        connection = await asyncpg.connect(_asyncpg_url(admin_url))
+        return bool(
+            await connection.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname = $1",
+                database_name,
+            )
+        )
+    except Exception:
+        raise PostgresSetupError(
+            "无法检查 PostgreSQL 数据库状态；请检查 POSTGRES_ADMIN_URL",
+        ) from None
+    finally:
+        if connection is not None:
+            await connection.close()
+
+
 def _create_setup_engine(config: DatabaseConfig) -> AsyncEngine:
     """Create an engine owned only by one setup invocation."""
     return create_async_engine(
@@ -445,12 +463,11 @@ async def _bootstrap_existing(
                 await connection.execute(text("SELECT 1"))
             await bootstrap_schema(engine)
             await _bootstrap_builtin_catalog(engine)
-            if default_model_bootstrap is not None:
-                await _bootstrap_default_model_schema(
-                    engine,
-                    default_model_bootstrap,
-                )
-                await _bootstrap_runtime_policy_schema(engine)
+            await _bootstrap_default_model_schema(
+                engine,
+                default_model_bootstrap,
+            )
+            await _bootstrap_runtime_policy_schema(engine)
             await _bootstrap_langgraph_schemas(database_url)
             await _bootstrap_default_project_schema(engine)
         return CURRENT_SCHEMA_REVISION
@@ -465,12 +482,9 @@ async def _bootstrap_existing(
     ) as exc:
         primary_error = exc
         raise PostgresSetupError(str(exc)) from None
-    except M7RecreateRequired as exc:
+    except SchemaRecreateRequired as exc:
         primary_error = exc
-        raise PostgresSetupError(f"M7_RECREATE_REQUIRED: 非空目标库不是完整的 {CURRENT_SCHEMA_REVISION}；请显式重建目标数据库") from None
-    except SchemaUpgradeRequired as exc:
-        primary_error = exc
-        raise PostgresSetupError(f"DATABASE_UPGRADE_REQUIRED: 目标库处于已知历史 revision，setup-db 不执行迁移；请运行 `make upgrade-db`（链头 {CURRENT_SCHEMA_REVISION}）") from None
+        raise PostgresSetupError(f"SCHEMA_RECREATE_REQUIRED: 非空目标库不是完整的 {CURRENT_SCHEMA_REVISION}；请显式重建目标数据库") from None
     except SchemaSetupRequired as exc:
         primary_error = exc
         raise PostgresSetupError("DATABASE_SETUP_REQUIRED: 目标库尚未初始化；请运行 `make setup-db`") from None
@@ -513,7 +527,7 @@ async def _bootstrap_default_project_schema(engine: AsyncEngine) -> None:
 
 async def _bootstrap_default_model_schema(
     engine: AsyncEngine,
-    material: DefaultSystemModelBootstrapMaterial,
+    material: DefaultSystemModelBootstrapMaterial | None,
 ) -> None:
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -538,21 +552,29 @@ async def setup_postgres(
     expected_database: str | None = None,
 ) -> SetupResult:
     """幂等创建目标数据库，并安装或验证完整 schema 快照。"""
-    try:
-        default_model_bootstrap = prepare_default_system_model_bootstrap()
-    except DefaultSystemModelBootstrapConfigurationInvalid as exc:
-        raise PostgresSetupError(str(exc)) from None
     parse_target(admin_url, maintenance=True)
     target = parse_target(database_url)
     if expected_database is not None:
         expected_database = validate_identifier(expected_database, kind="database")
         if target.database != expected_database:
             raise ValueError("DATABASE_URL database does not match --database")
+    default_model_bootstrap = None
+    existed = await _database_exists(admin_url, target.database)
+    if not existed:
+        try:
+            default_model_bootstrap = prepare_default_system_model_bootstrap()
+        except DefaultSystemModelBootstrapConfigurationInvalid as exc:
+            raise PostgresSetupError(str(exc)) from None
     created = await ensure_database(
         admin_url,
         target.database,
         owner_name=target.username,
     )
+    if default_model_bootstrap is None and (created or await _requires_initial_model_bootstrap(database_url)):
+        try:
+            default_model_bootstrap = prepare_default_system_model_bootstrap()
+        except DefaultSystemModelBootstrapConfigurationInvalid as exc:
+            raise PostgresSetupError(str(exc)) from None
     revision = await _bootstrap_existing(
         database_url,
         default_model_bootstrap=default_model_bootstrap,
@@ -565,6 +587,21 @@ async def setup_postgres(
         created=created,
         revision=revision,
     )
+
+
+async def _requires_initial_model_bootstrap(database_url: str) -> bool:
+    """Inspect only catalog presence before deciding whether Keys are required."""
+
+    engine = _create_setup_engine(DatabaseConfig(url=database_url))
+    try:
+        async with engine.connect() as connection:
+            table = await connection.scalar(text("SELECT to_regclass('system_model_configs')"))
+            if table is None:
+                return True
+            count = await connection.scalar(text("SELECT count(*) FROM system_model_configs"))
+            return not isinstance(count, int) or count == 0
+    finally:
+        await engine.dispose()
 
 
 def print_result(result: SetupResult) -> None:

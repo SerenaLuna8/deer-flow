@@ -9,6 +9,10 @@ from langchain_core.messages import HumanMessage
 from pydantic import SecretStr, ValidationError
 from sqlalchemy import text
 from support.private_thread_seed import TEST_MODEL_REF, seed_private_thread_database
+from support.system_model_seed import (
+    seed_system_model_config,
+    system_model_payload_checksum,
+)
 
 from app.gateway.private_work_schemas import PrivateRunCreateRequest
 from app.gateway.routers.private_work import _run_response
@@ -539,7 +543,7 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
         owner_user_id=str(context.user_id),
         namespace="default",
         preference_version=1,
-        summary_model_ref=None,
+        summary_model=None,
     )
 
     async def memory_archive_context(*_args, **_kwargs):
@@ -555,7 +559,7 @@ async def test_worker_treats_agent_sampling_incompatibility_as_permanent(
         run=run,
         snapshot=PersistedRunSnapshot(
             assets=(),
-            mcp_grants=(),
+            mcp_secrets=(),
             catalog_generation=1,
         ),
         checkpoint_namespace="",
@@ -628,7 +632,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         model="text-lead",
         supports_vision=False,
     )
-    lead_model._system_model_config_version_id = uuid.uuid4()
+    lead_model._system_model_config_id = uuid.uuid4()
     lead_model._system_provider_adapter = "openai"
     vision_model = ModelConfig(
         name=vision_model_ref,
@@ -639,7 +643,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         supports_vision=True,
         **provider_settings,
     )
-    vision_model._system_model_config_version_id = uuid.uuid4()
+    vision_model._system_model_config_id = uuid.uuid4()
     vision_model._system_provider_adapter = provider_adapter
     app_config = AppConfig(
         models=[lead_model, vision_model],
@@ -728,7 +732,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         run=run,
         snapshot=PersistedRunSnapshot(
             assets=(),
-            mcp_grants=(),
+            mcp_secrets=(),
             catalog_generation=1,
         ),
         checkpoint_namespace="",
@@ -760,7 +764,7 @@ async def test_worker_injects_durable_authority_for_any_selected_visual_adapter(
         owner_user_id=str(context.user_id),
         namespace="default",
         preference_version=1,
-        summary_model_ref=None,
+        summary_model=None,
     )
 
     async def memory_archive_context(*_args, **_kwargs):
@@ -811,9 +815,9 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
     thread_id = str(uuid.uuid4())
     run_id = str(uuid.uuid4())
     default_model_id = uuid.uuid4()
-    default_version_id = uuid.uuid4()
+    default_version_id = default_model_id
     selected_model_id = uuid.UUID(TEST_MODEL_REF)
-    selected_version_id = uuid.uuid4()
+    selected_version_id = selected_model_id
     selected_name = str(selected_model_id)
     try:
         async with seed.factory() as session, session.begin():
@@ -854,49 +858,16 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                     True,
                 ),
             ):
-                await session.execute(
-                    text(
-                        """INSERT INTO system_model_configs
-                        (id,display_name,status,
-                         current_version_id,revision,
-                         created_by_user_id,updated_by_user_id)
-                        VALUES (:id,:name,'active',NULL,1,
-                                :owner,:owner)"""
-                    ),
-                    {
-                        "id": model_id,
-                        "name": name,
-                        "owner": str(seed.owner_a.user_id),
-                    },
-                )
-                await session.execute(
-                    text(
-                        """INSERT INTO system_model_config_versions
-                        (id,model_config_id,version_number,provider_adapter,
-                         provider_model,settings,supports_thinking,
-                         supports_reasoning_effort,supports_vision,credential_id,
-                         credential_version_id,credential_env_key,payload_checksum,
-                         supersedes_version_id,created_by_user_id)
-                        VALUES (:version,:model,1,'vision_bridge_fake',:name,'{}'::jsonb,
-                                :supports,:supports,:supports,NULL,NULL,NULL,
-                                :checksum,NULL,:owner)"""
-                    ),
-                    {
-                        "version": version_id,
-                        "model": model_id,
-                        "name": name,
-                        "supports": supports,
-                        "checksum": ("b" * 64 if supports else "c" * 64),
-                        "owner": str(seed.owner_a.user_id),
-                    },
-                )
-                await session.execute(
-                    text(
-                        """UPDATE system_model_configs
-                        SET current_version_id=:version
-                        WHERE id=:model"""
-                    ),
-                    {"version": version_id, "model": model_id},
+                assert version_id == model_id
+                await seed_system_model_config(
+                    session,
+                    model_id=model_id,
+                    owner_user_id=str(seed.owner_a.user_id),
+                    display_name=name,
+                    provider_model=name,
+                    supports_thinking=supports,
+                    supports_reasoning_effort=supports,
+                    supports_vision=supports,
                 )
             await session.execute(
                 text(
@@ -963,7 +934,7 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
             row = (
                 await session.execute(
                     text(
-                        """SELECT model_config_id,model_config_version_id
+                        """SELECT model_config_id,payload_checksum
                         FROM run_model_config_snapshots
                         WHERE run_id=:run_id AND purpose='lead'"""
                     ),
@@ -971,7 +942,15 @@ async def test_postgres_run_snapshot_freezes_selected_model_and_effective_profil
                 )
             ).one()
         assert row.model_config_id == selected_model_id
-        assert row.model_config_version_id == selected_version_id
+        assert row.payload_checksum == system_model_payload_checksum(
+            model_id=selected_model_id,
+            provider_adapter="vision_bridge_fake",
+            provider_model=selected_name,
+            settings=None,
+            supports_thinking=True,
+            supports_reasoning_effort=True,
+            supports_vision=True,
+        )
 
         incompatible_version_id = uuid.uuid4()
         incompatible_payload = AgentPayload(

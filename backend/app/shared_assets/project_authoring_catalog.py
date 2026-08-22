@@ -38,7 +38,7 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
 )
-from app.shared_assets.mcp_tool_inventory_repository import mcp_grant_closure_digest
+from app.shared_assets.mcp_secret_store import McpSecretStore, mcp_secret_closure_digest
 from app.shared_assets.skill_design_generation import (
     SkillBuilderDependencySnapshot,
     SkillBuilderMcpToolDependency,
@@ -46,7 +46,6 @@ from app.shared_assets.skill_design_generation import (
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
-    CredentialGrantRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectMcpToolInventoryRow,
@@ -56,6 +55,7 @@ from deerflow.persistence.shared_assets import (
     SkillVersionFileRow,
     SkillVersionRow,
 )
+from deerflow.persistence.shared_assets.mcp_model import McpSecretSlotRow
 
 MAX_AUTHORING_SEARCH_QUERY_CHARS = 200
 MAX_AUTHORING_SEARCH_RESULTS = 20
@@ -451,7 +451,7 @@ class ProjectAuthoringCatalogRepository:
     """Read-only project catalog for Builder authoring references.
 
     The repository intentionally has no discovery, execution, activation,
-    binding, credential-material, or dependency-write methods. Catalog reads
+    binding, secret-material, or dependency-write methods. Catalog reads
     are observations only and never become runtime authority.
     """
 
@@ -797,21 +797,30 @@ class ProjectAuthoringCatalogRepository:
         ).limit(MAX_AUTHORING_MCP_SCAN_PER_PAGE + 1)
         rows = tuple((await self.session.execute(statement)).all())
         candidate_rows = rows[:MAX_AUTHORING_MCP_SCAN_PER_PAGE]
-        grant_ids = await self._active_grant_ids(
+        secret_digests = await self._secret_digests(
+            context,
             tuple(
                 sorted(
-                    {uuid.UUID(str(row.version_id)) for row in candidate_rows},
-                    key=lambda value: value.int,
+                    {
+                        (
+                            uuid.UUID(str(row.mcp_server_id)),
+                            uuid.UUID(str(row.version_id)),
+                        )
+                        for row in candidate_rows
+                    },
+                    key=lambda value: (value[0].int, value[1].int),
                 )
-            )
+            ),
         )
         valid_rows_and_items: list[tuple[object, McpToolCatalogItem]] = []
         for row in candidate_rows:
             item = self._mcp_tool_item(
                 row,
-                active_grant_ids=grant_ids.get(
-                    uuid.UUID(str(row.version_id)),
-                    (),
+                secret_digest=secret_digests.get(
+                    (
+                        uuid.UUID(str(row.mcp_server_id)),
+                        uuid.UUID(str(row.version_id)),
+                    )
                 ),
             )
             if item is not None:
@@ -859,10 +868,13 @@ class ProjectAuthoringCatalogRepository:
         row = (await self.session.execute(statement)).one_or_none()
         if row is None:
             raise AssetNotFound(context.request_id)
-        grant_ids = await self._active_grant_ids((request.version_id,))
+        secret_digests = await self._secret_digests(
+            context,
+            ((request.mcp_server_id, request.version_id),),
+        )
         item = self._mcp_tool_item(
             row,
-            active_grant_ids=grant_ids.get(request.version_id, ()),
+            secret_digest=secret_digests.get((request.mcp_server_id, request.version_id)),
         )
         if item is None:
             raise AssetNotFound(context.request_id)
@@ -1020,11 +1032,11 @@ class ProjectAuthoringCatalogRepository:
                 cached_name.label("tool_name"),
                 cached_description.label("tool_description"),
                 ProjectMcpToolInventoryRow.attempt_payload_checksum,
-                ProjectMcpToolInventoryRow.attempt_grant_digest,
+                ProjectMcpToolInventoryRow.attempt_secret_digest,
                 ProjectMcpToolInventoryRow.attempt_status,
                 ProjectMcpToolInventoryRow.public_error_code,
                 ProjectMcpToolInventoryRow.tools_payload_checksum,
-                ProjectMcpToolInventoryRow.tools_grant_digest,
+                ProjectMcpToolInventoryRow.tools_secret_digest,
                 ProjectMcpToolInventoryRow.last_success_at,
                 match_rank.label("match_rank"),
                 sort_server_slug.label("sort_server_slug"),
@@ -1095,30 +1107,45 @@ class ProjectAuthoringCatalogRepository:
             )
         return statement
 
-    async def _active_grant_ids(
+    async def _secret_digests(
         self,
-        version_ids: Sequence[uuid.UUID],
-    ) -> dict[uuid.UUID, tuple[uuid.UUID, ...]]:
-        if not version_ids:
+        context: ProjectContext,
+        targets: Sequence[tuple[uuid.UUID, uuid.UUID]],
+    ) -> dict[tuple[uuid.UUID, uuid.UUID], str]:
+        if not targets:
             return {}
-        statement = (
-            select(
-                CredentialGrantRow.mcp_server_version_id,
-                CredentialGrantRow.id,
+        version_ids = tuple(version_id for _mcp_id, version_id in targets)
+        slots = tuple(
+            (
+                await self.session.execute(
+                    select(McpSecretSlotRow)
+                    .where(McpSecretSlotRow.mcp_server_version_id.in_(version_ids))
+                    .order_by(
+                        McpSecretSlotRow.mcp_server_version_id,
+                        McpSecretSlotRow.id,
+                    )
+                )
             )
-            .where(
-                CredentialGrantRow.mcp_server_version_id.in_(version_ids),
-                CredentialGrantRow.status == "active",
-            )
-            .order_by(
-                CredentialGrantRow.mcp_server_version_id,
-                CredentialGrantRow.id,
-            )
+            .scalars()
+            .all()
         )
-        grouped: defaultdict[uuid.UUID, list[uuid.UUID]] = defaultdict(list)
-        for row in (await self.session.execute(statement)).all():
-            grouped[uuid.UUID(str(row.mcp_server_version_id))].append(uuid.UUID(str(row.id)))
-        return {key: tuple(values) for key, values in grouped.items()}
+        slots_by_version: defaultdict[uuid.UUID, list[McpSecretSlotRow]] = defaultdict(list)
+        for slot in slots:
+            slots_by_version[uuid.UUID(str(slot.mcp_server_version_id))].append(slot)
+        store = McpSecretStore(self.session)
+        result: dict[tuple[uuid.UUID, uuid.UUID], str] = {}
+        for mcp_server_id, version_id in targets:
+            materials = await store.load_materials(
+                project_id=context.project_id,
+                mcp_server_id=mcp_server_id,
+                mcp_server_version_id=version_id,
+                slots=slots_by_version.get(version_id, ()),
+                require_required=False,
+                for_update=False,
+                request_id=context.request_id,
+            )
+            result[(mcp_server_id, version_id)] = mcp_secret_closure_digest(materials)
+        return result
 
     @staticmethod
     def _skill_row_cursor_position(
@@ -1196,12 +1223,11 @@ class ProjectAuthoringCatalogRepository:
     def _mcp_tool_item(
         row: object,
         *,
-        active_grant_ids: tuple[uuid.UUID, ...],
+        secret_digest: str | None,
     ) -> McpToolCatalogItem | None:
-        current_grant_digest = mcp_grant_closure_digest(active_grant_ids)
-        if getattr(row, "tools_payload_checksum") != getattr(row, "payload_checksum") or getattr(row, "tools_grant_digest") != current_grant_digest or getattr(row, "last_success_at") is None:
+        if secret_digest is None or getattr(row, "tools_payload_checksum") != getattr(row, "payload_checksum") or getattr(row, "tools_secret_digest") != secret_digest or getattr(row, "last_success_at") is None:
             return None
-        attempt_matches = getattr(row, "attempt_payload_checksum") == getattr(row, "payload_checksum") and getattr(row, "attempt_grant_digest") == current_grant_digest
+        attempt_matches = getattr(row, "attempt_payload_checksum") == getattr(row, "payload_checksum") and getattr(row, "attempt_secret_digest") == secret_digest
         attempt_status = getattr(row, "attempt_status")
         if attempt_status not in {"ready", "failed"}:
             raise ValueError("MCP inventory status is invalid")
@@ -1248,7 +1274,7 @@ class ProjectAuthoringCatalogTools:
     """Fixed-context, read-only operations for a future Builder Agent.
 
     Calling a method only reads authoring references. It never activates a
-    Skill, performs MCP discovery or execution, reads credential material, or
+    Skill, performs MCP discovery or execution, reads secret material, or
     records a runtime dependency.
     """
 

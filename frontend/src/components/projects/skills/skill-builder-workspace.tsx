@@ -154,25 +154,25 @@ export function skillBuilderRevisionCommitSuccessCopy(
 export function SkillBuilderRevisionCommitSuccess({
   versionNumber,
   href,
-  credentialRequirementCount = 0,
+  secretRequirementCount = 0,
 }: {
   versionNumber: number | null;
   href: string;
-  credentialRequirementCount?: number;
+  secretRequirementCount?: number;
 }) {
   const { t } = useI18n();
   const copy = t.skills.builder.success;
   return (
     <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-center justify-center px-4 py-16 text-center">
       <p className="text-sm font-medium">
-        {credentialRequirementCount > 0
-          ? copy.revisionWithSecrets(versionNumber, credentialRequirementCount)
+        {secretRequirementCount > 0
+          ? copy.revisionWithSecrets(versionNumber, secretRequirementCount)
           : skillBuilderRevisionCommitSuccessCopy(versionNumber, copy)}
       </p>
       <Button asChild type="button" className="mt-6 min-h-11">
         <Link href={href}>
-          {credentialRequirementCount > 0
-            ? copy.configureCredentials
+          {secretRequirementCount > 0
+            ? copy.configureSecrets
             : copy.goActivate}
         </Link>
       </Button>
@@ -239,14 +239,14 @@ function skillBuilderExactVersionHref(
   listHref: string,
   skillId: string,
   skillVersionId: string,
-  configureCredentials: boolean,
+  configureSecrets: boolean,
 ): string {
   const params = new URLSearchParams({
     skill_id: skillId,
     skill_version_id: skillVersionId,
   });
-  if (configureCredentials) {
-    params.set("configure_credentials", "1");
+  if (configureSecrets) {
+    params.set("configure_secrets", "1");
   }
   return `${listHref}?${params.toString()}`;
 }
@@ -284,7 +284,7 @@ export function skillBuilderCreateCommitHref(
 export function skillBuilderCompletedVersionHref(
   listHref: string,
   session: SkillBuilderSession,
-  options: { configureCredentials: boolean },
+  options: { configureSecrets: boolean },
 ): string | null {
   if (
     session.status !== "completed" ||
@@ -297,7 +297,7 @@ export function skillBuilderCompletedVersionHref(
     listHref,
     session.created_skill_id,
     session.created_skill_version_id,
-    options.configureCredentials,
+    options.configureSecrets,
   );
 }
 
@@ -354,7 +354,7 @@ export function SkillBuilderCreateSecretSuccess({
         {copy.createdWithSecrets(requirementCount)}
       </p>
       <Button asChild type="button" className="mt-6 min-h-11">
-        <Link href={href}>{copy.configureCredentials}</Link>
+        <Link href={href}>{copy.configureSecrets}</Link>
       </Button>
     </div>
   );
@@ -478,7 +478,7 @@ export function SkillBuilderConversationView({
     message: string | null;
     skillHref: string;
     versionHref: string;
-    credentialHref: string | null;
+    secretHref: string | null;
   };
   onComposerTextChange: (value: string) => void;
   onSubmitMessage: () => void;
@@ -613,17 +613,17 @@ export function SkillBuilderConversationView({
                 completion.message && "mt-4",
               )}
             >
-              {completion.credentialHref ? (
+              {completion.secretHref ? (
                 <Button asChild type="button" className="min-h-10">
-                  <Link href={completion.credentialHref}>
-                    {t.skills.builder.success.configureCredentials}
+                  <Link href={completion.secretHref}>
+                    {t.skills.builder.success.configureSecrets}
                   </Link>
                 </Button>
               ) : null}
               <Button
                 asChild
                 type="button"
-                variant={completion.credentialHref ? "outline" : "default"}
+                variant={completion.secretHref ? "outline" : "default"}
                 className="min-h-10"
               >
                 <Link href={completion.versionHref}>
@@ -1651,7 +1651,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const createSecretHref =
     (session
       ? skillBuilderCompletedVersionHref(listHref, session, {
-          configureCredentials: true,
+          configureSecrets: true,
         })
       : null) ??
     (effectiveSecretSetup
@@ -1665,7 +1665,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
   const versionHref =
     (session
       ? skillBuilderCompletedVersionHref(listHref, session, {
-          configureCredentials: false,
+          configureSecrets: false,
         })
       : null) ??
     (session?.status === "completed" &&
@@ -1705,7 +1705,7 @@ export function SkillBuilderWorkspace({ sessionId }: { sessionId: string }) {
               : null,
           skillHref: completionSkillHref,
           versionHref,
-          credentialHref: completionSecretCount > 0 ? createSecretHref : null,
+          secretHref: completionSecretCount > 0 ? createSecretHref : null,
         }
       : undefined;
   const headerStatus = session?.target_skill_deleted

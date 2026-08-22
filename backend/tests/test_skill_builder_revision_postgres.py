@@ -14,6 +14,7 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.exc import IntegrityError, OperationalError
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.system_model_seed import seed_system_model_config
 
 from app.private_work.run_repository import PrivateRunRepository
 from app.projects.context import ProjectContext
@@ -49,10 +50,7 @@ from app.shared_assets.skill_service import (
 )
 from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
-from app.system_settings.bootstrap import (
-    GPT_5_6_LUNA_MODEL_ID,
-    GPT_5_6_LUNA_MODEL_VERSION_ID,
-)
+from app.system_settings.bootstrap import DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID
 from deerflow.persistence.jobs.model import WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobRepository
 from deerflow.persistence.run.model import RunRow
@@ -179,88 +177,22 @@ async def _environment(database_url: str, *, with_model: bool = False):
 
 async def _seed_default_model(seed: PrivateThreadSeed) -> None:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
     provider_model = f"builder-rev-{model_id.hex}"
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            sa.text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'Builder revision model','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {"id": model_id, "owner": str(seed.owner_a.user_id)},
+        await seed_system_model_config(
+            connection,
+            model_id=model_id,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="Builder revision model",
+            provider_model=provider_model,
         )
-        await connection.execute(
-            sa.text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,provider_model,
-                 settings,supports_thinking,supports_reasoning_effort,
-                 supports_vision,credential_id,credential_version_id,
-                 credential_env_key,payload_checksum,supersedes_version_id,
-                 created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake',:name,'{}'::jsonb,false,false,
-                        false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-            ),
-            {
-                "id": version_id,
-                "model": model_id,
-                "name": provider_model,
-                "checksum": "b" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            sa.text(
-                """UPDATE system_model_configs
-                   SET current_version_id=:version
-                 WHERE id=:model"""
-            ),
-            {"version": version_id, "model": model_id},
-        )
-        await connection.execute(
-            sa.text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'Builder revision vision model','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {
-                "id": GPT_5_6_LUNA_MODEL_ID,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            sa.text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,provider_model,
-                 settings,supports_thinking,supports_reasoning_effort,
-                 supports_vision,credential_id,credential_version_id,
-                 credential_env_key,payload_checksum,supersedes_version_id,
-                 created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake','builder-revision-vision',
-                        '{}'::jsonb,false,false,true,NULL,NULL,NULL,
-                        :checksum,NULL,:owner)"""
-            ),
-            {
-                "id": GPT_5_6_LUNA_MODEL_VERSION_ID,
-                "model": GPT_5_6_LUNA_MODEL_ID,
-                "checksum": "c" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            sa.text(
-                """UPDATE system_model_configs
-                   SET current_version_id=:version
-                 WHERE id=:model"""
-            ),
-            {
-                "version": GPT_5_6_LUNA_MODEL_VERSION_ID,
-                "model": GPT_5_6_LUNA_MODEL_ID,
-            },
+        await seed_system_model_config(
+            connection,
+            model_id=DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="Builder revision vision model",
+            provider_model="builder-revision-vision",
+            supports_vision=True,
         )
         await connection.execute(
             sa.text(
@@ -291,7 +223,7 @@ async def _create_current_template(skills: SkillService, context: ProjectContext
         created.version.id,
         expected_asset_version=created.asset.revision,
         expected_payload_checksum=created.version.payload_checksum,
-        expected_binding_revision=0,
+        expected_secret_revision=0,
     )
     return await skills.get(context, created.asset.id), current
 
@@ -1087,7 +1019,7 @@ async def test_create_session_validate_and_commit_saves_candidate_v1(
             committed.version.id,
             expected_asset_version=committed.skill.revision,
             expected_payload_checksum=committed.version.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
         assert activated.id == committed.version.id
         next_asset = await skills.get(context, committed.skill.id)
@@ -1104,7 +1036,7 @@ async def test_create_session_validate_and_commit_saves_candidate_v1(
             next_candidate.id,
             expected_asset_version=next_asset.revision,
             expected_payload_checksum=next_candidate.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
         assert next_current.id != committed.version.id
 
@@ -1440,7 +1372,7 @@ async def test_revision_commit_rejects_noop_and_stale_base(
             live_candidate.id,
             expected_asset_version=stale_asset.revision,
             expected_payload_checksum=live_candidate.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
         edited = await _edit_draft(
             design,
@@ -1743,7 +1675,7 @@ async def test_forward_activation_lineage_guard_on_postgres(
             second_candidate.id,
             expected_asset_version=current.revision,
             expected_payload_checksum=second_candidate.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
         latest = await skills.get(context, asset.id)
         with pytest.raises(AssetConflict):
@@ -1780,7 +1712,7 @@ async def test_forward_activation_lineage_guard_on_postgres(
                 third_candidate.id,
                 expected_asset_version=latest.revision - 1,
                 expected_payload_checksum=third_candidate.payload_checksum,
-                expected_binding_revision=0,
+                expected_secret_revision=0,
             )
         third = await skills.activate_version(
             context,
@@ -1788,7 +1720,7 @@ async def test_forward_activation_lineage_guard_on_postgres(
             third_candidate.id,
             expected_asset_version=latest.revision,
             expected_payload_checksum=third_candidate.payload_checksum,
-            expected_binding_revision=0,
+            expected_secret_revision=0,
         )
         assert third.id == third_candidate.id
         assert third.supersedes_version_id == second.id

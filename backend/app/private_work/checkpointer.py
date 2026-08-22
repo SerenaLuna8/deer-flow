@@ -57,6 +57,7 @@ from deerflow.agents.memory.snip import (
     MEMORY_ARCHIVE_RECEIPT_VERSION,
     SNIP_ARCHIVE_PROMPT_VERSION,
 )
+from deerflow.config.model_execution import SystemModelExecutionProvenance
 from deerflow.persistence.execution_approvals import (
     EXECUTION_APPROVAL_ACTIVE_STATUSES,
     ExecutionApprovalRequestRow,
@@ -92,7 +93,10 @@ _MEMORY_ARCHIVE_RECEIPT_FIELDS = frozenset(
         "content_digest",
         "preference_version",
         "snip_prompt_version",
-        "summary_model_ref",
+        "summary_model_config_id",
+        "summary_model_payload_checksum",
+        "summary_model_secret_generation_id",
+        "summary_model_secret_envelope_digest",
     }
 )
 
@@ -360,7 +364,13 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
         if committed_checkpoint_id is None:
             raise ValueError("Checkpoint Memory receipt commit is invalid")
         try:
-            summary_model_ref = uuid.UUID(str(receipt["summary_model_ref"]))
+            secret_generation_raw = receipt["summary_model_secret_generation_id"]
+            summary_model = SystemModelExecutionProvenance(
+                model_config_id=uuid.UUID(str(receipt["summary_model_config_id"])),
+                payload_checksum=str(receipt["summary_model_payload_checksum"]),
+                secret_generation_id=(uuid.UUID(str(secret_generation_raw)) if secret_generation_raw is not None else None),
+                secret_envelope_digest=(str(receipt["summary_model_secret_envelope_digest"]) if receipt["summary_model_secret_envelope_digest"] is not None else None),
+            )
         except (KeyError, TypeError, ValueError):
             raise ValueError("Checkpoint Memory model is invalid") from None
         return MemoryHistoryActivation(
@@ -377,7 +387,7 @@ class _ScopedCheckpointSaver(BaseCheckpointSaver):
             content_digest=receipt.get("content_digest"),
             preference_version=receipt.get("preference_version"),
             snip_prompt_version=receipt.get("snip_prompt_version"),
-            summary_model_ref=summary_model_ref,
+            summary_model=summary_model,
         )
 
     async def _repair_memory_archive_receipt(

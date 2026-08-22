@@ -16,22 +16,15 @@ from deerflow.persistence.shared_assets.binding_model import (
     ProjectSystemSkillBindingRow,
     SystemAssetUpgradeAuditRow,
 )
-from deerflow.persistence.shared_assets.credential_model import (
-    CredentialEnvelopeRow,
-    CredentialGrantRow,
-    CredentialRow,
-    CredentialVersionRow,
-)
 from deerflow.persistence.shared_assets.mcp_model import (
-    McpCredentialSlotRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
     McpToolDiscoveryAttemptRow,
+    ProjectMcpSecretGenerationRow,
+    ProjectMcpSecretStateRow,
+    ProjectMcpSecretTombstoneRow,
     ProjectMcpToolInventoryRow,
-)
-from deerflow.persistence.shared_assets.skill_credential_model import (
-    ProjectSkillCredentialBindingRow,
-    ProjectSkillCredentialConfigRow,
 )
 from deerflow.persistence.shared_assets.skill_design_model import (
     SkillDesignActivityRow,
@@ -45,6 +38,11 @@ from deerflow.persistence.shared_assets.skill_model import (
     SkillVersionFileRow,
     SkillVersionRow,
 )
+from deerflow.persistence.shared_assets.skill_secret_model import (
+    ProjectSkillSecretGenerationRow,
+    ProjectSkillSecretStateRow,
+    ProjectSkillSecretTombstoneRow,
+)
 
 __all__ = [
     "AgentRow",
@@ -55,21 +53,21 @@ __all__ = [
     "AgentVersionRow",
     "AgentVersionSkillRefRow",
     "AssetCatalogStateRow",
-    "CredentialEnvelopeRow",
-    "CredentialGrantRow",
-    "CredentialRow",
-    "CredentialVersionRow",
-    "McpCredentialSlotRow",
+    "McpSecretSlotRow",
     "McpServerRow",
     "McpServerVersionRow",
     "McpToolDiscoveryAttemptRow",
+    "ProjectMcpSecretGenerationRow",
+    "ProjectMcpSecretStateRow",
+    "ProjectMcpSecretTombstoneRow",
     "ProjectMcpToolInventoryRow",
     "ProjectSystemAgentBindingRow",
     "ProjectSystemMcpBindingRow",
     "ProjectSystemSkillBindingRow",
     "SystemAssetUpgradeAuditRow",
-    "ProjectSkillCredentialBindingRow",
-    "ProjectSkillCredentialConfigRow",
+    "ProjectSkillSecretGenerationRow",
+    "ProjectSkillSecretStateRow",
+    "ProjectSkillSecretTombstoneRow",
     "SkillRow",
     "SkillDesignActivityRow",
     "SkillDesignDraftFileRow",

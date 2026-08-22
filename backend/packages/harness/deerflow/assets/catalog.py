@@ -68,7 +68,6 @@ class AssetCatalogMcpSnapshot:
     version_id: uuid.UUID | str
     generation: int
     definition: Mapping[str, object]
-    credential_grant_ids: tuple[uuid.UUID, ...]
     asset_id: uuid.UUID | None = None
     checksum: str = ""
 

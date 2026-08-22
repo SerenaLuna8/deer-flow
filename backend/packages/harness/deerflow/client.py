@@ -59,7 +59,7 @@ from deerflow.runtime.goal import DEFAULT_MAX_GOAL_CONTINUATIONS, build_goal_sta
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.describe import build_skill_search_setup
 from deerflow.tools.builtins.tool_search import assemble_deferred_tools, build_mcp_routing_middleware, get_mcp_routing_hints_prompt_section
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
+from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY, generate_trace_id, get_current_trace_id, reset_current_trace_id, set_current_trace_id
 from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
 from deerflow.uploads.manager import (
     claim_unique_filename,
@@ -175,11 +175,11 @@ class DeerFlowClient:
             environment: Deployment environment label that ends up in
                 ``langfuse_tags`` (e.g. ``"production"`` / ``"staging"``).
                 When ``None`` the worker/client falls back to the
-                ``DEER_FLOW_ENV`` or ``ENVIRONMENT`` env vars. Pass an
+                ``ACT_WEAVE_ENV`` or ``ENVIRONMENT`` env vars. Pass an
                 explicit value for programmatic callers that do not want
                 env-var coupling.
             asset_context: Opaque trusted context supplied by an internal
-                caller for project-scoped credential materialization. Client
+                caller for project-scoped secret materialization. Client
                 dictionaries are not accepted as authorization context.
         """
         if config_path is not None:
@@ -814,7 +814,7 @@ class DeerFlowClient:
             user_id=get_effective_user_id(),
             assistant_id=self._agent_name or "lead-agent",
             model_name=configurable.get("model_name") or self._model_name,
-            environment=self._environment or os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+            environment=self._environment or os.environ.get("ACT_WEAVE_ENV") or os.environ.get("ENVIRONMENT"),
             deerflow_trace_id=deerflow_trace_id,
             include_deerflow_trace_id=is_trace_correlation_enabled(
                 self._app_config,
@@ -826,7 +826,7 @@ class DeerFlowClient:
         state: dict[str, Any] = {"messages": [HumanMessage(content=message)]}
         context = {"thread_id": thread_id}
         if deerflow_trace_id:
-            context[DEERFLOW_TRACE_METADATA_KEY] = deerflow_trace_id
+            context[ACT_WEAVE_TRACE_METADATA_KEY] = deerflow_trace_id
         if self._agent_name:
             context["agent_name"] = self._agent_name
 

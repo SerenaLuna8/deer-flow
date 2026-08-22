@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
+from deerflow.config.model_execution import FrozenSystemModelExecution
 
 type AgentDesignGenerationMode = Literal["flash", "thinking", "pro", "ultra"]
 type AgentDesignReasoningEffort = Literal["none", "low", "medium", "high"]
@@ -23,8 +24,7 @@ class AgentDesignGenerationProfile:
     mode: AgentDesignGenerationMode
     thinking_enabled: bool
     reasoning_effort: AgentDesignReasoningEffort | None
-    model_version_id: str | None = None
-    payload_checksum: str | None = None
+    model_execution: FrozenSystemModelExecution | None = None
 
     def as_dict(self) -> dict[str, object]:
         result: dict[str, object] = {
@@ -33,9 +33,14 @@ class AgentDesignGenerationProfile:
             "thinking_enabled": self.thinking_enabled,
             "reasoning_effort": self.reasoning_effort,
         }
-        if self.model_version_id is not None and self.payload_checksum is not None:
-            result["model_version_id"] = self.model_version_id
-            result["payload_checksum"] = self.payload_checksum
+        if self.model_execution is not None:
+            result["model_execution"] = {
+                "model_config_id": str(self.model_execution.model_config_id),
+                "provider_payload": dict(self.model_execution.provider_payload),
+                "payload_checksum": self.model_execution.payload_checksum,
+                "secret_generation_id": (str(self.model_execution.secret_generation_id) if self.model_execution.secret_generation_id is not None else None),
+                "secret_envelope_digest": (self.model_execution.secret_envelope_digest),
+            }
         return result
 
 

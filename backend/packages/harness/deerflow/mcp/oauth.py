@@ -82,21 +82,10 @@ class OAuthTokenManager:
         if oauth.audience:
             data["audience"] = oauth.audience
 
-        if oauth.grant_type == "client_credentials":
-            if not oauth.client_id or not oauth.client_secret:
-                raise ValueError("OAuth client_credentials requires client_id and client_secret")
-            data["client_id"] = oauth.client_id
-            data["client_secret"] = oauth.client_secret
-        elif oauth.grant_type == "refresh_token":
-            if not oauth.refresh_token:
-                raise ValueError("OAuth refresh_token grant requires refresh_token")
-            data["refresh_token"] = oauth.refresh_token
-            if oauth.client_id:
-                data["client_id"] = oauth.client_id
-            if oauth.client_secret:
-                data["client_secret"] = oauth.client_secret
-        else:
-            raise ValueError(f"Unsupported OAuth grant type: {oauth.grant_type}")
+        if not oauth.client_id or not oauth.client_secret:
+            raise ValueError("OAuth client_credentials requires client_id and client_secret")
+        data["client_id"] = oauth.client_id
+        data["client_secret"] = oauth.client_secret
 
         async with httpx.AsyncClient(timeout=15.0) as client:
             response = await client.post(oauth.token_url, data=data)

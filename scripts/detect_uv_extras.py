@@ -62,12 +62,12 @@ def parse_env_extras(value: str) -> list[str]:
 
 def find_config_file() -> Path | None:
     """Resolve explicit/env config first, otherwise repository-root config."""
-    explicit = os.environ.get("DEER_FLOW_CONFIG_PATH")
+    explicit = os.environ.get("ACT_WEAVE_CONFIG_PATH")
     if explicit:
         candidate = Path(explicit)
         if not candidate.is_file():
             raise FileNotFoundError(
-                "Config file specified by DEER_FLOW_CONFIG_PATH "
+                "Config file specified by ACT_WEAVE_CONFIG_PATH "
                 f"does not exist: {candidate}"
             )
         return candidate.resolve()

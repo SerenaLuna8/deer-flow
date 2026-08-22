@@ -30,6 +30,9 @@ from deerflow.persistence.shared_assets import (
     SkillVersionFileRow,
     SkillVersionRow,
 )
+from deerflow.persistence.shared_assets.skill_secret_model import (
+    ProjectSkillSecretTombstoneRow,
+)
 
 # Builder session states that may still progress; a deleted revision target
 # collapses them to ``failed`` inside the delete transaction.
@@ -389,6 +392,15 @@ class SkillRepository:
         )
 
         if selected_version_ids:
+            await self.session.execute(
+                delete(ProjectSkillSecretTombstoneRow).where(
+                    ProjectSkillSecretTombstoneRow.project_id == context.project_id,
+                    ProjectSkillSecretTombstoneRow.skill_id == asset.id,
+                    ProjectSkillSecretTombstoneRow.skill_version_id.in_(
+                        selected_version_ids,
+                    ),
+                )
+            )
             await self.session.execute(
                 delete(SkillVersionFileRow).where(
                     SkillVersionFileRow.skill_version_id.in_(

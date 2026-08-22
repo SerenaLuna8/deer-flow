@@ -90,7 +90,6 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.model_refs import ModelRefResolver
 from app.shared_assets.models import (
     AssetKind,
     AssetSelection,
@@ -98,6 +97,7 @@ from app.shared_assets.models import (
 )
 from app.shared_assets.resolver import ProjectAssetResolver
 from app.system_runtime_settings import AutomationsPolicyValue
+from app.system_settings.model_refs import ModelRefResolver
 from deerflow.mcp_definition_policy import McpEndpointPolicy
 from deerflow.persistence.scheduled_task_runs import (
     ScheduledTaskRunCreate,

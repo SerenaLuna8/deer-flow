@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from deerflow.config.database_config import DatabaseConfig
-from deerflow.persistence.bootstrap import M7RecreateRequired, classify_database
+from deerflow.persistence.bootstrap import SchemaRecreateRequired, classify_database
 
 try:
     from scripts.setup_postgres import parse_target
@@ -73,13 +73,13 @@ async def prepare_run_event_partitions(
         async with engine.begin() as connection:
             try:
                 state = await classify_database(connection)
-            except M7RecreateRequired:
+            except SchemaRecreateRequired:
                 raise RunEventPartitionPreparationError(
                     "目标库 schema 未处于可验证状态；请先运行 make check-db",
                 ) from None
             if state != "current":
                 raise RunEventPartitionPreparationError(
-                    "目标库不在当前 schema head；请先运行 make check-db/upgrade-db",
+                    "目标库不在当前 Schema V1；请先运行 make check-db",
                 )
             # A queued ACCESS EXCLUSIVE request can otherwise stall ordinary
             # traffic behind it. Operators can safely retry this idempotent job.

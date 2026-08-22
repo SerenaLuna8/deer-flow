@@ -112,10 +112,10 @@ The application does not import arbitrary model class paths from
 LangChain `BaseChatModel` interface, review and add its fixed class path to the
 server's provider-adapter allowlist, and deploy the code.
 
-After deployment, a system administrator creates a version in
-`/admin/settings/models`, stores only bounded secret-free provider settings,
-and binds the exact encrypted System Credential version. The browser never
-accepts a Python class path or a plaintext provider key.
+After deployment, a system administrator creates a configuration in
+`/admin/settings/models`, stores bounded provider settings, and writes its
+encrypted API Key there. The browser never accepts a Python class path and never
+receives a stored provider key.
 
 ## Custom checkpointer
 

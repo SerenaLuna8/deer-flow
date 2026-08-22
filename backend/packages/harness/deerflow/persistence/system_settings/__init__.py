@@ -4,12 +4,14 @@ from deerflow.persistence.system_settings.model import (
     RunModelConfigSnapshotRow,
     SystemModelCatalogStateRow,
     SystemModelConfigRow,
-    SystemModelConfigVersionRow,
+    SystemModelSecretGenerationRow,
+    SystemModelSecretTombstoneRow,
 )
 
 __all__ = [
     "RunModelConfigSnapshotRow",
     "SystemModelCatalogStateRow",
     "SystemModelConfigRow",
-    "SystemModelConfigVersionRow",
+    "SystemModelSecretGenerationRow",
+    "SystemModelSecretTombstoneRow",
 ]

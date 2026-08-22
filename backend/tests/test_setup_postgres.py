@@ -17,8 +17,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.projects.errors import ProjectBootstrapFailed
 from deerflow.persistence.final_schema_contract import (
-    FINAL_M7_CATALOG_SIGNATURE,
-    read_m7_catalog_signature,
+    FINAL_SCHEMA_V1_CATALOG_SIGNATURE,
+    read_schema_v1_catalog_signature,
 )
 from scripts import check_postgres, setup_postgres
 
@@ -26,15 +26,10 @@ from scripts import check_postgres, setup_postgres
 @pytest.fixture(autouse=True)
 def _default_model_bootstrap_environment(monkeypatch) -> None:
     encoded = b64encode(b"s" * 32).decode("ascii")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "unit-bootstrap-secret")
-    monkeypatch.setenv("OPENCODE_API_KEY", "unit-opencode-bootstrap-secret")
+    monkeypatch.setenv("ACT_WEAVE_SECRET_KEY", encoded)
     monkeypatch.setenv(
-        "DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID",
-        "unit-bootstrap",
-    )
-    monkeypatch.setenv(
-        "DEER_FLOW_CREDENTIAL_KEYRING_JSON",
-        f'{{"unit-bootstrap":"{encoded}"}}',
+        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY",
+        "unit-bootstrap-secret",
     )
 
 
@@ -302,6 +297,8 @@ async def test_bootstrap_existing_preserves_ambiguous_admin_code(monkeypatch) ->
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,
@@ -335,13 +332,13 @@ async def test_bootstrap_existing_rejects_unknown_schema_without_mutation(monkey
     monkeypatch.setattr(
         setup_postgres,
         "bootstrap_schema",
-        AsyncMock(side_effect=setup_postgres.M7RecreateRequired()),
+        AsyncMock(side_effect=setup_postgres.SchemaRecreateRequired()),
     )
 
     with pytest.raises(setup_postgres.PostgresSetupError) as exc_info:
         await setup_postgres._bootstrap_existing("postgresql://owner:private-password@localhost/deerflow_test_1_abc")
 
-    assert str(exc_info.value).startswith("M7_RECREATE_REQUIRED:")
+    assert str(exc_info.value).startswith("SCHEMA_RECREATE_REQUIRED:")
     assert setup_postgres.CURRENT_SCHEMA_REVISION in str(exc_info.value)
     assert "重建目标数据库" in str(exc_info.value)
     assert "private-password" not in str(exc_info.value)
@@ -398,6 +395,8 @@ async def test_bootstrap_existing_cleanup_failure_does_not_override_bootstrap_co
     monkeypatch.setattr(setup_postgres, "_complete_bootstrap_lock", coordination_lock)
     monkeypatch.setattr(setup_postgres, "bootstrap_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_builtin_catalog", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_default_model_schema", AsyncMock())
+    monkeypatch.setattr(setup_postgres, "_bootstrap_runtime_policy_schema", AsyncMock())
     monkeypatch.setattr(setup_postgres, "_bootstrap_langgraph_schemas", AsyncMock())
     monkeypatch.setattr(
         setup_postgres,
@@ -647,6 +646,7 @@ async def test_setup_validates_explicit_database_and_always_closes_engine(monkey
     bootstrap = AsyncMock(side_effect=setup_postgres.PostgresSetupError("sanitized"))
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
+    monkeypatch.setattr(setup_postgres, "_database_exists", AsyncMock(return_value=False))
 
     with pytest.raises(ValueError, match="does not match"):
         await setup_postgres.setup_postgres(
@@ -677,20 +677,17 @@ async def test_setup_preflights_default_model_before_creating_database(
 ) -> None:
     ensure = AsyncMock()
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
+    monkeypatch.setattr(setup_postgres, "_database_exists", AsyncMock(return_value=False))
     monkeypatch.setattr(
         setup_postgres,
         "prepare_default_system_model_bootstrap",
-        MagicMock(
-            side_effect=setup_postgres.PostgresSetupError(
-                "默认模型初始化前置条件不满足",
-            )
-        ),
+        MagicMock(side_effect=setup_postgres.DefaultSystemModelBootstrapConfigurationInvalid()),
         raising=False,
     )
 
     with pytest.raises(
         setup_postgres.PostgresSetupError,
-        match="默认模型初始化前置条件不满足",
+        match="ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY",
     ):
         await setup_postgres.setup_postgres(
             "postgresql://admin:secret@localhost/postgres",
@@ -729,6 +726,11 @@ async def test_two_concurrent_setup_calls_continue_to_bootstrap(monkeypatch) -> 
     bootstrap = AsyncMock(return_value=setup_postgres.CURRENT_SCHEMA_REVISION)
     monkeypatch.setattr(setup_postgres, "ensure_database", ensure)
     monkeypatch.setattr(setup_postgres, "_bootstrap_existing", bootstrap)
+    monkeypatch.setattr(
+        setup_postgres,
+        "_database_exists",
+        AsyncMock(side_effect=[False, False]),
+    )
     args = (
         "postgresql://admin:secret@localhost/postgres",
         "postgresql://owner:secret@localhost/deerflow_test_1_abc",
@@ -857,7 +859,7 @@ async def test_real_postgres_concurrent_setup_owner_bootstrap_and_check(
     engine = create_async_engine(database_url)
     try:
         async with engine.connect() as connection:
-            assert await read_m7_catalog_signature(connection) == FINAL_M7_CATALOG_SIGNATURE
+            assert await read_schema_v1_catalog_signature(connection) == FINAL_SCHEMA_V1_CATALOG_SIGNATURE
             vision_timeout_seconds = await connection.scalar(
                 text(
                     """SELECT (version.value->'vision_bridge'->>'timeout_seconds')::integer

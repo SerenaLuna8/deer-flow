@@ -7,7 +7,6 @@ export const ASSET_LIST_KINDS = [
   "agents",
   "skills",
   "mcp-servers",
-  "credentials",
 ] as const;
 export const ASSET_STATUSES = ["active", "archived", "suspended"] as const;
 export const ASSET_WORKFLOW_STATUSES = [
@@ -33,7 +32,6 @@ export const MCP_TRANSPORTS = [
   "http",
   "streamable_http",
 ] as const;
-export const CREDENTIAL_GRANT_STATUSES = ["active", "revoked"] as const;
 export const MCP_TOOL_INVENTORY_STATUSES = [
   "never_discovered",
   "testing",
@@ -59,7 +57,7 @@ export const AGENT_RUNTIME_ASSESSMENT_REASON_CODES = [
   "model_unavailable",
 ] as const;
 export const MAX_AGENT_RUNTIME_ASSESSMENTS = 100;
-export const CREDENTIAL_PAYLOAD_GROUPS = [
+export const SECRET_PAYLOAD_GROUPS = [
   "env",
   "headers",
   "query",
@@ -75,7 +73,6 @@ export const versionRelationSchema = z.enum(VERSION_RELATIONS);
 export const skillScanDecisionSchema = z.enum(SKILL_SCAN_DECISIONS);
 export const skillFilePreviewStatusSchema = z.enum(SKILL_FILE_PREVIEW_STATUSES);
 export const mcpTransportSchema = z.enum(MCP_TRANSPORTS);
-export const credentialGrantStatusSchema = z.enum(CREDENTIAL_GRANT_STATUSES);
 export const mcpToolInventoryStatusSchema = z.enum(MCP_TOOL_INVENTORY_STATUSES);
 export const mcpToolDiscoveryAttemptStatusSchema = z.enum(
   MCP_TOOL_DISCOVERY_ATTEMPT_STATUSES,
@@ -83,7 +80,7 @@ export const mcpToolDiscoveryAttemptStatusSchema = z.enum(
 export const mcpToolInventoryErrorCodeSchema = z.enum(
   MCP_TOOL_INVENTORY_ERROR_CODES,
 );
-export const credentialPayloadGroupSchema = z.enum(CREDENTIAL_PAYLOAD_GROUPS);
+export const secretPayloadGroupSchema = z.enum(SECRET_PAYLOAD_GROUPS);
 export const agentRuntimeAssessmentReasonCodeSchema = z.enum(
   AGENT_RUNTIME_ASSESSMENT_REASON_CODES,
 );
@@ -192,45 +189,33 @@ const safeJsonObjectSchema = z.custom<Record<string, unknown>>(
 );
 const stringMapSchema = z.custom<Record<string, string>>(isStringMap);
 const stringListMapSchema = z.custom<Record<string, string[]>>(isStringListMap);
-const credentialFieldNameSchema = z.string().min(1).max(255);
-const credentialFieldMapSchema = z
+const secretFieldNameSchema = z.string().min(1).max(255);
+const secretFieldMapSchema = z
   .record(z.string())
   .superRefine((value, context) => {
     const fields = Object.keys(value);
     if (fields.length === 0) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Credential payload groups cannot be empty",
+        message: "Secret payload groups cannot be empty",
       });
     }
     for (const fieldName of fields) {
-      if (!credentialFieldNameSchema.safeParse(fieldName).success) {
+      if (!secretFieldNameSchema.safeParse(fieldName).success) {
         context.addIssue({
           code: z.ZodIssueCode.custom,
-          message: "Credential field names must contain 1 to 255 characters",
+          message: "Secret field names must contain 1 to 255 characters",
           path: [fieldName],
         });
       }
     }
   });
-const credentialFieldListSchema = z
-  .array(credentialFieldNameSchema)
+const secretFieldListSchema = z
+  .array(secretFieldNameSchema)
   .min(1)
   .refine((fields) => new Set(fields).size === fields.length, {
-    message: "Credential field names must be unique within a group",
+    message: "Secret field names must be unique within a group",
   });
-const credentialPayloadStructureSchema = z
-  .object({
-    env: credentialFieldListSchema.optional(),
-    headers: credentialFieldListSchema.optional(),
-    query: credentialFieldListSchema.optional(),
-    oauth: credentialFieldListSchema.optional(),
-  })
-  .strict()
-  .refine((value) => Object.keys(value).length > 0, {
-    message: "Credential payload schema cannot be empty",
-  });
-
 export const agentModelSettingsSchema = z
   .object({
     temperature: z.number().min(0).max(2).optional(),
@@ -274,116 +259,21 @@ export const skillSecretDeclarationNameSchema = z
   .min(1)
   .regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 export const skillSecretNameSchema = skillSecretDeclarationNameSchema.max(255);
-export const eligibleSkillCredentialSchema = z
+export const skillSecretStatusSchema = z
   .object({
-    credential_id: assetIdSchema,
-    credential_version_id: assetIdSchema,
-    display_name: z.string().min(1),
-    version_number: z.number().int().positive(),
-    env_fields: z.array(credentialFieldNameSchema),
+    name: skillSecretNameSchema,
+    optional: z.boolean(),
+    configured: z.boolean(),
+    revision: z.number().int().nonnegative(),
   })
-  .strict()
-  .refine(
-    (value) => new Set(value.env_fields).size === value.env_fields.length,
-    {
-      message: "Credential env field names must be unique",
-      path: ["env_fields"],
-    },
-  );
-export const skillCredentialMappingStatusSchema = z.enum([
-  "missing",
-  "configured",
-  "invalid",
-]);
-const skillCredentialRequirementBaseSchema = z.object({
-  name: skillSecretDeclarationNameSchema,
-  optional: z.boolean(),
-  mapping_status: skillCredentialMappingStatusSchema,
-  eligible_credentials: z.array(eligibleSkillCredentialSchema),
-});
-export const skillCredentialRequirementSchema =
-  skillCredentialRequirementBaseSchema
-    .extend({
-      configured: z.boolean(),
-      credential_id: assetIdSchema.nullable(),
-      credential_version_id: assetIdSchema.nullable(),
-      credential_display_name: z.string().min(1).nullable(),
-      credential_version_number: z.number().int().positive().nullable(),
-      source_env_field_name: credentialFieldNameSchema.nullable(),
-    })
-    .strict()
-    .superRefine((value, context) => {
-      const shouldBeConfigured = value.mapping_status !== "missing";
-      if (value.configured !== shouldBeConfigured) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "Skill Credential configured state must match mapping status",
-          path: ["configured"],
-        });
-      }
-      const sourceIdentity = [
-        value.credential_id,
-        value.credential_version_id,
-        value.source_env_field_name,
-      ];
-      const sourceIdentityCount = sourceIdentity.filter(
-        (item) => item !== null,
-      ).length;
-      if (
-        sourceIdentityCount !== 0 &&
-        sourceIdentityCount !== sourceIdentity.length
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "Skill Credential source identity must be all visible or all redacted",
-          path: ["credential_id"],
-        });
-      }
-      const displayMetadata = [
-        value.credential_display_name,
-        value.credential_version_number,
-      ];
-      const displayMetadataCount = displayMetadata.filter(
-        (item) => item !== null,
-      ).length;
-      if (
-        displayMetadataCount !== 0 &&
-        displayMetadataCount !== displayMetadata.length
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message:
-            "Skill Credential display metadata must be all visible or all unavailable",
-          path: ["credential_display_name"],
-        });
-      }
-      if (displayMetadataCount > 0 && sourceIdentityCount === 0) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Skill Credential display metadata requires source identity",
-          path: ["credential_display_name"],
-        });
-      }
-      if (
-        value.mapping_status === "configured" &&
-        sourceIdentityCount > 0 &&
-        displayMetadataCount !== displayMetadata.length
-      ) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "A valid Skill Credential mapping requires display metadata",
-          path: ["credential_display_name"],
-        });
-      }
-    });
-export const skillCredentialBindingsResponseSchema = z
+  .strict();
+export const skillSecretSetResponseSchema = z
   .object({
     skill_id: assetIdSchema,
     skill_version_id: assetIdSchema,
     revision: z.number().int().nonnegative(),
-    requirements: z.array(skillCredentialRequirementSchema),
+    readiness: z.enum(["ready", "unready"]),
+    requirements: z.array(skillSecretStatusSchema),
     request_id: z.string().min(1),
   })
   .strict()
@@ -392,45 +282,30 @@ export const skillCredentialBindingsResponseSchema = z
     if (new Set(names).size !== names.length) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "Skill Credential requirement names must be unique",
+        message: "Skill secret names must be unique",
         path: ["requirements"],
       });
     }
-    value.requirements.forEach((requirement, requirementIndex) => {
-      const versionIds = requirement.eligible_credentials.map(
-        (credential) => credential.credential_version_id,
-      );
-      if (new Set(versionIds).size !== versionIds.length) {
-        context.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: "Eligible Credential versions must be unique",
-          path: ["requirements", requirementIndex, "eligible_credentials"],
-        });
-      }
-    });
+    const ready = value.requirements.every(
+      (requirement) => requirement.optional || requirement.configured,
+    );
+    if ((value.readiness === "ready") !== ready) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Skill secret readiness is inconsistent",
+        path: ["readiness"],
+      });
+    }
   });
-export const skillCredentialBindingInputSchema = z
+export const skillSecretReplaceInputSchema = z
   .object({
-    name: skillSecretNameSchema,
-    credential_version_id: assetIdSchema,
-    source_env_field_name: credentialFieldNameSchema,
+    secrets: z.record(skillSecretNameSchema, z.string().min(1)).refine(
+      (value) => Object.keys(value).length > 0,
+      "At least one Skill secret must be supplied",
+    ),
   })
   .strict();
-export const skillCredentialBindingsInputSchema = z
-  .object({
-    expected_revision: z.number().int().nonnegative(),
-    bindings: z.array(skillCredentialBindingInputSchema).max(256),
-  })
-  .strict()
-  .refine(
-    (value) =>
-      new Set(value.bindings.map((binding) => binding.name)).size ===
-      value.bindings.length,
-    {
-      message: "Skill Credential binding names must be unique",
-      path: ["bindings"],
-    },
-  );
+export const secretClearInputSchema = z.object({ confirmed: z.literal(true) }).strict();
 const skillFileViewSchema = z
   .object({
     path: z.string().min(1),
@@ -584,15 +459,15 @@ export const skillVersionSchema = z
     }
   });
 
-const mcpCredentialSlotNameSchema = z
+const mcpSecretSlotNameSchema = z
   .string()
   .max(63)
   .regex(/^[a-z][a-z0-9._-]{0,62}$/);
 
-const mcpCredentialSlotSchema = z
+const mcpSecretSlotSchema = z
   .object({
     id: assetIdSchema,
-    name: mcpCredentialSlotNameSchema,
+    name: mcpSecretSlotNameSchema,
     purpose: z.string(),
     payload_schema: stringListMapSchema,
     required: z.boolean(),
@@ -600,22 +475,10 @@ const mcpCredentialSlotSchema = z
   .strict();
 const mcpDefinitionSlotSchema = z
   .object({
-    name: mcpCredentialSlotNameSchema,
+    name: mcpSecretSlotNameSchema,
     purpose: z.string(),
     payload_schema: stringListMapSchema,
     required: z.boolean(),
-  })
-  .strict();
-const credentialGrantSchema = z
-  .object({
-    id: assetIdSchema,
-    mcp_server_version_id: assetIdSchema,
-    credential_slot_id: assetIdSchema,
-    credential_version_id: assetIdSchema,
-    status: credentialGrantStatusSchema,
-    version: z.number().int().positive(),
-    created_by_user_id: z.string().min(1),
-    created_at: z.string().datetime({ offset: true }),
   })
   .strict();
 const mcpDefinitionSchema = z
@@ -631,7 +494,7 @@ const mcpDefinitionSchema = z
     routing: safeJsonObjectSchema,
     tool_overrides: safeJsonObjectSchema,
     timeout_seconds: z.number().int().positive(),
-    credential_slots: z.array(mcpDefinitionSlotSchema),
+    secret_slots: z.array(mcpDefinitionSlotSchema),
   })
   .strict();
 
@@ -642,8 +505,7 @@ export const mcpVersionSchema = z
     version_number: z.number().int().positive(),
     workflow_status: assetWorkflowStatusSchema,
     definition: mcpDefinitionSchema,
-    credential_slots: z.array(mcpCredentialSlotSchema),
-    credential_grants: z.array(credentialGrantSchema),
+    secret_slots: z.array(mcpSecretSlotSchema),
     supersedes_version_id: assetIdSchema.nullable(),
     payload_checksum: z.string().min(1),
     submitted_at: z.string().datetime({ offset: true }).nullable(),
@@ -757,25 +619,10 @@ export const mcpToolDiscoveryAttemptResponseSchema = z
   })
   .strict();
 
-export const credentialVersionSchema = z
-  .object({
-    id: assetIdSchema,
-    credential_id: assetIdSchema,
-    version_number: z.number().int().positive(),
-    status: z.enum(["active", "retired", "revoked"]),
-    payload_schema_version: z.number().int().positive(),
-    payload_schema: credentialPayloadStructureSchema,
-    supersedes_version_id: assetIdSchema.nullable(),
-    created_by_user_id: z.string().min(1),
-    created_at: z.string().datetime({ offset: true }),
-  })
-  .strict();
-
 export const assetVersionSchema = z.union([
   agentVersionSchema,
   skillVersionSchema,
   mcpVersionSchema,
-  credentialVersionSchema,
 ]);
 
 export const agentVersionResponseSchema = z
@@ -788,7 +635,7 @@ export const mcpVersionResponseSchema = z
   .object({ data: mcpVersionSchema, request_id: z.string().min(1) })
   .strict();
 const configuredMcpVersionSchema = mcpVersionSchema.extend({
-  workflow_status: z.enum(["published", "pending_approval"]),
+  workflow_status: z.literal("published"),
 });
 export const configuredMcpResponseSchema = z
   .object({
@@ -814,30 +661,6 @@ export const configuredMcpResponseSchema = z
         path: ["item", "current_published_version_id"],
       });
     }
-    const hasCredentialSlots = value.version.credential_slots.length > 0;
-    const expectedWorkflowStatus = hasCredentialSlots
-      ? "pending_approval"
-      : "published";
-    if (value.version.workflow_status !== expectedWorkflowStatus) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "Configured MCP response workflow must match its Credential slots",
-        path: ["version", "workflow_status"],
-      });
-    }
-    if (
-      value.version.workflow_status === "pending_approval" &&
-      value.version.supersedes_version_id !==
-        value.item.current_published_version_id
-    ) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message:
-          "Pending configured MCP must extend the current published configuration",
-        path: ["version", "supersedes_version_id"],
-      });
-    }
   });
 
 const projectMcpEditableVersionSchema = mcpVersionSchema.extend({
@@ -848,13 +671,13 @@ function editableMcpSlotsMatch(
   version: z.infer<typeof projectMcpEditableVersionSchema>,
 ): boolean {
   if (
-    version.definition.credential_slots.length !==
-    version.credential_slots.length
+    version.definition.secret_slots.length !==
+    version.secret_slots.length
   ) {
     return false;
   }
-  return version.credential_slots.every((slot, index) => {
-    const definitionSlot = version.definition.credential_slots[index];
+  return version.secret_slots.every((slot, index) => {
+    const definitionSlot = version.definition.secret_slots[index];
     if (
       slot.name !== definitionSlot?.name ||
       slot.purpose !== definitionSlot.purpose ||
@@ -936,41 +759,6 @@ export const projectMcpEditableConfigurationResponseSchema = z
       });
     }
   });
-export const credentialMigrationReferenceSchema = z
-  .object({
-    kind: z.enum(["skill_binding", "mcp_grant", "system_model"]),
-    display_name: z.string().min(1),
-    version_number: z.number().int().positive(),
-    reference_name: z.string().min(1),
-    source_name: z.string().min(1).nullable(),
-  })
-  .strict();
-export const credentialPendingMigrationSchema = z
-  .object({
-    total: z.number().int().nonnegative(),
-    mcp_grant_count: z.number().int().nonnegative(),
-    skill_binding_count: z.number().int().nonnegative(),
-    system_model_count: z.number().int().nonnegative(),
-    references: z.array(credentialMigrationReferenceSchema),
-    current_reference_count: z.number().int().nonnegative(),
-    current_references: z.array(credentialMigrationReferenceSchema),
-  })
-  .strict();
-export const credentialMigrationStatusResponseSchema = z
-  .object({
-    data: credentialPendingMigrationSchema.nullable(),
-    request_id: z.string().min(1),
-  })
-  .strict();
-// Replacement only mints a version, so the server reports how many references
-// a migration would still have to move. Null means the count is unavailable.
-export const credentialReplacementResponseSchema = z
-  .object({
-    data: credentialVersionSchema,
-    pending_migration: credentialPendingMigrationSchema.nullable(),
-    request_id: z.string().min(1),
-  })
-  .strict();
 export const versionResponseSchema = z
   .object({ data: assetVersionSchema, request_id: z.string().min(1) })
   .strict();
@@ -982,12 +770,6 @@ export const skillVersionHistoryResponseSchema = z
   .strict();
 export const mcpVersionHistoryResponseSchema = z
   .object({ data: z.array(mcpVersionSchema), request_id: z.string().min(1) })
-  .strict();
-export const credentialVersionHistoryResponseSchema = z
-  .object({
-    data: z.array(credentialVersionSchema),
-    request_id: z.string().min(1),
-  })
   .strict();
 export const versionHistoryResponseSchema = z
   .object({ data: z.array(assetVersionSchema), request_id: z.string().min(1) })
@@ -1063,23 +845,6 @@ export const agentRuntimeAssessmentsResponseSchema = z
       });
     }
   });
-
-export const credentialMetadataSchema = z
-  .object({
-    id: assetIdSchema,
-    scope: assetScopeSchema,
-    project_id: assetIdSchema.nullable(),
-    name: z.string().min(1),
-    display_name: z.string().min(1),
-    credential_type: z.string().min(1),
-    status: z.enum(["active", "revoked"]),
-    current_version_id: assetIdSchema.nullable(),
-    version: z.number().int().positive(),
-    created_by_user_id: z.string().min(1),
-    created_at: z.string().datetime({ offset: true }),
-    updated_at: z.string().datetime({ offset: true }),
-  })
-  .strict();
 
 const legacySystemBindingItemSchema = z
   .object({
@@ -1169,10 +934,6 @@ export const legacyCompatibleProjectAssetItemSchema = z
 
 export const projectAssetItemSchema = currentVersionProjectAssetItemSchema;
 
-export const projectCredentialItemSchema = credentialMetadataSchema
-  .extend({ capabilities: assetCapabilitiesSchema })
-  .strict();
-
 export const projectAssetListSchema = z
   .object({
     system_items: z.array(projectAssetItemSchema),
@@ -1189,14 +950,6 @@ export const legacyCompatibleProjectAssetListSchema = z
   })
   .strict();
 
-export const projectCredentialListSchema = z
-  .object({
-    system_items: z.array(projectCredentialItemSchema),
-    project_items: z.array(projectCredentialItemSchema),
-    request_id: z.string().min(1),
-  })
-  .strict();
-
 export const adminAssetListSchema = z
   .object({
     items: z.array(currentVersionAssetSummarySchema),
@@ -1207,13 +960,6 @@ export const adminAssetListSchema = z
 export const legacyCompatibleAdminAssetListSchema = z
   .object({
     items: z.array(legacyCompatibleAssetSummarySchema),
-    request_id: z.string().min(1),
-  })
-  .strict();
-
-export const adminCredentialListSchema = z
-  .object({
-    items: z.array(credentialMetadataSchema),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1236,23 +982,6 @@ export const projectSkillImportResponseSchema = z
   .object({
     item: currentVersionAssetSummarySchema,
     version: skillVersionSchema,
-    request_id: z.string().min(1),
-  })
-  .strict();
-
-export const credentialMutationResponseSchema = z
-  .object({
-    item: credentialMetadataSchema,
-    request_id: z.string().min(1),
-  })
-  .strict();
-
-export const credentialGrantMigrationResponseSchema = z
-  .object({
-    credential_id: assetIdSchema,
-    credential_version_id: assetIdSchema,
-    migrated_count: z.number().int().nonnegative(),
-    migrated_model_count: z.number().int().nonnegative(),
     request_id: z.string().min(1),
   })
   .strict();
@@ -1325,7 +1054,7 @@ export const expectedRevisionInputSchema = z
 export const skillActivationInputSchema = expectedRevisionInputSchema
   .extend({
     expected_payload_checksum: z.string().regex(/^[a-f0-9]{64}$/u),
-    expected_binding_revision: z.number().int().nonnegative(),
+    expected_secret_revision: z.number().int().nonnegative(),
   })
   .strict();
 export const projectDefaultAgentSchema = z
@@ -1387,9 +1116,9 @@ export const skillVersionInputSchema = z
     expected_revision: z.number().int().positive(),
   })
   .strict();
-const mcpCredentialSlotInputSchema = z
+const mcpSecretSlotInputSchema = z
   .object({
-    name: mcpCredentialSlotNameSchema,
+    name: mcpSecretSlotNameSchema,
     purpose: z.string().default(""),
     payload_schema: stringListMapSchema,
     required: z.boolean().default(true),
@@ -1413,7 +1142,7 @@ export const mcpVersionInputSchema = z
   .object({
     ...mcpDefinitionInputCommonShape,
     transport: mcpTransportSchema.default("stdio"),
-    credential_slots: z.array(mcpCredentialSlotInputSchema).default([]),
+    secret_slots: z.array(mcpSecretSlotInputSchema).default([]),
     expected_asset_version: z.number().int().positive(),
   })
   .strict();
@@ -1470,28 +1199,28 @@ export function isSafeConfiguredProjectMcpUrl(value: string | null): boolean {
   }
 }
 
-const projectConfiguredMcpCredentialPayloadSchema = z
+const projectConfiguredMcpSecretPayloadSchema = z
   .object({
-    headers: credentialFieldListSchema.optional(),
-    query: credentialFieldListSchema.optional(),
+    headers: secretFieldListSchema.optional(),
+    query: secretFieldListSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length === 1, {
     message:
-      "Configured project MCP Credential slots support exactly one headers or query group",
+      "Configured project MCP secret slots support exactly one headers or query group",
   });
 
-const projectConfiguredMcpCredentialSlotInputSchema =
-  mcpCredentialSlotInputSchema.extend({
-    payload_schema: projectConfiguredMcpCredentialPayloadSchema,
+const projectConfiguredMcpSecretSlotInputSchema =
+  mcpSecretSlotInputSchema.extend({
+    payload_schema: projectConfiguredMcpSecretPayloadSchema,
   });
 
 const projectConfiguredMcpDefinitionObjectSchema = z
   .object({
     ...mcpDefinitionInputCommonShape,
     transport: z.enum(["sse", "http"]).default("http"),
-    credential_slots: z
-      .array(projectConfiguredMcpCredentialSlotInputSchema)
+    secret_slots: z
+      .array(projectConfiguredMcpSecretSlotInputSchema)
       .default([]),
   })
   .strict();
@@ -1512,12 +1241,12 @@ function validateProjectConfiguredMcpDefinition(
       path: ["url"],
     });
   }
-  const slotNames = value.credential_slots.map((slot) => slot.name);
+  const slotNames = value.secret_slots.map((slot) => slot.name);
   if (new Set(slotNames).size !== slotNames.length) {
     context.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "Configured project MCP Credential slot names must be unique",
-      path: ["credential_slots"],
+      message: "Configured project MCP secret slot names must be unique",
+      path: ["secret_slots"],
     });
   }
 }
@@ -1553,76 +1282,36 @@ export const syncCurrentSystemMcpBindingInputSchema = z
   })
   .strict();
 
-export const credentialPayloadSchema = z
+export const mcpSecretPayloadSchema = z
   .object({
-    env: credentialFieldMapSchema.optional(),
-    headers: credentialFieldMapSchema.optional(),
-    query: credentialFieldMapSchema.optional(),
-    oauth: credentialFieldMapSchema.optional(),
+    env: secretFieldMapSchema.optional(),
+    headers: secretFieldMapSchema.optional(),
+    query: secretFieldMapSchema.optional(),
+    oauth: secretFieldMapSchema.optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
-    message: "Credential payload cannot be empty",
+    message: "MCP secret payload cannot be empty",
   });
-
-export const CREDENTIAL_NAME_PATTERN =
-  /^[a-z0-9](?:[a-z0-9._-]{0,61}[a-z0-9])?$/u;
-const CREDENTIAL_TYPE_PATTERN = /^[a-z][a-z0-9._-]{0,31}$/u;
-
-export const createCredentialInputSchema = z
+export const mcpSecretReplaceInputSchema = z
   .object({
-    name: z.string().trim().min(1).max(63).regex(CREDENTIAL_NAME_PATTERN),
-    display_name: z.string().trim().min(1).max(120),
-    credential_type: z
-      .string()
-      .trim()
-      .min(1)
-      .max(32)
-      .regex(CREDENTIAL_TYPE_PATTERN),
-    payload: credentialPayloadSchema,
+    payload: mcpSecretPayloadSchema,
   })
   .strict();
-
-export const replaceCredentialInputSchema = z
-  .object({
-    payload: credentialPayloadSchema,
-    expected_credential_version: z.number().int().positive(),
+export const mcpSecretSlotStatusSchema = mcpSecretSlotSchema
+  .extend({
+    configured: z.boolean(),
+    revision: z.number().int().nonnegative(),
   })
   .strict();
-export const revokeCredentialInputSchema = z
-  .object({ expected_credential_version: z.number().int().positive() })
-  .strict();
-export const deleteCredentialInputSchema = z
-  .object({ expected_credential_version: z.number().int().positive() })
-  .strict();
-export const migrateCredentialGrantsInputSchema = z
-  .object({ expected_credential_version: z.number().int().positive() })
-  .strict();
-export const approveMcpInputSchema = z
+export const mcpSecretSetResponseSchema = z
   .object({
-    credential_versions: z.custom<Record<string, string>>(
-      (value) =>
-        isStringMap(value) &&
-        Object.values(value).every(
-          (item) => assetIdSchema.safeParse(item).success,
-        ),
-    ),
-    expected_asset_version: z.number().int().positive(),
-  })
-  .strict();
-export const configureSystemMcpCredentialGrantsInputSchema = z
-  .object({
-    credential_versions: z.custom<Record<string, string>>(
-      (value) =>
-        isStringMap(value) &&
-        Object.values(value).every(
-          (item) => assetIdSchema.safeParse(item).success,
-        ),
-    ),
-    expected_active_grant_versions: z.record(
-      z.string().min(1),
-      z.number().int().positive(),
-    ),
+    mcp_server_id: assetIdSchema,
+    mcp_server_version_id: assetIdSchema,
+    revision: z.number().int().nonnegative(),
+    readiness: z.enum(["ready", "unready"]),
+    slots: z.array(mcpSecretSlotStatusSchema),
+    request_id: z.string().min(1),
   })
   .strict();
 export const enableSystemBindingInputSchema = z
@@ -1650,7 +1339,7 @@ export const disableSystemBindingInputSchema = z
 
 export type AssetKind = z.infer<typeof assetKindSchema>;
 export type AssetListKind = z.infer<typeof assetListKindSchema>;
-export type MutableAssetListKind = Exclude<AssetListKind, "credentials">;
+export type MutableAssetListKind = AssetListKind;
 export type ProjectAssetStatusAction<Kind extends MutableAssetListKind> =
   Kind extends "skills" | "agents"
     ? "enable" | "suspend"
@@ -1661,13 +1350,9 @@ export type AdminProjectAssetStatusAction<Kind extends MutableAssetListKind> =
     : "archive" | "suspend";
 export type AssetScope = z.infer<typeof assetScopeSchema>;
 export type AssetStatus = z.infer<typeof assetStatusSchema>;
-export type CredentialPayloadGroup = z.infer<
-  typeof credentialPayloadGroupSchema
->;
-export type CredentialPayload = z.infer<typeof credentialPayloadSchema>;
+export type SecretPayloadGroup = z.infer<typeof secretPayloadGroupSchema>;
 export type AssetSummary = z.infer<typeof currentVersionAssetSummarySchema>;
 export type ProjectAssetItem = z.infer<typeof projectAssetItemSchema>;
-export type ProjectCredentialItem = z.infer<typeof projectCredentialItemSchema>;
 export type AssetVersion = z.infer<typeof assetVersionSchema>;
 export type AgentVersion = z.infer<typeof agentVersionSchema>;
 export type SkillVersion = z.infer<typeof skillVersionSchema>;
@@ -1705,34 +1390,13 @@ export type AgentRuntimeAssessmentsInput = z.input<
 export type AgentRuntimeAssessmentsResponse = z.infer<
   typeof agentRuntimeAssessmentsResponseSchema
 >;
-export type CredentialMetadata = z.infer<typeof credentialMetadataSchema>;
 export type SystemBinding = z.infer<typeof systemBindingSchema>;
 export type ProjectAssetList = z.infer<typeof projectAssetListSchema>;
-export type ProjectCredentialList = z.infer<typeof projectCredentialListSchema>;
 export type ProjectDefaultAgent = z.infer<typeof projectDefaultAgentSchema>;
 export type AdminAssetList = z.infer<typeof adminAssetListSchema>;
-export type AdminCredentialList = z.infer<typeof adminCredentialListSchema>;
 export type AssetMutationResponse = z.infer<typeof assetMutationResponseSchema>;
 export type ProjectSkillImportResponse = z.infer<
   typeof projectSkillImportResponseSchema
->;
-export type CredentialMutationResponse = z.infer<
-  typeof credentialMutationResponseSchema
->;
-export type CredentialGrantMigrationResponse = z.infer<
-  typeof credentialGrantMigrationResponseSchema
->;
-export type CredentialPendingMigration = z.infer<
-  typeof credentialPendingMigrationSchema
->;
-export type CredentialMigrationReference = z.infer<
-  typeof credentialMigrationReferenceSchema
->;
-export type CredentialMigrationStatusResponse = z.infer<
-  typeof credentialMigrationStatusResponseSchema
->;
-export type CredentialReplacementResponse = z.infer<
-  typeof credentialReplacementResponseSchema
 >;
 export type CreateAgentInput = z.input<typeof createAgentInputSchema>;
 export type AgentCreateResponse = z.infer<typeof agentCreateResponseSchema>;
@@ -1751,17 +1415,12 @@ export type SkillVersionFileContentResponse = z.infer<
 >;
 export type SkillFileChange = z.input<typeof skillFileChangeSchema>;
 export type SkillFileForkInput = z.input<typeof skillFileForkInputSchema>;
-export type SkillCredentialMappingStatus = z.infer<
-  typeof skillCredentialMappingStatusSchema
+export type SkillSecretStatus = z.infer<typeof skillSecretStatusSchema>;
+export type SkillSecretSetResponse = z.infer<
+  typeof skillSecretSetResponseSchema
 >;
-export type SkillCredentialRequirement = z.infer<
-  typeof skillCredentialRequirementSchema
->;
-export type SkillCredentialBindingsResponse = z.infer<
-  typeof skillCredentialBindingsResponseSchema
->;
-export type SkillCredentialBindingsInput = z.input<
-  typeof skillCredentialBindingsInputSchema
+export type SkillSecretReplaceInput = z.input<
+  typeof skillSecretReplaceInputSchema
 >;
 export type McpVersionInput = z.input<typeof mcpVersionInputSchema>;
 export type CreateConfiguredMcpInput = z.input<
@@ -1773,7 +1432,6 @@ export type UpdateConfiguredMcpInput = z.input<
 export type SyncCurrentSystemMcpBindingInput = z.input<
   typeof syncCurrentSystemMcpBindingInputSchema
 >;
-export type CreateCredentialInput = z.input<typeof createCredentialInputSchema>;
 export type ExpectedAssetVersionInput = z.input<
   typeof expectedAssetVersionInputSchema
 >;
@@ -1782,18 +1440,12 @@ export type SkillActivationInput = z.input<typeof skillActivationInputSchema>;
 export type ProjectDefaultAgentInput = z.input<
   typeof projectDefaultAgentInputSchema
 >;
-export type ReplaceCredentialInput = z.input<
-  typeof replaceCredentialInputSchema
+export type McpSecretPayload = z.infer<typeof mcpSecretPayloadSchema>;
+export type McpSecretReplaceInput = z.input<
+  typeof mcpSecretReplaceInputSchema
 >;
-export type RevokeCredentialInput = z.input<typeof revokeCredentialInputSchema>;
-export type DeleteCredentialInput = z.input<typeof deleteCredentialInputSchema>;
-export type MigrateCredentialGrantsInput = z.input<
-  typeof migrateCredentialGrantsInputSchema
->;
-export type ApproveMcpInput = z.input<typeof approveMcpInputSchema>;
-export type ConfigureSystemMcpCredentialGrantsInput = z.input<
-  typeof configureSystemMcpCredentialGrantsInputSchema
->;
+export type McpSecretSetResponse = z.infer<typeof mcpSecretSetResponseSchema>;
+export type SecretClearInput = z.input<typeof secretClearInputSchema>;
 export type EnableSystemBindingInput = z.input<
   typeof enableSystemBindingInputSchema
 >;

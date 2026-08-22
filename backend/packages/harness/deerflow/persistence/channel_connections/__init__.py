@@ -13,9 +13,11 @@ from deerflow.persistence.channel_connections.model import (
     ChannelCredentialRow,
     ChannelInboundDeliveryRow,
     ChannelOAuthStateRow,
-    ProjectChannelCredentialBindingRow,
     ProjectChannelInstanceLeaseRow,
     ProjectChannelInstanceRow,
+    ProjectChannelSecretGenerationRow,
+    ProjectChannelSecretStateRow,
+    ProjectChannelSecretTombstoneRow,
 )
 from deerflow.persistence.channel_connections.project_instance_repository import (
     ChannelInstanceLeaseClaim,
@@ -39,7 +41,6 @@ __all__ = [
     "ChannelInboundDeliveryRow",
     "ChannelOAuthStateRow",
     "ChannelInstanceLeaseClaim",
-    "ProjectChannelCredentialBindingRow",
     "ProjectChannelGroupBindingChallengeRow",
     "ProjectChannelGroupBindingRow",
     "ProjectChannelInstanceConflict",
@@ -48,4 +49,7 @@ __all__ = [
     "ProjectChannelInstanceNotFound",
     "ProjectChannelInstanceRepository",
     "ProjectChannelInstanceRow",
+    "ProjectChannelSecretGenerationRow",
+    "ProjectChannelSecretStateRow",
+    "ProjectChannelSecretTombstoneRow",
 ]

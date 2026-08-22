@@ -80,9 +80,9 @@ The Lead Agent resolves which model to use at runtime using the following priori
 3. The active default model in the PostgreSQL-backed system model catalog.
 
 Platform administrators manage display names, provider settings, capabilities,
-versioned System Credential references, activation, and the default selection
-under **Admin → System Settings → Models**. A Run freezes the exact selected
-model and Credential versions at admission.
+write-only API Keys, activation, and the default selection under **Admin →
+System Settings → Models**. A Run freezes the exact selected model payload and
+Secret Generation at admission.
 
 ## Thinking mode
 
@@ -91,8 +91,8 @@ If the model supports extended thinking (e.g., DeepSeek Reasoner, Doubao with th
 Thinking mode is controlled per-request through the `thinking_enabled` flag. If thinking is enabled but the configured model does not support it, the system falls back gracefully and logs a warning.
 
 The administrator marks thinking support and supplies any safe provider-specific
-thinking options on the model settings page. API keys remain encrypted
-Credential material and are not part of those settings.
+thinking options on the model settings page. API Keys remain encrypted model-owned
+secret material and are not returned by the API.
 
 ## Output-limit recovery
 

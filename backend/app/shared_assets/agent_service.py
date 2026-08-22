@@ -32,7 +32,6 @@ from app.shared_assets.errors import (
     SharedAssetError,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -44,6 +43,7 @@ from app.shared_assets.version_relation import (
     VersionLineageNode,
     classify_version_relations,
 )
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.shared_assets import AgentRow, AgentVersionRow
 
 _SLUG_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\Z")

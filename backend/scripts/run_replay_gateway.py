@@ -50,17 +50,17 @@ def main() -> int:
     cfg.write_text(build_config_yaml(home=home), encoding="utf-8")
 
     # Override (not setdefault): the replay gateway must be hermetic, so an outer
-    # DEER_FLOW_HOME can't leak in and shift prompt-affecting paths/skills.
-    os.environ["DEER_FLOW_HOME"] = str(home)
-    os.environ["DEER_FLOW_CONFIG_PATH"] = str(cfg)
+    # ACT_WEAVE_HOME can't leak in and shift prompt-affecting paths/skills.
+    os.environ["ACT_WEAVE_HOME"] = str(home)
+    os.environ["ACT_WEAVE_CONFIG_PATH"] = str(cfg)
     prepare_hermetic_skills(home)
-    os.environ["DEERFLOW_REPLAY_FIXTURE"] = args.fixture
+    os.environ["ACT_WEAVE_REPLAY_FIXTURE"] = args.fixture
     os.environ.setdefault("AUTH_JWT_SECRET", "ci-replay-secret")
     os.environ["GATEWAY_CORS_ORIGINS"] = args.cors
     # Child / dynamic imports (resolve_class) search PYTHONPATH too.
     os.environ["PYTHONPATH"] = os.pathsep.join(p for p in (str(_BACKEND), str(_BACKEND / "tests"), os.environ.get("PYTHONPATH", "")) if p)
     install_replay_model_adapter()
-    if os.environ.get("DEERFLOW_REPLAY_BOOTSTRAP_SCHEMA") == "1":
+    if os.environ.get("ACT_WEAVE_REPLAY_BOOTSTRAP_SCHEMA") == "1":
         asyncio.run(bootstrap_replay_test_database())
     asyncio.run(prepare_replay_runtime_catalog())
 

@@ -523,7 +523,7 @@ export function SkillBuilderCandidateWorkbench({
             ) : null}
             {validation.secret_requirements.length > 0 ? (
               <p className="text-muted-foreground">
-                {copy.requiredCredentials}
+                {copy.requiredSecrets}
                 {validation.secret_requirements
                   .map((item) => item.name)
                   .join(", ")}

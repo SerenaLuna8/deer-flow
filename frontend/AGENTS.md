@@ -67,7 +67,7 @@ generator. A necessary local patch needs focused coverage and an explanation.
   and account-scoped state. Network, 5xx, 403, and malformed-response failures do
   not silently log the user out.
 - Browser storage may retain safe preferences, never passwords, access/CSRF
-  tokens, raw session IDs, Credential values, or private runtime authority.
+  tokens, raw session IDs, secret values, or private runtime authority.
 - Redirects preserve only validated local destinations. Never reflect an
   arbitrary external URL through login/setup flows.
 
@@ -163,7 +163,7 @@ generator. A necessary local patch needs focused coverage and an explanation.
   includes `slug` only when the normalized review name differs from
   `session.slug`, and its idempotency signature must match that request body.
 
-#### Skills and Credentials
+#### Skills and secrets
 
 - Project Skill creation exposes exactly two user flows: AI Builder and validated
   archive upload. Do not reintroduce a manual metadata or starter-template form.
@@ -171,43 +171,43 @@ generator. A necessary local patch needs focused coverage and an explanation.
   `SKILL.md` buffer, never a second source of truth or a browser YAML parser.
   Parse/patch races must preserve newer local edits; invalid or pending source
   blocks save, validation, and activation without discarding unsaved changes.
-- The Skill version workbench presents one `Runtime credentials` surface while
-  preserving two distinct authorities: declarations edit the current
-  `SKILL.md` buffer, and project Credential mappings target one exact immutable
-  Skill version. After a new Candidate Version is saved, the workbench focuses
-  that version's mapping editor before activation. Credential mappings for
-  Project Candidate and Current Versions are writable; the version bytes remain
-  immutable. Historical Version mappings are read-only, and a current System
-  Skill may still receive project Credential mappings. Each mapping selects both
-  an exact Credential version and one safe `env` field name, while values remain
-  server-only. Hiding the surface must not discard an unsaved mapping, and a
-  revision conflict preserves local selections until explicit reload.
+- The Skill version workbench presents one `Runtime secrets` surface. Declarations
+  edit the current `SKILL.md` buffer; the Project stores one encrypted value for
+  each exact Skill Version and declared environment-variable name. System Skill
+  definitions declare slots only; every Project binding supplies its own values.
+  After a new Candidate Version is saved, compatible declarations receive
+  independently re-encrypted copies and changed declarations require new input.
 - Skill activation uses read-only server readiness. The activation request pins
-  the exact payload checksum and mapping revision and never submits Credential
-  choices or secret values. A Candidate cannot activate until readiness passes.
+  the exact payload checksum and secret revision and never submits plaintext. A
+  Candidate cannot activate until all required declarations are configured.
   Archive plus Builder create/revise results with declarations
-  must lead to the exact created version's Runtime credentials controls; AI
-  never chooses a Credential or source field.
+  must lead to the exact created version's Runtime secrets controls; AI never
+  chooses or sees a secret value.
 - System asset definitions are read-only in global admin views. Project binding
-  and Credential-grant operations are separate, narrow mutations.
+  and domain-secret operations are separate, narrow mutations.
 - System Agent/Skill definitions are read-only single-v1 assets. Project bindings
   store only the asset identity and runtime resolves its Current Version. System
   Skill revocation is displayed as governance eligibility, not a version state;
   optimistic `409` responses refresh authority and require a fresh choice.
 - Project and global System Skill details export the currently selected,
   persisted version through the same `Export ZIP` interaction. Unsaved Skill or
-  Credential-mapping edits disable export until saved or discarded; revoked
+  secret edits disable export until saved or discarded; revoked
   System versions remain visible but cannot export. Client success means the
   complete ZIP response arrived and the browser download was started, not that
   the user saved the file.
-- Credential forms never display or cache plaintext after submission. Responses
-  may expose safe status/revision metadata only.
+- Secret forms use write-only semantics: blank edit preserves the stored value,
+  replacement writes a new value, and clear requires a separate confirmation.
+  Responses expose only configured/readiness/revision metadata. Plaintext never
+  enters TanStack Query caches and controls are cleared immediately after submit.
 
 #### MCP, models, Agent state, and files
 
 - Project MCP authoring exposes only backend-supported remote transports and
-  secret-free URLs. Credential fields are encrypted bindings; the browser never
-  probes the MCP endpoint, performs discovery, or infers CIDR authorization.
+  secret-free URLs. Every Project stores encrypted values by exact MCP Version
+  and slot; the browser never probes the endpoint, performs discovery, or infers
+  CIDR authorization. Replacing or clearing a value marks discovery stale.
+- Model API keys belong to the Model configuration. Connection tests always
+  require a temporary Key from the current form and never read the stored copy.
 - Model/thinking selections are preferences. Gateway returns the effective
   execution profile; UI history and status use that server result rather than
   claiming the local selection was accepted.

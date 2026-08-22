@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 
 type ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
 

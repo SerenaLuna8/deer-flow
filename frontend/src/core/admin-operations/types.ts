@@ -243,15 +243,16 @@ export const adminAuditItemSchema = z
   })
   .passthrough()
   .superRefine((item, context) => {
-    const {
-      actor_user_id: _actorUserId,
-      actor_email: _actorEmail,
-      project_id: _projectId,
-      project_slug: _projectSlug,
-      project_display_name: _projectDisplayName,
-      ...base
-    } = item;
-    const baseResult = auditItemSchema.safeParse(base);
+    const baseResult = auditItemSchema.safeParse({
+      id: item.id,
+      occurred_at: item.occurred_at,
+      actor: item.actor,
+      action: item.action,
+      target_kind: item.target_kind,
+      outcome: item.outcome,
+      public_error_code: item.public_error_code,
+      metadata: item.metadata,
+    });
     if (!baseResult.success) {
       for (const issue of baseResult.error.issues) {
         context.addIssue({

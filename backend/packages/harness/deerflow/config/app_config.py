@@ -391,7 +391,7 @@ class AppConfig(BaseModel):
 
         Priority:
         1. If provided `config_path` argument, use it.
-        2. If provided `DEER_FLOW_CONFIG_PATH` environment variable, use it.
+        2. If provided `ACT_WEAVE_CONFIG_PATH` environment variable, use it.
         3. Otherwise, use ``config.yaml`` at the ActWeave repository root.
         """
         if config_path:
@@ -399,10 +399,10 @@ class AppConfig(BaseModel):
             if not Path.exists(path):
                 raise FileNotFoundError(f"Config file specified by param `config_path` not found at {path}")
             return path
-        elif os.getenv("DEER_FLOW_CONFIG_PATH"):
-            path = Path(os.getenv("DEER_FLOW_CONFIG_PATH"))
+        elif os.getenv("ACT_WEAVE_CONFIG_PATH"):
+            path = Path(os.getenv("ACT_WEAVE_CONFIG_PATH"))
             if not Path.exists(path):
-                raise FileNotFoundError(f"Config file specified by environment variable `DEER_FLOW_CONFIG_PATH` not found at {path}")
+                raise FileNotFoundError(f"Config file specified by environment variable `ACT_WEAVE_CONFIG_PATH` not found at {path}")
             return path
         path = REPO_ROOT / "config.yaml"
         if path.exists():
@@ -567,8 +567,8 @@ class AppConfig(BaseModel):
         """Return an isolated config carrying database-materialized models.
 
         Model definitions are no longer accepted from ``config.yaml``. The
-        application layer resolves an exact PostgreSQL catalog version,
-        decrypts its bound Credential only at the execution boundary, and
+        application layer resolves an exact stable Model configuration,
+        decrypts its model-owned Secret Generation only at the execution boundary, and
         injects the resulting ``ModelConfig`` objects through this helper.
         The source infrastructure config remains secret-free and unchanged.
         """

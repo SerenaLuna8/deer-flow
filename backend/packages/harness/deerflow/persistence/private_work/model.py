@@ -96,17 +96,21 @@ class RunAssetVersionRow(Base):
     )
 
 
-class RunMcpGrantSnapshotRow(Base):
-    __tablename__ = "run_mcp_grant_snapshots"
+class RunMcpSecretSnapshotRow(Base):
+    """Exact, secret-free MCP Generation references admitted for one Run."""
+
+    __tablename__ = "run_mcp_secret_snapshots"
 
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
     thread_id: Mapped[str] = mapped_column(String(64), nullable=False)
     run_id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    mcp_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    credential_slot_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
-    credential_grant_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    credential_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    slot_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    secret_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    secret_generation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    secret_generation_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
 
     __table_args__ = (
@@ -114,28 +118,48 @@ class RunMcpGrantSnapshotRow(Base):
             "project_id",
             "owner_user_id",
             "run_id",
-            "mcp_version_id",
-            "credential_slot_id",
-            name="pk_run_mcp_grant_snapshots",
+            "mcp_server_version_id",
+            "slot_id",
+            name="pk_run_mcp_secret_snapshots",
         ),
-        *_scope_constraints("run_mcp_grant_snapshots"),
+        *_scope_constraints("run_mcp_secret_snapshots"),
         ForeignKeyConstraint(
             ["project_id", "owner_user_id", "thread_id", "run_id"],
             ["runs.project_id", "runs.owner_user_id", "runs.thread_id", "runs.run_id"],
-            name="fk_run_mcp_grant_snapshots_private_run",
+            name="fk_run_mcp_secret_snapshots_private_run",
             ondelete="CASCADE",
         ),
-        ForeignKeyConstraint(["mcp_version_id"], ["mcp_server_versions.id"], name="fk_run_mcp_grant_snapshots_mcp_version", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["credential_slot_id"], ["mcp_version_credential_slots.id"], name="fk_run_mcp_grant_snapshots_slot", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["credential_grant_id"], ["credential_grants.id"], name="fk_run_mcp_grant_snapshots_grant", ondelete="RESTRICT"),
-        ForeignKeyConstraint(["credential_version_id"], ["credential_versions.id"], name="fk_run_mcp_grant_snapshots_credential_version", ondelete="RESTRICT"),
+        ForeignKeyConstraint(
+            ["mcp_server_id", "mcp_server_version_id"],
+            ["mcp_server_versions.mcp_server_id", "mcp_server_versions.id"],
+            name="fk_run_mcp_secret_snapshots_version",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["mcp_server_version_id", "slot_id"],
+            ["mcp_version_secret_slots.mcp_server_version_id", "mcp_version_secret_slots.id"],
+            name="fk_run_mcp_secret_snapshots_slot",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "secret_revision >= 1",
+            name="ck_run_mcp_secret_snapshots_revision",
+        ),
+        CheckConstraint(
+            "secret_generation_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_run_mcp_secret_snapshots_generation_digest",
+        ),
+        Index(
+            "ix_run_mcp_secret_snapshots_generation",
+            secret_generation_id,
+        ),
     )
 
 
-class RunSkillCredentialSnapshotRow(Base):
-    """Secret-free, immutable Skill credential references admitted for one Run."""
+class RunSkillSecretSnapshotRow(Base):
+    """Exact, secret-free Skill Generation references admitted for one Run."""
 
-    __tablename__ = "run_skill_credential_snapshots"
+    __tablename__ = "run_skill_secret_snapshots"
 
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     owner_user_id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -144,23 +168,15 @@ class RunSkillCredentialSnapshotRow(Base):
     skill_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     skill_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
     secret_name: Mapped[str] = mapped_column(String(255), primary_key=True)
-    skill_credential_binding_id: Mapped[uuid.UUID] = mapped_column(
-        Uuid,
-        nullable=False,
-    )
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    credential_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    secret_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    secret_generation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    secret_generation_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=_now,
         server_default=text("now()"),
     )
-    # New migration columns stay physically last so upgraded and fresh
-    # PostgreSQL catalogs have identical attribute order.
-    source_env_field_name: Mapped[str] = mapped_column(String(255), nullable=False)
-
     __table_args__ = (
         PrimaryKeyConstraint(
             "project_id",
@@ -168,33 +184,33 @@ class RunSkillCredentialSnapshotRow(Base):
             "run_id",
             "skill_version_id",
             "secret_name",
-            name="pk_run_skill_credential_snapshots",
+            name="pk_run_skill_secret_snapshots",
         ),
-        *_scope_constraints("run_skill_credential_snapshots"),
+        *_scope_constraints("run_skill_secret_snapshots"),
         ForeignKeyConstraint(
             ["project_id", "owner_user_id", "thread_id", "run_id"],
             ["runs.project_id", "runs.owner_user_id", "runs.thread_id", "runs.run_id"],
-            name="fk_run_skill_credential_snapshots_private_run",
+            name="fk_run_skill_secret_snapshots_private_run",
             ondelete="CASCADE",
         ),
         CheckConstraint(
             "secret_name ~ '^[A-Za-z_][A-Za-z0-9_]*$'",
-            name="ck_run_skill_credential_snapshots_secret_name",
+            name="ck_run_skill_secret_snapshots_secret_name",
         ),
         CheckConstraint(
-            "length(source_env_field_name) BETWEEN 1 AND 255",
-            name="ck_run_skill_credential_snapshots_source_env_field_name",
+            "secret_revision >= 1",
+            name="ck_run_skill_secret_snapshots_revision",
         ),
         CheckConstraint(
-            "binding_revision >= 1",
-            name="ck_run_skill_credential_snapshots_binding_revision",
+            "secret_generation_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_run_skill_secret_snapshots_generation_digest",
         ),
         Index(
-            "ix_run_skill_credential_snapshots_binding",
-            skill_credential_binding_id,
+            "ix_run_skill_secret_snapshots_generation",
+            secret_generation_id,
         ),
         Index(
-            "ix_run_skill_credential_snapshots_private_run",
+            "ix_run_skill_secret_snapshots_private_run",
             project_id,
             owner_user_id,
             thread_id,

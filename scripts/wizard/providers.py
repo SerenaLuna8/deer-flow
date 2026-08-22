@@ -1,7 +1,7 @@
 """Web tool provider definitions for the setup wizard.
 
 Model definitions deliberately do not live in the setup wizard. A system
-administrator manages the versioned model catalog and its Credential bindings
+administrator manages the model catalog and its encrypted API keys
 through ``/admin/settings/models`` after PostgreSQL initialization.
 """
 

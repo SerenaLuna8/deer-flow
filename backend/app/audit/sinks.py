@@ -189,6 +189,42 @@ class OperationalAuditSink:
             AuditAction.PROJECT_UPDATED,
         )
 
+    async def channel_secret_mutated(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        channel_instance_id: uuid.UUID,
+        operation: str,
+        generation_id: uuid.UUID | None,
+        revision: int,
+        result: str,
+        reason: str,
+        readiness: str,
+    ) -> None:
+        self._require_process(AuditProcess.GATEWAY)
+        await self._service.append(
+            session,
+            AuditActor.user(_uuid(context.user_id)),
+            AuditAction.ASSET_UPDATED,
+            AuditTarget(
+                AuditTargetKind.ASSET,
+                _uuid(channel_instance_id),
+                _uuid(context.project_id),
+            ),
+            AuditOutcome.SUCCESS,
+            {
+                "asset_kind": "channel",
+                "operation": operation,
+                "generation_id": generation_id,
+                "revision": revision,
+                "result": result,
+                "reason": reason,
+                "readiness": readiness,
+            },
+            request_id=context.request_id,
+        )
+
     async def project_deletion_requested(
         self,
         session: AsyncSession,

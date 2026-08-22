@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.pool import NullPool
 
 from deerflow.persistence.bootstrap import (
-    M7RecreateRequired,
+    SchemaRecreateRequired,
     bootstrap_schema,
     classify_database,
 )
@@ -100,14 +100,14 @@ async def test_fresh_schema_langgraph_and_future_partition_have_comments(
             assert await classify_database(connection) == "current"
             await connection.execute(text("COMMENT ON COLUMN checkpoints.metadata IS 'drifted'"))
             await connection.commit()
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
         await setup_postgres._bootstrap_langgraph_schemas(postgres_database_url)
         async with engine.connect() as connection:
             assert await classify_database(connection) == "current"
             await connection.execute(text("COMMENT ON COLUMN users.email IS NULL"))
             await connection.commit()
-            with pytest.raises(M7RecreateRequired):
+            with pytest.raises(SchemaRecreateRequired):
                 await classify_database(connection)
     finally:
         await engine.dispose()

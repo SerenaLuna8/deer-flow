@@ -24,7 +24,7 @@ export type McpRuntimeBlockMessages = {
   missingSystemCommand: string;
   missingSystemUrl: string;
   systemEnvOnly: string;
-  systemRemoteCredentialsOnly: string;
+  systemRemoteSecretsOnly: string;
 };
 
 export const UNSUPPORTED_MCP_VERSION_MESSAGE =
@@ -42,14 +42,14 @@ const DEFAULT_RUNTIME_BLOCK_MESSAGES: McpRuntimeBlockMessages = {
   projectOAuth:
     "当前 Project MCP 不支持配置内 OAuth。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   projectHeadersOnly:
-    "当前 Project MCP Credential 槽位仅支持 headers 或 query。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
+    "当前 Project MCP Secret 槽位仅支持 headers 或 query。此历史配置可以查看，但不能发布、绑定或用于 Agent。",
   missingSystemCommand:
     "当前 stdio 系统 MCP 缺少 command，不能绑定或用于 Agent。",
   missingSystemUrl: "当前远程系统 MCP 缺少 URL，不能绑定或用于 Agent。",
   systemEnvOnly:
-    "当前 stdio 系统 MCP Credential 槽位仅支持 env，不能绑定或用于 Agent。",
-  systemRemoteCredentialsOnly:
-    "当前远程系统 MCP Credential 槽位仅支持 headers、query 或 oauth，不能绑定或用于 Agent。",
+    "当前 stdio 系统 MCP Secret 槽位仅支持 env，不能绑定或用于 Agent。",
+  systemRemoteSecretsOnly:
+    "当前远程系统 MCP Secret 槽位仅支持 headers、query 或 oauth，不能绑定或用于 Agent。",
 };
 
 export function isMcpRuntimeTransport(
@@ -59,14 +59,14 @@ export function isMcpRuntimeTransport(
 }
 
 export function mcpVersionRuntimeBlockReason(
-  version: Pick<McpAssetVersion, "definition" | "credential_slots">,
+  version: Pick<McpAssetVersion, "definition" | "secret_slots">,
   scope: AssetScope,
   messages: McpRuntimeBlockMessages = DEFAULT_RUNTIME_BLOCK_MESSAGES,
 ): string | null {
   const transport = version.definition.transport;
-  const credentialSchemas = [
-    ...version.definition.credential_slots,
-    ...version.credential_slots,
+  const secretSchemas = [
+    ...version.definition.secret_slots,
+    ...version.secret_slots,
   ].map((slot) => Object.keys(slot.payload_schema));
 
   if (scope === "project") {
@@ -83,7 +83,7 @@ export function mcpVersionRuntimeBlockReason(
       return messages.projectOAuth;
     }
     if (
-      credentialSchemas.some(
+      secretSchemas.some(
         (sections) =>
           sections.length !== 1 ||
           (sections[0] !== "headers" && sections[0] !== "query"),
@@ -108,20 +108,20 @@ export function mcpVersionRuntimeBlockReason(
   ) {
     return messages.missingSystemUrl;
   }
-  const allowedCredentialSection =
+  const allowedSecretSection =
     transport === "stdio"
       ? new Set(["env"])
       : new Set(["headers", "query", "oauth"]);
   if (
-    credentialSchemas.some(
+    secretSchemas.some(
       (sections) =>
         sections.length === 0 ||
-        sections.some((section) => !allowedCredentialSection.has(section)),
+        sections.some((section) => !allowedSecretSection.has(section)),
     )
   ) {
     return transport === "stdio"
       ? messages.systemEnvOnly
-      : messages.systemRemoteCredentialsOnly;
+      : messages.systemRemoteSecretsOnly;
   }
   return null;
 }

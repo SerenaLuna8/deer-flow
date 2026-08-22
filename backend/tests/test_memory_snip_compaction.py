@@ -23,6 +23,7 @@ from deerflow.agents.middlewares import summarization_middleware as summarizatio
 from deerflow.agents.middlewares.summarization_middleware import (
     DeerFlowSummarizationMiddleware,
 )
+from deerflow.config.model_execution import SystemModelExecutionProvenance
 from deerflow.models import ModelRuntimeProfile
 from deerflow.runtime import context_compaction as context_compaction_module
 from deerflow.runtime.context_compaction import prepare_thread_compaction
@@ -75,7 +76,12 @@ def _archive_context(
         owner_user_id="20000000-0000-4000-8000-000000000002",
         namespace="default",
         preference_version=7,
-        summary_model_ref=uuid.UUID("30000000-0000-4000-8000-000000000003"),
+        summary_model=SystemModelExecutionProvenance(
+            model_config_id=uuid.UUID("30000000-0000-4000-8000-000000000003"),
+            payload_checksum="a" * 64,
+            secret_generation_id=uuid.UUID("40000000-0000-4000-8000-000000000004"),
+            secret_envelope_digest="b" * 64,
+        ),
         source_checkpoint_id=source_checkpoint_id,
     )
 
@@ -1161,7 +1167,7 @@ def test_memory_disabled_still_compacts_without_receipt() -> None:
         owner_user_id="20000000-0000-4000-8000-000000000002",
         namespace="default",
         preference_version=7,
-        summary_model_ref=None,
+        summary_model=None,
         source_checkpoint_id="checkpoint-source",
     )
 

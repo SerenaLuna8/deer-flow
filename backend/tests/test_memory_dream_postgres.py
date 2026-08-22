@@ -9,6 +9,10 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import (
+    frozen_system_model_execution,
+    seed_system_model_config,
+)
 
 from app.private_work.memory_dream_service import (
     MemoryDreamAdmissionService,
@@ -116,59 +120,27 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
     )
     base_time = datetime.now(UTC)
     model_id = uuid.uuid4()
-    model_version_id = uuid.uuid4()
+    model_config_id = model_id
     worker_id = uuid.uuid4()
     checksum = "a" * 64
     frozen = MemoryDreamFrozenRuntime(
         preference_version=1,
         policy_revision=7,
-        model_config_id=model_id,
-        model_version_id=model_version_id,
-        model_payload_checksum=checksum,
+        model_execution=frozen_system_model_execution(
+            model_id=model_id,
+            provider_model="dream-test",
+        ),
         prompt_version=DREAM_PROMPT_VERSION,
     )
     history_text = {index: f"- [durable] history-{index:02d}" for index in range(1, 26)}
     try:
         async with seed.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_configs
-                    (id,display_name,status,
-                     current_version_id,revision,created_by_user_id,
-                     updated_by_user_id)
-                    VALUES (:id,'Dream test','active',NULL,1,
-                            :owner,:owner)"""
-                ),
-                {
-                    "id": model_id,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'vision_bridge_fake','dream-test',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,NULL,:owner)"""
-                ),
-                {
-                    "id": model_version_id,
-                    "model": model_id,
-                    "checksum": checksum,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """UPDATE system_model_configs
-                    SET current_version_id=:version WHERE id=:model"""
-                ),
-                {"version": model_version_id, "model": model_id},
+            await seed_system_model_config(
+                connection,
+                model_id=model_id,
+                owner_user_id=scope.owner_user_id,
+                display_name="Dream test",
+                provider_model="dream-test",
             )
 
         async with seed.factory() as session, session.begin():
@@ -199,7 +171,8 @@ async def test_postgres_dream_serializes_oldest_twenty_and_settles_atomically(
                         content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
                         preference_version=1,
                         snip_prompt_version="snip-prompt-v1",
-                        summary_model_ref=model_version_id,
+                        summary_model_config_id=model_config_id,
+                        summary_model_payload_checksum=checksum,
                         created_at=base_time + timedelta(microseconds=index),
                     )
                 )
@@ -519,7 +492,7 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
     now = datetime.now(UTC)
     worker_id = uuid.uuid4()
     model_id = uuid.uuid4()
-    model_version_id = uuid.uuid4()
+    model_config_id = model_id
     model_checksum = "d" * 64
     model_name = str(model_id)
     policy_revision = 2
@@ -549,9 +522,10 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
     frozen = MemoryDreamFrozenRuntime(
         preference_version=1,
         policy_revision=policy_revision,
-        model_config_id=model_id,
-        model_version_id=model_version_id,
-        model_payload_checksum=model_checksum,
+        model_execution=frozen_system_model_execution(
+            model_id=model_id,
+            provider_model="dream-lock-order",
+        ),
         prompt_version=DREAM_PROMPT_VERSION,
     )
     worker_tagged_text = "- [durable] worker settlement lock order"
@@ -586,45 +560,12 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
 
     try:
         async with seed.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_configs
-                    (id,display_name,status,
-                     current_version_id,revision,created_by_user_id,
-                     updated_by_user_id)
-                    VALUES (:id,'Dream lock-order model','active',
-                            NULL,1,:owner,:owner)"""
-                ),
-                {
-                    "id": model_id,
-                    "owner": worker_scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'vision_bridge_fake','dream-lock-order',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,NULL,:owner)"""
-                ),
-                {
-                    "id": model_version_id,
-                    "model": model_id,
-                    "checksum": model_checksum,
-                    "owner": worker_scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """UPDATE system_model_configs
-                    SET current_version_id=:version WHERE id=:model"""
-                ),
-                {"version": model_version_id, "model": model_id},
+            await seed_system_model_config(
+                connection,
+                model_id=model_id,
+                owner_user_id=worker_scope.owner_user_id,
+                display_name="Dream lock-order model",
+                provider_model="dream-lock-order",
             )
 
         async with seed.factory() as session, session.begin():
@@ -692,7 +633,8 @@ async def test_scheduler_and_worker_settlement_share_one_deadlock_free_lock_orde
                         content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
                         preference_version=1,
                         snip_prompt_version="snip-prompt-v1",
-                        summary_model_ref=model_version_id,
+                        summary_model_config_id=model_config_id,
+                        summary_model_payload_checksum=model_checksum,
                         created_at=now - timedelta(hours=1),
                     )
                 )
@@ -809,14 +751,15 @@ async def test_release_settlement_locks_document_before_active_job(
     now = datetime.now(UTC)
     worker_id = uuid.uuid4()
     model_id = uuid.uuid4()
-    model_version_id = uuid.uuid4()
+    model_config_id = model_id
     model_checksum = "e" * 64
     frozen = MemoryDreamFrozenRuntime(
         preference_version=1,
         policy_revision=1,
-        model_config_id=model_id,
-        model_version_id=model_version_id,
-        model_payload_checksum=model_checksum,
+        model_execution=frozen_system_model_execution(
+            model_id=model_id,
+            provider_model="dream-release-lock-order",
+        ),
         prompt_version=DREAM_PROMPT_VERSION,
     )
     release_scope_locked = asyncio.Event()
@@ -855,45 +798,12 @@ async def test_release_settlement_locks_document_before_active_job(
 
     try:
         async with seed.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_configs
-                    (id,display_name,status,
-                     current_version_id,revision,created_by_user_id,
-                     updated_by_user_id)
-                    VALUES (:id,'Dream release lock-order model','active',
-                            NULL,1,:owner,:owner)"""
-                ),
-                {
-                    "id": model_id,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'vision_bridge_fake','dream-release-lock-order',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,NULL,:owner)"""
-                ),
-                {
-                    "id": model_version_id,
-                    "model": model_id,
-                    "checksum": model_checksum,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """UPDATE system_model_configs
-                    SET current_version_id=:version WHERE id=:model"""
-                ),
-                {"version": model_version_id, "model": model_id},
+            await seed_system_model_config(
+                connection,
+                model_id=model_id,
+                owner_user_id=scope.owner_user_id,
+                display_name="Dream release lock-order model",
+                provider_model="dream-release-lock-order",
             )
 
         async with seed.factory() as session, session.begin():
@@ -924,7 +834,8 @@ async def test_release_settlement_locks_document_before_active_job(
                     content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
                     preference_version=1,
                     snip_prompt_version="snip-prompt-v1",
-                    summary_model_ref=model_version_id,
+                    summary_model_config_id=model_config_id,
+                    summary_model_payload_checksum=model_checksum,
                     created_at=now,
                 )
             )
@@ -1039,7 +950,7 @@ async def test_release_settlement_locks_document_before_active_job(
 
 @pytest.mark.postgres
 @pytest.mark.anyio
-async def test_postgres_dream_settlement_cancels_when_active_model_version_drifts(
+async def test_postgres_dream_settlement_keeps_frozen_payload_when_model_config_changes(
     migrated_postgres_database_url: str,
 ) -> None:
     seed = await seed_private_thread_database(migrated_postgres_database_url)
@@ -1050,8 +961,6 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
     base_time = datetime.now(UTC)
     worker_id = uuid.uuid4()
     model_id = uuid.uuid4()
-    frozen_model_version_id = uuid.uuid4()
-    drifted_model_version_id = uuid.uuid4()
     frozen_checksum = "a" * 64
     drifted_checksum = "b" * 64
     model_name = str(model_id)
@@ -1076,53 +985,21 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
     frozen = MemoryDreamFrozenRuntime(
         preference_version=1,
         policy_revision=policy_revision,
-        model_config_id=model_id,
-        model_version_id=frozen_model_version_id,
-        model_payload_checksum=frozen_checksum,
+        model_execution=frozen_system_model_execution(
+            model_id=model_id,
+            provider_model="dream-frozen",
+        ),
         prompt_version=DREAM_PROMPT_VERSION,
     )
 
     try:
         async with seed.engine.begin() as connection:
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_configs
-                    (id,display_name,status,
-                     current_version_id,revision,created_by_user_id,
-                     updated_by_user_id)
-                    VALUES (:id,'Dream settlement model','active',
-                            NULL,1,:owner,:owner)"""
-                ),
-                {
-                    "id": model_id,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,1,'vision_bridge_fake','dream-frozen',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,NULL,:owner)"""
-                ),
-                {
-                    "id": frozen_model_version_id,
-                    "model": model_id,
-                    "checksum": frozen_checksum,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
-                    """UPDATE system_model_configs
-                    SET current_version_id=:version WHERE id=:model"""
-                ),
-                {"version": frozen_model_version_id, "model": model_id},
+            await seed_system_model_config(
+                connection,
+                model_id=model_id,
+                owner_user_id=scope.owner_user_id,
+                display_name="Dream settlement model",
+                provider_model="dream-frozen",
             )
 
         async with seed.factory() as session, session.begin():
@@ -1180,7 +1057,8 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
                     content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
                     preference_version=1,
                     snip_prompt_version="snip-prompt-v1",
-                    summary_model_ref=frozen_model_version_id,
+                    summary_model_config_id=model_id,
+                    summary_model_payload_checksum=frozen_checksum,
                     created_at=base_time,
                 )
             )
@@ -1225,7 +1103,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
 
         settlement = await handler(claim, authority)
         assert isinstance(settlement, JobSettlement)
-        assert settlement.outcome.status == "succeeded"
+        assert settlement.outcome.status == "succeeded", settlement.outcome
         assert len(runner.inputs) == 1
         assert runner.inputs[0].history[0].tagged_text == tagged_text
 
@@ -1240,33 +1118,14 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
             )
             await connection.execute(
                 text(
-                    """INSERT INTO system_model_config_versions
-                    (id,model_config_id,version_number,provider_adapter,
-                     provider_model,settings,supports_thinking,
-                     supports_reasoning_effort,supports_vision,credential_id,
-                     credential_version_id,credential_env_key,payload_checksum,
-                     supersedes_version_id,created_by_user_id)
-                    VALUES (:id,:model,2,'vision_bridge_fake','dream-drifted',
-                            '{}'::jsonb,false,false,false,NULL,NULL,NULL,
-                            :checksum,:supersedes,:owner)"""
-                ),
-                {
-                    "id": drifted_model_version_id,
-                    "model": model_id,
-                    "checksum": drifted_checksum,
-                    "supersedes": frozen_model_version_id,
-                    "owner": scope.owner_user_id,
-                },
-            )
-            await connection.execute(
-                text(
                     """UPDATE system_model_configs
-                    SET current_version_id=:version,revision=2,
+                    SET provider_model='dream-drifted',
+                        payload_checksum=:checksum,revision=2,
                         updated_by_user_id=:owner,updated_at=now()
                     WHERE id=:model"""
                 ),
                 {
-                    "version": drifted_model_version_id,
+                    "checksum": drifted_checksum,
                     "owner": scope.owner_user_id,
                     "model": model_id,
                 },
@@ -1282,12 +1141,8 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
             current_model = (
                 await connection.execute(
                     text(
-                        """SELECT c.current_version_id,v.payload_checksum
-                        FROM system_model_configs AS c
-                        JOIN system_model_config_versions AS v
-                          ON v.id=c.current_version_id
-                         AND v.model_config_id=c.id
-                        WHERE c.id=:model"""
+                        """SELECT provider_model,payload_checksum
+                        FROM system_model_configs WHERE id=:model"""
                     ),
                     {"model": model_id},
                 )
@@ -1302,7 +1157,7 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
             )
         assert policy_revision_before_drift == policy_revision
         assert policy_revision_after_drift == policy_revision
-        assert current_model.current_version_id == drifted_model_version_id
+        assert current_model.provider_model == "dream-drifted"
         assert current_model.payload_checksum == drifted_checksum
 
         await settlement.commit()
@@ -1348,17 +1203,17 @@ async def test_postgres_dream_settlement_cancels_when_active_model_version_drift
         assert document is not None
         assert dream_run is not None
         assert job is not None
-        assert document.content == EMPTY_MEMORY_DOCUMENT
-        assert document.version == 0
-        assert document.dream_cursor == 0
+        assert document.content == changed_content
+        assert document.version == 1
+        assert document.dream_cursor == 1
         assert document.active_dream_job_id is None
-        assert version_count == 0
-        assert dream_run.result_version is None
-        assert history.status == "pending"
-        assert history.dream_job_id is None
-        assert history.tagged_text == tagged_text
-        assert job.status == "cancelled"
-        assert attempt.outcome == "cancelled"
+        assert version_count == 1
+        assert dream_run.result_version == 1
+        assert history.status == "consumed"
+        assert history.dream_job_id == job_id
+        assert history.tagged_text is None
+        assert job.status == "succeeded"
+        assert attempt.outcome == "succeeded"
         assert current_policy_revision == policy_revision
     finally:
         await seed.engine.dispose()

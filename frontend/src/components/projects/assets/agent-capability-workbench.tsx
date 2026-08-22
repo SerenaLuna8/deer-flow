@@ -360,14 +360,14 @@ export function AgentCapabilityWorkbench({
   const skillOptions = useMemo(
     () =>
       skills.data
-        ? agentDependencyOptions("skill", skills.data as ProjectAssetList, copy)
+        ? agentDependencyOptions("skill", skills.data, copy)
         : [],
     [copy, skills.data],
   );
   const mcpOptions = useMemo(
     () =>
       mcps.data
-        ? agentDependencyOptions("mcp", mcps.data as ProjectAssetList, copy)
+        ? agentDependencyOptions("mcp", mcps.data, copy)
         : [],
     [copy, mcps.data],
   );

@@ -50,7 +50,8 @@ def _snapshot() -> ResolvedMcpSnapshot:
         catalog_generation=1,
         dependency_version_ids=(),
         definition={"transport": "http", "url": "https://mcp.invalid/mcp"},
-        credential_grant_ids=(),
+        secret_generation_ids=(),
+        secret_digest="",
     )
 
 

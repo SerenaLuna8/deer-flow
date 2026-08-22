@@ -67,11 +67,6 @@ class AuditAction(StrEnum):
     ASSET_DELETED = "asset.deleted"
     ASSET_BOUND = "asset.bound"
     ASSET_UNBOUND = "asset.unbound"
-    ASSET_CREDENTIAL_CREATED = "asset.credential_created"
-    ASSET_CREDENTIAL_REPLACED = "asset.credential_replaced"
-    ASSET_CREDENTIAL_REVOKED = "asset.credential_revoked"
-    ASSET_CREDENTIAL_DELETED = "asset.credential_deleted"
-    ASSET_CREDENTIAL_GRANTS_MIGRATED = "asset.credential_grants_migrated"
     AUTOMATION_CREATED = "automation.created"
     AUTOMATION_UPDATED = "automation.updated"
     AUTOMATION_DELETED = "automation.deleted"
@@ -245,11 +240,6 @@ for _action in (
     AuditAction.ASSET_EXPORTED,
     AuditAction.ASSET_DEPRECATED,
     AuditAction.ASSET_DELETED,
-    AuditAction.ASSET_CREDENTIAL_CREATED,
-    AuditAction.ASSET_CREDENTIAL_REPLACED,
-    AuditAction.ASSET_CREDENTIAL_REVOKED,
-    AuditAction.ASSET_CREDENTIAL_DELETED,
-    AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _ACTION_CONTRACTS[_action] = AuditActionContract(
         target_kind=AuditTargetKind.ASSET,
@@ -832,7 +822,7 @@ class RoleChangedAuditMetadata(_AuditMetadata):
 
 
 class AssetAuditMetadata(_AuditMetadata):
-    asset_kind: Literal["agent", "skill", "mcp"]
+    asset_kind: Literal["agent", "skill", "mcp", "model", "channel"]
     operation: Literal[
         "agent.create",
         "agent.version.create",
@@ -851,39 +841,63 @@ class AssetAuditMetadata(_AuditMetadata):
         "skill.version.revoke",
         "skill.delete",
         "skill.enable",
-        "skill.credential_bindings.configure",
+        "skill.secret.replace",
+        "skill.secret.configure",
+        "skill.secret.clear",
+        "skill.secret.copy",
+        "skill.secret.invalidate",
         "skill.suspend",
         "mcp.create",
         "mcp.version.create",
         "mcp.submit_approval",
-        "mcp.approve",
-        "mcp.credential_grants.configure",
+        "mcp.secret.replace",
+        "mcp.secret.configure",
+        "mcp.secret.clear",
+        "mcp.secret.copy",
+        "mcp.secret.invalidate",
         "mcp.publish",
         "mcp.archive",
         "mcp.suspend",
         "mcp.activate",
         "mcp.delete",
-        "credential.create",
-        "credential.replace",
-        "credential.revoke",
-        "credential.delete",
-        "credential.grants.migrate",
         "binding.enable",
         "binding.upgrade",
         "binding.rollback",
         "binding.sync_current",
         "binding.disable",
+        "model.secret.configure",
+        "model.secret.replace",
+        "model.secret.clear",
+        "channel.secret.configure",
+        "channel.secret.replace",
+        "channel.secret.clear",
     ]
     version_number: StrictInt | None = Field(default=None, ge=1)
+    version_id: uuid.UUID | None = None
+    slot_id: uuid.UUID | None = None
+    secret_name: StrictStr | None = Field(default=None, min_length=1, max_length=255)
+    generation_id: uuid.UUID | None = None
+    revision: StrictInt | None = Field(default=None, ge=1)
+    result: Literal["configured", "cleared", "copied", "invalidated"] | None = None
+    reason: (
+        Literal[
+            "created",
+            "replaced",
+            "cleared",
+            "compatible_copy",
+            "definition_change",
+            "recipient_changed",
+            "deleted",
+        ]
+        | None
+    ) = None
+    readiness: Literal["ready", "unready"] | None = None
 
     @model_validator(mode="after")
     def validate_asset_operation(self) -> Self:
         operation_domain = self.operation.partition(".")[0]
-        if operation_domain in {"agent", "skill", "mcp"} and operation_domain != self.asset_kind:
+        if operation_domain in {"agent", "skill", "mcp", "model", "channel"} and operation_domain != self.asset_kind:
             raise ValueError("asset audit operation does not match the asset kind")
-        if operation_domain == "credential" and self.asset_kind != "mcp":
-            raise ValueError("Credential audit operations must target an MCP asset")
-
         versioned_agent_operations = {
             "agent.version.create",
             "agent.instructions.update",
@@ -895,6 +909,11 @@ class AssetAuditMetadata(_AuditMetadata):
             "skill.version.activate",
             "skill.export",
             "skill.version.revoke",
+            "skill.secret.configure",
+            "skill.secret.replace",
+            "skill.secret.clear",
+            "skill.secret.copy",
+            "skill.secret.invalidate",
         }
         if operation_domain == "agent":
             expects_version = self.operation in versioned_agent_operations
@@ -904,8 +923,38 @@ class AssetAuditMetadata(_AuditMetadata):
             expects_version = self.operation in versioned_skill_operations
             if expects_version != (self.version_number is not None):
                 raise ValueError("Skill audit version coordinates are inconsistent")
-        elif self.version_number is not None:
+        elif operation_domain not in {"skill"} and self.version_number is not None:
             raise ValueError("asset audit version number is not supported for this operation")
+        secret_operation = ".secret." in self.operation
+        secret_coordinates = (
+            self.version_id,
+            self.slot_id,
+            self.secret_name,
+            self.generation_id,
+            self.revision,
+            self.result,
+            self.reason,
+            self.readiness,
+        )
+        if not secret_operation:
+            if any(value is not None for value in secret_coordinates):
+                raise ValueError("non-secret asset audit contains secret coordinates")
+            return self
+        if self.revision is None or self.result is None or self.reason is None or self.readiness is None:
+            raise ValueError("secret audit lifecycle metadata is incomplete")
+        if self.asset_kind == "skill":
+            if self.version_id is None or self.secret_name is None or self.slot_id is not None:
+                raise ValueError("Skill secret audit coordinates are inconsistent")
+        elif self.asset_kind == "mcp":
+            if self.version_id is None or self.slot_id is None or self.secret_name is None:
+                raise ValueError("MCP secret audit coordinates are inconsistent")
+        elif self.asset_kind in {"model", "channel"}:
+            if self.version_id is not None or self.slot_id is not None or self.secret_name is not None:
+                raise ValueError("configuration secret audit coordinates are inconsistent")
+        else:
+            raise ValueError("secret audit asset kind is invalid")
+        if self.operation.endswith((".configure", ".replace", ".copy")) and self.generation_id is None:
+            raise ValueError("configured secret audit requires a Generation")
         return self
 
 
@@ -1146,11 +1195,6 @@ for _action in (
     AuditAction.ASSET_DELETED,
     AuditAction.ASSET_BOUND,
     AuditAction.ASSET_UNBOUND,
-    AuditAction.ASSET_CREDENTIAL_CREATED,
-    AuditAction.ASSET_CREDENTIAL_REPLACED,
-    AuditAction.ASSET_CREDENTIAL_REVOKED,
-    AuditAction.ASSET_CREDENTIAL_DELETED,
-    AuditAction.ASSET_CREDENTIAL_GRANTS_MIGRATED,
 ):
     _AUDIT_METADATA_MODELS[_action] = AssetAuditMetadata
 for _action in (

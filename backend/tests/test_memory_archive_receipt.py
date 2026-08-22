@@ -21,6 +21,7 @@ from deerflow.agents.memory.snip import (
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.model_execution import SystemModelExecutionProvenance
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDocumentScope,
     MemoryHistoryActivation,
@@ -95,7 +96,12 @@ def _activation(**overrides: object) -> MemoryHistoryActivation:
         "content_digest": compute_snip_content_digest(tagged_text),
         "preference_version": 1,
         "snip_prompt_version": SNIP_ARCHIVE_PROMPT_VERSION,
-        "summary_model_ref": uuid.uuid4(),
+        "summary_model": SystemModelExecutionProvenance(
+            model_config_id=uuid.uuid4(),
+            payload_checksum="b" * 64,
+            secret_generation_id=uuid.uuid4(),
+            secret_envelope_digest="c" * 64,
+        ),
     }
     values.update(overrides)
     return MemoryHistoryActivation(**values)  # type: ignore[arg-type]
@@ -239,7 +245,7 @@ def test_exact_model_version_carrier_survives_runtime_copy_and_is_secret() -> No
         use="langchain_openai.ChatOpenAI",
         model="summary-model",
     )
-    model._system_model_config_version_id = exact_version
+    model._system_model_config_id = exact_version
     config = AppConfig.model_validate(
         {
             "sandbox": {
@@ -248,6 +254,6 @@ def test_exact_model_version_carrier_survives_runtime_copy_and_is_secret() -> No
         }
     ).with_runtime_models((model,))
 
-    assert config.models[0]._system_model_config_version_id == exact_version
-    assert "_system_model_config_version_id" not in config.models[0].model_dump()
-    assert "_system_model_config_version_id" not in config.model_dump()
+    assert config.models[0]._system_model_config_id == exact_version
+    assert "_system_model_config_id" not in config.models[0].model_dump()
+    assert "_system_model_config_id" not in config.model_dump()

@@ -310,7 +310,10 @@ async def gateway_platform_runtime(
         from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
         from deerflow.persistence.channel_connections import ChannelConnectionRepository
 
-        model_catalog = SystemModelCatalogService(sf)
+        model_catalog = SystemModelCatalogService(
+            sf,
+            audit_service=audit_service,
+        )
         model_materializer = SystemModelMaterializer(sf)
         app.state.system_model_catalog = model_catalog
         app.state.system_model_materializer = model_materializer

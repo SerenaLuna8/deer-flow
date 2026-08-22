@@ -61,7 +61,7 @@ SANDBOX_IMAGE = os.environ.get(
 )
 SKILLS_HOST_PATH = os.environ.get("SKILLS_HOST_PATH", "/skills")
 THREADS_HOST_PATH = os.environ.get("THREADS_HOST_PATH", "/.deer-flow/threads")
-DEER_FLOW_HOST_BASE_DIR = os.environ.get("DEER_FLOW_HOST_BASE_DIR", "/.deer-flow")
+ACT_WEAVE_HOST_BASE_DIR = os.environ.get("ACT_WEAVE_HOST_BASE_DIR", "/.deer-flow")
 SKILLS_PVC_NAME = os.environ.get("SKILLS_PVC_NAME", "")
 USERDATA_PVC_NAME = os.environ.get("USERDATA_PVC_NAME", "")
 SKILLS_PVC_SUBPATH_TEMPLATE = os.environ.get("SKILLS_PVC_SUBPATH_TEMPLATE", "")
@@ -297,7 +297,7 @@ def _build_volumes(
         )
 
         user_custom_path = join_host_path(
-            DEER_FLOW_HOST_BASE_DIR,
+            ACT_WEAVE_HOST_BASE_DIR,
             "users",
             user_id,
             "skills",

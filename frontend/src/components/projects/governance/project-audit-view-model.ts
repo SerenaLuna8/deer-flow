@@ -62,26 +62,6 @@ const ACTION_LABELS: Record<AuditAction, LocalizedLabel> = {
     "zh-CN": "已解除资产绑定",
     "en-US": "Asset binding removed",
   },
-  "asset.credential_created": {
-    "zh-CN": "已创建资产凭据",
-    "en-US": "Asset credential created",
-  },
-  "asset.credential_replaced": {
-    "zh-CN": "已替换资产凭据",
-    "en-US": "Asset credential replaced",
-  },
-  "asset.credential_revoked": {
-    "zh-CN": "已撤销资产凭据",
-    "en-US": "Asset credential revoked",
-  },
-  "asset.credential_deleted": {
-    "zh-CN": "已删除资产凭据",
-    "en-US": "Asset credential deleted",
-  },
-  "asset.credential_grants_migrated": {
-    "zh-CN": "已迁移凭据授权",
-    "en-US": "Credential grants migrated",
-  },
   "automation.created": {
     "zh-CN": "已创建自动化",
     "en-US": "Automation created",

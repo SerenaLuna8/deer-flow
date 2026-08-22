@@ -16,7 +16,7 @@ export const CAPABILITIES = [
   "shared_assets.execute",
   "shared_assets.edit",
   "shared_assets.manage_bindings",
-  "mcp.credentials.approve",
+  "shared_assets.manage_bindings",
   "private_work.create",
   "private_work.read_own",
   "private_work.approve_host_execution",

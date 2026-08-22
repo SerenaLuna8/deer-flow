@@ -27,7 +27,7 @@ import {
 import { resolveMcpCurrentConfiguration } from "@/core/shared-assets/mcp-current";
 import { mcpVersionRuntimeBlockReason } from "@/core/shared-assets/mcp-runtime";
 
-const BINDING_KIND: Record<Exclude<AssetListKind, "credentials">, AssetKind> = {
+const BINDING_KIND: Record<AssetListKind, AssetKind> = {
   agents: "agent",
   skills: "skill",
   "mcp-servers": "mcp",
@@ -78,7 +78,7 @@ export function canMoveSystemBinding(
 
 export function bindingVersionLabel(
   versionNumber?: number,
-  kind: Exclude<AssetListKind, "credentials"> = "skills",
+  kind: AssetListKind = "skills",
 ): string {
   if (kind === "mcp-servers") return "已启用";
   return versionNumber === undefined
@@ -138,7 +138,7 @@ export function SystemBindingDialog({
 }: {
   accountId: string;
   projectId: string;
-  kind: Exclude<AssetListKind, "credentials">;
+  kind: AssetListKind;
   item: ProjectAssetItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;

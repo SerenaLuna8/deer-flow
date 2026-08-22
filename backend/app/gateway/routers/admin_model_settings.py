@@ -8,7 +8,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, BeforeValidator, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, SecretStr, field_validator
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -83,9 +83,7 @@ class AdminModelCreateRequest(_StrictModel):
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
-    credential_id: _JsonUuid | None = None
-    credential_version_id: _JsonUuid | None = None
-    credential_env_key: str | None = None
+    api_key: SecretStr | None = None
 
 
 class AdminModelUpdateRequest(_StrictModel):
@@ -96,19 +94,19 @@ class AdminModelUpdateRequest(_StrictModel):
     supports_thinking: bool = False
     supports_reasoning_effort: bool = False
     supports_vision: bool = False
-    credential_id: _JsonUuid | None = None
-    credential_version_id: _JsonUuid | None = None
-    credential_env_key: str | None = None
-    expected_revision: int
+    api_key: SecretStr | None = None
 
 
 class AdminModelStatusRequest(_StrictModel):
     status: Literal["active", "suspended"]
-    expected_revision: int
 
 
 class AdminModelDefaultRequest(_StrictModel):
-    expected_catalog_revision: int
+    pass
+
+
+class AdminModelSecretClearRequest(_StrictModel):
+    confirmed: Literal[True]
 
 
 class AdminModelConnectionTestRequest(_StrictModel):
@@ -116,9 +114,14 @@ class AdminModelConnectionTestRequest(_StrictModel):
     provider_model: str
     settings: dict[str, object]
     supports_vision: bool
-    credential_id: _JsonUuid | None = None
-    credential_version_id: _JsonUuid | None = None
-    credential_env_key: str | None = None
+    api_key: SecretStr
+
+    @field_validator("api_key")
+    @classmethod
+    def require_non_empty_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value():
+            raise ValueError("api_key must not be empty")
+        return value
 
 
 class AdminModelItemResponse(_StrictModel):
@@ -133,10 +136,9 @@ class AdminModelItemResponse(_StrictModel):
     status: Literal["active", "suspended"]
     is_default: bool
     revision: int
-    version_number: int
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_env_key: str | None
+    api_key_configured: bool
+    secret_readiness: Literal["ready", "unready"]
+    secret_revision: int
     updated_at: datetime
 
 
@@ -161,7 +163,7 @@ class AdminModelProviderSettingFieldResponse(_StrictModel):
 
 class AdminModelProviderAdapterResponse(_StrictModel):
     id: str
-    credential_required: bool
+    api_key_required: bool
     setting_fields: list[AdminModelProviderSettingFieldResponse]
 
 
@@ -196,25 +198,24 @@ def _item_response(
     *,
     default_model_config_id: uuid.UUID | None,
 ) -> AdminModelItemResponse:
-    settings = _thaw_json(item.current_version.settings)
+    settings = _thaw_json(item.settings)
     if not isinstance(settings, dict):
         raise TypeError("model settings must be an object")
     return AdminModelItemResponse(
         id=item.id,
         display_name=item.display_name,
-        provider_adapter=item.current_version.provider_adapter,
-        provider_model=item.current_version.provider_model,
+        provider_adapter=item.provider_adapter,
+        provider_model=item.provider_model,
         settings=settings,
-        supports_thinking=item.current_version.supports_thinking,
-        supports_reasoning_effort=(item.current_version.supports_reasoning_effort),
-        supports_vision=item.current_version.supports_vision,
+        supports_thinking=item.supports_thinking,
+        supports_reasoning_effort=item.supports_reasoning_effort,
+        supports_vision=item.supports_vision,
         status=item.status,
         is_default=item.id == default_model_config_id,
         revision=item.revision,
-        version_number=item.current_version.version_number,
-        credential_id=item.current_version.credential_id,
-        credential_version_id=item.current_version.credential_version_id,
-        credential_env_key=item.current_version.credential_env_key,
+        api_key_configured=item.api_key_configured,
+        secret_readiness=item.secret_readiness,
+        secret_revision=item.secret_revision,
         updated_at=item.updated_at,
     )
 
@@ -234,7 +235,7 @@ def _catalog_response(
         provider_adapters=[
             AdminModelProviderAdapterResponse(
                 id=adapter_id,
-                credential_required=descriptor.credential_required,
+                api_key_required=descriptor.api_key_required,
                 setting_fields=[
                     AdminModelProviderSettingFieldResponse(
                         name=field.name,
@@ -352,9 +353,7 @@ async def create_admin_model(
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),
                 supports_vision=body.supports_vision,
-                credential_id=body.credential_id,
-                credential_version_id=body.credential_version_id,
-                credential_env_key=body.credential_env_key,
+                api_key=(body.api_key.get_secret_value() if body.api_key is not None else None),
             ),
         )
         catalog = await _catalog_after_mutation(service, context)
@@ -398,9 +397,7 @@ async def test_admin_model_connection(
                 provider_model=body.provider_model,
                 settings=body.settings,
                 supports_vision=body.supports_vision,
-                credential_id=body.credential_id,
-                credential_version_id=body.credential_version_id,
-                credential_env_key=body.credential_env_key,
+                api_key=body.api_key.get_secret_value(),
             ),
         )
         model = await materializer.materialize_connection_test(material)
@@ -442,11 +439,43 @@ async def update_admin_model(
                 supports_thinking=body.supports_thinking,
                 supports_reasoning_effort=(body.supports_reasoning_effort),
                 supports_vision=body.supports_vision,
-                credential_id=body.credential_id,
-                credential_version_id=body.credential_version_id,
-                credential_env_key=body.credential_env_key,
+                api_key=(body.api_key.get_secret_value() if body.api_key is not None else None),
             ),
-            expected_revision=body.expected_revision,
+        )
+        catalog = await _catalog_after_mutation(service, context)
+        return AdminModelMutationResponse(
+            item=_item_response(
+                updated,
+                default_model_config_id=catalog.default_model_config_id,
+            ),
+            catalog_revision=catalog.catalog_revision,
+            request_id=context.request_id,
+        )
+    except SystemModelError as error:
+        raise _system_model_http_exception(error) from None
+
+
+@router.post(
+    "/{model_config_id}/api-key/clear",
+    response_model=AdminModelMutationResponse,
+)
+async def clear_admin_model_api_key(
+    model_config_id: uuid.UUID,
+    body: AdminModelSecretClearRequest,
+    context: Annotated[
+        SystemAuditContext,
+        Depends(current_model_admin_context),
+    ],
+    service: Annotated[
+        SystemModelCatalogService,
+        Depends(get_system_model_catalog),
+    ],
+) -> AdminModelMutationResponse:
+    try:
+        updated = await service.clear_api_key(
+            context,
+            model_config_id,
+            confirmed=body.confirmed,
         )
         catalog = await _catalog_after_mutation(service, context)
         return AdminModelMutationResponse(
@@ -482,7 +511,6 @@ async def set_admin_model_status(
             context,
             model_config_id,
             body.status,
-            expected_revision=body.expected_revision,
         )
         catalog = await _catalog_after_mutation(service, context)
         return AdminModelMutationResponse(
@@ -517,7 +545,6 @@ async def set_admin_model_default(
         await service.set_default(
             context,
             model_config_id,
-            expected_catalog_revision=body.expected_catalog_revision,
         )
         catalog = await _catalog_after_mutation(service, context)
         selected = next(

@@ -22,7 +22,7 @@ easy to customize per environment.
 ActWeave resolves `config.yaml` using the following priority order:
 
 1. The path passed to `AppConfig.from_file(config_path)` explicitly.
-2. The `DEER_FLOW_CONFIG_PATH` environment variable.
+2. The `ACT_WEAVE_CONFIG_PATH` environment variable.
 3. `config.yaml` in the repository root.
 
 If none of these paths exist, the application raises an error at startup.
@@ -30,7 +30,7 @@ If none of these paths exist, the application raises an error at startup.
 To use a custom location:
 
 ```bash
-export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+export ACT_WEAVE_CONFIG_PATH=/path/to/my-config.yaml
 ```
 
 ## Environment variable interpolation
@@ -75,12 +75,11 @@ This pattern is how ActWeave achieves pluggability without hardcoding class refe
 
 Platform administrators configure provider adapters, provider model names,
 capabilities, and bounded provider-specific JSON in **Admin → System Settings
-→ Models**. API keys are selected through versioned System Credentials; they
-are never stored in model settings or `config.yaml`.
+→ Models**. API Keys are encrypted directly into the owning Model configuration;
+they are never stored in `config.yaml` or returned by the API.
 
-Each Run freezes the exact model configuration and Credential version admitted
-for that Run, so later administrative changes do not silently alter queued
-work.
+Each Run freezes the exact model payload and Secret Generation admitted for that
+Run, so later administrative changes do not silently alter admitted work.
 
 ## Configuration version
 

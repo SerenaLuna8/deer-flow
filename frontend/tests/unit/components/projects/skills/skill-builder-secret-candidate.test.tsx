@@ -224,14 +224,14 @@ describe("Skill Builder secret candidate drafts", () => {
   });
 });
 
-describe("Skill Builder create Credential setup", () => {
+describe("Skill Builder create secret setup", () => {
   test("round-trips the durable exact created version in the session contract", () => {
     const parsed = skillBuilderCommitResponseSchema.parse(commitResponse());
 
     expect(parsed.data.session.created_skill_version_id).toBe(VERSION_ID);
   });
 
-  test("rebuilds the create Credential action from a refreshed durable session", () => {
+  test("rebuilds the create secret action from a refreshed durable session", () => {
     const completed = session({
       status: "completed",
       created_skill_id: SKILL_ID,
@@ -246,10 +246,10 @@ describe("Skill Builder create Credential setup", () => {
     });
     expect(
       skillBuilderCompletedVersionHref("/projects/demo/skills", completed, {
-        configureCredentials: true,
+        configureSecrets: true,
       }),
     ).toBe(
-      `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`,
+      `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_secrets=1`,
     );
   });
 
@@ -268,17 +268,17 @@ describe("Skill Builder create Credential setup", () => {
 
     expect(
       skillBuilderCompletedVersionHref("/projects/demo/skills", completed, {
-        configureCredentials: false,
+        configureSecrets: false,
       }),
     ).toBe(
       `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}`,
     );
     expect(
       skillBuilderCompletedVersionHref("/projects/demo/skills", completed, {
-        configureCredentials: true,
+        configureSecrets: true,
       }),
     ).toBe(
-      `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`,
+      `/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_secrets=1`,
     );
     expect(skillBuilderCreatedSecretSetupFromSession(completed)).toEqual({
       skillId: SKILL_ID,
@@ -414,16 +414,16 @@ describe("Skill Builder create Credential setup", () => {
       <I18nProvider initialLocale="zh-CN">
         <SkillBuilderCreateSecretSuccess
           requirementCount={1}
-          href={`/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`}
+          href={`/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_secrets=1`}
         />
       </I18nProvider>,
     );
 
-    expect(html).toContain("1 项环境变量需要配置运行凭证");
-    expect(html).toContain("配置凭证");
+    expect(html).toContain("1 项环境变量需要配置运行秘密");
+    expect(html).toContain("配置秘密");
     expect(html).toContain(`skill_id=${SKILL_ID}`);
     expect(html).toContain(`skill_version_id=${VERSION_ID}`);
-    expect(html).toContain("configure_credentials=1");
+    expect(html).toContain("configure_secrets=1");
   });
 
   test("routes a revised Candidate Version with declarations to exact-version mappings", () => {
@@ -431,14 +431,14 @@ describe("Skill Builder create Credential setup", () => {
       <I18nProvider initialLocale="zh-CN">
         <SkillBuilderRevisionCommitSuccess
           versionNumber={2}
-          credentialRequirementCount={1}
-          href={`/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_credentials=1`}
+          secretRequirementCount={1}
+          href={`/projects/demo/skills?skill_id=${SKILL_ID}&skill_version_id=${VERSION_ID}&configure_secrets=1`}
         />
       </I18nProvider>,
     );
 
-    expect(html).toContain("1 项环境变量需要配置运行凭证");
-    expect(html).toContain("配置凭证");
-    expect(html).toContain("configure_credentials=1");
+    expect(html).toContain("1 项环境变量需要配置运行秘密");
+    expect(html).toContain("配置秘密");
+    expect(html).toContain("configure_secrets=1");
   });
 });

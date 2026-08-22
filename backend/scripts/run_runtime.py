@@ -35,6 +35,9 @@ MODEL_PROVIDER_ENV_NAMES = frozenset(
 )
 INSTALLATION_ONLY_ENV_NAMES = frozenset(
     {
+        # setup-db consumes this once to create encrypted model-owned copies.
+        # Runtime roles must never inherit the bootstrap plaintext.
+        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY",
         # This superuser connection is admitted only by setup/upgrade entry
         # points. Gateway, Worker, Scheduler, and maintenance runtime commands
         # must use the application DATABASE_URL instead.

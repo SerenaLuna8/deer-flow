@@ -14,8 +14,12 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Overwrite
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.system_model_seed import (
+    frozen_system_model_execution,
+    seed_system_model_config,
+)
 
 import deerflow.runtime.checkpoint_mode as checkpoint_mode_state
 from app.gateway.deps import (
@@ -119,49 +123,24 @@ def _reset_checkpoint_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-async def _seed_model_version(seed: PrivateThreadSeed) -> uuid.UUID:
+async def _seed_model_config(seed: PrivateThreadSeed) -> uuid.UUID:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'SNIP test model','active',
-                        NULL,1,:owner,:owner)"""
-            ),
-            {
-                "id": model_id,
-                "owner": str(seed.owner_a.user_id),
-            },
+        await seed_system_model_config(
+            connection,
+            model_id=model_id,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="SNIP test model",
+            provider_model="snip-test",
         )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,
-                 provider_model,settings,supports_thinking,
-                 supports_reasoning_effort,supports_vision,credential_id,
-                 credential_version_id,credential_env_key,payload_checksum,
-                 supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake','snip-test','{}'::jsonb,
-                        false,false,false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-            ),
-            {
-                "id": version_id,
-                "model": model_id,
-                "checksum": "a" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """UPDATE system_model_configs SET current_version_id=:version
-                WHERE id=:model"""
-            ),
-            {"version": version_id, "model": model_id},
-        )
-    return version_id
+    return model_id
+
+
+def _model_provenance(model_id: uuid.UUID):
+    return frozen_system_model_execution(
+        model_id=model_id,
+        provider_model="snip-test",
+    ).provenance
 
 
 async def _source_snapshot(
@@ -197,7 +176,7 @@ async def _source_snapshot(
     return state, snapshot
 
 
-def _receipt(seed: PrivateThreadSeed, snapshot, model_version_id: uuid.UUID):
+def _receipt(seed: PrivateThreadSeed, snapshot, model_config_id: uuid.UUID):
     source_checkpoint_id = snapshot_checkpoint_id(snapshot)
     assert source_checkpoint_id is not None
     messages = snapshot.values["messages"]
@@ -209,7 +188,7 @@ def _receipt(seed: PrivateThreadSeed, snapshot, model_version_id: uuid.UUID):
             owner_user_id=str(seed.owner_a.user_id),
             namespace="default",
             preference_version=1,
-            summary_model_ref=model_version_id,
+            summary_model=_model_provenance(model_config_id),
             source_checkpoint_id=source_checkpoint_id,
         ),
         thread_id=snapshot.config["configurable"]["thread_id"],
@@ -241,14 +220,14 @@ async def test_checkpoint_aput_activates_once_and_branch_or_client_cannot_copy_r
     source_thread_id = f"receipt-source-{uuid.uuid4()}"
     target_thread_id = f"receipt-target-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         state, source = await _source_snapshot(
             seed,
             scoped,
             app_config,
             source_thread_id,
         )
-        tagged_text, receipt = _receipt(seed, source, model_version_id)
+        tagged_text, receipt = _receipt(seed, source, model_config_id)
         committed_config = await state.aupdate(
             source.config,
             {
@@ -334,14 +313,14 @@ async def test_checkpoint_write_failure_never_creates_history(
     app_config = _app_config()
     thread_id = f"receipt-checkpoint-failure-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         state, source = await _source_snapshot(
             seed,
             scoped,
             app_config,
             thread_id,
         )
-        tagged_text, receipt = _receipt(seed, source, model_version_id)
+        tagged_text, receipt = _receipt(seed, source, model_config_id)
         raw.fail_next_put = True
 
         with pytest.raises(PrivateWorkUnavailable):
@@ -377,7 +356,7 @@ async def test_real_stategraph_threshold_uses_runtime_checkpoint_and_activates_h
     app_config = _app_config()
     thread_id = f"receipt-runtime-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         state, source = await _source_snapshot(
             seed,
             scoped,
@@ -428,7 +407,7 @@ async def test_real_stategraph_threshold_uses_runtime_checkpoint_and_activates_h
             owner_user_id=str(seed.owner_a.user_id),
             namespace="default",
             preference_version=1,
-            summary_model_ref=model_version_id,
+            summary_model=_model_provenance(model_config_id),
             source_checkpoint_id=None,
         )
 
@@ -472,14 +451,14 @@ async def test_worker_receipt_activation_does_not_deadlock_durable_stream_append
     thread_id = f"receipt-stream-{uuid.uuid4()}"
     run_id = f"receipt-stream-run-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         _, source = await _source_snapshot(
             seed,
             scoped,
             app_config,
             thread_id,
         )
-        tagged_text, receipt = _receipt(seed, source, model_version_id)
+        tagged_text, receipt = _receipt(seed, source, model_config_id)
 
         admitted = await PrivateRunAdmissionService(seed.factory).admit(
             seed.owner_a,
@@ -685,7 +664,7 @@ async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_ba
     continuity = "The long thread remains coherent across every compaction batch."
     tagged_text = "- [durable] Manual compact archives each bounded batch into tagged history"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         async with seed.factory() as session, session.begin():
             await PrivateThreadRepository(session).create(
                 scope=seed.owner_a_scope,
@@ -732,7 +711,8 @@ async def test_private_compact_endpoint_drains_long_thread_in_multiple_tagged_ba
             # per batch instead of allowing one oversized archive.
             custom_get_token_ids=lambda text: list(range(len(text))),
         )
-        runtime_model._system_model_config_version_id = model_version_id
+        runtime_model._system_model_config_id = model_config_id
+        runtime_model._system_model_payload_checksum = _model_provenance(model_config_id).payload_checksum
         app_config.summarization.enabled = True
         app_config.summarization.model_name = runtime_model.name
         app_config.summarization.trim_tokens_to_summarize = 1_100
@@ -818,7 +798,7 @@ async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_bef
     app_config = _app_config()
     thread_id = f"dream-barrier-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         await _source_snapshot(
             seed,
             scoped,
@@ -834,7 +814,8 @@ async def test_durable_dream_prepare_worker_drains_real_thread_and_activates_bef
             responses=["<continuity>\nThe thread is drained ahead of the Dream admission barrier.\n</continuity>\n- [durable] Direct Dream requests archive the Thread before admission"],
             custom_get_token_ids=lambda text: list(range(len(text))),
         )
-        runtime_model._system_model_config_version_id = model_version_id
+        runtime_model._system_model_config_id = model_config_id
+        runtime_model._system_model_payload_checksum = _model_provenance(model_config_id).payload_checksum
         app_config.summarization.enabled = True
         app_config.summarization.model_name = runtime_model.name
         app_config.summarization.trim_tokens_to_summarize = 20_000
@@ -973,14 +954,14 @@ async def test_committed_receipt_repairs_after_history_transaction_loss(
     app_config = _app_config()
     thread_id = f"receipt-repair-{repair_operation}-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         state, source = await _source_snapshot(
             seed,
             scoped,
             app_config,
             thread_id,
         )
-        tagged_text, receipt = _receipt(seed, source, model_version_id)
+        tagged_text, receipt = _receipt(seed, source, model_config_id)
         original_activate = MemoryDocumentRepository.activate_history
         activation_calls = 0
 
@@ -1049,14 +1030,14 @@ async def test_old_receipt_is_stale_after_memory_reset_version_change(
     app_config = _app_config()
     thread_id = f"receipt-stale-{uuid.uuid4()}"
     try:
-        model_version_id = await _seed_model_version(seed)
+        model_config_id = await _seed_model_config(seed)
         state, source = await _source_snapshot(
             seed,
             scoped,
             app_config,
             thread_id,
         )
-        tagged_text, receipt = _receipt(seed, source, model_version_id)
+        tagged_text, receipt = _receipt(seed, source, model_config_id)
         original_activate = MemoryDocumentRepository.activate_history
         failed = False
 

@@ -114,10 +114,10 @@ describe("Agent directory search and deep-link navigation", () => {
     expect(
       projectAssetSelectionHref(
         "/projects/alpha/skills",
-        `skill_id=${AGENT_A_ID}&skill_version_id=${AGENT_B_ID}&configure_credentials=1&tab=project`,
+        `skill_id=${AGENT_A_ID}&skill_version_id=${AGENT_B_ID}&configure_secrets=1&tab=project`,
         "skill_id",
         AGENT_B_ID,
-        ["skill_version_id", "configure_credentials"],
+        ["skill_version_id", "configure_secrets"],
       ),
     ).toBe(`/projects/alpha/skills?skill_id=${AGENT_B_ID}&tab=project`);
   });

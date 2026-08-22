@@ -1,4 +1,4 @@
-"""Canonical, read-only PostgreSQL contract for the final M7 application schema."""
+"""Canonical, read-only PostgreSQL contract for the Schema V1 application catalog."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 import deerflow.persistence.models  # noqa: F401 -- populate final metadata
 from deerflow.persistence.base import Base
-from deerflow.persistence.final_schema_digest import M7_CANONICAL_SCHEMA_DIGEST
+from deerflow.persistence.final_schema_digest import SCHEMA_V1_CANONICAL_DIGEST
 
 FINAL_APP_TABLES = frozenset(Base.metadata.tables)
 COMMENTED_ROOT_TABLES = FINAL_APP_TABLES | {"alembic_version"}
@@ -60,8 +60,6 @@ REQUIRED_FUNCTIONS = frozenset(
         "bump_asset_catalog_generation",
         "cleanup_run_event_invariant",
         "drop_run_event_partitions_before",
-        "enforce_run_model_snapshot_credential_closure",
-        "enforce_live_skill_credential_binding_target",
         "enforce_run_event_identity_immutable",
         "enforce_scheduled_task_agent_project",
         "enforce_shared_asset_version_state_transition",
@@ -73,12 +71,11 @@ REQUIRED_FUNCTIONS = frozenset(
         "prevent_memory_document_sections_mutation",
         "prevent_asset_version_child_mutation",
         "prevent_run_memory_snapshot_sections_mutation",
-        "protect_live_skill_credential_binding_target",
         "prevent_shared_asset_version_payload_update",
-        "reject_m7_append_only_mutation",
+        "reject_schema_v1_append_only_mutation",
         "reject_direct_run_model_snapshot_mutation",
         "reject_direct_run_runtime_policy_snapshot_mutation",
-        "set_m7_updated_at",
+        "set_schema_v1_updated_at",
         "set_threads_meta_updated_at",
     }
 )
@@ -105,42 +102,42 @@ class CatalogInvariant:
 
 # The current catalog is generated from ``full_schema.sql``. Values are read
 # from PostgreSQL after installing the snapshot in an empty database.
-FINAL_M7_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
+FINAL_SCHEMA_V1_CATALOG_SIGNATURE: dict[str, CatalogInvariant] = {
     "relations": CatalogInvariant(
-        count=92,
-        digest="9cb4600b3ae172e9f31f50bd6ba252b99c72ba1b9a9c7551851475a830477933",
+        count=95,
+        digest="3206643a11835c0e3344f01ff4cd1ccf52de91075d1dd23073863a8670ebea75",
     ),
     "columns": CatalogInvariant(
-        count=1146,
-        digest="6992a380f8d83a37c2938b8e46cb1f01bdb415888e1a0de7122782d802176ac5",
+        count=1163,
+        digest="d569d9aa37411d6a69d47b3431bf515ec13ae7e3b8a7a2187bc4f5ef3c77b2ba",
     ),
     "table_comments": CatalogInvariant(
-        count=93,
-        digest="9d2d97a4bec0b53cb70ceddb8a0f17368db6f358fc6b28430c16095f64b1ddc8",
+        count=96,
+        digest="2cb1e77059219e3dc8603abc1b92955ae7658776e9dfd6d5634f054a8918185d",
     ),
     "column_comments": CatalogInvariant(
-        count=1147,
-        digest="df9983b1163db236baf8c9ffa71ccff76d750e5522148ff9060833065de023c6",
+        count=1164,
+        digest="bc98d30455d50dfe1c2ea059f1e34ef70e28c30b429764f5881dfd2f6643dd45",
     ),
     "sequences": CatalogInvariant(
         count=4,
         digest="73cb0d46bc3afc9585d0959b1d57d093621113408f2629dad9a6b027550af894",
     ),
     "constraints": CatalogInvariant(
-        count=852,
-        digest="e3635bfc2cd6c49c4f3d8e3d5533f908ca8aee0f112473fa76bafc12e83f4861",
+        count=862,
+        digest="0f7b7a1fc24bab89cf9a82cc406f43f12b34c2d17a615eb6618f234c6dc4bdb6",
     ),
     "indexes": CatalogInvariant(
-        count=322,
-        digest="75c8379138718dca4913f8258a92f15b96e162dc645f6db35feccd352883cf21",
+        count=310,
+        digest="d447223088748a00aa45cb2ed35aa8c101b440e01ca31f11e25ebab911aa0698",
     ),
     "functions": CatalogInvariant(
-        count=23,
-        digest="f51bd157876ea08ba0f53a634ec1b2e9e5fa7b197bd601ee4d95c466421590f6",
+        count=20,
+        digest="dc672a38b73f7aac37cea2265a55d1f49d12ed7be6b299836a14dd79521c26c3",
     ),
     "triggers": CatalogInvariant(
-        count=85,
-        digest="33b8d78c50c9529bc162f825761e050fa20233694ca214e5182c391e31380abf",
+        count=81,
+        digest="bcc95a8f600f9c572d13df08b876f9ebc70d3e4c5872223cb0b7840db822c58e",
     ),
 }
 
@@ -170,8 +167,8 @@ def _catalog_signature_digest(signature: dict[str, CatalogInvariant]) -> str:
     ).hexdigest()
 
 
-if M7_CANONICAL_SCHEMA_DIGEST != _catalog_signature_digest(FINAL_M7_CATALOG_SIGNATURE):  # pragma: no cover - import-time release invariant
-    raise RuntimeError("M7 canonical schema digest does not match its catalog signature")
+if SCHEMA_V1_CANONICAL_DIGEST != _catalog_signature_digest(FINAL_SCHEMA_V1_CATALOG_SIGNATURE):  # pragma: no cover - import-time release invariant
+    raise RuntimeError("Schema V1 canonical digest does not match its catalog signature")
 
 
 _VARCHAR_TEXT_ARRAY = re.compile(r"ARRAY\[(?P<body>(?:'(?:''|[^'])*'::character varying(?:::text)?(?:,\s*)?)+)\](?:::text\[\])?")
@@ -322,7 +319,7 @@ def _normalize_catalog_value(value: object) -> object:
     return _VARCHAR_TEXT_ARRAY.sub(normalize_varchar_text_array, value)
 
 
-async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, CatalogInvariant]:
+async def read_schema_v1_catalog_signature(connection: AsyncConnection) -> dict[str, CatalogInvariant]:
     """Read stable final-schema invariants directly from ``pg_catalog``."""
 
     parameters = {
@@ -339,11 +336,11 @@ async def read_m7_catalog_signature(connection: AsyncConnection) -> dict[str, Ca
     return signature
 
 
-async def verify_m7_catalog(connection: AsyncConnection) -> bool:
+async def verify_schema_v1_catalog(connection: AsyncConnection) -> bool:
     """Return whether all current catalog invariants match exactly."""
 
-    signature = await read_m7_catalog_signature(connection)
-    return signature == FINAL_M7_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection) and await _langgraph_comments_are_valid(connection)
+    signature = await read_schema_v1_catalog_signature(connection)
+    return signature == FINAL_SCHEMA_V1_CATALOG_SIGNATURE and await _run_event_partition_catalog_is_valid(connection) and await _langgraph_comments_are_valid(connection)
 
 
 async def _langgraph_comments_are_valid(connection: AsyncConnection) -> bool:
@@ -771,7 +768,7 @@ async def inventory_user_schema_objects(connection: AsyncConnection) -> frozense
     return frozenset(str(value) for value in result.scalars())
 
 
-def inventory_is_m7_allowed(objects: frozenset[str]) -> bool:
+def inventory_is_schema_v1_allowed(objects: frozenset[str]) -> bool:
     """Validate exact app-only or complete app-plus-LangGraph root objects."""
 
     allowed_relations = FINAL_APP_TABLES | LANGGRAPH_TABLES | {"alembic_version"}
@@ -832,8 +829,8 @@ __all__ = [
     "COMMENTED_ROOT_TABLES",
     "FINAL_APP_TABLES",
     "FINAL_APP_SEQUENCES",
-    "FINAL_M7_CATALOG_SIGNATURE",
-    "M7_CANONICAL_SCHEMA_DIGEST",
+    "FINAL_SCHEMA_V1_CATALOG_SIGNATURE",
+    "SCHEMA_V1_CANONICAL_DIGEST",
     "LANGGRAPH_INDEXES",
     "LANGGRAPH_COMMENT_SIGNATURE",
     "LANGGRAPH_ROOT_OBJECTS",
@@ -841,8 +838,8 @@ __all__ = [
     "LANGGRAPH_TABLES",
     "REQUIRED_FUNCTIONS",
     "REQUIRED_FUNCTION_IDENTITIES",
-    "inventory_is_m7_allowed",
+    "inventory_is_schema_v1_allowed",
     "inventory_user_schema_objects",
-    "read_m7_catalog_signature",
-    "verify_m7_catalog",
+    "read_schema_v1_catalog_signature",
+    "verify_schema_v1_catalog",
 ]

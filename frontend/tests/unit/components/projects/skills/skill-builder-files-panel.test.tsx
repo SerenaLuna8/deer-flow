@@ -92,7 +92,7 @@ describe("SkillBuilderCandidateWorkbench", () => {
     expect(html).toContain("候选文件包");
     expect(html).toContain('aria-label="关闭候选文件包"');
     expect(html).toContain('role="tablist"');
-    expect(html).toContain("运行凭证");
+    expect(html).toContain("运行秘密");
     expect(html).toContain("aria-controls=");
     expect(html).toContain("aria-labelledby=");
     expect(html).toContain('tabindex="-1"');

@@ -186,22 +186,22 @@ class SkillDesignNoChanges(SharedAssetError):
     public_message = "The candidate is identical to the base version"
 
 
-class SkillCredentialBindingsIncomplete(AssetValidationFailed):
+class SkillSecretsIncomplete(AssetValidationFailed):
     """A Skill Candidate cannot activate without every required secret."""
 
-    code = "SKILL_CREDENTIAL_BINDINGS_INCOMPLETE"
-    public_message = "Required Skill credential bindings are incomplete"
+    code = "SKILL_SECRETS_INCOMPLETE"
+    public_message = "Required Skill secrets are incomplete"
 
 
-class SkillCredentialBindingInvalid(AssetValidationFailed):
-    """A Skill binding name or Credential schema is incompatible."""
+class SkillSecretConfigurationInvalid(AssetValidationFailed):
+    """A Skill declaration or write-only secret input is invalid."""
 
-    code = "SKILL_CREDENTIAL_BINDING_INVALID"
-    public_message = "Skill credential binding is invalid"
+    code = "SKILL_SECRET_CONFIGURATION_INVALID"
+    public_message = "Skill secret configuration is invalid"
 
 
-class SkillCredentialSelectionStale(AssetConflict):
-    """A selected Credential or activation-plan revision is no longer current."""
+class SkillSecretRevisionStale(AssetConflict):
+    """The activation-plan secret revision is no longer current."""
 
-    code = "SKILL_CREDENTIAL_SELECTION_STALE"
-    public_message = "Skill credential selection is stale"
+    code = "SKILL_SECRET_REVISION_STALE"
+    public_message = "Skill secret revision is stale"

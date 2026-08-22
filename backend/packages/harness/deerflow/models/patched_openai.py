@@ -40,7 +40,7 @@ class PatchedChatOpenAI(ChatOpenAI):
     request payload before it is sent to the API.
 
     In the PostgreSQL-backed System Settings catalog, choose the
-    ``patched_openai`` adapter, bind an encrypted System Credential, set the
+    ``patched_openai`` adapter, save its encrypted model-owned API Key, set the
     provider model name, and place only secret-free options such as
     ``base_url``, ``max_tokens``, and thinking payload controls in ``settings``.
     """

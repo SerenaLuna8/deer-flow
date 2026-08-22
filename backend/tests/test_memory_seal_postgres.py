@@ -7,9 +7,12 @@ import pytest
 import sqlalchemy as sa
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.system_model_seed import (
+    seed_system_model_config,
+    system_model_payload_checksum,
+)
 
 import deerflow.runtime.checkpoint_mode as checkpoint_mode_state
 from app.private_work.chat_controls import ProjectChatControlService
@@ -64,46 +67,14 @@ def _checkpointer_url(database_url: str) -> str:
 
 async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
     model_name = str(model_id)
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'Memory seal test model','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {
-                "id": model_id,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,
-                 provider_model,settings,supports_thinking,
-                 supports_reasoning_effort,supports_vision,credential_id,
-                 credential_version_id,credential_env_key,payload_checksum,
-                 supersedes_version_id,created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake','memory-seal-test','{}'::jsonb,
-                        false,false,false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-            ),
-            {
-                "id": version_id,
-                "model": model_id,
-                "checksum": "e" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """UPDATE system_model_configs SET current_version_id=:version
-                WHERE id=:model"""
-            ),
-            {"version": version_id, "model": model_id},
+        await seed_system_model_config(
+            connection,
+            model_id=model_id,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="Memory seal test model",
+            provider_model="memory-seal-test",
         )
 
     runtime_model = ModelConfig(
@@ -117,7 +88,16 @@ async def _seed_summary_model(seed: PrivateThreadSeed) -> ModelConfig:
         ],
         custom_get_token_ids=lambda value: list(range(len(value))),
     )
-    runtime_model._system_model_config_version_id = version_id
+    runtime_model._system_model_config_id = model_id
+    runtime_model._system_model_payload_checksum = system_model_payload_checksum(
+        model_id=model_id,
+        provider_adapter="vision_bridge_fake",
+        provider_model="memory-seal-test",
+        settings=None,
+        supports_thinking=False,
+        supports_reasoning_effort=False,
+        supports_vision=False,
+    )
     return runtime_model
 
 

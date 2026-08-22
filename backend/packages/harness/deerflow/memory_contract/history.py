@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from deerflow.config.model_execution import SystemModelExecutionProvenance
 from deerflow.memory_contract.common import MemoryDocumentScope
 
 EPISODE_SEARCH_TAGS: tuple[str, ...] = (
@@ -111,16 +112,19 @@ class MemoryHistoryActivation:
     content_digest: str
     preference_version: int
     snip_prompt_version: str
-    summary_model_ref: uuid.UUID
+    summary_model: SystemModelExecutionProvenance
 
     def __post_init__(self) -> None:
         try:
-            summary_model_ref = uuid.UUID(str(self.summary_model_ref))
             tagged_text = validate_snip_output(self.tagged_text)
         except (TypeError, ValueError):
             raise ValueError("Memory history activation is invalid") from None
         if (
             type(self.scope) is not MemoryDocumentScope
+            or not isinstance(
+                self.summary_model,
+                SystemModelExecutionProvenance,
+            )
             or not isinstance(self.thread_id, str)
             or not self.thread_id
             or len(self.thread_id) > 64
@@ -144,7 +148,6 @@ class MemoryHistoryActivation:
         ):
             raise ValueError("Memory history activation is invalid")
         object.__setattr__(self, "tagged_text", tagged_text)
-        object.__setattr__(self, "summary_model_ref", summary_model_ref)
 
 
 @dataclass(frozen=True, slots=True)

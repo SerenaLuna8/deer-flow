@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 
 from sqlalchemy import and_, delete, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -12,37 +11,24 @@ from sqlalchemy.orm import aliased
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
 from app.shared_assets.errors import AssetConflict, AssetForbidden, AssetNotFound
-from deerflow.persistence.private_work.model import (
-    RunAssetVersionRow,
-    RunMcpGrantSnapshotRow,
-)
+from deerflow.persistence.private_work.model import RunAssetVersionRow
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
     AgentVersionMcpRefRow,
-    CredentialGrantRow,
-    CredentialRow,
-    CredentialVersionRow,
-    McpCredentialSlotRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectSystemMcpBindingRow,
+)
+from deerflow.persistence.shared_assets.mcp_model import (
+    ProjectMcpSecretTombstoneRow,
 )
 
 
 @dataclass(frozen=True)
 class McpVersionRecord:
     row: McpServerVersionRow
-    slots: tuple[McpCredentialSlotRow, ...]
-    grants: tuple[CredentialGrantRow, ...]
-
-
-@dataclass(frozen=True)
-class GrantState:
-    grant: CredentialGrantRow
-    mcp_status: str
-    mcp_workflow_status: str
-    credential_status: str
-    credential_version_status: str
+    slots: tuple[McpSecretSlotRow, ...]
 
 
 def _request_id(context: object) -> str:
@@ -188,26 +174,12 @@ class McpRepository:
         _locked_slot_ids = tuple(
             (
                 await self.session.execute(
-                    select(McpCredentialSlotRow.id)
+                    select(McpSecretSlotRow.id)
                     .where(
-                        McpCredentialSlotRow.mcp_server_version_id.in_(version_ids),
+                        McpSecretSlotRow.mcp_server_version_id.in_(version_ids),
                     )
-                    .order_by(McpCredentialSlotRow.id)
-                    .with_for_update(of=McpCredentialSlotRow)
-                )
-            )
-            .scalars()
-            .all()
-        )
-        _locked_grant_ids = tuple(
-            (
-                await self.session.execute(
-                    select(CredentialGrantRow.id)
-                    .where(
-                        CredentialGrantRow.mcp_server_version_id.in_(version_ids),
-                    )
-                    .order_by(CredentialGrantRow.id)
-                    .with_for_update(of=CredentialGrantRow)
+                    .order_by(McpSecretSlotRow.id)
+                    .with_for_update(of=McpSecretSlotRow)
                 )
             )
             .scalars()
@@ -229,9 +201,6 @@ class McpRepository:
                             RunAssetVersionRow.asset_id == asset.id,
                         ),
                         exists().where(
-                            RunMcpGrantSnapshotRow.mcp_version_id.in_(version_ids),
-                        ),
-                        exists().where(
                             or_(
                                 ProjectSystemMcpBindingRow.system_mcp_server_id == asset.id,
                                 ProjectSystemMcpBindingRow.mcp_server_version_id.in_(
@@ -245,8 +214,8 @@ class McpRepository:
         )
         if retained_reference_exists:
             raise AssetConflict(context.request_id)
-        # Keep both lock queries above even when the identifiers are otherwise
-        # unused: they close FK insertion races before the reference check.
+        # Keep the slot lock query above even when its identifiers are otherwise
+        # unused: it closes FK insertion races before the reference check.
         return version_ids
 
     async def delete_project_asset(
@@ -279,15 +248,17 @@ class McpRepository:
 
         if selected_version_ids:
             await self.session.execute(
-                delete(CredentialGrantRow).where(
-                    CredentialGrantRow.mcp_server_version_id.in_(
+                delete(ProjectMcpSecretTombstoneRow).where(
+                    ProjectMcpSecretTombstoneRow.project_id == context.project_id,
+                    ProjectMcpSecretTombstoneRow.mcp_server_id == asset.id,
+                    ProjectMcpSecretTombstoneRow.mcp_server_version_id.in_(
                         selected_version_ids,
-                    )
+                    ),
                 )
             )
             await self.session.execute(
-                delete(McpCredentialSlotRow).where(
-                    McpCredentialSlotRow.mcp_server_version_id.in_(
+                delete(McpSecretSlotRow).where(
+                    McpSecretSlotRow.mcp_server_version_id.in_(
                         selected_version_ids,
                     )
                 )
@@ -514,7 +485,7 @@ class McpRepository:
         self,
         asset: McpServerRow,
         version: McpServerVersionRow,
-        slots: Sequence[McpCredentialSlotRow],
+        slots: Sequence[McpSecretSlotRow],
         *,
         request_id: str,
     ) -> McpVersionRecord:
@@ -524,7 +495,7 @@ class McpRepository:
         await self.session.flush()
         self.session.add_all(slots)
         await self.session.flush()
-        return McpVersionRecord(version, tuple(slots), ())
+        return McpVersionRecord(version, tuple(slots))
 
     async def get_project_version(
         self,
@@ -806,191 +777,8 @@ class McpRepository:
         *,
         for_update: bool,
     ) -> McpVersionRecord:
-        slots_statement = select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == row.id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id)
+        slots_statement = select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == row.id).order_by(McpSecretSlotRow.name, McpSecretSlotRow.id)
         if for_update:
-            slots_statement = slots_statement.with_for_update(of=McpCredentialSlotRow)
+            slots_statement = slots_statement.with_for_update(of=McpSecretSlotRow)
         slots = tuple((await self.session.execute(slots_statement)).scalars().all())
-        grants_statement = select(CredentialGrantRow).where(CredentialGrantRow.mcp_server_version_id == row.id).order_by(CredentialGrantRow.created_at, CredentialGrantRow.id)
-        grants = tuple((await self.session.execute(grants_statement)).scalars().all())
-        return McpVersionRecord(row, slots, grants)
-
-    async def create_grants(
-        self,
-        version: McpServerVersionRow,
-        bindings: Sequence[tuple[McpCredentialSlotRow, CredentialVersionRow]],
-        *,
-        user_id: uuid.UUID,
-        request_id: str,
-    ) -> tuple[CredentialGrantRow, ...]:
-        slot_ids = tuple(slot.id for slot, _credential_version in bindings)
-        if not slot_ids:
-            return ()
-        # Grants are always the final lock in the approval order.
-        existing_statement = (
-            select(CredentialGrantRow)
-            .where(
-                CredentialGrantRow.mcp_server_version_id == version.id,
-                CredentialGrantRow.credential_slot_id.in_(slot_ids),
-                CredentialGrantRow.status == "active",
-            )
-            .with_for_update(of=CredentialGrantRow)
-        )
-        existing = tuple((await self.session.execute(existing_statement)).scalars().all())
-        if existing:
-            raise AssetConflict(request_id)
-        grants = tuple(
-            CredentialGrantRow(
-                mcp_server_version_id=version.id,
-                credential_slot_id=slot.id,
-                credential_version_id=credential_version.id,
-                created_by_user_id=str(user_id),
-            )
-            for slot, credential_version in bindings
-        )
-        self.session.add_all(grants)
-        await self.session.flush()
-        return grants
-
-    async def replace_system_grants(
-        self,
-        version: McpServerVersionRow,
-        slots: Sequence[McpCredentialSlotRow],
-        bindings: Sequence[tuple[McpCredentialSlotRow, CredentialVersionRow]],
-        *,
-        expected_active_grant_versions: Mapping[str, int],
-        user_id: uuid.UUID,
-        request_id: str,
-    ) -> tuple[CredentialGrantRow, ...]:
-        slot_names = {slot.id: slot.name for slot in slots}
-        existing_statement = (
-            select(CredentialGrantRow)
-            .where(
-                CredentialGrantRow.mcp_server_version_id == version.id,
-                CredentialGrantRow.status == "active",
-            )
-            .order_by(CredentialGrantRow.credential_slot_id)
-            .with_for_update(of=CredentialGrantRow)
-        )
-        existing = tuple((await self.session.execute(existing_statement)).scalars().all())
-        if any(grant.credential_slot_id not in slot_names for grant in existing):
-            raise AssetConflict(request_id)
-        actual_versions = {slot_names[grant.credential_slot_id]: grant.version for grant in existing}
-        if dict(expected_active_grant_versions) != actual_versions:
-            raise AssetConflict(request_id)
-
-        desired_versions = {slot.id: credential_version.id for slot, credential_version in bindings}
-        if len(desired_versions) != len(bindings):
-            raise AssetConflict(request_id)
-        if len(existing) == len(desired_versions) and all(desired_versions.get(grant.credential_slot_id) == grant.credential_version_id for grant in existing):
-            return existing
-
-        now = datetime.now(UTC)
-        for grant in existing:
-            grant.status = "revoked"
-            grant.version += 1
-            grant.revoked_at = now
-            grant.revoked_by_user_id = str(user_id)
-        await self.session.flush()
-        return await self.create_grants(
-            version,
-            bindings,
-            user_id=user_id,
-            request_id=request_id,
-        )
-
-    async def project_grant_state(self, context: ProjectContext, grant_id: uuid.UUID) -> GrantState:
-        self._require_project_actor(context)
-        statement = (
-            select(
-                CredentialGrantRow,
-                McpServerRow.status,
-                McpServerVersionRow.workflow_status,
-                CredentialRow.status,
-                CredentialVersionRow.status,
-            )
-            .join(McpServerVersionRow, McpServerVersionRow.id == CredentialGrantRow.mcp_server_version_id)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
-            .join(CredentialVersionRow, CredentialVersionRow.id == CredentialGrantRow.credential_version_id)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
-            .where(
-                CredentialGrantRow.id == grant_id,
-                McpServerRow.scope == "project",
-                McpServerRow.project_id == context.project_id,
-                CredentialRow.scope == "project",
-                CredentialRow.project_id == context.project_id,
-                CredentialRow.is_delete.is_(False),
-                self._project_context_exists(context),
-            )
-        )
-        result = (await self.session.execute(statement)).one_or_none()
-        if result is None:
-            raise AssetNotFound(context.request_id)
-        return GrantState(*result)
-
-    async def override_grant_state(
-        self,
-        context: SystemAssetGovernanceContext,
-        grant_id: uuid.UUID,
-    ) -> GrantState:
-        self._require_system_actor(context)
-        if context.project_id is None:
-            raise AssetNotFound(context.request_id)
-        statement = (
-            select(
-                CredentialGrantRow,
-                McpServerRow.status,
-                McpServerVersionRow.workflow_status,
-                CredentialRow.status,
-                CredentialVersionRow.status,
-            )
-            .join(McpServerVersionRow, McpServerVersionRow.id == CredentialGrantRow.mcp_server_version_id)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
-            .join(CredentialVersionRow, CredentialVersionRow.id == CredentialGrantRow.credential_version_id)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
-            .where(
-                CredentialGrantRow.id == grant_id,
-                McpServerRow.scope == "project",
-                McpServerRow.project_id == context.project_id,
-                CredentialRow.scope == "project",
-                CredentialRow.project_id == context.project_id,
-                CredentialRow.is_delete.is_(False),
-            )
-        )
-        result = (await self.session.execute(statement)).one_or_none()
-        if result is None:
-            raise AssetNotFound(context.request_id)
-        return GrantState(*result)
-
-    async def system_grant_state(
-        self,
-        context: SystemAssetGovernanceContext,
-        grant_id: uuid.UUID,
-    ) -> GrantState:
-        self._require_system_actor(context)
-        if context.project_id is not None:
-            raise AssetNotFound(context.request_id)
-        statement = (
-            select(
-                CredentialGrantRow,
-                McpServerRow.status,
-                McpServerVersionRow.workflow_status,
-                CredentialRow.status,
-                CredentialVersionRow.status,
-            )
-            .join(McpServerVersionRow, McpServerVersionRow.id == CredentialGrantRow.mcp_server_version_id)
-            .join(McpServerRow, McpServerRow.id == McpServerVersionRow.mcp_server_id)
-            .join(CredentialVersionRow, CredentialVersionRow.id == CredentialGrantRow.credential_version_id)
-            .join(CredentialRow, CredentialRow.id == CredentialVersionRow.credential_id)
-            .where(
-                CredentialGrantRow.id == grant_id,
-                McpServerRow.scope == "system",
-                McpServerRow.project_id.is_(None),
-                CredentialRow.scope == "system",
-                CredentialRow.project_id.is_(None),
-                CredentialRow.is_delete.is_(False),
-            )
-        )
-        result = (await self.session.execute(statement)).one_or_none()
-        if result is None:
-            raise AssetNotFound(context.request_id)
-        return GrantState(*result)
+        return McpVersionRecord(row, slots)

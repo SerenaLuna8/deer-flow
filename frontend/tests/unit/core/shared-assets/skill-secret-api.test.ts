@@ -1,20 +1,17 @@
 import { afterEach, describe, expect, rs, test } from "@rstest/core";
 
 import {
-  getProjectSkillActivationReadiness,
-  parseProjectSkillFrontmatter,
-  patchProjectSkillFrontmatter,
   activateProjectAssetVersion,
-  updateProjectSkillCredentialBindings,
-  type SharedAssetApiError,
+  clearProjectSkillSecret,
+  getProjectSkillActivationReadiness,
+  getProjectSkillSecrets,
+  replaceProjectSkillSecrets,
 } from "@/core/shared-assets";
 
 const PROJECT_ID = "11111111-1111-4111-8111-111111111111";
 const SKILL_ID = "22222222-2222-4222-8222-222222222222";
 const VERSION_ID = "33333333-3333-4333-8333-333333333333";
-const USER_ID = "66666666-6666-4666-8666-666666666666";
 const SHA = "a".repeat(64);
-const CONTENT = "---\nname: example\n---\n";
 
 afterEach(() => {
   rs.unstubAllGlobals();
@@ -24,145 +21,105 @@ function jsonResponse(body: unknown, status = 200) {
   return Response.json(body, { status });
 }
 
-describe("Skill secret API", () => {
-  test("uses the no-YAML client parse and patch contracts", async () => {
-    const parseResponse = {
-      source_sha256: SHA,
-      valid: true,
-      patchable: true,
-      projection: {
-        required_secrets: [],
-        secrets_autonomous: false,
-        secrets_autonomous_explicit: false,
-        shorthand_count: 0,
-      },
-      diagnostics: [],
-      request_id: "parse-request",
-    };
-    const patchedContent =
-      '---\nname: example\nrequired-secrets:\n  - name: "API_KEY"\n    optional: false\nsecrets-autonomous: false\n---\n';
-    const patchResponse = {
-      source_sha256: SHA,
-      result_sha256: "b".repeat(64),
-      content: patchedContent,
-      changed: true,
-      changed_fields: ["required-secrets"],
-      projection: {
-        required_secrets: [{ name: "API_KEY", optional: false }],
-        secrets_autonomous: false,
-        secrets_autonomous_explicit: true,
-        shorthand_count: 0,
-      },
-      diagnostics: [],
-      request_id: "patch-request",
-    };
+const secretStatus = {
+  skill_id: SKILL_ID,
+  skill_version_id: VERSION_ID,
+  revision: 2,
+  readiness: "ready" as const,
+  requirements: [
+    { name: "API_KEY", optional: false, configured: true, revision: 2 },
+  ],
+  request_id: "secret-status",
+};
+
+describe("Skill domain secret API", () => {
+  test("reads status only and writes values to the exact Skill version", async () => {
     const fetchMock = rs
       .fn()
-      .mockResolvedValueOnce(jsonResponse(parseResponse))
-      .mockResolvedValueOnce(jsonResponse(patchResponse));
+      .mockResolvedValueOnce(jsonResponse(secretStatus))
+      .mockResolvedValueOnce(jsonResponse(secretStatus));
     rs.stubGlobal("fetch", fetchMock);
 
     await expect(
-      parseProjectSkillFrontmatter(PROJECT_ID, {
-        content: CONTENT,
-        source_sha256: SHA,
-      }),
-    ).resolves.toEqual(parseResponse);
+      getProjectSkillSecrets(PROJECT_ID, SKILL_ID, VERSION_ID),
+    ).resolves.toEqual(secretStatus);
     await expect(
-      patchProjectSkillFrontmatter(PROJECT_ID, {
-        content: CONTENT,
-        source_sha256: SHA,
-        required_secrets: [{ name: "API_KEY", optional: false }],
-        secrets_autonomous: false,
+      replaceProjectSkillSecrets(PROJECT_ID, SKILL_ID, VERSION_ID, {
+        secrets: { API_KEY: "temporary-value" },
       }),
-    ).resolves.toEqual(patchResponse);
+    ).resolves.toEqual(secretStatus);
 
-    expect(fetchMock).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining(
-        `/api/projects/${PROJECT_ID}/skills/frontmatter/parse`,
-      ),
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify({ content: CONTENT, source_sha256: SHA }),
-      }),
-    );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       expect.stringContaining(
-        `/api/projects/${PROJECT_ID}/skills/frontmatter/patch`,
+        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/secrets`,
       ),
-      expect.objectContaining({ method: "POST" }),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ secrets: { API_KEY: "temporary-value" } }),
+      }),
+    );
+    expect(secretStatus).not.toHaveProperty("secrets");
+  });
+
+  test("clears one exact secret only with explicit confirmation", async () => {
+    const cleared = {
+      ...secretStatus,
+      readiness: "unready" as const,
+      requirements: [
+        { name: "API_KEY", optional: false, configured: false, revision: 3 },
+      ],
+    };
+    const fetchMock = rs.fn(async () => jsonResponse(cleared));
+    rs.stubGlobal("fetch", fetchMock);
+    await expect(
+      clearProjectSkillSecret(
+        PROJECT_ID,
+        SKILL_ID,
+        VERSION_ID,
+        "API_KEY",
+        { confirmed: true },
+      ),
+    ).resolves.toEqual(cleared);
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining(`/secrets/API_KEY/clear`),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ confirmed: true }),
+      }),
     );
   });
 
-  test("loads version-bound activation readiness and rejects a mismatched identity", async () => {
+  test("activation pins the secret revision returned by readiness", async () => {
     const plan = {
       skill_id: SKILL_ID,
       skill_version_id: VERSION_ID,
       revision: 4,
       payload_checksum: SHA,
-      binding_revision: 1,
+      secret_revision: 2,
       secrets_autonomous: false,
       ready: true,
       required_count: 1,
       configured_required_count: 1,
-      invalid_count: 0,
       requirements: [
-        {
-          name: "API_KEY",
-          optional: false,
-          mapping_status: "configured",
-        },
+        { name: "API_KEY", optional: false, configured: true },
       ],
-      request_id: "plan-request",
+      request_id: "readiness",
     };
-    rs.stubGlobal(
-      "fetch",
-      rs.fn(async () => jsonResponse(plan)),
-    );
-    await expect(
-      getProjectSkillActivationReadiness(PROJECT_ID, SKILL_ID, VERSION_ID),
-    ).resolves.toEqual(plan);
-
-    rs.stubGlobal(
-      "fetch",
-      rs.fn(async () =>
-        jsonResponse({
-          ...plan,
-          skill_id: "77777777-7777-4777-8777-777777777777",
-        }),
-      ),
-    );
-    await expect(
-      getProjectSkillActivationReadiness(PROJECT_ID, SKILL_ID, VERSION_ID),
-    ).rejects.toMatchObject({
-      code: "ASSET_RESPONSE_INVALID",
-    } satisfies Partial<SharedAssetApiError>);
-  });
-
-  test("activates the target version with payload and binding CAS only", async () => {
-    const response = {
+    const activation = {
       data: {
         id: VERSION_ID,
         skill_id: SKILL_ID,
         version_number: 2,
         relation: "current",
         description: "Example",
-        frontmatter: { name: "example" },
+        frontmatter: {},
         compatibility: null,
         secret_requirements: [{ name: "API_KEY", optional: false }],
         scan_decision: "allow",
         scan_rule_ids: [],
         scan_summary: {},
-        file_views: [
-          {
-            path: "SKILL.md",
-            media_type: "text/markdown",
-            size_bytes: 25,
-            sha256: SHA,
-          },
-        ],
+        file_views: [],
         supersedes_version_id: null,
         payload_checksum: SHA,
         revoked_at: null,
@@ -170,117 +127,35 @@ describe("Skill secret API", () => {
         revocation_reason_code: null,
         governance_status: "active",
         binding_eligible: true,
-        created_by_user_id: USER_ID,
-        created_at: "2026-08-19T09:00:00Z",
+        created_by_user_id: "system",
+        created_at: "2026-08-22T00:00:00Z",
       },
-      request_id: "activation-request",
+      request_id: "activation",
     };
-    const fetchMock = rs.fn(async () => jsonResponse(response));
+    const fetchMock = rs
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(plan))
+      .mockResolvedValueOnce(jsonResponse(activation));
     rs.stubGlobal("fetch", fetchMock);
+    await expect(
+      getProjectSkillActivationReadiness(PROJECT_ID, SKILL_ID, VERSION_ID),
+    ).resolves.toEqual(plan);
     const input = {
       expected_revision: 4,
       expected_payload_checksum: SHA,
-      expected_binding_revision: 1,
+      expected_secret_revision: 2,
     };
-
-    await expect(
-      activateProjectAssetVersion(
-        PROJECT_ID,
-        "skills",
-        SKILL_ID,
-        VERSION_ID,
-        input,
-      ),
-    ).resolves.toEqual(response);
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/activate`,
-      ),
-      expect.objectContaining({
-        method: "POST",
-        body: JSON.stringify(input),
-      }),
+    await activateProjectAssetVersion(
+      PROJECT_ID,
+      "skills",
+      SKILL_ID,
+      VERSION_ID,
+      input,
     );
-  });
-
-  test("replaces source-field mappings at the exact Skill version URL", async () => {
-    const response = {
-      skill_id: SKILL_ID,
-      skill_version_id: VERSION_ID,
-      revision: 3,
-      requirements: [],
-      request_id: "binding-request",
-    };
-    const fetchMock = rs.fn(async () => jsonResponse(response));
-    rs.stubGlobal("fetch", fetchMock);
-    const input = { expected_revision: 2, bindings: [] };
-
-    await expect(
-      updateProjectSkillCredentialBindings(
-        PROJECT_ID,
-        SKILL_ID,
-        VERSION_ID,
-        input,
-      ),
-    ).resolves.toEqual(response);
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(
-        `/api/projects/${PROJECT_ID}/skills/${SKILL_ID}/versions/${VERSION_ID}/credential-bindings`,
-      ),
-      expect.objectContaining({
-        method: "PUT",
-        body: JSON.stringify(input),
-      }),
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining(`/versions/${VERSION_ID}/activate`),
+      expect.objectContaining({ body: JSON.stringify(input) }),
     );
-  });
-
-  test("preserves the dedicated invalid-declaration code with safe diagnostics", async () => {
-    rs.stubGlobal(
-      "fetch",
-      rs.fn(async () =>
-        jsonResponse(
-          {
-            detail: {
-              code: "SKILL_SECRET_DECLARATION_INVALID",
-              message: "Skill secret declaration is invalid",
-              request_id: "error-request",
-              diagnostics: [
-                {
-                  code: "invalid_env_name",
-                  severity: "error",
-                  field_path: ["required-secrets", 0, "name"],
-                  line: 4,
-                  column: 11,
-                  public_message: "Environment variable name is invalid",
-                },
-              ],
-            },
-          },
-          422,
-        ),
-      ),
-    );
-
-    await expect(
-      patchProjectSkillFrontmatter(PROJECT_ID, {
-        content: CONTENT,
-        source_sha256: SHA,
-        required_secrets: [],
-        secrets_autonomous: false,
-      }),
-    ).rejects.toMatchObject({
-      status: 422,
-      code: "SKILL_SECRET_DECLARATION_INVALID",
-      diagnostics: [
-        {
-          code: "invalid_env_name",
-          severity: "error",
-          field_path: ["required-secrets", 0, "name"],
-          line: 4,
-          column: 11,
-          public_message: "Environment variable name is invalid",
-        },
-      ],
-    } satisfies Partial<SharedAssetApiError>);
   });
 });

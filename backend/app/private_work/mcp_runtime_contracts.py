@@ -63,7 +63,7 @@ def validate_project_mcp_snapshot_policy(
     endpoint_policy: McpEndpointPolicy | None,
     http_client_factory: SecureMcpHttpClientFactory | None,
 ) -> None:
-    """Apply the shared Project MCP network and credential-schema boundary."""
+    """Apply the shared Project MCP network and secret-schema boundary."""
 
     if snapshot.scope is not AssetScope.PROJECT:
         return
@@ -71,24 +71,24 @@ def validate_project_mcp_snapshot_policy(
     oauth = definition.get("oauth", {})
     if not isinstance(oauth, Mapping) or oauth:
         raise McpDefinitionPolicyError
-    slots = definition.get("credential_slots", ())
+    slots = definition.get("secret_slots", ())
     if not isinstance(slots, (list, tuple)):
         raise McpDefinitionPolicyError
-    credential_slot_schemas: list[Mapping[object, object]] = []
+    secret_slot_schemas: list[Mapping[object, object]] = []
     for slot in slots:
         if not isinstance(slot, Mapping):
             raise McpDefinitionPolicyError
         payload_schema = slot.get("payload_schema", {})
         if not isinstance(payload_schema, Mapping) or "env" in payload_schema or "oauth" in payload_schema:
             raise McpDefinitionPolicyError
-        credential_slot_schemas.append(payload_schema)
+        secret_slot_schemas.append(payload_schema)
     validate_project_mcp_definition(
         transport=definition.get("transport"),
         url=definition.get("url"),
         env=definition.get("env", {}),  # type: ignore[arg-type]
         headers=definition.get("headers", {}),  # type: ignore[arg-type]
         oauth=oauth,
-        credential_slot_schemas=tuple(credential_slot_schemas),
+        secret_slot_schemas=tuple(secret_slot_schemas),
         endpoint_policy=endpoint_policy,
     )
     if http_client_factory is None:
@@ -111,8 +111,8 @@ def validate_project_mcp_material_policy(
 def safe_mcp_definition_copy(value: object) -> object:
     """Copy only the resolver's JSON-like, secret-free MCP definition.
 
-    Credential schema *field names* such as ``client_secret`` and ``key_id``
-    describe required input; they are not credential material.  The M3
+    Secret schema *field names* such as ``client_secret`` and ``key_id``
+    describe required input; they are not secret material. The resolver
     resolver owns the plaintext boundary and deliberately excludes envelopes
     and decrypted payloads from this definition, so this copy validates shape
     instead of guessing secrecy from key names.

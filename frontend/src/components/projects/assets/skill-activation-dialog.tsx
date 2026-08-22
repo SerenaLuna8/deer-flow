@@ -33,20 +33,18 @@ import type { SkillAssetVersion } from "./skill-asset-detail";
 function readinessIdentity(
   readiness: SkillActivationReadinessResponse,
 ): string {
-  return `${readiness.skill_version_id}:${readiness.revision}:${readiness.payload_checksum}:${readiness.binding_revision}`;
+  return `${readiness.skill_version_id}:${readiness.revision}:${readiness.payload_checksum}:${readiness.secret_revision}`;
 }
 
-function mappingStatusLabel(
-  status: SkillActivationReadinessResponse["requirements"][number]["mapping_status"],
+function secretStatusLabel(
+  configured: boolean,
   copy: {
     statusConfigured: string;
     statusInvalid: string;
     statusMissing: string;
   },
 ): string {
-  if (status === "configured") return copy.statusConfigured;
-  if (status === "invalid") return copy.statusInvalid;
-  return copy.statusMissing;
+  return configured ? copy.statusConfigured : copy.statusMissing;
 }
 
 export function SkillActivationDialog({
@@ -57,7 +55,7 @@ export function SkillActivationDialog({
   version,
   onOpenChange,
   onActivated,
-  onConfigureCredentials,
+  onConfigureSecrets,
 }: {
   open: boolean;
   accountId: string;
@@ -66,7 +64,7 @@ export function SkillActivationDialog({
   version: SkillAssetVersion;
   onOpenChange: (open: boolean) => void;
   onActivated: (versionId: string) => void;
-  onConfigureCredentials: () => void;
+  onConfigureSecrets: () => void;
 }) {
   const { t } = useI18n();
   const copy = t.skills.activationDialog;
@@ -83,8 +81,8 @@ export function SkillActivationDialog({
     "skills",
   );
   const plan = readiness.data ?? null;
-  const canConfigureCredentials = item.capabilities.includes(
-    "mcp.credentials.approve",
+  const canConfigureSecrets = item.capabilities.includes(
+    "shared_assets.manage_bindings",
   );
 
   async function activateVersion() {
@@ -161,7 +159,7 @@ export function SkillActivationDialog({
                   {copy.preflightSummary(
                     plan.configured_required_count,
                     plan.required_count,
-                    plan.invalid_count,
+                    0,
                   )}
                 </p>
               </div>
@@ -189,12 +187,12 @@ export function SkillActivationDialog({
                       </Badge>
                       <Badge
                         variant={
-                          requirement.mapping_status === "configured"
+                          requirement.configured
                             ? "default"
                             : "secondary"
                         }
                       >
-                        {mappingStatusLabel(requirement.mapping_status, copy)}
+                        {secretStatusLabel(requirement.configured, copy)}
                       </Badge>
                     </div>
                   ))}
@@ -240,9 +238,9 @@ export function SkillActivationDialog({
               {copy.retry}
             </Button>
           ) : null}
-          {plan && !plan.ready && canConfigureCredentials ? (
-            <Button type="button" onClick={onConfigureCredentials}>
-              {copy.configureCredentials}
+          {plan && !plan.ready && canConfigureSecrets ? (
+            <Button type="button" onClick={onConfigureSecrets}>
+              {copy.configureSecrets}
             </Button>
           ) : null}
           <Button

@@ -83,17 +83,19 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
 )
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
     AssetScope,
     SkillAssetRef,
 )
+from app.system_settings.execution_payload import freeze_system_model_material
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
 )
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.persistence.shared_assets import (
     AgentDesignOperationRow,
     AgentDesignSessionRow,
@@ -711,8 +713,7 @@ class AgentDesignService:
             if generation_profile is not None:
                 generation_kwargs.update(
                     model_ref=generation_profile.model_ref,
-                    model_version_id=generation_profile.model_version_id,
-                    model_payload_checksum=generation_profile.payload_checksum,
+                    model_execution=generation_profile.model_execution,
                     thinking_enabled=generation_profile.thinking_enabled,
                     reasoning_effort=generation_profile.reasoning_effort,
                 )
@@ -1687,7 +1688,7 @@ class AgentDesignService:
         try:
             material = await SystemModelRepository(session).resolve_active_model(
                 requested_model_ref,
-                load_envelope=False,
+                load_secret=True,
             )
         except SystemModelRepositoryInvariant:
             raise AssetStorageUnavailable(context.request_id) from None
@@ -1697,8 +1698,8 @@ class AgentDesignService:
             try:
                 thinking_enabled, reasoning_effort = agent_design_mode_profile(
                     requested_mode,
-                    supports_thinking=material.version.supports_thinking,
-                    supports_reasoning_effort=material.version.supports_reasoning_effort,
+                    supports_thinking=material.model.supports_thinking,
+                    supports_reasoning_effort=(material.model.supports_reasoning_effort),
                 )
             except AgentDesignGenerationProfileUnsupported:
                 raise AgentDesignGenerationProfileStale(context.request_id) from None
@@ -1709,13 +1710,12 @@ class AgentDesignService:
                 mode=requested_mode,
                 thinking_enabled=thinking_enabled,
                 reasoning_effort=reasoning_effort,
-                supports_thinking=material.version.supports_thinking,
-                supports_reasoning_effort=(material.version.supports_reasoning_effort),
+                supports_thinking=material.model.supports_thinking,
+                supports_reasoning_effort=(material.model.supports_reasoning_effort),
             )
             return replace(
                 profile,
-                model_version_id=str(uuid.UUID(str(material.version.id))),
-                payload_checksum=material.version.payload_checksum,
+                model_execution=freeze_system_model_material(material),
             )
         except AgentDesignGenerationProfileUnsupported:
             raise AgentDesignGenerationProfileStale(context.request_id) from None
@@ -1798,7 +1798,7 @@ class AgentDesignService:
                             operation,
                             duration_ms=duration_ms,
                         )
-                    if not await self._generation_profile_is_current(
+                    if not await self._generation_profile_is_valid(
                         session,
                         operation,
                     ):
@@ -1942,10 +1942,11 @@ class AgentDesignService:
             raise AssetStorageUnavailable(context.request_id) from None
 
     @staticmethod
-    async def _generation_profile_is_current(
+    async def _generation_profile_is_valid(
         session: AsyncSession,
         operation: AgentDesignOperationRow,
     ) -> bool:
+        del session
         requested = operation.requested_generation_profile_json
         effective = operation.effective_generation_profile_json
         if requested is None and effective is None:
@@ -1954,30 +1955,34 @@ class AgentDesignService:
             return False
         try:
             requested_model_ref = str(requested["model_ref"])
-            material = await SystemModelRepository(session).resolve_active_model(
-                requested_model_ref,
-                load_envelope=False,
-            )
-            if material is None:
+            execution_raw = effective["model_execution"]
+            if not isinstance(execution_raw, dict):
                 return False
+            generation_raw = execution_raw["secret_generation_id"]
+            execution = FrozenSystemModelExecution(
+                model_config_id=uuid.UUID(str(execution_raw["model_config_id"])),
+                provider_payload=execution_raw["provider_payload"],
+                payload_checksum=str(execution_raw["payload_checksum"]),
+                secret_generation_id=(uuid.UUID(str(generation_raw)) if generation_raw is not None else None),
+                secret_envelope_digest=(str(execution_raw["secret_envelope_digest"]) if execution_raw["secret_envelope_digest"] is not None else None),
+            )
+            provider_payload = execution.provider_payload
             resolved = resolve_agent_design_generation_profile(
                 requested_model_ref=requested_model_ref,
-                effective_model_ref=str(uuid.UUID(str(material.model.id))),
+                effective_model_ref=str(execution.model_config_id),
                 mode=requested.get("mode"),
                 thinking_enabled=requested.get("thinking_enabled"),
                 reasoning_effort=requested.get("reasoning_effort"),
-                supports_thinking=material.version.supports_thinking,
-                supports_reasoning_effort=material.version.supports_reasoning_effort,
+                supports_thinking=provider_payload["supports_thinking"],
+                supports_reasoning_effort=provider_payload["supports_reasoning_effort"],
             )
             resolved = replace(
                 resolved,
-                model_version_id=str(uuid.UUID(str(material.version.id))),
-                payload_checksum=material.version.payload_checksum,
+                model_execution=execution,
             )
         except (
             AgentDesignGenerationProfileUnsupported,
             KeyError,
-            SystemModelRepositoryInvariant,
             TypeError,
             ValueError,
         ):

@@ -13,6 +13,7 @@ import sqlalchemy as sa
 from fastapi import HTTPException
 from sqlalchemy import text
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.system_model_seed import seed_system_model_config
 
 from app.gateway.routers.private_work import reconnect_private_run_stream
 from app.private_work.errors import (
@@ -62,8 +63,7 @@ from app.shared_assets.skill_design_service import (
 from app.system_runtime_settings import SystemRuntimePolicyService
 from app.system_settings import SystemModelCatalogService
 from app.system_settings.bootstrap import (
-    GPT_5_6_LUNA_MODEL_ID,
-    GPT_5_6_LUNA_MODEL_VERSION_ID,
+    DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID,
 )
 from app.worker.service import JobLeaseAuthority
 from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
@@ -169,91 +169,22 @@ def _project_context(seed: PrivateThreadSeed, *, request_id: str) -> ProjectCont
 
 async def _seed_default_model(seed: PrivateThreadSeed) -> None:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
     provider_model = f"builder-pg-{model_id.hex}"
     async with seed.engine.begin() as connection:
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'Builder PG model','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {
-                "id": model_id,
-                "owner": str(seed.owner_a.user_id),
-            },
+        await seed_system_model_config(
+            connection,
+            model_id=model_id,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="Builder PG model",
+            provider_model=provider_model,
         )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,provider_model,
-                 settings,supports_thinking,supports_reasoning_effort,
-                 supports_vision,credential_id,credential_version_id,
-                 credential_env_key,payload_checksum,supersedes_version_id,
-                 created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake',:name,'{}'::jsonb,false,false,
-                        false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-            ),
-            {
-                "id": version_id,
-                "model": model_id,
-                "name": provider_model,
-                "checksum": "b" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """UPDATE system_model_configs
-                   SET current_version_id=:version
-                 WHERE id=:model"""
-            ),
-            {"version": version_id, "model": model_id},
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_configs
-                (id,display_name,status,current_version_id,
-                 revision,created_by_user_id,updated_by_user_id)
-                VALUES (:id,'Builder PG vision model','active',NULL,1,
-                        :owner,:owner)"""
-            ),
-            {
-                "id": GPT_5_6_LUNA_MODEL_ID,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """INSERT INTO system_model_config_versions
-                (id,model_config_id,version_number,provider_adapter,provider_model,
-                 settings,supports_thinking,supports_reasoning_effort,
-                 supports_vision,credential_id,credential_version_id,
-                 credential_env_key,payload_checksum,supersedes_version_id,
-                 created_by_user_id)
-                VALUES (:id,:model,1,'vision_bridge_fake','builder-pg-vision',
-                        '{}'::jsonb,false,false,true,NULL,NULL,NULL,
-                        :checksum,NULL,:owner)"""
-            ),
-            {
-                "id": GPT_5_6_LUNA_MODEL_VERSION_ID,
-                "model": GPT_5_6_LUNA_MODEL_ID,
-                "checksum": "c" * 64,
-                "owner": str(seed.owner_a.user_id),
-            },
-        )
-        await connection.execute(
-            text(
-                """UPDATE system_model_configs
-                   SET current_version_id=:version
-                 WHERE id=:model"""
-            ),
-            {
-                "version": GPT_5_6_LUNA_MODEL_VERSION_ID,
-                "model": GPT_5_6_LUNA_MODEL_ID,
-            },
+        await seed_system_model_config(
+            connection,
+            model_id=DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID,
+            owner_user_id=str(seed.owner_a.user_id),
+            display_name="Builder PG vision model",
+            provider_model="builder-pg-vision",
+            supports_vision=True,
         )
         await connection.execute(
             text(
@@ -442,8 +373,8 @@ async def test_durable_builder_run_replay_retry_delta_cancel_and_delete_link(
                     )
                 )
             ).scalar_one()
-            assert vision_snapshot.model_config_id == GPT_5_6_LUNA_MODEL_ID
-            assert vision_snapshot.model_config_version_id == GPT_5_6_LUNA_MODEL_VERSION_ID
+            assert vision_snapshot.model_config_id == DEEPSEEK_V4_FLASH_VISION_EXP_MODEL_ID
+            assert vision_snapshot.provider_payload["supports_vision"] is True
             initial_payload = json.loads(
                 run.kwargs_json["input"]["messages"][0]["content"],
             )

@@ -38,9 +38,8 @@ async def init_engine(config: DatabaseConfig) -> None:
         json_serializer=_json_serializer,
     )
     from deerflow.persistence.bootstrap import (
-        M7RecreateRequired,
+        SchemaRecreateRequired,
         SchemaSetupRequired,
-        SchemaUpgradeRequired,
         validate_schema,
     )
 
@@ -48,8 +47,8 @@ async def init_engine(config: DatabaseConfig) -> None:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
         await validate_schema(engine)
-    except (SchemaSetupRequired, SchemaUpgradeRequired, M7RecreateRequired) as exc:
-        # Schema gates carry their own operator guidance (setup-db/upgrade-db);
+    except (SchemaSetupRequired, SchemaRecreateRequired) as exc:
+        # Schema gates carry their own operator guidance (setup-db/recreate);
         # never bury it under the generic connectivity message.
         await engine.dispose()
         _engine = None

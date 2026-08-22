@@ -17,7 +17,7 @@ class _Rows:
 
 
 class _ClosureSession:
-    def __init__(self, source_env_field_name: str) -> None:
+    def __init__(self, generation_id: uuid.UUID) -> None:
         self._results = iter(
             (
                 _Rows(()),
@@ -32,17 +32,9 @@ class _ClosureSession:
                                 "30000000-0000-0000-0000-000000000002",
                             ),
                             secret_name="TARGET_API_KEY",
-                            source_env_field_name=source_env_field_name,
-                            skill_credential_binding_id=uuid.UUID(
-                                "30000000-0000-0000-0000-000000000003",
-                            ),
-                            binding_revision=7,
-                            credential_id=uuid.UUID(
-                                "30000000-0000-0000-0000-000000000004",
-                            ),
-                            credential_version_id=uuid.UUID(
-                                "30000000-0000-0000-0000-000000000005",
-                            ),
+                            secret_revision=7,
+                            secret_generation_id=generation_id,
+                            secret_generation_digest="a" * 64,
                         ),
                     ),
                 ),
@@ -56,28 +48,34 @@ class _ClosureSession:
 
 
 @pytest.mark.asyncio
-async def test_host_approval_asset_closure_detects_skill_source_field_drift() -> None:
+async def test_host_approval_asset_closure_detects_skill_generation_drift() -> None:
     values = {
         "project_id": uuid.uuid4(),
         "owner_user_id": str(uuid.uuid4()),
         "run_id": "source-field-closure-run",
     }
 
-    provider_token = await _asset_closure(
-        _ClosureSession("PROVIDER_TOKEN"),  # type: ignore[arg-type]
+    first_generation = uuid.UUID("30000000-0000-0000-0000-000000000003")
+    second_generation = uuid.UUID("30000000-0000-0000-0000-000000000004")
+    first = await _asset_closure(
+        _ClosureSession(first_generation),  # type: ignore[arg-type]
         **values,
     )
-    rotated_field = await _asset_closure(
-        _ClosureSession("ROTATED_PROVIDER_TOKEN"),  # type: ignore[arg-type]
+    replaced = await _asset_closure(
+        _ClosureSession(second_generation),  # type: ignore[arg-type]
         **values,
     )
 
-    assert provider_token[2][0][2:4] == (
+    assert first[2][0][2:] == (
         "TARGET_API_KEY",
-        "PROVIDER_TOKEN",
+        7,
+        str(first_generation),
+        "a" * 64,
     )
-    assert rotated_field[2][0][2:4] == (
+    assert replaced[2][0][2:] == (
         "TARGET_API_KEY",
-        "ROTATED_PROVIDER_TOKEN",
+        7,
+        str(second_generation),
+        "a" * 64,
     )
-    assert provider_token != rotated_field
+    assert first != replaced

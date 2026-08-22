@@ -122,7 +122,7 @@ describe("admin contracts", () => {
     };
     const newAdapterDescriptor = {
       id: "new_vendor_v2",
-      credential_required: false,
+      api_key_required: false,
       setting_fields: [baseUrlField, customNumberField],
     };
     const catalog = {
@@ -245,13 +245,12 @@ describe("admin contracts", () => {
       supports_thinking: false,
       supports_reasoning_effort: false,
       supports_vision: true,
-      credential_id: null,
-      credential_version_id: null,
-      credential_env_key: null,
       status: "suspended" as const,
       is_default: false,
       revision: 1,
-      version_number: 1,
+      api_key_configured: false,
+      secret_readiness: "unready" as const,
+      secret_revision: 0,
       updated_at: "2026-08-16T00:00:00+00:00",
     };
 
@@ -279,9 +278,6 @@ describe("admin contracts", () => {
       supports_thinking: false,
       supports_reasoning_effort: false,
       supports_vision: false,
-      credential_id: "00000000-0000-4000-8000-000000000101",
-      credential_version_id: "00000000-0000-4000-8000-000000000102",
-      credential_env_key: "OPENAI_API_KEY",
     };
 
     expect(
@@ -291,7 +287,9 @@ describe("admin contracts", () => {
         status: "suspended",
         is_default: false,
         revision: 1,
-        version_number: 1,
+        api_key_configured: true,
+        secret_readiness: "ready",
+        secret_revision: 1,
         updated_at: "2026-08-16T00:00:00+00:00",
       }).success,
     ).toBe(true);
@@ -299,11 +297,13 @@ describe("admin contracts", () => {
       createAdminModelInputSchema.safeParse({
         ...version,
         status: "suspended",
+        api_key: "temporary-key",
       }).success,
     ).toBe(false);
     expect(
       replaceAdminModelInputSchema.safeParse({
         ...version,
+        api_key: null,
         expected_revision: 1,
       }).success,
     ).toBe(false);
@@ -313,9 +313,7 @@ describe("admin contracts", () => {
         provider_model: version.provider_model,
         settings: version.settings,
         supports_vision: version.supports_vision,
-        credential_id: version.credential_id,
-        credential_version_id: version.credential_version_id,
-        credential_env_key: version.credential_env_key,
+        api_key: "temporary-key",
       }).success,
     ).toBe(false);
   });
@@ -330,13 +328,12 @@ describe("admin contracts", () => {
       supports_thinking: false,
       supports_reasoning_effort: false,
       supports_vision: false,
-      credential_id: null,
-      credential_version_id: null,
-      credential_env_key: null,
       status: "suspended",
       is_default: false,
       revision: 1,
-      version_number: 1,
+      api_key_configured: false,
+      secret_readiness: "unready",
+      secret_revision: 0,
       updated_at: "2026-08-16T00:00:00+00:00",
     };
 

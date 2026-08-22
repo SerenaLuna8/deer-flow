@@ -1,4 +1,4 @@
-"""Worker and auxiliary-call materializers for exact system model versions."""
+"""Worker and auxiliary-call materializers for admitted System Models."""
 
 from __future__ import annotations
 
@@ -9,11 +9,14 @@ from collections.abc import Callable
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.system_settings.credential_adapter import (
-    SystemModelCredentialAdapter,
+from app.system_settings.execution_adapter import (
+    SystemModelExecutionAdapter,
     SystemModelMaterializationUnavailable,
 )
-from app.system_settings.models import ConnectionTestSystemModelMaterial
+from app.system_settings.models import (
+    ConnectionTestSystemModelMaterial,
+    FrozenSystemModelExecution,
+)
 from app.system_settings.repository import (
     SystemModelRepository,
     SystemModelRepositoryInvariant,
@@ -29,10 +32,10 @@ class SystemModelMaterializer:
         self,
         session_factory: Callable[[], AsyncSession],
         *,
-        credential_adapter: SystemModelCredentialAdapter | None = None,
+        execution_adapter: SystemModelExecutionAdapter | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._credential_adapter = credential_adapter or SystemModelCredentialAdapter()
+        self._execution_adapter = execution_adapter or SystemModelExecutionAdapter()
 
     async def materialize_active(
         self,
@@ -44,16 +47,16 @@ class SystemModelMaterializer:
                     session,
                 ).resolve_active_model(
                     model_ref,
-                    load_envelope=True,
+                    load_secret=True,
                 )
                 if material is None or not (
                     is_provider_adapter_eligible_for_new_binding(
-                        material.version.provider_adapter,
+                        material.model.provider_adapter,
                     )
                 ):
                     raise SystemModelMaterializationUnavailable
                 return await asyncio.to_thread(
-                    self._credential_adapter.materialize,
+                    self._execution_adapter.materialize,
                     material,
                 )
         except SystemModelMaterializationUnavailable:
@@ -65,44 +68,16 @@ class SystemModelMaterializer:
         self,
         material: ConnectionTestSystemModelMaterial,
     ) -> ModelConfig:
-        """Decrypt and materialize one non-persistent, admin-authorized probe."""
+        """Materialize one non-persistent, admin-authorized probe."""
 
         try:
             return await asyncio.to_thread(
-                self._credential_adapter.materialize_connection_test,
+                self._execution_adapter.materialize_connection_test,
                 material,
             )
         except SystemModelMaterializationUnavailable:
             raise
         except RuntimeError:
-            raise SystemModelMaterializationUnavailable() from None
-
-    async def materialize_exact(
-        self,
-        *,
-        model_config_id: uuid.UUID,
-        model_config_version_id: uuid.UUID,
-        payload_checksum: str,
-    ) -> ModelConfig:
-        try:
-            async with self._session_factory() as session, session.begin():
-                material = await SystemModelRepository(
-                    session,
-                ).lock_exact_material(
-                    model_config_id=model_config_id,
-                    model_config_version_id=model_config_version_id,
-                    payload_checksum=payload_checksum,
-                    load_envelope=True,
-                )
-                if material is None:
-                    raise SystemModelMaterializationUnavailable
-                return await asyncio.to_thread(
-                    self._credential_adapter.materialize,
-                    material,
-                )
-        except SystemModelMaterializationUnavailable:
-            raise
-        except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
             raise SystemModelMaterializationUnavailable() from None
 
     async def materialize_snapshot(
@@ -126,7 +101,27 @@ class SystemModelMaterializer:
                 if material is None:
                     raise SystemModelMaterializationUnavailable
                 return await asyncio.to_thread(
-                    self._credential_adapter.materialize,
+                    self._execution_adapter.materialize,
+                    material,
+                )
+        except SystemModelMaterializationUnavailable:
+            raise
+        except (DBAPIError, RuntimeError, SystemModelRepositoryInvariant):
+            raise SystemModelMaterializationUnavailable() from None
+
+    async def materialize_frozen(
+        self,
+        execution: FrozenSystemModelExecution,
+    ) -> ModelConfig:
+        try:
+            async with self._session_factory() as session, session.begin():
+                material = await SystemModelRepository(
+                    session,
+                ).lock_frozen_material(execution)
+                if material is None:
+                    raise SystemModelMaterializationUnavailable
+                return await asyncio.to_thread(
+                    self._execution_adapter.materialize,
                     material,
                 )
         except SystemModelMaterializationUnavailable:

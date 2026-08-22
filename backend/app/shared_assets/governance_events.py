@@ -47,8 +47,9 @@ class SharedAssetGovernanceEventSink:
         action: str,
         request_id: str,
         asset_kind: str | None = None,
+        secret_metadata: dict[str, object] | None = None,
     ) -> None:
-        del session, asset_kind
+        del session, asset_kind, secret_metadata
         self.write_override(
             actor=actor,
             project_id=project_id,
@@ -69,7 +70,8 @@ class SharedAssetGovernanceEventSink:
         action: str,
         request_id: str,
         asset_kind: str | None = None,
+        secret_metadata: dict[str, object] | None = None,
     ) -> None:
         """Compatibility hook; the formal M6 adapter persists project events."""
 
-        del session, actor, project_id, asset_id, version_id, action, request_id, asset_kind
+        del session, actor, project_id, asset_id, version_id, action, request_id, asset_kind, secret_metadata

@@ -32,9 +32,9 @@ from app.shared_assets.errors import (
     AssetValidationFailed,
     SharedAssetError,
     SkillArchiveLimitExceeded,
-    SkillCredentialBindingInvalid,
-    SkillCredentialBindingsIncomplete,
-    SkillCredentialSelectionStale,
+    SkillSecretConfigurationInvalid,
+    SkillSecretRevisionStale,
+    SkillSecretsIncomplete,
 )
 from app.shared_assets.governance_events import SharedAssetGovernanceEventSink
 from app.shared_assets.models import AssetScope, SkillArchiveFile, VersionRelation
@@ -44,22 +44,18 @@ from app.shared_assets.skill_archive import (
     dump_skill_distribution_zip,
     load_skill_archive_package,
 )
-from app.shared_assets.skill_credential_closure import (
-    SkillCredentialClosureInvalid,
-    lock_skill_credential_closure,
-)
-from app.shared_assets.skill_credential_repository import (
-    SkillCredentialRepository,
-    SkillCredentialTarget,
-)
-from app.shared_assets.skill_credential_service import (
-    inherit_compatible_skill_credential_bindings_in_transaction,
-    prepare_skill_credential_bindings_in_transaction,
-)
 from app.shared_assets.skill_repository import (
     SkillRepository,
     SkillVersionFileMetadataRecord,
     SkillVersionRecord,
+)
+from app.shared_assets.skill_secret_closure import (
+    SkillSecretClosureInvalid,
+    lock_skill_secret_closure,
+)
+from app.shared_assets.skill_secret_service import (
+    copy_compatible_skill_secrets_in_transaction,
+    validate_skill_secret_readiness_in_transaction,
 )
 from app.shared_assets.version_relation import (
     VersionLineageNode,
@@ -123,9 +119,8 @@ _CONFLICT_CONSTRAINTS = frozenset(
         "uq_skills_project_slug",
         "uq_skills_system_slug",
         "uq_skill_versions_asset_number",
-        "pk_project_skill_credential_configs",
-        "uq_project_skill_credential_configs_revision",
-        "uq_project_skill_credential_bindings_active_name",
+        "pk_project_skill_secret_states",
+        "uq_project_skill_secret_generations_revision",
     }
 )
 _Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
@@ -1120,16 +1115,16 @@ class SkillService:
         *,
         expected_asset_version: int,
         expected_payload_checksum: str | None = None,
-        expected_binding_revision: int | None = None,
+        expected_secret_revision: int | None = None,
     ) -> SkillVersionView:
         self._require_capability(actor, Capability.SHARED_ASSETS_EDIT)
         request_id = getattr(actor, "request_id", "unknown")
         if not (isinstance(actor, ProjectContext) or (isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None)):
             raise AssetForbidden(request_id)
         if not isinstance(expected_payload_checksum, str) or re.fullmatch(r"[0-9a-f]{64}", expected_payload_checksum) is None:
-            raise SkillCredentialBindingInvalid(request_id)
-        if not isinstance(expected_binding_revision, int) or isinstance(expected_binding_revision, bool) or expected_binding_revision < 0:
-            raise SkillCredentialBindingInvalid(request_id)
+            raise SkillSecretConfigurationInvalid(request_id)
+        if not isinstance(expected_secret_revision, int) or isinstance(expected_secret_revision, bool) or expected_secret_revision < 0:
+            raise SkillSecretConfigurationInvalid(request_id)
 
         async def operation(repository: SkillRepository) -> SkillVersionView:
             return await self._activate_version_in_transaction(
@@ -1139,7 +1134,7 @@ class SkillService:
                 version_id,
                 expected_asset_version=expected_asset_version,
                 expected_payload_checksum=expected_payload_checksum,
-                expected_binding_revision=expected_binding_revision,
+                expected_secret_revision=expected_secret_revision,
             )
 
         return await self._execute(
@@ -1268,14 +1263,14 @@ class SkillService:
                 raise AssetForbidden(actor.request_id)
             if current.row.secret_requirements:
                 try:
-                    await lock_skill_credential_closure(
+                    await lock_skill_secret_closure(
                         repository.session,
                         project_id,
                         asset.id,
                         current.row.id,
                     )
-                except SkillCredentialClosureInvalid:
-                    raise SkillCredentialBindingsIncomplete(
+                except SkillSecretClosureInvalid:
+                    raise SkillSecretsIncomplete(
                         actor.request_id,
                     ) from None
             asset.status = "active"
@@ -1684,7 +1679,7 @@ class SkillService:
         *,
         expected_asset_version: int,
         expected_payload_checksum: str | None = None,
-        expected_binding_revision: int | None = None,
+        expected_secret_revision: int | None = None,
     ) -> SkillVersionView:
         asset = await self._get_asset(repository, actor, asset_id, for_update=True)
         self._require_expected_version(actor, asset, expected_asset_version)
@@ -1715,15 +1710,15 @@ class SkillService:
             raise AssetValidationFailed(actor.request_id)
         if expected_payload_checksum is not None and record.row.payload_checksum != expected_payload_checksum:
             if isinstance(actor, ProjectContext):
-                raise SkillCredentialSelectionStale(actor.request_id)
+                raise SkillSecretRevisionStale(actor.request_id)
             raise AssetConflict(actor.request_id)
-        if bool(record.row.secret_requirements) or expected_binding_revision is not None:
-            await prepare_skill_credential_bindings_in_transaction(
-                SkillCredentialRepository(repository.session),
+        if bool(record.row.secret_requirements) or expected_secret_revision is not None:
+            await validate_skill_secret_readiness_in_transaction(
+                repository.session,
                 actor,
-                SkillCredentialTarget(asset, record.row),
-                None,
-                expected_revision=expected_binding_revision,
+                asset,
+                record.row,
+                expected_revision=expected_secret_revision,
                 require_complete=True,
             )
         await repository.ensure_project_skill_runtime_name_available(actor, asset)
@@ -1810,12 +1805,45 @@ class SkillService:
                 supersedes_version_id,
                 for_update=True,
             )
-            await inherit_compatible_skill_credential_bindings_in_transaction(
-                SkillCredentialRepository(repository.session),
+            copied_secret_states = await copy_compatible_skill_secrets_in_transaction(
+                repository.session,
                 actor,
-                SkillCredentialTarget(asset, source.row),
-                SkillCredentialTarget(asset, record.row),
+                asset,
+                source.row,
+                record.row,
             )
+            if isinstance(actor, ProjectContext) and copied_secret_states:
+                readiness = (
+                    "ready"
+                    if all(
+                        bool(item.get("optional", False)) or any(state.secret_name == item.get("name") and state.current_generation_id is not None for state in copied_secret_states)
+                        for item in record.row.secret_requirements
+                        if isinstance(item, dict)
+                    )
+                    else "unready"
+                )
+                for state in copied_secret_states:
+                    if state.current_generation_id is None:
+                        continue
+                    await self._governance_sink.append_project(
+                        repository.session,
+                        actor=actor.user_id,
+                        project_id=actor.project_id,
+                        asset_id=asset.id,
+                        version_id=record.row.id,
+                        action="skill.secret.copy",
+                        request_id=actor.request_id,
+                        asset_kind="skill",
+                        secret_metadata={
+                            "version_id": record.row.id,
+                            "secret_name": state.secret_name,
+                            "generation_id": state.current_generation_id,
+                            "revision": int(state.revision),
+                            "result": "copied",
+                            "reason": "compatible_copy",
+                            "readiness": readiness,
+                        },
+                    )
         asset.revision += 1
         await repository.session.flush()
         return self._version_view(record, relation=VersionRelation.CANDIDATE)

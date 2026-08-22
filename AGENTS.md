@@ -66,13 +66,13 @@ complete application.
 | `config.example.yaml`       | Root runtime configuration template                               |
 
 Runtime configuration is resolved from the repository-root `config.yaml` (or an
-explicit `DEER_FLOW_CONFIG_PATH`). PostgreSQL is the authority for application
+explicit `ACT_WEAVE_CONFIG_PATH`). PostgreSQL is the authority for application
 metadata, project/private state, jobs, streams, checkpoints, audit, and governed
 asset versions. System model, runtime, authentication, Memory-template, and
 quota policies are administered in PostgreSQL, not duplicated in YAML.
 
-Fresh schema installation and explicit upgrades are separate operator actions.
-The runtime never creates, upgrades, stamps, or repairs the application schema;
+Schema V1 installation is an explicit operator action for an empty database.
+The runtime never creates, stamps, or repairs the application schema;
 see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
 
 ## Command boundaries
@@ -81,9 +81,9 @@ see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
   the current command index.
 - Run backend targets from `backend/` and frontend targets from `frontend/`, for
   example `make lint` and `pnpm check`.
-- Treat `make setup-db`, `make upgrade-db`, and
-  `make upgrade-system-assets` as explicit operator actions, not runtime startup
-  steps. Use `make check-db` for read-only database readiness evidence.
+- Treat `make setup-db` and `make upgrade-system-assets` as explicit operator
+  actions, not runtime startup steps. Use `make check-db` for read-only database
+  readiness evidence.
 
 ## Repository-wide rules
 
@@ -102,9 +102,10 @@ see [backend/AGENTS.md](backend/AGENTS.md) before changing persistence.
   context, capabilities, and owner scope. Never trust IDs or authority copied
   from request metadata, browser state, or model output.
 - Secrets must not enter source, logs, browser storage, query caches, API
-  responses, snapshots, or diagnostic bundles. Use governed Credential paths.
-- Schema changes require ORM, full-schema SQL, migration-chain, and parity-test
-  updates. Never patch or stamp a database manually.
+  responses, snapshots, or diagnostic bundles. Each consuming domain owns its
+  encrypted values and uses the shared secret-envelope infrastructure.
+- Schema changes require ORM, the Schema V1 SQL snapshot, catalog digest, and
+  focused schema tests to change together. Never patch or stamp a database manually.
 
 ### Verification and handoff
 

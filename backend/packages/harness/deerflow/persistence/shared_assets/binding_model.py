@@ -140,7 +140,7 @@ class SystemAssetUpgradeAuditRow(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("asset_kind IN ('agent', 'skill')", name="ck_system_asset_upgrade_audit_kind"),
+        CheckConstraint("asset_kind IN ('agent', 'skill', 'mcp')", name="ck_system_asset_upgrade_audit_kind"),
         CheckConstraint("before_checksum ~ '^[0-9a-f]{64}$'", name="ck_system_asset_upgrade_audit_before_checksum"),
         CheckConstraint("after_checksum ~ '^[0-9a-f]{64}$'", name="ck_system_asset_upgrade_audit_after_checksum"),
         CheckConstraint("package_digest ~ '^[0-9a-f]{64}$'", name="ck_system_asset_upgrade_audit_package_digest"),
@@ -154,11 +154,14 @@ DECLARE
     asset_scope text;
 BEGIN
     IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
-       AND TG_TABLE_NAME IN ('agent_versions', 'skill_versions') THEN
+       AND TG_TABLE_NAME IN ('agent_versions', 'skill_versions', 'mcp_server_versions') THEN
         IF TG_TABLE_NAME = 'agent_versions' THEN
             SELECT scope INTO asset_scope FROM agents WHERE id = NEW.agent_id;
-        ELSE
+        ELSIF TG_TABLE_NAME = 'skill_versions' THEN
             SELECT scope INTO asset_scope FROM skills WHERE id = NEW.skill_id;
+        ELSE
+            SELECT scope INTO asset_scope FROM mcp_servers
+            WHERE id = NEW.mcp_server_id;
         END IF;
         IF asset_scope = 'system' THEN
             RETURN NEW;
@@ -470,11 +473,15 @@ BEGIN
                       AND project.deletion_effective_at <= now()
                 ) INTO purge_allowed;
             END IF;
-        WHEN 'mcp_version_credential_slots' THEN
+        WHEN 'mcp_version_secret_slots' THEN
             parent_version_id := CASE WHEN TG_OP = 'DELETE'
                 THEN OLD.mcp_server_version_id ELSE NEW.mcp_server_version_id END;
-            SELECT workflow_status INTO parent_status
-            FROM mcp_server_versions WHERE id = parent_version_id FOR UPDATE;
+            SELECT asset.scope, asset.project_id, asset.id,
+                   version.workflow_status
+            INTO parent_scope, parent_project_id, parent_asset_id, parent_status
+            FROM mcp_server_versions version
+            JOIN mcp_servers asset ON asset.id = version.mcp_server_id
+            WHERE version.id = parent_version_id FOR UPDATE OF version, asset;
             IF TG_OP = 'DELETE' THEN
                 SELECT EXISTS (
                     SELECT 1
@@ -508,7 +515,8 @@ BEGIN
     IF TG_TABLE_NAME IN (
         'skill_version_files',
         'agent_version_skill_refs',
-        'agent_version_mcp_refs'
+        'agent_version_mcp_refs',
+        'mcp_version_secret_slots'
     ) THEN
         IF current_setting('deerflow.system_asset_upgrade', true) = 'on'
            AND parent_scope = 'system' THEN
@@ -545,16 +553,6 @@ _CREATE_VERSION_STATE_FUNCTION = """
 CREATE OR REPLACE FUNCTION enforce_shared_asset_version_state_transition()
 RETURNS trigger AS $$
 BEGIN
-    IF TG_TABLE_NAME = 'credential_versions' THEN
-        IF NEW.status = OLD.status
-           OR (OLD.status = 'active' AND NEW.status IN ('retired', 'revoked'))
-           OR (OLD.status = 'retired' AND NEW.status = 'revoked') THEN
-            RETURN NEW;
-        END IF;
-        RAISE EXCEPTION 'invalid credential version status transition'
-            USING ERRCODE = 'integrity_constraint_violation';
-    END IF;
-
     IF NEW.workflow_status = OLD.workflow_status
        OR (OLD.workflow_status = 'draft'
            AND NEW.workflow_status IN ('pending_approval', 'published'))
@@ -580,11 +578,10 @@ _TRIGGER_DDL = (
     "CREATE TRIGGER trg_skill_versions_immutable BEFORE UPDATE ON skill_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_versions_revocation BEFORE INSERT OR UPDATE OF revoked_at, revoked_by_user_id, revocation_reason_code ON skill_versions FOR EACH ROW EXECUTE FUNCTION enforce_system_skill_version_revocation()",
     "CREATE TRIGGER trg_mcp_server_versions_immutable BEFORE UPDATE ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
-    "CREATE TRIGGER trg_credential_versions_immutable BEFORE UPDATE ON credential_versions FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_skill_version_files_immutable BEFORE UPDATE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_agent_version_skill_refs_immutable BEFORE UPDATE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_agent_version_mcp_refs_immutable BEFORE UPDATE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
-    "CREATE TRIGGER trg_mcp_credential_slots_immutable BEFORE UPDATE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
+    "CREATE TRIGGER trg_mcp_secret_slots_immutable BEFORE UPDATE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_shared_asset_version_payload_update()",
     "CREATE TRIGGER trg_agent_bindings_current BEFORE INSERT OR UPDATE ON project_system_agent_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
     "CREATE TRIGGER trg_skill_bindings_current BEFORE INSERT OR UPDATE ON project_system_skill_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
     "CREATE TRIGGER trg_mcp_bindings_published BEFORE INSERT OR UPDATE ON project_system_mcp_bindings FOR EACH ROW EXECUTE FUNCTION ensure_system_binding_eligible_version()",
@@ -592,20 +589,16 @@ _TRIGGER_DDL = (
     "CREATE TRIGGER trg_skill_version_files_child_immutable BEFORE INSERT OR DELETE ON skill_version_files FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
     "CREATE TRIGGER trg_agent_version_skill_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_skill_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
     "CREATE TRIGGER trg_agent_version_mcp_refs_child_immutable BEFORE INSERT OR DELETE ON agent_version_mcp_refs FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
-    "CREATE TRIGGER trg_mcp_credential_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_credential_slots FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
+    "CREATE TRIGGER trg_mcp_secret_slots_child_immutable BEFORE INSERT OR DELETE ON mcp_version_secret_slots FOR EACH ROW EXECUTE FUNCTION prevent_asset_version_child_mutation()",
     "CREATE TRIGGER trg_mcp_server_versions_state_transition BEFORE UPDATE OF workflow_status ON mcp_server_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
-    "CREATE TRIGGER trg_credential_versions_state_transition BEFORE UPDATE OF status ON credential_versions FOR EACH ROW EXECUTE FUNCTION enforce_shared_asset_version_state_transition()",
     "CREATE TRIGGER trg_agents_generation AFTER UPDATE OF status, current_version_id, revision ON agents FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skills_generation AFTER UPDATE OF status, current_version_id, revision ON skills FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_mcp_servers_generation AFTER UPDATE OF status, current_published_version_id ON mcp_servers FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skill_version_revocations_generation AFTER UPDATE OF revoked_at ON skill_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_mcp_server_versions_generation AFTER UPDATE OF workflow_status ON mcp_server_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
-    "CREATE TRIGGER trg_credentials_generation AFTER UPDATE OF status, current_version_id, is_delete ON credentials FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
-    "CREATE TRIGGER trg_credential_versions_generation AFTER UPDATE OF status ON credential_versions FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_agent_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON project_system_agent_bindings FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_skill_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON project_system_skill_bindings FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
     "CREATE TRIGGER trg_mcp_bindings_generation AFTER INSERT OR UPDATE OR DELETE ON project_system_mcp_bindings FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
-    "CREATE TRIGGER trg_credential_grants_generation AFTER INSERT OR UPDATE OR DELETE ON credential_grants FOR EACH STATEMENT EXECUTE FUNCTION bump_asset_catalog_generation()",
 )
 
 _TRIGGER_TABLES = frozenset(
@@ -616,16 +609,13 @@ _TRIGGER_TABLES = frozenset(
         "skill_versions",
         "skill_version_files",
         "mcp_server_versions",
-        "mcp_version_credential_slots",
-        "credential_versions",
-        "credential_grants",
+        "mcp_version_secret_slots",
         "project_system_agent_bindings",
         "project_system_skill_bindings",
         "project_system_mcp_bindings",
         "agents",
         "skills",
         "mcp_servers",
-        "credentials",
         "asset_catalog_state",
     }
 )

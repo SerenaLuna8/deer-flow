@@ -62,7 +62,7 @@ from deerflow.subagents.status_contract import (
     make_subagent_additional_kwargs,
 )
 from deerflow.tools.types import Runtime
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
+from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY, get_current_trace_id, normalize_trace_id
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -859,7 +859,7 @@ async def task_tool(
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
     channel_identity_present = "channel_user_id" in parent_context
-    deerflow_trace_id = normalize_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(DEERFLOW_TRACE_METADATA_KEY)) or get_current_trace_id()
+    deerflow_trace_id = normalize_trace_id(parent_context.get(ACT_WEAVE_TRACE_METADATA_KEY)) or normalize_trace_id(metadata.get(ACT_WEAVE_TRACE_METADATA_KEY)) or get_current_trace_id()
 
     parent_available_skills = metadata.get("available_skills")
     if runtime_agent_profile is None and parent_available_skills is not None:

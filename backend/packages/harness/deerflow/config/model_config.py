@@ -16,9 +16,12 @@ class ModelConfig(BaseModel):
     )
     model: str = Field(..., description="Model name")
     model_config = ConfigDict(extra="allow")
-    _system_model_config_version_id: uuid.UUID | None = PrivateAttr(
+    _system_model_config_id: uuid.UUID | None = PrivateAttr(default=None)
+    _system_model_payload_checksum: str | None = PrivateAttr(default=None)
+    _system_model_secret_generation_id: uuid.UUID | None = PrivateAttr(
         default=None,
     )
+    _system_model_secret_envelope_digest: str | None = PrivateAttr(default=None)
     _system_provider_adapter: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")

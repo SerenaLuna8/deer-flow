@@ -40,7 +40,9 @@ const projectChannelInstanceSchema = z
     status: z.enum(PROJECT_CHANNEL_INSTANCE_STATUSES),
     enabled: z.boolean(),
     configured: z.boolean(),
-    credential_configured: z.boolean(),
+    secret_configured: z.boolean(),
+    secret_readiness: z.enum(["ready", "unready"]),
+    secret_revision: z.number().int().nonnegative(),
     public_config: z.record(z.string(), z.string()),
     updated_at: z.string().datetime({ offset: true }).nullable(),
     last_error: z.string().min(1).nullable(),
@@ -72,7 +74,7 @@ const projectChannelInstanceResponseSchema = projectChannelInstanceSchema;
 const configureProjectChannelInstanceInputSchema = z
   .object({
     publicConfig: z.record(z.string(), z.string()),
-    credentials: z.record(z.string(), z.string()).optional(),
+    secrets: z.record(z.string(), z.string()).optional(),
     enabled: z.boolean(),
   })
   .strict();
@@ -148,9 +150,9 @@ export async function configureProjectChannelInstance(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         public_config: parsedInput.publicConfig,
-        ...(parsedInput.credentials === undefined
+        ...(parsedInput.secrets === undefined
           ? {}
-          : { credentials: parsedInput.credentials }),
+          : { secrets: parsedInput.secrets }),
         enabled: parsedInput.enabled,
       }),
       signal,
@@ -181,6 +183,28 @@ export async function setProjectChannelInstanceEnabled(
     response,
     projectChannelInstanceResponseSchema,
     `Failed to ${enabled ? "enable" : "disable"} ${parsedProvider}`,
+  );
+}
+
+export async function clearProjectChannelInstanceSecret(
+  access: ProjectConnectionAccess,
+  provider: ChannelProviderId,
+  signal?: AbortSignal,
+): Promise<ProjectChannelInstance> {
+  const parsedProvider = z.string().min(1).parse(provider);
+  const response = await fetchWithAuth(
+    `${projectChannelInstancesBaseURL(access)}/${encodeURIComponent(parsedProvider)}/secret/clear`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmed: true }),
+      signal,
+    },
+  );
+  return readResponse(
+    response,
+    projectChannelInstanceResponseSchema,
+    `Failed to clear ${parsedProvider} secret`,
   );
 }
 

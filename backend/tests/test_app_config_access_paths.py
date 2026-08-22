@@ -77,7 +77,7 @@ def test_file_backed_cache_rechecks_the_content_signature(
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("config_version: 1\n", encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(path))
+    monkeypatch.setenv("ACT_WEAVE_CONFIG_PATH", str(path))
     signature = (path.stat().st_mtime, path.stat().st_size, "unchanged")
     cached = _config("cached")
     _seed_file_cache(cached, path=path, signature=signature)
@@ -106,7 +106,7 @@ def test_same_metadata_with_a_new_digest_still_reloads(
 ) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("config_version: 1\n", encoding="utf-8")
-    monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(path))
+    monkeypatch.setenv("ACT_WEAVE_CONFIG_PATH", str(path))
     previous_signature = (123.0, 18, "old-digest")
     current_signature = (123.0, 18, "new-digest")
     _seed_file_cache(

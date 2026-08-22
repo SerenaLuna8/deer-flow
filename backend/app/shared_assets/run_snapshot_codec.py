@@ -79,7 +79,8 @@ def encode_run_asset_snapshot(snapshot: ResolvedAssetSnapshot) -> dict[str, obje
     elif type(snapshot) is ResolvedMcpSnapshot:
         base["mcp"] = {
             "definition": _json_value(snapshot.definition),
-            "credential_grant_ids": [str(value) for value in snapshot.credential_grant_ids],
+            "secret_generation_ids": [str(value) for value in snapshot.secret_generation_ids],
+            "secret_digest": snapshot.secret_digest,
         }
     else:
         raise RunAssetSnapshotInvalid("unsupported Run asset snapshot")
@@ -224,7 +225,7 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
                 secret_requirements=tuple(requirements),
             )
         raw = _mapping(value["mcp"])
-        if set(raw) != {"definition", "credential_grant_ids"}:
+        if set(raw) != {"definition", "secret_generation_ids", "secret_digest"}:
             raise RunAssetSnapshotInvalid("Run MCP snapshot shape is invalid")
         definition = _mapping(raw["definition"])
         if _mcp_checksum(definition) != checksum:
@@ -232,7 +233,8 @@ def decode_run_asset_snapshot(value: Mapping[str, object]) -> ResolvedAssetSnaps
         return ResolvedMcpSnapshot(
             **common,
             definition=_freeze_json(definition),
-            credential_grant_ids=_uuids(raw["credential_grant_ids"]),
+            secret_generation_ids=_uuids(raw["secret_generation_ids"]),
+            secret_digest=_digest(raw["secret_digest"]),
         )
     except RunAssetSnapshotInvalid:
         raise
@@ -261,7 +263,7 @@ def _mcp_checksum(definition: Mapping[str, object]) -> str:
     expected = {
         "args",
         "command",
-        "credential_slots",
+        "secret_slots",
         "description",
         "env",
         "headers",
@@ -275,13 +277,13 @@ def _mcp_checksum(definition: Mapping[str, object]) -> str:
     if set(definition) != expected:
         raise RunAssetSnapshotInvalid("Run MCP definition shape is invalid")
     slots = _mapping_sequence(
-        definition["credential_slots"],
+        definition["secret_slots"],
         {"name", "payload_schema", "purpose", "required"},
     )
     canonical = {
         "args": list(_strings(definition["args"])),
         "command": definition["command"],
-        "credential_slots": [
+        "secret_slots": [
             {
                 "name": _string(slot["name"]),
                 "payload_schema": _mapping(slot["payload_schema"]),
@@ -305,7 +307,7 @@ def _mcp_checksum(definition: Mapping[str, object]) -> str:
         or (canonical["url"] is not None and not isinstance(canonical["url"], str))
         or not isinstance(canonical["timeout_seconds"], int)
         or isinstance(canonical["timeout_seconds"], bool)
-        or any(not isinstance(slot["required"], bool) for slot in canonical["credential_slots"])
+        or any(not isinstance(slot["required"], bool) for slot in canonical["secret_slots"])
     ):
         raise RunAssetSnapshotInvalid("Run MCP definition is invalid")
     encoded = json.dumps(
@@ -361,6 +363,13 @@ def _string(value: object) -> str:
     if not isinstance(value, str):
         raise RunAssetSnapshotInvalid("Run snapshot string is invalid")
     return value
+
+
+def _digest(value: object) -> str:
+    result = _string(value)
+    if len(result) != 64 or any(character not in "0123456789abcdef" for character in result):
+        raise RunAssetSnapshotInvalid("Run snapshot digest is invalid")
+    return result
 
 
 def _strings(value: object) -> tuple[str, ...]:

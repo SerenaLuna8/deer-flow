@@ -67,7 +67,7 @@ import {
   projectAgentVersionCanActivate,
   projectMcpDeleteErrorMessage,
   projectSkillDeleteErrorMessage,
-  projectSkillCredentialSetupRequired,
+  projectSkillSecretSetupRequired,
   projectSkillVersionCanActivate,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
@@ -78,7 +78,7 @@ import {
 } from "./project-skill-delete-dialog";
 import { SkillActivationDialog } from "./skill-activation-dialog";
 import { isMainProjectAgent } from "./use-mcp-dependency-runtime";
-type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+type MutableAssetKind = AssetListKind;
 
 export function projectAssetDetailShowsVersionHistory(
   kind: MutableAssetKind,
@@ -165,11 +165,11 @@ export function projectAssetRequestedVersionResolution(
   return !historyReady || historyRefreshing ? "pending" : "missing";
 }
 
-export function projectSkillCredentialRepairVersionId(
+export function projectSkillSecretRepairVersionId(
   error: unknown,
   currentVersionId: string | null,
 ): string | null {
-  return projectSkillCredentialSetupRequired(error) ? currentVersionId : null;
+  return projectSkillSecretSetupRequired(error) ? currentVersionId : null;
 }
 
 export function projectAgentPreviousVersion(
@@ -425,17 +425,17 @@ export type ProjectAssetVersionRenderContext = {
   item: ProjectAssetItem;
   canAuthor: boolean;
   editing: boolean;
-  credentialBindingsDirty: boolean;
+  secretConfigurationDirty: boolean;
   onEditingChange: (editing: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
-  onCredentialBindingsDirtyChange: (dirty: boolean) => void;
+  onSecretsDirtyChange: (dirty: boolean) => void;
   onActivationValidityChange: (valid: boolean) => void;
   onVersionCreated: (
     versionId: string,
-    options?: { focusCredentials?: boolean },
+    options?: { focusSecrets?: boolean },
   ) => void;
-  focusSkillCredentials: boolean;
-  onSkillCredentialsFocused: () => void;
+  focusSkillSecrets: boolean;
+  onSkillSecretsFocused: () => void;
 };
 
 const VERSION_STATUS_LABEL: Record<VersionStatus, string> = {
@@ -455,7 +455,7 @@ export function projectMcpCurrentConfigurationLabel(
   status: McpVersion["workflow_status"],
 ): string {
   return status === "pending_approval"
-    ? "凭据未绑定 · 尚未生效"
+    ? "秘密未配置 · 尚未生效"
     : VERSION_STATUS_LABEL[status];
 }
 
@@ -483,8 +483,7 @@ export function projectAssetVersionDisplayStatus(
     return "revoked";
   }
   if ("workflow_status" in version) return version.workflow_status;
-  if ("relation" in version) return version.relation;
-  return version.status;
+  return version.relation;
 }
 
 function AgentVersionCapabilitySummary({
@@ -531,9 +530,9 @@ export function primaryVersionActionDisabled(
 
 export function projectAssetDetailDirty(
   versionDirty: boolean,
-  credentialBindingsDirty: boolean,
+  secretConfigurationDirty: boolean,
 ): boolean {
-  return versionDirty || credentialBindingsDirty;
+  return versionDirty || secretConfigurationDirty;
 }
 
 export function versionActionDisabled(
@@ -782,9 +781,9 @@ export function ProjectAssetDetailSheet({
   renderDetailActions,
   renderAssetEditor,
   renderVersion,
-  focusSkillCredentials = false,
-  onSkillCredentialsFocused,
-  onSkillCredentialSetupRequired,
+  focusSkillSecrets = false,
+  onSkillSecretsFocused,
+  onSkillSecretSetupRequired,
 }: {
   accountId: string;
   projectId: string;
@@ -819,9 +818,9 @@ export function ProjectAssetDetailSheet({
     version: AssetVersion,
     context: ProjectAssetVersionRenderContext,
   ) => ReactNode;
-  focusSkillCredentials?: boolean;
-  onSkillCredentialsFocused?: () => void;
-  onSkillCredentialSetupRequired?: (versionId: string | null) => void;
+  focusSkillSecrets?: boolean;
+  onSkillSecretsFocused?: () => void;
+  onSkillSecretSetupRequired?: (versionId: string | null) => void;
 }) {
   const { models } = useModels({ enabled: open && kind === "agents" });
   const history = useProjectAssetVersions(
@@ -857,7 +856,7 @@ export function ProjectAssetDetailSheet({
   const deleteMcp = useDeleteProjectMcp(accountId, projectId);
   const [selectedVersionId, setSelectedVersionId] = useState("");
   const [versionDirty, setVersionDirty] = useState(false);
-  const [credentialBindingsDirty, setCredentialBindingsDirty] = useState(false);
+  const [secretConfigurationDirty, setSecretsDirty] = useState(false);
   const [versionEditing, setVersionEditing] = useState(false);
   const [skillDeleteSnapshot, setSkillDeleteSnapshot] =
     useState<ProjectSkillDeleteSnapshot | null>(null);
@@ -878,20 +877,20 @@ export function ProjectAssetDetailSheet({
     | {
         type: "version";
         versionId: string;
-        focusSkillCredentials?: boolean;
+        focusSkillSecrets?: boolean;
       }
     | null
   >(null);
   const updateVersionDirty = useCallback((dirty: boolean) => {
     setVersionDirty(dirty);
   }, []);
-  const updateCredentialBindingsDirty = useCallback(
-    (dirty: boolean) => setCredentialBindingsDirty(dirty),
+  const updateSecretsDirty = useCallback(
+    (dirty: boolean) => setSecretsDirty(dirty),
     [],
   );
   const detailDirty = projectAssetDetailDirty(
     versionDirty,
-    credentialBindingsDirty,
+    secretConfigurationDirty,
   );
 
   useEffect(() => {
@@ -1036,7 +1035,7 @@ export function ProjectAssetDetailSheet({
     if (open) return;
     setSelectedVersionId("");
     updateVersionDirty(false);
-    updateCredentialBindingsDirty(false);
+    updateSecretsDirty(false);
     setVersionEditing(false);
     setSkillDeleteSnapshot(null);
     setAgentDeleteSnapshot(null);
@@ -1044,7 +1043,7 @@ export function ProjectAssetDetailSheet({
     setSkillActivationVersion(null);
     setSkillActivationValidity(null);
     setDiscardAction(null);
-  }, [open, updateCredentialBindingsDirty, updateVersionDirty]);
+  }, [open, updateSecretsDirty, updateVersionDirty]);
 
   useEffect(
     () => () => {
@@ -1112,7 +1111,7 @@ export function ProjectAssetDetailSheet({
       kind,
       selectedVersion.workflow_status,
       isMcpVersion(selectedVersion) &&
-        selectedVersion.credential_slots.length > 0,
+        selectedVersion.secret_slots.length > 0,
     );
   }, [item.scope, kind, selectedVersion]);
 
@@ -1131,19 +1130,19 @@ export function ProjectAssetDetailSheet({
       : undefined;
 
   const handleWorkbenchVersionCreated = useCallback(
-    (versionId: string, options?: { focusCredentials?: boolean }) => {
+    (versionId: string, options?: { focusSecrets?: boolean }) => {
       updateVersionDirty(false);
       setVersionEditing(false);
       onVersionCreated(item.id, versionId);
-      if (options?.focusCredentials) {
-        onSkillCredentialSetupRequired?.(versionId);
+      if (options?.focusSecrets) {
+        onSkillSecretSetupRequired?.(versionId);
       }
       void history.refetch();
     },
     [
       history,
       item.id,
-      onSkillCredentialSetupRequired,
+      onSkillSecretSetupRequired,
       onVersionCreated,
       updateVersionDirty,
     ],
@@ -1203,11 +1202,11 @@ export function ProjectAssetDetailSheet({
 
   function requestVersionChange(
     versionId: string,
-    options: { focusSkillCredentials?: boolean } = {},
+    options: { focusSkillSecrets?: boolean } = {},
   ) {
     if (versionId === selectedVersionId) {
-      if (options.focusSkillCredentials) {
-        onSkillCredentialSetupRequired?.(versionId);
+      if (options.focusSkillSecrets) {
+        onSkillSecretSetupRequired?.(versionId);
       }
       return;
     }
@@ -1215,14 +1214,14 @@ export function ProjectAssetDetailSheet({
       setDiscardAction({
         type: "version",
         versionId,
-        focusSkillCredentials: options.focusSkillCredentials,
+        focusSkillSecrets: options.focusSkillSecrets,
       });
       return;
     }
     setVersionEditing(false);
     setSelectedVersionId(versionId);
-    if (options.focusSkillCredentials) {
-      onSkillCredentialSetupRequired?.(versionId);
+    if (options.focusSkillSecrets) {
+      onSkillSecretSetupRequired?.(versionId);
     }
   }
 
@@ -1230,14 +1229,14 @@ export function ProjectAssetDetailSheet({
     const action = discardAction;
     setDiscardAction(null);
     updateVersionDirty(false);
-    updateCredentialBindingsDirty(false);
+    updateSecretsDirty(false);
     setVersionEditing(false);
     if (action?.type === "close") {
       onOpenChange(false);
     } else if (action?.type === "version") {
       setSelectedVersionId(action.versionId);
-      if (action.focusSkillCredentials) {
-        onSkillCredentialSetupRequired?.(action.versionId);
+      if (action.focusSkillSecrets) {
+        onSkillSecretSetupRequired?.(action.versionId);
       }
     }
   }
@@ -1305,17 +1304,17 @@ export function ProjectAssetDetailSheet({
       },
       {
         onError: (error) => {
-          const repairVersionId = projectSkillCredentialRepairVersionId(
+          const repairVersionId = projectSkillSecretRepairVersionId(
             error,
             item.current_version_id,
           );
-          if (!projectSkillCredentialSetupRequired(error)) return;
+          if (!projectSkillSecretSetupRequired(error)) return;
           if (repairVersionId) {
             requestVersionChange(repairVersionId, {
-              focusSkillCredentials: true,
+              focusSkillSecrets: true,
             });
           } else {
-            onSkillCredentialSetupRequired?.(null);
+            onSkillSecretSetupRequired?.(null);
           }
         },
       },
@@ -1354,14 +1353,14 @@ export function ProjectAssetDetailSheet({
     item,
     canAuthor: versionCanAuthor,
     editing: versionEditing,
-    credentialBindingsDirty,
+    secretConfigurationDirty,
     onEditingChange: setVersionEditing,
     onDirtyChange: updateVersionDirty,
-    onCredentialBindingsDirtyChange: updateCredentialBindingsDirty,
+    onSecretsDirtyChange: updateSecretsDirty,
     onActivationValidityChange: handleSkillActivationValidityChange,
     onVersionCreated: handleWorkbenchVersionCreated,
-    focusSkillCredentials,
-    onSkillCredentialsFocused: onSkillCredentialsFocused ?? (() => undefined),
+    focusSkillSecrets,
+    onSkillSecretsFocused: onSkillSecretsFocused ?? (() => undefined),
   });
 
   return (
@@ -1783,17 +1782,17 @@ export function ProjectAssetDetailSheet({
                               canAuthorSelectedVersion &&
                               !versionSelectionPending,
                             editing: versionEditing,
-                            credentialBindingsDirty,
+                            secretConfigurationDirty,
                             onEditingChange: setVersionEditing,
                             onDirtyChange: updateVersionDirty,
-                            onCredentialBindingsDirtyChange:
-                              updateCredentialBindingsDirty,
+                            onSecretsDirtyChange:
+                              updateSecretsDirty,
                             onActivationValidityChange:
                               handleSkillActivationValidityChange,
                             onVersionCreated: handleWorkbenchVersionCreated,
-                            focusSkillCredentials,
-                            onSkillCredentialsFocused:
-                              onSkillCredentialsFocused ?? (() => undefined),
+                            focusSkillSecrets,
+                            onSkillSecretsFocused:
+                              onSkillSecretsFocused ?? (() => undefined),
                           },
                         )}
                       </div>
@@ -1936,10 +1935,10 @@ export function ProjectAssetDetailSheet({
             setSelectedVersionId(versionId);
             handleWorkbenchVersionCreated(versionId);
           }}
-          onConfigureCredentials={() => {
+          onConfigureSecrets={() => {
             setSkillActivationVersion(null);
             requestVersionChange(skillActivationVersion.id, {
-              focusSkillCredentials: true,
+              focusSkillSecrets: true,
             });
           }}
         />

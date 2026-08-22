@@ -629,7 +629,7 @@ export function ProjectAgentSelectorDialog({
   const candidateAgents = useMemo(
     () =>
       otherProjectAgents(
-        executableProjectAgents(assets.data as ProjectAssetList | undefined),
+        executableProjectAgents(assets.data),
         currentAgent,
       ),
     [assets.data, currentAgent],
@@ -637,7 +637,7 @@ export function ProjectAgentSelectorDialog({
   const systemAgents = useMemo(
     () =>
       otherProjectAgents(
-        configurableSystemAgents(assets.data as ProjectAssetList | undefined),
+        configurableSystemAgents(assets.data),
         currentAgent,
       ),
     [assets.data, currentAgent],
@@ -733,13 +733,13 @@ export function ProjectAgentSelectorDialog({
   const boundSkillAssetRefs = useMemo(
     () =>
       boundSystemSkillAssetRefs(
-        skillAssets.data as ProjectAssetList | undefined,
+        skillAssets.data,
       ),
     [skillAssets.data],
   );
   const boundMcpVersionIds = useMemo(() => {
     const bound = boundSystemVersionIds(
-      mcpAssets.data as ProjectAssetList | undefined,
+      mcpAssets.data,
     );
     const supported = supportedMcpVersionIds(mcpDependencyRuntime.versions);
     return new Set([...bound].filter((id) => supported.has(id)));

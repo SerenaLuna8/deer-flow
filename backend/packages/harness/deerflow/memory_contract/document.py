@@ -192,7 +192,6 @@ class MemoryDocumentVersionRecord:
     history_to: int | None
     history_count: int | None
     prompt_version: str | None
-    model_ref: uuid.UUID | None
     needs_review: bool
     created_at: datetime
 

@@ -104,7 +104,7 @@ admission path:
 - locks the Thread and rejects a conflicting active Run;
 - strips client-supplied authority while preserving graph input as data;
 - resolves the exact Lead Agent dependency closure;
-- freezes Agent, model, Skill, MCP grant, credential reference, runtime policy,
+- freezes Agent, model, Skill, MCP, domain-secret Generation, runtime policy,
   and current-upload inputs into the Run Snapshot;
 - creates the pending Run and queued Job, reserves concurrent-run quota, and
   records admission audit state; and
@@ -137,7 +137,7 @@ Job Attempt and a lease token. The Worker then:
 4. stops heartbeating before committing the handler's settlement.
 
 The Execution Lease is active authority, not just liveness metadata. Every
-Run, checkpoint, stream, file, Memory, credential, and governed side-effect
+Run, checkpoint, stream, file, Memory, secret, and governed side-effect
 mutation is ultimately constrained by the same attempt scope. If heartbeat or
 lease validation fails, the Worker cancels the handler and the stale Attempt is
 not allowed to settle.
@@ -188,7 +188,7 @@ attempt-scoped runtime objects. It does not re-resolve user intent. It:
 - creates one execution boundary for authorization, lease, cancellation, and
   side-effect ambiguity;
 - materializes the frozen runtime policy and exact Lead, delegated, title,
-  summarization, Memory, and Vision model versions needed by the Run;
+  summarization, Memory, and Vision model execution snapshots needed by the Run;
 - materializes the admitted Agent prompt bundle, Skills, MCP tools, delegated
   Agent catalog, and short-lived Skill-secret provider;
 - creates Project-scoped checkpoint, file, Memory, Vision, and host-execution

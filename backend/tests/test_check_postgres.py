@@ -107,7 +107,7 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
     monkeypatch.setattr(
         check_postgres,
         "classify_database",
-        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
+        AsyncMock(side_effect=check_postgres.SchemaRecreateRequired()),
     )
     monkeypatch.setattr(check_postgres, "get_schema_marker", lambda: CURRENT_SCHEMA_MARKER)
 
@@ -121,11 +121,11 @@ async def test_check_is_unhealthy_for_old_revision_or_missing_final_table(monkey
 
 
 @pytest.mark.asyncio
-async def test_check_reports_legacy_schema_as_recreate_required(
+async def test_check_reports_pre_v1_schema_as_recreate_required(
     monkeypatch,
 ) -> None:
     connection = _connection(
-        revision="0004_credential_soft_delete",
+        revision="pre_v1_legacy_schema",
         present_tables=set(check_postgres.REQUIRED_TABLES),
     )
     monkeypatch.setattr(
@@ -136,7 +136,7 @@ async def test_check_reports_legacy_schema_as_recreate_required(
     monkeypatch.setattr(
         check_postgres,
         "classify_database",
-        AsyncMock(side_effect=check_postgres.M7RecreateRequired()),
+        AsyncMock(side_effect=check_postgres.SchemaRecreateRequired()),
     )
     monkeypatch.setattr(
         check_postgres,
@@ -146,42 +146,10 @@ async def test_check_reports_legacy_schema_as_recreate_required(
 
     result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
 
-    assert result.current_revision == "0004_credential_soft_delete"
+    assert result.current_revision == "pre_v1_legacy_schema"
     assert result.head_revision == CURRENT_SCHEMA_MARKER
     assert result.schema_state == "recreate_required"
     assert result.missing_tables == ()
-    assert result.healthy is False
-
-
-@pytest.mark.asyncio
-async def test_check_reports_a_known_ancestor_as_upgrade_required(monkeypatch) -> None:
-    connection = _connection(
-        revision="released_schema_ancestor",
-        present_tables=set(check_postgres.REQUIRED_TABLES),
-    )
-    monkeypatch.setattr(
-        check_postgres,
-        "create_async_engine",
-        lambda *_args, **_kwargs: _Engine(connection),
-    )
-    monkeypatch.setattr(
-        check_postgres,
-        "classify_database",
-        AsyncMock(return_value="behind"),
-    )
-    monkeypatch.setattr(
-        check_postgres,
-        "get_schema_marker",
-        lambda: CURRENT_SCHEMA_MARKER,
-    )
-
-    result = await check_postgres.check_postgres("postgresql://owner:secret@localhost/deerflow_test_1_abc")
-
-    assert result.current_revision == "released_schema_ancestor"
-    assert result.head_revision == CURRENT_SCHEMA_MARKER
-    assert result.schema_state == "upgrade_required"
-    assert result.revision_matches is False
-    assert "make upgrade-db" in result.error
     assert result.healthy is False
 
 

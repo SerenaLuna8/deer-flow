@@ -406,13 +406,13 @@ def build_inspect_image_tool(
 
     ``inspect_image`` owns authorization, image normalization and the bounded
     ToolMessage.  ``ModelRuntime`` and the selected System Model's existing
-    adapter own all Provider construction, credentials and wire protocols.
+    adapter own all Provider construction, model-owned API Keys and wire protocols.
     """
 
     bridge = app_config.vision_bridge
     model_name = bridge.model_name
     model_config = app_config.get_model_config(model_name) if model_name is not None else None
-    if model_config is None or model_config._system_model_config_version_id is None or not model_config.supports_vision:
+    if model_config is None or model_config._system_model_config_id is None or not model_config.supports_vision:
         raise _InspectImageCallFailure("VISION_CONFIGURATION_ERROR")
     model_runtime = model_runtime_factory(app_config)
 

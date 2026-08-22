@@ -39,6 +39,7 @@ class _Session:
                     provider_adapter=self.provider_adapter,
                     settings=self.settings,
                     supports_vision=self.supports_vision,
+                    current_secret_generation_id=uuid.uuid4(),
                 ),
             )
         )

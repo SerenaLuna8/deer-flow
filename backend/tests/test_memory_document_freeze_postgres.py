@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 import sqlalchemy as sa
 from support.private_thread_seed import seed_private_thread_database
+from support.system_model_seed import seed_system_model_config
 
 from app.personalization.repository import AccountPersonalizationRepository
 from app.private_work.errors import PrivateWorkConflict
@@ -93,43 +94,14 @@ async def _seed_memory_model(
     actor_user_id: str,
 ) -> tuple[str, uuid.UUID]:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
-    await session.execute(
-        sa.text(
-            """INSERT INTO system_model_configs
-            (id,display_name,status,current_version_id,
-             revision,created_by_user_id,updated_by_user_id)
-            VALUES (:id,'Memory freeze model','active',NULL,1,
-                    :owner,:owner)"""
-        ),
-        {"id": model_id, "owner": actor_user_id},
+    await seed_system_model_config(
+        session,
+        model_id=model_id,
+        owner_user_id=actor_user_id,
+        display_name="Memory freeze model",
+        provider_model="memory-freeze",
     )
-    await session.execute(
-        sa.text(
-            """INSERT INTO system_model_config_versions
-            (id,model_config_id,version_number,provider_adapter,provider_model,
-             settings,supports_thinking,supports_reasoning_effort,
-             supports_vision,credential_id,credential_version_id,
-             credential_env_key,payload_checksum,supersedes_version_id,
-             created_by_user_id)
-            VALUES (:id,:model,1,'vision_bridge_fake','memory-freeze','{}'::jsonb,
-                    false,false,false,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-        ),
-        {
-            "id": version_id,
-            "model": model_id,
-            "checksum": "a" * 64,
-            "owner": actor_user_id,
-        },
-    )
-    await session.execute(
-        sa.text(
-            """UPDATE system_model_configs
-            SET current_version_id=:version WHERE id=:model"""
-        ),
-        {"version": version_id, "model": model_id},
-    )
-    return str(model_id), version_id
+    return str(model_id), model_id
 
 
 async def _replace_agent_runtime_memory_model(
@@ -175,7 +147,7 @@ async def _add_pending_history(
     *,
     scope: MemoryDocumentScope,
     thread_id: str,
-    model_version_id: uuid.UUID,
+    model_config_id: uuid.UUID,
     preference_version: int,
     text: str,
 ) -> None:
@@ -196,7 +168,8 @@ async def _add_pending_history(
             content_digest=hashlib.sha256(text.encode()).hexdigest(),
             preference_version=preference_version,
             snip_prompt_version="snip-prompt-v1",
-            summary_model_ref=model_version_id,
+            summary_model_config_id=model_config_id,
+            summary_model_payload_checksum="a" * 64,
             created_at=datetime.now(UTC),
         )
     )
@@ -252,7 +225,7 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
     )
     try:
         async with seed.factory() as session, session.begin():
-            model_name, model_version_id = await _seed_memory_model(
+            model_name, model_config_id = await _seed_memory_model(
                 session,
                 actor_user_id=scope_a.owner_user_id,
             )
@@ -268,17 +241,17 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
             )
             active_model = await SystemModelRepository(session).resolve_active_model(
                 model_name,
-                load_envelope=False,
+                load_secret=False,
             )
             assert active_model is not None
-            assert active_model.version.id == model_version_id
+            assert active_model.model.id == model_config_id
             preference_a = await AccountPersonalizationRepository(session).read_memory(scope_a.owner_user_id)
             preference_b = await AccountPersonalizationRepository(session).read_memory(scope_b.owner_user_id)
             await _add_pending_history(
                 session,
                 scope=scope_a,
                 thread_id="freeze-a",
-                model_version_id=active_model.version.id,
+                model_config_id=active_model.model.id,
                 preference_version=preference_a.version,
                 text="- [durable] scope A fact",
             )
@@ -286,7 +259,7 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
                 session,
                 scope=scope_b,
                 thread_id="freeze-b",
-                model_version_id=active_model.version.id,
+                model_config_id=active_model.model.id,
                 preference_version=preference_b.version,
                 text="- [durable] scope B fact",
             )
@@ -452,7 +425,6 @@ async def test_postgres_memory_document_sections_freeze_across_policy_drift_and_
                     history_to=None,
                     history_count=None,
                     prompt_version=None,
-                    model_ref=None,
                     needs_review=False,
                     created_at=now + timedelta(seconds=5),
                 )

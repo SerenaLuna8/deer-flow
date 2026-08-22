@@ -22,7 +22,7 @@ export function SystemAssetSection({
   onManageBinding,
   renderDetails,
 }: {
-  kind: Exclude<AssetListKind, "credentials">;
+  kind: AssetListKind;
   items: SystemAssetItem[];
   onManageBinding?: (item: SystemAssetItem) => void;
   renderDetails?: (item: SystemAssetItem) => React.ReactNode;

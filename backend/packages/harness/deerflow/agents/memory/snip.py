@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from importlib import resources
 from typing import Any, Literal, TypedDict
 
+from deerflow.config.model_execution import SystemModelExecutionProvenance
 from deerflow.memory_contract.history import (
     MAX_SNIP_OUTPUT_CHARS,
     SNIP_NOTHING,
@@ -66,7 +67,10 @@ class MemoryArchiveReceipt(TypedDict):
     content_digest: str
     preference_version: int
     snip_prompt_version: str
-    summary_model_ref: str
+    summary_model_config_id: str
+    summary_model_payload_checksum: str
+    summary_model_secret_generation_id: str | None
+    summary_model_secret_envelope_digest: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +87,7 @@ class SnipArchiveContext:
     owner_user_id: str
     namespace: str
     preference_version: int
-    summary_model_ref: uuid.UUID | None
+    summary_model: SystemModelExecutionProvenance | None
     source_checkpoint_id: str | None = None
 
     def __post_init__(self) -> None:
@@ -102,18 +106,16 @@ class SnipArchiveContext:
             or (self.source_checkpoint_id is not None and (not isinstance(self.source_checkpoint_id, str) or not self.source_checkpoint_id or len(self.source_checkpoint_id) > 128))
         ):
             raise ValueError("SNIP archive context is invalid")
-        summary_model_ref = self.summary_model_ref
-        if summary_model_ref is not None:
-            try:
-                summary_model_ref = uuid.UUID(str(summary_model_ref))
-            except (TypeError, ValueError):
-                raise ValueError("SNIP summary model reference is invalid") from None
-        if self.enabled and summary_model_ref is None:
-            raise ValueError("Enabled SNIP archive requires an exact model version")
+        if self.summary_model is not None and not isinstance(
+            self.summary_model,
+            SystemModelExecutionProvenance,
+        ):
+            raise ValueError("SNIP summary model provenance is invalid")
+        if self.enabled and self.summary_model is None:
+            raise ValueError("Enabled SNIP archive requires model provenance")
         object.__setattr__(self, "project_id", project_id)
         object.__setattr__(self, "owner_user_id", owner_user_id)
         object.__setattr__(self, "namespace", namespace)
-        object.__setattr__(self, "summary_model_ref", summary_model_ref)
 
 
 def parse_snip_dual_output(raw: str) -> tuple[str, str]:
@@ -228,8 +230,8 @@ def build_memory_archive_receipt(
     exact_source_checkpoint_id = source_checkpoint_id or context.source_checkpoint_id
     if not isinstance(exact_source_checkpoint_id, str) or not exact_source_checkpoint_id or len(exact_source_checkpoint_id) > 128:
         raise ValueError("SNIP archive source checkpoint is invalid")
-    if context.summary_model_ref is None:
-        raise ValueError("SNIP archive model version is missing")
+    if context.summary_model is None:
+        raise ValueError("SNIP archive model provenance is missing")
     return MemoryArchiveReceipt(
         version=MEMORY_ARCHIVE_RECEIPT_VERSION,
         project_id=str(context.project_id),
@@ -246,7 +248,10 @@ def build_memory_archive_receipt(
         content_digest=compute_snip_content_digest(normalized),
         preference_version=context.preference_version,
         snip_prompt_version=SNIP_ARCHIVE_PROMPT_VERSION,
-        summary_model_ref=str(context.summary_model_ref),
+        summary_model_config_id=str(context.summary_model.model_config_id),
+        summary_model_payload_checksum=context.summary_model.payload_checksum,
+        summary_model_secret_generation_id=(str(context.summary_model.secret_generation_id) if context.summary_model.secret_generation_id is not None else None),
+        summary_model_secret_envelope_digest=(context.summary_model.secret_envelope_digest),
     )
 
 

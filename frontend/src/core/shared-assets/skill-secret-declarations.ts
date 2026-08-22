@@ -2,7 +2,6 @@ import { z } from "zod";
 
 import {
   assetIdSchema,
-  skillCredentialMappingStatusSchema,
   skillSecretDeclarationNameSchema,
   type SkillActivationInput,
 } from "./types";
@@ -122,7 +121,7 @@ export const skillActivationRequirementSchema = z
   .object({
     name: skillSecretDeclarationNameSchema,
     optional: z.boolean(),
-    mapping_status: skillCredentialMappingStatusSchema,
+    configured: z.boolean(),
   })
   .strict();
 
@@ -132,12 +131,11 @@ export const skillActivationReadinessResponseSchema = z
     skill_version_id: assetIdSchema,
     revision: z.number().int().positive(),
     payload_checksum: sha256Schema,
-    binding_revision: z.number().int().nonnegative(),
+    secret_revision: z.number().int().nonnegative(),
     secrets_autonomous: z.boolean(),
     ready: z.boolean(),
     required_count: z.number().int().nonnegative().max(256),
     configured_required_count: z.number().int().nonnegative().max(256),
-    invalid_count: z.number().int().nonnegative().max(256),
     requirements: z.array(skillActivationRequirementSchema).max(256),
     request_id: z.string().min(1),
   })
@@ -157,10 +155,7 @@ export const skillActivationReadinessResponseSchema = z
       (requirement) => !requirement.optional,
     );
     const configuredRequired = required.filter(
-      (requirement) => requirement.mapping_status === "configured",
-    );
-    const invalid = value.requirements.filter(
-      (requirement) => requirement.mapping_status === "invalid",
+      (requirement) => requirement.configured,
     );
     if (value.required_count !== required.length) {
       context.addIssue({
@@ -177,15 +172,7 @@ export const skillActivationReadinessResponseSchema = z
         path: ["configured_required_count"],
       });
     }
-    if (value.invalid_count !== invalid.length) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Skill activation invalid count does not match requirements",
-        path: ["invalid_count"],
-      });
-    }
-    const ready =
-      configuredRequired.length === required.length && invalid.length === 0;
+    const ready = configuredRequired.length === required.length;
     if (value.ready !== ready) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -233,7 +220,7 @@ export function missingRequiredSkillActivationRequirements(
 ): SkillActivationRequirement[] {
   return readiness.requirements.filter(
     (requirement) =>
-      !requirement.optional && requirement.mapping_status !== "configured",
+      !requirement.optional && !requirement.configured,
   );
 }
 
@@ -253,6 +240,6 @@ export function buildSkillActivationInput({
   return {
     expected_revision: readiness.revision,
     expected_payload_checksum: readiness.payload_checksum,
-    expected_binding_revision: readiness.binding_revision,
+    expected_secret_revision: readiness.secret_revision,
   };
 }

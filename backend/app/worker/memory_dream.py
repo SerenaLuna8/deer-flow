@@ -25,7 +25,6 @@ from app.system_runtime_settings.models import (
     RuntimePolicySection,
 )
 from app.system_settings import SystemModelMaterializer
-from app.system_settings.repository import SystemModelRepository
 from app.worker.service import (
     JobLeaseAuthority,
     JobOutcome,
@@ -131,7 +130,6 @@ class MemoryDreamJobHandler:
         runner_factory: Callable[[object], DreamRunnerPort] | None = None,
         repository_builder=MemoryDocumentRepository,
         job_repository_builder=JobRepository,
-        model_repository_builder=SystemModelRepository,
         scope_validator: MemoryDreamScopeValidator | None = None,
         personalization_repository_builder=AccountPersonalizationRepository,
         retry_initial_seconds: int = 5,
@@ -142,7 +140,6 @@ class MemoryDreamJobHandler:
             not callable(session_factory)
             or not callable(repository_builder)
             or not callable(job_repository_builder)
-            or not callable(model_repository_builder)
             or not callable(personalization_repository_builder)
             or (runner_factory is None and not isinstance(app_config, AppConfig))
             or type(retry_initial_seconds) is not int
@@ -166,7 +163,6 @@ class MemoryDreamJobHandler:
         self._runner_factory = runner_factory or self._make_runner
         self._repository_builder = repository_builder
         self._job_repository_builder = job_repository_builder
-        self._model_repository_builder = model_repository_builder
         self._scope_validator = scope_validator or _default_scope_validator
         self._personalization_repository_builder = personalization_repository_builder
         self._retry_initial_seconds = retry_initial_seconds
@@ -325,10 +321,8 @@ class MemoryDreamJobHandler:
         if not isinstance(frozen_policy, AgentRuntimePolicyValue) or not frozen_policy.memory.enabled:
             return self._release_settlement(claim, cancelled=True)
         try:
-            model = await self._model_materializer.materialize_exact(
-                model_config_id=work.model_config_id,
-                model_config_version_id=work.model_version_id,
-                payload_checksum=work.model_payload_checksum,
+            model = await self._model_materializer.materialize_frozen(
+                work.model_execution,
             )
             dream_input = self._input(
                 work,
@@ -457,18 +451,6 @@ class MemoryDreamJobHandler:
                     if not isinstance(current, AgentRuntimePolicyValue):
                         raise _DreamSettlementTransient("MEMORY_DREAM_POLICY_UNAVAILABLE")
 
-                    current_model = None
-                    if current.memory.enabled:
-                        try:
-                            current_model = await self._model_repository_builder(session).resolve_active_model(
-                                current.memory.model_name,
-                                load_envelope=False,
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception:
-                            raise _DreamSettlementTransient("MEMORY_DREAM_MODEL_UNAVAILABLE") from None
-
                     try:
                         preference = await self._personalization_repository_builder(session).read_memory(
                             work.owner_user_id,
@@ -481,13 +463,6 @@ class MemoryDreamJobHandler:
                     except Exception:
                         raise _DreamSettlementTransient("MEMORY_DREAM_SETTLEMENT_UNAVAILABLE") from None
 
-                    try:
-                        current_model_matches = (
-                            current_model is not None and current_model.model.id == work.model_config_id and current_model.version.id == work.model_version_id and current_model.version.payload_checksum == work.model_payload_checksum
-                        )
-                    except Exception:
-                        raise _DreamSettlementTransient("MEMORY_DREAM_MODEL_UNAVAILABLE") from None
-
                     still_valid = (
                         preference is not None
                         and preference.memory_enabled
@@ -495,7 +470,6 @@ class MemoryDreamJobHandler:
                         and current.memory.enabled
                         and policy_revision == work.policy_revision
                         and current.memory.max_injection_tokens == max_tokens
-                        and current_model_matches
                     )
                     if not still_valid:
                         try:

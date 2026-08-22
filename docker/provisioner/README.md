@@ -85,7 +85,7 @@ runs the Provisioner.
 | `K8S_API_SERVER`              | unset                  | Trusted-local API-server override; disables TLS verification |
 | `PROVISIONER_API_KEY`         | empty                  | Shared control key; empty disables all `/api/*` calls        |
 | `SKILLS_HOST_PATH`            | `/skills`              | HostPath base for public and optional legacy Skills          |
-| `DEER_FLOW_HOST_BASE_DIR`     | `/.deer-flow`          | HostPath base for per-user custom Skills                     |
+| `ACT_WEAVE_HOST_BASE_DIR`     | `/.deer-flow`          | HostPath base for per-user custom Skills                     |
 | `THREADS_HOST_PATH`           | `/.deer-flow/threads`  | HostPath base for thread user-data                           |
 | `SKILLS_PVC_NAME`             | empty                  | PVC replacing Skill HostPaths                                |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty                  | Optional Skill PVC subpath using `{user_id}`/`{thread_id}`   |
@@ -108,7 +108,7 @@ the default image and pin the reviewed result by tag or digest.
 HostPath mode mounts:
 
 - `SKILLS_HOST_PATH/public` -> `/mnt/skills/public` read-only;
-- `DEER_FLOW_HOST_BASE_DIR/users/{user_id}/skills/custom` ->
+- `ACT_WEAVE_HOST_BASE_DIR/users/{user_id}/skills/custom` ->
   `/mnt/skills/custom` read-only;
 - optional `SKILLS_HOST_PATH/custom` -> `/mnt/skills/legacy` read-only when
   `include_legacy_skills=true`;
@@ -146,7 +146,7 @@ Create request:
 
 ## Start and smoke check
 
-Set `DEER_FLOW_ROOT`, configure provisioner mode and its shared key, then run:
+Set `ACT_WEAVE_ROOT`, configure provisioner mode and its shared key, then run:
 
 ```bash
 make docker-start

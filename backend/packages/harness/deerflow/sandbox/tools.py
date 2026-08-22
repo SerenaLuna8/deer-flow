@@ -99,10 +99,10 @@ _DEFAULT_WRITE_FILE_ERROR_MAX_CHARS = 2000
 # because the tool-call JSON payload (which the model must emit as one
 # continuous stream) grows past the safe window. 80 KB ≈ 20K tokens, a
 # comfortable headroom under the factory-default 240s stream_chunk_timeout.
-# Deployments can override via env var DEERFLOW_WRITE_FILE_MAX_BYTES; set to
+# Deployments can override via env var ACT_WEAVE_WRITE_FILE_MAX_BYTES; set to
 # 0 (or negative) to disable the guard entirely.
 _WRITE_FILE_CONTENT_MAX_BYTES = 80 * 1024
-_WRITE_FILE_MAX_BYTES_ENV = "DEERFLOW_WRITE_FILE_MAX_BYTES"
+_WRITE_FILE_MAX_BYTES_ENV = "ACT_WEAVE_WRITE_FILE_MAX_BYTES"
 _LOCAL_BASH_CWD_COMMANDS = {"cd", "pushd"}
 _LOCAL_BASH_COMMAND_WRAPPERS = {"command", "builtin"}
 _LOCAL_BASH_COMMAND_PREFIX_KEYWORDS = {"!", "{", "case", "do", "elif", "else", "for", "if", "select", "then", "time", "until", "while"}
@@ -1417,12 +1417,12 @@ async def _run_sync_tool_after_async_sandbox_init(
         owner_loop = asyncio.get_running_loop()
         cancellation_requested = threading.Event()
 
-        def invoke_with_fresh_skill_credentials() -> str:
+        def invoke_with_fresh_skill_secrets() -> str:
             fresh_scoped: object = None
             active: dict[str, str] = {}
             try:
                 if cancellation_requested.is_set():
-                    return "Error: Skill credential material is unavailable"
+                    return "Error: Skill secret material is unavailable"
                 if requested:
                     try:
                         materialization = asyncio.run_coroutine_threadsafe(
@@ -1430,20 +1430,20 @@ async def _run_sync_tool_after_async_sandbox_init(
                             owner_loop,
                         )
                     except Exception:
-                        return "Error: Skill credential material is unavailable"
+                        return "Error: Skill secret material is unavailable"
                     try:
                         fresh_scoped = materialization.result()
                     except Exception:
                         materialization.cancel()
-                        return "Error: Skill credential material is unavailable"
+                        return "Error: Skill secret material is unavailable"
                     if not isinstance(fresh_scoped, dict) or set(fresh_scoped) != set(requested) or any(not isinstance(values, dict) for values in fresh_scoped.values()):
-                        return "Error: Skill credential material is unavailable"
+                        return "Error: Skill secret material is unavailable"
                     active = resolve_provider_active_secrets(
                         call_context,
                         fresh_scoped,
                     )
                 if cancellation_requested.is_set():
-                    return "Error: Skill credential material is unavailable"
+                    return "Error: Skill secret material is unavailable"
                 if active:
                     call_context[ACTIVE_SECRETS_CONTEXT_KEY] = active
                 call_context[SKILL_SECRET_EXEC_READY_CONTEXT_KEY] = True
@@ -1459,7 +1459,7 @@ async def _run_sync_tool_after_async_sandbox_init(
                     fresh_scoped.clear()
 
         try:
-            return await asyncio.to_thread(invoke_with_fresh_skill_credentials)
+            return await asyncio.to_thread(invoke_with_fresh_skill_secrets)
         finally:
             cancellation_requested.set()
 
@@ -1536,7 +1536,7 @@ def mask_secret_values(output: str, injected_env: dict[str, str] | None) -> str:
     stdout, unlike MCP tools). Replace every non-empty secret value with a
     redaction marker, including short PINs. A short value can cause false-positive
     masking in otherwise benign output, but confidentiality takes precedence:
-    once a value has been admitted as a Credential there is no reliable way to
+    once a value has been admitted as a secret there is no reliable way to
     distinguish an echoed secret from an identical ordinary token. Longest
     values are replaced first so overlapping values are never partially exposed.
     """
@@ -1630,7 +1630,7 @@ def _truncate_ls_output(output: str, max_chars: int) -> str:
 # Fixed env var exposing the IM-channel platform user id (Feishu open_id,
 # Slack Uxxx, ...) to sandbox commands, so skills can act on the current end
 # user's channel identity (#3914). An identifier, not a secret.
-CHANNEL_USER_ID_ENV = "DEERFLOW_CHANNEL_USER_ID"
+CHANNEL_USER_ID_ENV = "ACT_WEAVE_CHANNEL_USER_ID"
 
 _CHANNEL_USER_ID_CONTEXT_KEY = "channel_user_id"
 
@@ -2035,7 +2035,7 @@ def bash_tool(runtime: Runtime, description: str, command: str) -> str:
     runtime_context = getattr(runtime, "context", None)
     private_skill_provider = runtime_context.get(SKILL_SECRET_PROVIDER_CONTEXT_KEY) if isinstance(runtime_context, dict) and "private_scope" in runtime_context else None
     if callable(private_skill_provider) and runtime_context.get(SKILL_SECRET_EXEC_READY_CONTEXT_KEY) is not True:
-        return "Error: Skill credential material is unavailable"
+        return "Error: Skill secret material is unavailable"
     injected_env = read_active_secrets(runtime_context) or None
     try:
         sandbox = ensure_sandbox_initialized(runtime)
@@ -2467,7 +2467,7 @@ read_file_tool.coroutine = _read_file_tool_async
 def _effective_write_file_max_bytes() -> int:
     """Return the active size cap for non-append write_file calls.
 
-    Reads ``DEERFLOW_WRITE_FILE_MAX_BYTES`` at call time (not import time)
+    Reads ``ACT_WEAVE_WRITE_FILE_MAX_BYTES`` at call time (not import time)
     so tests and runtime tweaks take effect without restart. Falls back to
     the default on missing/malformed values. A non-positive value disables
     the guard.
@@ -2520,7 +2520,7 @@ def write_file_tool(
          create the file; subsequent calls use append=True. The 80 KB cap does
          NOT apply to append=True calls.
 
-    Operators can override the cap via env var `DEERFLOW_WRITE_FILE_MAX_BYTES`
+    Operators can override the cap via env var `ACT_WEAVE_WRITE_FILE_MAX_BYTES`
     (0 disables the guard entirely). Raising it risks streaming timeouts.
 
     Args:

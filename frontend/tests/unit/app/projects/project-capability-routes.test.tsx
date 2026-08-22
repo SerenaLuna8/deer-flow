@@ -108,7 +108,7 @@ describe("project capability workspace routes", () => {
     );
   });
 
-  test("validates the exact Skill version and Credential-focus deep link", async () => {
+  test("validates the exact Skill version and secret-focus deep link", async () => {
     const skillId = "11111111-1111-4111-8111-111111111111";
     const versionId = "22222222-2222-4222-8222-222222222222";
     const rendered = await ProjectSkillsPage({
@@ -116,14 +116,14 @@ describe("project capability workspace routes", () => {
       searchParams: Promise.resolve({
         skill_id: skillId,
         skill_version_id: versionId,
-        configure_credentials: "1",
+        configure_secrets: "1",
       }),
     });
 
     expect(rendered.props).toMatchObject({
       selectedAssetId: skillId,
       selectedVersionId: versionId,
-      focusSelectedSkillCredentials: true,
+      focusSelectedSkillSecrets: true,
     });
 
     const rejected = await ProjectSkillsPage({
@@ -131,13 +131,13 @@ describe("project capability workspace routes", () => {
       searchParams: Promise.resolve({
         skill_id: skillId,
         skill_version_id: [versionId, versionId],
-        configure_credentials: "true",
+        configure_secrets: "true",
       }),
     });
     expect(rejected.props).toMatchObject({
       selectedAssetId: skillId,
       selectedVersionId: null,
-      focusSelectedSkillCredentials: false,
+      focusSelectedSkillSecrets: false,
     });
   });
 });

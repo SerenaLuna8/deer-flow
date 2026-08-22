@@ -64,26 +64,16 @@ from app.private_work.snapshot_repository import (
     RunSnapshotRepository,
 )
 from app.projects.context import resolve_project_context_in_transaction
-from app.shared_assets.crypto import (
-    CredentialDecryptFailed,
-    EncryptedEnvelope,
-    decrypt_credential_payload,
-)
 from app.shared_assets.errors import (
     AssetForbidden,
     AssetResolutionUnavailable,
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.keyring import (
-    CredentialKeyring,
-    CredentialKeyringInvalid,
-)
+from app.shared_assets.mcp_secret_store import mcp_secret_closure_digest
 from app.shared_assets.mcp_tool_inventory_repository import (
     McpToolInventoryRepository,
-    mcp_grant_closure_digest,
 )
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, resolve_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AssetKind,
@@ -91,6 +81,8 @@ from app.shared_assets.models import (
     ResolvedMcpSnapshot,
 )
 from app.shared_assets.resolver import ProjectAssetResolver
+from app.shared_assets.skill_secret_store import skill_secret_recipient
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, resolve_model_ref
 from deerflow.agents.lead_agent.prompt import AgentPromptBundle
 from deerflow.config.app_config import peek_current_app_config
 from deerflow.mcp.http_security import SecureMcpHttpClientFactory
@@ -102,6 +94,11 @@ from deerflow.mcp_definition_policy import (
     McpEndpointPolicy,
 )
 from deerflow.sandbox.sandbox import AuthorizationRevoked
+from deerflow.secrets import (
+    SecretKey,
+    SecretKeyInvalid,
+    SecretMaterializationFailed,
+)
 from deerflow.skills.types import Skill
 from deerflow.subagents.runtime_catalog import (
     RuntimeAgentCatalog,
@@ -384,7 +381,7 @@ class PrivateAgentRuntime:
                     sorted(
                         (
                             item
-                            for item in await repository.list_skill_credentials_in_session(
+                            for item in await repository.list_skill_secrets_in_session(
                                 session,
                                 self._context,
                                 self._run_id,
@@ -395,15 +392,14 @@ class PrivateAgentRuntime:
                         key=lambda item: (
                             item.skill_version_id.int,
                             item.secret_name,
-                            item.skill_credential_binding_id.int,
-                            item.credential_version_id.int,
+                            item.secret_generation_id.int,
                         ),
                     )
                 )
                 skill_runtime_by_version = {manifest.version_id: (path, skill) for path, (manifest, skill) in skill_by_path.items() if manifest.version_id in requested_version_ids}
                 if set(skill_runtime_by_version) != requested_version_ids:
                     raise RunSnapshotAssetStale
-                materials = await repository.lock_admitted_skill_credentials_in_session(
+                materials = await repository.lock_admitted_skill_secrets_in_session(
                     session,
                     self._context,
                     persisted,
@@ -411,7 +407,7 @@ class PrivateAgentRuntime:
                     required_targets=frozenset((manifest.version_id, requirement.name) for manifest in requested_manifests for requirement in skill_runtime_by_version[manifest.version_id][1].required_secrets if not requirement.optional),
                     load_envelopes=True,
                 )
-                credential_keyring: CredentialKeyring | None = None
+                secret_key: SecretKey | None = None
                 for manifest in requested_manifests:
                     skill_path = skill_runtime_by_version[manifest.version_id][0]
                     requested_names = requested_by_path.get(
@@ -421,41 +417,33 @@ class PrivateAgentRuntime:
                     for material in materials:
                         if material.skill_version_id != manifest.version_id:
                             continue
-                        if material.env_name not in requested_names:
+                        if material.secret_name not in requested_names:
                             continue
                         envelope = material.envelope
                         if envelope is None:
                             raise RunSnapshotAssetStale
-                        if credential_keyring is None:
+                        if secret_key is None:
                             try:
-                                credential_keyring = CredentialKeyring.from_environment()
-                            except CredentialKeyringInvalid:
+                                secret_key = SecretKey.from_environment()
+                            except SecretKeyInvalid:
                                 raise AssetStorageUnavailable(self._context.request_id) from None
-                        payload: dict[str, object] | None = None
                         try:
-                            payload = await asyncio.to_thread(
-                                decrypt_credential_payload,
-                                EncryptedEnvelope(
-                                    key_id=envelope.key_id,
-                                    nonce=bytes(envelope.nonce),
-                                    ciphertext=bytes(envelope.ciphertext),
+                            plaintext = await asyncio.to_thread(
+                                envelope.materialize,
+                                recipient=skill_secret_recipient(
+                                    self._context.project_id,
+                                    material.skill_id,
+                                    material.skill_version_id,
+                                    material.secret_name,
                                 ),
-                                AssetScope.PROJECT,
-                                self._context.project_id,
-                                material.credential_version_id,
-                                credential_keyring,
+                                key=secret_key,
                             )
-                            env = payload.get(material.credential_field_group)
-                            value = env.get(material.credential_field_name) if isinstance(env, Mapping) else None
-                            if not isinstance(value, str):
+                            value = plaintext.decode("utf-8")
+                            if not value or "\x00" in value:
                                 raise RunSnapshotAssetStale
-                            values_by_version[manifest.version_id][material.env_name] = value
-                        finally:
-                            if isinstance(payload, dict):
-                                for group in payload.values():
-                                    if isinstance(group, dict):
-                                        group.clear()
-                                payload.clear()
+                            values_by_version[manifest.version_id][material.secret_name] = value
+                        except (SecretMaterializationFailed, UnicodeError):
+                            raise RunSnapshotAssetStale from None
             result = {path: dict(values_by_version[manifest.version_id]) for path, (manifest, _skill) in skill_by_path.items() if path in requested_by_path}
             return result
         except (
@@ -466,8 +454,6 @@ class PrivateAgentRuntime:
         ):
             raise PrivateWorkAssetStale(self._context.request_id) from None
         except AssetStorageUnavailable:
-            raise PrivateWorkUnavailable(self._context.request_id) from None
-        except CredentialDecryptFailed:
             raise PrivateWorkUnavailable(self._context.request_id) from None
         except PrivateWorkError as error:
             raise type(error)(self._context.request_id) from None
@@ -723,33 +709,32 @@ class PrivateAgentRuntime:
             persisted = tuple(
                 sorted(
                     (
-                        grant
-                        for grant in await snapshots.list_mcp_grants_in_session(
+                        secret
+                        for secret in await snapshots.list_mcp_secrets_in_session(
                             session,
                             context,
                             self._run_id,
                             lock=True,
                         )
-                        if grant.mcp_version_id == snapshot.version_id
+                        if secret.mcp_server_version_id == snapshot.version_id
                     ),
                     key=lambda item: (
-                        item.mcp_version_id.int,
-                        item.credential_slot_id.int,
-                        item.credential_grant_id.int,
-                        item.credential_version_id.int,
+                        item.mcp_server_version_id.int,
+                        item.slot_id.int,
+                        item.secret_generation_id.int,
                     ),
                 )
             )
-            current = await snapshots.current_mcp_grants_in_session(
+            current = await snapshots.current_mcp_secrets_in_session(
                 session,
                 context,
                 matching,
             )
-            current_for_version = tuple(item for item in current if item.mcp_version_id == snapshot.version_id)
+            current_for_version = tuple(item for item in current if item.mcp_server_version_id == snapshot.version_id)
             if current_for_version != persisted:
                 return
-            grant_ids = tuple(item.credential_grant_id for item in persisted)
-            if set(grant_ids) != set(snapshot.credential_grant_ids):
+            generation_ids = tuple(item.secret_generation_id for item in persisted)
+            if set(generation_ids) != set(snapshot.secret_generation_ids):
                 return
             inventory = McpToolInventoryRepository(session)
             common = {
@@ -757,7 +742,7 @@ class PrivateAgentRuntime:
                 "mcp_server_id": snapshot.asset_id,
                 "mcp_server_version_id": snapshot.version_id,
                 "payload_checksum": snapshot.checksum,
-                "grant_digest": mcp_grant_closure_digest(grant_ids),
+                "secret_digest": mcp_secret_closure_digest(persisted),
             }
             if tools is not None:
                 await inventory.record_success(
@@ -771,7 +756,7 @@ class PrivateAgentRuntime:
                 )
 
     def _mcp_session_key(self, version_id: uuid.UUID) -> McpRunSessionKey | None:
-        """Bind session reuse to the exact snapshot and grant closure."""
+        """Bind session reuse to the exact snapshot and secret closure."""
         if self._mcp_run_sessions is None:
             return None
         snapshot = next((item for item in self._mcp_snapshots if item.version_id == version_id), None)
@@ -780,7 +765,7 @@ class PrivateAgentRuntime:
         return (
             snapshot.version_id,
             snapshot.checksum,
-            mcp_grant_closure_digest(snapshot.credential_grant_ids),
+            snapshot.secret_digest,
         )
 
     def _proxy_tool(self, schema: _DiscoveredMcpTool) -> StructuredTool:
@@ -1473,20 +1458,19 @@ class PrivateAgentRuntime:
                 persisted = tuple(
                     sorted(
                         (
-                            grant
-                            for grant in await repository.list_mcp_grants_in_session(
+                            secret
+                            for secret in await repository.list_mcp_secrets_in_session(
                                 session,
                                 self._context,
                                 self._run_id,
                                 lock=True,
                             )
-                            if grant.mcp_version_id == snapshot.version_id
+                            if secret.mcp_server_version_id == snapshot.version_id
                         ),
                         key=lambda item: (
-                            item.mcp_version_id.int,
-                            item.credential_slot_id.int,
-                            item.credential_grant_id.int,
-                            item.credential_version_id.int,
+                            item.mcp_server_version_id.int,
+                            item.slot_id.int,
+                            item.secret_generation_id.int,
                         ),
                     )
                 )
@@ -1494,13 +1478,13 @@ class PrivateAgentRuntime:
                     session,
                     current,
                     snapshot,
-                    expected_grants=tuple(
+                    expected_secrets=tuple(
                         (
-                            grant.credential_slot_id,
-                            grant.credential_grant_id,
-                            grant.credential_version_id,
+                            secret.slot_id,
+                            secret.secret_generation_id,
+                            secret.secret_generation_digest,
                         )
-                        for grant in persisted
+                        for secret in persisted
                     ),
                 )
                 return materialized

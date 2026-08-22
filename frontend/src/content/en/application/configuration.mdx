@@ -11,8 +11,8 @@ PostgreSQL, sandbox, authentication, and Worker settings.
 Scheduler process presence is still operator-owned; Automation polling,
 concurrency, and one-time delay live in PostgreSQL at `/admin/settings/system`.
 Model definitions are not accepted from YAML: after startup, a system
-administrator configures their versioned provider settings and encrypted
-Credentials at `/admin/settings/models`.
+administrator configures their provider settings and encrypted API Keys at
+`/admin/settings/models`.
 
 ```bash
 make config
@@ -20,11 +20,10 @@ make doctor
 make check-db
 ```
 
-Agent, Skill, MCP, Credential and model definitions are versioned database
-assets. System admins manage the model catalog and system assets; project
-members manage project assets and bindings in authenticated settings. Secrets
-use encrypted Credential envelopes and are never stored in browser query
-caches.
+Agent, Skill, and MCP definitions are versioned database assets. Models are
+stable mutable configurations. Model, Skill, MCP, and Channel domains each own
+their encrypted values and lifecycle; plaintext is never stored in browser
+query caches.
 
 ## Project MCP networks
 
@@ -53,14 +52,14 @@ the destination address, not its port, path, or service identity, so grant only
 the networks project members need.
 
 HTTP is suitable only for a trusted, isolated network because header/query
-Credentials cross it in plaintext. Use HTTPS across untrusted links; an IP HTTPS
+secrets cross it in plaintext. Use HTTPS across untrusted links; an IP HTTPS
 certificate must contain the matching IP SAN. When controlled egress is enabled,
 the proxy must independently enforce an equivalent network policy, and
 `127.0.0.1` refers to the proxy's network namespace rather than the Worker.
 `mcp_security` is captured by Gateway, Scheduler, and Worker at startup, so all
 of those processes must restart after a change.
 
-Gateway, Worker and Scheduler validate the configured database and schema at startup. Use the explicit database setup/migration commands before starting application processes.
+Gateway, Worker and Scheduler validate the configured database and Schema V1 at startup. Use explicit empty-database setup before starting application processes.
 
 `agent_runtime.memory` has six controls: enablement, Dream model, automatic Dream interval,
 the document injection budget, idle sealing, and episode retention. A separate

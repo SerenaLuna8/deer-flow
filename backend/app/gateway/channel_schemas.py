@@ -67,8 +67,14 @@ class ProjectChannelInstanceConfigureRequest(BaseModel):
 
     display_name: str | None = Field(default=None, min_length=1, max_length=120)
     public_config: dict[str, str] = Field(default_factory=dict)
-    credentials: dict[str, str] = Field(default_factory=dict, repr=False)
+    secrets: dict[str, str] = Field(default_factory=dict, repr=False)
     enabled: bool
+
+
+class ProjectChannelSecretClearRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    confirmed: Literal[True]
 
 
 class ProjectChannelInstanceResponse(StrictChannelResponse):
@@ -78,7 +84,9 @@ class ProjectChannelInstanceResponse(StrictChannelResponse):
     status: Literal["unconfigured", "disabled", "stopped", "starting", "running", "error"]
     enabled: bool
     configured: bool
-    credential_configured: bool
+    secret_configured: bool
+    secret_readiness: Literal["ready", "unready"]
+    secret_revision: int = Field(ge=0)
     public_config: dict[str, str] = Field(default_factory=dict)
     updated_at: datetime | None
     last_error: str | None = None
@@ -124,6 +132,7 @@ __all__ = [
     "PROJECT_CONNECTION_RUNTIME_REQUIREMENTS",
     "ProjectChannelInstanceConfigureRequest",
     "ProjectChannelInstanceResponse",
+    "ProjectChannelSecretClearRequest",
     "ProjectChannelInstancesResponse",
     "ProjectConnectRequest",
     "ProjectConnectResponse",

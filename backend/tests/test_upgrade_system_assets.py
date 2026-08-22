@@ -10,7 +10,7 @@ from sqlalchemy.exc import OperationalError
 from app.shared_assets.bootstrap import BootstrapConflict, BootstrapResult
 from deerflow.persistence.bootstrap import (
     SCHEMA_MUTATION_LOCK_KEY,
-    M7RecreateRequired,
+    SchemaRecreateRequired,
 )
 
 _DATABASE_URL = "postgresql://operator:do-not-print-this-password@db.example:5432/deerflow_test_operator"
@@ -418,7 +418,6 @@ async def test_unlock_failure_reports_indeterminate_result_without_credentials(
     ("database_state", "bootstrap_error", "bootstrap_count"),
     [
         pytest.param("empty", None, 0, id="empty"),
-        pytest.param("behind", None, 0, id="behind"),
         pytest.param(
             "current",
             BootstrapConflict(f"leak-marker conflict at {_DATABASE_URL}"),
@@ -475,7 +474,6 @@ async def test_primary_failure_plus_unlock_failure_never_claims_release_executed
     ("database_state", "bootstrap_error", "primary_diagnostic", "bootstrap_count"),
     [
         pytest.param("empty", None, "setup-db", 0, id="empty"),
-        pytest.param("behind", None, "upgrade-db", 0, id="behind"),
         pytest.param(
             "current",
             BootstrapConflict(f"leak-marker conflict at {_DATABASE_URL}"),
@@ -521,7 +519,6 @@ async def test_primary_failure_plus_lock_exit_failure_preserves_primary_diagnost
     ("database_state", "guidance"),
     [
         pytest.param("empty", "setup-db", id="empty"),
-        pytest.param("behind", "upgrade-db", id="behind"),
     ],
 )
 async def test_noncurrent_schema_fails_closed_without_bootstrap(
@@ -554,13 +551,13 @@ async def test_drifted_schema_fails_closed_without_bootstrap(
     wiring = _wire_operator(
         monkeypatch,
         upgrade_module,
-        classify_error=M7RecreateRequired(),
+        classify_error=SchemaRecreateRequired(),
     )
 
     with pytest.raises(upgrade_module.SystemAssetUpgradeError) as exc_info:
         await upgrade_module.upgrade_system_assets(_DATABASE_URL)
 
-    assert "M7_RECREATE_REQUIRED" in str(exc_info.value)
+    assert "SCHEMA_RECREATE_REQUIRED" in str(exc_info.value)
     assert wiring.bootstrap_calls == []
     assert wiring.lock_engine.connection.locked is False
     assert wiring.lock_engine.dispose_count == 1

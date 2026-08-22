@@ -40,7 +40,7 @@ def test_admin_catalog_projects_only_authorable_builtin_adapters() -> None:
     }
     assert "vision_bridge_fake" not in descriptors
     assert "vision_openai_compatible_v1" not in descriptors
-    assert descriptors["openai"].credential_required is True
+    assert descriptors["openai"].api_key_required is True
     openai_fields = {field.name: field for field in descriptors["openai"].setting_fields}
     anthropic_fields = {field.name: field for field in descriptors["anthropic"].setting_fields}
     assert openai_fields["use_responses_api"].input_type == "boolean"
@@ -90,7 +90,7 @@ def test_admin_catalog_projects_new_adapter_custom_field_without_ui_code_change(
 
     assert response.provider_adapters[0].model_dump() == {
         "id": "new_vendor_v2",
-        "credential_required": False,
+        "api_key_required": False,
         "setting_fields": [
             {
                 "name": "vendor_quality",

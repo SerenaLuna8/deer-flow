@@ -9,6 +9,10 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy import text
 from support.private_thread_seed import PrivateThreadSeed, seed_private_thread_database
+from support.system_model_seed import (
+    frozen_system_model_execution,
+    seed_system_model_config,
+)
 
 from app.personalization.repository import (
     AccountMemoryResetCounts,
@@ -56,10 +60,6 @@ from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets.agent_model import AgentRow
 from deerflow.persistence.system_runtime_settings import SystemRuntimePolicyRow
-from deerflow.persistence.system_settings import (
-    SystemModelConfigRow,
-    SystemModelConfigVersionRow,
-)
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
 
@@ -244,38 +244,15 @@ async def _add_test_model(
     owner_user_id: str,
 ) -> tuple[uuid.UUID, uuid.UUID, str]:
     model_id = uuid.uuid4()
-    version_id = uuid.uuid4()
-    checksum = hashlib.sha256(version_id.bytes).hexdigest()
-    model = SystemModelConfigRow(
-        id=model_id,
+    checksum = hashlib.sha256(model_id.bytes).hexdigest()
+    await seed_system_model_config(
+        session,
+        model_id=model_id,
+        owner_user_id=owner_user_id,
         display_name="Memory reset PostgreSQL model",
-        status="active",
-        current_version_id=None,
-        revision=1,
-        created_by_user_id=owner_user_id,
-        updated_by_user_id=owner_user_id,
+        provider_model="memory-reset-test",
     )
-    session.add(model)
-    await session.flush()
-    session.add(
-        SystemModelConfigVersionRow(
-            id=version_id,
-            model_config_id=model_id,
-            version_number=1,
-            provider_adapter="vision_bridge_fake",
-            provider_model="memory-reset-test",
-            settings={},
-            supports_thinking=False,
-            supports_reasoning_effort=False,
-            supports_vision=False,
-            payload_checksum=checksum,
-            created_by_user_id=owner_user_id,
-        )
-    )
-    await session.flush()
-    model.current_version_id = version_id
-    await session.flush()
-    return model_id, version_id, checksum
+    return model_id, model_id, checksum
 
 
 def _pending_tool_history(
@@ -302,7 +279,6 @@ def _pending_tool_history(
         content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
         preference_version=preference_version,
         snip_prompt_version="remember-tool-v1",
-        summary_model_ref=None,
         created_at=now,
     )
 
@@ -334,9 +310,10 @@ async def _prepare_dream_input(
         MemoryDreamFrozenRuntime(
             preference_version=preference.version,
             policy_revision=1,
-            model_config_id=model_id,
-            model_version_id=version_id,
-            model_payload_checksum=checksum,
+            model_execution=frozen_system_model_execution(
+                model_id=model_id,
+                provider_model="memory-reset-test",
+            ),
             prompt_version=DREAM_PROMPT_VERSION,
         ),
         policy_version_id,

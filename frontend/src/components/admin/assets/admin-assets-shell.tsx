@@ -1,6 +1,6 @@
 "use client";
 
-import { BotIcon, KeyRoundIcon, NetworkIcon, SparklesIcon } from "lucide-react";
+import { BotIcon, NetworkIcon, SparklesIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
@@ -11,11 +11,6 @@ const NAVIGATION = [
   { href: "/admin/assets/agents", labelKey: "agent", icon: BotIcon },
   { href: "/admin/assets/skills", labelKey: "skill", icon: SparklesIcon },
   { href: "/admin/assets/mcp", labelKey: "mcp", icon: NetworkIcon },
-  {
-    href: "/admin/assets/credentials",
-    labelKey: "credential",
-    icon: KeyRoundIcon,
-  },
 ] as const;
 
 export function AdminAssetsNavigation({ pathname }: { pathname: string }) {

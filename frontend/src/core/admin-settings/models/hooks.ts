@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { modelsQueryKey } from "@/core/models/hooks";
 
 import {
+  clearAdminModelApiKey,
   createAdminModel,
   fetchAdminModelCatalog,
   replaceAdminModel,
@@ -81,6 +82,19 @@ export function useReplaceAdminModel(accountId: string) {
     }) =>
       runAbortableAdminModelMutation(parsed, (signal) =>
         replaceAdminModel(parsed, modelId, input, signal),
+      ),
+    onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
+  });
+}
+
+export function useClearAdminModelApiKey(accountId: string) {
+  const parsed = adminModelAccountIdSchema.parse(accountId);
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationKey: adminModelMutationKey(parsed, "clear_api_key"),
+    mutationFn: (modelId: string) =>
+      runAbortableAdminModelMutation(parsed, (signal) =>
+        clearAdminModelApiKey(parsed, modelId, { confirmed: true }, signal),
       ),
     onSuccess: () => invalidateModelCatalogs(queryClient, parsed),
   });

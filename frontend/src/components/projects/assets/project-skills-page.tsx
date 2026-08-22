@@ -45,19 +45,18 @@ function ProjectSkillDetail({
         item: context.item,
         canAuthor: context.canAuthor,
         editing: context.editing,
-        credentialBindingsDirty: context.credentialBindingsDirty,
+        secretConfigurationDirty: context.secretConfigurationDirty,
         onEditingChange: context.onEditingChange,
         onDirtyChange: context.onDirtyChange,
-        onCredentialBindingsDirtyChange:
-          context.onCredentialBindingsDirtyChange,
+        onSecretsDirtyChange:
+          context.onSecretsDirtyChange,
         onActivationValidityChange: context.onActivationValidityChange,
         onVersionCreated: context.onVersionCreated,
-        canManageCredentials: project.capabilities.includes(
-          "mcp.credentials.approve",
+        canManageSecrets: project.capabilities.includes(
+          "shared_assets.manage_bindings",
         ),
-        credentialsHref: `/projects/${encodeURIComponent(project.slug)}/credentials`,
-        focusCredentials: context.focusSkillCredentials,
-        onCredentialsFocused: context.onSkillCredentialsFocused,
+        focusSecrets: context.focusSkillSecrets,
+        onSecretsFocused: context.onSkillSecretsFocused,
       }}
     />
   );
@@ -84,11 +83,11 @@ function ProjectSkillBuilderLead({ project }: { project: Project }) {
 export function ProjectSkillsPage({
   selectedAssetId = null,
   selectedVersionId = null,
-  focusSelectedSkillCredentials = false,
+  focusSelectedSkillSecrets = false,
 }: {
   selectedAssetId?: string | null;
   selectedVersionId?: string | null;
-  focusSelectedSkillCredentials?: boolean;
+  focusSelectedSkillSecrets?: boolean;
 }) {
   const project = useCurrentProject();
 
@@ -98,11 +97,11 @@ export function ProjectSkillsPage({
       title="Skill"
       initialSelectedAssetId={selectedAssetId}
       initialSelectedVersionId={selectedVersionId}
-      initialFocusSkillCredentials={focusSelectedSkillCredentials}
+      initialFocusSkillSecrets={focusSelectedSkillSecrets}
       selectionQueryParam="skill_id"
       selectionDependentQueryParams={[
         "skill_version_id",
-        "configure_credentials",
+        "configure_secrets",
       ]}
       renderLead={({ project }) => (
         <ProjectSkillBuilderLead project={project} />

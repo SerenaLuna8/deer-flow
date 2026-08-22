@@ -71,7 +71,7 @@ import { skillWorkbenchTabVariant } from "./skill-workbench-tabs";
 type PathDialogMode = "add" | "rename";
 type WorkbenchSurface = "files" | "secrets";
 
-export function beginSkillCredentialEditing(
+export function beginSkillSecretEditing(
   setSurface: (surface: WorkbenchSurface) => void,
   onEditingChange: (editing: boolean) => void,
 ): void {
@@ -82,12 +82,12 @@ export function beginSkillCredentialEditing(
 export function notifySkillCandidateVersionCreated(
   onVersionCreated: (
     versionId: string,
-    options?: { focusCredentials?: boolean },
+    options?: { focusSecrets?: boolean },
   ) => void,
   version: Pick<SkillAssetVersion, "id" | "secret_requirements">,
 ): void {
   onVersionCreated(version.id, {
-    focusCredentials: version.secret_requirements.length > 0,
+    focusSecrets: version.secret_requirements.length > 0,
   });
 }
 
@@ -253,10 +253,10 @@ export function SkillVersionWorkbench({
   onDirtyChange,
   onActivationValidityChange,
   onVersionCreated,
-  credentialBindingsDirty = false,
-  focusCredentials = false,
-  onCredentialsFocused,
-  credentialBindings,
+  secretConfigurationDirty = false,
+  focusSecrets = false,
+  onSecretsFocused,
+  secretConfiguration,
 }: {
   accountId: string;
   projectId: string;
@@ -269,12 +269,12 @@ export function SkillVersionWorkbench({
   onActivationValidityChange: (valid: boolean) => void;
   onVersionCreated: (
     versionId: string,
-    options?: { focusCredentials?: boolean },
+    options?: { focusSecrets?: boolean },
   ) => void;
-  credentialBindingsDirty?: boolean;
-  focusCredentials?: boolean;
-  onCredentialsFocused?: () => void;
-  credentialBindings?: ReactNode;
+  secretConfigurationDirty?: boolean;
+  focusSecrets?: boolean;
+  onSecretsFocused?: () => void;
+  secretConfiguration?: ReactNode;
 }) {
   const { t } = useI18n();
   const secretCopy = t.skills.secrets;
@@ -437,22 +437,22 @@ export function SkillVersionWorkbench({
   }, [dirty, onDirtyChange]);
 
   useEffect(() => {
-    if (!focusCredentials) return;
+    if (!focusSecrets) return;
     if (surface !== "secrets") setSurface("secrets");
-  }, [focusCredentials, surface]);
+  }, [focusSecrets, surface]);
 
   useEffect(() => {
-    if (!focusCredentials || surface !== "secrets") return;
+    if (!focusSecrets || surface !== "secrets") return;
     const frame = requestAnimationFrame(() => {
       secretsPanelRef.current?.focus({ preventScroll: true });
       secretsPanelRef.current?.scrollIntoView({
         behavior: "smooth",
         block: "start",
       });
-      onCredentialsFocused?.();
+      onSecretsFocused?.();
     });
     return () => cancelAnimationFrame(frame);
-  }, [focusCredentials, onCredentialsFocused, surface]);
+  }, [focusSecrets, onSecretsFocused, surface]);
 
   useEffect(() => {
     const conflictRecovery = conflictRecoveryRef.current;
@@ -820,20 +820,19 @@ export function SkillVersionWorkbench({
     }
   }
 
-  const credentialMappingContent = isEditing ? (
+  const secretConfigurationContent = isEditing ? (
     <section className="border-border/70 space-y-2 rounded-xl border p-4">
       <div className="flex items-center gap-2">
         <KeyRoundIcon aria-hidden className="size-4" />
-        <h3 className="text-sm font-semibold">2. 项目凭证映射</h3>
+        <h3 className="text-sm font-semibold">2. 版本秘密配置</h3>
       </div>
       <p className="text-muted-foreground text-sm leading-6">
-        当前正在编辑
-        SKILL.md。先保存为精确候选版本；保存后仍在此页面为每个声明选择项目
-        Credential 和具体来源 env 字段。激活窗口只做运行前检查，不再填写凭证。
+        当前正在编辑 SKILL.md。请先保存为精确候选版本；保存后，当前 Project
+        可在此页面为每个目标环境变量写入独立加密秘密。激活窗口只检查就绪状态，不填写秘密值。
       </p>
     </section>
   ) : (
-    credentialBindings
+    secretConfiguration
   );
 
   return (
@@ -1212,19 +1211,19 @@ export function SkillVersionWorkbench({
             projectId={projectId}
             content={skillMdContent}
             editable={isEditing}
-            canBeginEdit={canAuthor && !isEditing && !credentialBindingsDirty}
+            canBeginEdit={canAuthor && !isEditing && !secretConfigurationDirty}
             readOnlyReason={
               !canAuthor
                 ? "当前版本只读，你没有创建新版本的权限。"
-                : credentialBindingsDirty
-                  ? "请先保存或撤销当前凭证绑定修改，再创建新版本。"
+                : secretConfigurationDirty
+                  ? "请先保存或撤销当前秘密配置修改，再创建新版本。"
                   : undefined
             }
             disabled={fork.isPending}
-            beforeAdvancedSettings={credentialMappingContent}
+            beforeAdvancedSettings={secretConfigurationContent}
             onContentChange={applySkillMdContent}
             onBeginEdit={() =>
-              beginSkillCredentialEditing(setSurface, onEditingChange)
+              beginSkillSecretEditing(setSurface, onEditingChange)
             }
             onOpenSource={openSkillMdSource}
             onValidityChange={handleSecretValidityChange}

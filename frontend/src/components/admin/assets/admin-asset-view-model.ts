@@ -4,7 +4,6 @@ import {
   type AssetListKind,
   type AssetSummary,
   type AssetStatus,
-  type CredentialPendingMigration,
 } from "@/core/shared-assets";
 
 export const ADMIN_ASSET_PAGE_SIZE = 20;
@@ -28,98 +27,6 @@ export function filterAdminProjectCatalogItems<
   return items.filter(
     (item) => item.scope === "project" && item.project_id === projectId,
   );
-}
-
-export function credentialPendingMigrationMessage(
-  pending: CredentialPendingMigration | null,
-  copy: Translations["adminAssets"]["common"],
-): string | null {
-  // Nothing pending is a silent success; the count itself is server authority
-  // and is never recomputed from a version list here.
-  if (!pending || pending.total <= 0) return null;
-  return copy.pendingMigrationNotice(
-    pending.total,
-    pending.mcp_grant_count,
-    pending.skill_binding_count,
-    pending.system_model_count,
-  );
-}
-
-export function credentialMigrationActionVisible(
-  pending: CredentialPendingMigration | null,
-): boolean {
-  return Boolean(pending && pending.total > 0);
-}
-
-export function credentialMigrationCompleteMessage(
-  pending: CredentialPendingMigration | null,
-  copy: Translations["adminAssets"]["common"],
-): string | null {
-  return pending?.total === 0 ? copy.credentialMigrationComplete : null;
-}
-
-type CredentialTypeCopy =
-  Translations["adminAssets"]["common"]["credentialTypes"];
-type McpTransportCopy = Translations["adminAssets"]["common"]["transportTypes"];
-type CredentialPayloadGroupCopy =
-  Translations["adminAssets"]["common"]["credentialPayloadGroups"];
-
-export function adminCredentialTypeLabel(
-  credentialType: string,
-  copy: CredentialTypeCopy,
-): string {
-  switch (credentialType) {
-    case "model_api_key":
-      return copy.modelApiKey;
-    case "api_key":
-      return copy.apiKey;
-    case "token":
-      return copy.token;
-    case "mcp_auth":
-      return copy.mcpAuth;
-    case "skill_auth":
-      return copy.skillAuth;
-    case "oauth":
-      return copy.oauth;
-    case "database":
-      return copy.database;
-    default:
-      return credentialType;
-  }
-}
-
-export function adminMcpTransportLabel(
-  transport: string,
-  copy: McpTransportCopy,
-): string {
-  switch (transport) {
-    case "stdio":
-      return copy.stdio;
-    case "sse":
-      return copy.sse;
-    case "http":
-      return copy.http;
-    default:
-      return transport;
-  }
-}
-
-export function adminCredentialPayloadGroupLabel(
-  group: string,
-  copy: CredentialPayloadGroupCopy,
-): string {
-  switch (group) {
-    case "env":
-      return copy.env;
-    case "headers":
-      return copy.headers;
-    case "query":
-      return copy.query;
-    case "oauth":
-      return copy.oauth;
-    default:
-      return group;
-  }
 }
 
 export type AdminAssetPublicationFilter = "all" | "published" | "unpublished";
@@ -286,7 +193,7 @@ export function resetAdminAssetPage(
 }
 
 export type AssetLifecycleAction = "archive" | "suspend";
-export type VersionWorkflowAction = "publish" | "submit" | "approve";
+export type VersionWorkflowAction = "publish";
 
 export function assetLifecycleActions(
   status: AssetStatus,
@@ -297,20 +204,11 @@ export function assetLifecycleActions(
 }
 
 export function versionWorkflowActions(
-  kind: Exclude<AssetListKind, "credentials">,
+  _kind: AssetListKind,
   workflowStatus: "draft" | "pending_approval" | "published" | "rejected",
-  hasCredentialSlots: boolean,
+  _hasSecretSlots: boolean,
 ): VersionWorkflowAction[] {
-  if (workflowStatus === "published" || workflowStatus === "rejected") {
-    return [];
-  }
-  if (kind !== "mcp-servers") {
-    return workflowStatus === "draft" ? ["publish"] : [];
-  }
-  if (!hasCredentialSlots) {
-    return workflowStatus === "draft" ? ["publish"] : [];
-  }
-  return workflowStatus === "draft" ? ["submit"] : ["approve"];
+  return workflowStatus === "draft" ? ["publish"] : [];
 }
 
 const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
@@ -327,8 +225,8 @@ const ERROR_MESSAGES: Partial<Record<SharedAssetApiError["code"], string>> = {
     "Skill 包超过上传、解压大小或文件数量限制，请缩小后重试。",
   SKILL_RUNTIME_NAME_CONFLICT:
     "与已启用 Skill 的运行名称冲突，请先停用其中一个 Skill 后重试。",
-  SKILL_CREDENTIAL_BINDINGS_INCOMPLETE:
-    "启用前请先配置必需的 Credential 环境变量；已打开 Skill 详情中的环境变量区域。",
+  SKILL_SECRETS_INCOMPLETE:
+    "启用前请先配置必需的 Skill 运行秘密；已打开 Skill 详情中的环境变量区域。",
   AUTH_REQUIRED: "登录状态已失效，请重新登录。",
   ASSET_NETWORK_ERROR: "暂时无法连接资产服务，请稍后重试。",
   ASSET_RESPONSE_INVALID: "资产服务返回了无效数据。",
@@ -380,23 +278,7 @@ export function projectMcpVersionErrorMessage(
   ) {
     return (
       copy?.mcpVersionValidation ??
-      "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌凭据、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个凭据槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。"
-    );
-  }
-  return adminAssetErrorMessage(error, copy);
-}
-
-export function projectMcpCredentialErrorMessage(
-  error: unknown,
-  copy?: AdminAssetErrorCopy,
-): string {
-  if (
-    error instanceof SharedAssetApiError &&
-    error.code === "ASSET_VALIDATION_FAILED"
-  ) {
-    return (
-      copy?.mcpCredentialMismatch ??
-      "所选凭据不满足 MCP 槽位要求，或凭据已失效。凭据必须处于启用状态，并且分组和字段名必须与所选槽位的 schema 完全一致（包括大小写）。"
+      "MCP 配置未通过校验。请确认传输方式为 HTTP（Streamable HTTP）或 SSE；URL 不含内嵌秘密、查询参数或片段，主机仅使用精确的 localhost 或规范格式的 IPv4/IPv6 字面量，不使用普通 DNS 主机名；localhost 大小写不敏感并按 127.0.0.1 处理，IPv6 请显式填写 [::1]；IP 属于管理员配置的允许网段；每个秘密槽位只使用 headers 或 query 单一分组且已填写字段。允许网段由平台管理员配置，无需在此表单选择。如果管理员刚调整允许网段，请重启 Gateway、Scheduler 和 Worker 后重试。"
     );
   }
   return adminAssetErrorMessage(error, copy);

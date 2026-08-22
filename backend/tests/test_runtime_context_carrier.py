@@ -30,7 +30,7 @@ from deerflow.runtime.skill_context_authority import (
 from deerflow.subagents.runtime_catalog import (
     RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
 )
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY
 
 
 def test_runtime_context_keys_reuse_existing_canonical_values() -> None:
@@ -44,7 +44,7 @@ def test_runtime_context_keys_reuse_existing_canonical_values() -> None:
     assert RuntimeContextKeys.SKILL_SECRET_PROVIDER == SKILL_SECRET_PROVIDER_CONTEXT_KEY
     assert RuntimeContextKeys.VERIFIED_SKILL_SOURCE == VERIFIED_SKILL_SOURCE_CONTEXT_KEY
     assert RuntimeContextKeys.LEAD_MODEL_CALL_SEQ == LEAD_MODEL_CALL_SEQ_CONTEXT_KEY
-    assert RuntimeContextKeys.TRACE_ID == DEERFLOW_TRACE_METADATA_KEY
+    assert RuntimeContextKeys.TRACE_ID == ACT_WEAVE_TRACE_METADATA_KEY
     assert RuntimeContextKeys.INSTALL_KEYS <= RuntimeContextKeys.SERVER_OWNED_KEYS
     assert RuntimeContextKeys.CALLER_PASSTHROUGH_KEYS.isdisjoint(
         RuntimeContextKeys.SERVER_OWNED_KEYS,

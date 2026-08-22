@@ -465,7 +465,7 @@ describe("SkillBuilderConversationView", () => {
           message: "Skill 已创建并默认停用，可前往查看并激活。",
           skillHref: "/projects/example/skills?skill_id=1",
           versionHref: "/projects/example/skills?skill_id=1&skill_version_id=2",
-          credentialHref: null,
+          secretHref: null,
         }}
         onComposerTextChange={() => undefined}
         onSubmitMessage={() => undefined}

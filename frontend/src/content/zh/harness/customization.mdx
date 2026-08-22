@@ -108,9 +108,9 @@ Memory 是项目私有的 PostgreSQL 资源。扩展其外围产品行为时，�
 LangChain `BaseChatModel` 接口，经过审查后把固定类路径加入服务端 provider-adapter
 allowlist，并部署代码。
 
-部署完成后，由 system admin 在 `/admin/settings/models` 创建版本，只保存有界且不含
-secret 的 provider 设置，并绑定精确的加密 System Credential 版本。浏览器不会接受
-Python 类路径或明文 provider key。
+部署完成后，由 system admin 在 `/admin/settings/models` 创建配置，保存有界 provider
+设置，并在所属 Model configuration 中写入加密 API Key。浏览器不会接受 Python 类路径，
+也不会收到已保存的 provider key。
 
 ## 自定义检查点
 

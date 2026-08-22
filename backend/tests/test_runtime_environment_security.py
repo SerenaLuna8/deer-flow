@@ -28,6 +28,26 @@ def test_runtime_environment_drops_installation_admin_credentials(
     assert "POSTGRES_ADMIN_URL" not in environment
 
 
+def test_runtime_environment_drops_bootstrap_model_key_from_file_and_ambient(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY=file-bootstrap-key\n",
+        encoding="utf-8",
+    )
+
+    environment = build_runtime_environment(
+        env_file,
+        base_environment={
+            "ACT_WEAVE_BOOTSTRAP_DEEPSEEK_API_KEY": "ambient-bootstrap-key",
+            "RUNTIME_MARKER": "preserved",
+        },
+    )
+
+    assert environment == {"RUNTIME_MARKER": "preserved"}
+
+
 def test_sandbox_environment_drops_ambient_postgres_admin_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -43,8 +63,8 @@ def test_sandbox_environment_drops_ambient_channel_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(
-        "DEERFLOW_CHANNEL_USER_ID",
+        "ACT_WEAVE_CHANNEL_USER_ID",
         "stale-worker-channel-user",
     )
 
-    assert "DEERFLOW_CHANNEL_USER_ID" not in build_sandbox_env()
+    assert "ACT_WEAVE_CHANNEL_USER_ID" not in build_sandbox_env()

@@ -77,7 +77,7 @@ import { ProjectAssetDetailSheet } from "./project-asset-detail-sheet";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import {
   projectMcpStatusToggleState,
-  projectSkillCredentialSetupRequired,
+  projectSkillSecretSetupRequired,
   projectSkillStatusToggleState,
 } from "./project-asset-view-model";
 import { ProjectMcpCreateDialog } from "./project-mcp-create-dialog";
@@ -88,7 +88,7 @@ import {
 } from "./project-skill-import-dialog";
 import { SystemBindingDialog } from "./system-binding-dialog";
 
-type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+type MutableAssetKind = AssetListKind;
 export type ProjectAssetSourceFilter = "system" | "project";
 export type ProjectAssetPageLayout = "default" | "agent-cards";
 export type ProjectAssetListRenderContext = {
@@ -146,7 +146,7 @@ export function SkillCreateMenuItems({
 
 function assetAvailability(
   item: ProjectAssetItem,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: AssetListKind,
 ): string {
   if (item.scope === "system") {
     if (!item.binding) return "未启用";
@@ -215,15 +215,15 @@ export function projectSkillExactVersionSelectionHref(
   currentSearch: string,
   skillId: string,
   skillVersionId: string,
-  configureCredentials: boolean,
+  configureSecrets: boolean,
 ): string {
   const params = new URLSearchParams(currentSearch);
   params.set("skill_id", skillId);
   params.set("skill_version_id", skillVersionId);
-  if (configureCredentials) {
-    params.set("configure_credentials", "1");
+  if (configureSecrets) {
+    params.set("configure_secrets", "1");
   } else {
-    params.delete("configure_credentials");
+    params.delete("configure_secrets");
   }
   return `${pathname}?${params.toString()}`;
 }
@@ -476,7 +476,7 @@ export function importedSkillSelectionReady(
 
 export const configuredMcpSelectionReady = importedSkillSelectionReady;
 
-export function projectSkillImportNeedsCredentialSetup(
+export function projectSkillImportNeedsSecretSetup(
   version: Pick<
     Extract<AssetVersion, { skill_id: string }>,
     "secret_requirements"
@@ -490,7 +490,7 @@ export function configuredMcpSuccessMessage(
 ): string {
   return workflowStatus === "published"
     ? "MCP 已添加并发布。"
-    : "MCP 配置已保存，凭据尚未绑定，因此暂未生效。";
+    : "MCP 配置已保存，秘密尚未配置，因此暂未生效。";
 }
 
 export function createdProjectAssetSelectionReady(
@@ -861,7 +861,7 @@ function ProjectAssetCatalog({
   createOpen,
   initialSelectedAssetId,
   initialSelectedVersionId,
-  initialFocusSkillCredentials,
+  initialFocusSkillSecrets,
   selectionQueryParam,
   selectionDependentQueryParams,
   onCreateOpenChange,
@@ -878,7 +878,7 @@ function ProjectAssetCatalog({
   createOpen: boolean;
   initialSelectedAssetId: string | null;
   initialSelectedVersionId: string | null;
-  initialFocusSkillCredentials: boolean;
+  initialFocusSkillSecrets: boolean;
   selectionQueryParam?: string;
   selectionDependentQueryParams: readonly string[];
   onCreateOpenChange: (open: boolean) => void;
@@ -958,12 +958,12 @@ function ProjectAssetCatalog({
   );
   const [importedSkillSelection, setImportedSkillSelection] =
     useState<ImportedSkillSelection | null>(null);
-  const [credentialSetupAssetId, setCredentialSetupAssetId] = useState<
+  const [secretSetupAssetId, setSecretSetupAssetId] = useState<
     string | null
   >(null);
-  const initialCredentialSetupSelectionRef =
+  const initialSecretSetupSelectionRef =
     useRef<ImportedSkillSelection | null>(
-      initialFocusSkillCredentials &&
+      initialFocusSkillSecrets &&
         kind === "skills" &&
         initialSelectedAssetId &&
         initialSelectedVersionId
@@ -975,7 +975,7 @@ function ProjectAssetCatalog({
     );
   const appliedInitialVersionSelectionRef = useRef(
     initialSelectedAssetId && initialSelectedVersionId
-      ? `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillCredentials}`
+      ? `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillSecrets}`
       : null,
   );
   const [configuredMcpSelection, setConfiguredMcpSelection] =
@@ -1149,10 +1149,10 @@ function ProjectAssetCatalog({
   useEffect(() => {
     if (!initialSelectedAssetId || !initialSelectedVersionId) {
       appliedInitialVersionSelectionRef.current = null;
-      initialCredentialSetupSelectionRef.current = null;
+      initialSecretSetupSelectionRef.current = null;
       return;
     }
-    const identity = `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillCredentials}`;
+    const identity = `${initialSelectedAssetId}:${initialSelectedVersionId}:${initialFocusSkillSecrets}`;
     if (appliedInitialVersionSelectionRef.current === identity) return;
     appliedInitialVersionSelectionRef.current = identity;
     setCreatedVersions((current) =>
@@ -1162,15 +1162,15 @@ function ProjectAssetCatalog({
         initialSelectedVersionId,
       ),
     );
-    initialCredentialSetupSelectionRef.current =
-      initialFocusSkillCredentials && kind === "skills"
+    initialSecretSetupSelectionRef.current =
+      initialFocusSkillSecrets && kind === "skills"
         ? {
             assetId: initialSelectedAssetId,
             versionId: initialSelectedVersionId,
           }
         : null;
   }, [
-    initialFocusSkillCredentials,
+    initialFocusSkillSecrets,
     initialSelectedAssetId,
     initialSelectedVersionId,
     kind,
@@ -1223,7 +1223,7 @@ function ProjectAssetCatalog({
     (
       assetId: string,
       versionId: string,
-      configureCredentials: boolean,
+      configureSecrets: boolean,
       history: "push" | "replace",
     ) => {
       requestAssetSelection({
@@ -1233,7 +1233,7 @@ function ProjectAssetCatalog({
           window.location.search,
           assetId,
           versionId,
-          configureCredentials,
+          configureSecrets,
         ),
         history,
         routeAlreadyChanged: false,
@@ -1244,22 +1244,22 @@ function ProjectAssetCatalog({
 
   const handleRequestedVersionHandled = useCallback(
     (assetId: string, versionId: string, available: boolean) => {
-      const credentialSetupSelection =
-        initialCredentialSetupSelectionRef.current;
+      const secretSetupSelection =
+        initialSecretSetupSelectionRef.current;
       if (
         available &&
-        credentialSetupSelection?.assetId === assetId &&
-        credentialSetupSelection.versionId === versionId
+        secretSetupSelection?.assetId === assetId &&
+        secretSetupSelection.versionId === versionId
       ) {
-        initialCredentialSetupSelectionRef.current = null;
-        setCredentialSetupAssetId(assetId);
+        initialSecretSetupSelectionRef.current = null;
+        setSecretSetupAssetId(assetId);
       } else if (
         !available &&
-        credentialSetupSelection?.assetId === assetId &&
-        credentialSetupSelection.versionId === versionId
+        secretSetupSelection?.assetId === assetId &&
+        secretSetupSelection.versionId === versionId
       ) {
-        initialCredentialSetupSelectionRef.current = null;
-        setCredentialSetupAssetId((current) =>
+        initialSecretSetupSelectionRef.current = null;
+        setSecretSetupAssetId((current) =>
           current === assetId ? null : current,
         );
       }
@@ -1360,7 +1360,7 @@ function ProjectAssetCatalog({
     }
   }
 
-  const data = query.data as ProjectAssetList | undefined;
+  const data = query.data;
   useEffect(() => {
     if (!sourceTouched && data) {
       setSourceFilter(
@@ -1413,11 +1413,11 @@ function ProjectAssetCatalog({
     navigateToSkillVersion(
       readySelection.assetId,
       readySelection.versionId,
-      credentialSetupAssetId === readySelection.assetId,
+      secretSetupAssetId === readySelection.assetId,
       "push",
     );
   }, [
-    credentialSetupAssetId,
+    secretSetupAssetId,
     data,
     importedSkillSelection,
     navigateToSkillVersion,
@@ -1539,8 +1539,8 @@ function ProjectAssetCatalog({
       },
       {
         onError: (error) => {
-          if (kind === "skills" && projectSkillCredentialSetupRequired(error)) {
-            setCredentialSetupAssetId(item.id);
+          if (kind === "skills" && projectSkillSecretSetupRequired(error)) {
+            setSecretSetupAssetId(item.id);
             const currentVersionId = item.current_version_id;
             if (currentVersionId) {
               setCreatedVersions((current) =>
@@ -1570,8 +1570,8 @@ function ProjectAssetCatalog({
         assetId: result.item.id,
         versionId: result.version.id,
       });
-      setCredentialSetupAssetId(
-        projectSkillImportNeedsCredentialSetup(result.version)
+      setSecretSetupAssetId(
+        projectSkillImportNeedsSecretSetup(result.version)
           ? result.item.id
           : null,
       );
@@ -1855,14 +1855,14 @@ function ProjectAssetCatalog({
           renderDetailActions={renderDetailActions}
           renderAssetEditor={renderAssetEditor}
           renderVersion={renderVersion}
-          focusSkillCredentials={credentialSetupAssetId === selectedItem.id}
-          onSkillCredentialsFocused={() =>
-            setCredentialSetupAssetId((current) =>
+          focusSkillSecrets={secretSetupAssetId === selectedItem.id}
+          onSkillSecretsFocused={() =>
+            setSecretSetupAssetId((current) =>
               current === selectedItem.id ? null : current,
             )
           }
-          onSkillCredentialSetupRequired={(versionId) => {
-            setCredentialSetupAssetId(selectedItem.id);
+          onSkillSecretSetupRequired={(versionId) => {
+            setSecretSetupAssetId(selectedItem.id);
             if (!versionId) return;
             setCreatedVersions((current) =>
               rememberRequestedVersion(current, selectedItem.id, versionId),
@@ -2017,7 +2017,7 @@ export function ProjectAssetPageShell({
   headerActions,
   initialSelectedAssetId = null,
   initialSelectedVersionId = null,
-  initialFocusSkillCredentials = false,
+  initialFocusSkillSecrets = false,
   selectionQueryParam,
   selectionDependentQueryParams = [],
   renderList,
@@ -2032,7 +2032,7 @@ export function ProjectAssetPageShell({
   headerActions?: ReactNode;
   initialSelectedAssetId?: string | null;
   initialSelectedVersionId?: string | null;
-  initialFocusSkillCredentials?: boolean;
+  initialFocusSkillSecrets?: boolean;
   selectionQueryParam?: string;
   selectionDependentQueryParams?: readonly string[];
   renderList?: (context: ProjectAssetListRenderContext) => ReactNode;
@@ -2094,7 +2094,7 @@ export function ProjectAssetPageShell({
         createOpen={createOpen}
         initialSelectedAssetId={initialSelectedAssetId}
         initialSelectedVersionId={initialSelectedVersionId}
-        initialFocusSkillCredentials={initialFocusSkillCredentials}
+        initialFocusSkillSecrets={initialFocusSkillSecrets}
         selectionQueryParam={selectionQueryParam}
         selectionDependentQueryParams={selectionDependentQueryParams}
         onCreateOpenChange={setCreateOpen}

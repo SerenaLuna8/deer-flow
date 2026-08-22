@@ -20,7 +20,7 @@ ActWeave 将基础设施进程配置与数据库治理设置明确分开，使�
 ActWeave 使用以下优先级顺序解析 `config.yaml`：
 
 1. 显式传递给 `AppConfig.from_file(config_path)` 的路径。
-2. `DEER_FLOW_CONFIG_PATH` 环境变量。
+2. `ACT_WEAVE_CONFIG_PATH` 环境变量。
 3. 仓库根目录中的 `config.yaml`。
 
 如果这些路径都不存在，应用程序在启动时会报错。
@@ -28,7 +28,7 @@ ActWeave 使用以下优先级顺序解析 `config.yaml`：
 要使用自定义位置：
 
 ```bash
-export DEER_FLOW_CONFIG_PATH=/path/to/my-config.yaml
+export ACT_WEAVE_CONFIG_PATH=/path/to/my-config.yaml
 ```
 
 ## 环境变量插值
@@ -72,10 +72,10 @@ tools:
 ## 模型 provider 设置
 
 平台管理员在 **Admin → 系统设置 → 模型** 中配置 provider adapter、provider
-模型名、能力和有界的 provider 专用 JSON。API key 通过版本化 System Credential
-选择，绝不保存在模型设置或 `config.yaml` 中。
+模型名、能力和有界的 provider 专用 JSON。API Key 直接加密写入所属 Model
+configuration，绝不存入 `config.yaml` 或由 API 返回。
 
-每个 Run 都会固定准入时的精确模型配置和 Credential 版本，因此之后的管理变更不会
+每个 Run 都会固定准入时的精确模型载荷和 Secret Generation，因此之后的管理变更不会
 静默改变已经排队的工作。
 
 ## 配置版本

@@ -13,6 +13,8 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -121,8 +123,8 @@ class McpServerVersionRow(Base):
     )
 
 
-class McpCredentialSlotRow(Base):
-    __tablename__ = "mcp_version_credential_slots"
+class McpSecretSlotRow(Base):
+    __tablename__ = "mcp_version_secret_slots"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("mcp_server_versions.id", ondelete="RESTRICT"), nullable=False)
@@ -132,8 +134,144 @@ class McpCredentialSlotRow(Base):
     required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default=text("true"))
 
     __table_args__ = (
-        UniqueConstraint("mcp_server_version_id", "name", name="uq_mcp_credential_slots_version_name"),
-        UniqueConstraint("mcp_server_version_id", "id", name="uq_mcp_credential_slots_version_id"),
+        UniqueConstraint("mcp_server_version_id", "name", name="uq_mcp_secret_slots_version_name"),
+        UniqueConstraint("mcp_server_version_id", "id", name="uq_mcp_secret_slots_version_id"),
+    )
+
+
+class ProjectMcpSecretStateRow(Base):
+    __tablename__ = "project_mcp_secret_states"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    slot_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    current_generation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    updated_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, onupdate=_now, server_default=text("now()"))
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "project_id",
+            "mcp_server_id",
+            "mcp_server_version_id",
+            "slot_id",
+            name="pk_project_mcp_secret_states",
+        ),
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_project_mcp_secret_states_project", ondelete="CASCADE"),
+        ForeignKeyConstraint(
+            ["mcp_server_id", "mcp_server_version_id"],
+            ["mcp_server_versions.mcp_server_id", "mcp_server_versions.id"],
+            name="fk_project_mcp_secret_states_version",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["mcp_server_version_id", "slot_id"],
+            ["mcp_version_secret_slots.mcp_server_version_id", "mcp_version_secret_slots.id"],
+            name="fk_project_mcp_secret_states_slot",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "mcp_server_id", "mcp_server_version_id", "slot_id", "current_generation_id"],
+            [
+                "project_mcp_secret_generations.project_id",
+                "project_mcp_secret_generations.mcp_server_id",
+                "project_mcp_secret_generations.mcp_server_version_id",
+                "project_mcp_secret_generations.slot_id",
+                "project_mcp_secret_generations.id",
+            ],
+            name="fk_project_mcp_secret_states_current_generation",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(["updated_by_user_id"], ["users.id"], name="fk_project_mcp_secret_states_updater", ondelete="RESTRICT"),
+        CheckConstraint("revision >= 0", name="ck_project_mcp_secret_states_revision"),
+    )
+
+
+class ProjectMcpSecretGenerationRow(Base):
+    __tablename__ = "project_mcp_secret_generations"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    slot_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_project_mcp_secret_generations_project", ondelete="CASCADE"),
+        ForeignKeyConstraint(
+            ["mcp_server_id", "mcp_server_version_id"],
+            ["mcp_server_versions.mcp_server_id", "mcp_server_versions.id"],
+            name="fk_project_mcp_secret_generations_version",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["mcp_server_version_id", "slot_id"],
+            ["mcp_version_secret_slots.mcp_server_version_id", "mcp_version_secret_slots.id"],
+            name="fk_project_mcp_secret_generations_slot",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(["created_by_user_id"], ["users.id"], name="fk_project_mcp_secret_generations_creator", ondelete="RESTRICT"),
+        UniqueConstraint(
+            "project_id",
+            "mcp_server_id",
+            "mcp_server_version_id",
+            "slot_id",
+            "id",
+            name="uq_project_mcp_secret_generations_owner_id",
+        ),
+        UniqueConstraint(
+            "project_id",
+            "mcp_server_id",
+            "mcp_server_version_id",
+            "slot_id",
+            "revision",
+            name="uq_project_mcp_secret_generations_revision",
+        ),
+        CheckConstraint("revision >= 1", name="ck_project_mcp_secret_generations_revision"),
+        CheckConstraint("octet_length(nonce) = 12 AND octet_length(ciphertext) >= 16", name="ck_project_mcp_secret_generations_envelope"),
+        CheckConstraint("envelope_digest ~ '^[0-9a-f]{64}$'", name="ck_project_mcp_secret_generations_digest"),
+    )
+
+
+class ProjectMcpSecretTombstoneRow(Base):
+    __tablename__ = "project_mcp_secret_tombstones"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    mcp_server_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    slot_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    destroyed_generation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    reason: Mapped[str] = mapped_column(String(24), nullable=False)
+    destroyed_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    destroyed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=_now, server_default=text("now()"))
+
+    __table_args__ = (
+        ForeignKeyConstraint(["project_id"], ["projects.id"], name="fk_project_mcp_secret_tombstones_project", ondelete="CASCADE"),
+        ForeignKeyConstraint(["destroyed_by_user_id"], ["users.id"], name="fk_project_mcp_secret_tombstones_actor", ondelete="RESTRICT"),
+        UniqueConstraint(
+            "project_id",
+            "mcp_server_id",
+            "mcp_server_version_id",
+            "slot_id",
+            "destroyed_generation_id",
+            name="uq_project_mcp_secret_tombstones_generation",
+        ),
+        CheckConstraint("revision >= 1", name="ck_project_mcp_secret_tombstones_revision"),
+        CheckConstraint("envelope_digest ~ '^[0-9a-f]{64}$'", name="ck_project_mcp_secret_tombstones_digest"),
+        CheckConstraint("reason IN ('replace', 'clear', 'definition_change', 'version_purge')", name="ck_project_mcp_secret_tombstones_reason"),
     )
 
 
@@ -164,7 +302,7 @@ class McpToolDiscoveryAttemptRow(Base):
     )
     trigger: Mapped[str] = mapped_column(String(16), nullable=False)
     payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    grant_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    secret_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     result_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     public_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     requested_at: Mapped[datetime] = mapped_column(
@@ -202,8 +340,8 @@ class McpToolDiscoveryAttemptRow(Base):
             name="ck_mcp_tool_discovery_attempt_checksum",
         ),
         CheckConstraint(
-            "grant_digest ~ '^[0-9a-f]{64}$'",
-            name="ck_mcp_tool_discovery_attempt_grant_digest",
+            "secret_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_mcp_tool_discovery_attempt_secret_digest",
         ),
         CheckConstraint(
             "result_status IS NULL OR result_status IN ('succeeded', 'failed', 'cancelled')",
@@ -234,7 +372,7 @@ class McpToolDiscoveryAttemptRow(Base):
             "mcp_server_id",
             "mcp_server_version_id",
             "payload_checksum",
-            "grant_digest",
+            "secret_digest",
             requested_at.desc(),
         ),
     )
@@ -263,7 +401,7 @@ class ProjectMcpToolInventoryRow(Base):
     )
     mcp_server_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     attempt_payload_checksum: Mapped[str] = mapped_column(CHAR(64), nullable=False)
-    attempt_grant_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    attempt_secret_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     attempt_status: Mapped[str] = mapped_column(String(16), nullable=False)
     public_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     tools: Mapped[list[dict[str, str]]] = mapped_column(
@@ -273,7 +411,7 @@ class ProjectMcpToolInventoryRow(Base):
         server_default=text("'[]'::jsonb"),
     )
     tools_payload_checksum: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
-    tools_grant_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
+    tools_secret_digest: Mapped[str | None] = mapped_column(CHAR(64), nullable=True)
     last_attempt_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -299,23 +437,23 @@ class ProjectMcpToolInventoryRow(Base):
             name="ck_project_mcp_tool_inventory_attempt_checksum",
         ),
         CheckConstraint(
-            "attempt_grant_digest ~ '^[0-9a-f]{64}$'",
-            name="ck_project_mcp_tool_inventory_attempt_grant_digest",
+            "attempt_secret_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_project_mcp_tool_inventory_attempt_secret_digest",
         ),
         CheckConstraint(
             "tools_payload_checksum IS NULL OR tools_payload_checksum ~ '^[0-9a-f]{64}$'",
             name="ck_project_mcp_tool_inventory_tools_checksum",
         ),
         CheckConstraint(
-            "tools_grant_digest IS NULL OR tools_grant_digest ~ '^[0-9a-f]{64}$'",
-            name="ck_project_mcp_tool_inventory_tools_grant_digest",
+            "tools_secret_digest IS NULL OR tools_secret_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_project_mcp_tool_inventory_tools_secret_digest",
         ),
         CheckConstraint(
             "(attempt_status = 'ready' AND public_error_code IS NULL) OR (attempt_status = 'failed' AND public_error_code IN ('mcp_discovery_unavailable', 'mcp_catalog_invalid'))",
             name="ck_project_mcp_tool_inventory_error",
         ),
         CheckConstraint(
-            "(tools_payload_checksum IS NULL AND tools_grant_digest IS NULL AND last_success_at IS NULL) OR (tools_payload_checksum IS NOT NULL AND tools_grant_digest IS NOT NULL AND last_success_at IS NOT NULL)",
+            "(tools_payload_checksum IS NULL AND tools_secret_digest IS NULL AND last_success_at IS NULL) OR (tools_payload_checksum IS NOT NULL AND tools_secret_digest IS NOT NULL AND last_success_at IS NOT NULL)",
             name="ck_project_mcp_tool_inventory_success_shape",
         ),
         CheckConstraint(

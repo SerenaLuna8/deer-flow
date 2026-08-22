@@ -204,13 +204,13 @@ class PrivateAssetRuntime:
                     run.run_id,
                     lock=True,
                 )
-                grants = await self._snapshots.list_mcp_grants_in_session(
+                mcp_secrets = await self._snapshots.list_mcp_secrets_in_session(
                     session,
                     context,
                     run.run_id,
                     lock=True,
                 )
-                skill_credentials = await self._snapshots.list_skill_credentials_in_session(
+                skill_secrets = await self._snapshots.list_skill_secrets_in_session(
                     session,
                     context,
                     run.run_id,
@@ -293,39 +293,37 @@ class PrivateAssetRuntime:
                     required_mcp_versions.update(delegated.payload.mcp_version_ids)
                 if required_skill_versions != set(skill_by_version) or required_mcp_versions != set(mcp_by_version):
                     raise RunSnapshotAssetStale
-                current_grants = await self._snapshots.current_mcp_grants_in_session(
+                current_mcp_secrets = await self._snapshots.current_mcp_secrets_in_session(
                     session,
                     context,
                     tuple(asset for asset in assets if asset.asset_kind == AssetKind.MCP.value),
                 )
-                persisted_grants = tuple(
+                persisted_mcp_secrets = tuple(
                     sorted(
-                        grants,
+                        mcp_secrets,
                         key=lambda item: (
-                            item.mcp_version_id.int,
-                            item.credential_slot_id.int,
-                            item.credential_grant_id.int,
-                            item.credential_version_id.int,
+                            item.mcp_server_version_id.int,
+                            item.slot_id.int,
+                            item.secret_generation_id.int,
                         ),
                     )
                 )
-                if current_grants != persisted_grants:
+                if current_mcp_secrets != persisted_mcp_secrets:
                     raise RunSnapshotAssetStale
-                persisted_skill_credentials = tuple(
+                persisted_skill_secrets = tuple(
                     sorted(
-                        skill_credentials,
+                        skill_secrets,
                         key=lambda item: (
                             item.skill_version_id.int,
                             item.secret_name,
-                            item.skill_credential_binding_id.int,
-                            item.credential_version_id.int,
+                            item.secret_generation_id.int,
                         ),
                     )
                 )
-                await self._snapshots.lock_admitted_skill_credentials_in_session(
+                await self._snapshots.lock_admitted_skill_secrets_in_session(
                     session,
                     context,
-                    persisted_skill_credentials,
+                    persisted_skill_secrets,
                     declared_targets=frozenset((snapshot.version_id, requirement.name) for snapshot in skill_snapshots for requirement in snapshot.secret_requirements),
                     required_targets=frozenset((snapshot.version_id, requirement.name) for snapshot in skill_snapshots for requirement in snapshot.secret_requirements if not requirement.optional),
                 )

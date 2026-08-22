@@ -1,6 +1,6 @@
 """Closed runtime profiles for governed chat-model construction and invocation.
 
-Provider adapters remain the sole owners of wire protocols and Credential use.
+Provider adapters remain the sole owners of wire protocols and model-owned API Key use.
 This module chooses the platform-owned call profile, delegates construction to
 the shared factory, and provides one cancellation/deadline boundary around the
 adapter invocation.

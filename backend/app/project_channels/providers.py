@@ -36,15 +36,15 @@ class ChannelProviderSpec:
     display_name: str
     public_fields: tuple[str, ...]
     required_public_fields: tuple[str, ...]
-    credential_fields: tuple[str, ...]
-    credential_env: Mapping[str, str]
+    secret_fields: tuple[str, ...]
+    secret_env: Mapping[str, str]
 
 
 @dataclass(frozen=True)
 class NormalizedChannelConfiguration:
     provider: str
     public_config: dict[str, str]
-    credential_payload: dict[str, dict[str, str]] | None
+    secret_payload: dict[str, str] | None
 
 
 def _spec(
@@ -52,16 +52,16 @@ def _spec(
     display_name: str,
     public_fields: tuple[str, ...],
     required_public_fields: tuple[str, ...],
-    credential_fields: tuple[str, ...],
-    credential_env: dict[str, str],
+    secret_fields: tuple[str, ...],
+    secret_env: dict[str, str],
 ) -> ChannelProviderSpec:
     return ChannelProviderSpec(
         provider=provider,
         display_name=display_name,
         public_fields=public_fields,
         required_public_fields=required_public_fields,
-        credential_fields=credential_fields,
-        credential_env=MappingProxyType(dict(credential_env)),
+        secret_fields=secret_fields,
+        secret_env=MappingProxyType(dict(secret_env)),
     )
 
 
@@ -138,8 +138,8 @@ def validate_channel_configuration(
     provider: str,
     *,
     public_config: object,
-    credentials: object,
-    has_existing_credential: bool,
+    secrets: object,
+    has_existing_secret: bool,
     request_id: str,
 ) -> NormalizedChannelConfiguration:
     spec = CHANNEL_PROVIDER_SPECS.get(provider)
@@ -149,14 +149,14 @@ def validate_channel_configuration(
             "This channel provider is not supported.",
             fields=("provider",),
         )
-    if not isinstance(public_config, Mapping) or not isinstance(credentials, Mapping):
+    if not isinstance(public_config, Mapping) or not isinstance(secrets, Mapping):
         raise ChannelInstanceValidationFailed(
             request_id,
             f"{spec.display_name} configuration is invalid.",
         )
     if _unsupported_fields(public_config, spec.public_fields) or _unsupported_fields(
-        credentials,
-        spec.credential_fields,
+        secrets,
+        spec.secret_fields,
     ):
         raise ChannelInstanceValidationFailed(
             request_id,
@@ -185,16 +185,16 @@ def validate_channel_configuration(
         assert isinstance(value, str)
         normalized_public[field] = value.strip()
 
-    normalized_credentials: dict[str, str] = {}
-    if credentials:
-        for field in spec.credential_fields:
-            value = credentials.get(field)
+    normalized_secrets: dict[str, str] = {}
+    if secrets:
+        for field in spec.secret_fields:
+            value = secrets.get(field)
             if not isinstance(value, str) or not value or len(value) > _MAX_SECRET_LENGTH or "\x00" in value:
-                missing_fields.append(f"credentials.{field}")
+                missing_fields.append(f"secrets.{field}")
                 continue
-            normalized_credentials[field] = value
-    elif not has_existing_credential:
-        missing_fields.extend(f"credentials.{field}" for field in spec.credential_fields)
+            normalized_secrets[field] = value
+    elif not has_existing_secret:
+        missing_fields.extend(f"secrets.{field}" for field in spec.secret_fields)
 
     if missing_fields:
         labels = " and ".join(
@@ -217,12 +217,12 @@ def validate_channel_configuration(
         )
 
     payload = None
-    if normalized_credentials:
-        payload = {"env": {spec.credential_env[field]: normalized_credentials[field] for field in spec.credential_fields}}
+    if normalized_secrets:
+        payload = dict(normalized_secrets)
     return NormalizedChannelConfiguration(
         provider=provider,
         public_config=normalized_public,
-        credential_payload=payload,
+        secret_payload=payload,
     )
 
 

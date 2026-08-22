@@ -288,7 +288,7 @@ class VisionBridgePolicy(_PolicyModel):
     """Frozen selection for the text-model Vision Bridge.
 
     A non-null ``model_name`` is the enablement signal.  Provider, endpoint,
-    credential and prompt details remain outside this policy and are resolved
+    secret and prompt details remain outside this policy and are resolved
     through the exact System Model snapshot admitted for the Run.
     """
 
@@ -405,7 +405,7 @@ CATALOG_DEFAULT_MODEL_REF = "default"
 DEFAULT_VISION_BRIDGE_MODEL_NAME = str(
     uuid.uuid5(
         uuid.UUID("e9ef2794-807b-5d89-967c-c67be15b42e7"),
-        "gpt-5.6-luna:model",
+        "deepseek-v4-flash-vision-exp:model",
     )
 )
 

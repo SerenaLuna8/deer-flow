@@ -13,7 +13,7 @@ from contextvars import ContextVar, Token
 from typing import Final
 
 TRACE_ID_HEADER: Final[str] = "X-Trace-Id"
-DEERFLOW_TRACE_METADATA_KEY: Final[str] = "deerflow_trace_id"
+ACT_WEAVE_TRACE_METADATA_KEY: Final[str] = "deerflow_trace_id"
 _MAX_TRACE_ID_LENGTH: Final[int] = 512
 
 _current_trace_id: Final[ContextVar[str | None]] = ContextVar("deerflow_current_trace_id", default=None)

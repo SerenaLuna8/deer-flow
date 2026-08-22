@@ -54,6 +54,7 @@ from app.system_runtime_settings.validation import (
 )
 from app.system_settings.validation import (
     is_provider_adapter_eligible_for_new_binding,
+    provider_api_key_required,
 )
 from deerflow.persistence.system_runtime_settings import (
     RunRuntimePolicySnapshotRow,
@@ -61,7 +62,6 @@ from deerflow.persistence.system_runtime_settings import (
 )
 from deerflow.persistence.system_settings import (
     SystemModelConfigRow,
-    SystemModelConfigVersionRow,
 )
 from deerflow.persistence.user.model import UserRow
 
@@ -252,12 +252,9 @@ class SystemRuntimePolicyService:
                         await repository.session.execute(
                             select(
                                 SystemModelConfigRow.id,
-                                SystemModelConfigVersionRow.provider_adapter,
-                                SystemModelConfigVersionRow.supports_vision,
-                            )
-                            .join(
-                                SystemModelConfigVersionRow,
-                                (SystemModelConfigVersionRow.model_config_id == SystemModelConfigRow.id) & (SystemModelConfigVersionRow.id == SystemModelConfigRow.current_version_id),
+                                SystemModelConfigRow.provider_adapter,
+                                SystemModelConfigRow.supports_vision,
+                                SystemModelConfigRow.current_secret_generation_id,
                             )
                             .where(
                                 SystemModelConfigRow.status == "active",
@@ -265,10 +262,7 @@ class SystemRuntimePolicyService:
                             )
                             .with_for_update(
                                 read=True,
-                                of=(
-                                    SystemModelConfigRow,
-                                    SystemModelConfigVersionRow,
-                                ),
+                                of=SystemModelConfigRow,
                             )
                         )
                     ).all()
@@ -278,6 +272,7 @@ class SystemRuntimePolicyService:
                     not is_provider_adapter_eligible_for_new_binding(
                         row.provider_adapter,
                     )
+                    or (provider_api_key_required(row.provider_adapter) and row.current_secret_generation_id is None)
                     for row in active_models
                 ):
                     raise SystemRuntimePolicyInvalid(actor.request_id)

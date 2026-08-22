@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
-AUTH_DISABLED_ENV_VAR = "DEER_FLOW_AUTH_DISABLED"
+AUTH_DISABLED_ENV_VAR = "ACT_WEAVE_AUTH_DISABLED"
 AUTH_DISABLED_USER_ID = DEFAULT_USER_ID
 AUTH_DISABLED_USER_EMAIL = "default@test.local"
 AUTH_DISABLED_USER_USERNAME = "default"
@@ -17,7 +17,7 @@ AUTH_SOURCE_SESSION = "session"
 AUTH_SOURCE_INTERNAL = "internal"
 AUTH_SOURCE_AUTH_DISABLED = "auth_disabled"
 
-_PRODUCTION_ENV_VARS: tuple[str, ...] = ("DEER_FLOW_ENV", "ENVIRONMENT")
+_PRODUCTION_ENV_VARS: tuple[str, ...] = ("ACT_WEAVE_ENV", "ENVIRONMENT")
 _PRODUCTION_ENV_VALUES: frozenset[str] = frozenset({"prod", "production"})
 
 logger = logging.getLogger(__name__)

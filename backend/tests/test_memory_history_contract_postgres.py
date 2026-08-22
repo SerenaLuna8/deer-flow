@@ -33,7 +33,6 @@ def _tool_history(seed, *, prompt_version: str) -> MemoryHistoryEntryRow:
         content_digest=hashlib.sha256(tagged_text.encode()).hexdigest(),
         preference_version=1,
         snip_prompt_version=prompt_version,
-        summary_model_ref=None,
     )
 
 

@@ -109,7 +109,6 @@ from deerflow.persistence.system_runtime_settings import (
 from deerflow.persistence.system_settings import (
     RunModelConfigSnapshotRow,
     SystemModelConfigRow,
-    SystemModelConfigVersionRow,
 )
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.user.model import UserRow
@@ -3879,7 +3878,6 @@ class _AtomicContinuationAdmission:
         agent_id: uuid.UUID,
         agent_version_id: uuid.UUID,
         model_config_id: uuid.UUID,
-        model_config_version_id: uuid.UUID,
         model_payload_checksum: str,
         runtime_policy_version_id: uuid.UUID,
         runtime_policy_schema_version: int,
@@ -3893,7 +3891,6 @@ class _AtomicContinuationAdmission:
         self._agent_id = agent_id
         self._agent_version_id = agent_version_id
         self._model_config_id = model_config_id
-        self._model_config_version_id = model_config_version_id
         self._model_payload_checksum = model_payload_checksum
         self._runtime_policy_version_id = runtime_policy_version_id
         self._runtime_policy_schema_version = runtime_policy_schema_version
@@ -3974,11 +3971,10 @@ class _AtomicContinuationAdmission:
                         run_id=request.run_id,
                         purpose="chat",
                         model_config_id=self._model_config_id,
-                        model_config_version_id=self._model_config_version_id,
+                        provider_payload={"model_ref": str(self._model_config_id)},
                         payload_checksum=self._model_payload_checksum,
-                        credential_id=None,
-                        credential_version_id=None,
-                        credential_env_key=None,
+                        secret_generation_id=None,
+                        secret_envelope_digest=None,
                     ),
                 )
                 session.add(
@@ -4037,8 +4033,6 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
     worker_id = uuid.uuid4()
     agent_version_id = uuid.uuid4()
     model_config_id = uuid.uuid4()
-    model_config_version_id = uuid.uuid4()
-    drifted_model_config_version_id = uuid.uuid4()
     model_payload_checksum = "b" * 64
     drifted_model_payload_checksum = "c" * 64
     drifted_runtime_policy_version_id = uuid.uuid4()
@@ -4116,52 +4110,21 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 id=model_config_id,
                 display_name="Test model",
                 status="active",
-                current_version_id=None,
+                provider_adapter="openai",
+                provider_model="test-model",
+                settings={},
+                supports_thinking=False,
+                supports_reasoning_effort=False,
+                supports_vision=False,
+                payload_checksum=model_payload_checksum,
+                current_secret_generation_id=None,
+                secret_revision=0,
                 revision=1,
                 created_by_user_id=str(owner_id),
                 updated_by_user_id=str(owner_id),
             )
             session.add(model_config)
             await session.flush()
-            session.add(
-                SystemModelConfigVersionRow(
-                    id=model_config_version_id,
-                    model_config_id=model_config_id,
-                    version_number=1,
-                    provider_adapter="openai_compatible",
-                    provider_model="test-model",
-                    settings={},
-                    supports_thinking=False,
-                    supports_reasoning_effort=False,
-                    supports_vision=False,
-                    credential_id=None,
-                    credential_version_id=None,
-                    credential_env_key=None,
-                    payload_checksum=model_payload_checksum,
-                    supersedes_version_id=None,
-                    created_by_user_id=str(owner_id),
-                ),
-            )
-            await session.flush()
-            session.add(
-                SystemModelConfigVersionRow(
-                    id=drifted_model_config_version_id,
-                    model_config_id=model_config_id,
-                    version_number=2,
-                    provider_adapter="openai_compatible",
-                    provider_model="test-model-v2",
-                    settings={},
-                    supports_thinking=False,
-                    supports_reasoning_effort=False,
-                    supports_vision=False,
-                    credential_id=None,
-                    credential_version_id=None,
-                    credential_env_key=None,
-                    payload_checksum=drifted_model_payload_checksum,
-                    supersedes_version_id=model_config_version_id,
-                    created_by_user_id=str(owner_id),
-                ),
-            )
             session.add(
                 SystemRuntimePolicyVersionRow(
                     id=drifted_runtime_policy_version_id,
@@ -4175,7 +4138,6 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                 ),
             )
             await session.flush()
-            model_config.current_version_id = model_config_version_id
             session.add(
                 ThreadMetaRow(
                     thread_id=thread_id,
@@ -4233,11 +4195,10 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
                     run_id=source_run_id,
                     purpose="chat",
                     model_config_id=model_config_id,
-                    model_config_version_id=model_config_version_id,
+                    provider_payload={"model_ref": str(model_config_id)},
                     payload_checksum=model_payload_checksum,
-                    credential_id=None,
-                    credential_version_id=None,
-                    credential_env_key=None,
+                    secret_generation_id=None,
+                    secret_envelope_digest=None,
                 ),
             )
             session.add(
@@ -4352,7 +4313,6 @@ async def test_local_host_execution_approval_is_consumed_once_with_receipt(
             agent_id=agent_id,
             agent_version_id=agent_version_id,
             model_config_id=model_config_id,
-            model_config_version_id=(drifted_model_config_version_id if snapshot_drift == "model" else model_config_version_id),
             model_payload_checksum=(drifted_model_payload_checksum if snapshot_drift == "model" else model_payload_checksum),
             runtime_policy_version_id=(drifted_runtime_policy_version_id if snapshot_drift == "runtime" else runtime_policy_version.id),
             runtime_policy_schema_version=runtime_policy_version.schema_version,

@@ -15,8 +15,8 @@ from types import MappingProxyType
 from app.quotas.models import QuotaSourceRef
 from deerflow.persistence.jobs.sql import JobOwnerRef
 
-_ACTIVE_KEY_ID_ENV = "DEER_FLOW_AUDIT_ACTIVE_KEY_ID"
-_KEYRING_JSON_ENV = "DEER_FLOW_AUDIT_KEYRING_JSON"
+_ACTIVE_KEY_ID_ENV = "ACT_WEAVE_AUDIT_ACTIVE_KEY_ID"
+_KEYRING_JSON_ENV = "ACT_WEAVE_AUDIT_KEYRING_JSON"
 _KEY_BYTES = 32
 _KEY_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,63}")
 _JOB_OWNER_DOMAIN = b"deerflow.m6.job-owner-ref.v1\x00"

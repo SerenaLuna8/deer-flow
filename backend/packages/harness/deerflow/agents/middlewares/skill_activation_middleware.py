@@ -478,7 +478,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                     sources.append((slash_skill.name, posixpath.normpath(slash_path), tuple(slash_skill.required_secrets), True))
 
         if callable(private_provider):
-            # Private Skill Credential values are deliberately absent during
+            # Private Skill secret values are deliberately absent during
             # model calls.  Persist only the validated name/path activation plan
             # so the async bash boundary can select values from a freshly
             # revalidated one-command carrier.
@@ -529,7 +529,7 @@ Follow this skill before choosing a general workflow. Load supporting resources 
                 # A flat subprocess env cannot safely represent two active
                 # autonomous Skills that claim the same name with different
                 # (or partially missing) scoped bindings. Drop that name rather
-                # than expose one Skill's Credential to another.
+                # than expose one Skill's secret to another.
                 conflicts[secret_name] = skill_names
                 continue
             if all_supplied and supplied_values:

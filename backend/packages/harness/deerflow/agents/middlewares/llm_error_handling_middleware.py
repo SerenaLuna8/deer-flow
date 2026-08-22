@@ -247,7 +247,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "current_upload"
 
         # Proxy authentication is an egress transport failure, not evidence
-        # that the model Credential itself is invalid. Handle it before any
+        # that the model-owned API Key itself is invalid. Handle it before any
         # provider authentication classification.
         if status_code == 407 or exception_names & _TRANSPORT_EXCEPTION_NAMES:
             return True, "transient"

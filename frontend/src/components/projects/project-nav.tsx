@@ -7,7 +7,6 @@ import {
   CableIcon,
   CalendarClockIcon,
   FolderKanbanIcon,
-  KeyRoundIcon,
   MessagesSquareIcon,
   MenuIcon,
   NetworkIcon,
@@ -186,14 +185,6 @@ export function projectNavigationItems(
       href: `${base}/connections`,
       icon: CableIcon,
       label: "渠道连接",
-      section: "management",
-    });
-  }
-  if (project.capabilities.includes("mcp.credentials.approve")) {
-    items.push({
-      href: `${base}/credentials`,
-      icon: KeyRoundIcon,
-      label: "项目凭证",
       section: "management",
     });
   }

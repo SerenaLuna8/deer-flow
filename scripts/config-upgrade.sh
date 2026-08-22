@@ -12,13 +12,13 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 EXAMPLE="$REPO_ROOT/config.example.yaml"
 
 # Resolve config.yaml location: explicit environment path > repository root.
-if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
-    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+if [ -n "${ACT_WEAVE_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$ACT_WEAVE_CONFIG_PATH" ]; then
+        echo "✗ ACT_WEAVE_CONFIG_PATH does not name a file: $ACT_WEAVE_CONFIG_PATH"
         exit 1
     fi
-    CONFIG_DIR="$(cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" && pwd -P)"
-    CONFIG="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
+    CONFIG_DIR="$(cd "$(dirname "$ACT_WEAVE_CONFIG_PATH")" && pwd -P)"
+    CONFIG="$CONFIG_DIR/$(basename "$ACT_WEAVE_CONFIG_PATH")"
 else
     CONFIG="$REPO_ROOT/config.yaml"
 fi
@@ -31,7 +31,7 @@ fi
 if [ ! -f "$CONFIG" ]; then
     echo "No config.yaml found — creating from example..."
     cp "$EXAMPLE" "$REPO_ROOT/config.yaml"
-    echo "OK config.yaml created. Review the process settings, then configure models and Credentials at /admin/settings/models after startup."
+    echo "OK config.yaml created. Review the process settings, then configure models and API keys at /admin/settings/models after startup."
     exit 0
 fi
 

@@ -65,28 +65,24 @@ from app.shared_assets import (
     AssetValidationFailed,
     BindingService,
     CreateAgent,
-    CreateCredential,
     CreateMcpServer,
-    CredentialService,
-    McpCredentialSlot,
     McpDefinition,
+    McpSecretSlot,
     McpService,
     ProjectDefaultAgentService,
     SharedAssetError,
     SkillArchiveFile,
     SkillArchiveLimitExceeded,
     SkillAssetRef,
-    SkillCredentialBindingInput,
-    SkillCredentialBindingInvalid,
-    SkillCredentialBindingService,
-    SkillCredentialBindingsIncomplete,
-    SkillCredentialSelectionStale,
     SkillDesignNoChanges,
     SkillDesignTargetDeleted,
     SkillDesignTargetSessionExists,
     SkillDesignTargetUnsupported,
     SkillFileChange,
     SkillRuntimeNameConflict,
+    SkillSecretConfigurationInvalid,
+    SkillSecretRevisionStale,
+    SkillSecretsIncomplete,
     SkillService,
     VersionRelation,
     WorkflowStatus,
@@ -96,13 +92,12 @@ from app.shared_assets.agent_catalog import (
     StaticToolGroupCatalog,
 )
 from app.shared_assets.contexts import SystemAssetReadContext, resolve_asset_reader
+from app.shared_assets.mcp_secret_service import McpSecretService
 from app.shared_assets.skill_archive import MAX_SKILL_ARCHIVE_UPLOAD_BYTES
+from app.shared_assets.skill_secret_service import SkillSecretService
 from app.shared_assets.skill_service import (
     MAX_SKILL_ARCHIVE_BYTES,
     MAX_SKILL_ARCHIVE_FILES,
-)
-from app.system_settings.credential_migration import (
-    SystemModelCredentialMigrationAdapter,
 )
 from deerflow.config.app_config import AppConfig
 from deerflow.mcp_definition_policy import NetworkMcpEndpointPolicy
@@ -223,25 +218,6 @@ class ProjectCurrentVersionSkillItemResponse(
     description: str
 
 
-class CredentialItemResponse(_StrictModel):
-    id: uuid.UUID
-    scope: AssetScope
-    project_id: uuid.UUID | None
-    name: str
-    display_name: str
-    credential_type: str
-    status: str
-    current_version_id: uuid.UUID | None
-    version: int
-    created_by_user_id: str
-    created_at: datetime
-    updated_at: datetime
-
-
-class ProjectCredentialItemResponse(CredentialItemResponse):
-    capabilities: list[Capability]
-
-
 class ScopedAssetListResponse(_StrictModel):
     system_items: list[ProjectAssetItemResponse]
     project_items: list[ProjectAssetItemResponse]
@@ -263,12 +239,6 @@ class ScopedCurrentVersionAssetListResponse(_StrictModel):
 class ScopedCurrentVersionSkillAssetListResponse(_StrictModel):
     system_items: list[ProjectCurrentVersionSkillItemResponse]
     project_items: list[ProjectCurrentVersionSkillItemResponse]
-    request_id: str
-
-
-class ScopedCredentialListResponse(_StrictModel):
-    system_items: list[ProjectCredentialItemResponse]
-    project_items: list[ProjectCredentialItemResponse]
     request_id: str
 
 
@@ -301,11 +271,6 @@ class AssetMutationResponse(_StrictModel):
 
 class CurrentVersionAssetMutationResponse(_StrictModel):
     item: CurrentVersionAssetItemResponse
-    request_id: str
-
-
-class CredentialMutationResponse(_StrictModel):
-    item: CredentialItemResponse
     request_id: str
 
 
@@ -359,7 +324,7 @@ class SkillActivationRequest(ExpectedRevisionRequest):
     expected_payload_checksum: str = Field(
         pattern=r"^[0-9a-f]{64}$",
     )
-    expected_binding_revision: int = Field(ge=0)
+    expected_secret_revision: int = Field(ge=0)
 
 
 class ProjectDefaultAgentRequest(_StrictModel):
@@ -558,7 +523,7 @@ class McpVersionRequest(_StrictModel):
     routing: dict[str, Any] = Field(default_factory=dict)
     tool_overrides: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
-    credential_slots: list[McpSlotRequest] = Field(default_factory=list)
+    secret_slots: list[McpSlotRequest] = Field(default_factory=list)
     expected_asset_version: int = Field(ge=1)
 
 
@@ -576,41 +541,15 @@ class McpConfiguredRequest(_StrictModel):
     routing: dict[str, Any] = Field(default_factory=dict)
     tool_overrides: dict[str, Any] = Field(default_factory=dict)
     timeout_seconds: int = 30
-    credential_slots: list[McpSlotRequest] = Field(default_factory=list)
+    secret_slots: list[McpSlotRequest] = Field(default_factory=list)
 
 
-class McpApproveRequest(_StrictModel):
-    credential_versions: dict[str, uuid.UUID]
-    expected_asset_version: int = Field(ge=1)
+class McpSecretReplaceRequest(_StrictModel):
+    payload: dict[str, dict[str, str]] = Field(repr=False)
 
 
-class SystemMcpCredentialGrantRequest(_StrictModel):
-    credential_versions: dict[str, uuid.UUID]
-    expected_active_grant_versions: dict[str, int] = Field(default_factory=dict)
-
-
-class CredentialCreateRequest(_StrictModel):
-    name: str
-    display_name: str
-    credential_type: str
-    payload: dict[str, dict[str, str]]
-
-
-class CredentialReplaceRequest(_StrictModel):
-    payload: dict[str, dict[str, str]]
-    expected_credential_version: int = Field(ge=1)
-
-
-class CredentialRevokeRequest(_StrictModel):
-    expected_credential_version: int = Field(ge=1)
-
-
-class CredentialDeleteRequest(_StrictModel):
-    expected_credential_version: int = Field(ge=1)
-
-
-class CredentialGrantMigrationRequest(_StrictModel):
-    expected_credential_version: int = Field(ge=1)
+class McpSecretClearRequest(_StrictModel):
+    confirmed: Literal[True]
 
 
 class AgentVersionItemResponse(_StrictModel):
@@ -640,39 +579,26 @@ class SkillSecretRequirementResponse(_StrictModel):
     optional: bool
 
 
-class EligibleSkillCredentialResponse(_StrictModel):
-    credential_id: uuid.UUID
-    credential_version_id: uuid.UUID
-    display_name: str
-    version_number: int
-    env_fields: list[str]
-
-
-class SkillCredentialRequirementResponse(_StrictModel):
+class SkillSecretStatusResponse(_StrictModel):
     name: str
     optional: bool
     configured: bool
-    mapping_status: Literal["missing", "configured", "invalid"]
-    credential_id: uuid.UUID | None
-    credential_version_id: uuid.UUID | None
-    credential_display_name: str | None
-    credential_version_number: int | None
-    source_env_field_name: str | None
-    eligible_credentials: list[EligibleSkillCredentialResponse]
+    revision: int = Field(ge=0)
 
 
-class SkillCredentialBindingSetResponse(_StrictModel):
+class SkillSecretSetResponse(_StrictModel):
     skill_id: uuid.UUID
     skill_version_id: uuid.UUID
     revision: int = Field(ge=0)
-    requirements: list[SkillCredentialRequirementResponse]
+    readiness: Literal["ready", "unready"]
+    requirements: list[SkillSecretStatusResponse]
     request_id: str
 
 
-class SkillCredentialReadinessRequirementResponse(_StrictModel):
+class SkillSecretReadinessRequirementResponse(_StrictModel):
     name: str
     optional: bool
-    mapping_status: Literal["missing", "configured", "invalid"]
+    configured: bool
 
 
 class SkillActivationReadinessResponse(_StrictModel):
@@ -680,36 +606,26 @@ class SkillActivationReadinessResponse(_StrictModel):
     skill_version_id: uuid.UUID
     revision: int = Field(ge=1)
     payload_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
-    binding_revision: int = Field(ge=0)
+    secret_revision: int = Field(ge=0)
     secrets_autonomous: bool
     ready: bool
     required_count: int = Field(ge=0)
     configured_required_count: int = Field(ge=0)
-    invalid_count: int = Field(ge=0)
-    requirements: list[SkillCredentialReadinessRequirementResponse]
+    requirements: list[SkillSecretReadinessRequirementResponse]
     request_id: str
 
 
-class SkillCredentialBindingRequest(_StrictModel):
-    name: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$", max_length=255)
-    credential_version_id: uuid.UUID
-    source_env_field_name: str = Field(
-        min_length=1,
-        max_length=255,
-    )
-
-
-class SkillCredentialBindingReplaceRequest(_StrictModel):
+class SkillSecretReplaceRequest(_StrictModel):
     expected_skill_version_id: uuid.UUID
-    expected_revision: int = Field(ge=0)
-    bindings: list[SkillCredentialBindingRequest] = Field(
-        max_length=256,
-    )
+    secrets: dict[str, str] = Field(max_length=256, repr=False)
 
 
-class SkillCredentialExactBindingReplaceRequest(_StrictModel):
-    expected_revision: int = Field(ge=0)
-    bindings: list[SkillCredentialBindingRequest] = Field(max_length=256)
+class SkillSecretExactReplaceRequest(_StrictModel):
+    secrets: dict[str, str] = Field(max_length=256, repr=False)
+
+
+class SkillSecretClearRequest(_StrictModel):
+    confirmed: Literal[True]
 
 
 class SkillFileResponse(_StrictModel):
@@ -774,10 +690,10 @@ class McpDefinitionResponse(_StrictModel):
     routing: dict[str, Any]
     tool_overrides: dict[str, Any]
     timeout_seconds: int
-    credential_slots: list[McpDefinitionSlotResponse]
+    secret_slots: list[McpDefinitionSlotResponse]
 
 
-class McpCredentialSlotResponse(_StrictModel):
+class McpSecretSlotResponse(_StrictModel):
     id: uuid.UUID
     name: str
     purpose: str
@@ -785,15 +701,18 @@ class McpCredentialSlotResponse(_StrictModel):
     required: bool
 
 
-class CredentialGrantResponse(_StrictModel):
-    id: uuid.UUID
+class McpSecretSlotStatusResponse(McpSecretSlotResponse):
+    configured: bool
+    revision: int = Field(ge=0)
+
+
+class McpSecretSetResponse(_StrictModel):
+    mcp_server_id: uuid.UUID
     mcp_server_version_id: uuid.UUID
-    credential_slot_id: uuid.UUID
-    credential_version_id: uuid.UUID
-    status: Literal["active", "revoked"]
-    version: int
-    created_by_user_id: str
-    created_at: datetime
+    revision: int = Field(ge=0)
+    readiness: Literal["ready", "unready"]
+    slots: list[McpSecretSlotStatusResponse]
+    request_id: str
 
 
 class McpVersionItemResponse(_StrictModel):
@@ -802,8 +721,7 @@ class McpVersionItemResponse(_StrictModel):
     version_number: int
     workflow_status: WorkflowStatus
     definition: McpDefinitionResponse
-    credential_slots: list[McpCredentialSlotResponse]
-    credential_grants: list[CredentialGrantResponse]
+    secret_slots: list[McpSecretSlotResponse]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
     submitted_at: datetime | None
@@ -811,26 +729,6 @@ class McpVersionItemResponse(_StrictModel):
     reviewed_by_user_id: str | None
     created_by_user_id: str
     created_at: datetime
-
-
-class CredentialVersionItemResponse(_StrictModel):
-    id: uuid.UUID
-    credential_id: uuid.UUID
-    version_number: int
-    status: Literal["active", "retired", "revoked"]
-    payload_schema_version: int
-    payload_schema: dict[str, list[str]]
-    supersedes_version_id: uuid.UUID | None
-    created_by_user_id: str
-    created_at: datetime
-
-
-class CredentialGrantMigrationResponse(_StrictModel):
-    credential_id: uuid.UUID
-    credential_version_id: uuid.UUID
-    migrated_count: int = Field(ge=0)
-    migrated_model_count: int = Field(ge=0)
-    request_id: str
 
 
 class AgentVersionResponse(_StrictModel):
@@ -868,50 +766,6 @@ class McpVersionResponse(_StrictModel):
 class McpConfiguredResponse(_StrictModel):
     item: AssetItemResponse
     version: McpVersionItemResponse
-    request_id: str
-
-
-class CredentialMigrationReferenceResponse(_StrictModel):
-    kind: Literal["skill_binding", "mcp_grant", "system_model"]
-    display_name: str
-    version_number: int = Field(ge=1)
-    reference_name: str
-    source_name: str | None = None
-
-
-class CredentialPendingMigrationResponse(_StrictModel):
-    total: int = Field(ge=0)
-    mcp_grant_count: int = Field(ge=0)
-    skill_binding_count: int = Field(ge=0)
-    system_model_count: int = Field(ge=0)
-    references: list[CredentialMigrationReferenceResponse]
-    current_reference_count: int = Field(ge=0)
-    current_references: list[CredentialMigrationReferenceResponse]
-
-
-class CredentialMigrationStatusResponse(_StrictModel):
-    data: CredentialPendingMigrationResponse | None
-    request_id: str
-
-
-def _credential_pending_migration_response(
-    pending,
-) -> CredentialPendingMigrationResponse:
-    return CredentialPendingMigrationResponse(
-        total=pending.total,
-        mcp_grant_count=pending.mcp_grant_count,
-        skill_binding_count=pending.skill_binding_count,
-        system_model_count=pending.system_model_count,
-        references=[CredentialMigrationReferenceResponse(**vars(reference)) for reference in pending.references],
-        current_reference_count=pending.current_reference_count,
-        current_references=[CredentialMigrationReferenceResponse(**vars(reference)) for reference in pending.current_references],
-    )
-
-
-class CredentialVersionResponse(_StrictModel):
-    data: CredentialVersionItemResponse
-    # Null when the pending count is not derivable, never a silent zero.
-    pending_migration: CredentialPendingMigrationResponse | None
     request_id: str
 
 
@@ -983,11 +837,6 @@ class McpToolDiscoveryAttemptResponse(_StrictModel):
     request_id: str
 
 
-class CredentialVersionHistoryResponse(_StrictModel):
-    data: list[CredentialVersionItemResponse]
-    request_id: str
-
-
 ASSET_ERRORS = (
     AssetNotFound,
     AssetForbidden,
@@ -1001,9 +850,9 @@ ASSET_ERRORS = (
     SkillDesignTargetSessionExists,
     SkillDesignTargetDeleted,
     SkillDesignNoChanges,
-    SkillCredentialBindingInvalid,
-    SkillCredentialBindingsIncomplete,
-    SkillCredentialSelectionStale,
+    SkillSecretConfigurationInvalid,
+    SkillSecretRevisionStale,
+    SkillSecretsIncomplete,
     SkillRuntimeNameConflict,
     AgentDesignSecretDetected,
     AgentDesignSessionLimitExceeded,
@@ -1028,9 +877,9 @@ def raise_asset_domain(exc: SharedAssetError, request_id: str | None = None) -> 
         SkillDesignTargetSessionExists: 409,
         SkillDesignTargetDeleted: 409,
         SkillDesignNoChanges: 409,
-        SkillCredentialBindingInvalid: 422,
-        SkillCredentialBindingsIncomplete: 422,
-        SkillCredentialSelectionStale: 409,
+        SkillSecretConfigurationInvalid: 422,
+        SkillSecretsIncomplete: 422,
+        SkillSecretRevisionStale: 409,
         SkillRuntimeNameConflict: 409,
         AgentDesignSecretDetected: 422,
         AgentDesignSessionLimitExceeded: 429,
@@ -1176,11 +1025,10 @@ def get_mcp_service(request: Request) -> McpService:
     )
 
 
-def get_credential_service(request: Request) -> CredentialService:
-    return CredentialService(
+def get_mcp_secret_service(request: Request) -> McpSecretService:
+    return McpSecretService(
         _factory(),
         governance_sink=_governance_sink(request),
-        system_models=SystemModelCredentialMigrationAdapter(),
     )
 
 
@@ -1197,10 +1045,10 @@ def get_project_default_agent_service(
     )
 
 
-def get_skill_credential_binding_service(
+def get_skill_secret_service(
     request: Request,
-) -> SkillCredentialBindingService:
-    return SkillCredentialBindingService(
+) -> SkillSecretService:
+    return SkillSecretService(
         _factory(),
         governance_sink=_governance_sink(request),
     )
@@ -1215,10 +1063,6 @@ def _current_version_asset_item(view) -> CurrentVersionAssetItemResponse:
         view,
         from_attributes=True,
     )
-
-
-def _credential_item(view) -> CredentialItemResponse:
-    return CredentialItemResponse.model_validate(view, from_attributes=True)
 
 
 async def _list_system_catalog(
@@ -1325,18 +1169,6 @@ def _asset_item_capabilities(
     }
     if scope is AssetScope.PROJECT:
         allowed.add(Capability.SHARED_ASSETS_EDIT)
-        if kind in {AssetKind.MCP, AssetKind.SKILL}:
-            allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
-    return sorted(context.capabilities & allowed, key=str)
-
-
-def _credential_item_capabilities(
-    context: ProjectContext,
-    scope: AssetScope,
-) -> list[Capability]:
-    allowed = {Capability.SHARED_ASSETS_READ}
-    if scope is AssetScope.PROJECT:
-        allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
     return sorted(context.capabilities & allowed, key=str)
 
 
@@ -1524,8 +1356,7 @@ def _response_data(
             # Historical versions may contain values that were labelled
             # "non-secret" at authoring time. Arbitrary values cannot be
             # classified reliably, so public API responses expose only the
-            # Credential-slot schema and never replay persisted env/header
-            # values.
+            # Secret-slot schema and never replay persisted env/header values.
             response["env"] = {}
             response["headers"] = {}
             if redact_project_mcp:
@@ -1620,14 +1451,14 @@ def _mcp_definition(body: McpVersionRequest | McpConfiguredRequest) -> McpDefini
         routing=dict(body.routing),
         tool_overrides=dict(body.tool_overrides),
         timeout_seconds=body.timeout_seconds,
-        credential_slots=tuple(
-            McpCredentialSlot(
+        secret_slots=tuple(
+            McpSecretSlot(
                 name=slot.name,
                 purpose=slot.purpose,
                 payload_schema={key: tuple(values) for key, values in slot.payload_schema.items()},
                 required=slot.required,
             )
-            for slot in body.credential_slots
+            for slot in body.secret_slots
         ),
     )
 
@@ -1764,7 +1595,7 @@ def register_asset_routes(
                 version_id,
                 expected_asset_version=body.expected_revision,
                 expected_payload_checksum=body.expected_payload_checksum,
-                expected_binding_revision=body.expected_binding_revision,
+                expected_secret_revision=body.expected_secret_revision,
             ),
             SkillVersionResponse,
         )
@@ -1809,9 +1640,6 @@ def register_asset_routes(
     async def submit_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: ExpectedAssetVersionRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
         return await _version_call(actor, lambda: service.submit_approval(actor, asset_id, version_id, expected_asset_version=body.expected_asset_version), McpVersionResponse)
 
-    async def approve_mcp(asset_id: uuid.UUID, version_id: uuid.UUID, body: McpApproveRequest, actor=Depends(actor_dependency), service=Depends(get_mcp_service)):
-        return await _version_call(actor, lambda: service.approve(actor, asset_id, version_id, body.credential_versions, expected_asset_version=body.expected_asset_version), McpVersionResponse)
-
     def add_status_route(
         segment: str,
         action: Literal["activate", "archive", "enable", "suspend"],
@@ -1846,74 +1674,6 @@ def register_asset_routes(
             response_model=(CurrentVersionAssetMutationResponse if current_contract else AssetMutationResponse),
             name=f"{action}_{segment}",
         )
-
-    async def create_credential(body: CredentialCreateRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            view = await service.create(actor, CreateCredential(body.name, body.display_name, body.credential_type), body.payload)
-            return CredentialMutationResponse(item=_credential_item(view), request_id=actor.request_id)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-
-    async def get_credential(credential_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            view = await service.get(actor, credential_id)
-            return CredentialMutationResponse(item=_credential_item(view), request_id=actor.request_id)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-
-    async def get_credential_versions(credential_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        return await _version_history(actor, lambda: service.get_version_history(actor, credential_id), CredentialVersionHistoryResponse)
-
-    async def replace_credential(credential_id: uuid.UUID, body: CredentialReplaceRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            result = await service.replace(actor, credential_id, body.payload, expected_credential_version=body.expected_credential_version)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-        pending = result.pending_migration
-        return CredentialVersionResponse(
-            data=_response_data(result.version, redact_project_mcp=_is_project_asset_actor(actor)),
-            pending_migration=(_credential_pending_migration_response(pending) if pending is not None else None),
-            request_id=actor.request_id,
-        )
-
-    async def revoke_credential(credential_id: uuid.UUID, body: CredentialRevokeRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            view = await service.revoke(actor, credential_id, expected_credential_version=body.expected_credential_version)
-            return CredentialMutationResponse(item=_credential_item(view), request_id=actor.request_id)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-
-    async def delete_credential(credential_id: uuid.UUID, body: CredentialDeleteRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            await service.delete(
-                actor,
-                credential_id,
-                expected_credential_version=body.expected_credential_version,
-            )
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    async def migrate_credential_grants(credential_id: uuid.UUID, body: CredentialGrantMigrationRequest, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            view = await service.migrate_grants(
-                actor,
-                credential_id,
-                expected_credential_version=body.expected_credential_version,
-            )
-            return CredentialGrantMigrationResponse(**vars(view), request_id=actor.request_id)
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
-
-    async def get_credential_migration_status(credential_id: uuid.UUID, actor=Depends(actor_dependency), service=Depends(get_credential_service)):
-        try:
-            pending = await service.migration_status(actor, credential_id)
-            return CredentialMigrationStatusResponse(
-                data=(_credential_pending_migration_response(pending) if pending is not None else None),
-                request_id=actor.request_id,
-            )
-        except ASSET_ERRORS as exc:
-            raise_asset_domain(exc)
 
     async def export_skill_version(
         asset_id: uuid.UUID,
@@ -1968,19 +1728,8 @@ def register_asset_routes(
         ("/mcp-servers/{asset_id}/versions", create_mcp_version, ["POST"], McpVersionResponse, 201),
         ("/mcp-servers/{asset_id}/versions/{version_id}/publish", publish_mcp, ["POST"], McpVersionResponse, 200),
         ("/mcp-servers/{asset_id}/versions/{version_id}/submit-approval", submit_mcp, ["POST"], McpVersionResponse, 200),
-        ("/mcp-servers/{asset_id}/versions/{version_id}/approve", approve_mcp, ["POST"], McpVersionResponse, 200),
     )
-    credential_routes = (
-        ("/credentials", create_credential, ["POST"], CredentialMutationResponse, 201),
-        ("/credentials/{credential_id}", get_credential, ["GET"], CredentialMutationResponse, 200),
-        ("/credentials/{credential_id}/versions", get_credential_versions, ["GET"], CredentialVersionHistoryResponse, 200),
-        ("/credentials/{credential_id}/replace", replace_credential, ["POST"], CredentialVersionResponse, 200),
-        ("/credentials/{credential_id}/revoke", revoke_credential, ["POST"], CredentialMutationResponse, 200),
-        ("/credentials/{credential_id}/migration-status", get_credential_migration_status, ["GET"], CredentialMigrationStatusResponse, 200),
-        ("/credentials/{credential_id}/migrate-grants", migrate_credential_grants, ["POST"], CredentialGrantMigrationResponse, 200),
-        ("/credentials/{credential_id}", delete_credential, ["DELETE"], None, status.HTTP_204_NO_CONTENT),
-    )
-    routes = (*read_routes, *credential_routes)
+    routes = read_routes
     if include_shared_asset_mutations:
         routes = (*routes, *shared_asset_write_routes)
     for path, endpoint, methods, response_model, code in routes:
@@ -2124,11 +1873,11 @@ async def import_project_skill_archive(
         raise_asset_domain(exc)
 
 
-def _skill_credential_binding_response(
+def _skill_secret_response(
     value,
     request_id: str,
-) -> SkillCredentialBindingSetResponse:
-    return SkillCredentialBindingSetResponse(
+) -> SkillSecretSetResponse:
+    return SkillSecretSetResponse(
         **_response_data(value),
         request_id=request_id,
     )
@@ -2144,8 +1893,8 @@ async def get_project_skill_activation_readiness(
     response: Response,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[
-        SkillCredentialBindingService,
-        Depends(get_skill_credential_binding_service),
+        SkillSecretService,
+        Depends(get_skill_secret_service),
     ],
 ):
     try:
@@ -2161,24 +1910,24 @@ async def get_project_skill_activation_readiness(
 
 
 @project_router.get(
-    "/skills/{skill_id}/versions/{version_id}/credential-bindings",
-    response_model=SkillCredentialBindingSetResponse,
+    "/skills/{skill_id}/versions/{version_id}/secrets",
+    response_model=SkillSecretSetResponse,
 )
-async def get_project_skill_version_credential_bindings(
+async def get_project_skill_version_secrets(
     skill_id: uuid.UUID,
     version_id: uuid.UUID,
     response: Response,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[
-        SkillCredentialBindingService,
-        Depends(get_skill_credential_binding_service),
+        SkillSecretService,
+        Depends(get_skill_secret_service),
     ],
 ):
     try:
         value = await service.get_exact(context, skill_id, version_id)
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        return _skill_credential_binding_response(
+        return _skill_secret_response(
             value,
             context.request_id,
         )
@@ -2187,18 +1936,18 @@ async def get_project_skill_version_credential_bindings(
 
 
 @project_router.put(
-    "/skills/{skill_id}/versions/{version_id}/credential-bindings",
-    response_model=SkillCredentialBindingSetResponse,
+    "/skills/{skill_id}/versions/{version_id}/secrets",
+    response_model=SkillSecretSetResponse,
 )
-async def replace_project_skill_version_credential_bindings(
+async def replace_project_skill_version_secrets(
     skill_id: uuid.UUID,
     version_id: uuid.UUID,
-    body: SkillCredentialExactBindingReplaceRequest,
+    body: SkillSecretExactReplaceRequest,
     response: Response,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[
-        SkillCredentialBindingService,
-        Depends(get_skill_credential_binding_service),
+        SkillSecretService,
+        Depends(get_skill_secret_service),
     ],
 ):
     try:
@@ -2206,19 +1955,11 @@ async def replace_project_skill_version_credential_bindings(
             context,
             skill_id,
             version_id,
-            tuple(
-                SkillCredentialBindingInput(
-                    item.name,
-                    item.credential_version_id,
-                    item.source_env_field_name,
-                )
-                for item in body.bindings
-            ),
-            expected_revision=body.expected_revision,
+            body.secrets,
         )
         response.headers["Cache-Control"] = "private, no-store"
         response.headers["X-Content-Type-Options"] = "nosniff"
-        return _skill_credential_binding_response(
+        return _skill_secret_response(
             value,
             context.request_id,
         )
@@ -2227,19 +1968,19 @@ async def replace_project_skill_version_credential_bindings(
 
 
 @project_router.get(
-    "/skills/{skill_id}/credential-bindings",
-    response_model=SkillCredentialBindingSetResponse,
+    "/skills/{skill_id}/secrets",
+    response_model=SkillSecretSetResponse,
 )
-async def get_project_skill_credential_bindings(
+async def get_project_skill_secrets(
     skill_id: uuid.UUID,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[
-        SkillCredentialBindingService,
-        Depends(get_skill_credential_binding_service),
+        SkillSecretService,
+        Depends(get_skill_secret_service),
     ],
 ):
     try:
-        return _skill_credential_binding_response(
+        return _skill_secret_response(
             await service.get(context, skill_id),
             context.request_id,
         )
@@ -2248,36 +1989,56 @@ async def get_project_skill_credential_bindings(
 
 
 @project_router.put(
-    "/skills/{skill_id}/credential-bindings",
-    response_model=SkillCredentialBindingSetResponse,
+    "/skills/{skill_id}/secrets",
+    response_model=SkillSecretSetResponse,
 )
-async def replace_project_skill_credential_bindings(
+async def replace_project_skill_secrets(
     skill_id: uuid.UUID,
-    body: SkillCredentialBindingReplaceRequest,
+    body: SkillSecretReplaceRequest,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
     service: Annotated[
-        SkillCredentialBindingService,
-        Depends(get_skill_credential_binding_service),
+        SkillSecretService,
+        Depends(get_skill_secret_service),
     ],
 ):
     try:
-        return _skill_credential_binding_response(
+        return _skill_secret_response(
             await service.replace(
                 context,
                 skill_id,
-                tuple(
-                    SkillCredentialBindingInput(
-                        item.name,
-                        item.credential_version_id,
-                        item.source_env_field_name,
-                    )
-                    for item in body.bindings
-                ),
+                body.secrets,
                 expected_skill_version_id=body.expected_skill_version_id,
-                expected_revision=body.expected_revision,
             ),
             context.request_id,
         )
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.post(
+    "/skills/{skill_id}/versions/{version_id}/secrets/{secret_name}/clear",
+    response_model=SkillSecretSetResponse,
+)
+async def clear_project_skill_version_secret(
+    skill_id: uuid.UUID,
+    version_id: uuid.UUID,
+    secret_name: str,
+    body: SkillSecretClearRequest,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[SkillSecretService, Depends(get_skill_secret_service)],
+):
+    try:
+        value = await service.clear(
+            context,
+            skill_id,
+            version_id,
+            secret_name,
+            confirmed=body.confirmed,
+        )
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        return _skill_secret_response(value, context.request_id)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 
@@ -2453,24 +2214,91 @@ async def get_project_configured_mcp(
         raise_asset_domain(exc)
 
 
-@project_router.get("/credentials", response_model=ScopedCredentialListResponse)
-async def list_project_credentials(
+def _mcp_secret_response(value: object, request_id: str) -> McpSecretSetResponse:
+    return McpSecretSetResponse.model_validate(
+        {
+            "mcp_server_id": getattr(value, "mcp_server_id"),
+            "mcp_server_version_id": getattr(value, "mcp_server_version_id"),
+            "revision": getattr(value, "revision"),
+            "readiness": getattr(value, "readiness"),
+            "slots": [vars(slot) for slot in getattr(value, "slots")],
+            "request_id": request_id,
+        }
+    )
+
+
+@project_router.get(
+    "/mcp-servers/{asset_id}/versions/{version_id}/secrets",
+    response_model=McpSecretSetResponse,
+)
+async def get_project_mcp_secrets(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    response: Response,
     context: Annotated[ProjectContext, Depends(project_asset_context)],
-    service: Annotated[CredentialService, Depends(get_credential_service)],
+    service: Annotated[McpSecretService, Depends(get_mcp_secret_service)],
 ):
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
     try:
-        items = [
-            ProjectCredentialItemResponse(
-                **vars(view),
-                capabilities=_credential_item_capabilities(context, view.scope),
-            )
-            for view in await service.list_visible(context)
-        ]
-        return ScopedCredentialListResponse(
-            system_items=[item for item in items if item.scope is AssetScope.SYSTEM],
-            project_items=[item for item in items if item.scope is AssetScope.PROJECT],
-            request_id=context.request_id,
+        value = await service.get(context, asset_id, version_id)
+        return _mcp_secret_response(value, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.put(
+    "/mcp-servers/{asset_id}/versions/{version_id}/secrets/{slot_name}",
+    response_model=McpSecretSetResponse,
+)
+async def replace_project_mcp_secret(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    slot_name: str,
+    body: McpSecretReplaceRequest,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpSecretService, Depends(get_mcp_secret_service)],
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    try:
+        value = await service.replace(
+            context,
+            asset_id,
+            version_id,
+            slot_name,
+            body.payload,
         )
+        return _mcp_secret_response(value, context.request_id)
+    except ASSET_ERRORS as exc:
+        raise_asset_domain(exc)
+
+
+@project_router.post(
+    "/mcp-servers/{asset_id}/versions/{version_id}/secrets/{slot_name}/clear",
+    response_model=McpSecretSetResponse,
+)
+async def clear_project_mcp_secret(
+    asset_id: uuid.UUID,
+    version_id: uuid.UUID,
+    slot_name: str,
+    body: McpSecretClearRequest,
+    response: Response,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service: Annotated[McpSecretService, Depends(get_mcp_secret_service)],
+):
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    try:
+        value = await service.clear(
+            context,
+            asset_id,
+            version_id,
+            slot_name,
+            confirmed=body.confirmed,
+        )
+        return _mcp_secret_response(value, context.request_id)
     except ASSET_ERRORS as exc:
         raise_asset_domain(exc)
 

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.memory_contract.common import MemoryDocumentScope
 
 BUDGET_REWRITE_HISTORY_DIGEST = hashlib.sha256(b"deerflow.dream.budget_rewrite.empty.v1").hexdigest()
@@ -66,9 +67,7 @@ class MemoryBudgetRewriteScopePage:
 class MemoryDreamFrozenRuntime:
     preference_version: int
     policy_revision: int
-    model_config_id: uuid.UUID
-    model_version_id: uuid.UUID
-    model_payload_checksum: str
+    model_execution: FrozenSystemModelExecution
     prompt_version: str
 
     def __post_init__(self) -> None:
@@ -77,10 +76,10 @@ class MemoryDreamFrozenRuntime:
             or self.preference_version < 1
             or type(self.policy_revision) is not int
             or self.policy_revision < 1
-            or not isinstance(self.model_config_id, uuid.UUID)
-            or not isinstance(self.model_version_id, uuid.UUID)
-            or not isinstance(self.model_payload_checksum, str)
-            or len(self.model_payload_checksum) != 64
+            or not isinstance(
+                self.model_execution,
+                FrozenSystemModelExecution,
+            )
             or not isinstance(self.prompt_version, str)
             or not self.prompt_version
             or len(self.prompt_version) > 64
@@ -123,9 +122,7 @@ class MemoryDreamWork:
     sections_policy_version_id: uuid.UUID
     preference_version: int
     policy_revision: int
-    model_config_id: uuid.UUID
-    model_version_id: uuid.UUID
-    model_payload_checksum: str
+    model_execution: FrozenSystemModelExecution
     prompt_version: str
     result_version: int | None
     cancel_requested: bool

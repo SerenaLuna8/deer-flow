@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy import select, text
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from support.system_model_seed import seed_system_model_config
 
 from app.audit.models import resolve_system_audit_context
 from app.audit.service import AuditService
@@ -36,9 +37,9 @@ from deerflow.persistence.system_runtime_settings import (
 
 @pytest.fixture(autouse=True)
 def _audit_hmac_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEER_FLOW_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
+    monkeypatch.setenv("ACT_WEAVE_AUDIT_ACTIVE_KEY_ID", "test-audit-v1")
     monkeypatch.setenv(
-        "DEER_FLOW_AUDIT_KEYRING_JSON",
+        "ACT_WEAVE_AUDIT_KEYRING_JSON",
         '{"test-audit-v1":"YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE="}',
     )
 
@@ -325,9 +326,7 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin_id = uuid.uuid4()
     compatible_model_id = uuid.uuid4()
-    compatible_version_id = uuid.uuid4()
     incompatible_model_id = uuid.uuid4()
-    incompatible_version_id = uuid.uuid4()
     compatible_name = str(compatible_model_id)
     incompatible_name = str(incompatible_model_id)
     try:
@@ -344,64 +343,31 @@ async def test_postgres_vision_bridge_policy_requires_compatible_active_model(
                     "email": f"{admin_id}@example.com",
                 },
             )
-            for model_id, version_id, name, adapter, checksum in (
+            for model_id, name, adapter, checksum in (
                 (
                     compatible_model_id,
-                    compatible_version_id,
                     compatible_name,
-                    "openai",
+                    "vision_bridge_fake",
                     "d" * 64,
                 ),
                 (
                     incompatible_model_id,
-                    incompatible_version_id,
                     incompatible_name,
                     "vision_openai_compatible_v1",
                     "e" * 64,
                 ),
             ):
-                await connection.execute(
-                    text(
-                        """INSERT INTO system_model_configs
-                        (id,display_name,status,
-                         current_version_id,revision,
-                         created_by_user_id,updated_by_user_id)
-                        VALUES (:id,:name,'active',NULL,1,
-                                :owner,:owner)"""
-                    ),
-                    {
-                        "id": model_id,
-                        "name": name,
-                        "owner": str(admin_id),
+                await seed_system_model_config(
+                    connection,
+                    model_id=model_id,
+                    owner_user_id=str(admin_id),
+                    display_name=name,
+                    provider_model=name,
+                    provider_adapter=adapter,
+                    supports_vision=True,
+                    settings={
+                        "base_url": "https://vision.example.test/v1",
                     },
-                )
-                await connection.execute(
-                    text(
-                        """INSERT INTO system_model_config_versions
-                        (id,model_config_id,version_number,provider_adapter,
-                         provider_model,settings,supports_thinking,
-                         supports_reasoning_effort,supports_vision,credential_id,
-                         credential_version_id,credential_env_key,payload_checksum,
-                         supersedes_version_id,created_by_user_id)
-                        VALUES (:version,:model,1,:adapter,:name,
-                                '{"base_url":"https://vision.example.test/v1"}'::jsonb,
-                                false,false,true,NULL,NULL,NULL,:checksum,NULL,:owner)"""
-                    ),
-                    {
-                        "version": version_id,
-                        "model": model_id,
-                        "adapter": adapter,
-                        "name": name,
-                        "checksum": checksum,
-                        "owner": str(admin_id),
-                    },
-                )
-                await connection.execute(
-                    text(
-                        """UPDATE system_model_configs
-                        SET current_version_id=:version WHERE id=:model"""
-                    ),
-                    {"version": version_id, "model": model_id},
                 )
 
         audit = AuditService(factory, AuditHmacKeyring.from_environment())

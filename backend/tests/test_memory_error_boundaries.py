@@ -228,7 +228,7 @@ async def test_durable_executor_maps_memory_authority_unavailable_to_existing_re
         owner_user_id=str(context.user_id),
         namespace="default",
         preference_version=1,
-        summary_model_ref=None,
+        summary_model=None,
     )
 
     async def memory_archive_context(*_args, **_kwargs):
@@ -244,7 +244,7 @@ async def test_durable_executor_maps_memory_authority_unavailable_to_existing_re
         run=run,
         snapshot=PersistedRunSnapshot(
             assets=(),
-            mcp_grants=(),
+            mcp_secrets=(),
             catalog_generation=1,
         ),
         checkpoint_namespace="",

@@ -29,6 +29,7 @@ from app.system_runtime_settings.models import (
     MemoryDocumentPolicy,
     MemoryPolicy,
 )
+from app.system_settings.models import LockedSystemModelMaterial
 from deerflow.agents.memory.dream import (
     DEFAULT_MEMORY_DOCUMENT_SECTION_TITLES,
     EMPTY_MEMORY_DOCUMENT,
@@ -40,6 +41,7 @@ from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamAdmissionRecord,
     MemoryEpisodeCursorInvalid,
 )
+from deerflow.persistence.system_settings import SystemModelConfigRow
 
 NOW = datetime(2026, 8, 5, 1, 2, 3, tzinfo=UTC)
 SECTIONS_POLICY_VERSION_ID = uuid.UUID("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
@@ -174,11 +176,23 @@ def _runtime():
             max_injection_tokens=3_000,
         )
     )
-    model = SimpleNamespace(
-        model=SimpleNamespace(id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")),
-        version=SimpleNamespace(
-            id=uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"),
+    model = LockedSystemModelMaterial(
+        model=SystemModelConfigRow(
+            id=uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            display_name="Dream model",
+            status="active",
+            provider_adapter="vision_bridge_fake",
+            provider_model="dream-test",
+            settings={},
+            supports_thinking=False,
+            supports_reasoning_effort=False,
+            supports_vision=False,
             payload_checksum="c" * 64,
+            current_secret_generation_id=None,
+            secret_revision=0,
+            revision=1,
+            created_by_user_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            updated_by_user_id="eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
         ),
     )
     return policy, 23, model
@@ -362,8 +376,8 @@ async def test_platform_runtime_freezes_one_locked_policy_pointer_and_model_vers
         def __init__(self, session) -> None:
             self.session = session
 
-        async def resolve_active_model(self, model_ref, *, load_envelope):
-            calls.append((self.session, model_ref, load_envelope))
+        async def resolve_active_model(self, model_ref, *, load_secret):
+            calls.append((self.session, model_ref, load_secret))
             return _runtime()[2]
 
     monkeypatch.setattr(
@@ -391,12 +405,12 @@ async def test_platform_runtime_freezes_one_locked_policy_pointer_and_model_vers
 
     assert policy == _runtime()[0]
     assert revision == 23
-    assert model == _runtime()[2]
+    assert model.model.id == _runtime()[2].model.id
     assert creation_policy == _creation_policy()
     assert calls == [
         (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
         (session, "memory_document", True),
-        (session, DREAM_MODEL_REF, False),
+        (session, DREAM_MODEL_REF, True),
     ]
 
 
@@ -417,8 +431,8 @@ async def test_platform_runtime_does_not_read_current_document_policy_for_existi
         def __init__(self, session) -> None:
             self.session = session
 
-        async def resolve_active_model(self, model_ref, *, load_envelope):
-            calls.append((self.session, model_ref, load_envelope))
+        async def resolve_active_model(self, model_ref, *, load_secret):
+            calls.append((self.session, model_ref, load_secret))
             return _runtime()[2]
 
     monkeypatch.setattr(
@@ -439,11 +453,13 @@ async def test_platform_runtime_does_not_read_current_document_policy_for_existi
         create_document=False,
     )
 
-    assert (policy, revision, model) == _runtime()
+    expected_policy, expected_revision, expected_model = _runtime()
+    assert (policy, revision) == (expected_policy, expected_revision)
+    assert model.model.id == expected_model.model.id
     assert creation_policy is None
     assert calls == [
         (session, service_module.RuntimePolicySection.AGENT_RUNTIME, True),
-        (session, DREAM_MODEL_REF, False),
+        (session, DREAM_MODEL_REF, True),
     ]
 
 
@@ -472,9 +488,9 @@ async def test_manual_admission_freezes_exact_four_field_runtime_and_model(
     frozen = kwargs["frozen"]
     assert frozen.preference_version == 8
     assert frozen.policy_revision == 23
-    assert frozen.model_config_id == _runtime()[2].model.id
-    assert frozen.model_version_id == _runtime()[2].version.id
-    assert frozen.model_payload_checksum == "c" * 64
+    assert frozen.model_execution.model_config_id == _runtime()[2].model.id
+    assert frozen.model_execution.payload_checksum == "c" * 64
+    assert frozen.model_execution.secret_generation_id is None
     assert kwargs["initial_content"] is None
     assert kwargs["initial_sections"] is None
     assert kwargs["sections_policy_version_id"] is None
@@ -637,8 +653,8 @@ async def test_scheduler_discovers_without_row_locks_then_uses_one_transaction_p
         def __init__(self, session: Session) -> None:
             self.session = session
 
-        async def resolve_active_model(self, _model_ref, *, load_envelope):
-            assert load_envelope is False
+        async def resolve_active_model(self, _model_ref, *, load_secret):
+            assert load_secret is True
             events.append(("model", self.session.identity))
             return _runtime()[2]
 

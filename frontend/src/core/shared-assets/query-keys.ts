@@ -54,7 +54,7 @@ export function adminProjectAssetKey(
 
 export function systemCatalogKey(
   accountId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: AssetListKind,
 ) {
   return [
     ...sharedAssetKeys.account(accountId),
@@ -142,53 +142,6 @@ export function adminProjectAssetVersionsKey(
   ] as const;
 }
 
-export function adminCredentialMigrationStatusKey(
-  accountId: string,
-  credentialId: string,
-  credentialVersionId: string,
-) {
-  return [
-    ...adminAssetKey(accountId, "credentials"),
-    "asset",
-    assetIdSchema.parse(credentialId),
-    "version",
-    assetIdSchema.parse(credentialVersionId),
-    "migration-status",
-  ] as const;
-}
-
-export function adminProjectCredentialMigrationStatusKey(
-  accountId: string,
-  projectId: string,
-  credentialId: string,
-  credentialVersionId: string,
-) {
-  return [
-    ...adminProjectAssetKey(accountId, projectId, "credentials"),
-    "asset",
-    assetIdSchema.parse(credentialId),
-    "version",
-    assetIdSchema.parse(credentialVersionId),
-    "migration-status",
-  ] as const;
-}
-
-export function projectCredentialMigrationStatusKey(
-  accountId: string,
-  projectId: string,
-  credentialId: string,
-  credentialVersionId: string,
-) {
-  return [
-    ...projectAssetKey(accountId, projectId, "credentials"),
-    "asset",
-    assetIdSchema.parse(credentialId),
-    "version",
-    assetIdSchema.parse(credentialVersionId),
-    "migration-status",
-  ] as const;
-}
-
 export function projectAssetVersionsKey(
   accountId: string,
   projectId: string,
@@ -251,7 +204,7 @@ export function projectMcpEditableConfigurationKey(
   ] as const;
 }
 
-export function projectSkillCredentialBindingsKey(
+export function projectSkillSecretsKey(
   accountId: string,
   projectId: string,
   skillId: string,
@@ -266,18 +219,18 @@ export function projectSkillCredentialBindingsKey(
     ),
     "version",
     assetIdSchema.parse(versionId),
-    "credential-bindings",
+    "secrets",
   ] as const;
 }
 
-export function projectSkillCredentialBindingsMutationKey(
+export function projectSkillSecretsMutationKey(
   accountId: string,
   projectId: string,
   skillId: string,
   versionId: string,
 ) {
   return [
-    ...projectSkillCredentialBindingsKey(
+    ...projectSkillSecretsKey(
       accountId,
       projectId,
       skillId,
@@ -285,6 +238,20 @@ export function projectSkillCredentialBindingsMutationKey(
     ),
     "mutation",
     "replace",
+  ] as const;
+}
+
+export function projectMcpSecretsKey(
+  accountId: string,
+  projectId: string,
+  assetId: string,
+  versionId: string,
+) {
+  return [
+    ...projectAssetVersionsKey(accountId, projectId, "mcp-servers", assetId),
+    "version",
+    assetIdSchema.parse(versionId),
+    "secrets",
   ] as const;
 }
 

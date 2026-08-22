@@ -83,7 +83,7 @@ function describe(
             `${file.path} · ${file.size_bytes} B · ${file.media_type} · ${file.sha256}`,
         )
         .join("\n"),
-      [copy.credentialRequirements]: version.secret_requirements
+      [copy.secretRequirements]: version.secret_requirements
         .map(
           (item) =>
             `${item.name}（${item.optional ? copy.optional : copy.required}）`,
@@ -100,7 +100,7 @@ function describe(
       [copy.url]: value(version.definition.url),
       [copy.arguments]: list(version.definition.args, separator),
       [copy.timeout]: copy.seconds(version.definition.timeout_seconds),
-      [copy.credentialSlots]: version.credential_slots
+      [copy.secretSlots]: version.secret_slots
         .map(
           (slot) =>
             `${slot.name}（${slot.required ? copy.required : copy.optional}） · ${slot.purpose || copy.noDescription}`,
@@ -108,13 +108,7 @@ function describe(
         .join("\n"),
     };
   }
-  return {
-    [copy.status]: statuses[version.status],
-    [copy.payloadSchemaVersion]: String(version.payload_schema_version),
-    [copy.payloadFields]: Object.entries(version.payload_schema)
-      .map(([group, fields]) => `${group}: ${fields.join(separator)}`)
-      .join("\n"),
-  };
+  return {};
 }
 
 function diffRows(

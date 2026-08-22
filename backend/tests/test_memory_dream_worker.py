@@ -22,6 +22,7 @@ from deerflow.agents.memory.dream import (
     render_empty_memory_document,
     validate_memory_document,
 )
+from deerflow.config.model_execution import FrozenSystemModelExecution
 from deerflow.persistence.jobs.sql import JobClaim, JobScope
 from deerflow.persistence.private_work.memory_document_repository import (
     MemoryDreamHistoryRecord,
@@ -115,37 +116,11 @@ class _Personalization:
 
 class _ModelMaterializer:
     def __init__(self) -> None:
-        self.exact: list[dict[str, object]] = []
+        self.frozen: list[FrozenSystemModelExecution] = []
 
-    async def materialize_exact(self, **kwargs):
-        self.exact.append(kwargs)
+    async def materialize_frozen(self, execution):
+        self.frozen.append(execution)
         return SimpleNamespace(name=DREAM_MODEL_REF)
-
-
-class _CurrentModelRepository:
-    def __init__(
-        self,
-        work: MemoryDreamWork,
-        *,
-        version_id: uuid.UUID | None = None,
-        error: Exception | None = None,
-    ) -> None:
-        self.work = work
-        self.version_id = version_id or work.model_version_id
-        self.error = error
-
-    async def resolve_active_model(self, model_ref, *, load_envelope: bool):
-        if self.error is not None:
-            raise self.error
-        assert model_ref == DREAM_MODEL_REF
-        assert load_envelope is False
-        return SimpleNamespace(
-            model=SimpleNamespace(id=self.work.model_config_id),
-            version=SimpleNamespace(
-                id=self.version_id,
-                payload_checksum=self.work.model_payload_checksum,
-            ),
-        )
 
 
 class _PolicyMaterializer:
@@ -305,9 +280,17 @@ def _work() -> MemoryDreamWork:
         sections_policy_version_id=uuid.UUID("99999999-9999-4999-8999-999999999999"),
         preference_version=6,
         policy_revision=17,
-        model_config_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
-        model_version_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
-        model_payload_checksum="a" * 64,
+        model_execution=FrozenSystemModelExecution(
+            model_config_id=uuid.UUID("66666666-6666-4666-8666-666666666666"),
+            provider_payload={
+                "name": DREAM_MODEL_REF,
+                "provider_adapter": "deepseek",
+                "model": "deepseek-v4-flash",
+            },
+            payload_checksum="a" * 64,
+            secret_generation_id=uuid.UUID("77777777-7777-4777-8777-777777777777"),
+            secret_envelope_digest="b" * 64,
+        ),
         prompt_version=DREAM_PROMPT_VERSION,
         result_version=None,
         cancel_requested=False,
@@ -323,9 +306,7 @@ def _handler(
     runner: _Runner,
     preference: AccountMemoryPreference | None = None,
     current_policy_revision: int = 17,
-    current_model_version_id: uuid.UUID | None = None,
     current_policy_error: Exception | None = None,
-    current_model_error: Exception | None = None,
     audit: _Audit | None = None,
 ):
     policy = AgentRuntimePolicyValue(
@@ -353,11 +334,6 @@ def _handler(
                 session=session,
             ),
             job_repository_builder=lambda _session: object(),
-            model_repository_builder=lambda _session: _CurrentModelRepository(
-                state.work,
-                version_id=current_model_version_id,
-                error=current_model_error,
-            ),
             scope_validator=lambda *_args, **_kwargs: _async_true(),
             personalization_repository_builder=lambda _session: _Personalization(preference or AccountMemoryPreference(True, 6)),
             audit=audit,
@@ -392,13 +368,7 @@ async def test_dream_worker_waits_without_db_lock_then_atomically_finalizes() ->
     assert isinstance(settlement, JobSettlement)
     assert settlement.outcome.status == "succeeded"
     assert not state.finalized
-    assert model_materializer.exact == [
-        {
-            "model_config_id": state.work.model_config_id,
-            "model_config_version_id": state.work.model_version_id,
-            "payload_checksum": state.work.model_payload_checksum,
-        }
-    ]
+    assert model_materializer.frozen == [state.work.model_execution]
     await settlement.commit()
     await settlement.commit()
     assert len(state.finalized) == 1
@@ -702,7 +672,7 @@ async def test_success_commit_policy_drift_persists_cancellation_not_version() -
 
 
 @pytest.mark.asyncio
-async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> None:
+async def test_success_commit_does_not_recheck_the_current_model() -> None:
     factory = _SessionFactory()
     state = _RepositoryState(_work())
     runner = _Runner(
@@ -716,7 +686,6 @@ async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> N
         factory=factory,
         state=state,
         runner=runner,
-        current_model_version_id=uuid.UUID("88888888-8888-4888-8888-888888888888"),
     )
 
     settlement = await handler(_claim(), _Authority())
@@ -724,9 +693,8 @@ async def test_success_commit_current_model_drift_cancels_the_frozen_work() -> N
     assert isinstance(settlement, JobSettlement)
     assert settlement.outcome.status == "succeeded"
     await settlement.commit()
-    assert not state.finalized
-    assert len(state.released) == 1
-    assert state.released[0]["cancelled"] is True
+    assert len(state.finalized) == 1
+    assert not state.released
 
 
 @pytest.mark.asyncio
@@ -758,38 +726,6 @@ async def test_success_commit_policy_unavailable_rolls_back_then_retries() -> No
     assert state.released[0]["public_error_code"] == "MEMORY_DREAM_POLICY_UNAVAILABLE"
     assert factory.opened == 3
     assert factory.transaction_exits[0] is None
-    assert factory.transaction_exits[1] is not None
-    assert factory.transaction_exits[2] is None
-
-
-@pytest.mark.asyncio
-async def test_success_commit_model_lookup_failure_rolls_back_then_retries() -> None:
-    factory = _SessionFactory()
-    state = _RepositoryState(_work())
-    runner = _Runner(
-        factory,
-        result=MemoryDreamResult(
-            content=EMPTY_MEMORY_DOCUMENT,
-            replaced=True,
-        ),
-    )
-    handler, _materializer = _handler(
-        factory=factory,
-        state=state,
-        runner=runner,
-        current_model_error=RuntimeError("model catalog unavailable"),
-    )
-
-    settlement = await handler(_claim(), _Authority())
-    assert isinstance(settlement, JobSettlement)
-
-    await settlement.commit()
-
-    assert not state.finalized
-    assert len(state.released) == 1
-    assert state.released[0]["cancelled"] is False
-    assert state.released[0]["public_error_code"] == "MEMORY_DREAM_MODEL_UNAVAILABLE"
-    assert factory.opened == 3
     assert factory.transaction_exits[1] is not None
     assert factory.transaction_exits[2] is None
 
@@ -1082,14 +1018,6 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
             events.append("policy")
             return self.policy, self.current_revision
 
-    class Models(_CurrentModelRepository):
-        async def resolve_active_model(self, model_ref, *, load_envelope: bool):
-            events.append("model")
-            return await super().resolve_active_model(
-                model_ref,
-                load_envelope=load_envelope,
-            )
-
     class Personalization(_Personalization):
         async def read_memory(self, owner, *, for_update: bool = False):
             assert for_update is True
@@ -1120,7 +1048,6 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
             session=session,
         ),
         job_repository_builder=lambda _session: object(),
-        model_repository_builder=lambda _session: Models(work),
         scope_validator=scope_validator,
         personalization_repository_builder=lambda _session: Personalization(
             AccountMemoryPreference(True, 6),
@@ -1139,7 +1066,6 @@ async def test_success_settlement_uses_global_memory_lock_order() -> None:
     assert events == [
         "project",
         "policy",
-        "model",
         "preference",
         "document",
     ]
@@ -1198,7 +1124,7 @@ async def test_dream_worker_prompt_version_drift_cancels_without_retry_or_model(
 
     assert isinstance(settlement, JobSettlement)
     assert settlement.outcome.status == "cancelled"
-    assert not model_materializer.exact
+    assert not model_materializer.frozen
     assert not runner.inputs
     await settlement.commit()
     assert not state.finalized

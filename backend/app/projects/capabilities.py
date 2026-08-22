@@ -16,7 +16,6 @@ class Capability(StrEnum):
     SHARED_ASSETS_EXECUTE = "shared_assets.execute"
     SHARED_ASSETS_EDIT = "shared_assets.edit"
     SHARED_ASSETS_MANAGE_BINDINGS = "shared_assets.manage_bindings"
-    MCP_CREDENTIALS_APPROVE = "mcp.credentials.approve"
     PRIVATE_WORK_CREATE = "private_work.create"
     PRIVATE_WORK_READ_OWN = "private_work.read_own"
     PRIVATE_WORK_APPROVE_HOST_EXECUTION = "private_work.approve_host_execution"

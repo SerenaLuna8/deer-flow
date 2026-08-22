@@ -10,7 +10,7 @@ import {
 } from "react";
 
 import { SkillCreateMenuItems } from "@/components/projects/assets/project-asset-page-shell";
-import { projectSkillImportNeedsCredentialSetup } from "@/components/projects/assets/project-asset-page-shell";
+import { projectSkillImportNeedsSecretSetup } from "@/components/projects/assets/project-asset-page-shell";
 import { projectSkillExactVersionSelectionHref } from "@/components/projects/assets/project-asset-page-shell";
 
 type InspectableProps = {
@@ -119,14 +119,14 @@ describe("Project Skill creation paths", () => {
     expect(adminPage).toContain("<CreateVersionDialog");
   });
 
-  test("guides only imported Skills with declared secrets to Credential setup", () => {
+  test("guides only imported Skills with declared secrets to secret setup", () => {
     expect(
-      projectSkillImportNeedsCredentialSetup({
+      projectSkillImportNeedsSecretSetup({
         secret_requirements: [{ name: "API_KEY", optional: false }],
       }),
     ).toBe(true);
     expect(
-      projectSkillImportNeedsCredentialSetup({ secret_requirements: [] }),
+      projectSkillImportNeedsSecretSetup({ secret_requirements: [] }),
     ).toBe(false);
   });
 
@@ -137,7 +137,7 @@ describe("Project Skill creation paths", () => {
     expect(
       projectSkillExactVersionSelectionHref(
         "/projects/demo/skills",
-        "?view=project&skill_id=old&skill_version_id=old&configure_credentials=1",
+        "?view=project&skill_id=old&skill_version_id=old&configure_secrets=1",
         skillId,
         versionId,
         false,
@@ -154,7 +154,7 @@ describe("Project Skill creation paths", () => {
         true,
       ),
     ).toBe(
-      `/projects/demo/skills?view=project&skill_id=${skillId}&skill_version_id=${versionId}&configure_credentials=1`,
+      `/projects/demo/skills?view=project&skill_id=${skillId}&skill_version_id=${versionId}&configure_secrets=1`,
     );
   });
 });

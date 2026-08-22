@@ -69,7 +69,7 @@ def test_core_gate_reads_database_url_and_requires_zero_skips(
         "DATABASE_URL",
         "postgresql+asyncpg://developer:secret@127.0.0.1:5432/deerflow",
     )
-    monkeypatch.setenv("DEER_FLOW_CORE_REQUIRE_ZERO_SKIPS", "0")
+    monkeypatch.setenv("ACT_WEAVE_CORE_REQUIRE_ZERO_SKIPS", "0")
     monkeypatch.setattr(
         core_gate_plugin.pytest,
         "main",

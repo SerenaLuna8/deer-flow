@@ -13,40 +13,40 @@ from app.gateway.routers.project_assets import (
     AssetRoute,
     BindingItemResponse,
     BindingResponse,
-    CredentialItemResponse,
     CurrentBindingResponse,
     CurrentSystemBindingRequest,
     CurrentVersionAssetItemResponse,
     DisableSystemBindingRequest,
-    McpVersionResponse,
     MoveSystemBindingRequest,
     ProjectAssetItemResponse,
-    ProjectCredentialItemResponse,
     ProjectCurrentVersionAssetItemResponse,
     ProjectCurrentVersionSkillItemResponse,
     ScopedAssetListResponse,
-    ScopedCredentialListResponse,
     ScopedCurrentVersionAssetListResponse,
     ScopedCurrentVersionSkillAssetListResponse,
     SkillVersionResponse,
     SystemBindingRequest,
-    SystemMcpCredentialGrantRequest,
     _asset_item,
     _binding_response,
-    _credential_item,
     _current_version_asset_item,
     _StrictModel,
     _version_call,
     get_agent_service,
     get_binding_service,
-    get_credential_service,
     get_mcp_service,
     get_skill_service,
     raise_asset_domain,
     register_asset_routes,
 )
 from app.projects.capabilities import Capability
-from app.shared_assets import AgentService, AssetKind, AssetSelection, BindingService, CredentialService, McpService, SkillService
+from app.shared_assets import (
+    AgentService,
+    AssetKind,
+    AssetSelection,
+    BindingService,
+    McpService,
+    SkillService,
+)
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext, resolve_asset_actor
 from app.shared_assets.errors import AssetForbidden, AssetValidationFailed
 from app.shared_assets.models import AssetScope
@@ -72,18 +72,6 @@ class AdminAssetListResponse(_StrictModel):
 class AdminCurrentVersionAssetListResponse(_StrictModel):
     items: list[CurrentVersionAssetItemResponse]
     request_id: str
-
-
-class AdminCredentialListResponse(_StrictModel):
-    items: list[CredentialItemResponse]
-    request_id: str
-
-
-class CredentialRotationStatusResponse(_StrictModel):
-    eligible_total: int
-    current: int
-    pending: int
-    status: Literal["current", "pending"]
 
 
 class SystemSkillVersionRevocationRequest(_StrictModel):
@@ -139,19 +127,6 @@ async def _list_assets(
         raise_asset_domain(exc)
 
 
-async def _list_credentials(
-    actor: SystemAssetGovernanceContext,
-    service: CredentialService,
-) -> AdminCredentialListResponse:
-    try:
-        return AdminCredentialListResponse(
-            items=[_credential_item(view) for view in await service.list_visible(actor)],
-            request_id=actor.request_id,
-        )
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
 def _override_asset_capabilities(scope: AssetScope, kind: AssetKind) -> list[Capability]:
     allowed = {
         Capability.SHARED_ASSETS_READ,
@@ -160,8 +135,6 @@ def _override_asset_capabilities(scope: AssetScope, kind: AssetKind) -> list[Cap
     }
     if scope is AssetScope.PROJECT:
         allowed.add(Capability.SHARED_ASSETS_EDIT)
-        if kind in {AssetKind.MCP, AssetKind.SKILL}:
-            allowed.add(Capability.MCP_CREDENTIALS_APPROVE)
     return sorted(allowed, key=str)
 
 
@@ -212,32 +185,6 @@ async def _list_override_assets(
         return response_model(
             system_items=system_items,
             project_items=project_items,
-            request_id=actor.request_id,
-        )
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
-async def _scoped_override_credentials(
-    actor: SystemAssetGovernanceContext,
-    service: CredentialService,
-) -> ScopedCredentialListResponse:
-    try:
-        views = await service.list_visible(actor)
-        if any(view.scope is not AssetScope.PROJECT or view.project_id != actor.project_id for view in views):
-            raise AssetValidationFailed(actor.request_id)
-        return ScopedCredentialListResponse(
-            system_items=[],
-            project_items=[
-                ProjectCredentialItemResponse(
-                    **vars(view),
-                    capabilities=[
-                        Capability.SHARED_ASSETS_READ,
-                        Capability.MCP_CREDENTIALS_APPROVE,
-                    ],
-                )
-                for view in views
-            ],
             request_id=actor.request_id,
         )
     except ASSET_ERRORS as exc:
@@ -298,53 +245,6 @@ async def list_system_mcp_servers(
     return await _list_assets(actor, service)
 
 
-@admin_router.post(
-    "/mcp-servers/{asset_id}/versions/{version_id}/credential-grants",
-    response_model=McpVersionResponse,
-)
-async def configure_system_mcp_credential_grants(
-    asset_id: uuid.UUID,
-    version_id: uuid.UUID,
-    body: SystemMcpCredentialGrantRequest,
-    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
-    service: Annotated[McpService, Depends(get_mcp_service)],
-):
-    return await _version_call(
-        actor,
-        lambda: service.configure_system_credential_grants(
-            actor,
-            asset_id,
-            version_id,
-            body.credential_versions,
-            body.expected_active_grant_versions,
-        ),
-        McpVersionResponse,
-    )
-
-
-@admin_router.get("/credentials", response_model=AdminCredentialListResponse)
-async def list_system_credentials(
-    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
-    service: Annotated[CredentialService, Depends(get_credential_service)],
-):
-    return await _list_credentials(actor, service)
-
-
-@admin_router.get(
-    "/credentials/rotation-status",
-    response_model=CredentialRotationStatusResponse,
-)
-async def get_system_credential_rotation_status(
-    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_actor)],
-    service: Annotated[CredentialService, Depends(get_credential_service)],
-):
-    try:
-        view = await service.rotation_status(actor)
-        return CredentialRotationStatusResponse(**vars(view))
-    except ASSET_ERRORS as exc:
-        raise_asset_domain(exc)
-
-
 @admin_project_router.get(
     "/agents",
     response_model=ScopedCurrentVersionAssetListResponse,
@@ -376,14 +276,6 @@ async def list_override_mcp_servers(
     binding_service: Annotated[BindingService, Depends(get_binding_service)],
 ):
     return await _list_override_assets(actor, AssetKind.MCP, service, binding_service)
-
-
-@admin_project_router.get("/credentials", response_model=ScopedCredentialListResponse)
-async def list_override_credentials(
-    actor: Annotated[SystemAssetGovernanceContext, Depends(_admin_project_actor)],
-    service: Annotated[CredentialService, Depends(get_credential_service)],
-):
-    return await _scoped_override_credentials(actor, service)
 
 
 register_asset_routes(

@@ -38,10 +38,10 @@ if [ -f "$REPO_ROOT/.env" ]; then
     set +a
 fi
 
-# Model API keys are PostgreSQL-backed System Credentials. Keep common legacy
+# Model API keys are encrypted inside model-domain PostgreSQL rows. Keep common legacy
 # provider variables out of Gateway, Worker, and Scheduler process environments
-# so a provider cannot silently bypass the exact admitted Credential version.
-# Tool/process credentials remain available through their own distinct names.
+# so a provider cannot silently bypass the exact admitted secret generation.
+# Tool/process secrets remain available through their own distinct names.
 # The opt-in Claude Code/Codex CLI handoff variables are intentionally separate.
 unset "ANTHROPIC_API_KEY"
 unset "DEEPSEEK_API_KEY"
@@ -102,12 +102,12 @@ done
 # the same dev ports (8001/3000/2026), so a service started from ANY of them
 # must be reclaimable from here — otherwise `make stop`/`make dev` in this
 # worktree can neither kill nor take over a port held by a sibling worktree.
-# DEERFLOW_ROOTS is that set of roots; processes living outside all of them
+# ACT_WEAVE_ROOTS is that set of roots; processes living outside all of them
 # (e.g. an unrelated project on port 3000) are still never touched.
 # Sorted most-specific-first (longest path first): a linked worktree lives
 # under the main checkout, so both roots are substrings of its files — checking
 # the deeper root first attributes a reclaimed port to the right worktree.
-DEERFLOW_ROOTS="$(
+ACT_WEAVE_ROOTS="$(
     {
         printf '%s\n' "$REPO_ROOT"
         git -C "$REPO_ROOT" worktree list --porcelain 2>/dev/null |
@@ -121,12 +121,12 @@ DEERFLOW_ROOTS="$(
 _is_deerflow_pid() {
     local pid=$1 files root
 
-    # Daemon children inherit DEERFLOW_DAEMON_ROOT from run_service. Checking
+    # Daemon children inherit ACT_WEAVE_DAEMON_ROOT from run_service. Checking
     # it (Linux only — macOS has no /proc) identifies processes like
     # next-server that lsof misses, so the name/port reaps in stop_all can
     # claim them.
     if [ -r "/proc/$pid/environ" ] &&
-        tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fxq "DEERFLOW_DAEMON_ROOT=$REPO_ROOT"; then
+        tr '\0' '\n' < "/proc/$pid/environ" 2>/dev/null | grep -Fxq "ACT_WEAVE_DAEMON_ROOT=$REPO_ROOT"; then
         return 0
     fi
 
@@ -136,7 +136,7 @@ _is_deerflow_pid() {
         case "$files" in
             *"$root"/*) return 0 ;;
         esac
-    done <<< "$DEERFLOW_ROOTS"
+    done <<< "$ACT_WEAVE_ROOTS"
     return 1
 }
 
@@ -153,7 +153,7 @@ _report_reclaimed_ports() {
             while IFS= read -r root; do
                 [ -n "$root" ] || continue
                 case "$files" in *"$root"/*) owner="$root"; break ;; esac
-            done <<< "$DEERFLOW_ROOTS"
+            done <<< "$ACT_WEAVE_ROOTS"
             echo "  ↻ Reclaiming port $port from another worktree: ${owner:-?}"
             break
         done
@@ -251,7 +251,7 @@ _is_repo_nginx_pid() {
         case "$args" in
             *"$root"/docker/nginx/nginx.local.conf*|*"$root"/*) return 0 ;;
         esac
-    done <<< "$DEERFLOW_ROOTS"
+    done <<< "$ACT_WEAVE_ROOTS"
 
     _is_deerflow_pid "$pid"
 }
@@ -349,29 +349,29 @@ fi
 
 # Resolve pnpm through the same runner used by check/install/doctor. Exporting
 # both paths preserves whitespace when run_service invokes a child shell.
-if ! DEERFLOW_PNPM_PYTHON="$(_pick_python)"; then
+if ! ACT_WEAVE_PNPM_PYTHON="$(_pick_python)"; then
     echo "Python 3 is required to locate pnpm or its Corepack fallback."
     exit 1
 fi
-DEERFLOW_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"
-export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
+ACT_WEAVE_PNPM_RUNNER="$REPO_ROOT/scripts/pnpm.py"
+export ACT_WEAVE_PNPM_PYTHON ACT_WEAVE_PNPM_RUNNER
 
 if $DEV_MODE; then
-    FRONTEND_CMD='"$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
+    FRONTEND_CMD='"$ACT_WEAVE_PNPM_PYTHON" "$ACT_WEAVE_PNPM_RUNNER" run dev'
 else
-    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
+    FRONTEND_CMD="env BETTER_AUTH_SECRET=$($ACT_WEAVE_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$ACT_WEAVE_PNPM_PYTHON\" \"\$ACT_WEAVE_PNPM_RUNNER\" run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
 # so pin ActWeave-owned state to the expected backend runtime directory and
 # create it before uvicorn builds its reload exclude filter.
-if [ -z "$DEER_FLOW_PROJECT_ROOT" ]; then
-    export DEER_FLOW_PROJECT_ROOT="$REPO_ROOT"
+if [ -z "$ACT_WEAVE_PROJECT_ROOT" ]; then
+    export ACT_WEAVE_PROJECT_ROOT="$REPO_ROOT"
 fi
 
 BACKEND_RUNTIME_HOME="$REPO_ROOT/backend/.deer-flow"
-if [ -z "$DEER_FLOW_HOME" ]; then
-    export DEER_FLOW_HOME="$BACKEND_RUNTIME_HOME"
+if [ -z "$ACT_WEAVE_HOME" ]; then
+    export ACT_WEAVE_HOME="$BACKEND_RUNTIME_HOME"
 fi
 
 # `backend/sandbox` is excluded from uvicorn's reload watcher below. uvicorn only
@@ -379,15 +379,15 @@ fi
 # otherwise it globs the pattern, and Python 3.12's pathlib rejects absolute glob
 # patterns with NotImplementedError, crashing `make dev` on a fresh checkout
 # (#3459 / #3454). Creating it here keeps every absolute exclude on the is_dir path.
-mkdir -p "$DEER_FLOW_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"
-DEER_FLOW_HOME="$(cd "$DEER_FLOW_HOME" && pwd -P)"
+mkdir -p "$ACT_WEAVE_HOME" "$BACKEND_RUNTIME_HOME" "$REPO_ROOT/backend/sandbox"
+ACT_WEAVE_HOME="$(cd "$ACT_WEAVE_HOME" && pwd -P)"
 BACKEND_RUNTIME_HOME="$(cd "$BACKEND_RUNTIME_HOME" && pwd -P)"
-export DEER_FLOW_HOME
+export ACT_WEAVE_HOME
 
 # Extra flags for uvicorn
 if $DEV_MODE && ! $DAEMON_MODE; then
     GATEWAY_WORKERS=1
-    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$DEER_FLOW_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
+    GATEWAY_EXTRA_FLAGS="--reload --reload-include='*.yaml' --reload-include='.env' --reload-exclude='*.pyc' --reload-exclude='__pycache__' --reload-exclude='$REPO_ROOT/backend/sandbox' --reload-exclude='$ACT_WEAVE_HOME' --reload-exclude='$BACKEND_RUNTIME_HOME'"
 else
     GATEWAY_WORKERS="${GATEWAY_WORKERS:-1}"
     case "$GATEWAY_WORKERS" in
@@ -402,15 +402,15 @@ export GATEWAY_WORKERS
 
 # ── Config check ─────────────────────────────────────────────────────────────
 
-if [ -n "${DEER_FLOW_CONFIG_PATH:-}" ]; then
-    if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
-        echo "✗ DEER_FLOW_CONFIG_PATH does not name a file: $DEER_FLOW_CONFIG_PATH"
+if [ -n "${ACT_WEAVE_CONFIG_PATH:-}" ]; then
+    if [ ! -f "$ACT_WEAVE_CONFIG_PATH" ]; then
+        echo "✗ ACT_WEAVE_CONFIG_PATH does not name a file: $ACT_WEAVE_CONFIG_PATH"
         exit 1
     fi
-    CONFIG_DIR="$(builtin cd "$(dirname "$DEER_FLOW_CONFIG_PATH")" >/dev/null 2>&1 && pwd -P)"
-    export DEER_FLOW_CONFIG_PATH="$CONFIG_DIR/$(basename "$DEER_FLOW_CONFIG_PATH")"
+    CONFIG_DIR="$(builtin cd "$(dirname "$ACT_WEAVE_CONFIG_PATH")" >/dev/null 2>&1 && pwd -P)"
+    export ACT_WEAVE_CONFIG_PATH="$CONFIG_DIR/$(basename "$ACT_WEAVE_CONFIG_PATH")"
 else
-    export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
+    export ACT_WEAVE_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
 
 RUNTIME_ROOT="$REPO_ROOT"
@@ -470,9 +470,9 @@ _start_macos_daemon() {
     launch_env=(
         /usr/bin/env
         "PATH=$PATH"
-        "DEER_FLOW_CONFIG_PATH=$DEER_FLOW_CONFIG_PATH"
-        "DEER_FLOW_HOME=$DEER_FLOW_HOME"
-        "DEER_FLOW_PROJECT_ROOT=$DEER_FLOW_PROJECT_ROOT"
+        "ACT_WEAVE_CONFIG_PATH=$ACT_WEAVE_CONFIG_PATH"
+        "ACT_WEAVE_HOME=$ACT_WEAVE_HOME"
+        "ACT_WEAVE_PROJECT_ROOT=$ACT_WEAVE_PROJECT_ROOT"
     )
     if [ -n "${GATEWAY_WORKERS:-}" ]; then
         launch_env+=("GATEWAY_WORKERS=$GATEWAY_WORKERS")
@@ -500,7 +500,7 @@ _start_macos_daemon() {
     echo "  🛑 Stop: make stop"
 }
 
-if [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+if [ ! -f "$ACT_WEAVE_CONFIG_PATH" ]; then
     echo "✗ No ActWeave config file found."
     echo "  Run 'make setup' (recommended) or 'make config' to generate config.yaml."
     exit 1
@@ -520,7 +520,7 @@ fi
 # Pick a runnable Python for the extras detector. On Windows/Git Bash,
 # `python3` can resolve to the Microsoft Store alias in WindowsApps, which is
 # present on PATH but not executable from Bash.
-DETECT_PYTHON="$DEERFLOW_PNPM_PYTHON"
+DETECT_PYTHON="$ACT_WEAVE_PNPM_PYTHON"
 
 # Resolve existing optional extras (for example ollama or discord) from
 # UV_EXTRAS or config.yaml so that
@@ -547,7 +547,7 @@ if ! $SKIP_INSTALL; then
     # `--all-packages` propagates selected extras into workspace members.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent || { echo "✗ Frontend dependency install failed"; exit 1; }
+    "$ACT_WEAVE_PNPM_PYTHON" "$ACT_WEAVE_PNPM_RUNNER" install --silent || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
@@ -628,9 +628,9 @@ run_service() {
     echo "Starting $name..."
     if $DAEMON_MODE; then
         # Tag the daemon so every descendant (pnpm → next → next-server)
-        # carries DEERFLOW_DAEMON_ROOT in its environment, letting
+        # carries ACT_WEAVE_DAEMON_ROOT in its environment, letting
         # _is_deerflow_pid recognize it at stop time.
-        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
+        nohup env ACT_WEAVE_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
     else
         sh -c "$cmd" &
     fi
@@ -652,7 +652,7 @@ run_process() {
     local name="$1" cmd="$2" logfile="$3" pid attempt
     echo "Starting $name..."
     if $DAEMON_MODE; then
-        nohup env DEERFLOW_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
+        nohup env ACT_WEAVE_DAEMON_ROOT="$REPO_ROOT" sh -c "$cmd" > /dev/null 2>&1 &
     else
         sh -c "$cmd" &
     fi

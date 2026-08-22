@@ -212,11 +212,6 @@ describe("project shell navigation", () => {
           section: "management",
         }),
         expect.objectContaining({
-          href: "/projects/alpha/credentials",
-          label: "项目凭证",
-          section: "management",
-        }),
-        expect.objectContaining({
           href: "/projects/alpha/audit",
           label: "审计日志",
           section: "management",
@@ -290,7 +285,6 @@ describe("project shell navigation", () => {
       "Agent",
       "Skill",
       "MCP",
-      "项目凭证",
       "返回工作空间",
       "账户",
     ]) {
@@ -374,11 +368,11 @@ describe("project shell navigation", () => {
         "project.members.manage",
       ] as Project["capabilities"],
     };
-    const credentialApprover = {
+    const secretManager = {
       ...sharedAssetReader,
       capabilities: [
         ...sharedAssetReader.capabilities,
-        "mcp.credentials.approve",
+        "shared_assets.manage_bindings",
       ] as Project["capabilities"],
     };
     const channelManager = {
@@ -398,7 +392,6 @@ describe("project shell navigation", () => {
     expect(renderShell(capabilityViewer)).not.toContain("Agent");
     expect(renderShell(sharedAssetReader)).toContain("Agent");
     expect(renderShell(sharedAssetEditor)).toContain("Agent");
-    expect(renderShell(sharedAssetReader)).not.toContain("项目凭证");
     expect(renderShell(memberManager)).toContain("项目设置");
     expect(renderShell(memberManager)).not.toContain("项目成员");
     expect(
@@ -406,6 +399,6 @@ describe("project shell navigation", () => {
         (item) => item.label === "项目设置",
       )?.href,
     ).toBe("/projects/alpha/settings/members");
-    expect(renderShell(credentialApprover)).toContain("项目凭证");
+    expect(renderShell(secretManager)).not.toContain("项目秘密");
   });
 });

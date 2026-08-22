@@ -49,8 +49,8 @@ def test_full_schema_pins_builder_thread_and_run_link() -> None:
 
     assert "thread_kind VARCHAR(16) DEFAULT 'chat' NOT NULL" in schema
     assert "CONSTRAINT ck_threads_meta_kind CHECK (thread_kind IN ('chat', 'skill_builder'))" in schema
-    assert "CONSTRAINT fk_skill_design_operations_run FOREIGN KEY(project_id,owner_user_id,run_id) REFERENCES runs(project_id,owner_user_id,run_id) ON DELETE RESTRICT" in schema
-    assert "CONSTRAINT uq_skill_design_operations_run UNIQUE(project_id,owner_user_id,run_id)" in schema
+    assert "CONSTRAINT fk_skill_design_operations_run FOREIGN KEY(project_id, owner_user_id, run_id) REFERENCES runs (project_id, owner_user_id, run_id) ON DELETE RESTRICT" in schema
+    assert "CONSTRAINT uq_skill_design_operations_run UNIQUE (project_id, owner_user_id, run_id)" in schema
     assert f"INSERT INTO alembic_version (version_num) VALUES ('{CURRENT_SCHEMA_REVISION}');" in schema
 
 

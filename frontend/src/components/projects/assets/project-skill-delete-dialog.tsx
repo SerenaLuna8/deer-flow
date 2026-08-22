@@ -24,7 +24,7 @@ export function projectAssetDeleteDescription(
   if (assetKind === "Agent") {
     return `删除后，Agent“${assetName}”将不再出现在项目 Agent 列表中，也不再用于新的运行。已有对话和运行记录会保留，正在执行的运行会继续完成。`;
   }
-  return `将永久删除整个 MCP“${assetName}”及其配置与 Credential 槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或 Credential 授权快照引用时不会级联删除，需先解除引用。`;
+  return `将永久删除整个 MCP“${assetName}”及其配置与秘密槽位。此操作不可恢复，已发布连接将不再可用；存在 Agent、历史运行或执行快照引用时不会级联删除，需先解除引用。`;
 }
 
 export function skillDeleteSecondsRemaining(

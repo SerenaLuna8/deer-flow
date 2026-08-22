@@ -45,8 +45,8 @@ from deerflow.persistence.private_work.model import (
     PrivateFileChunkRow,
     PrivateFileRow,
     RunAssetVersionRow,
-    RunMcpGrantSnapshotRow,
-    RunSkillCredentialSnapshotRow,
+    RunMcpSecretSnapshotRow,
+    RunSkillSecretSnapshotRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.shared_assets import (
@@ -821,15 +821,15 @@ async def purge_private_scope(
         )
     )
     await session.execute(
-        delete(RunMcpGrantSnapshotRow).where(
-            RunMcpGrantSnapshotRow.project_id == project_id,
-            *(() if owner_user_id is None else (RunMcpGrantSnapshotRow.owner_user_id == owner_user_id,)),
+        delete(RunMcpSecretSnapshotRow).where(
+            RunMcpSecretSnapshotRow.project_id == project_id,
+            *(() if owner_user_id is None else (RunMcpSecretSnapshotRow.owner_user_id == owner_user_id,)),
         )
     )
     await session.execute(
-        delete(RunSkillCredentialSnapshotRow).where(
-            RunSkillCredentialSnapshotRow.project_id == project_id,
-            *(() if owner_user_id is None else (RunSkillCredentialSnapshotRow.owner_user_id == owner_user_id,)),
+        delete(RunSkillSecretSnapshotRow).where(
+            RunSkillSecretSnapshotRow.project_id == project_id,
+            *(() if owner_user_id is None else (RunSkillSecretSnapshotRow.owner_user_id == owner_user_id,)),
         )
     )
     await session.execute(
@@ -978,7 +978,6 @@ async def _delete_project_version_leaves(
         ("agents", "agent_versions", "agent_id"),
         ("skills", "skill_versions", "skill_id"),
         ("mcp_servers", "mcp_server_versions", "mcp_server_id"),
-        ("credentials", "credential_versions", "credential_id"),
     }:
         raise ValueError("unsupported project asset version chain")
     while True:
@@ -1149,79 +1148,43 @@ async def purge_project_shared_scope(
             parameters,
         )
 
-    # Run Skill credential snapshots were removed with private work. Retired
-    # System binding authorities deliberately have no version/config FK, so the
-    # physical purge removes every binding before its project-local configs.
-    await session.execute(
-        text(
-            "UPDATE project_skill_credential_bindings SET runtime_authority_binding_id=NULL WHERE project_id=:project_id",
-        ),
-        parameters,
-    )
-    await session.execute(
-        text("DELETE FROM project_skill_credential_bindings WHERE project_id=:project_id"),
-        parameters,
-    )
-    await session.execute(
-        text("DELETE FROM project_skill_credential_configs WHERE project_id=:project_id"),
-        parameters,
-    )
+    # Private Run snapshots were removed in the prior phase. Final purge is the
+    # irreversible boundary for all Project-owned domain secrets and their
+    # secret-free tombstones, including values bound to System definitions.
+    for state_table in (
+        "project_skill_secret_states",
+        "project_mcp_secret_states",
+        "project_channel_secret_states",
+    ):
+        await session.execute(
+            text(f"UPDATE {state_table} SET current_generation_id=NULL WHERE project_id=:project_id"),
+            parameters,
+        )
+    for table_name in (
+        "project_skill_secret_generations",
+        "project_mcp_secret_generations",
+        "project_channel_secret_generations",
+        "project_skill_secret_states",
+        "project_mcp_secret_states",
+        "project_channel_secret_states",
+        "project_skill_secret_tombstones",
+        "project_mcp_secret_tombstones",
+        "project_channel_secret_tombstones",
+    ):
+        await session.execute(
+            text(f"DELETE FROM {table_name} WHERE project_id=:project_id"),
+            parameters,
+        )
 
     await session.execute(
         text("DELETE FROM project_invitations WHERE project_id=:project_id"),
         parameters,
     )
 
-    # Retention is a physical purge boundary, so it intentionally traverses
-    # both visible and logically deleted Credentials.
-    project_credential_versions = """SELECT version.id
-        FROM credential_versions AS version
-        JOIN credentials AS asset ON asset.id=version.credential_id
-        WHERE asset.scope='project' AND asset.project_id=:project_id"""
     project_mcp_versions = """SELECT version.id
         FROM mcp_server_versions AS version
         JOIN mcp_servers AS asset ON asset.id=version.mcp_server_id
         WHERE asset.scope='project' AND asset.project_id=:project_id"""
-
-    # Run snapshots were already deleted by purge_private_scope. Remove both
-    # sides of a project Credential/MCP grant before any envelope or slot.
-    await session.execute(
-        text(
-            f"""DELETE FROM credential_grants AS grant_row
-                 WHERE grant_row.credential_version_id IN ({project_credential_versions})
-                    OR grant_row.mcp_server_version_id IN ({project_mcp_versions})"""
-        ),
-        parameters,
-    )
-    await session.execute(
-        text(
-            f"""UPDATE credential_envelopes
-                    SET rotated_from_envelope_id=NULL
-                  WHERE rotated_from_envelope_id IN (
-                      SELECT envelope.id
-                      FROM credential_envelopes AS envelope
-                      WHERE envelope.credential_version_id IN ({project_credential_versions})
-                  )"""
-        ),
-        parameters,
-    )
-    await session.execute(
-        text(
-            f"""DELETE FROM credential_envelopes
-                 WHERE credential_version_id IN ({project_credential_versions})"""
-        ),
-        parameters,
-    )
-    await session.execute(
-        text(
-            """UPDATE credentials
-                  SET current_version_id=NULL, status='revoked', source_key=NULL,
-                      revoked_at=:purged_at, updated_at=:purged_at,
-                      version=version + 1
-                WHERE scope='project' AND project_id=:project_id"""
-        ),
-        parameters,
-    )
 
     # Remove immutable published children only after the project is locked,
     # pending deletion, and due. The database trigger independently enforces
@@ -1269,7 +1232,7 @@ async def purge_project_shared_scope(
     )
     await session.execute(
         text(
-            f"""DELETE FROM mcp_version_credential_slots AS slot
+            f"""DELETE FROM mcp_version_secret_slots AS slot
                  WHERE slot.mcp_server_version_id IN ({project_mcp_versions})"""
         ),
         parameters,
@@ -1287,13 +1250,6 @@ async def purge_project_shared_scope(
             parameters,
         )
 
-    await _delete_project_version_leaves(
-        session,
-        project_id=project_uuid,
-        asset_table="credentials",
-        version_table="credential_versions",
-        asset_id_column="credential_id",
-    )
     await _delete_project_version_leaves(
         session,
         project_id=project_uuid,
@@ -1316,13 +1272,6 @@ async def purge_project_shared_scope(
         asset_id_column="mcp_server_id",
     )
 
-    await session.execute(
-        text(
-            """DELETE FROM credentials
-               WHERE scope='project' AND project_id=:project_id"""
-        ),
-        parameters,
-    )
     await session.execute(
         text(
             """DELETE FROM skills

@@ -102,7 +102,6 @@ def version_record(row: MemoryDocumentVersionRow) -> MemoryDocumentVersionRecord
         history_to=None if row.history_to is None else int(row.history_to),
         history_count=None if row.history_count is None else int(row.history_count),
         prompt_version=row.prompt_version,
-        model_ref=row.model_ref,
         needs_review=bool(row.needs_review),
         created_at=row.created_at,
     )
@@ -151,7 +150,10 @@ class MemoryHistoryRepository:
                 content_digest=activation.content_digest,
                 preference_version=activation.preference_version,
                 snip_prompt_version=activation.snip_prompt_version,
-                summary_model_ref=activation.summary_model_ref,
+                summary_model_config_id=activation.summary_model.model_config_id,
+                summary_model_payload_checksum=(activation.summary_model.payload_checksum),
+                summary_model_secret_generation_id=(activation.summary_model.secret_generation_id),
+                summary_model_secret_envelope_digest=(activation.summary_model.secret_envelope_digest),
             )
             .on_conflict_do_nothing(
                 index_elements=(
@@ -209,7 +211,10 @@ class MemoryHistoryRepository:
             or row.content_digest != activation.content_digest
             or int(row.preference_version) != activation.preference_version
             or row.snip_prompt_version != activation.snip_prompt_version
-            or row.summary_model_ref != activation.summary_model_ref
+            or row.summary_model_config_id != activation.summary_model.model_config_id
+            or row.summary_model_payload_checksum != activation.summary_model.payload_checksum
+            or row.summary_model_secret_generation_id != activation.summary_model.secret_generation_id
+            or row.summary_model_secret_envelope_digest != activation.summary_model.secret_envelope_digest
             or row.status not in {"pending", "processing", "consumed"}
             or (row.status in {"pending", "processing"} and row.tagged_text != activation.tagged_text)
             or (row.status == "consumed" and row.tagged_text is not None)
@@ -514,7 +519,6 @@ class MemoryDocumentStore:
             history_to=None,
             history_count=None,
             prompt_version=None,
-            model_ref=None,
             created_at=now,
         )
         self.session.add(restored)

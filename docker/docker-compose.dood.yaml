@@ -19,8 +19,8 @@
 #
 # Compatible with both docker-compose.yaml (prod) and docker-compose-dev.yaml
 # (dev): both define a `worker` service, and Compose merges this volume entry
-# onto it. DEER_FLOW_DOCKER_SOCKET defaults to /var/run/docker.sock.
+# onto it. ACT_WEAVE_DOCKER_SOCKET defaults to /var/run/docker.sock.
 services:
   worker:
     volumes:
-      - ${DEER_FLOW_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      - ${ACT_WEAVE_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock

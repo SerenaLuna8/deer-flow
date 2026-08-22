@@ -20,17 +20,6 @@ from app.shared_assets.agent_payload_checksum import (
 )
 from app.shared_assets.binding_repository import BindingRepository
 from app.shared_assets.catalog_state_repository import CatalogStateRepository
-from app.shared_assets.credential_closure import (
-    LockedMcpCredentialClosure,
-    McpCredentialClosureInvalid,
-    McpCredentialClosureTarget,
-    lock_mcp_credential_closures,
-)
-from app.shared_assets.crypto import (
-    CredentialDecryptFailed,
-    EncryptedEnvelope,
-    decrypt_credential_payload,
-)
 from app.shared_assets.errors import (
     AgentArchived,
     AssetForbidden,
@@ -43,10 +32,13 @@ from app.shared_assets.errors import (
 from app.shared_assets.internal_assets import (
     BUILTIN_SKILL_BUILDER_AGENT_SOURCE_KEY,
 )
-from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
 from app.shared_assets.mcp_repository import McpVersionRecord
+from app.shared_assets.mcp_secret_closure import (
+    McpSecretClosure,
+    lock_mcp_secret_closure,
+)
+from app.shared_assets.mcp_secret_store import McpSecretStore
 from app.shared_assets.mcp_service import McpService
-from app.shared_assets.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from app.shared_assets.models import (
     AgentModelSettings,
     AgentPayload,
@@ -64,12 +56,13 @@ from app.shared_assets.models import (
 )
 from app.shared_assets.skill_repository import SkillVersionRecord
 from app.shared_assets.skill_service import SkillService
+from app.system_settings.model_refs import DEFAULT_MODEL_REF, exact_model_ref
 from deerflow.persistence.shared_assets import (
     AgentRow,
     AgentVersionMcpRefRow,
     AgentVersionRow,
     AgentVersionSkillRefRow,
-    McpCredentialSlotRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
     ProjectSystemAgentBindingRow,
@@ -79,6 +72,7 @@ from deerflow.persistence.shared_assets import (
     SkillVersionFileRow,
     SkillVersionRow,
 )
+from deerflow.secrets import SecretKey
 
 
 @dataclass(frozen=True)
@@ -136,10 +130,10 @@ class ProjectAssetResolver:
         self,
         session_factory: Callable[[], AsyncSession],
         *,
-        keyring: CredentialKeyring | None = None,
+        secret_key: SecretKey | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._keyring = keyring
+        self._secret_key = secret_key
 
     async def resolve_project_asset_snapshot(
         self,
@@ -833,14 +827,12 @@ class ProjectAssetResolver:
                         resolved,
                         request_id,
                         lock_project=True,
-                        expected_grants=None,
+                        expected_secrets=None,
                     )
         except (AssetValidationFailed, AssetResolutionUnavailable):
             raise
         except AssetNotFound:
             raise AssetResolutionUnavailable(request_id) from None
-        except (CredentialDecryptFailed, CredentialKeyringInvalid):
-            raise AssetStorageUnavailable(request_id) from None
         except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(request_id) from None
 
@@ -850,8 +842,8 @@ class ProjectAssetResolver:
         context: ProjectContext,
         resolved: ResolvedMcpSnapshot,
         *,
-        expected_grants: tuple[
-            tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+        expected_secrets: tuple[
+            tuple[uuid.UUID, uuid.UUID, str],
             ...,
         ]
         | None = None,
@@ -869,14 +861,12 @@ class ProjectAssetResolver:
                 resolved,
                 request_id,
                 lock_project=False,
-                expected_grants=expected_grants,
+                expected_secrets=expected_secrets,
             )
         except (AssetValidationFailed, AssetResolutionUnavailable):
             raise
         except AssetNotFound:
             raise AssetResolutionUnavailable(request_id) from None
-        except (CredentialDecryptFailed, CredentialKeyringInvalid):
-            raise AssetStorageUnavailable(request_id) from None
         except (DBAPIError, SATimeoutError):
             raise AssetStorageUnavailable(request_id) from None
 
@@ -900,8 +890,10 @@ class ProjectAssetResolver:
             or type(resolved.catalog_generation) is not int
             or resolved.catalog_generation < 0
             or not isinstance(resolved.definition, Mapping)
-            or any(not isinstance(grant_id, uuid.UUID) for grant_id in resolved.credential_grant_ids)
-            or len(set(resolved.credential_grant_ids)) != len(resolved.credential_grant_ids)
+            or any(not isinstance(generation_id, uuid.UUID) for generation_id in resolved.secret_generation_ids)
+            or len(set(resolved.secret_generation_ids)) != len(resolved.secret_generation_ids)
+            or not isinstance(resolved.secret_digest, str)
+            or len(resolved.secret_digest) != 64
         ):
             raise AssetValidationFailed(request_id)
 
@@ -1137,8 +1129,9 @@ class ProjectAssetResolver:
         skill_ids = tuple(item.version.id for item in skill_records)
         if len(skill_records) != len(skill_refs) or len(mcp_records) != len(mcp_ids):
             raise AssetResolutionUnavailable(context.request_id)
-        await self._lock_credential_closures(
+        await self._lock_mcp_secret_closures(
             session,
+            context,
             mcp_records,
             context.request_id,
         )
@@ -1318,16 +1311,19 @@ class ProjectAssetResolver:
         if not isinstance(record.version, McpServerVersionRow):
             raise AssetResolutionUnavailable(context.request_id)
         slots = tuple(
-            (
-                await session.execute(
-                    select(McpCredentialSlotRow).where(McpCredentialSlotRow.mcp_server_version_id == record.version.id).order_by(McpCredentialSlotRow.name, McpCredentialSlotRow.id).with_for_update(read=True, of=McpCredentialSlotRow)
-                )
-            )
+            (await session.execute(select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == record.version.id).order_by(McpSecretSlotRow.name, McpSecretSlotRow.id).with_for_update(read=True, of=McpSecretSlotRow)))
             .scalars()
             .all()
         )
-        mcp_record = McpVersionRecord(record.version, slots, ())
-        grant_ids = await self._usable_grant_ids(session, record, context.request_id)
+        mcp_record = McpVersionRecord(record.version, slots)
+        closure = await lock_mcp_secret_closure(
+            session,
+            project_id=context.project_id,
+            mcp_server_id=record.asset.id,
+            mcp_server_version_id=record.version.id,
+            slots=slots,
+            request_id=context.request_id,
+        )
         safe_definition = self._safe_mcp_definition(
             mcp_record,
             context.request_id,
@@ -1341,7 +1337,8 @@ class ProjectAssetResolver:
             catalog_generation=generation,
             dependency_version_ids=(),
             definition=safe_definition,
-            credential_grant_ids=grant_ids,
+            secret_generation_ids=tuple(material.generation_id for material in closure.materials),
+            secret_digest=closure.digest,
         )
 
     @staticmethod
@@ -1363,14 +1360,14 @@ class ProjectAssetResolver:
                 "routing": definition.routing,
                 "tool_overrides": definition.tool_overrides,
                 "timeout_seconds": definition.timeout_seconds,
-                "credential_slots": tuple(
+                "secret_slots": tuple(
                     {
                         "name": slot.name,
                         "purpose": slot.purpose,
                         "payload_schema": slot.payload_schema,
                         "required": slot.required,
                     }
-                    for slot in definition.credential_slots
+                    for slot in definition.secret_slots
                 ),
             }
         )
@@ -1554,49 +1551,44 @@ class ProjectAssetResolver:
             version_id,
         )
 
-    async def _usable_grant_ids(
+    async def _lock_mcp_secret_closures(
         self,
         session: AsyncSession,
-        record: _ResolvedRecord,
-        request_id: str,
-    ) -> tuple[uuid.UUID, ...]:
-        if not isinstance(record.version, McpServerVersionRow):
-            raise AssetResolutionUnavailable(request_id)
-        closures = await self._lock_credential_closures(
-            session,
-            (record,),
-            request_id,
-        )
-        return closures[uuid.UUID(str(record.version.id))].grant_ids
-
-    async def _lock_credential_closures(
-        self,
-        session: AsyncSession,
+        context: ProjectContext,
         records: Sequence[_ResolvedRecord],
         request_id: str,
-        *,
-        load_envelopes: bool = False,
-    ) -> dict[uuid.UUID, LockedMcpCredentialClosure]:
-        targets: list[McpCredentialClosureTarget] = []
+    ) -> dict[uuid.UUID, McpSecretClosure]:
+        closures: dict[uuid.UUID, McpSecretClosure] = {}
         for record in records:
             if not isinstance(record.version, McpServerVersionRow):
                 raise AssetResolutionUnavailable(request_id)
-            project_id = uuid.UUID(str(record.asset.project_id)) if record.scope is AssetScope.PROJECT and record.asset.project_id is not None else None
-            targets.append(
-                McpCredentialClosureTarget(
-                    uuid.UUID(str(record.version.id)),
-                    record.scope,
-                    project_id,
+            slots = tuple(
+                (
+                    await session.execute(
+                        select(McpSecretSlotRow)
+                        .where(
+                            McpSecretSlotRow.mcp_server_version_id == record.version.id,
+                        )
+                        .order_by(McpSecretSlotRow.name, McpSecretSlotRow.id)
+                        .with_for_update(read=True, of=McpSecretSlotRow)
+                    )
                 )
+                .scalars()
+                .all()
             )
-        try:
-            return await lock_mcp_credential_closures(
-                session,
-                tuple(targets),
-                load_envelopes=load_envelopes,
-            )
-        except McpCredentialClosureInvalid:
-            raise AssetResolutionUnavailable(request_id) from None
+            try:
+                closure = await lock_mcp_secret_closure(
+                    session,
+                    project_id=context.project_id,
+                    mcp_server_id=record.asset.id,
+                    mcp_server_version_id=record.version.id,
+                    slots=slots,
+                    request_id=request_id,
+                )
+            except AssetValidationFailed:
+                raise AssetResolutionUnavailable(request_id) from None
+            closures[uuid.UUID(str(record.version.id))] = closure
+        return closures
 
     async def _materialize(
         self,
@@ -1606,8 +1598,8 @@ class ProjectAssetResolver:
         request_id: str,
         *,
         lock_project: bool,
-        expected_grants: tuple[
-            tuple[uuid.UUID, uuid.UUID, uuid.UUID],
+        expected_secrets: tuple[
+            tuple[uuid.UUID, uuid.UUID, str],
             ...,
         ]
         | None,
@@ -1616,7 +1608,6 @@ class ProjectAssetResolver:
         if lock_project:
             await repository.lock_project(context, read=True)
         scope = resolved.scope
-        project_id = uuid.UUID(str(context.project_id)) if scope is AssetScope.PROJECT else None
         if scope is AssetScope.SYSTEM:
             binding = await repository.get_binding(
                 context,
@@ -1658,73 +1649,67 @@ class ProjectAssetResolver:
             raise AssetResolutionUnavailable(request_id)
 
         record = _ResolvedRecord(scope, asset, version)
-        closures = await self._lock_credential_closures(
-            session,
-            (record,),
-            request_id,
-            load_envelopes=True,
-        )
-        closure = closures[uuid.UUID(str(version.id))]
-        current_grants = tuple(
+        closure = (
+            await self._lock_mcp_secret_closures(
+                session,
+                context,
+                (record,),
+                request_id,
+            )
+        )[uuid.UUID(str(version.id))]
+        current_refs = tuple(
             sorted(
                 (
                     (
-                        uuid.UUID(str(material.slot.id)),
-                        uuid.UUID(str(material.grant.id)),
-                        uuid.UUID(str(material.version.id)),
+                        material.slot_id,
+                        material.generation_id,
+                        material.generation_digest,
                     )
                     for material in closure.materials
                 ),
-                key=lambda item: (item[0].int, item[1].int, item[2].int),
+                key=lambda item: (item[0].int, item[1].int, item[2]),
             )
         )
-        if expected_grants is not None:
+        if expected_secrets is not None:
             try:
-                normalized_values = tuple(tuple(uuid.UUID(str(value)) for value in item) for item in expected_grants if isinstance(item, tuple) and len(item) == 3)
+                normalized_values = tuple(
+                    (
+                        uuid.UUID(str(item[0])),
+                        uuid.UUID(str(item[1])),
+                        str(item[2]),
+                    )
+                    for item in expected_secrets
+                    if isinstance(item, tuple) and len(item) == 3
+                )
             except (AttributeError, TypeError, ValueError):
                 raise AssetValidationFailed(request_id)
-            if len(normalized_values) != len(expected_grants):
+            if len(normalized_values) != len(expected_secrets):
                 raise AssetValidationFailed(request_id)
             normalized_expected = tuple(
                 sorted(
                     normalized_values,
-                    key=lambda item: (item[0].int, item[1].int, item[2].int),
+                    key=lambda item: (item[0].int, item[1].int, item[2]),
                 )
             )
-            if current_grants != normalized_expected:
+            if current_refs != normalized_expected:
                 raise AssetResolutionUnavailable(request_id)
         locked_definition = self._safe_mcp_definition(
-            McpVersionRecord(version, closure.slots, ()),
+            McpVersionRecord(
+                version,
+                tuple((await session.execute(select(McpSecretSlotRow).where(McpSecretSlotRow.mcp_server_version_id == version.id).order_by(McpSecretSlotRow.name, McpSecretSlotRow.id))).scalars().all()),
+            ),
             request_id,
         )
-        if locked_definition != resolved.definition or closure.grant_ids != resolved.credential_grant_ids:
+        if locked_definition != resolved.definition or tuple(material.generation_id for material in closure.materials) != resolved.secret_generation_ids:
             raise AssetResolutionUnavailable(request_id)
-        try:
-            keyring = self._keyring or CredentialKeyring.from_environment()
-        except CredentialKeyringInvalid:
-            raise
         by_slot: dict[str, Mapping[str, object]] = {}
+        store = McpSecretStore(session, secret_key=self._secret_key)
         for material in closure.materials:
-            envelope = material.envelope
-            if envelope is None:
-                raise AssetResolutionUnavailable(request_id)
-            encrypted = EncryptedEnvelope(
-                key_id=envelope.key_id,
-                nonce=bytes(envelope.nonce),
-                ciphertext=bytes(envelope.ciphertext),
-            )
-            payload = await asyncio.to_thread(
-                decrypt_credential_payload,
-                encrypted,
-                scope,
-                project_id,
-                uuid.UUID(str(material.version.id)),
-                keyring,
-            )
+            payload = store.materialize(material, request_id=request_id)
             frozen_payload = _freeze(payload)
             if not isinstance(frozen_payload, Mapping):
                 raise AssetResolutionUnavailable(request_id)
-            by_slot[material.slot.name] = frozen_payload
+            by_slot[material.slot_name] = frozen_payload
         return MaterializedMcpSecrets(
             mcp_version_id=version.id,
             by_slot=MappingProxyType(by_slot),
@@ -1750,11 +1735,11 @@ async def materialize_mcp_secrets(
     resolved: ResolvedMcpSnapshot,
     *,
     session_factory: Callable[[], AsyncSession],
-    keyring: CredentialKeyring | None = None,
+    secret_key: SecretKey | None = None,
 ) -> MaterializedMcpSecrets:
     """Functional internal adapter; plaintext exists only in the returned object."""
 
     return await ProjectAssetResolver(
         session_factory,
-        keyring=keyring,
+        secret_key=secret_key,
     ).materialize_mcp_secrets(context, resolved)

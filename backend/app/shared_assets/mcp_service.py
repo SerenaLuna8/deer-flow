@@ -19,12 +19,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
 from app.shared_assets.contexts import SystemAssetGovernanceContext, SystemAssetReadContext
-from app.shared_assets.credential_closure import (
-    McpCredentialClosureInvalid,
-    lock_mcp_credential_closure,
-)
-from app.shared_assets.credential_repository import CredentialRepository, LockedCredentialVersion
-from app.shared_assets.credential_service import CredentialGrantView
 from app.shared_assets.errors import (
     AssetConflict,
     AssetForbidden,
@@ -38,11 +32,15 @@ from app.shared_assets.mcp_discovery_repository import (
     McpToolDiscoveryAttemptRecord,
     McpToolDiscoveryAttemptRepository,
 )
-from app.shared_assets.mcp_repository import GrantState, McpRepository, McpVersionRecord
+from app.shared_assets.mcp_repository import McpRepository, McpVersionRecord
+from app.shared_assets.mcp_secret_closure import lock_mcp_secret_closure
+from app.shared_assets.mcp_secret_store import (
+    McpSecretStore,
+    mcp_secret_closure_digest,
+)
 from app.shared_assets.mcp_tool_inventory_repository import (
     McpToolInventoryRecord,
     McpToolInventoryRepository,
-    mcp_grant_closure_digest,
 )
 from app.shared_assets.models import AssetScope, WorkflowStatus
 from deerflow.mcp_definition_policy import (
@@ -50,8 +48,7 @@ from deerflow.mcp_definition_policy import (
     validate_project_mcp_definition,
 )
 from deerflow.persistence.shared_assets import (
-    CredentialVersionRow,
-    McpCredentialSlotRow,
+    McpSecretSlotRow,
     McpServerRow,
     McpServerVersionRow,
 )
@@ -65,7 +62,6 @@ _OAUTH_FIELDS = frozenset(
         "enabled",
         "token_url",
         "grant_type",
-        "client_id",
         "scope",
         "audience",
         "token_field",
@@ -102,10 +98,9 @@ _CONFLICT_CONSTRAINTS = frozenset(
         "uq_mcp_servers_project_slug",
         "uq_mcp_servers_system_slug",
         "uq_mcp_server_versions_asset_number",
-        "uq_credential_grants_active_slot",
     }
 )
-_MCP_DISCOVERY_IDEMPOTENCY_DOMAIN = b"deerflow:mcp-tool-discovery:v1\0"
+_MCP_DISCOVERY_IDEMPOTENCY_DOMAIN = b"actweave:mcp-tool-discovery:v1\0"
 _Actor = ProjectContext | SystemAssetGovernanceContext | SystemAssetReadContext
 _T = TypeVar("_T")
 
@@ -135,7 +130,7 @@ class CreateMcpServer:
 
 
 @dataclass(frozen=True)
-class McpCredentialSlot:
+class McpSecretSlot:
     name: str
     purpose: str
     payload_schema: Mapping[str, object]
@@ -155,7 +150,7 @@ class McpDefinition:
     routing: Mapping[str, object] = field(default_factory=dict)
     tool_overrides: Mapping[str, object] = field(default_factory=dict)
     timeout_seconds: int = 30
-    credential_slots: tuple[McpCredentialSlot, ...] = ()
+    secret_slots: tuple[McpSecretSlot, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,7 +169,7 @@ class McpAssetView:
 
 
 @dataclass(frozen=True)
-class McpCredentialSlotView:
+class McpSecretSlotView:
     id: uuid.UUID
     name: str
     purpose: str
@@ -189,8 +184,7 @@ class McpVersionView:
     version_number: int
     workflow_status: WorkflowStatus
     definition: McpDefinition
-    credential_slots: tuple[McpCredentialSlotView, ...]
-    credential_grants: tuple[CredentialGrantView, ...]
+    secret_slots: tuple[McpSecretSlotView, ...]
     supersedes_version_id: uuid.UUID | None
     payload_checksum: str
     submitted_at: datetime | None
@@ -249,12 +243,11 @@ class McpToolDiscoveryAttemptView:
 def _mcp_tool_inventory_view(
     *,
     payload_checksum: str,
-    active_grant_ids: tuple[uuid.UUID, ...],
+    secret_digest: str,
     inventory: McpToolInventoryRecord | None,
     testing: bool = False,
     latest_attempt: McpToolDiscoveryAttemptRecord | None = None,
 ) -> McpToolInventoryView:
-    current_grant_digest = mcp_grant_closure_digest(active_grant_ids)
     latest_failure_at: datetime | None = None
     latest_failure_code: (
         Literal[
@@ -263,7 +256,7 @@ def _mcp_tool_inventory_view(
         ]
         | None
     ) = None
-    if latest_attempt is not None and latest_attempt.status == "failed" and latest_attempt.payload_checksum == payload_checksum and latest_attempt.grant_digest == current_grant_digest and latest_attempt.public_error_code is not None:
+    if latest_attempt is not None and latest_attempt.status == "failed" and latest_attempt.payload_checksum == payload_checksum and latest_attempt.secret_digest == secret_digest and latest_attempt.public_error_code is not None:
         candidate_at = latest_attempt.completed_at or latest_attempt.requested_at
         if inventory is None or candidate_at > inventory.last_attempt_at:
             latest_failure_at = candidate_at
@@ -284,8 +277,8 @@ def _mcp_tool_inventory_view(
             last_success_at=None,
             error_code=None,
         )
-    attempt_matches = inventory.attempt_payload_checksum == payload_checksum and inventory.attempt_grant_digest == current_grant_digest
-    tools_match = inventory.tools_payload_checksum == payload_checksum and inventory.tools_grant_digest == current_grant_digest and inventory.last_success_at is not None
+    attempt_matches = inventory.attempt_payload_checksum == payload_checksum and inventory.attempt_secret_digest == secret_digest
+    tools_match = inventory.tools_payload_checksum == payload_checksum and inventory.tools_secret_digest == secret_digest and inventory.last_success_at is not None
     tools = (
         tuple(
             McpToolView(
@@ -347,7 +340,7 @@ def _mcp_tool_discovery_idempotency_key(
     mcp_server_id: uuid.UUID,
     mcp_server_version_id: uuid.UUID,
     payload_checksum: str,
-    grant_digest: str,
+    secret_digest: str,
     trigger: Literal["auto", "manual"],
     nonce: uuid.UUID | None = None,
 ) -> str:
@@ -356,7 +349,7 @@ def _mcp_tool_discovery_idempotency_key(
     digest.update(mcp_server_id.bytes)
     digest.update(mcp_server_version_id.bytes)
     digest.update(payload_checksum.encode("ascii"))
-    digest.update(grant_digest.encode("ascii"))
+    digest.update(secret_digest.encode("ascii"))
     digest.update(trigger.encode("ascii"))
     if nonce is not None:
         digest.update(nonce.bytes)
@@ -453,14 +446,14 @@ class McpService:
                 created_by_user_id=str(actor.user_id),
             )
             slots = tuple(
-                McpCredentialSlotRow(
+                McpSecretSlotRow(
                     mcp_server_version_id=version_id,
                     name=slot.name,
                     purpose=slot.purpose,
                     payload_schema={key: list(values) for key, values in slot.payload_schema.items()},
                     required=slot.required,
                 )
-                for slot in definition.credential_slots
+                for slot in definition.secret_slots
             )
             record = await repository.add_version(
                 asset,
@@ -471,27 +464,20 @@ class McpService:
             asset.version += 1
             await repository.session.flush()
 
-            if record.slots:
-                await self._submit_draft_for_approval_in_session(
-                    actor,
-                    repository,
-                    asset,
-                    record,
-                )
-            else:
-                await self._publish_draft_in_session(
-                    actor,
-                    repository,
-                    asset,
-                    record,
-                )
+            await self._publish_draft_in_session(
+                actor,
+                repository,
+                asset,
+                record,
+            )
+            if not record.slots:
                 await self._enqueue_tool_discovery_in_session(
                     actor,
                     repository,
                     asset_id=asset.id,
                     version_id=record.row.id,
                     payload_checksum=record.row.payload_checksum,
-                    grant_ids=(),
+                    secret_digest=hashlib.sha256(b"actweave:mcp-secret-closure:v1\0").hexdigest(),
                     trigger="auto",
                 )
             return ProjectMcpConfiguredCreateResult(
@@ -522,7 +508,7 @@ class McpService:
                 actor,
                 result.asset.id,
                 result.version.id,
-                "mcp.submit_approval" if result.version.workflow_status is WorkflowStatus.PENDING_APPROVAL else "mcp.publish",
+                "mcp.publish",
             )
 
         return await self._execute(actor, operation, governance=governance)
@@ -561,6 +547,14 @@ class McpService:
             )
             if asset.status != "active":
                 raise AssetConflict(actor.request_id)
+            source = None
+            if asset.current_published_version_id is not None:
+                source = await repository.get_project_version(
+                    actor,
+                    asset.id,
+                    asset.current_published_version_id,
+                    for_update=True,
+                )
             version_id = uuid.uuid4()
             version = McpServerVersionRow(
                 id=version_id,
@@ -583,14 +577,14 @@ class McpService:
                 created_by_user_id=str(actor.user_id),
             )
             slots = tuple(
-                McpCredentialSlotRow(
+                McpSecretSlotRow(
                     mcp_server_version_id=version_id,
                     name=slot.name,
                     purpose=slot.purpose,
                     payload_schema={key: list(values) for key, values in slot.payload_schema.items()},
                     required=slot.required,
                 )
-                for slot in definition.credential_slots
+                for slot in definition.secret_slots
             )
             record = await repository.add_version(
                 asset,
@@ -600,29 +594,20 @@ class McpService:
             )
             asset.version += 1
             await repository.session.flush()
-            if record.slots:
-                await self._submit_draft_for_approval_in_session(
-                    actor,
-                    repository,
-                    asset,
-                    record,
-                )
-            else:
-                await self._publish_draft_in_session(
-                    actor,
-                    repository,
-                    asset,
-                    record,
-                )
-                await self._enqueue_tool_discovery_in_session(
-                    actor,
-                    repository,
-                    asset_id=asset.id,
-                    version_id=record.row.id,
-                    payload_checksum=record.row.payload_checksum,
-                    grant_ids=(),
-                    trigger="auto",
-                )
+            await self._copy_project_secrets_if_compatible(
+                actor,
+                repository,
+                asset,
+                source,
+                record,
+            )
+            await self._publish_draft_in_session(
+                actor,
+                repository,
+                asset,
+                record,
+            )
+            await self._enqueue_if_ready(actor, repository, asset, record)
             return ProjectMcpConfiguredCreateResult(
                 asset=self._asset_view(asset),
                 version=self._version_view(record),
@@ -644,7 +629,7 @@ class McpService:
                 actor,
                 result.asset.id,
                 result.version.id,
-                "mcp.submit_approval" if result.version.workflow_status is WorkflowStatus.PENDING_APPROVAL else "mcp.publish",
+                "mcp.publish",
             )
 
         return await self._execute(actor, operation, governance=governance)
@@ -710,6 +695,14 @@ class McpService:
             self._require_expected_version(actor, asset, expected_asset_version)
             if asset.status != "active":
                 raise AssetConflict(actor.request_id)
+            source = None
+            if isinstance(actor, ProjectContext) and asset.current_published_version_id is not None:
+                source = await repository.get_project_version(
+                    actor,
+                    asset.id,
+                    asset.current_published_version_id,
+                    for_update=True,
+                )
             version_id = uuid.uuid4()
             version = McpServerVersionRow(
                 id=version_id,
@@ -732,14 +725,14 @@ class McpService:
                 created_by_user_id=str(actor.user_id),
             )
             slots = tuple(
-                McpCredentialSlotRow(
+                McpSecretSlotRow(
                     mcp_server_version_id=version_id,
                     name=slot.name,
                     purpose=slot.purpose,
                     payload_schema={key: list(values) for key, values in slot.payload_schema.items()},
                     required=slot.required,
                 )
-                for slot in definition.credential_slots
+                for slot in definition.secret_slots
             )
             record = await repository.add_version(
                 asset,
@@ -749,6 +742,14 @@ class McpService:
             )
             asset.version += 1
             await repository.session.flush()
+            if isinstance(actor, ProjectContext):
+                await self._copy_project_secrets_if_compatible(
+                    actor,
+                    repository,
+                    asset,
+                    source,
+                    record,
+                )
             return self._version_view(record)
 
         return await self._execute(
@@ -783,168 +784,6 @@ class McpService:
             actor,
             operation,
             governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.submit_approval"),
-        )
-
-    async def approve(
-        self,
-        actor: _Actor,
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        credential_versions: Mapping[str, uuid.UUID],
-        *,
-        expected_asset_version: int,
-    ) -> McpVersionView:
-        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
-        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is None:
-            raise AssetForbidden(actor.request_id)
-        credential_versions = self._validate_credential_bindings(actor, credential_versions)
-
-        async def operation(repository: McpRepository) -> McpVersionView:
-            credentials = CredentialRepository(repository.session)
-            await self._lock_project_first(repository, actor)
-            asset = await self._get_asset(
-                repository,
-                actor,
-                asset_id,
-                for_update=True,
-                lock_project=False,
-            )
-            self._require_expected_version(actor, asset, expected_asset_version)
-            record = await self._get_version(repository, actor, asset_id, version_id, for_update=True)
-            if asset.status != "active" or not record.slots:
-                raise AssetConflict(actor.request_id)
-            expected_status = {WorkflowStatus.DRAFT.value, WorkflowStatus.PENDING_APPROVAL.value} if isinstance(actor, SystemAssetGovernanceContext) else {WorkflowStatus.PENDING_APPROVAL.value}
-            if record.row.workflow_status not in expected_status:
-                raise AssetConflict(actor.request_id)
-            self._require_current_lineage(actor, asset, record)
-            self._validate_transition_definition(actor, record)
-            slots_by_name = {slot.name: slot for slot in record.slots}
-            if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
-                raise AssetValidationFailed(actor.request_id)
-            try:
-                locked_versions = await self._lock_credential_versions(
-                    credentials,
-                    actor,
-                    tuple(credential_versions.values()),
-                )
-            except AssetNotFound:
-                raise AssetValidationFailed(actor.request_id) from None
-            bindings: list[tuple[McpCredentialSlotRow, CredentialVersionRow]] = []
-            for slot in record.slots:
-                credential_version_id = credential_versions.get(slot.name)
-                if credential_version_id is None:
-                    continue
-                locked = locked_versions.get(credential_version_id)
-                if locked is None:
-                    raise AssetValidationFailed(actor.request_id)
-                self._validate_slot_credential(actor, asset, slot, locked)
-                bindings.append((slot, locked.version))
-            grants = await repository.create_grants(
-                record.row,
-                bindings,
-                user_id=actor.user_id,
-                request_id=actor.request_id,
-            )
-            record.row.workflow_status = WorkflowStatus.PUBLISHED.value
-            record.row.reviewed_at = datetime.now(UTC)
-            record.row.reviewed_by_user_id = str(actor.user_id)
-            asset.current_published_version_id = record.row.id
-            asset.version += 1
-            await repository.session.flush()
-            if isinstance(actor, ProjectContext):
-                await self._enqueue_tool_discovery_in_session(
-                    actor,
-                    repository,
-                    asset_id=asset.id,
-                    version_id=record.row.id,
-                    payload_checksum=record.row.payload_checksum,
-                    grant_ids=tuple(grant.id for grant in grants if grant.status == "active"),
-                    trigger="auto",
-                )
-            return self._version_view(McpVersionRecord(record.row, record.slots, grants))
-
-        return await self._execute(
-            actor,
-            operation,
-            governance=lambda session, result: self._record_governance(session, actor, asset_id, result.id, "mcp.approve"),
-        )
-
-    async def configure_system_credential_grants(
-        self,
-        actor: _Actor,
-        asset_id: uuid.UUID,
-        version_id: uuid.UUID,
-        credential_versions: Mapping[str, uuid.UUID],
-        expected_active_grant_versions: Mapping[str, int],
-    ) -> McpVersionView:
-        self._require_capability(actor, Capability.MCP_CREDENTIALS_APPROVE)
-        if not isinstance(actor, SystemAssetGovernanceContext) or actor.project_id is not None:
-            raise AssetForbidden(getattr(actor, "request_id", "unknown"))
-        credential_versions = self._validate_credential_bindings(actor, credential_versions)
-        expected_active_grant_versions = self._validate_expected_active_grant_versions(
-            actor,
-            expected_active_grant_versions,
-        )
-
-        async def operation(repository: McpRepository) -> McpVersionView:
-            credentials = CredentialRepository(repository.session)
-            asset = await repository.get_system_asset(actor, asset_id, for_update=True)
-            if not asset.source_key or asset.status != "active" or asset.current_published_version_id != version_id:
-                raise AssetConflict(actor.request_id)
-            record = await repository.get_system_version(
-                actor,
-                asset_id,
-                version_id,
-                for_update=True,
-            )
-            if record.row.workflow_status != WorkflowStatus.PUBLISHED.value or not record.slots or self._checksum(self._definition_from_record(record)) != record.row.payload_checksum:
-                raise AssetConflict(actor.request_id)
-            slots_by_name = {slot.name: slot for slot in record.slots}
-            if set(credential_versions).difference(slots_by_name) or any(slot.required and slot.name not in credential_versions for slot in record.slots):
-                raise AssetValidationFailed(actor.request_id)
-            try:
-                locked_versions = await credentials.lock_system_credential_versions(
-                    actor,
-                    tuple(credential_versions.values()),
-                )
-            except AssetNotFound:
-                raise AssetValidationFailed(actor.request_id) from None
-            bindings: list[tuple[McpCredentialSlotRow, CredentialVersionRow]] = []
-            for slot in record.slots:
-                credential_version_id = credential_versions.get(slot.name)
-                if credential_version_id is None:
-                    continue
-                locked = locked_versions.get(credential_version_id)
-                if locked is None:
-                    raise AssetValidationFailed(actor.request_id)
-                self._validate_slot_credential(actor, asset, slot, locked)
-                bindings.append((slot, locked.version))
-            await repository.replace_system_grants(
-                record.row,
-                record.slots,
-                bindings,
-                expected_active_grant_versions=expected_active_grant_versions,
-                user_id=actor.user_id,
-                request_id=actor.request_id,
-            )
-            refreshed = await repository.get_system_version(
-                actor,
-                asset_id,
-                version_id,
-                for_update=False,
-            )
-            return self._version_view(refreshed)
-
-        return await self._execute(
-            actor,
-            operation,
-            governance=lambda session, result: self._record_governance(
-                session,
-                actor,
-                asset_id,
-                result.id,
-                "mcp.credential_grants.configure",
-            ),
         )
 
     async def publish(
@@ -998,7 +837,7 @@ class McpService:
         asset: McpServerRow,
         record: McpVersionRecord,
     ) -> None:
-        if asset.status != "active" or record.row.workflow_status != WorkflowStatus.DRAFT.value or record.slots:
+        if asset.status != "active" or record.row.workflow_status != WorkflowStatus.DRAFT.value:
             raise AssetConflict(actor.request_id)
         self._require_current_lineage(actor, asset, record)
         self._validate_transition_definition(actor, record)
@@ -1137,15 +976,14 @@ class McpService:
                 project_id = getattr(actor, "project_id", None)
                 if not isinstance(project_id, uuid.UUID):
                     raise AssetForbidden(actor.request_id)
-                try:
-                    await lock_mcp_credential_closure(
-                        repository.session,
-                        current.row.id,
-                        scope=AssetScope(asset.scope),
-                        project_id=project_id,
-                    )
-                except McpCredentialClosureInvalid:
-                    raise AssetValidationFailed(actor.request_id) from None
+                await lock_mcp_secret_closure(
+                    repository.session,
+                    project_id=project_id,
+                    mcp_server_id=asset.id,
+                    mcp_server_version_id=current.row.id,
+                    slots=current.slots,
+                    request_id=actor.request_id,
+                )
             asset.status = "active"
             asset.version += 1
             await repository.session.flush()
@@ -1228,16 +1066,14 @@ class McpService:
             if asset.status != "active" or asset.current_published_version_id != version_id or record.row.workflow_status != WorkflowStatus.PUBLISHED.value:
                 raise AssetConflict(actor.request_id)
             self._validate_transition_definition(actor, record)
-            try:
-                closure = await lock_mcp_credential_closure(
-                    repository.session,
-                    version_id,
-                    scope=AssetScope.PROJECT,
-                    project_id=actor.project_id,
-                )
-            except McpCredentialClosureInvalid:
-                raise AssetValidationFailed(actor.request_id) from None
-            grant_digest = mcp_grant_closure_digest(closure.grant_ids)
+            closure = await lock_mcp_secret_closure(
+                repository.session,
+                project_id=actor.project_id,
+                mcp_server_id=asset_id,
+                mcp_server_version_id=version_id,
+                slots=record.slots,
+                request_id=actor.request_id,
+            )
             attempts = McpToolDiscoveryAttemptRepository(repository.session)
             try:
                 active = await attempts.active_for_closure(
@@ -1245,7 +1081,7 @@ class McpService:
                     asset_id,
                     version_id,
                     record.row.payload_checksum,
-                    grant_digest,
+                    closure.digest,
                 )
             except (TypeError, ValueError):
                 raise AssetStorageUnavailable(actor.request_id) from None
@@ -1258,7 +1094,7 @@ class McpService:
                     asset_id=asset_id,
                     version_id=version_id,
                     payload_checksum=record.row.payload_checksum,
-                    grant_ids=closure.grant_ids,
+                    secret_digest=closure.digest,
                     trigger="manual",
                 )
             )
@@ -1321,15 +1157,23 @@ class McpService:
                     mcp_server_id=asset_id,
                     mcp_server_version_id=version_id,
                 )
-                grant_ids = tuple(grant.id for grant in record.grants if grant.status == "active")
-                grant_digest = mcp_grant_closure_digest(grant_ids)
+                materials = await McpSecretStore(repository.session).load_materials(
+                    project_id=actor.project_id,
+                    mcp_server_id=asset_id,
+                    mcp_server_version_id=version_id,
+                    slots=record.slots,
+                    require_required=False,
+                    for_update=False,
+                    request_id=actor.request_id,
+                )
+                secret_digest = mcp_secret_closure_digest(materials)
                 attempts = McpToolDiscoveryAttemptRepository(repository.session)
                 active_discovery = await attempts.active_for_closure(
                     actor.project_id,
                     asset_id,
                     version_id,
                     record.row.payload_checksum,
-                    grant_digest,
+                    secret_digest,
                 )
                 latest_discovery = await attempts.latest_for_version(
                     actor.project_id,
@@ -1340,7 +1184,7 @@ class McpService:
                 raise AssetStorageUnavailable(actor.request_id) from None
             return _mcp_tool_inventory_view(
                 payload_checksum=record.row.payload_checksum,
-                active_grant_ids=grant_ids,
+                secret_digest=secret_digest,
                 inventory=inventory,
                 testing=active_discovery is not None,
                 latest_attempt=latest_discovery,
@@ -1356,16 +1200,15 @@ class McpService:
         asset_id: uuid.UUID,
         version_id: uuid.UUID,
         payload_checksum: str,
-        grant_ids: tuple[uuid.UUID, ...],
+        secret_digest: str,
         trigger: Literal["auto", "manual"],
     ) -> McpToolDiscoveryAttemptRecord:
-        grant_digest = mcp_grant_closure_digest(grant_ids)
         idempotency_key = _mcp_tool_discovery_idempotency_key(
             project_id=actor.project_id,
             mcp_server_id=asset_id,
             mcp_server_version_id=version_id,
             payload_checksum=payload_checksum,
-            grant_digest=grant_digest,
+            secret_digest=secret_digest,
             trigger=trigger,
             nonce=uuid.uuid4() if trigger == "manual" else None,
         )
@@ -1376,26 +1219,130 @@ class McpService:
                 mcp_server_id=asset_id,
                 mcp_server_version_id=version_id,
                 payload_checksum=payload_checksum,
-                grant_digest=grant_digest,
+                secret_digest=secret_digest,
                 trigger=trigger,
                 idempotency_key=idempotency_key,
             )
         except (TypeError, ValueError, RuntimeError):
             raise AssetStorageUnavailable(actor.request_id) from None
 
-    async def grant_is_usable(self, actor: _Actor, grant_id: uuid.UUID) -> bool:
-        self._require_capability(actor, Capability.SHARED_ASSETS_READ)
+    async def _copy_project_secrets_if_compatible(
+        self,
+        actor: ProjectContext,
+        repository: McpRepository,
+        asset: McpServerRow,
+        source: McpVersionRecord | None,
+        target: McpVersionRecord,
+    ) -> None:
+        if source is None or Capability.SHARED_ASSETS_MANAGE_BINDINGS not in actor.capabilities or not self._mcp_secret_copy_compatible(source, target):
+            return
+        store = McpSecretStore(repository.session)
+        copied = await store.copy_compatible(
+            project_id=actor.project_id,
+            mcp_server_id=asset.id,
+            source_version_id=source.row.id,
+            source_slots=source.slots,
+            target_version_id=target.row.id,
+            target_slots=target.slots,
+            actor_user_id=str(actor.user_id),
+            request_id=actor.request_id,
+        )
+        if not copied:
+            return
+        current = await store.list_states(
+            project_id=actor.project_id,
+            mcp_server_id=asset.id,
+            mcp_server_version_id=target.row.id,
+            for_update=True,
+        )
+        by_slot = {state.slot_id: state for state in current}
+        readiness = "ready" if all(not slot.required or (slot.id in by_slot and by_slot[slot.id].current_generation_id is not None) for slot in target.slots) else "unready"
+        slots = {slot.id: slot for slot in target.slots}
+        for state in copied:
+            slot = slots[state.slot_id]
+            await self._governance_sink.append_project(
+                repository.session,
+                actor=actor.user_id,
+                project_id=actor.project_id,
+                asset_id=asset.id,
+                version_id=target.row.id,
+                action="mcp.secret.copy",
+                request_id=actor.request_id,
+                asset_kind="mcp",
+                secret_metadata={
+                    "version_id": target.row.id,
+                    "slot_id": slot.id,
+                    "secret_name": slot.name,
+                    "generation_id": state.current_generation_id,
+                    "revision": int(state.revision),
+                    "result": "copied",
+                    "reason": "compatible_copy",
+                    "readiness": readiness,
+                },
+            )
 
-        async def operation(repository: McpRepository) -> bool:
-            if isinstance(actor, ProjectContext):
-                state = await repository.project_grant_state(actor, grant_id)
-            elif actor.project_id is not None:
-                state = await repository.override_grant_state(actor, grant_id)
-            else:
-                state = await repository.system_grant_state(actor, grant_id)
-            return self._grant_state_usable(state)
+    async def _enqueue_if_ready(
+        self,
+        actor: ProjectContext,
+        repository: McpRepository,
+        asset: McpServerRow,
+        record: McpVersionRecord,
+    ) -> None:
+        materials = await McpSecretStore(repository.session).load_materials(
+            project_id=actor.project_id,
+            mcp_server_id=asset.id,
+            mcp_server_version_id=record.row.id,
+            slots=record.slots,
+            require_required=False,
+            for_update=True,
+            request_id=actor.request_id,
+        )
+        configured = {item.slot_id for item in materials}
+        if any(slot.required and slot.id not in configured for slot in record.slots):
+            return
+        await self._enqueue_tool_discovery_in_session(
+            actor,
+            repository,
+            asset_id=asset.id,
+            version_id=record.row.id,
+            payload_checksum=record.row.payload_checksum,
+            secret_digest=mcp_secret_closure_digest(materials),
+            trigger="auto",
+        )
 
-        return await self._execute(actor, operation)
+    @staticmethod
+    def _mcp_secret_copy_compatible(
+        source: McpVersionRecord,
+        target: McpVersionRecord,
+    ) -> bool:
+        if source.row.transport != target.row.transport:
+            return False
+
+        def origin(value: str | None) -> tuple[str, str, int | None] | None:
+            if value is None:
+                return None
+            parsed = urlsplit(value)
+            port = parsed.port
+            if port is None:
+                port = 443 if parsed.scheme.lower() in {"https", "wss"} else 80
+            return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+
+        if origin(source.row.url) != origin(target.row.url):
+            return False
+
+        def schemas(record: McpVersionRecord):
+            return tuple(
+                sorted(
+                    (
+                        slot.name,
+                        tuple(sorted((key, tuple(values)) for key, values in slot.payload_schema.items())),
+                        slot.required,
+                    )
+                    for slot in record.slots
+                )
+            )
+
+        return schemas(source) == schemas(target)
 
     async def _change_status(
         self,
@@ -1497,89 +1444,6 @@ class McpService:
             await repository.lock_override_project(actor)
 
     @staticmethod
-    async def _lock_credential_version(
-        repository: CredentialRepository,
-        actor: _Actor,
-        credential_version_id: uuid.UUID,
-    ) -> LockedCredentialVersion:
-        if isinstance(actor, ProjectContext):
-            return await repository.lock_project_credential_version(actor, credential_version_id)
-        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
-            return await repository.lock_override_credential_version(actor, credential_version_id)
-        if isinstance(actor, SystemAssetGovernanceContext):
-            return await repository.lock_system_credential_version(actor, credential_version_id)
-        raise AssetForbidden("unknown")
-
-    @staticmethod
-    async def _lock_credential_versions(
-        repository: CredentialRepository,
-        actor: _Actor,
-        credential_version_ids: tuple[uuid.UUID, ...],
-    ) -> dict[uuid.UUID, LockedCredentialVersion]:
-        if isinstance(actor, ProjectContext):
-            return await repository.lock_project_credential_versions(
-                actor,
-                credential_version_ids,
-            )
-        if isinstance(actor, SystemAssetGovernanceContext) and actor.project_id is not None:
-            return await repository.lock_override_credential_versions(
-                actor,
-                credential_version_ids,
-            )
-        if isinstance(actor, SystemAssetGovernanceContext):
-            return await repository.lock_system_credential_versions(
-                actor,
-                credential_version_ids,
-            )
-        raise AssetForbidden("unknown")
-
-    @staticmethod
-    def _validate_slot_credential(
-        actor: _Actor,
-        asset: McpServerRow,
-        slot: McpCredentialSlotRow,
-        locked: LockedCredentialVersion,
-    ) -> None:
-        credential = locked.credential
-        version = locked.version
-        if credential.scope != asset.scope or credential.project_id != asset.project_id or credential.status != "active" or version.status != "active":
-            raise AssetValidationFailed(actor.request_id)
-        expected_schema = {key: tuple(values) for key, values in version.payload_schema.items()}
-        slot_schema = {key: tuple(values) for key, values in slot.payload_schema.items()}
-        if slot_schema != expected_schema:
-            raise AssetValidationFailed(actor.request_id)
-
-    @staticmethod
-    def _validate_credential_bindings(
-        actor: _Actor,
-        credential_versions: object,
-    ) -> Mapping[str, uuid.UUID]:
-        request_id = getattr(actor, "request_id", "unknown")
-        if not isinstance(credential_versions, Mapping):
-            raise AssetValidationFailed(request_id)
-        normalized: dict[str, uuid.UUID] = {}
-        for slot_name, credential_version_id in credential_versions.items():
-            if not isinstance(slot_name, str) or _SLOT_PATTERN.fullmatch(slot_name) is None or not isinstance(credential_version_id, uuid.UUID):
-                raise AssetValidationFailed(request_id)
-            normalized[slot_name] = credential_version_id
-        return MappingProxyType(normalized)
-
-    @staticmethod
-    def _validate_expected_active_grant_versions(
-        actor: _Actor,
-        expected: object,
-    ) -> Mapping[str, int]:
-        request_id = getattr(actor, "request_id", "unknown")
-        if not isinstance(expected, Mapping):
-            raise AssetValidationFailed(request_id)
-        normalized: dict[str, int] = {}
-        for slot_name, grant_version in expected.items():
-            if not isinstance(slot_name, str) or _SLOT_PATTERN.fullmatch(slot_name) is None or not isinstance(grant_version, int) or isinstance(grant_version, bool) or grant_version < 1:
-                raise AssetValidationFailed(request_id)
-            normalized[slot_name] = grant_version
-        return MappingProxyType(normalized)
-
-    @staticmethod
     def _validate_create(actor: _Actor, command: CreateMcpServer) -> CreateMcpServer:
         request_id = getattr(actor, "request_id", "unknown")
         if not isinstance(command, CreateMcpServer):
@@ -1612,7 +1476,7 @@ class McpService:
             oauth = cls._copy_json_mapping(definition.oauth)
             routing = cls._copy_json_mapping(definition.routing)
             tool_overrides = cls._copy_json_mapping(definition.tool_overrides)
-            slots = tuple(cls._validate_slot(slot) for slot in definition.credential_slots)
+            slots = tuple(cls._validate_slot(slot) for slot in definition.secret_slots)
             if cls._contains_sensitive_cli_option(args) or (command is not None and cls._contains_sensitive_cli_option(shlex.split(command))):
                 raise ValueError
             if (
@@ -1641,7 +1505,7 @@ class McpService:
                     env=env,
                     headers=headers,
                     oauth=oauth,
-                    credential_slot_schemas=tuple(slot.payload_schema for slot in slots),
+                    secret_slot_schemas=tuple(slot.payload_schema for slot in slots),
                     endpoint_policy=endpoint_policy,
                 )
             persistent_strings = (
@@ -1660,6 +1524,7 @@ class McpService:
                 raise ValueError
             if (
                 not set(oauth).issubset(_OAUTH_FIELDS)
+                or (oauth and oauth.get("grant_type", "client_credentials") != "client_credentials")
                 or cls._contains_sensitive_key(oauth.get("extra_token_params", {}))
                 or cls._contains_sensitive_key(routing)
                 or cls._contains_sensitive_key(tool_overrides)
@@ -1680,14 +1545,14 @@ class McpService:
                 routing=MappingProxyType(routing),
                 tool_overrides=MappingProxyType(tool_overrides),
                 timeout_seconds=definition.timeout_seconds,
-                credential_slots=slots,
+                secret_slots=slots,
             )
         except (AttributeError, RecursionError, TypeError, ValueError):
             raise AssetValidationFailed(request_id) from None
 
     @classmethod
-    def _validate_slot(cls, slot: McpCredentialSlot) -> McpCredentialSlot:
-        if not isinstance(slot, McpCredentialSlot):
+    def _validate_slot(cls, slot: McpSecretSlot) -> McpSecretSlot:
+        if not isinstance(slot, McpSecretSlot):
             raise ValueError
         name = slot.name.strip()
         purpose = slot.purpose.strip()
@@ -1704,7 +1569,7 @@ class McpService:
             if any(not isinstance(value, str) or not value or len(value) > 255 for value in names) or len(set(names)) != len(names):
                 raise ValueError
             normalized[section] = tuple(sorted(names))
-        return McpCredentialSlot(name, purpose, MappingProxyType(normalized), slot.required)
+        return McpSecretSlot(name, purpose, MappingProxyType(normalized), slot.required)
 
     @classmethod
     def _copy_json_mapping(cls, value: Mapping[str, object]) -> dict[str, object]:
@@ -1790,10 +1655,7 @@ class McpService:
     @staticmethod
     def _require_capability(actor: _Actor, capability: Capability) -> None:
         if isinstance(actor, SystemAssetGovernanceContext):
-            if actor.project_id is not None or capability in {
-                Capability.SHARED_ASSETS_READ,
-                Capability.MCP_CREDENTIALS_APPROVE,
-            }:
+            if actor.project_id is not None or capability is Capability.SHARED_ASSETS_READ:
                 return
             raise AssetForbidden(actor.request_id)
         if isinstance(actor, SystemAssetReadContext) and capability is Capability.SHARED_ASSETS_READ:
@@ -1808,28 +1670,18 @@ class McpService:
             raise AssetConflict(actor.request_id)
 
     @staticmethod
-    def _grant_state_usable(state: GrantState) -> bool:
-        return (
-            state.grant.status == "active"
-            and state.mcp_status != "suspended"
-            and state.mcp_workflow_status == WorkflowStatus.PUBLISHED.value
-            and state.credential_status == "active"
-            and state.credential_version_status in {"active", "retired"}
-        )
-
-    @staticmethod
     def _checksum(definition: McpDefinition) -> str:
         canonical = {
             "args": list(definition.args),
             "command": definition.command,
-            "credential_slots": [
+            "secret_slots": [
                 {
                     "name": slot.name,
                     "payload_schema": {key: list(values) for key, values in slot.payload_schema.items()},
                     "purpose": slot.purpose,
                     "required": slot.required,
                 }
-                for slot in definition.credential_slots
+                for slot in definition.secret_slots
             ],
             "description": definition.description,
             "env": dict(definition.env),
@@ -1878,8 +1730,8 @@ class McpService:
             routing=MappingProxyType(dict(record.row.routing)),
             tool_overrides=MappingProxyType(dict(record.row.tool_overrides)),
             timeout_seconds=record.row.timeout_seconds,
-            credential_slots=tuple(
-                McpCredentialSlot(
+            secret_slots=tuple(
+                McpSecretSlot(
                     slot.name,
                     slot.purpose,
                     MappingProxyType({key: tuple(values) for key, values in slot.payload_schema.items()}),
@@ -1897,8 +1749,8 @@ class McpService:
             version_number=record.row.version_number,
             workflow_status=WorkflowStatus(record.row.workflow_status),
             definition=cls._definition_from_record(record),
-            credential_slots=tuple(
-                McpCredentialSlotView(
+            secret_slots=tuple(
+                McpSecretSlotView(
                     id=slot.id,
                     name=slot.name,
                     purpose=slot.purpose,
@@ -1907,7 +1759,6 @@ class McpService:
                 )
                 for slot in record.slots
             ),
-            credential_grants=tuple(cls._grant_view(grant) for grant in record.grants),
             supersedes_version_id=record.row.supersedes_version_id,
             payload_checksum=record.row.payload_checksum,
             submitted_at=record.row.submitted_at,
@@ -1915,19 +1766,6 @@ class McpService:
             reviewed_by_user_id=record.row.reviewed_by_user_id,
             created_by_user_id=record.row.created_by_user_id,
             created_at=record.row.created_at,
-        )
-
-    @staticmethod
-    def _grant_view(row) -> CredentialGrantView:
-        return CredentialGrantView(
-            id=row.id,
-            mcp_server_version_id=row.mcp_server_version_id,
-            credential_slot_id=row.credential_slot_id,
-            credential_version_id=row.credential_version_id,
-            status=row.status,
-            version=row.version,
-            created_by_user_id=row.created_by_user_id,
-            created_at=row.created_at,
         )
 
     @staticmethod

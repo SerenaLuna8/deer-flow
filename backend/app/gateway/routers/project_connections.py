@@ -171,7 +171,7 @@ async def _project_provider_runtimes(
             rows = await repository.list_project_instances(session, context.project_id)
             result: dict[str, _ProjectProviderRuntime] = {}
             for row in rows:
-                binding = await repository.get_credential_binding(
+                secret_state = await repository.get_secret_state(
                     session,
                     row.id,
                     project_id=context.project_id,
@@ -182,7 +182,7 @@ async def _project_provider_runtimes(
                     provider=row.provider,
                     public_config=dict(row.public_config),
                     enabled=row.desired_status == "enabled",
-                    configured=binding is not None,
+                    configured=(secret_state is not None and secret_state.current_generation_id is not None),
                     running=(row.observed_status == "running" or local_running is True),
                     observed_status=row.observed_status,
                 )

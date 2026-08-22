@@ -20,6 +20,7 @@ from support.private_thread_seed import (
     PrivateThreadSeed,
     seed_private_thread_database,
 )
+from support.system_model_seed import seed_system_model_config
 
 from app.private_work.execution_approval import (
     ExecutionApprovalService,
@@ -50,10 +51,6 @@ from deerflow.persistence.jobs.model import JobRow, WorkerNodeRow
 from deerflow.persistence.jobs.sql import JobClaim, JobRepository
 from deerflow.persistence.private_work import PrivateArtifactRow, PrivateFileRow
 from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.system_settings import (
-    SystemModelConfigRow,
-    SystemModelConfigVersionRow,
-)
 from deerflow.runtime.host_execution_approval import HostExecutionPlan
 from deerflow.runtime.host_execution_domain import (
     HostExecutionDomainSnapshot,
@@ -170,40 +167,15 @@ async def _add_source_output(
 
 async def _seed_active_model(seed: PrivateThreadSeed) -> None:
     model_id = uuid.UUID(TEST_MODEL_REF)
-    version_id = uuid.uuid4()
     async with seed.factory() as session, session.begin():
-        model = SystemModelConfigRow(
-            id=model_id,
+        await seed_system_model_config(
+            session,
+            model_id=model_id,
+            owner_user_id=str(seed.owner_a.user_id),
             display_name="Approval output E2E model",
-            status="active",
-            current_version_id=None,
-            revision=1,
-            created_by_user_id=str(seed.owner_a.user_id),
-            updated_by_user_id=str(seed.owner_a.user_id),
+            provider_model="test-model",
+            supports_vision=True,
         )
-        session.add(model)
-        await session.flush()
-        session.add(
-            SystemModelConfigVersionRow(
-                id=version_id,
-                model_config_id=model_id,
-                version_number=1,
-                provider_adapter="vision_bridge_fake",
-                provider_model="test-model",
-                settings={},
-                supports_thinking=False,
-                supports_reasoning_effort=False,
-                supports_vision=True,
-                credential_id=None,
-                credential_version_id=None,
-                credential_env_key=None,
-                payload_checksum="b" * 64,
-                supersedes_version_id=None,
-                created_by_user_id=str(seed.owner_a.user_id),
-            )
-        )
-        await session.flush()
-        model.current_version_id = version_id
 
 
 class _DeterministicLocalSandbox:

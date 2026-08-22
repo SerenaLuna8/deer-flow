@@ -4,7 +4,7 @@ import { ProjectSkillsPage as ProjectSkillsAssetPage } from "@/components/projec
 import { requireServerProjectCapability } from "@/core/projects/server-capability";
 import { assetIdSchema } from "@/core/shared-assets";
 
-const configureCredentialsSchema = z.literal("1");
+const configureSecretsSchema = z.literal("1");
 
 export default async function ProjectSkillsPage({
   params,
@@ -14,7 +14,7 @@ export default async function ProjectSkillsPage({
   searchParams: Promise<{
     skill_id?: string | string[];
     skill_version_id?: string | string[];
-    configure_credentials?: string | string[];
+    configure_secrets?: string | string[];
   }>;
 }) {
   const { project_slug: slug } = await params;
@@ -22,7 +22,7 @@ export default async function ProjectSkillsPage({
   const {
     skill_id: skillId,
     skill_version_id: skillVersionId,
-    configure_credentials: configureCredentials,
+    configure_secrets: configureSecrets,
   } = await searchParams;
   const selectedAsset = assetIdSchema.safeParse(skillId);
   const selectedVersion = assetIdSchema.safeParse(skillVersionId);
@@ -31,9 +31,9 @@ export default async function ProjectSkillsPage({
     <ProjectSkillsAssetPage
       selectedAssetId={selectedAsset.success ? selectedAsset.data : null}
       selectedVersionId={exactSelectionValid ? selectedVersion.data : null}
-      focusSelectedSkillCredentials={
+      focusSelectedSkillSecrets={
         exactSelectionValid &&
-        configureCredentialsSchema.safeParse(configureCredentials).success
+        configureSecretsSchema.safeParse(configureSecrets).success
       }
     />
   );

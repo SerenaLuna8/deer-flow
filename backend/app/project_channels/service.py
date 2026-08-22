@@ -7,12 +7,11 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.exc import TimeoutError as SATimeoutError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.project_channels.credential_store import ProjectChannelCredentialStore
 from app.project_channels.errors import (
     ChannelInstanceConflict,
     ChannelInstanceForbidden,
@@ -31,9 +30,9 @@ from app.project_channels.providers import (
     ChannelProviderSpec,
     validate_channel_configuration,
 )
+from app.project_channels.secret_store import ProjectChannelSecretStore
 from app.projects.capabilities import Capability
 from app.projects.context import ProjectContext
-from app.shared_assets.credential_repository import CredentialRepository
 from app.shared_assets.errors import AssetForbidden, AssetNotFound, AssetStorageUnavailable
 from deerflow.persistence.channel_connections.model import ChannelConnectionRow
 from deerflow.persistence.channel_connections.project_instance_repository import (
@@ -41,18 +40,18 @@ from deerflow.persistence.channel_connections.project_instance_repository import
     ProjectChannelInstanceNotFound,
     ProjectChannelInstanceRepository,
 )
+from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 
 _IDENTITY_CONSTRAINTS = {
     "uq_project_channel_instances_live_identity",
 }
 _CONFLICT_CONSTRAINTS = {
     "uq_project_channel_instances_live_provider",
-    "uq_project_channel_credential_bindings_active_instance",
-    "uq_credentials_project_name",
-    "uq_credential_versions_asset_number",
+    "pk_project_channel_secret_states",
+    "uq_project_channel_secret_generations_revision",
 }
 _LAST_ERROR_MESSAGES = {
-    "channel_credentials_unavailable": "Channel credentials could not be loaded.",
+    "channel_secrets_unavailable": "Channel secrets could not be loaded.",
     "channel_provider_start_failed": "The channel could not connect. Check the application credentials and permissions.",
     "channel_lease_lost": "The channel is reconnecting on another runtime.",
 }
@@ -80,15 +79,13 @@ class ProjectChannelInstanceService:
         session_factory: Callable[[], AsyncSession],
         *,
         repository: ProjectChannelInstanceRepository | Any | None = None,
-        credential_repository_factory: Callable[[AsyncSession], CredentialRepository] | None = None,
-        credential_store_factory: Callable[[CredentialRepository], ProjectChannelCredentialStore] | None = None,
+        secret_store_factory: Callable[[AsyncSession], ProjectChannelSecretStore] | None = None,
         runtime_coordinator: Any | None = None,
         audit: Any | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._repository = repository or ProjectChannelInstanceRepository()
-        self._credential_repository_factory = credential_repository_factory or CredentialRepository
-        self._credential_store_factory = credential_store_factory or ProjectChannelCredentialStore
+        self._secret_store_factory = secret_store_factory or ProjectChannelSecretStore
         self._runtime = runtime_coordinator
         self._audit = audit
 
@@ -99,6 +96,57 @@ class ProjectChannelInstanceService:
     ) -> None:
         if self._audit is not None:
             await self._audit.project_updated(session, context)
+
+    async def _record_secret_event(
+        self,
+        session: AsyncSession,
+        context: ProjectContext,
+        *,
+        instance_id: uuid.UUID,
+        operation: str,
+        generation_id: uuid.UUID | None,
+        revision: int,
+        result: str,
+        reason: str,
+    ) -> None:
+        record = getattr(self._audit, "channel_secret_mutated", None)
+        if record is not None:
+            await record(
+                session,
+                context,
+                channel_instance_id=instance_id,
+                operation=operation,
+                generation_id=generation_id,
+                revision=revision,
+                result=result,
+                reason=reason,
+                readiness="ready" if result == "configured" else "unready",
+            )
+
+    @staticmethod
+    async def _lock_project(
+        session: AsyncSession,
+        context: ProjectContext,
+    ) -> None:
+        found = await session.scalar(
+            select(ProjectRow.id)
+            .join(
+                ProjectMembershipRow,
+                ProjectMembershipRow.project_id == ProjectRow.id,
+            )
+            .where(
+                ProjectRow.id == context.project_id,
+                ProjectRow.status == "active",
+                ProjectRow.is_suspended.is_(False),
+                ProjectMembershipRow.id == context.membership_id,
+                ProjectMembershipRow.user_id == str(context.user_id),
+                ProjectMembershipRow.status == "active",
+                ProjectMembershipRow.version == context.membership_version,
+            )
+            .with_for_update(of=[ProjectRow, ProjectMembershipRow])
+        )
+        if found is None:
+            raise ChannelInstanceForbidden(context.request_id)
 
     @staticmethod
     def _require_manage(context: ProjectContext) -> None:
@@ -156,22 +204,21 @@ class ProjectChannelInstanceService:
         self._require_manage(context)
 
         async def operation(session: AsyncSession):
-            credentials = self._credential_repository_factory(session)
-            await credentials.lock_project(context)
+            await self._lock_project(session, context)
+            secrets = self._secret_store_factory(session)
             rows = await self._repository.list_project_instances(
                 session,
                 context.project_id,
             )
             result: dict[str, ProjectChannelInstanceView] = {}
             for row in rows:
-                binding = await self._repository.get_credential_binding(
-                    session,
-                    row.id,
+                secret_status = await secrets.status(
                     project_id=context.project_id,
+                    instance_id=row.id,
                 )
                 result[row.provider] = self._view(
                     row,
-                    credential_configured=binding is not None,
+                    secret_status=secret_status,
                 )
             return tuple(result.get(provider) or self._unconfigured(spec) for provider, spec in CHANNEL_PROVIDER_SPECS.items())
 
@@ -199,27 +246,26 @@ class ProjectChannelInstanceService:
             )
 
         async def operation(session: AsyncSession):
-            credential_repository = self._credential_repository_factory(session)
-            await credential_repository.lock_project(context)
+            await self._lock_project(session, context)
+            secrets = self._secret_store_factory(session)
             instance = await self._repository.get_project_provider_instance(
                 session,
                 project_id=context.project_id,
                 provider=provider,
                 for_update=True,
             )
-            binding = None
+            secret_status = None
             if instance is not None:
-                binding = await self._repository.get_credential_binding(
-                    session,
-                    instance.id,
+                secret_status = await secrets.status(
                     project_id=context.project_id,
+                    instance_id=instance.id,
                     for_update=True,
                 )
             normalized = validate_channel_configuration(
                 provider,
                 public_config=command.public_config,
-                credentials=command.credentials,
-                has_existing_credential=binding is not None,
+                secrets=command.secrets,
+                has_existing_secret=(secret_status is not None and secret_status.configured),
                 request_id=context.request_id,
             )
             digest = self._identity_digest(
@@ -228,6 +274,12 @@ class ProjectChannelInstanceService:
                 normalized.public_config,
             )
             identity_changed = instance is not None and instance.provider_identity_digest != digest
+            if identity_changed and normalized.secret_payload is None and secret_status is not None and secret_status.configured:
+                raise ChannelInstanceValidationFailed(
+                    context.request_id,
+                    "Channel secrets must be replaced when the application identity changes.",
+                    fields=("secrets",),
+                )
             if instance is None:
                 instance = await self._repository.create_instance(
                     session,
@@ -254,30 +306,27 @@ class ProjectChannelInstanceService:
             if identity_changed:
                 await self._freeze_connections(session, instance.id)
 
-            if normalized.credential_payload is not None:
-                store = self._credential_store_factory(credential_repository)
-                if binding is None:
-                    credential_ref = await store.create(
-                        context,
-                        instance_id=instance.id,
-                        provider=provider,
-                        display_name=display_name,
-                        payload=normalized.credential_payload,
-                    )
-                else:
-                    credential_ref = await store.rotate(
-                        context,
-                        credential_id=binding.credential_id,
-                        provider=provider,
-                        payload=normalized.credential_payload,
-                    )
-                binding = await self._repository.replace_credential_binding(
+            if normalized.secret_payload is not None:
+                had_secret = secret_status is not None and secret_status.configured
+                secret_status = await secrets.replace(
+                    context,
+                    instance=instance,
+                    payload=normalized.secret_payload,
+                )
+                await self._record_secret_event(
                     session,
+                    context,
+                    instance_id=instance.id,
+                    operation=("channel.secret.replace" if had_secret else "channel.secret.configure"),
+                    generation_id=secret_status.generation_id,
+                    revision=secret_status.revision,
+                    result="configured",
+                    reason="replaced" if had_secret else "created",
+                )
+            elif secret_status is None:
+                secret_status = await secrets.status(
                     project_id=context.project_id,
-                    channel_instance_id=instance.id,
-                    credential_id=credential_ref.credential_id,
-                    credential_version_id=credential_ref.credential_version_id,
-                    actor_user_id=str(context.user_id),
+                    instance_id=instance.id,
                 )
             await self._repository.set_observed_status(
                 session,
@@ -287,11 +336,11 @@ class ProjectChannelInstanceService:
                 expected_revision=instance.revision,
             )
             await self._record_update(session, context)
-            return instance, binding is not None
+            return instance, secret_status
 
-        instance, has_binding = await self._execute(context, operation)
+        instance, secret_status = await self._execute(context, operation)
         await self._reconcile(instance.id)
-        return self._view(instance, credential_configured=has_binding)
+        return self._view(instance, secret_status=secret_status)
 
     async def set_enabled(
         self,
@@ -303,8 +352,8 @@ class ProjectChannelInstanceService:
         self._provider(context, provider)
 
         async def operation(session: AsyncSession):
-            credential_repository = self._credential_repository_factory(session)
-            await credential_repository.lock_project(context)
+            await self._lock_project(session, context)
+            secrets = self._secret_store_factory(session)
             instance = await self._repository.get_project_provider_instance(
                 session,
                 project_id=context.project_id,
@@ -313,17 +362,16 @@ class ProjectChannelInstanceService:
             )
             if instance is None:
                 raise ChannelInstanceNotFound(context.request_id)
-            binding = await self._repository.get_credential_binding(
-                session,
-                instance.id,
+            secret_status = await secrets.status(
                 project_id=context.project_id,
+                instance_id=instance.id,
                 for_update=True,
             )
-            if enabled and binding is None:
+            if enabled and not secret_status.configured:
                 raise ChannelInstanceValidationFailed(
                     context.request_id,
-                    f"{CHANNEL_PROVIDER_SPECS[provider].display_name} credentials are required before enabling.",
-                    fields=("credentials",),
+                    f"{CHANNEL_PROVIDER_SPECS[provider].display_name} secrets are required before enabling.",
+                    fields=("secrets",),
                 )
             instance = await self._repository.update_instance(
                 session,
@@ -341,11 +389,65 @@ class ProjectChannelInstanceService:
                 expected_revision=instance.revision,
             )
             await self._record_update(session, context)
-            return instance, binding is not None
+            return instance, secret_status
 
-        instance, has_binding = await self._execute(context, operation)
+        instance, secret_status = await self._execute(context, operation)
         await self._reconcile(instance.id)
-        return self._view(instance, credential_configured=has_binding)
+        return self._view(instance, secret_status=secret_status)
+
+    async def clear_secret(
+        self,
+        context: ProjectContext,
+        provider: str,
+        *,
+        confirmed: bool,
+    ) -> ProjectChannelInstanceView:
+        self._require_manage(context)
+        self._provider(context, provider)
+        if confirmed is not True:
+            raise ChannelInstanceValidationFailed(
+                context.request_id,
+                "Clearing Channel secrets requires confirmation.",
+                fields=("confirmed",),
+            )
+
+        async def operation(session: AsyncSession):
+            await self._lock_project(session, context)
+            instance = await self._repository.get_project_provider_instance(
+                session,
+                project_id=context.project_id,
+                provider=provider,
+                for_update=True,
+            )
+            if instance is None:
+                raise ChannelInstanceNotFound(context.request_id)
+            secrets = self._secret_store_factory(session)
+            previous = await secrets.status(
+                project_id=context.project_id,
+                instance_id=instance.id,
+                for_update=True,
+            )
+            status = await secrets.clear(
+                context,
+                instance=instance,
+            )
+            await self._record_secret_event(
+                session,
+                context,
+                instance_id=instance.id,
+                operation="channel.secret.clear",
+                generation_id=previous.generation_id,
+                revision=status.revision,
+                result="cleared",
+                reason="cleared",
+            )
+            await self._freeze_connections(session, instance.id)
+            await self._record_update(session, context)
+            return instance, status
+
+        instance, secret_status = await self._execute(context, operation)
+        await self._reconcile(instance.id)
+        return self._view(instance, secret_status=secret_status)
 
     async def delete(
         self,
@@ -356,8 +458,8 @@ class ProjectChannelInstanceService:
         self._provider(context, provider)
 
         async def operation(session: AsyncSession):
-            credential_repository = self._credential_repository_factory(session)
-            await credential_repository.lock_project(context)
+            await self._lock_project(session, context)
+            secrets = self._secret_store_factory(session)
             instance = await self._repository.get_project_provider_instance(
                 session,
                 project_id=context.project_id,
@@ -366,24 +468,26 @@ class ProjectChannelInstanceService:
             )
             if instance is None:
                 raise ChannelInstanceNotFound(context.request_id)
-            binding = await self._repository.get_credential_binding(
-                session,
-                instance.id,
+            previous = await secrets.status(
                 project_id=context.project_id,
+                instance_id=instance.id,
                 for_update=True,
             )
-            await self._repository.revoke_credential_binding(
-                session,
-                project_id=context.project_id,
-                channel_instance_id=instance.id,
-                actor_user_id=str(context.user_id),
+            cleared = await secrets.clear(
+                context,
+                instance=instance,
+                reason="delete",
             )
-            if binding is not None:
-                await self._credential_store_factory(credential_repository).revoke(
-                    context,
-                    credential_id=binding.credential_id,
-                    provider=provider,
-                )
+            await self._record_secret_event(
+                session,
+                context,
+                instance_id=instance.id,
+                operation="channel.secret.clear",
+                generation_id=previous.generation_id,
+                revision=cleared.revision,
+                result="cleared",
+                reason="deleted",
+            )
             await self._repository.soft_delete_instance(
                 session,
                 project_id=context.project_id,
@@ -444,7 +548,9 @@ class ProjectChannelInstanceService:
             status="unconfigured",
             enabled=False,
             configured=False,
-            credential_configured=False,
+            secret_configured=False,
+            secret_readiness="unready",
+            secret_revision=0,
             public_config={},
             updated_at=None,
             last_error=None,
@@ -454,7 +560,7 @@ class ProjectChannelInstanceService:
     def _view(
         row: Any,
         *,
-        credential_configured: bool,
+        secret_status: Any,
     ) -> ProjectChannelInstanceView:
         enabled = row.desired_status == "enabled"
         if not enabled:
@@ -475,8 +581,10 @@ class ProjectChannelInstanceService:
             display_name=row.display_name,
             status=status_value,
             enabled=enabled,
-            configured=credential_configured,
-            credential_configured=credential_configured,
+            configured=secret_status.configured,
+            secret_configured=secret_status.configured,
+            secret_readiness=("ready" if secret_status.configured else "unready"),
+            secret_revision=secret_status.revision,
             public_config=dict(row.public_config),
             updated_at=row.updated_at,
             last_error=last_error,

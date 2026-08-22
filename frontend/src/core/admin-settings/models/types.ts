@@ -31,11 +31,7 @@ const providerFieldSchema = z
       });
     }
   });
-const credentialEnvKeySchema = z
-  .string()
-  .min(1)
-  .max(128)
-  .regex(/^[A-Z_][A-Z0-9_]*$/u);
+const apiKeyInputSchema = z.string().min(1).max(16_384);
 
 export type AdminModelSettingValue =
   | string
@@ -254,38 +250,6 @@ export const safeAdminModelSettingsSchema =
 // count, but every new mutation strips and rejects it.
 const readableAdminModelSettingsSchema = genericAdminModelSettingsSchema;
 
-const credentialBindingFields = {
-  credential_id: z.string().uuid().nullable(),
-  credential_version_id: z.string().uuid().nullable(),
-  credential_env_key: credentialEnvKeySchema.nullable(),
-} as const;
-
-function validateCredentialBinding(
-  value: {
-    provider_adapter: z.infer<typeof readableAdminModelProviderAdapterSchema>;
-    credential_id: string | null;
-    credential_version_id: string | null;
-    credential_env_key: string | null;
-  },
-  context: z.RefinementCtx,
-): void {
-  const values = [
-    value.credential_id,
-    value.credential_version_id,
-    value.credential_env_key,
-  ];
-  const present = values.filter((item) => item !== null).length;
-  if (present !== 0 && present !== values.length) {
-    context.addIssue({
-      code: z.ZodIssueCode.custom,
-      path: ["credential_id"],
-      message:
-        "Credential id, version and environment key must be set together",
-    });
-    return;
-  }
-}
-
 export const adminModelProviderSettingFieldSchema = z
   .object({
     name: settingKeySchema,
@@ -369,7 +333,7 @@ export const adminModelProviderSettingFieldSchema = z
 export const adminModelProviderAdapterDescriptorSchema = z
   .object({
     id: adminModelProviderAdapterSchema,
-    credential_required: z.boolean(),
+    api_key_required: z.boolean(),
     setting_fields: z.array(adminModelProviderSettingFieldSchema).max(64),
   })
   .strict()
@@ -481,7 +445,6 @@ const modelVersionFields = {
   supports_thinking: z.boolean(),
   supports_reasoning_effort: z.boolean(),
   supports_vision: z.boolean(),
-  ...credentialBindingFields,
 } as const;
 
 const writableModelVersionFields = {
@@ -497,12 +460,13 @@ export const adminModelItemSchema = z
     status: adminModelStatusSchema,
     is_default: z.boolean(),
     revision: z.number().int().positive(),
-    version_number: z.number().int().positive(),
+    api_key_configured: z.boolean(),
+    secret_readiness: z.enum(["ready", "unready"]),
+    secret_revision: z.number().int().nonnegative(),
     updated_at: z.string().datetime({ offset: true }),
   })
   .strict()
   .superRefine((item, context) => {
-    validateCredentialBinding(item, context);
     if (item.is_default && item.status !== "active") {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -542,21 +506,16 @@ export const createAdminModelInputSchema = z
   .object({
     ...writableModelVersionFields,
     status: adminModelStatusSchema,
+    api_key: apiKeyInputSchema.nullable(),
   })
-  .strict()
-  .superRefine((item, context) => {
-    validateCredentialBinding(item, context);
-  });
+  .strict();
 
 export const replaceAdminModelInputSchema = z
   .object({
     ...writableModelVersionFields,
-    expected_revision: z.number().int().positive(),
+    api_key: apiKeyInputSchema.nullable(),
   })
-  .strict()
-  .superRefine((item, context) => {
-    validateCredentialBinding(item, context);
-  });
+  .strict();
 
 export const testAdminModelConnectionInputSchema = z
   .object({
@@ -564,25 +523,21 @@ export const testAdminModelConnectionInputSchema = z
     provider_model: providerFieldSchema,
     settings: safeAdminModelSettingsSchema,
     supports_vision: z.boolean(),
-    ...credentialBindingFields,
+    api_key: apiKeyInputSchema,
   })
-  .strict()
-  .superRefine((item, context) => {
-    validateCredentialBinding(item, context);
-  });
+  .strict();
+
+export const adminModelSecretClearInputSchema = z
+  .object({ confirmed: z.literal(true) })
+  .strict();
 
 export const adminModelStatusInputSchema = z
   .object({
     status: adminModelStatusSchema,
-    expected_revision: z.number().int().positive(),
   })
   .strict();
 
-export const adminModelDefaultInputSchema = z
-  .object({
-    expected_catalog_revision: z.number().int().positive(),
-  })
-  .strict();
+export const adminModelDefaultInputSchema = z.object({}).strict();
 
 export const adminModelMutationResponseSchema = z
   .object({
@@ -617,6 +572,9 @@ export type TestAdminModelConnectionInput = z.infer<
 export type AdminModelStatusInput = z.infer<typeof adminModelStatusInputSchema>;
 export type AdminModelDefaultInput = z.infer<
   typeof adminModelDefaultInputSchema
+>;
+export type AdminModelSecretClearInput = z.infer<
+  typeof adminModelSecretClearInputSchema
 >;
 export type AdminModelMutationResponse = z.infer<
   typeof adminModelMutationResponseSchema

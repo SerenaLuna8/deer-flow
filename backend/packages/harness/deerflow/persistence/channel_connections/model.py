@@ -6,6 +6,7 @@ import uuid
 from datetime import UTC, datetime
 
 from sqlalchemy import (
+    CHAR,
     JSON,
     BigInteger,
     CheckConstraint,
@@ -14,6 +15,7 @@ from sqlalchemy import (
     ForeignKeyConstraint,
     Index,
     Integer,
+    LargeBinary,
     PrimaryKeyConstraint,
     String,
     Text,
@@ -34,8 +36,8 @@ def _utc_now() -> datetime:
 class ProjectChannelInstanceRow(Base):
     """One dynamically managed provider application for one project.
 
-    ``public_config`` is deliberately separate from the exact project
-    Credential version pinned by :class:`ProjectChannelCredentialBindingRow`.
+    ``public_config`` is deliberately separate from the domain-owned protected
+    secret bundle.
     Provider secrets never belong in this row.
     """
 
@@ -220,23 +222,81 @@ class ProjectChannelInstanceLeaseRow(Base):
     )
 
 
-class ProjectChannelCredentialBindingRow(Base):
-    """Immutable history of exact project Credential versions for one instance."""
+class ProjectChannelSecretStateRow(Base):
+    """Write-only secret-bundle state owned by one Channel Instance."""
 
-    __tablename__ = "project_channel_credential_bindings"
+    __tablename__ = "project_channel_secret_states"
+
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    channel_instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    current_generation_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    revision: Mapped[int] = mapped_column(
+        BigInteger,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    updated_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        onupdate=_utc_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "project_id",
+            "channel_instance_id",
+            name="pk_project_channel_secret_states",
+        ),
+        CheckConstraint(
+            "revision >= 0",
+            name="ck_project_channel_secret_states_revision",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id"],
+            ["project_channel_instances.project_id", "project_channel_instances.id"],
+            name="fk_project_channel_secret_states_instance",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["project_id", "channel_instance_id", "current_generation_id"],
+            [
+                "project_channel_secret_generations.project_id",
+                "project_channel_secret_generations.channel_instance_id",
+                "project_channel_secret_generations.id",
+            ],
+            name="fk_project_channel_secret_states_current_generation",
+            ondelete="RESTRICT",
+            use_alter=True,
+        ),
+        ForeignKeyConstraint(
+            ["updated_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_secret_states_updater",
+            ondelete="RESTRICT",
+        ),
+    )
+
+
+class ProjectChannelSecretGenerationRow(Base):
+    __tablename__ = "project_channel_secret_generations"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     channel_instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    credential_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    credential_version_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    status: Mapped[str] = mapped_column(
-        String(16),
-        nullable=False,
-        default="active",
-        server_default="active",
-    )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    nonce: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    ciphertext: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     created_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -244,75 +304,95 @@ class ProjectChannelCredentialBindingRow(Base):
         default=_utc_now,
         server_default=text("now()"),
     )
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    revoked_by_user_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
 
     __table_args__ = (
-        PrimaryKeyConstraint(
-            "id",
-            name="pk_project_channel_credential_bindings",
-        ),
-        CheckConstraint(
-            "binding_revision >= 1",
-            name="ck_project_channel_credential_bindings_revision",
-        ),
-        CheckConstraint(
-            "status IN ('active', 'revoked')",
-            name="ck_project_channel_credential_bindings_status",
-        ),
-        CheckConstraint(
-            "(status = 'active' AND revoked_at IS NULL AND revoked_by_user_id IS NULL) OR (status = 'revoked' AND revoked_at IS NOT NULL AND revoked_by_user_id IS NOT NULL)",
-            name="ck_project_channel_credential_bindings_revocation",
-        ),
         ForeignKeyConstraint(
             ["project_id", "channel_instance_id"],
             ["project_channel_instances.project_id", "project_channel_instances.id"],
-            name="fk_project_channel_credential_bindings_instance",
+            name="fk_project_channel_secret_generations_instance",
             ondelete="CASCADE",
-        ),
-        ForeignKeyConstraint(
-            ["project_id", "credential_id"],
-            ["credentials.project_id", "credentials.id"],
-            name="fk_project_channel_credential_bindings_project_credential",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            ["credential_id", "credential_version_id"],
-            ["credential_versions.credential_id", "credential_versions.id"],
-            name="fk_project_channel_credential_bindings_credential_version",
-            ondelete="RESTRICT",
         ),
         ForeignKeyConstraint(
             ["created_by_user_id"],
             ["users.id"],
-            name="fk_project_channel_credential_bindings_creator",
-            ondelete="RESTRICT",
-        ),
-        ForeignKeyConstraint(
-            ["revoked_by_user_id"],
-            ["users.id"],
-            name="fk_project_channel_credential_bindings_revoker",
+            name="fk_project_channel_secret_generations_creator",
             ondelete="RESTRICT",
         ),
         UniqueConstraint(
             "project_id",
             "channel_instance_id",
             "id",
-            name="uq_project_channel_credential_bindings_scope_id",
+            name="uq_project_channel_secret_generations_owner_id",
         ),
-        Index(
-            "uq_project_channel_credential_bindings_active_instance",
+        UniqueConstraint(
             "project_id",
             "channel_instance_id",
-            unique=True,
-            postgresql_where=text("status = 'active'"),
+            "revision",
+            name="uq_project_channel_secret_generations_revision",
         ),
-        Index(
-            "ix_project_channel_credential_bindings_credential",
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_project_channel_secret_generations_revision",
+        ),
+        CheckConstraint(
+            "octet_length(nonce) = 12 AND octet_length(ciphertext) >= 16",
+            name="ck_project_channel_secret_generations_envelope",
+        ),
+        CheckConstraint(
+            "envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_project_channel_secret_generations_digest",
+        ),
+    )
+
+
+class ProjectChannelSecretTombstoneRow(Base):
+    __tablename__ = "project_channel_secret_tombstones"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    channel_instance_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    destroyed_generation_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    envelope_digest: Mapped[str] = mapped_column(CHAR(64), nullable=False)
+    reason: Mapped[str] = mapped_column(String(24), nullable=False)
+    destroyed_by_user_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    destroyed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=_utc_now,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name="fk_project_channel_secret_tombstones_project",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["destroyed_by_user_id"],
+            ["users.id"],
+            name="fk_project_channel_secret_tombstones_actor",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
             "project_id",
-            "credential_id",
-            "credential_version_id",
-            "status",
+            "channel_instance_id",
+            "destroyed_generation_id",
+            name="uq_project_channel_secret_tombstones_generation",
+        ),
+        CheckConstraint(
+            "revision >= 1",
+            name="ck_project_channel_secret_tombstones_revision",
+        ),
+        CheckConstraint(
+            "envelope_digest ~ '^[0-9a-f]{64}$'",
+            name="ck_project_channel_secret_tombstones_digest",
+        ),
+        CheckConstraint(
+            "reason IN ('replace', 'clear', 'delete', 'recipient_change')",
+            name="ck_project_channel_secret_tombstones_reason",
         ),
     )
 

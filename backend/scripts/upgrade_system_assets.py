@@ -21,7 +21,7 @@ from app.shared_assets.bootstrap import (
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.persistence.bootstrap import (
     SCHEMA_MUTATION_LOCK_KEY,
-    M7RecreateRequired,
+    SchemaRecreateRequired,
     classify_database,
 )
 
@@ -73,12 +73,10 @@ async def upgrade_system_assets(database_url: str) -> BootstrapResult:
                 lock_acquired = True
                 try:
                     state = await classify_database(lock_connection)
-                except M7RecreateRequired:
-                    raise SystemAssetUpgradeError("M7_RECREATE_REQUIRED: 目标库 marker 未知或 schema catalog 已漂移；请人工检查后显式重建") from None
+                except SchemaRecreateRequired:
+                    raise SystemAssetUpgradeError("SCHEMA_RECREATE_REQUIRED: 目标库 marker 未知或 schema catalog 已漂移；请人工检查后显式重建") from None
                 if state == "empty":
                     raise SystemAssetUpgradeError("目标库尚未初始化；请先运行 `make setup-db`")
-                if state == "behind":
-                    raise SystemAssetUpgradeError("目标库 schema 不是当前链头；请运行 `make upgrade-db`")
                 if state != "current":
                     raise SystemAssetUpgradeError("目标库 schema 状态不受支持；未应用任何 System Asset 变更")
 

@@ -50,13 +50,14 @@ from app.shared_assets.errors import (
     AssetStorageUnavailable,
     AssetValidationFailed,
 )
-from app.shared_assets.model_refs import ConfiguredModelRefResolver
 from app.shared_assets.models import AssetKind, AssetSelection, ResolvedAgentSnapshot
 from app.shared_assets.resolver import ProjectAssetResolver
 from app.system_settings import (
     SystemModelMaterializationUnavailable,
     SystemModelMaterializer,
 )
+from app.system_settings.execution_payload import model_execution_provenance
+from app.system_settings.model_refs import ConfiguredModelRefResolver
 from deerflow.agents.memory.snip import SnipArchiveContext
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.mcp_definition_policy import McpEndpointPolicy
@@ -419,16 +420,13 @@ class ProjectChatControlService:
     ) -> SnipArchiveContext:
         requested_enabled = bool(app_config.memory.enabled and preference_enabled)
         effective_enabled = requested_enabled
-        summary_model_ref: uuid.UUID | None = None
+        summary_model = None
         if requested_enabled:
             model_name = app_config.summarization.model_name
             model = app_config.get_model_config(model_name) if model_name is not None else (app_config.models[0] if app_config.models else None)
-            summary_model_ref = getattr(
-                model,
-                "_system_model_config_version_id",
-                None,
-            )
-            if not isinstance(summary_model_ref, uuid.UUID):
+            try:
+                summary_model = model_execution_provenance(model)
+            except ValueError:
                 if self._model_materializer is not None:
                     raise PrivateWorkUnavailable(context.request_id)
                 # Isolated service tests may inject an unmaterialized AppConfig.
@@ -441,7 +439,7 @@ class ProjectChatControlService:
             owner_user_id=str(context.user_id),
             namespace=DEFAULT_MEMORY_NAMESPACE,
             preference_version=preference_version,
-            summary_model_ref=summary_model_ref,
+            summary_model=summary_model,
             source_checkpoint_id=source_checkpoint_id,
         )
 

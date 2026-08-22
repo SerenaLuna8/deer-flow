@@ -8,6 +8,7 @@ import {
 } from "@/core/shared-assets";
 
 import { McpAssetDetail } from "./mcp-asset-detail";
+import { McpSecretConfiguration } from "./mcp-secret-configuration";
 import type { ProjectAssetVersionRenderContext } from "./project-asset-detail-sheet";
 import { ProjectAssetPageShell } from "./project-asset-page-shell";
 
@@ -42,29 +43,46 @@ function ProjectMcpVersionDetail({
     context.projectId,
   );
   const canTestService = projectMcpCanTestService(context.item);
+  const exactBindingOwnedByProject =
+    context.item.scope === "project" ||
+    (context.item.binding?.enabled === true &&
+      context.item.binding.current_version_id === version.id);
 
   return (
-    <McpAssetDetail
-      version={version}
-      scope={context.item.scope}
-      toolInventory={inventory.data?.data}
-      toolInventoryLoading={
-        !inventory.data && inventory.isFetching && !inventory.isError
-      }
-      toolInventoryError={inventory.error}
-      toolInventoryRefreshing={inventory.isFetching}
-      toolDiscoveryPending={toolDiscovery.isPending}
-      toolDiscoveryError={toolDiscovery.error}
-      onTestToolDiscovery={
-        canTestService
-          ? () =>
-              toolDiscovery.mutate({
-                assetId: context.item.id,
-                versionId: version.id,
-              })
-          : undefined
-      }
-    />
+    <div className="space-y-6">
+      <McpAssetDetail
+        version={version}
+        scope={context.item.scope}
+        toolInventory={inventory.data?.data}
+        toolInventoryLoading={
+          !inventory.data && inventory.isFetching && !inventory.isError
+        }
+        toolInventoryError={inventory.error}
+        toolInventoryRefreshing={inventory.isFetching}
+        toolDiscoveryPending={toolDiscovery.isPending}
+        toolDiscoveryError={toolDiscovery.error}
+        onTestToolDiscovery={
+          canTestService
+            ? () =>
+                toolDiscovery.mutate({
+                  assetId: context.item.id,
+                  versionId: version.id,
+                })
+            : undefined
+        }
+      />
+      {exactBindingOwnedByProject ? (
+        <McpSecretConfiguration
+          accountId={context.accountId}
+          projectId={context.projectId}
+          assetId={context.item.id}
+          versionId={version.id}
+          canManage={context.item.capabilities.includes(
+            "shared_assets.manage_bindings",
+          )}
+        />
+      ) : null}
+    </div>
   );
 }
 

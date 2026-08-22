@@ -661,13 +661,6 @@ def check_postgres(project_root: Path) -> CheckResult:
             "只读健康检查失败",
             fix="运行 make check-db 查看脱敏状态；旧 revision 或未知非空库必须创建全新的空数据库",
         )
-    if result.get("schema_state") == "upgrade_required":
-        return CheckResult(
-            "PostgreSQL",
-            "fail",
-            f"数据库处于已知历史 revision（{result.get('current_revision')}），需要显式升级",
-            fix="先备份数据库，再运行 make upgrade-db 升级到链头，然后重跑 make check-db",
-        )
     if not result.get("healthy"):
         return CheckResult(
             "PostgreSQL",

@@ -3,8 +3,8 @@
 - Status: Accepted
 - Date: 2026-08-21
 
-> **Partially superseded:** ADR-0006 replaces this ADR's Credential ownership,
-> permission, and Skill-mapping inheritance rules. ADR-0007 replaces its
+> **Partially superseded:** ADR-0006 replaces this ADR's secret ownership,
+> permission, and Skill-secret inheritance rules. ADR-0007 replaces its
 > in-place System Skill v1 upgrade rule. The Agent and Project Skill version
 > lifecycle defined here remains accepted.
 
@@ -34,10 +34,10 @@ Project and System Agent/Skill assets expose `current_version_id`.
 - Asset suspension remains an independent emergency stop. Re-enabling a
   suspended asset keeps the same Current Version.
 - Editor and Admin may save and activate versions and enable or suspend assets.
-  Admin alone manages Credential material. Editor sees readiness metadata and
-  may activate a ready candidate.
-- Skill Credential mappings are inherited into a forward Candidate Version when
-  declarations remain compatible. Activation revalidates the exact candidate,
+  Project Admin alone manages Skill secret values. Editor sees readiness metadata
+  and may activate a ready candidate.
+- Skill secret values are independently re-encrypted into a forward Candidate
+  Version when declarations remain compatible. Activation revalidates the exact candidate,
   required mappings, checksums, model/tool availability, dependency closure, and
   runtime-name uniqueness.
 - Agent versions bind Skills by `{scope, asset_id}`. Run Admission resolves every

@@ -21,8 +21,8 @@ from deerflow.mcp_endpoint_policy import (
 
 _HTTP_HEADER_NAME = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+\Z")
 _QUERY_PARAMETER_NAME = re.compile(r"[A-Za-z0-9._~-]{1,128}\Z")
-_PROJECT_CREDENTIAL_SECTIONS = frozenset({"headers", "query"})
-_FORBIDDEN_PROJECT_CREDENTIAL_HEADERS = frozenset(
+_PROJECT_SECRET_SECTIONS = frozenset({"headers", "query"})
+_FORBIDDEN_PROJECT_SECRET_HEADERS = frozenset(
     {
         "connection",
         "content-length",
@@ -142,14 +142,14 @@ def validate_project_mcp_definition(
     env: Mapping[object, object],
     headers: Mapping[object, object],
     oauth: Mapping[object, object],
-    credential_slot_schemas: tuple[Mapping[object, object], ...],
+    secret_slot_schemas: tuple[Mapping[object, object], ...],
     endpoint_policy: McpEndpointPolicy | None,
 ) -> str:
     """Enforce the project-authored MCP subset shared by Gateway and Worker."""
 
     if type(transport) is not str or transport.strip() not in {"http", "sse"}:
         raise McpDefinitionPolicyError
-    if not isinstance(env, Mapping) or not isinstance(headers, Mapping) or not isinstance(oauth, Mapping) or type(credential_slot_schemas) is not tuple or env or headers or oauth:
+    if not isinstance(env, Mapping) or not isinstance(headers, Mapping) or not isinstance(oauth, Mapping) or type(secret_slot_schemas) is not tuple or env or headers or oauth:
         raise McpDefinitionPolicyError
     normalized_endpoint = validate_remote_mcp_endpoint(
         url,
@@ -162,15 +162,15 @@ def validate_project_mcp_definition(
             keep_blank_values=True,
         )
     }
-    credential_query_names: set[str] = set()
-    for schema in credential_slot_schemas:
-        if not isinstance(schema, Mapping) or len(schema) != 1 or not set(schema).issubset(_PROJECT_CREDENTIAL_SECTIONS):
+    secret_query_names: set[str] = set()
+    for schema in secret_slot_schemas:
+        if not isinstance(schema, Mapping) or len(schema) != 1 or not set(schema).issubset(_PROJECT_SECRET_SECTIONS):
             raise McpDefinitionPolicyError
         header_names = schema.get("headers")
         if header_names is not None and (
             not isinstance(header_names, (list, tuple))
             or not header_names
-            or any(type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None or name.casefold() in _FORBIDDEN_PROJECT_CREDENTIAL_HEADERS for name in header_names)
+            or any(type(name) is not str or len(name) > 255 or _HTTP_HEADER_NAME.fullmatch(name) is None or name.casefold() in _FORBIDDEN_PROJECT_SECRET_HEADERS for name in header_names)
             or len({name.casefold() for name in header_names}) != len(header_names)
         ):
             raise McpDefinitionPolicyError
@@ -182,10 +182,10 @@ def validate_project_mcp_definition(
                 or any(type(name) is not str or _QUERY_PARAMETER_NAME.fullmatch(name) is None for name in query_names)
                 or len(set(query_names)) != len(query_names)
                 or base_query_names.intersection(query_names)
-                or credential_query_names.intersection(query_names)
+                or secret_query_names.intersection(query_names)
             ):
                 raise McpDefinitionPolicyError
-            credential_query_names.update(query_names)
+            secret_query_names.update(query_names)
     return normalized_endpoint
 
 

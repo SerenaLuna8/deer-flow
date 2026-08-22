@@ -10,6 +10,7 @@ from app.gateway.channel_schemas import (
     ProjectChannelInstanceConfigureRequest,
     ProjectChannelInstanceResponse,
     ProjectChannelInstancesResponse,
+    ProjectChannelSecretClearRequest,
 )
 from app.gateway.routers.project_assets import project_asset_context
 from app.project_channels.errors import (
@@ -128,11 +129,34 @@ async def configure_project_channel_instance(
     command = ConfigureProjectChannelInstance(
         display_name=body.display_name,
         public_config=dict(body.public_config),
-        credentials=dict(body.credentials),
+        secrets=dict(body.secrets),
         enabled=body.enabled,
     )
     try:
         return _response(await service.configure(context, provider, command))
+    except ProjectChannelError as exc:
+        _raise_channel_error(exc)
+
+
+@router.post(
+    "/{provider}/secret/clear",
+    response_model=ProjectChannelInstanceResponse,
+)
+async def clear_project_channel_instance_secret(
+    provider: str,
+    body: ProjectChannelSecretClearRequest,
+    context: Annotated[ProjectContext, Depends(project_asset_context)],
+    service=Depends(get_project_channel_instance_service),
+) -> ProjectChannelInstanceResponse:
+    _require_manage(context)
+    try:
+        return _response(
+            await service.clear_secret(
+                context,
+                provider,
+                confirmed=body.confirmed,
+            )
+        )
     except ProjectChannelError as exc:
         _raise_channel_error(exc)
 

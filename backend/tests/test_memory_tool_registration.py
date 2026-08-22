@@ -49,7 +49,7 @@ def _app_config(
             model="fake-vision",
             supports_vision=True,
         )
-        vision_model._system_model_config_version_id = uuid.uuid4()
+        vision_model._system_model_config_id = uuid.uuid4()
         vision_model._system_provider_adapter = "vision_bridge_fake"
         models.append(vision_model)
         vision_bridge = {"model_name": VISION_MODEL_REF}

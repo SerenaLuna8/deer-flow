@@ -23,7 +23,7 @@ The primary integration point is `DeerFlowClient`. It wraps the LangGraph runtim
 from deerflow.client import DeerFlowClient
 from deerflow.config import load_config
 
-# Load configuration (reads config.yaml or DEER_FLOW_CONFIG_PATH)
+# Load configuration (reads config.yaml or ACT_WEAVE_CONFIG_PATH)
 load_config()
 
 client = DeerFlowClient()
@@ -157,7 +157,7 @@ When embedded in another application, set the config path explicitly to avoid am
 
 ```python
 import os
-os.environ["DEER_FLOW_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
+os.environ["ACT_WEAVE_CONFIG_PATH"] = "/path/to/my-deerflow-config.yaml"
 
 from deerflow.config import load_config
 load_config()

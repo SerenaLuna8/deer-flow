@@ -34,11 +34,11 @@ services:
       # Host paths for K8s HostPath volumes (must be absolute paths accessible by K8s node)
       # On Docker Desktop/OrbStack, use your actual host paths like /Users/username/...
       # Set these in your shell before running docker-compose:
-      #   export DEER_FLOW_ROOT=/absolute/path/to/deer-flow
-      - SKILLS_HOST_PATH=${DEER_FLOW_ROOT}/skills
-      - THREADS_HOST_PATH=${DEER_FLOW_ROOT}/backend/.deer-flow/threads
+      #   export ACT_WEAVE_ROOT=/absolute/path/to/deer-flow
+      - SKILLS_HOST_PATH=${ACT_WEAVE_ROOT}/skills
+      - THREADS_HOST_PATH=${ACT_WEAVE_ROOT}/backend/.deer-flow/threads
       # Per-user data base directory for user-scoped skill mounts
-      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
+      - ACT_WEAVE_HOST_BASE_DIR=${ACT_WEAVE_ROOT}/backend/.deer-flow
       # Production: use PVC instead of hostPath to avoid data loss on node failure.
       # When set, hostPath vars above are ignored for the corresponding volume.
       # USERDATA_PVC_NAME uses subPath (deer-flow/users/{user_id}/threads/{thread_id}/user-data) automatically.
@@ -73,13 +73,13 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf.template:ro
     environment:
-      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN}
+      - ACT_WEAVE_PROXY_AUTH_TOKEN=${ACT_WEAVE_PROXY_AUTH_TOKEN}
     command:
       - sh
       - -c
       - |
         set -e
-        envsubst '$$DEER_FLOW_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
+        envsubst '$$ACT_WEAVE_PROXY_AUTH_TOKEN' < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
         test -e /proc/net/if_inet6 || sed -i '/^[[:space:]]*listen[[:space:]]\+\[::\]:2026[[:space:]]/d' /etc/nginx/nginx.conf
         exec nginx -g 'daemon off;'
     depends_on:
@@ -112,7 +112,7 @@ services:
       - NODE_ENV=development
       - WATCHPACK_POLLING=true
       - CI=true
-      - DEER_FLOW_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
+      - ACT_WEAVE_INTERNAL_GATEWAY_BASE_URL=http://gateway:8001
     env_file:
       - ../frontend/.env
     networks:
@@ -164,26 +164,25 @@ services:
       - CI=true
       # Reload mode is a single uvicorn worker; do not inherit a production override.
       - GATEWAY_WORKERS=1
-      - DEER_FLOW_PROJECT_ROOT=/app
-      - DEER_FLOW_HOME=/app/backend/.deer-flow
-      - DEER_FLOW_CONFIG_PATH=/app/project/config.yaml
-      - DEER_FLOW_CHANNELS_LANGGRAPH_URL=${DEER_FLOW_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
-      - DEER_FLOW_CHANNELS_GATEWAY_URL=${DEER_FLOW_CHANNELS_GATEWAY_URL:-http://gateway:8001}
+      - ACT_WEAVE_PROJECT_ROOT=/app
+      - ACT_WEAVE_HOME=/app/backend/.deer-flow
+      - ACT_WEAVE_CONFIG_PATH=/app/project/config.yaml
+      - ACT_WEAVE_CHANNELS_LANGGRAPH_URL=${ACT_WEAVE_CHANNELS_LANGGRAPH_URL:-http://gateway:8001/api}
+      - ACT_WEAVE_CHANNELS_GATEWAY_URL=${ACT_WEAVE_CHANNELS_GATEWAY_URL:-http://gateway:8001}
       - AUTH_JWT_SECRET=${AUTH_JWT_SECRET:-}
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET:-}
       - DATABASE_URL=${DATABASE_URL:-}
-      - DEER_FLOW_AUDIT_ACTIVE_KEY_ID=${DEER_FLOW_AUDIT_ACTIVE_KEY_ID:-}
-      - DEER_FLOW_AUDIT_KEYRING_JSON=${DEER_FLOW_AUDIT_KEYRING_JSON:-}
-      - DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID=${DEER_FLOW_CREDENTIAL_ACTIVE_KEY_ID:-}
-      - DEER_FLOW_CREDENTIAL_KEYRING_JSON=${DEER_FLOW_CREDENTIAL_KEYRING_JSON:-}
-      - DEER_FLOW_INTERNAL_AUTH_TOKEN=${DEER_FLOW_INTERNAL_AUTH_TOKEN:-}
-      - DEER_FLOW_PROXY_AUTH_TOKEN=${DEER_FLOW_PROXY_AUTH_TOKEN:-}
+      - ACT_WEAVE_AUDIT_ACTIVE_KEY_ID=${ACT_WEAVE_AUDIT_ACTIVE_KEY_ID:-}
+      - ACT_WEAVE_AUDIT_KEYRING_JSON=${ACT_WEAVE_AUDIT_KEYRING_JSON:-}
+      - ACT_WEAVE_SECRET_KEY=${ACT_WEAVE_SECRET_KEY:-}
+      - ACT_WEAVE_INTERNAL_AUTH_TOKEN=${ACT_WEAVE_INTERNAL_AUTH_TOKEN:-}
+      - ACT_WEAVE_PROXY_AUTH_TOKEN=${ACT_WEAVE_PROXY_AUTH_TOKEN:-}
       - PROVISIONER_API_KEY=${PROVISIONER_API_KEY:-}
-      - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_ROOT}/backend/.deer-flow
-      - DEER_FLOW_HOST_SKILLS_PATH=${DEER_FLOW_ROOT}/skills
-      - DEER_FLOW_SANDBOX_HOST=host.docker.internal
+      - ACT_WEAVE_HOST_BASE_DIR=${ACT_WEAVE_ROOT}/backend/.deer-flow
+      - ACT_WEAVE_HOST_SKILLS_PATH=${ACT_WEAVE_ROOT}/skills
+      - ACT_WEAVE_SANDBOX_HOST=host.docker.internal
       # Forward only the explicit runtime proxy contract. The root .env is not
-      # mounted wholesale because model provider Credentials live in PostgreSQL.
+      # mounted wholesale because model provider secrets live in PostgreSQL.
       - HTTP_PROXY=${HTTP_PROXY:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - ALL_PROXY=${ALL_PROXY:-}

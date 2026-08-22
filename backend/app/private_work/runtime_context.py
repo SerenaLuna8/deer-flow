@@ -86,7 +86,6 @@ _SECRET_KEY_PARTS = (
     "api_key",
     "authorization",
     "cookie",
-    "credential_envelope",
     "ciphertext",
     "password",
     "private_key",

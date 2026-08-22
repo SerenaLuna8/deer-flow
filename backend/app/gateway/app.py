@@ -56,6 +56,7 @@ from deerflow.runtime.checkpoint_mode import (
     freeze_checkpoint_channel_mode,
     freeze_checkpoint_snapshot_frequency,
 )
+from deerflow.secrets import SecretKey
 from deerflow.uploads.manager import cleanup_stale_upload_staging_files
 
 AppConfig = deerflow_app_config.AppConfig
@@ -144,6 +145,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # visible without a process restart. We deliberately do NOT cache this
     # snapshot on `app.state` to keep that contract enforceable.
     try:
+        SecretKey.from_environment()
         startup_config = get_app_config()
         freeze_checkpoint_channel_mode(startup_config.database.checkpoint_channel_mode)
         freeze_checkpoint_snapshot_frequency(startup_config.database.checkpoint_delta.snapshot_frequency)
@@ -384,7 +386,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
     # registers the GitHub channel's ChannelRunPolicy as an import side-effect.
     #
     # Fail-closed: only mount the route when a webhook secret is configured
-    # (or when the explicit DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1
+    # (or when the explicit ACT_WEAVE_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS=1
     # dev opt-in is set). A misconfigured deployment without a secret cannot
     # serve forged deliveries because the URL responds 404 — there is no
     # handler to reach.
@@ -392,7 +394,7 @@ This gateway provides project-scoped runtime endpoints and administrative operat
         app.include_router(github_webhooks.router)
         logger.info("GitHub webhooks route mounted at /api/webhooks/github")
     else:
-        logger.warning("GitHub webhooks route NOT mounted: GITHUB_WEBHOOK_SECRET unset and DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS not set. /api/webhooks/github will respond 404. Configure either env var to enable the route.")
+        logger.warning("GitHub webhooks route NOT mounted: GITHUB_WEBHOOK_SECRET unset and ACT_WEAVE_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS not set. /api/webhooks/github will respond 404. Configure either env var to enable the route.")
 
     @app.get("/health", tags=["health"])
     async def health_check() -> dict[str, str]:

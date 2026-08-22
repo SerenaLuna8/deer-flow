@@ -157,13 +157,12 @@ async def prepare_replay_runtime_catalog(
         )
         model_catalog = SystemModelCatalogService(session_factory)
         catalog = await model_catalog.list_models(audit_context)
-        matches = tuple(item for item in catalog.items if item.display_name == "Scenario Model" and item.current_version.provider_adapter == "vision_bridge_fake" and item.current_version.provider_model == "replay")
+        matches = tuple(item for item in catalog.items if item.display_name == "Scenario Model" and item.provider_adapter == "vision_bridge_fake" and item.provider_model == "replay")
         if len(matches) > 1:
             raise RuntimeError("replay scenario model catalog is ambiguous")
         if matches:
             model = matches[0]
-            version = model.current_version
-            if model.status != "active" or version.provider_adapter != "vision_bridge_fake" or version.provider_model != "replay" or version.settings or not version.supports_thinking or version.credential_id is not None:
+            if model.status != "active" or model.provider_adapter != "vision_bridge_fake" or model.provider_model != "replay" or model.settings or not model.supports_thinking or model.api_key_configured:
                 raise RuntimeError("existing scenario-model is not replay-compatible")
         else:
             model = await model_catalog.create_model(
@@ -177,9 +176,7 @@ async def prepare_replay_runtime_catalog(
                     supports_thinking=True,
                     supports_reasoning_effort=False,
                     supports_vision=False,
-                    credential_id=None,
-                    credential_version_id=None,
-                    credential_env_key=None,
+                    api_key=None,
                 ),
             )
             catalog = await model_catalog.list_models(audit_context)
@@ -188,7 +185,6 @@ async def prepare_replay_runtime_catalog(
             await model_catalog.set_default(
                 audit_context,
                 model.id,
-                expected_catalog_revision=catalog.catalog_revision,
             )
 
         runtime_policy = SystemRuntimePolicyService(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -16,25 +17,21 @@ from app.project_channels.providers import (
     CHANNEL_PROVIDER_SPECS,
     validate_channel_configuration,
 )
-from app.shared_assets.crypto import (
-    CredentialDecryptFailed,
-    EncryptedEnvelope,
-    decrypt_credential_payload,
-)
-from app.shared_assets.keyring import CredentialKeyring, CredentialKeyringInvalid
-from app.shared_assets.models import AssetScope
+from app.project_channels.secret_store import channel_secret_recipient
 from deerflow.persistence.channel_connections.model import (
-    ProjectChannelCredentialBindingRow,
     ProjectChannelInstanceRow,
+    ProjectChannelSecretGenerationRow,
+    ProjectChannelSecretStateRow,
 )
 from deerflow.persistence.channel_connections.project_instance_repository import (
     ChannelInstanceLeaseClaim,
     ProjectChannelInstanceRepository,
 )
-from deerflow.persistence.shared_assets import (
-    CredentialEnvelopeRow,
-    CredentialRow,
-    CredentialVersionRow,
+from deerflow.secrets import (
+    SecretEnvelope,
+    SecretKey,
+    SecretKeyInvalid,
+    SecretMaterializationFailed,
 )
 
 _LEASE_TTL_SECONDS = 30
@@ -53,29 +50,29 @@ class ProjectChannelRuntimeConfig:
     provider: str
     config: dict[str, Any] = field(repr=False)
     instance_revision: int = 0
-    binding_revision: int = 0
-    credential_version_id: uuid.UUID | None = None
+    secret_revision: int = 0
+    secret_generation_id: uuid.UUID | None = None
 
     @property
     def closure(self) -> tuple[int, int, uuid.UUID | None]:
         return (
             self.instance_revision,
-            self.binding_revision,
-            self.credential_version_id,
+            self.secret_revision,
+            self.secret_generation_id,
         )
 
 
-class ProjectChannelCredentialMaterializer:
-    """Load one exact active binding and decrypt it only inside Gateway memory."""
+class ProjectChannelSecretMaterializer:
+    """Resolve the then-current Channel bundle only at the delivery boundary."""
 
     def __init__(
         self,
         session_factory: Callable[[], AsyncSession],
         *,
-        keyring: CredentialKeyring | None = None,
+        secret_key: SecretKey | None = None,
     ) -> None:
         self._session_factory = session_factory
-        self._keyring = keyring
+        self._secret_key = secret_key
 
     async def load(self, instance_id: uuid.UUID) -> ProjectChannelRuntimeConfig:
         try:
@@ -84,32 +81,20 @@ class ProjectChannelCredentialMaterializer:
                     statement = (
                         select(
                             ProjectChannelInstanceRow,
-                            ProjectChannelCredentialBindingRow,
-                            CredentialRow,
-                            CredentialVersionRow,
-                            CredentialEnvelopeRow,
+                            ProjectChannelSecretStateRow,
+                            ProjectChannelSecretGenerationRow,
                         )
                         .join(
-                            ProjectChannelCredentialBindingRow,
-                            (ProjectChannelCredentialBindingRow.project_id == ProjectChannelInstanceRow.project_id)
-                            & (ProjectChannelCredentialBindingRow.channel_instance_id == ProjectChannelInstanceRow.id)
-                            & (ProjectChannelCredentialBindingRow.status == "active"),
+                            ProjectChannelSecretStateRow,
+                            (ProjectChannelSecretStateRow.project_id == ProjectChannelInstanceRow.project_id)
+                            & (ProjectChannelSecretStateRow.channel_instance_id == ProjectChannelInstanceRow.id)
+                            & (ProjectChannelSecretStateRow.current_generation_id.is_not(None)),
                         )
                         .join(
-                            CredentialRow,
-                            (CredentialRow.id == ProjectChannelCredentialBindingRow.credential_id)
-                            & (CredentialRow.project_id == ProjectChannelInstanceRow.project_id)
-                            & (CredentialRow.scope == "project")
-                            & (CredentialRow.status == "active")
-                            & (CredentialRow.is_delete.is_(False)),
-                        )
-                        .join(
-                            CredentialVersionRow,
-                            (CredentialVersionRow.id == ProjectChannelCredentialBindingRow.credential_version_id) & (CredentialVersionRow.credential_id == CredentialRow.id) & (CredentialVersionRow.status == "active"),
-                        )
-                        .join(
-                            CredentialEnvelopeRow,
-                            (CredentialEnvelopeRow.credential_version_id == CredentialVersionRow.id) & (CredentialEnvelopeRow.is_active.is_(True)),
+                            ProjectChannelSecretGenerationRow,
+                            (ProjectChannelSecretGenerationRow.id == ProjectChannelSecretStateRow.current_generation_id)
+                            & (ProjectChannelSecretGenerationRow.project_id == ProjectChannelSecretStateRow.project_id)
+                            & (ProjectChannelSecretGenerationRow.channel_instance_id == ProjectChannelSecretStateRow.channel_instance_id),
                         )
                         .where(
                             ProjectChannelInstanceRow.id == instance_id,
@@ -119,61 +104,62 @@ class ProjectChannelCredentialMaterializer:
                     )
                     material = (await session.execute(statement)).one_or_none()
             if material is None:
-                raise ChannelRuntimeMaterializationError("channel_credentials_unavailable")
-            instance, binding, credential, version, envelope = material
+                raise ChannelRuntimeMaterializationError("channel_secrets_unavailable")
+            instance, state, generation = material
             spec = CHANNEL_PROVIDER_SPECS.get(instance.provider)
-            if spec is None or credential.credential_type != f"channel.{instance.provider}" or not isinstance(instance.public_config, Mapping):
-                raise ChannelRuntimeMaterializationError("channel_credentials_unavailable")
+            if spec is None or not isinstance(instance.public_config, Mapping):
+                raise ChannelRuntimeMaterializationError("channel_secrets_unavailable")
             try:
-                keyring = self._keyring or CredentialKeyring.from_environment()
-                payload = decrypt_credential_payload(
-                    EncryptedEnvelope(
-                        key_id=envelope.key_id,
-                        nonce=envelope.nonce,
-                        ciphertext=envelope.ciphertext,
-                    ),
-                    AssetScope.PROJECT,
-                    instance.project_id,
-                    version.id,
-                    keyring,
+                plaintext = SecretEnvelope(
+                    nonce=bytes(generation.nonce),
+                    ciphertext=bytes(generation.ciphertext),
+                ).materialize(
+                    recipient=channel_secret_recipient(instance),
+                    key=self._secret_key or SecretKey.from_environment(),
                 )
-            except (CredentialDecryptFailed, CredentialKeyringInvalid):
-                raise ChannelRuntimeMaterializationError("channel_credentials_unavailable") from None
-            env = payload.get("env")
-            if not isinstance(env, Mapping):
-                raise ChannelRuntimeMaterializationError("channel_credentials_unavailable")
-            credentials = {credential_field: env.get(env_name) for credential_field, env_name in spec.credential_env.items()}
+                payload = json.loads(plaintext)
+            except (
+                json.JSONDecodeError,
+                SecretKeyInvalid,
+                SecretMaterializationFailed,
+                TypeError,
+                UnicodeError,
+            ):
+                raise ChannelRuntimeMaterializationError("channel_secrets_unavailable") from None
+            if not isinstance(payload, Mapping):
+                raise ChannelRuntimeMaterializationError("channel_secrets_unavailable")
+            secrets = {field: payload.get(field) for field in spec.secret_fields}
             try:
                 normalized = validate_channel_configuration(
                     instance.provider,
                     public_config=instance.public_config,
-                    credentials=credentials,
-                    has_existing_credential=False,
+                    secrets=secrets,
+                    has_existing_secret=False,
                     request_id="channel-runtime",
                 )
             except ChannelInstanceValidationFailed:
-                raise ChannelRuntimeMaterializationError("channel_credentials_unavailable") from None
+                raise ChannelRuntimeMaterializationError("channel_secrets_unavailable") from None
             config: dict[str, Any] = {
                 "enabled": True,
                 **normalized.public_config,
             }
-            for credential_field, env_name in spec.credential_env.items():
-                value = env.get(env_name)
+            for secret_field in spec.secret_fields:
+                value = payload.get(secret_field)
                 if not isinstance(value, str) or not value:
-                    raise ChannelRuntimeMaterializationError("channel_credentials_unavailable")
-                config[credential_field] = value
+                    raise ChannelRuntimeMaterializationError("channel_secrets_unavailable")
+                config[secret_field] = value
             return ProjectChannelRuntimeConfig(
                 instance_id=instance.id,
                 provider=instance.provider,
                 config=config,
                 instance_revision=instance.revision,
-                binding_revision=binding.binding_revision,
-                credential_version_id=version.id,
+                secret_revision=state.revision,
+                secret_generation_id=generation.id,
             )
         except ChannelRuntimeMaterializationError:
             raise
         except (DBAPIError, SATimeoutError):
-            raise ChannelRuntimeMaterializationError("channel_credentials_unavailable") from None
+            raise ChannelRuntimeMaterializationError("channel_secrets_unavailable") from None
 
 
 class ProjectChannelRuntimeCoordinator:
@@ -185,14 +171,14 @@ class ProjectChannelRuntimeCoordinator:
         channel_service: Any,
         *,
         repository: ProjectChannelInstanceRepository | Any | None = None,
-        materializer: ProjectChannelCredentialMaterializer | Any | None = None,
+        materializer: ProjectChannelSecretMaterializer | Any | None = None,
         holder_id: uuid.UUID | None = None,
         start_heartbeat_tasks: bool = True,
     ) -> None:
         self._session_factory = session_factory
         self._channel_service = channel_service
         self._repository = repository or ProjectChannelInstanceRepository()
-        self._materializer = materializer or ProjectChannelCredentialMaterializer(session_factory)
+        self._materializer = materializer or ProjectChannelSecretMaterializer(session_factory)
         self._holder_id = holder_id or uuid.uuid4()
         self._start_heartbeat_tasks = start_heartbeat_tasks
         self._leases: dict[uuid.UUID, ChannelInstanceLeaseClaim] = {}
@@ -273,7 +259,7 @@ class ProjectChannelRuntimeCoordinator:
                 ready = False
                 error_code = exc.code
                 # Never leave a previously running adapter on stale secrets
-                # when the current exact Credential closure cannot load.
+                # when the current exact domain-owned generation cannot load.
                 await self._channel_service.remove_channel_instance(str(instance_id))
                 self._applied_revisions.pop(instance_id, None)
                 self._applied_closures.pop(instance_id, None)
@@ -383,8 +369,8 @@ class ProjectChannelRuntimeCoordinator:
         closure = self._applied_closures.get(instance_id)
         if closure is None:
             return False
-        instance_revision, binding_revision, credential_version_id = closure
-        if credential_version_id is None:
+        instance_revision, secret_revision, secret_generation_id = closure
+        if secret_generation_id is None:
             return False
         try:
             async with self._session_factory() as session:
@@ -397,8 +383,8 @@ class ProjectChannelRuntimeCoordinator:
                         lease_token=claim.lease_token,
                         fencing_generation=claim.fencing_generation,
                         expected_revision=instance_revision,
-                        binding_revision=binding_revision,
-                        credential_version_id=credential_version_id,
+                        secret_revision=secret_revision,
+                        secret_generation_id=secret_generation_id,
                     )
         except Exception:
             return False
@@ -571,7 +557,7 @@ class ProjectChannelRuntimeCoordinator:
 
 __all__ = [
     "ChannelRuntimeMaterializationError",
-    "ProjectChannelCredentialMaterializer",
+    "ProjectChannelSecretMaterializer",
     "ProjectChannelRuntimeConfig",
     "ProjectChannelRuntimeCoordinator",
 ]

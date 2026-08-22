@@ -69,9 +69,9 @@ mcp_security:
     - 192.168.0.0/16
     - ::1/128
     - fc00::/7
-  # Query credentials are injected by Worker and never belong in the persisted
+  # Query secrets are injected by Worker and never belong in the persisted
   # base URL. Production proxy/upstream logs must omit or redact query strings.
-  # HTTP sends header/query Credentials in plaintext and is only appropriate on
+  # HTTP sends header/query secrets in plaintext and is only appropriate on
   # a trusted isolated network. Use HTTPS elsewhere; IP certificates need IP SANs.
   # Optional hardening: when enabled, route MCP traffic through a proxy that
   # enforces the deployment's independent network policy.
@@ -109,7 +109,7 @@ sandbox:
     # host/OS namespace. It is never returned to the browser.
     execution_domain_id: null
     # Safe presentation-only label for the approval card. Do not include a
-    # hostname, username, path, credential, or other private identifier.
+    # hostname, username, path, secret, or other private identifier.
     execution_domain_label: Worker host environment
   bash_output_max_chars: 20000
   read_file_output_max_chars: 50000

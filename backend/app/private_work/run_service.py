@@ -58,8 +58,8 @@ from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.private_work.model import (
     PrivateArtifactRow,
     RunAssetVersionRow,
-    RunMcpGrantSnapshotRow,
-    RunSkillCredentialSnapshotRow,
+    RunMcpSecretSnapshotRow,
+    RunSkillSecretSnapshotRow,
 )
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.shared_assets import SkillDesignOperationRow
@@ -585,8 +585,8 @@ class PrivateRunService:
                         )
                     )
                     for snapshot_type in (
-                        RunSkillCredentialSnapshotRow,
-                        RunMcpGrantSnapshotRow,
+                        RunSkillSecretSnapshotRow,
+                        RunMcpSecretSnapshotRow,
                         RunAssetVersionRow,
                     ):
                         await session.execute(

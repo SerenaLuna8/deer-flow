@@ -159,7 +159,7 @@ export function useThreadAgentModelRef(
     "agents",
     enabled,
   );
-  const catalog = agentQuery.data as ProjectAssetList | undefined;
+  const catalog = agentQuery.data;
   const catalogSettled =
     catalog !== undefined &&
     !agentQuery.isLoading &&
@@ -220,7 +220,7 @@ export function useProjectSlashSkills() {
   const { scope } = useProjectPrivateWorkScope();
   const query = useProjectAssets(scope.accountId, scope.projectId, "skills");
   const skills = useMemo(() => {
-    const catalog = query.data as ProjectAssetList | undefined;
+    const catalog = query.data;
     return catalog ? projectSlashSkills(catalog) : [];
   }, [query.data]);
   return { skills, isLoading: query.isLoading, error: query.error };
@@ -240,7 +240,7 @@ export function useProjectRuntimeSlashSkills(
     scope.projectId,
     "agents",
   );
-  const agentCatalog = agentQuery.data as ProjectAssetList | undefined;
+  const agentCatalog = agentQuery.data;
   const agent = useMemo(
     () => threadAgent(agentCatalog, metadata),
     [agentCatalog, metadata],
@@ -259,7 +259,7 @@ export function useProjectRuntimeSlashSkills(
   const version = currentAgentVersion(versionQuery.data, agent);
   const error = skillQuery.error ?? agentQuery.error ?? versionQuery.error;
   const skills = useMemo(() => {
-    const catalog = skillQuery.data as ProjectAssetList | undefined;
+    const catalog = skillQuery.data;
     if (error || !catalog || !agent) return [];
     if (main) return projectRuntimeSlashSkills(catalog, { kind: "main" });
     return version

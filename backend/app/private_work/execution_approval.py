@@ -78,8 +78,8 @@ from deerflow.persistence.jobs.model import JobAttemptRow, JobRow
 from deerflow.persistence.jobs.sql import JobClaim
 from deerflow.persistence.private_work import (
     RunAssetVersionRow,
-    RunMcpGrantSnapshotRow,
-    RunSkillCredentialSnapshotRow,
+    RunMcpSecretSnapshotRow,
+    RunSkillSecretSnapshotRow,
 )
 from deerflow.persistence.projects.model import ProjectMembershipRow, ProjectRow
 from deerflow.persistence.run.model import RunRow
@@ -541,53 +541,53 @@ async def _asset_closure(
     )
     grants = (
         await session.execute(
-            sa.select(RunMcpGrantSnapshotRow)
+            sa.select(RunMcpSecretSnapshotRow)
             .where(
-                RunMcpGrantSnapshotRow.project_id == project_id,
-                RunMcpGrantSnapshotRow.owner_user_id == owner_user_id,
-                RunMcpGrantSnapshotRow.run_id == run_id,
+                RunMcpSecretSnapshotRow.project_id == project_id,
+                RunMcpSecretSnapshotRow.owner_user_id == owner_user_id,
+                RunMcpSecretSnapshotRow.run_id == run_id,
             )
             .order_by(
-                RunMcpGrantSnapshotRow.mcp_version_id,
-                RunMcpGrantSnapshotRow.credential_slot_id,
+                RunMcpSecretSnapshotRow.mcp_server_version_id,
+                RunMcpSecretSnapshotRow.slot_id,
             ),
         )
     ).scalars()
     grant_values = tuple(
         (
-            str(row.mcp_version_id),
-            str(row.credential_slot_id),
-            str(row.credential_grant_id),
-            str(row.credential_version_id),
+            str(row.mcp_server_id),
+            str(row.mcp_server_version_id),
+            str(row.slot_id),
+            str(row.secret_revision),
+            str(row.secret_generation_id),
+            row.secret_generation_digest,
         )
         for row in grants
     )
-    skill_credentials = (
+    skill_secrets = (
         await session.execute(
-            sa.select(RunSkillCredentialSnapshotRow)
+            sa.select(RunSkillSecretSnapshotRow)
             .where(
-                RunSkillCredentialSnapshotRow.project_id == project_id,
-                RunSkillCredentialSnapshotRow.owner_user_id == owner_user_id,
-                RunSkillCredentialSnapshotRow.run_id == run_id,
+                RunSkillSecretSnapshotRow.project_id == project_id,
+                RunSkillSecretSnapshotRow.owner_user_id == owner_user_id,
+                RunSkillSecretSnapshotRow.run_id == run_id,
             )
             .order_by(
-                RunSkillCredentialSnapshotRow.skill_version_id,
-                RunSkillCredentialSnapshotRow.secret_name,
+                RunSkillSecretSnapshotRow.skill_version_id,
+                RunSkillSecretSnapshotRow.secret_name,
             ),
         )
     ).scalars()
-    skill_credential_values = tuple(
+    skill_secret_values = tuple(
         (
             str(row.skill_id),
             str(row.skill_version_id),
             row.secret_name,
-            row.source_env_field_name,
-            str(row.skill_credential_binding_id),
-            row.binding_revision,
-            str(row.credential_id),
-            str(row.credential_version_id),
+            row.secret_revision,
+            str(row.secret_generation_id),
+            row.secret_generation_digest,
         )
-        for row in skill_credentials
+        for row in skill_secrets
     )
     model_snapshots = (
         await session.execute(
@@ -604,11 +604,9 @@ async def _asset_closure(
         (
             row.purpose,
             str(row.model_config_id),
-            str(row.model_config_version_id),
             row.payload_checksum,
-            str(row.credential_id) if row.credential_id is not None else None,
-            (str(row.credential_version_id) if row.credential_version_id is not None else None),
-            row.credential_env_key,
+            (str(row.secret_generation_id) if row.secret_generation_id is not None else None),
+            row.secret_envelope_digest,
         )
         for row in model_snapshots
     )
@@ -635,7 +633,7 @@ async def _asset_closure(
     return (
         asset_values,
         grant_values,
-        skill_credential_values,
+        skill_secret_values,
         model_snapshot_values,
         runtime_snapshot_values,
     )

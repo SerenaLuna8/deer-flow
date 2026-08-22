@@ -45,8 +45,8 @@ class HostExecutionSkillSecretSource:
 
     The path and complete declared-name set select an exact admitted Skill in
     the private Run. ``explicit`` preserves slash-activation precedence when
-    multiple active Skills declare the same environment name. Credential
-    values and Credential identifiers never enter this frozen plan.
+    multiple active Skills declare the same environment name. Secret values
+    and Secret Generation identifiers never enter this frozen plan.
     """
 
     skill_path: str

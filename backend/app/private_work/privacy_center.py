@@ -3,7 +3,7 @@
 Only the authenticated account's ended memberships are visible. Exports use a
 PostgreSQL repeatable-read snapshot and stream NDJSON records. File chunks are
 encoded one at a time, so a valid 100 MiB file never requires a 100 MiB Python
-buffer. Credential envelopes, OAuth tokens, and secret-bearing tables are never
+buffer. Secret Envelopes, OAuth tokens, and secret-bearing tables are never
 queried. Host-execution JSON is projected through an explicit scalar allowlist;
 provider policy, host paths, digests, and environment-key names stay private.
 """

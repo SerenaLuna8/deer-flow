@@ -30,7 +30,7 @@ from deerflow.runtime.skill_context_authority import (
 from deerflow.subagents.runtime_catalog import (
     RUNTIME_AGENT_CATALOG_CONTEXT_KEY,
 )
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY
+from deerflow.trace_context import ACT_WEAVE_TRACE_METADATA_KEY
 
 CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY: Final[str] = "__deerflow_pre_run_message_ids"
 
@@ -64,7 +64,7 @@ class RuntimeContextKeys:
     SKILL_SCOPED_SECRETS: Final[str] = SKILL_SCOPED_SECRETS_CONTEXT_KEY
     SKILL_SECRET_PROVIDER: Final[str] = SKILL_SECRET_PROVIDER_CONTEXT_KEY
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS: Final[str] = CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-    TRACE_ID: Final[str] = DEERFLOW_TRACE_METADATA_KEY
+    TRACE_ID: Final[str] = ACT_WEAVE_TRACE_METADATA_KEY
     RUN_JOURNAL: Final[str] = "__run_journal"
     SERVER_ABORT_EVENT: Final[str] = "__server_abort_event"
     VISION_DISPATCH_AUTHORITY: Final[str] = "__vision_dispatch_authority"

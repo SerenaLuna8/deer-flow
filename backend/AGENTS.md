@@ -14,7 +14,7 @@ tests.
 | HTTP, domains, authorization     | Authorization and transactions              |
 | Schema or durable state          | PostgreSQL schema and persistence           |
 | Jobs, Runs, streams, files       | Jobs, Runs, streams, checkpoints, and files |
-| Agents, Skills, MCP, Credentials | Governed assets                             |
+| Agents, Skills, MCP, domain secrets | Governed assets                          |
 | Memory, audit, quota, retention  | Memory, audit, quota, and retention         |
 | Configuration, models, vision    | Configuration, models, and `inspect_image`  |
 | Implementation or verification   | Common change paths; Tests and code quality |
@@ -46,7 +46,7 @@ Run full-stack commands from the repository root and backend targets from
   contexts, and domain transactions.
 - `packages/harness/deerflow/<domain>/` owns reusable graph, runtime,
   persistence, sandbox, Skill, MCP, and subagent primitives.
-- `migrations/` and `scripts/` own explicit schema and operator workflows.
+- `scripts/` owns explicit Schema V1 setup and operator workflows.
 - `tests/` owns unit, PostgreSQL, process, and contract gates.
 
 The dependency direction is `app.* -> deerflow.*`; harness code must never
@@ -63,8 +63,8 @@ import `app.*`.
 - Project channel configuration, group bindings, and owner-attributed channel
   connection state require `project.channels.manage`; member private-work
   capabilities never grant access to the project Connections surface or API.
-- Never accept project, owner, membership, capability, Run snapshot, Credential
-  grant, Job, lease, or internal runtime authority from request metadata,
+- Never accept project, owner, membership, capability, Run snapshot, secret
+  authority, Job, lease, or internal runtime authority from request metadata,
   model/tool arguments, or ambient globals.
 - Revalidate project, membership, capability, resource state, and Job/Run lease
   inside the transaction that performs each side effect.
@@ -92,44 +92,40 @@ import `app.*`.
 - Browser tokens remain valid only while signature, session ID, token version,
   and the durable auth-session row all validate. Logout and password change
   revoke durable authority, not just browser state.
-- Passwords, JWTs, CSRF values, raw session IDs, API keys, Credential plaintext,
+- Passwords, JWTs, CSRF values, raw session IDs, API keys, secret plaintext,
   nonces, ciphertext, storage locators, and full connection URLs never enter
   logs, traces, public responses, snapshots, audit metadata, or browser caches.
-- Credential plaintext is decrypted only at the Worker execution boundary and
-  injected into the exact authorized subprocess or remote call. Output masking
-  is accidental-leak protection, not DLP; Credential-bearing Skills are trusted
-  code.
+- Skill and MCP plaintext is decrypted only at the Worker execution boundary and
+  injected into the exact authorized Sandbox or remote call. Output masking is
+  accidental-leak protection, not DLP; secret-bearing Skills are trusted code.
 
 ### PostgreSQL schema and persistence
 
 `deerflow/persistence/full_schema.sql` is the complete source for fresh installs;
-the current marker is `skill_design_activity`. Fresh setup runs that schema directly
-and stamps the chain head. Runtime processes never create, migrate, stamp, repair,
+the current marker is `schema_v1`. Fresh setup runs that schema directly
+and stamps the V1 marker. Runtime processes never create, migrate, stamp, repair,
 or downgrade an application database.
 
 - `make setup-db` accepts a new empty target only and initializes application,
   LangGraph, system-asset, and default-project state.
-- Every initialized application/Alembic table and column has a checked-in
+- Every initialized application table and column has a checked-in
   Chinese comment. LangGraph comments are applied after its third-party setup,
   and each physical `run_events` partition copies the parent comments. Run
   `uv run python scripts/generate_schema_comments.py --check` after schema edits.
-- `make preflight-upgrade` is the read-only Agent/Skill lifecycle inventory for a known ancestor marker. `make upgrade-db` repeats that fail-closed preflight and is the sole mutation path.
-  It runs the migration chain and verifies parity with a fresh install.
-- `make check-db` is read-only and reports ready, upgrade-required, or a
+- Schema V1 has no migration ancestry. Any nonempty database that does not match
+  the exact catalog must be explicitly recreated; runtime never upgrades it.
+- `make check-db` is read-only and reports ready, recreate-required, or a
   fail-closed recreate/unavailable state without exposing credentials.
 - `make upgrade-system-assets` is an explicit maintenance-window action for a
-  current schema. It replaces deterministic System v1 definitions in place,
-  preserves already-admitted Run Snapshots and asset-ID project bindings, and
-  affects only later admissions. It may be rerun idempotently after checking an
-  uncertain outcome.
+  current schema. System Skill v1 payload changes are rejected; changed behavior
+  must use a new System Skill identity. The operation remains idempotent.
 - `make prepare-run-event-partitions` is an explicit, idempotent operator action
   for UTC months N through N+2. Schedule it outside application runtime; it
   refuses non-current schemas and bounds DDL lock waiting.
 - Unknown markers, an unversioned nonempty schema, and catalog drift are never
   repaired in place.
 - A schema change updates the ORM registration, `full_schema.sql`, catalog
-  signature/digest, required relations, chain marker, migration script, and
-  parity tests together.
+  signature/digest, required relations, V1 marker, and schema tests together.
 - Application metadata and durable state live in PostgreSQL. File/artifact bytes
   may live in configured storage, but access, identity, version, and scope remain
   database-authoritative.
@@ -141,9 +137,9 @@ or downgrade an application database.
   admission.
 - Worker stores raw lease tokens only in memory. Every append, tool side effect,
   and terminal settlement validates the exact current lease in its transaction.
-- Run admission freezes an exact, secret-free Agent/model/Skill/MCP/Credential
-  reference closure. Retry and resume use that closure rather than current
-  catalog pointers.
+- Run admission freezes an exact Agent/model/Skill/MCP payload closure plus exact
+  domain-secret Generation references. Retry and resume use that closure rather
+  than current catalog pointers.
 - Durable events are committed before notification. PostgreSQL `NOTIFY` is only
   a wake-up hint; correctness comes from scoped reads, monotonic cursors, and one
   durable terminal outcome.
@@ -176,12 +172,12 @@ or downgrade an application database.
   `PYTHONPATH=. uv run python scripts/generate_public_system_skill_catalog.py`
   and use `--check` for verification.
 - Packaged System Agent/Skill/MCP definitions are bootstrap-only and immutable at
-  runtime. Global admin definition routes are read-only; the narrow packaged MCP
-  Credential-grant route changes grants, not the definition.
+  runtime. Global admin definition routes are read-only; Projects configure their
+  own secret values after binding exact System Skill/MCP versions.
 - Packaged System Agent and Skill assets have one deterministic v1 identity and
-  expose it through `current_version_id`. Bootstrap replaces changed authenticated
-  v1 bytes in place, never appends a version, and is idempotent on rerun. Project
-  bindings store only the System Agent/Skill asset identity.
+  expose it through `current_version_id`. A changed System Skill v1 payload is
+  rejected and must ship under a new identity. Same-byte bootstrap is idempotent.
+  Project bindings store only the System Agent/Skill asset identity.
 - Server-owned Builder Agents are absent from every regular project, global-admin,
   and runtime System Agent catalog, including direct detail and version-history
   lookup. Only bootstrap and the dedicated internal resolver may address them.
@@ -191,7 +187,7 @@ or downgrade an application database.
   New bindings and Run Admission reject a revoked v1. Already admitted Runs retain
   their immutable Run Snapshot and are not force-aborted.
 
-#### Project assets and Credentials
+#### Project assets and domain secrets
 
 - Project Agent/Skill/MCP versions are immutable. Agent/Skill creation saves a
   complete suspended asset plus Candidate Version v1. Further versions may be
@@ -206,18 +202,17 @@ or downgrade an application database.
   select any persisted Project version; System exports require the eligible
   Current Version. The deterministic root-layout ZIP excludes root `evals/`,
   any `node_modules/` or `__pycache__/`, `.DS_Store`, and `*.pyc`, and never
-  includes Credential mappings, secrets, lifecycle state, or version history.
+  includes configured secret values, lifecycle state, or version history.
 - A Skill's `SKILL.md` is the sole authority for `required-secrets` and
   `secrets-autonomous`. Archive, Builder, validation, review, activation, and
   runtime consumers use the canonical parser; form edits patch only those
   managed frontmatter fields and preserve the rest of the document.
-- Skill Credential mappings belong to one exact Skill version and map each
-  declared target environment name to one exact Project Credential version and
-  one source `env` field. Candidate and Current mappings use revision CAS;
-  Historical Versions are read-only. Saving a forward Candidate inherits only
-  compatible mappings. Activation requires every required mapping to be valid
-  and no optional mapping to be invalid. Secret values never enter Skill bytes,
-  activation readiness, snapshots, audit metadata, or API responses.
+- Project Skill secrets belong to one exact Skill Version and declared target
+  environment name. Candidate and Current values use revision CAS; Historical
+  Versions are read-only. Saving a forward Candidate independently re-encrypts
+  only compatible values. Activation requires every required declaration to be
+  configured. Secret values never enter Skill bytes, public readiness, audit
+  metadata, or API responses.
 
 #### Runtime admission and MCP
 
@@ -227,24 +222,24 @@ or downgrade an application database.
   resolution rejects any legacy conflicting closure.
 - Every Run Admission resolves current Agent/Skill asset pointers, including later
   messages in an existing Thread, Automation, Channel, edit, regeneration, and
-  fork paths. It then persists exact versions, bytes, checksums, Credentials, MCP
-  configurations, and policy in one self-contained Run Snapshot. Worker execution
+  fork paths. It then persists exact versions, bytes, checksums, domain-secret
+  Generation references, MCP configurations, and policy in one self-contained Run Snapshot. Worker execution
   and retries decode only that snapshot and never reread Current Versions.
 - A newly admitted Run pins exact versions and checksums. Unrelated catalog
   changes do not invalidate it, while revoked membership, capability, binding,
-  Credential, or lease fails at the applicable execution boundary.
+  secret Generation, or lease fails at the applicable execution boundary.
 - A project Skill is passive until explicit slash activation or verified reading
   of its admitted `SKILL.md`. Active policy restricts model schemas, execution,
   and `tool_search`; stale or malformed evidence fails closed.
 - Project MCP authoring accepts only supported remote HTTP/SSE definitions under
-  the configured CIDR policy. Secrets use encrypted header/query Credential
-  slots. Worker disables redirects and ambient proxy trust, revalidates the
+  the configured CIDR policy. Projects save encrypted values by exact MCP Version
+  and header/query slot. Worker disables redirects and ambient proxy trust, revalidates the
   target and closure for discovery/calls, and treats inventory as diagnostic—not
   execution authority.
-- After exact closure and Credential materialization succeed, Worker isolates a
+- After exact closure and secret materialization succeed, Worker isolates a
   remote MCP discovery transport/catalog failure to that MCP for the current Run,
   exposes no tools from it, and supplies only a stable secret-free capability
-  notice to the Agent. Authorization, snapshot, database, and Credential
+  notice to the Agent. Authorization, snapshot, database, and secret
   materialization uncertainty still fail closed. Ordinary Skill/tool execution
   failures return safe error results; malformed or stale Skill evidence remains
   fail closed.
@@ -323,10 +318,10 @@ or downgrade an application database.
 
 #### Configuration authority
 
-Configuration is read only from explicit `DEER_FLOW_CONFIG_PATH` or the
+Configuration is read only from explicit `ACT_WEAVE_CONFIG_PATH` or the
 repository-root `config.yaml`. Infrastructure settings are restart-required.
-Model definitions, runtime/auth/Memory/quota/Automation policy, and provider
-Credentials are PostgreSQL authority and must not be reintroduced as YAML or
+Model definitions, runtime/auth/Memory/quota/Automation policy, and model-owned
+API Keys are PostgreSQL authority and must not be reintroduced as YAML or
 ambient-key fallbacks.
 
 #### Model adapters and `inspect_image`
@@ -353,7 +348,7 @@ new authoring, defaults, bindings, or Run snapshots. Preserve exact frozen
 `purpose="vision"` snapshots, Worker abort/deadline behavior, tracing
 suppression, and durable dispatch authority.
 
-#### Configuration schema and bootstrap Credentials
+#### Configuration schema and bootstrap secrets
 
 The example declares `config_version: 1`. Version 1 is the initial public
 configuration schema. It includes the explicit restart-required
@@ -362,8 +357,8 @@ current process/runtime settings as one baseline rather than as public upgrade
 milestones. Removed top-level policy keys remain fail-closed tombstones; use
 `make config-upgrade` rather than manually guessing a future migration.
 
-`make setup-db` is the only command allowed to consume initial provider keys and
-persist encrypted Credential versions. Normal Gateway, Worker, Scheduler,
+`make setup-db` is the only command allowed to consume the bootstrap DeepSeek Key
+and persist three independently encrypted model-owned copies. Normal Gateway, Worker, Scheduler,
 doctor, and Compose startup must not broadcast provider keys as process-wide
 model configuration.
 
@@ -384,11 +379,11 @@ model configuration.
 
 1. Add/import the ORM model so `Base.metadata` registers it.
 2. Update `full_schema.sql` and all database constraints.
-3. Add an explicit migration with the previous head as `down_revision`.
-4. Update schema marker, catalog signature/digest, readiness relations, and the
+3. Update schema marker, catalog signature/digest, readiness relations, and the
    closed Job/audit/API type contracts that apply.
-5. Prove fresh-install and migration parity with disposable PostgreSQL targets.
-   Never stamp or hand-patch a development database as evidence.
+4. Prove fresh-install ORM/full-schema/catalog parity with a disposable
+   PostgreSQL target. Schema V1 has no migration ancestry; recreate a drifted
+   development database instead of stamping or hand-patching it.
 
 ### Agent tool or middleware
 

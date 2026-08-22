@@ -7,7 +7,6 @@ const ROUTE_KIND: Record<string, AssetListKind> = {
   agents: "agents",
   skills: "skills",
   mcp: "mcp-servers",
-  credentials: "credentials",
 };
 
 export default async function AdminProjectAssetKindPage({

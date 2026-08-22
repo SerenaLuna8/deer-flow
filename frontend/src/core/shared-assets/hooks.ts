@@ -14,13 +14,10 @@ import { projectKeys } from "@/core/projects/query-keys";
 
 import {
   SharedAssetApiError,
-  approveAdminProjectMcpVersion,
-  approveProjectMcpVersion,
   activateAdminProjectAssetVersion,
   activateProjectAssetVersion,
   changeAdminProjectAssetStatus,
   changeProjectAssetStatus,
-  configureAdminMcpCredentialGrants,
   createAdminProjectAssetVersion,
   createConfiguredProjectMcp,
   createProjectAssetVersion,
@@ -35,10 +32,8 @@ import {
   getProjectMcpEditableConfiguration,
   getProjectMcpToolInventory,
   getProjectDefaultAgent,
-  getAdminCredentialMigrationStatus,
-  getAdminProjectCredentialMigrationStatus,
-  getProjectCredentialMigrationStatus,
-  getProjectSkillCredentialBindings,
+  getProjectSkillSecrets,
+  getProjectMcpSecrets,
   getProjectSkillActivationReadiness,
   getProjectSkillVersionFile,
   importProjectSkillArchive,
@@ -53,29 +48,27 @@ import {
   publishProjectMcpVersion,
   publishAdminProjectMcpVersion,
   requestProjectMcpToolDiscovery,
-  revokeAdminCredential,
-  revokeProjectCredential,
+  replaceProjectMcpSecret,
+  replaceProjectSkillSecrets,
   rollbackProjectSystemBinding,
   rollbackAdminProjectSystemBinding,
   setProjectDefaultAgent,
   syncCurrentProjectSystemMcpBinding,
   submitAdminProjectMcpVersion,
   submitProjectMcpVersion,
+  clearProjectMcpSecret,
+  clearProjectSkillSecret,
   updateConfiguredProjectMcp,
   updateProjectAgentCapabilityBindings,
   updateProjectAgentInstructions,
-  updateProjectSkillCredentialBindings,
   upgradeAdminProjectSystemBinding,
   upgradeProjectSystemBinding,
 } from "./api";
 import {
   adminAssetKey,
   adminAssetVersionsKey,
-  adminCredentialMigrationStatusKey,
   adminProjectAssetKey,
   adminProjectAssetVersionsKey,
-  adminProjectCredentialMigrationStatusKey,
-  projectCredentialMigrationStatusKey,
   projectAssetKey,
   projectAssetMutationKey,
   projectAssetVersionsKey,
@@ -83,8 +76,8 @@ import {
   projectDefaultAgentKey,
   projectMcpEditableConfigurationKey,
   projectMcpToolInventoryKey,
-  projectSkillCredentialBindingsKey,
-  projectSkillCredentialBindingsMutationKey,
+  projectSkillSecretsKey,
+  projectMcpSecretsKey,
   projectSkillActivationReadinessKey,
   projectSkillVersionFileKey,
   systemCatalogKey,
@@ -96,14 +89,10 @@ import type {
   AssetSummary,
   AgentCapabilityBindingsInput,
   AdminProjectAssetStatusAction,
-  CredentialMigrationStatusResponse,
-  AdminCredentialList,
   AgentInstructionsInput,
-  ApproveMcpInput,
   AssetKind,
   AssetListKind,
   CreateConfiguredMcpInput,
-  ConfigureSystemMcpCredentialGrantsInput,
   DisableSystemBindingInput,
   EnableSystemBindingInput,
   EnableCurrentSystemBindingInput,
@@ -114,15 +103,16 @@ import type {
   McpToolInventoryResponse,
   ProjectAssetList,
   ProjectAssetStatusAction,
-  ProjectCredentialList,
   ProjectDefaultAgent,
   ProjectDefaultAgentInput,
   ProjectMcpEditableConfigurationResponse,
-  RevokeCredentialInput,
   SkillVersionInput,
   SkillFileForkInput,
-  SkillCredentialBindingsInput,
-  SkillCredentialBindingsResponse,
+  SkillSecretSetResponse,
+  McpSecretSetResponse,
+  McpSecretReplaceInput,
+  SecretClearInput,
+  SkillSecretReplaceInput,
   SkillActivationInput,
   SkillVersionFileContentResponse,
   SyncCurrentSystemMcpBindingInput,
@@ -130,7 +120,7 @@ import type {
   VersionHistoryResponse,
 } from "./types";
 
-type MutableAssetKind = Exclude<AssetListKind, "credentials">;
+type MutableAssetKind = AssetListKind;
 type ActivatableVersionKind = "agents" | "skills";
 type AuthorableVersionKind = Exclude<MutableAssetKind, "agents">;
 type VersionAuthoringInput = SkillVersionInput | McpVersionInput;
@@ -367,11 +357,6 @@ function useProjectMutationRunner(accountId: string, projectId: string) {
   return { runMutation, whenActive };
 }
 
-function useAdminInvalidation(accountId: string, kind: AssetListKind) {
-  const queryClient = useQueryClient();
-  return () => invalidateAdminAssetQueries(queryClient, accountId, kind);
-}
-
 function useAdminProjectInvalidation(
   accountId: string,
   projectId: string,
@@ -388,12 +373,9 @@ export function useProjectAssets(
   kind: AssetListKind,
   enabled = true,
 ) {
-  return useQuery<ProjectAssetList | ProjectCredentialList>({
+  return useQuery<ProjectAssetList>({
     queryKey: projectAssetKey(accountId, projectId, kind),
-    queryFn: ({ signal }) =>
-      kind === "credentials"
-        ? listProjectAssets(projectId, kind, signal)
-        : listProjectAssets(projectId, kind, signal),
+    queryFn: ({ signal }) => listProjectAssets(projectId, kind, signal),
     enabled,
   });
 }
@@ -446,12 +428,9 @@ export function useAdminAssets(
   kind: AssetListKind,
   enabled = true,
 ) {
-  return useQuery<AdminAssetList | AdminCredentialList>({
+  return useQuery<AdminAssetList>({
     queryKey: adminAssetKey(accountId, kind),
-    queryFn: ({ signal }) =>
-      kind === "credentials"
-        ? listAdminAssets(kind, signal)
-        : listAdminAssets(kind, signal),
+    queryFn: ({ signal }) => listAdminAssets(kind, signal),
     enabled,
   });
 }
@@ -462,19 +441,16 @@ export function useAdminProjectAssets(
   kind: AssetListKind,
   enabled = true,
 ) {
-  return useQuery<ProjectAssetList | ProjectCredentialList>({
+  return useQuery<ProjectAssetList>({
     queryKey: adminProjectAssetKey(accountId, projectId, kind),
-    queryFn: ({ signal }) =>
-      kind === "credentials"
-        ? listAdminProjectAssets(projectId, kind, signal)
-        : listAdminProjectAssets(projectId, kind, signal),
+    queryFn: ({ signal }) => listAdminProjectAssets(projectId, kind, signal),
     enabled,
   });
 }
 
 export function useSystemAssetCatalog(
   accountId: string,
-  kind: Exclude<AssetListKind, "credentials">,
+  kind: AssetListKind,
 ) {
   return useQuery<AdminAssetList>({
     queryKey: systemCatalogKey(accountId, kind),
@@ -610,22 +586,22 @@ export function useProjectSkillVersionFile(
   });
 }
 
-export function useProjectSkillCredentialBindings(
+export function useProjectSkillSecrets(
   accountId: string,
   projectId: string,
   skillId: string,
   versionId: string,
   enabled = true,
 ) {
-  return useQuery<SkillCredentialBindingsResponse>({
-    queryKey: projectSkillCredentialBindingsKey(
+  return useQuery<SkillSecretSetResponse>({
+    queryKey: projectSkillSecretsKey(
       accountId,
       projectId,
       skillId,
       versionId,
     ),
     queryFn: ({ signal }) =>
-      getProjectSkillCredentialBindings(projectId, skillId, versionId, signal),
+      getProjectSkillSecrets(projectId, skillId, versionId, signal),
     enabled: enabled && versionId !== "",
   });
 }
@@ -651,33 +627,117 @@ export function useProjectSkillActivationReadiness(
   });
 }
 
-export function useUpdateProjectSkillCredentialBindings(
+export function useProjectMcpSecrets(
   accountId: string,
   projectId: string,
-  skillId: string,
+  assetId: string,
   versionId: string,
+  enabled = true,
 ) {
-  const queryClient = useQueryClient();
-  const key = projectSkillCredentialBindingsKey(
-    accountId,
-    projectId,
-    skillId,
-    versionId,
-  );
-  const { runMutation, whenActive } = useProjectMutationRunner(
-    accountId,
-    projectId,
-  );
+  return useQuery<McpSecretSetResponse>({
+    queryKey: projectMcpSecretsKey(accountId, projectId, assetId, versionId),
+    queryFn: ({ signal }) =>
+      getProjectMcpSecrets(projectId, assetId, versionId, signal),
+    enabled: enabled && assetId !== "" && versionId !== "",
+    staleTime: 0,
+  });
+}
+
+export function useReplaceProjectMcpSecret(
+  accountId: string,
+  projectId: string,
+) {
+  const { runMutation } = useProjectMutationRunner(accountId, projectId);
   return useMutation({
-    mutationKey: projectSkillCredentialBindingsMutationKey(
+    mutationKey: projectAssetMutationKey(
       accountId,
       projectId,
+      "mcp-servers",
+      "secret-replace",
+    ),
+    mutationFn: ({
+      assetId,
+      versionId,
+      slotName,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      slotName: string;
+      input: McpSecretReplaceInput;
+    }) =>
+      runMutation((signal) =>
+        replaceProjectMcpSecret(
+          projectId,
+          assetId,
+          versionId,
+          slotName,
+          input,
+          signal,
+        ),
+      ),
+  });
+}
+
+export function useClearProjectMcpSecret(
+  accountId: string,
+  projectId: string,
+) {
+  const { runMutation } = useProjectMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "mcp-servers",
+      "secret-clear",
+    ),
+    mutationFn: ({
+      assetId,
+      versionId,
+      slotName,
+      input,
+    }: {
+      assetId: string;
+      versionId: string;
+      slotName: string;
+      input: SecretClearInput;
+    }) =>
+      runMutation((signal) =>
+        clearProjectMcpSecret(
+          projectId,
+          assetId,
+          versionId,
+          slotName,
+          input,
+          signal,
+        ),
+      ),
+  });
+}
+
+export function useReplaceProjectSkillSecrets(
+  accountId: string,
+  projectId: string,
+) {
+  const { runMutation } = useProjectMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "skills",
+      "secret-replace",
+    ),
+    mutationFn: ({
       skillId,
       versionId,
-    ),
-    mutationFn: (input: SkillCredentialBindingsInput) =>
+      input,
+    }: {
+      skillId: string;
+      versionId: string;
+      input: SkillSecretReplaceInput;
+    }) =>
       runMutation((signal) =>
-        updateProjectSkillCredentialBindings(
+        replaceProjectSkillSecrets(
           projectId,
           skillId,
           versionId,
@@ -685,14 +745,42 @@ export function useUpdateProjectSkillCredentialBindings(
           signal,
         ),
       ),
-    onSuccess: whenActive((response: SkillCredentialBindingsResponse) => {
-      queryClient.setQueryData(key, response);
-      return invalidateProjectAgentRuntimeAssessments(
-        queryClient,
-        accountId,
-        projectId,
-      );
-    }),
+  });
+}
+
+export function useClearProjectSkillSecret(
+  accountId: string,
+  projectId: string,
+) {
+  const { runMutation } = useProjectMutationRunner(accountId, projectId);
+  return useMutation({
+    mutationKey: projectAssetMutationKey(
+      accountId,
+      projectId,
+      "skills",
+      "secret-clear",
+    ),
+    mutationFn: ({
+      skillId,
+      versionId,
+      secretName,
+      input,
+    }: {
+      skillId: string;
+      versionId: string;
+      secretName: string;
+      input: SecretClearInput;
+    }) =>
+      runMutation((signal) =>
+        clearProjectSkillSecret(
+          projectId,
+          skillId,
+          versionId,
+          secretName,
+          input,
+          signal,
+        ),
+      ),
   });
 }
 
@@ -717,76 +805,6 @@ export function useAdminProjectAssetVersions(
     queryKey: adminProjectAssetVersionsKey(accountId, projectId, kind, assetId),
     queryFn: ({ signal }) =>
       listAdminProjectAssetVersions(projectId, kind, assetId, signal),
-  });
-}
-
-export function useAdminCredentialMigrationStatus(
-  accountId: string,
-  credentialId: string,
-  credentialVersionId: string,
-  enabled = true,
-) {
-  const active = enabled && credentialId !== "" && credentialVersionId !== "";
-  return useQuery<CredentialMigrationStatusResponse>({
-    queryKey: active
-      ? adminCredentialMigrationStatusKey(
-          accountId,
-          credentialId,
-          credentialVersionId,
-        )
-      : ["credential-migration-status", "disabled", accountId],
-    queryFn: ({ signal }) =>
-      getAdminCredentialMigrationStatus(credentialId, signal),
-    enabled: active,
-    staleTime: 0,
-  });
-}
-
-export function useAdminProjectCredentialMigrationStatus(
-  accountId: string,
-  projectId: string,
-  credentialId: string,
-  credentialVersionId: string,
-  enabled = true,
-) {
-  const active = enabled && credentialId !== "" && credentialVersionId !== "";
-  return useQuery<CredentialMigrationStatusResponse>({
-    queryKey: active
-      ? adminProjectCredentialMigrationStatusKey(
-          accountId,
-          projectId,
-          credentialId,
-          credentialVersionId,
-        )
-      : ["credential-migration-status", "disabled", accountId, projectId],
-    queryFn: ({ signal }) =>
-      getAdminProjectCredentialMigrationStatus(projectId, credentialId, signal),
-    enabled: active,
-    staleTime: 0,
-  });
-}
-
-export function useProjectCredentialMigrationStatus(
-  accountId: string,
-  projectId: string,
-  credentialId: string,
-  credentialVersionId: string,
-  enabled = true,
-) {
-  const active = enabled && credentialId !== "" && credentialVersionId !== "";
-  return useQuery<CredentialMigrationStatusResponse>({
-    queryKey: active
-      ? projectCredentialMigrationStatusKey(
-          accountId,
-          projectId,
-          credentialId,
-          credentialVersionId,
-        )
-      : ["credential-migration-status", "disabled", accountId, projectId],
-    queryFn: ({ signal }) =>
-      getProjectCredentialMigrationStatus(projectId, credentialId, signal),
-    enabled: active,
-    staleTime: 0,
   });
 }
 
@@ -1574,54 +1592,6 @@ export function usePublishAdminProjectMcpVersion(
   });
 }
 
-export function useRevokeProjectCredential(
-  accountId: string,
-  projectId: string,
-) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "credentials",
-  );
-  const { runMutation, whenActive } = useProjectMutationRunner(
-    accountId,
-    projectId,
-  );
-  return useMutation({
-    mutationKey: projectAssetMutationKey(
-      accountId,
-      projectId,
-      "credentials",
-      "revoke",
-    ),
-    mutationFn: ({
-      credentialId,
-      input,
-    }: {
-      credentialId: string;
-      input: RevokeCredentialInput;
-    }) =>
-      runMutation((signal) =>
-        revokeProjectCredential(projectId, credentialId, input, signal),
-      ),
-    onSuccess: whenActive(invalidate),
-  });
-}
-
-export function useRevokeAdminCredential(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "credentials");
-  return useMutation({
-    mutationFn: ({
-      credentialId,
-      input,
-    }: {
-      credentialId: string;
-      input: RevokeCredentialInput;
-    }) => revokeAdminCredential(credentialId, input),
-    onSuccess: invalidate,
-  });
-}
-
 export function useSubmitProjectMcpVersion(
   accountId: string,
   projectId: string,
@@ -1677,81 +1647,6 @@ export function useSubmitAdminProjectMcpVersion(
       versionId: string;
       input: ExpectedAssetVersionInput;
     }) => submitAdminProjectMcpVersion(projectId, assetId, versionId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useApproveProjectMcpVersion(
-  accountId: string,
-  projectId: string,
-) {
-  const invalidate = useProjectInvalidation(
-    accountId,
-    projectId,
-    "mcp-servers",
-  );
-  const { runMutation, whenActive } = useProjectMutationRunner(
-    accountId,
-    projectId,
-  );
-  return useMutation({
-    mutationKey: projectAssetMutationKey(
-      accountId,
-      projectId,
-      "mcp-servers",
-      "approve-version",
-    ),
-    mutationFn: ({
-      assetId,
-      versionId,
-      input,
-    }: {
-      assetId: string;
-      versionId: string;
-      input: ApproveMcpInput;
-    }) =>
-      runMutation((signal) =>
-        approveProjectMcpVersion(projectId, assetId, versionId, input, signal),
-      ),
-    onSuccess: whenActive(invalidate),
-  });
-}
-
-export function useApproveAdminProjectMcpVersion(
-  accountId: string,
-  projectId: string,
-) {
-  const invalidate = useAdminProjectInvalidation(
-    accountId,
-    projectId,
-    "mcp-servers",
-  );
-  return useMutation({
-    mutationFn: ({
-      assetId,
-      versionId,
-      input,
-    }: {
-      assetId: string;
-      versionId: string;
-      input: ApproveMcpInput;
-    }) => approveAdminProjectMcpVersion(projectId, assetId, versionId, input),
-    onSuccess: invalidate,
-  });
-}
-
-export function useConfigureAdminMcpCredentialGrants(accountId: string) {
-  const invalidate = useAdminInvalidation(accountId, "mcp-servers");
-  return useMutation({
-    mutationFn: ({
-      assetId,
-      versionId,
-      input,
-    }: {
-      assetId: string;
-      versionId: string;
-      input: ConfigureSystemMcpCredentialGrantsInput;
-    }) => configureAdminMcpCredentialGrants(assetId, versionId, input),
     onSuccess: invalidate,
   });
 }

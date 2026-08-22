@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import re
 import uuid
 from collections.abc import Mapping, Sequence
@@ -30,7 +29,6 @@ MCP_TOOL_INVENTORY_ERROR_CODES = frozenset(
 
 _TOOL_NAME = re.compile(r"[A-Za-z0-9_-]+\Z")
 _HEX_DIGEST = re.compile(r"[0-9a-f]{64}\Z")
-_GRANT_DIGEST_DOMAIN = b"deerflow:mcp-tool-inventory:grant-closure:v1\0"
 
 McpToolInventoryAttemptStatus = Literal["ready", "failed"]
 McpToolInventoryErrorCode = Literal[
@@ -42,23 +40,14 @@ McpToolInventoryErrorCode = Literal[
 @dataclass(frozen=True, slots=True)
 class McpToolInventoryRecord:
     attempt_payload_checksum: str
-    attempt_grant_digest: str
+    attempt_secret_digest: str
     attempt_status: McpToolInventoryAttemptStatus
     public_error_code: McpToolInventoryErrorCode | None
     tools: tuple[dict[str, str], ...]
     tools_payload_checksum: str | None
-    tools_grant_digest: str | None
+    tools_secret_digest: str | None
     last_attempt_at: datetime
     last_success_at: datetime | None
-
-
-def mcp_grant_closure_digest(grant_ids: Sequence[uuid.UUID]) -> str:
-    digest = hashlib.sha256(_GRANT_DIGEST_DOMAIN)
-    for grant_id in sorted(grant_ids, key=lambda value: value.int):
-        if not isinstance(grant_id, uuid.UUID):
-            raise TypeError("MCP grant closure IDs must be UUIDs")
-        digest.update(grant_id.bytes)
-    return digest.hexdigest()
 
 
 def normalize_mcp_tool_inventory(
@@ -101,7 +90,7 @@ class McpToolInventoryRepository:
         mcp_server_id: uuid.UUID,
         mcp_server_version_id: uuid.UUID,
         payload_checksum: str,
-        grant_digest: str,
+        secret_digest: str,
         tools: Sequence[Mapping[str, object]],
         attempted_at: datetime | None = None,
     ) -> None:
@@ -118,12 +107,12 @@ class McpToolInventoryRepository:
             mcp_server_id=mcp_server_id,
             mcp_server_version_id=mcp_server_version_id,
             attempt_payload_checksum=payload_checksum,
-            attempt_grant_digest=grant_digest,
+            attempt_secret_digest=secret_digest,
             attempt_status="ready",
             public_error_code=None,
             tools=list(normalized),
             tools_payload_checksum=payload_checksum,
-            tools_grant_digest=grant_digest,
+            tools_secret_digest=secret_digest,
             last_attempt_at=timestamp,
             last_success_at=timestamp,
             revision=1,
@@ -138,12 +127,12 @@ class McpToolInventoryRepository:
                 set_={
                     "mcp_server_id": excluded.mcp_server_id,
                     "attempt_payload_checksum": excluded.attempt_payload_checksum,
-                    "attempt_grant_digest": excluded.attempt_grant_digest,
+                    "attempt_secret_digest": excluded.attempt_secret_digest,
                     "attempt_status": excluded.attempt_status,
                     "public_error_code": None,
                     "tools": excluded.tools,
                     "tools_payload_checksum": excluded.tools_payload_checksum,
-                    "tools_grant_digest": excluded.tools_grant_digest,
+                    "tools_secret_digest": excluded.tools_secret_digest,
                     "last_attempt_at": excluded.last_attempt_at,
                     "last_success_at": excluded.last_success_at,
                     "revision": ProjectMcpToolInventoryRow.revision + 1,
@@ -159,7 +148,7 @@ class McpToolInventoryRepository:
         mcp_server_id: uuid.UUID,
         mcp_server_version_id: uuid.UUID,
         payload_checksum: str,
-        grant_digest: str,
+        secret_digest: str,
         public_error_code: str,
         attempted_at: datetime | None = None,
     ) -> None:
@@ -177,12 +166,12 @@ class McpToolInventoryRepository:
             mcp_server_id=mcp_server_id,
             mcp_server_version_id=mcp_server_version_id,
             attempt_payload_checksum=payload_checksum,
-            attempt_grant_digest=grant_digest,
+            attempt_secret_digest=secret_digest,
             attempt_status="failed",
             public_error_code=public_error_code,
             tools=[],
             tools_payload_checksum=None,
-            tools_grant_digest=None,
+            tools_secret_digest=None,
             last_attempt_at=timestamp,
             last_success_at=None,
             revision=1,
@@ -197,7 +186,7 @@ class McpToolInventoryRepository:
                 set_={
                     "mcp_server_id": excluded.mcp_server_id,
                     "attempt_payload_checksum": excluded.attempt_payload_checksum,
-                    "attempt_grant_digest": excluded.attempt_grant_digest,
+                    "attempt_secret_digest": excluded.attempt_secret_digest,
                     "attempt_status": excluded.attempt_status,
                     "public_error_code": excluded.public_error_code,
                     "last_attempt_at": excluded.last_attempt_at,
@@ -228,20 +217,20 @@ class McpToolInventoryRepository:
         if (
             not isinstance(row.attempt_payload_checksum, str)
             or _HEX_DIGEST.fullmatch(row.attempt_payload_checksum) is None
-            or not isinstance(row.attempt_grant_digest, str)
-            or _HEX_DIGEST.fullmatch(row.attempt_grant_digest) is None
+            or not isinstance(row.attempt_secret_digest, str)
+            or _HEX_DIGEST.fullmatch(row.attempt_secret_digest) is None
             or row.attempt_status not in {"ready", "failed"}
             or (row.attempt_status == "ready" and row.public_error_code is not None)
             or (row.attempt_status == "failed" and row.public_error_code not in MCP_TOOL_INVENTORY_ERROR_CODES)
             or (row.tools_payload_checksum is not None and (not isinstance(row.tools_payload_checksum, str) or _HEX_DIGEST.fullmatch(row.tools_payload_checksum) is None))
-            or (row.tools_grant_digest is not None and (not isinstance(row.tools_grant_digest, str) or _HEX_DIGEST.fullmatch(row.tools_grant_digest) is None))
-            or ((row.tools_payload_checksum is None) != (row.tools_grant_digest is None))
+            or (row.tools_secret_digest is not None and (not isinstance(row.tools_secret_digest, str) or _HEX_DIGEST.fullmatch(row.tools_secret_digest) is None))
+            or ((row.tools_payload_checksum is None) != (row.tools_secret_digest is None))
             or ((row.tools_payload_checksum is None) != (row.last_success_at is None))
         ):
             raise ValueError("invalid persisted MCP tool inventory")
         return McpToolInventoryRecord(
             attempt_payload_checksum=row.attempt_payload_checksum,
-            attempt_grant_digest=row.attempt_grant_digest,
+            attempt_secret_digest=row.attempt_secret_digest,
             attempt_status=cast(McpToolInventoryAttemptStatus, row.attempt_status),
             public_error_code=cast(
                 McpToolInventoryErrorCode | None,
@@ -249,7 +238,7 @@ class McpToolInventoryRepository:
             ),
             tools=normalize_mcp_tool_inventory(row.tools),
             tools_payload_checksum=row.tools_payload_checksum,
-            tools_grant_digest=row.tools_grant_digest,
+            tools_secret_digest=row.tools_secret_digest,
             last_attempt_at=row.last_attempt_at,
             last_success_at=row.last_success_at,
         )
@@ -295,6 +284,5 @@ __all__ = [
     "MCP_TOOL_INVENTORY_ERROR_CODES",
     "McpToolInventoryRecord",
     "McpToolInventoryRepository",
-    "mcp_grant_closure_digest",
     "normalize_mcp_tool_inventory",
 ]

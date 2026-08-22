@@ -11,7 +11,7 @@ class CatalogStateRepository:
     """Catalog generation helpers used inside the caller's transaction.
 
     M3 schema triggers already bump generation for every resolver-visible asset,
-    binding, credential and grant mutation. Services must therefore not call
+    binding or secret mutation. Services must therefore not call
     ``bump_generation`` for those writes; this explicit helper is reserved for
     future resolver-visible mutations that do not have a trigger.
     """

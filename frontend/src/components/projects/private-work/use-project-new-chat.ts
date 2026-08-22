@@ -12,7 +12,6 @@ import type { Project } from "@/core/projects/types";
 import {
   useProjectAssets,
   useProjectDefaultAgent,
-  type ProjectAssetList,
 } from "@/core/shared-assets";
 import { invalidateStoppedThreadCaches } from "@/core/threads/hooks";
 
@@ -42,7 +41,7 @@ export function useProjectNewChat(project: Project) {
   const resolution = useMemo(
     () =>
       resolveProjectDefaultAgent(
-        assets.data as ProjectAssetList | undefined,
+        assets.data,
         defaultAgent.data,
       ),
     [assets.data, defaultAgent.data],

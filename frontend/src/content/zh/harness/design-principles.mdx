@@ -90,9 +90,9 @@ ActWeave 通过**上下文工程**来解决这个问题——有意识地控制 
 
 ## 明确的配置权威驱动行为
 
-ActWeave 按权威边界拆分配置：基础设施和进程策略位于 `config.yaml`，版本化模型定义、
-能力、provider 设置、默认选择和精确 Credential 引用位于 PostgreSQL 系统设置。
-运维人员无需修改代码即可调整行为，同时每个已准入 Run 都固定其将使用的精确模型版本。
+ActWeave 按权威边界拆分配置：基础设施和进程策略位于 `config.yaml`，模型定义、
+能力、provider 设置、默认选择和模型自有的加密 API Key 位于 PostgreSQL 系统设置。
+运维人员无需修改代码即可调整行为，同时每个已准入 Run 都固定其模型载荷和 Secret Generation。
 
 这个设计原则有三个含义：
 
@@ -100,8 +100,8 @@ ActWeave 按权威边界拆分配置：基础设施和进程策略位于 `config
 2. **可部署性**：相同代码可在不同环境使用不同基础设施和受治理的模型目录。
 3. **可审计性**：模型变更是版本化数据库操作，而不是无法追踪的 YAML 修改。
 
-模型 provider key 使用加密 System Credential，在 `/admin/settings/models` 中按精确版本
-选择，并且只在执行边界解密；它既不是普通模型设置，也不是 `config.yaml` 环境变量引用。
+模型 provider key 直接加密保存在所属 Model configuration 中，只在执行边界解密；
+它不是 `config.yaml` 环境变量引用，API 也不会返回明文。
 
 ## 总结
 

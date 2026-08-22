@@ -81,47 +81,47 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
 
-# ── DEER_FLOW_HOME ────────────────────────────────────────────────────────────
+# ── ACT_WEAVE_HOME ────────────────────────────────────────────────────────────
 
-if [ -z "$DEER_FLOW_HOME" ]; then
-    export DEER_FLOW_HOME="$REPO_ROOT/backend/.deer-flow"
+if [ -z "$ACT_WEAVE_HOME" ]; then
+    export ACT_WEAVE_HOME="$REPO_ROOT/backend/.deer-flow"
 fi
-echo -e "${BLUE}DEER_FLOW_HOME=$DEER_FLOW_HOME${NC}"
-mkdir -p "$DEER_FLOW_HOME"
+echo -e "${BLUE}ACT_WEAVE_HOME=$ACT_WEAVE_HOME${NC}"
+mkdir -p "$ACT_WEAVE_HOME"
 
-# ── DEER_FLOW_REPO_ROOT (for skills host path in DooD) ───────────────────────
+# ── ACT_WEAVE_REPO_ROOT (for skills host path in DooD) ───────────────────────
 
-export DEER_FLOW_REPO_ROOT="$REPO_ROOT"
+export ACT_WEAVE_REPO_ROOT="$REPO_ROOT"
 
 # ── config.yaml ───────────────────────────────────────────────────────────────
 
-if [ -z "$DEER_FLOW_CONFIG_PATH" ]; then
-    export DEER_FLOW_CONFIG_PATH="$REPO_ROOT/config.yaml"
+if [ -z "$ACT_WEAVE_CONFIG_PATH" ]; then
+    export ACT_WEAVE_CONFIG_PATH="$REPO_ROOT/config.yaml"
 fi
 
-if  [ "$CMD" != "down" ] && [ ! -f "$DEER_FLOW_CONFIG_PATH" ]; then
+if  [ "$CMD" != "down" ] && [ ! -f "$ACT_WEAVE_CONFIG_PATH" ]; then
     # Try to seed from repo (config.example.yaml is the canonical template)
     if [ -f "$REPO_ROOT/config.example.yaml" ]; then
-        cp "$REPO_ROOT/config.example.yaml" "$DEER_FLOW_CONFIG_PATH"
-        echo -e "${GREEN}✓ Seeded config.example.yaml → $DEER_FLOW_CONFIG_PATH${NC}"
+        cp "$REPO_ROOT/config.example.yaml" "$ACT_WEAVE_CONFIG_PATH"
+        echo -e "${GREEN}✓ Seeded config.example.yaml → $ACT_WEAVE_CONFIG_PATH${NC}"
         echo -e "${YELLOW}⚠ config.yaml was seeded from the example template.${NC}"
-        echo "  Run 'make setup' to generate a minimal config, or edit $DEER_FLOW_CONFIG_PATH manually before use."
+        echo "  Run 'make setup' to generate a minimal config, or edit $ACT_WEAVE_CONFIG_PATH manually before use."
     else
         echo -e "${RED}✗ No config.yaml found.${NC}"
         echo "  Run 'make setup' from the repo root (recommended),"
         echo "  or 'make config' for the full process template. After startup, configure"
-        echo "  models and encrypted Credentials at /admin/settings/models."
+        echo "  models and encrypted API keys at /admin/settings/models."
         exit 1
     fi
 else
-    echo -e "${GREEN}✓ config.yaml: $DEER_FLOW_CONFIG_PATH${NC}"
+    echo -e "${GREEN}✓ config.yaml: $ACT_WEAVE_CONFIG_PATH${NC}"
 fi
 
 # ── BETTER_AUTH_SECRET ───────────────────────────────────────────────────────
 # Required by Next.js in production. Generated once and persisted so auth
 # sessions survive container restarts.
 
-_secret_file="$DEER_FLOW_HOME/.better-auth-secret"
+_secret_file="$ACT_WEAVE_HOME/.better-auth-secret"
 if [ -z "$BETTER_AUTH_SECRET" ]; then
     if [ -f "$_secret_file" ]; then
         export BETTER_AUTH_SECRET
@@ -149,71 +149,71 @@ if [ -z "$BETTER_AUTH_SECRET" ]; then
     fi
 fi
 
-# ── DEER_FLOW_INTERNAL_AUTH_TOKEN ────────────────────────────────────────────
+# ── ACT_WEAVE_INTERNAL_AUTH_TOKEN ────────────────────────────────────────────
 # Shared by all Gateway workers so channel workers can call internal Gateway
 # APIs even when the request is handled by a different Uvicorn worker.
 
-_internal_auth_token_file="$DEER_FLOW_HOME/.internal-auth-token"
-if  [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_INTERNAL_AUTH_TOKEN" ]; then
+_internal_auth_token_file="$ACT_WEAVE_HOME/.internal-auth-token"
+if  [ "$CMD" != "down" ] && [ -z "$ACT_WEAVE_INTERNAL_AUTH_TOKEN" ]; then
     if [ -f "$_internal_auth_token_file" ]; then
-        export DEER_FLOW_INTERNAL_AUTH_TOKEN
-        DEER_FLOW_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
-        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
+        export ACT_WEAVE_INTERNAL_AUTH_TOKEN
+        ACT_WEAVE_INTERNAL_AUTH_TOKEN="$(cat "$_internal_auth_token_file")"
+        echo -e "${GREEN}✓ ACT_WEAVE_INTERNAL_AUTH_TOKEN loaded from $_internal_auth_token_file${NC}"
     else
-        export DEER_FLOW_INTERNAL_AUTH_TOKEN
+        export ACT_WEAVE_INTERNAL_AUTH_TOKEN
         if command -v python3 > /dev/null 2>&1 && \
-            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            ACT_WEAVE_INTERNAL_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
             true
         elif command -v python > /dev/null 2>&1 && \
-            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            ACT_WEAVE_INTERNAL_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
             true
         elif command -v openssl > /dev/null 2>&1 && \
-            DEER_FLOW_INTERNAL_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            ACT_WEAVE_INTERNAL_AUTH_TOKEN="$(openssl rand -hex 32)"; then
             true
         else
-            echo -e "${RED}✗ Cannot generate DEER_FLOW_INTERNAL_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
-            echo -e "${RED}  Set DEER_FLOW_INTERNAL_AUTH_TOKEN manually before running make up.${NC}" >&2
+            echo -e "${RED}✗ Cannot generate ACT_WEAVE_INTERNAL_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set ACT_WEAVE_INTERNAL_AUTH_TOKEN manually before running make up.${NC}" >&2
             exit 1
         fi
-        echo "$DEER_FLOW_INTERNAL_AUTH_TOKEN" > "$_internal_auth_token_file"
+        echo "$ACT_WEAVE_INTERNAL_AUTH_TOKEN" > "$_internal_auth_token_file"
         chmod 600 "$_internal_auth_token_file"
-        echo -e "${GREEN}✓ DEER_FLOW_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
+        echo -e "${GREEN}✓ ACT_WEAVE_INTERNAL_AUTH_TOKEN generated → $_internal_auth_token_file${NC}"
     fi
 fi
 
-# ── DEER_FLOW_PROXY_AUTH_TOKEN ──────────────────────────────────────────────
+# ── ACT_WEAVE_PROXY_AUTH_TOKEN ──────────────────────────────────────────────
 # Dedicated nginx-to-Gateway attestation. This is deliberately independent of
 # the internal channel token so a proxy compromise cannot mint internal users.
 
-_proxy_auth_token_file="$DEER_FLOW_HOME/.proxy-auth-token"
-if [ "$CMD" != "down" ] && [ -z "$DEER_FLOW_PROXY_AUTH_TOKEN" ]; then
+_proxy_auth_token_file="$ACT_WEAVE_HOME/.proxy-auth-token"
+if [ "$CMD" != "down" ] && [ -z "$ACT_WEAVE_PROXY_AUTH_TOKEN" ]; then
     if [ -f "$_proxy_auth_token_file" ]; then
-        export DEER_FLOW_PROXY_AUTH_TOKEN
-        DEER_FLOW_PROXY_AUTH_TOKEN="$(cat "$_proxy_auth_token_file")"
-        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN loaded from $_proxy_auth_token_file${NC}"
+        export ACT_WEAVE_PROXY_AUTH_TOKEN
+        ACT_WEAVE_PROXY_AUTH_TOKEN="$(cat "$_proxy_auth_token_file")"
+        echo -e "${GREEN}✓ ACT_WEAVE_PROXY_AUTH_TOKEN loaded from $_proxy_auth_token_file${NC}"
     else
-        export DEER_FLOW_PROXY_AUTH_TOKEN
+        export ACT_WEAVE_PROXY_AUTH_TOKEN
         if command -v python3 > /dev/null 2>&1 && \
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(python3 -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
             true
         elif command -v python > /dev/null 2>&1 && \
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(python -c 'import sys; sys.version_info >= (3, 6) or sys.exit(1); import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null)"; then
             true
         elif command -v openssl > /dev/null 2>&1 && \
-            DEER_FLOW_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"; then
+            ACT_WEAVE_PROXY_AUTH_TOKEN="$(openssl rand -hex 32)"; then
             true
         else
-            echo -e "${RED}✗ Cannot generate DEER_FLOW_PROXY_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
-            echo -e "${RED}  Set DEER_FLOW_PROXY_AUTH_TOKEN manually before running make up.${NC}" >&2
+            echo -e "${RED}✗ Cannot generate ACT_WEAVE_PROXY_AUTH_TOKEN: python3, python, and openssl are all unavailable.${NC}" >&2
+            echo -e "${RED}  Set ACT_WEAVE_PROXY_AUTH_TOKEN manually before running make up.${NC}" >&2
             exit 1
         fi
-        echo "$DEER_FLOW_PROXY_AUTH_TOKEN" > "$_proxy_auth_token_file"
+        echo "$ACT_WEAVE_PROXY_AUTH_TOKEN" > "$_proxy_auth_token_file"
         chmod 600 "$_proxy_auth_token_file"
-        echo -e "${GREEN}✓ DEER_FLOW_PROXY_AUTH_TOKEN generated → $_proxy_auth_token_file${NC}"
+        echo -e "${GREEN}✓ ACT_WEAVE_PROXY_AUTH_TOKEN generated → $_proxy_auth_token_file${NC}"
     fi
 fi
-if [ "$CMD" != "down" ] && [ "${#DEER_FLOW_PROXY_AUTH_TOKEN}" -lt 32 ]; then
-    echo -e "${RED}✗ DEER_FLOW_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
+if [ "$CMD" != "down" ] && [ "${#ACT_WEAVE_PROXY_AUTH_TOKEN}" -lt 32 ]; then
+    echo -e "${RED}✗ ACT_WEAVE_PROXY_AUTH_TOKEN must contain at least 32 characters.${NC}" >&2
     exit 1
 fi
 
@@ -261,7 +261,7 @@ detect_sandbox_mode() {
     local sandbox_use=""
     local provisioner_url=""
 
-    [ -f "$DEER_FLOW_CONFIG_PATH" ] || { echo "local"; return; }
+    [ -f "$ACT_WEAVE_CONFIG_PATH" ] || { echo "local"; return; }
 
     sandbox_use=$(awk '
         /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
@@ -269,7 +269,7 @@ detect_sandbox_mode() {
         in_sandbox && /^[[:space:]]*use:[[:space:]]*/ {
             line=$0; sub(/^[[:space:]]*use:[[:space:]]*/, "", line); print line; exit
         }
-    ' "$DEER_FLOW_CONFIG_PATH")
+    ' "$ACT_WEAVE_CONFIG_PATH")
 
     provisioner_url=$(awk '
         /^[[:space:]]*sandbox:[[:space:]]*$/ { in_sandbox=1; next }
@@ -277,7 +277,7 @@ detect_sandbox_mode() {
         in_sandbox && /^[[:space:]]*provisioner_url:[[:space:]]*/ {
             line=$0; sub(/^[[:space:]]*provisioner_url:[[:space:]]*/, "", line); print line; exit
         }
-    ' "$DEER_FLOW_CONFIG_PATH")
+    ' "$ACT_WEAVE_CONFIG_PATH")
 
     if [[ "$sandbox_use" == *"deerflow.community.aio_sandbox:AioSandboxProvider"* ]]; then
         if [ -n "$provisioner_url" ]; then
@@ -295,12 +295,12 @@ detect_sandbox_mode() {
 if [ "$CMD" = "down" ]; then
     # Set minimal env var defaults so docker compose can parse the file without
     # warning about unset variables that appear in volume specs.
-    export DEER_FLOW_HOME="${DEER_FLOW_HOME:-$REPO_ROOT/backend/.deer-flow}"
-    export DEER_FLOW_CONFIG_PATH="${DEER_FLOW_CONFIG_PATH:-$DEER_FLOW_HOME/config.yaml}"
-    export DEER_FLOW_REPO_ROOT="${DEER_FLOW_REPO_ROOT:-$REPO_ROOT}"
+    export ACT_WEAVE_HOME="${ACT_WEAVE_HOME:-$REPO_ROOT/backend/.deer-flow}"
+    export ACT_WEAVE_CONFIG_PATH="${ACT_WEAVE_CONFIG_PATH:-$ACT_WEAVE_HOME/config.yaml}"
+    export ACT_WEAVE_REPO_ROOT="${ACT_WEAVE_REPO_ROOT:-$REPO_ROOT}"
     export BETTER_AUTH_SECRET="${BETTER_AUTH_SECRET:-placeholder}"
-    export DEER_FLOW_INTERNAL_AUTH_TOKEN="${DEER_FLOW_INTERNAL_AUTH_TOKEN:-placeholder}"
-    export DEER_FLOW_PROXY_AUTH_TOKEN="${DEER_FLOW_PROXY_AUTH_TOKEN:-placeholder-placeholder-placeholder-00}"
+    export ACT_WEAVE_INTERNAL_AUTH_TOKEN="${ACT_WEAVE_INTERNAL_AUTH_TOKEN:-placeholder}"
+    export ACT_WEAVE_PROXY_AUTH_TOKEN="${ACT_WEAVE_PROXY_AUTH_TOKEN:-placeholder-placeholder-placeholder-00}"
     "${COMPOSE_CMD[@]}" down
     exit 0
 fi
@@ -349,23 +349,23 @@ if [ "$sandbox_mode" = "provisioner" ]; then
     services="$services provisioner"
 fi
 
-# ── DEER_FLOW_DOCKER_SOCKET (aio / pure-DooD mode only) ──────────────────────
+# ── ACT_WEAVE_DOCKER_SOCKET (aio / pure-DooD mode only) ──────────────────────
 # Only aio mode (AioSandboxProvider without provisioner_url) needs the host
 # Docker socket. It is mounted via the opt-in docker-compose.dood.yaml overlay,
 # appended here, so the default (local) and provisioner modes never expose the
 # host daemon. Mounting the socket grants root-equivalent host control.
 
-if [ -z "$DEER_FLOW_DOCKER_SOCKET" ]; then
-    export DEER_FLOW_DOCKER_SOCKET="/var/run/docker.sock"
+if [ -z "$ACT_WEAVE_DOCKER_SOCKET" ]; then
+    export ACT_WEAVE_DOCKER_SOCKET="/var/run/docker.sock"
 fi
 
 if [ "$sandbox_mode" = "aio" ]; then
-    if [ ! -S "$DEER_FLOW_DOCKER_SOCKET" ]; then
-        echo -e "${RED}⚠ Docker socket not found at $DEER_FLOW_DOCKER_SOCKET${NC}"
+    if [ ! -S "$ACT_WEAVE_DOCKER_SOCKET" ]; then
+        echo -e "${RED}⚠ Docker socket not found at $ACT_WEAVE_DOCKER_SOCKET${NC}"
         echo "  AioSandboxProvider (DooD) will not work."
         exit 1
     fi
-    echo -e "${GREEN}✓ Docker socket: $DEER_FLOW_DOCKER_SOCKET${NC}"
+    echo -e "${GREEN}✓ Docker socket: $ACT_WEAVE_DOCKER_SOCKET${NC}"
     echo -e "${YELLOW}  Mounting host Docker socket into Worker (DooD = host root-equivalent).${NC}"
     COMPOSE_CMD+=(-f "$DOCKER_DIR/docker-compose.dood.yaml")
 fi

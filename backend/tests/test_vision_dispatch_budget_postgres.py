@@ -193,19 +193,11 @@ def _vision_model() -> ModelConfig:
         api_key=SecretStr("test-secret"),
         supports_vision=True,
     )
-    model._system_model_config_version_id = uuid.UUID(
+    model._system_model_config_id = uuid.UUID(
         "00000000-0000-0000-0000-000000000201",
     )
     model._system_provider_adapter = "openai"
     return model
-
-
-class _ModelMaterializer:
-    def __init__(self, model: ModelConfig) -> None:
-        self._model = model
-
-    async def materialize_snapshot(self, **_kwargs: object) -> ModelConfig:
-        return self._model
 
 
 def _job_owner_ref(_owner_user_id: str) -> JobOwnerRef:
@@ -680,11 +672,6 @@ async def test_postgres_committed_reserve_survives_inflight_provider_cancellatio
         model = _vision_model()
         authority = PrivateRunVisionDispatchAuthority(
             boundary=_boundary(seed, active),
-            materializer=_ModelMaterializer(model),
-            project_id=seed.owner_a.project_id,
-            owner_user_id=str(seed.owner_a.user_id),
-            run_id=active.run_id,
-            expected_model=model,
         )
         provider_started = asyncio.Event()
 

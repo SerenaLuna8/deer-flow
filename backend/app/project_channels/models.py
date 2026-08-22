@@ -10,7 +10,7 @@ from datetime import datetime
 class ConfigureProjectChannelInstance:
     display_name: str | None
     public_config: Mapping[str, str]
-    credentials: Mapping[str, str] = field(repr=False)
+    secrets: Mapping[str, str] = field(repr=False)
     enabled: bool
 
 
@@ -22,7 +22,9 @@ class ProjectChannelInstanceView:
     status: str
     enabled: bool
     configured: bool
-    credential_configured: bool
+    secret_configured: bool
+    secret_readiness: str
+    secret_revision: int
     public_config: Mapping[str, str]
     updated_at: datetime | None
     last_error: str | None
